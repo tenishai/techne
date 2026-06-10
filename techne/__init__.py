@@ -1,6 +1,11 @@
 """techne — agentic memory and knowledge system."""
 
-__version__ = "0.4.1"
+from importlib.metadata import version as _pkg_version, PackageNotFoundError as _PackageNotFoundError
+
+try:
+    __version__ = _pkg_version("techne")
+except _PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 
 # Public API. Stable for library consumers.
 

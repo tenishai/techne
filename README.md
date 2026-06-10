@@ -6,7 +6,9 @@ A single-file SQLite-backed memory store that gives AI agents persistent memory 
 
 ```bash
 git clone https://github.com/dimartin/techne.git
-cd techne && pip install -e .
+cd techne
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
 techne init
 ```
 
@@ -32,9 +34,12 @@ The schema and triggers all live in `techne/core/database.py`. Schema migrations
 
 techne is in early alpha — installed from source. Public PyPI distribution is on the roadmap.
 
+Use a virtual environment — required on Debian/Ubuntu (PEP 668), recommended everywhere else:
+
 ```bash
 git clone https://github.com/dimartin/techne.git
 cd techne
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .                  # core
 pip install -e ".[vectors]"       # adds sqlite-vec + fastembed for semantic search
 pip install -e ".[anthropic]"     # if you want to pin Anthropic SDK directly (LiteLLM handles routing by default)
