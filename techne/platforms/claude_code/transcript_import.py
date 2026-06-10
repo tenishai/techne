@@ -1,0 +1,292 @@
+"""Import Claude Code JSONL transcripts into the techne database.
+
+Backfills historical sessions that predate the live PostToolUse hook, so the
+memory store contains the same shape of observations regardless of capture
+mechanism.
+"""
+
+import json
+from pathlib import Path, PurePosixPath
+
+from techne.core.database import connect
+from techne.hooks.post_tool_use import SKIP_TOOLS, summarize
+
+
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def project_slug_for_cwd(cwd: Path | None = None) -> str:
+    """Encode a POSIX cwd into Claude Code's project-dir slug.
+
+    Claude Code stores transcripts under ``~/.claude/projects/<slug>/`` where the
+    slug is the absolute path with ``/`` → ``-`` and a leading ``-``. Works the
+    same on macOS and Linux. (Claude Code on Windows uses a different convention
+    and is out of scope.)
+    """
+    # Do NOT call .resolve() — it dereferences symlinks/firmlinks (macOS APFS
+    # turns /home into /System/Volumes/Data/home), producing a slug that does
+    # not match the cwd Claude Code recorded. Path.cwd() is already absolute.
+    cwd = (cwd or Path.cwd()).absolute()
+    posix = PurePosixPath(cwd.as_posix())
+    return "-" + str(posix).lstrip("/").replace("/", "-")
+
+
+def default_transcripts_dir(cwd: Path | None = None) -> Path:
+    """Return ``~/.claude/projects/<slug>/`` for the given (or current) cwd."""
+    return PROJECTS_DIR / project_slug_for_cwd(cwd)
+
+
+def _should_import(tool_name: str) -> bool:
+    """Filter for backfill — looser than the live `should_capture` hook.
+
+    The live hook honors `capture_bash` / `capture_read` flags to bound runtime
+    overhead. The JSONL has those tool calls regardless, and historical memory
+    is more valuable than skipping them, so we only drop the explicit blocklist.
+    """
+    if tool_name in SKIP_TOOLS:
+        return False
+    if tool_name.startswith("mcp__memory__"):
+        return False
+    return True
+
+
+def _iter_records(jsonl_path: Path):
+    with jsonl_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def _content_blocks(rec: dict) -> list:
+    msg = rec.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        return content
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return []
+
+
+def _extract_user_text(blocks: list) -> str:
+    parts = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "text":
+            t = b.get("text") or ""
+            if t.strip():
+                parts.append(t)
+    return "\n".join(parts).strip()
+
+
+def _tool_result_text(result) -> str:
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list):
+        out = []
+        for b in result:
+            if isinstance(b, dict) and b.get("type") == "text":
+                out.append(b.get("text") or "")
+            elif isinstance(b, dict):
+                out.append(json.dumps(b, default=str))
+            else:
+                out.append(str(b))
+        return "\n".join(out)
+    return json.dumps(result, default=str) if result is not None else ""
+
+
+def import_transcript(
+    db_path: Path,
+    jsonl_path: Path,
+    *,
+    include_user_prompts: bool = True,
+    force: bool = False,
+) -> dict:
+    """Import a single JSONL transcript. Idempotent — if the session already
+    has observations, returns {"skipped": True, ...} unless `force=True`.
+
+    The gate ("session has any observations" → skip) intentionally conflates
+    live-captured and previously-imported observations. A session with a
+    handful of PostToolUse-captured observations will block its own full
+    historical import; pass `force=True` to override and insert the full
+    transcript on top. Observations are append-only here, so re-running with
+    `force` produces duplicates rather than updates — only use when you know
+    the live capture was partial.
+
+    Returns: {session_id, project_path, tool_obs, prompt_obs, summary_set, skipped}.
+    """
+    records = list(_iter_records(jsonl_path))
+    if not records:
+        return {"session_id": None, "skipped": True, "reason": "empty"}
+
+    session_id = None
+    project_path = ""
+    first_ts = None
+    last_ts = None
+    ai_title = ""
+    for rec in records:
+        sid = rec.get("sessionId")
+        if sid and not session_id:
+            session_id = sid
+        if not project_path:
+            cwd = rec.get("cwd")
+            if cwd:
+                project_path = cwd
+        ts = rec.get("timestamp")
+        if ts:
+            if not first_ts:
+                first_ts = ts
+            last_ts = ts
+        if rec.get("type") == "ai-title":
+            title = (rec.get("aiTitle") or "").strip()
+            if title:
+                ai_title = title  # last one wins (titles within a session are identical anyway)
+
+    if not session_id:
+        session_id = jsonl_path.stem
+
+    conn = connect(db_path)
+    try:
+        # UPSERT session metadata FIRST — runs on every import, including re-runs
+        # that will skip observation insertion. This lets us backfill new
+        # session-level fields (ai-title summary, etc.) onto sessions that were
+        # imported before those fields were captured.
+        existing_session = conn.execute(
+            "SELECT id, summary_llm FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        summary_set = False
+        if not existing_session:
+            conn.execute(
+                """INSERT INTO sessions
+                   (id, started_at, ended_at, project_path, platform, summary_llm)
+                   VALUES (?, ?, ?, ?, 'claude-code', ?)""",
+                (session_id, first_ts, last_ts, project_path, ai_title or None),
+            )
+            summary_set = bool(ai_title)
+        else:
+            # ai-title is stable within a session (we saw it re-emitted with the
+            # same value 89 times). Always overwrite summary_llm — if the model
+            # ever did change the title, the latest one is the right one.
+            conn.execute(
+                """UPDATE sessions
+                   SET project_path = COALESCE(NULLIF(project_path, ''), ?),
+                       started_at = COALESCE(started_at, ?),
+                       ended_at = COALESCE(ended_at, ?),
+                       summary_llm = COALESCE(?, summary_llm)
+                   WHERE id = ?""",
+                (project_path, first_ts, last_ts, ai_title or None, session_id),
+            )
+            prior_llm = (existing_session["summary_llm"] or "").strip()
+            summary_set = bool(ai_title) and ai_title != prior_llm
+
+        existing_obs = conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        if existing_obs > 0 and not force:
+            conn.commit()
+            return {
+                "session_id": session_id,
+                "project_path": project_path,
+                "tool_obs": 0,
+                "prompt_obs": 0,
+                "summary_set": summary_set,
+                "skipped": True,
+                "reason": f"already has {existing_obs} observations",
+            }
+
+        pending: dict[str, dict] = {}
+        tool_count = 0
+        prompt_count = 0
+
+        for rec in records:
+            rtype = rec.get("type")
+            ts = rec.get("timestamp")
+            blocks = _content_blocks(rec)
+
+            if rtype == "assistant":
+                for b in blocks:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        pending[b.get("id", "")] = {
+                            "name": b.get("name", ""),
+                            "input": b.get("input") or {},
+                            "ts": ts,
+                        }
+
+            elif rtype == "user":
+                for b in blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_result":
+                        tu = pending.pop(b.get("tool_use_id", ""), None)
+                        if not tu:
+                            continue
+                        tool_name = tu["name"]
+                        if not _should_import(tool_name):
+                            continue
+                        output = _tool_result_text(b.get("content"))
+                        content = summarize(tool_name, tu["input"], output)
+                        conn.execute(
+                            """INSERT INTO observations
+                               (session_id, timestamp, tool_name, content, tier)
+                               VALUES (?, ?, ?, ?, 'hot')""",
+                            (session_id, tu["ts"] or ts, tool_name, content),
+                        )
+                        tool_count += 1
+
+                # Capture human text on the same record as a tool_result too —
+                # Claude Code emits both blocks together when a tool is
+                # cancelled and the user follows up. Suppressing the prompt
+                # whenever `paired_any` is True silently drops that text.
+                if include_user_prompts:
+                    text = _extract_user_text(blocks)
+                    if text and not text.startswith("<"):
+                        conn.execute(
+                            """INSERT INTO observations
+                               (session_id, timestamp, tool_name, content, tier)
+                               VALUES (?, ?, 'UserPrompt', ?, 'hot')""",
+                            (session_id, ts, text[:4000]),
+                        )
+                        prompt_count += 1
+
+        conn.commit()
+        return {
+            "session_id": session_id,
+            "project_path": project_path,
+            "tool_obs": tool_count,
+            "prompt_obs": prompt_count,
+            "summary_set": summary_set,
+            "skipped": False,
+        }
+    finally:
+        conn.close()
+
+
+def import_directory(
+    db_path: Path,
+    directory: Path,
+    *,
+    include_user_prompts: bool = True,
+    force: bool = False,
+) -> list[dict]:
+    """Import every *.jsonl file in `directory`. Returns one result per file."""
+    results = []
+    for jsonl_path in sorted(directory.glob("*.jsonl")):
+        try:
+            results.append(import_transcript(
+                db_path, jsonl_path,
+                include_user_prompts=include_user_prompts,
+                force=force,
+            ))
+        except Exception as e:
+            results.append({
+                "session_id": jsonl_path.stem,
+                "skipped": True,
+                "reason": f"error: {e}",
+            })
+    return results

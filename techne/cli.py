@@ -1,0 +1,647 @@
+"""techne CLI — human interface for inspecting and managing agent memory."""
+
+import json
+from pathlib import Path
+
+import click
+
+from techne import __version__
+from techne.config import Config, DEFAULT_CONFIG
+
+
+@click.group()
+@click.version_option(version=__version__)
+@click.pass_context
+def main(ctx):
+    """techne — agentic memory and knowledge system."""
+    ctx.ensure_object(dict)
+    ctx.obj["config"] = Config.load()
+
+
+@main.command()
+@click.pass_context
+def status(ctx):
+    """Show current state: active threads, session info, database stats."""
+    config = ctx.obj["config"]
+    from techne.core.state import db_stats, get_active_session
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    stats = db_stats(config.db_path)
+    session = get_active_session(config.db_path)
+
+    click.echo(f"Database: {config.db_path}")
+    click.echo(f"Platform: {config.platform}")
+    click.echo(f"Sync adapter: {config.sync.adapter}")
+    click.echo()
+    click.echo(f"Sessions: {stats['sessions']}")
+    click.echo(f"Threads: {stats['threads']} ({stats['active_threads']} active)")
+    click.echo(f"Observations: {stats['observations']}")
+    click.echo(f"Knowledge: {stats['knowledge']}")
+    click.echo(f"Identity: {stats['identity']}")
+    click.echo(f"Outbox: {stats['pending_outbox']} pending")
+    if stats["last_session"]:
+        click.echo(f"Last session: {stats['last_session']}")
+    if session:
+        click.echo(f"Active session: {session['id'][:16]}... (project: {session['project_path']})")
+
+
+@main.group(invoke_without_command=True)
+@click.option("--active", is_flag=True, help="Only show threads with unfinished resume points")
+@click.option("--topic", default="", help="Search threads by topic")
+@click.option("--limit", default=20, help="Max results")
+@click.pass_context
+def threads(ctx, active, topic, limit):
+    """List recent threads across sessions (or run a subcommand)."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    config = ctx.obj["config"]
+    from techne.core.database import connect
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    conn = connect(config.db_path)
+    try:
+        if topic:
+            from techne.core.search import search_fts
+            results = search_fts(config.db_path, topic, table="threads", limit=limit)
+            for r in results:
+                status_tag = f" [{r['status']}]" if r["status"] != "active" else ""
+                click.echo(f"  {r['id'][:20]}...{status_tag}  {r['label']}")
+                click.echo(f"    {r['summary'][:200]}")
+                if r.get("resume_points"):
+                    click.echo(f"    Resume: {r['resume_points'][:200]}")
+                click.echo()
+        else:
+            query = "SELECT id, label, summary, resume_points, status, updated_at FROM threads"
+            params: list = []
+            if active:
+                query += " WHERE status = 'active' AND resume_points IS NOT NULL AND resume_points != ''"
+            query += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(limit)
+
+            rows = conn.execute(query, params).fetchall()
+            for r in rows:
+                status_tag = f" [{r['status']}]" if r["status"] != "active" else ""
+                click.echo(f"  {r['id'][:20]}...{status_tag}  {r['label']}")
+                click.echo(f"    {r['summary'][:200]}")
+                if r["resume_points"]:
+                    click.echo(f"    Resume: {r['resume_points'][:200]}")
+                click.echo()
+    finally:
+        conn.close()
+
+
+@threads.command("redetect")
+@click.argument("session_id")
+@click.option(
+    "--sync/--no-sync",
+    default=False,
+    help=(
+        "Enqueue thread_summary outbox entries for downstream consumers. "
+        "Off by default — iterative tuning would flood the outbox with "
+        "stale syncs. Turn on once the detector settles."
+    ),
+)
+@click.pass_context
+def threads_redetect(ctx, session_id, sync):
+    """Re-run heuristic thread detection on an already-recorded session.
+
+    Useful after the detector itself changed (new signals, retuned weights)
+    or after late observations arrived via `techne import`. Replaces existing
+    threads + boundary scores for the session and refreshes the heuristic
+    summary; the manual / LLM summary slots are left alone, and ended_at is
+    NOT touched (this is a re-analysis, not a re-end).
+
+    SESSION_ID can be a prefix — the first matching session is used.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core.database import connect
+    from techne.lifecycle import redetect_threads
+
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id FROM sessions WHERE id LIKE ? || '%' "
+            "ORDER BY started_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        click.echo(f"No session matching: {session_id}")
+        return
+
+    sid = row["id"]
+    result = redetect_threads(config, sid, sync=sync)
+    sync_msg = f", {result['queued']} queued for sync" if sync else ""
+    click.echo(
+        f"Redetected {sid[:16]}... — {result['threads']} threads from "
+        f"{result['observations']} observations ({result['boundaries']} scored pairs)"
+        f"{sync_msg}"
+    )
+
+
+@threads.command("show")
+@click.argument("session_id")
+@click.option("--no-color", is_flag=True, help="Disable colorized output")
+@click.option(
+    "--detector",
+    type=click.Choice(["auto", "live", "stored"]),
+    default="auto",
+    help=(
+        "Where to source boundary scores. 'auto' uses stored if present, else "
+        "runs the heuristic detector live. 'live' always re-runs. 'stored' only "
+        "shows what's persisted (errors out if there's nothing)."
+    ),
+)
+@click.pass_context
+def threads_show(ctx, session_id, no_color, detector):
+    """Show the observation timeline + heuristic boundary scores for a session.
+
+    SESSION_ID can be a prefix — the first matching session is used.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core import heuristic_threads as ht
+    from techne.core.database import connect
+
+    def maybe_style(text, **kwargs):
+        return text if no_color else click.style(text, **kwargs)
+
+    conn = connect(config.db_path)
+    try:
+        sess = conn.execute(
+            "SELECT id, project_path, started_at FROM sessions "
+            "WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if sess is None:
+            click.echo(f"No session matching: {session_id}")
+            return
+
+        sid = sess["id"]
+        click.echo(maybe_style(f"Session {sid}", bold=True))
+        click.echo(f"  project: {sess['project_path']}  started: {sess['started_at']}")
+        click.echo()
+
+        obs_rows = conn.execute(
+            "SELECT timestamp, tool_name, content FROM observations "
+            "WHERE session_id = ? ORDER BY timestamp",
+            (sid,),
+        ).fetchall()
+        if not obs_rows:
+            click.echo("(no observations)")
+            return
+
+        observations = [
+            {"tool_name": o["tool_name"], "content": o["content"], "timestamp": o["timestamp"]}
+            for o in obs_rows
+        ]
+
+        stored = ht.load_boundaries(conn, sid)
+        if detector == "stored" and not stored:
+            click.echo("No stored boundaries for this session. Re-run with --detector=live.")
+            return
+
+        if detector == "live" or (detector == "auto" and not stored):
+            segments, scores = ht.detect_threads(observations)
+            boundary_set = ht.boundary_indices_from_segments(segments)
+            score_rows = [
+                {
+                    "obs_index_a": s.a_index,
+                    "obs_index_b": s.b_index,
+                    "gap_seconds": s.gap_seconds,
+                    "family_a": s.family_a,
+                    "family_b": s.family_b,
+                    "signals": s.signals,
+                    "total_score": s.total,
+                    "is_boundary": s.a_index in boundary_set,
+                }
+                for s in scores
+            ]
+            source_label = "live"
+        else:
+            score_rows = stored
+            source_label = "stored"
+            segments = _segments_from_boundary_rows(len(observations), stored)
+
+        click.echo(maybe_style(
+            f"Boundary scores ({source_label}): {len(score_rows)} pairs, "
+            f"{sum(1 for r in score_rows if r['is_boundary'])} boundaries, "
+            f"{len(segments)} threads",
+            fg="green",
+        ))
+        click.echo()
+
+        threads_by_num = {
+            t["thread_num"]: dict(t)
+            for t in conn.execute(
+                "SELECT thread_num, label, summary, resume_points FROM threads "
+                "WHERE session_id = ? ORDER BY thread_num",
+                (sid,),
+            ).fetchall()
+        }
+
+        scores_by_a = {r["obs_index_a"]: r for r in score_rows}
+
+        for thread_num, segment in enumerate(segments, 1):
+            t = threads_by_num.get(thread_num, {})
+            header = f"Thread {thread_num}: {t.get('label', '(unlabeled)')} ({len(segment)} obs)"
+            click.echo(maybe_style(f"━━━ {header} ━━━", fg="cyan", bold=True))
+            if t.get("summary"):
+                click.echo(maybe_style(f"  {t['summary']}", fg="cyan"))
+            if t.get("resume_points"):
+                for line in t["resume_points"].splitlines():
+                    click.echo(maybe_style(f"  ⤷ {line}", fg="cyan"))
+            click.echo()
+
+            for i in segment:
+                obs = observations[i]
+                ts = (obs.get("timestamp") or "")[:19]
+                tool = obs.get("tool_name") or "?"
+                content = (obs.get("content") or "").replace("\n", " ")
+                snippet = content[:80]
+                click.echo(f"  [{i:3d}] {ts}  {tool:<24}  {snippet}")
+
+                s = scores_by_a.get(i)
+                if s and s["total_score"] > 0:
+                    marker = "║" if s["is_boundary"] else "·"
+                    sig_str = " ".join(
+                        f"{k}={v:.1f}" for k, v in sorted(s["signals"].items())
+                    )
+                    line = (
+                        f"       {marker} score={s['total_score']:.2f}  "
+                        f"gap={s['gap_seconds']:.0f}s  [{sig_str}]"
+                    )
+                    color = "yellow" if s["is_boundary"] else None
+                    click.echo(maybe_style(line, fg=color) if color else line)
+            click.echo()
+    finally:
+        conn.close()
+
+
+def _segments_from_boundary_rows(n_obs: int, rows: list[dict]) -> list[list[int]]:
+    """Rebuild segments from persisted boundary rows."""
+    bounds = {r["obs_index_a"] for r in rows if r["is_boundary"]}
+    segments: list[list[int]] = []
+    current: list[int] = []
+    for i in range(n_obs):
+        current.append(i)
+        if i in bounds:
+            segments.append(current)
+            current = []
+    if current:
+        segments.append(current)
+    return segments
+
+
+@main.command()
+@click.argument("query")
+@click.option("--table", type=click.Choice(["all", "threads", "observations", "knowledge"]), default="all")
+@click.option("--limit", default=20)
+@click.pass_context
+def search(ctx, query, table, limit):
+    """Search across all layers — threads, observations, knowledge."""
+    config = ctx.obj["config"]
+    from techne.core.search import search as do_search
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    results = do_search(config.db_path, query, table=table, limit=limit)
+    if not results:
+        click.echo("No results.")
+        return
+
+    for r in results:
+        source = r.get("source", "fts")
+        type_tag = r["type"]
+        click.echo(f"  [{type_tag}] ({source})")
+        if type_tag == "thread":
+            click.echo(f"    {r.get('label', '')} — {r.get('summary', '')[:200]}")
+        elif type_tag == "observation":
+            click.echo(f"    [{r.get('tool_name', '')}] {r.get('content', '')[:200]}")
+        elif type_tag == "knowledge":
+            click.echo(f"    [{r.get('knowledge_type', '')}] {r.get('content', '')[:200]}")
+        click.echo()
+
+
+@main.command()
+@click.option("--days", default=7, help="Number of days to show")
+@click.option("--limit", default=20)
+@click.pass_context
+def history(ctx, days, limit):
+    """Show session history with thread summaries."""
+    config = ctx.obj["config"]
+    from techne.core.database import connect
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core.state import effective_summary
+
+    conn = connect(config.db_path)
+    try:
+        rows = conn.execute(
+            """SELECT id, started_at, ended_at, project_path, agent_identity,
+                      summary, summary_llm, summary_heuristic
+               FROM sessions
+               WHERE started_at > datetime('now', ? || ' days')
+               ORDER BY started_at DESC LIMIT ?""",
+            (f"-{days}", limit),
+        ).fetchall()
+
+        for s in rows:
+            ended = s["ended_at"] or "active"
+            click.echo(f"  {s['started_at']}  {s['id'][:16]}...  [{ended}]")
+            if s["project_path"]:
+                click.echo(f"    Project: {s['project_path']}")
+            summary = effective_summary(s)
+            if summary:
+                click.echo(f"    {summary[:300]}")
+
+            # Show threads for this session
+            threads = conn.execute(
+                "SELECT label, status FROM threads WHERE session_id = ? ORDER BY thread_num",
+                (s["id"],),
+            ).fetchall()
+            if threads:
+                labels = ", ".join(f"{t['label']}[{t['status']}]" for t in threads)
+                click.echo(f"    Threads: {labels}")
+            click.echo()
+    finally:
+        conn.close()
+
+
+@main.group()
+@click.pass_context
+def knowledge(ctx):
+    """Browse and manage the knowledge store."""
+    pass
+
+
+@knowledge.command("list")
+@click.option("--type", "ktype", type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"]))
+@click.option("--tags", default="")
+@click.option("--limit", default=50)
+@click.pass_context
+def knowledge_list(ctx, ktype, tags, limit):
+    """List knowledge entries."""
+    config = ctx.obj["config"]
+    from techne.core.knowledge import list_entries
+
+    entries = list_entries(config.db_path, type=ktype, tags=tags or None, limit=limit)
+    for e in entries:
+        click.echo(f"  [{e['id']}] [{e['type']}] ({e['confidence']}) {e['content'][:200]}")
+        if e["tags"]:
+            click.echo(f"    Tags: {e['tags']}")
+        click.echo()
+
+
+@knowledge.command("add")
+@click.argument("content")
+@click.option("--type", "ktype", type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"]), default="fact")
+@click.option("--tags", default="")
+@click.option("--confidence", type=click.Choice(["high", "medium", "low"]), default="medium")
+@click.pass_context
+def knowledge_add(ctx, content, ktype, tags, confidence):
+    """Add a knowledge entry."""
+    config = ctx.obj["config"]
+    from techne.core.knowledge import store
+
+    entry_id = store(config.db_path, content, type=ktype, tags=tags, confidence=confidence, source="manual")
+    click.echo(f"Stored knowledge entry #{entry_id}")
+
+
+@main.group()
+@click.pass_context
+def identity(ctx):
+    """View and manage identity configuration."""
+    pass
+
+
+@identity.command("show")
+@click.option("--prefix", default="", help="Filter by key prefix")
+@click.pass_context
+def identity_show(ctx, prefix):
+    """Display identity entries."""
+    config = ctx.obj["config"]
+    from techne.core.identity import list_entries
+
+    entries = list_entries(config.db_path, prefix=prefix)
+    for e in entries:
+        value_preview = e["value"][:100] + "..." if len(e["value"]) > 100 else e["value"]
+        click.echo(f"  {e['key']} = {value_preview}  ({e['source']})")
+
+
+@main.group()
+@click.pass_context
+def outbox(ctx):
+    """Manage the sync outbox."""
+    pass
+
+
+@outbox.command("status")
+@click.pass_context
+def outbox_status(ctx):
+    """Show outbox statistics."""
+    config = ctx.obj["config"]
+    from techne.sync.outbox import stats
+
+    s = stats(config.db_path)
+    click.echo(f"Total: {s['total']}  Pending: {s['pending']}  Synced: {s['synced']}  Dead: {s['dead']}")
+
+
+@outbox.command("flush")
+@click.pass_context
+def outbox_flush(ctx):
+    """Manually flush pending entries to team backend."""
+    config = ctx.obj["config"]
+    from techne.sync.adapter import load_adapter
+    from techne.sync.outbox import flush
+
+    adapter = load_adapter(config.sync.adapter, url=config.sync.url, path=config.sync.path)
+    synced, failed = flush(config.db_path, adapter)
+    click.echo(f"Flushed: {synced} synced, {failed} failed")
+
+
+@outbox.command("dead")
+@click.pass_context
+def outbox_dead(ctx):
+    """List permanently failed outbox entries."""
+    config = ctx.obj["config"]
+    from techne.sync.outbox import list_dead
+
+    entries = list_dead(config.db_path)
+    if not entries:
+        click.echo("No dead entries.")
+        return
+    for e in entries:
+        click.echo(f"  [{e['id']}] {e['target']}  {e['error_message']}  {e['created_at']}")
+
+
+@main.command()
+@click.pass_context
+def compact(ctx):
+    """Manually trigger tier aging on threads."""
+    config = ctx.obj["config"]
+    from techne.core.threads import age_threads
+
+    aged = age_threads(config.db_path, config)
+    click.echo(f"Aged: {aged['completed']} completed, {aged['stale']} stale")
+
+
+@main.command("import")
+@click.argument("path", type=click.Path(exists=True, path_type=Path), required=False)
+@click.option("--no-prompts", is_flag=True, help="Skip user-prompt observations (tool calls only)")
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Bypass the 'session already has observations' idempotency gate. "
+        "Use when live-captured observations are sparse and the full "
+        "transcript should be appended on top. Produces duplicates if the "
+        "session is already fully imported — only use when you know the "
+        "live capture was partial."
+    ),
+)
+@click.pass_context
+def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
+    """Backfill observations from Claude Code JSONL transcripts.
+
+    PATH may be a single .jsonl file or a directory of transcripts. Defaults to
+    ~/.claude/projects/<project>/ for the current working directory.
+    """
+    from techne.platforms.claude_code import (
+        default_transcripts_dir,
+        import_directory,
+        import_transcript,
+    )
+
+    config = ctx.obj["config"]
+
+    if path is None:
+        path = default_transcripts_dir()
+        if not path.exists():
+            click.echo(f"No transcripts found for current project: {path}")
+            return
+
+    include_prompts = not no_prompts
+    results = (
+        [import_transcript(
+            config.db_path, path,
+            include_user_prompts=include_prompts, force=force,
+        )]
+        if path.is_file()
+        else import_directory(
+            config.db_path, path,
+            include_user_prompts=include_prompts, force=force,
+        )
+    )
+
+    imported = sum(1 for r in results if not r.get("skipped"))
+    skipped = sum(1 for r in results if r.get("skipped"))
+    tool_total = sum(r.get("tool_obs", 0) for r in results)
+    prompt_total = sum(r.get("prompt_obs", 0) for r in results)
+    summaries_set = sum(1 for r in results if r.get("summary_set"))
+
+    for r in results:
+        sid = (r.get("session_id") or "")[:8]
+        marker = " +title" if r.get("summary_set") else ""
+        if r.get("skipped"):
+            click.echo(f"  skip {sid}  — {r.get('reason', 'skipped')}{marker}")
+        else:
+            click.echo(
+                f"  ok   {sid}  — {r['tool_obs']} tool obs, "
+                f"{r['prompt_obs']} prompts{marker}  ({r.get('project_path', '')})"
+            )
+    click.echo(
+        f"\n{imported} imported, {skipped} skipped — "
+        f"{tool_total} tool obs + {prompt_total} prompts added, "
+        f"{summaries_set} session summaries set"
+    )
+
+
+@main.command("migrate-summaries")
+@click.option("--dry-run", is_flag=True, help="Report what would move without writing")
+@click.pass_context
+def migrate_summaries_cmd(ctx, dry_run: bool):
+    """One-shot: move heuristic-shaped sessions.summary content to summary_heuristic.
+
+    Pre-dual-column rows packed every summary source into `summary`. This
+    cleanup reclassifies legacy auto-generated content so the priority rule
+    (manual > LLM > heuristic) picks newer LLM signals over old heuristic
+    breakdowns. Conservative — only matches the auto-generator's structural
+    fingerprint; leaves anything ambiguous alone.
+    """
+    from techne.core.state import migrate_legacy_summaries
+
+    config = ctx.obj["config"]
+    result = migrate_legacy_summaries(config.db_path, dry_run=dry_run)
+    moved_verb = "would move" if dry_run else "moved"
+    cleared_verb = "would clear" if dry_run else "cleared"
+    click.echo(
+        f"Scanned {result['scanned']} rows — "
+        f"{moved_verb} {result['moved']}, "
+        f"{cleared_verb} {result['cleared']} (legacy redundant with existing), "
+        f"skipped {result['skipped']}"
+    )
+
+
+@main.command("init")
+@click.option("--platform", type=click.Choice(["claude-code", "codex", "standalone"]), default="claude-code")
+@click.option("--identity-dir", type=click.Path(exists=True), default=None, help="Directory with identity markdown files")
+@click.pass_context
+def init(ctx, platform, identity_dir):
+    """Initialize techne — create database, register hooks, set up MCP."""
+    from techne.core.database import init_db
+
+    config = Config.load()
+    config.platform = platform
+    if identity_dir:
+        config.identity_dir = Path(identity_dir)
+
+    # Create database
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    conn = init_db(config.db_path)
+    conn.close()
+    click.echo(f"Database created: {config.db_path}")
+
+    # Import identity if directory provided
+    if config.identity_dir:
+        from techne.core.identity import sync_from_markdown
+        sync_from_markdown(config.db_path, config.identity_dir)
+        click.echo(f"Identity imported from: {config.identity_dir}")
+
+    # Platform-specific setup
+    if platform == "claude-code":
+        from techne.platforms.claude_code import register_hooks, register_mcp
+        register_hooks(config)
+        register_mcp(config)
+        click.echo("Claude Code hooks registered")
+        click.echo("MCP server registered")
+
+    # Save config
+    config.save()
+    click.echo(f"Config saved: {DEFAULT_CONFIG}")
+    click.echo("\ntechne initialized. Run 'techne status' to verify.")
+
+
+if __name__ == "__main__":
+    main()

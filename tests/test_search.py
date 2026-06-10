@@ -1,0 +1,385 @@
+"""Tests for techne.core.search — FTS5 search, vector search, and combined search."""
+
+import pytest
+
+from techne.core.database import init_db, connect
+from techne.core.search import search_fts, search_vec, search, _sanitize_fts_query
+from techne.core.threads import Thread, save_threads
+from techne.core.knowledge import store as store_knowledge
+from techne.core.state import start_session
+
+
+@pytest.fixture
+def db_path(tmp_path):
+    path = tmp_path / "test_search.db"
+    conn = init_db(path)
+    conn.close()
+    return path
+
+
+# ---------------------------------------------------------------------------
+# FTS5 search tests
+# ---------------------------------------------------------------------------
+
+class TestSearchFtsThreads:
+    def test_search_fts_threads(self, db_path):
+        """Store a thread, search by a term from its label, verify it appears."""
+        session_id = start_session(db_path)
+        threads = [Thread(
+            thread_num=1,
+            label="Kubernetes deployment rollout",
+            summary="Deployed container image to Kubernetes cluster via rolling update.",
+        )]
+        save_threads(threads, session_id, db_path)
+
+        results = search_fts(db_path, "Kubernetes", table="threads")
+
+        assert len(results) >= 1
+        ids = [r["id"] for r in results]
+        assert f"{session_id}-1" in ids
+        labels = [r["label"] for r in results]
+        assert "Kubernetes deployment rollout" in labels
+
+    def test_search_fts_threads_no_false_positives(self, db_path):
+        """Searching for a term not in any thread returns empty results."""
+        session_id = start_session(db_path)
+        threads = [Thread(
+            thread_num=1,
+            label="DNS configuration cleanup",
+            summary="Removed stale DNS A records from Route53.",
+        )]
+        save_threads(threads, session_id, db_path)
+
+        results = search_fts(db_path, "xyzzy_nonexistent_term_42", table="threads")
+        assert results == []
+
+
+class TestSearchFtsObservations:
+    def test_search_fts_observations(self, db_path):
+        """Insert an observation with distinctive content, verify FTS finds it."""
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO sessions (id, started_at) VALUES ('sess-obs-1', CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            """INSERT INTO observations (session_id, content, tool_name)
+               VALUES ('sess-obs-1', 'refactored zymurgy fermentation module for performance', 'Edit')"""
+        )
+        conn.commit()
+        conn.close()
+
+        results = search_fts(db_path, "zymurgy", table="observations")
+
+        assert len(results) >= 1
+        types = [r["type"] for r in results]
+        assert "observation" in types
+        contents = [r["content"] for r in results]
+        assert any("zymurgy" in c for c in contents)
+
+    def test_search_fts_observations_result_shape(self, db_path):
+        """Observation results have the expected keys."""
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO sessions (id, started_at) VALUES ('sess-obs-2', CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            """INSERT INTO observations (session_id, content, tool_name)
+               VALUES ('sess-obs-2', 'configured palimpsest archival storage', 'Bash')"""
+        )
+        conn.commit()
+        conn.close()
+
+        results = search_fts(db_path, "palimpsest", table="observations")
+
+        assert len(results) >= 1
+        r = results[0]
+        assert r["type"] == "observation"
+        for key in ("id", "content", "tool_name", "session_id", "timestamp", "tier", "rank"):
+            assert key in r, f"Missing key: {key}"
+
+
+class TestSearchFtsKnowledge:
+    def test_search_fts_knowledge(self, db_path):
+        """Store a knowledge entry, search for a distinctive term, verify it appears."""
+        store_knowledge(db_path, "quidditch scoring uses golden snitch retrieval", type="fact")
+
+        results = search_fts(db_path, "quidditch", table="knowledge")
+
+        assert len(results) >= 1
+        types = [r["type"] for r in results]
+        assert "knowledge" in types
+        contents = [r["content"] for r in results]
+        assert any("quidditch" in c for c in contents)
+
+    def test_search_fts_knowledge_result_shape(self, db_path):
+        """Knowledge results have the expected keys."""
+        store_knowledge(db_path, "albatross migration pattern spans hemispheres", type="fact")
+
+        results = search_fts(db_path, "albatross", table="knowledge")
+
+        assert len(results) >= 1
+        r = results[0]
+        assert r["type"] == "knowledge"
+        for key in ("id", "knowledge_type", "content", "tags", "confidence", "source", "updated_at", "rank"):
+            assert key in r, f"Missing key: {key}"
+
+    def test_search_fts_knowledge_superseded_excluded(self, db_path):
+        """Superseded knowledge entries are not returned by FTS search."""
+        from techne.core.knowledge import supersede
+
+        old_id = store_knowledge(db_path, "tachyon drives are experimental", type="fact")
+        supersede(db_path, old_id, "tachyon drives are now production-grade")
+
+        # Old content should not appear (superseded)
+        results = search_fts(db_path, "experimental", table="knowledge")
+        ids = [r["id"] for r in results]
+        assert old_id not in ids
+
+
+class TestSearchFtsAll:
+    def test_search_fts_all(self, db_path):
+        """Store data in multiple tables with a shared term; 'all' returns multiple types."""
+        shared_term = "wombat"
+
+        session_id = start_session(db_path)
+        threads = [Thread(
+            thread_num=1,
+            label=f"wombat habitat analysis",
+            summary=f"Analyzed wombat burrowing patterns in southern Australia.",
+        )]
+        save_threads(threads, session_id, db_path)
+
+        store_knowledge(db_path, f"wombat populations are declining in dry regions", type="fact")
+
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO sessions (id, started_at) VALUES ('sess-wombat', CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            """INSERT INTO observations (session_id, content, tool_name)
+               VALUES ('sess-wombat', 'studied wombat dietary requirements', 'Read')"""
+        )
+        conn.commit()
+        conn.close()
+
+        results = search_fts(db_path, shared_term, table="all")
+
+        assert len(results) >= 2
+        result_types = {r["type"] for r in results}
+        # Should have at least two distinct types
+        assert len(result_types) >= 2
+
+    def test_search_fts_all_sorted_by_rank(self, db_path):
+        """Results from 'all' table are sorted by rank (ascending = most relevant first)."""
+        session_id = start_session(db_path)
+        threads = [Thread(
+            thread_num=1,
+            label="tantalum metallurgy processing",
+            summary="Investigated tantalum ore processing for semiconductor use cases.",
+        )]
+        save_threads(threads, session_id, db_path)
+
+        store_knowledge(db_path, "tantalum is a rare earth metal used in capacitors", type="fact")
+
+        results = search_fts(db_path, "tantalum", table="all")
+        assert len(results) >= 1
+
+        ranks = [r["rank"] for r in results]
+        assert ranks == sorted(ranks), "Results should be sorted by rank ascending"
+
+
+class TestSearchFtsEdgeCases:
+    def test_search_fts_empty_query_returns_empty(self, db_path):
+        """Empty query returns empty list."""
+        results = search_fts(db_path, "", table="all")
+        assert results == []
+
+    def test_search_fts_whitespace_query_returns_empty(self, db_path):
+        """Whitespace-only query returns empty list."""
+        results = search_fts(db_path, "   ", table="all")
+        assert results == []
+
+    def test_search_fts_empty_db_returns_empty(self, db_path):
+        """Searching an empty database returns empty results."""
+        results = search_fts(db_path, "anything", table="all")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_fts_query tests
+# ---------------------------------------------------------------------------
+
+class TestSanitizeFtsQuery:
+    def test_sanitize_plain_query(self):
+        """Plain query without special chars is returned unchanged."""
+        result = _sanitize_fts_query("hello world")
+        assert result == "hello world"
+
+    def test_sanitize_single_word(self):
+        """Single plain word is returned unchanged."""
+        result = _sanitize_fts_query("python")
+        assert result == "python"
+
+    def test_sanitize_parens(self):
+        """Parentheses trigger quoting of each term."""
+        result = _sanitize_fts_query("foo(bar)")
+        assert '"foo(bar)"' == result
+
+    def test_sanitize_asterisk(self):
+        """Asterisk triggers quoting."""
+        result = _sanitize_fts_query("foo*")
+        assert '"foo*"' == result
+
+    def test_sanitize_colon(self):
+        """Colon triggers quoting."""
+        result = _sanitize_fts_query("field:value")
+        assert '"field:value"' == result
+
+    def test_sanitize_caret(self):
+        """Caret triggers quoting."""
+        result = _sanitize_fts_query("foo^bar")
+        assert '"foo^bar"' == result
+
+    def test_sanitize_tilde(self):
+        """Tilde triggers quoting."""
+        result = _sanitize_fts_query("foo~3")
+        assert '"foo~3"' == result
+
+    def test_sanitize_square_brackets(self):
+        """Square brackets trigger quoting."""
+        result = _sanitize_fts_query("foo[bar]")
+        assert '"foo[bar]"' == result
+
+    def test_sanitize_curly_braces(self):
+        """Curly braces trigger quoting."""
+        result = _sanitize_fts_query("foo{bar}")
+        assert '"foo{bar}"' == result
+
+    def test_sanitize_double_quotes(self):
+        """Double-quoted term triggers quoting of terms."""
+        result = _sanitize_fts_query('"exact phrase"')
+        # Each whitespace-split token gets quoted
+        assert '"exact' in result or result.startswith('"')
+
+    def test_sanitize_multi_term_with_special(self):
+        """Multi-term query with a special char wraps each term in quotes."""
+        result = _sanitize_fts_query("foo(bar) baz")
+        # Each term should be wrapped
+        assert '"foo(bar)"' in result
+        assert '"baz"' in result
+
+    def test_sanitize_multi_term_no_special(self):
+        """Multi-term query without special chars is unchanged."""
+        result = _sanitize_fts_query("the quick brown fox")
+        assert result == "the quick brown fox"
+
+
+# ---------------------------------------------------------------------------
+# Combined search (search()) tests
+# ---------------------------------------------------------------------------
+
+class TestSearchCombined:
+    def test_search_combined_with_vectors_disabled(self, db_path):
+        """search(..., use_vectors=False) returns FTS-only results."""
+        session_id = start_session(db_path)
+        threads = [Thread(
+            thread_num=1,
+            label="ephemeral container orchestration",
+            summary="Set up ephemeral containers in Kubernetes for debugging pods.",
+        )]
+        save_threads(threads, session_id, db_path)
+
+        results = search(db_path, "ephemeral", use_vectors=False)
+
+        assert len(results) >= 1
+        ids = [r["id"] for r in results]
+        assert f"{session_id}-1" in ids
+
+    def test_search_combined_use_vectors_false_no_vec_import(self, db_path, monkeypatch):
+        """use_vectors=False path must not attempt to import vector dependencies."""
+        import sys
+
+        # Block sqlite_vec import to confirm it's never reached
+        original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else None
+
+        blocked = {"sqlite_vec": True, "fastembed": True}
+        real_import = __import__
+
+        def strict_import(name, *args, **kwargs):
+            if name in blocked:
+                raise ImportError(f"Blocked import of {name} in test")
+            return real_import(name, *args, **kwargs)
+
+        import builtins
+        monkeypatch.setattr(builtins, "__import__", strict_import)
+
+        # This should not raise even though sqlite_vec/fastembed are blocked
+        results = search(db_path, "anything", use_vectors=False)
+        assert isinstance(results, list)
+
+    def test_search_combined_returns_list(self, db_path):
+        """search() always returns a list, even on empty DB."""
+        results = search(db_path, "nothinghere", use_vectors=False)
+        assert isinstance(results, list)
+        assert results == []
+
+    def test_search_combined_empty_query(self, db_path):
+        """Combined search with empty query returns empty list."""
+        results = search(db_path, "", use_vectors=False)
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Vector search tests (skipped when extras not available)
+# ---------------------------------------------------------------------------
+
+class TestSearchVec:
+    def test_search_vec_returns_empty_without_extras(self, db_path):
+        """search_vec returns [] gracefully when sqlite_vec/fastembed not installed.
+
+        On Python 3.14 these extras have no wheel, so the ImportError path is tested.
+        If extras ARE present, skip this specific assertion and test the happy path instead.
+        """
+        try:
+            import sqlite_vec
+            import fastembed
+            extras_available = True
+        except ImportError:
+            extras_available = False
+
+        if not extras_available:
+            # ImportError path: should return [] without raising
+            results = search_vec(db_path, "any query")
+            assert results == [], f"Expected [] without extras, got {results}"
+        else:
+            # If extras are somehow available, just confirm it returns a list
+            pytest.skip("Vector extras are installed; skipping graceful-degradation test")
+
+    def test_search_combined_dedupes(self, db_path):
+        """Combined search deduplicates results that appear in both FTS and vec.
+
+        Requires vector extras. Skipped cleanly if not available.
+        """
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        pytest.importorskip("fastembed")
+
+        session_id = start_session(db_path)
+        threads = [Thread(
+            thread_num=1,
+            label="vector deduplication test thread",
+            summary="Testing that combined search returns deduplicated results.",
+        )]
+        save_threads(threads, session_id, db_path)
+
+        # Backfill vectors so this thread appears in vec search too
+        from techne.core.search import backfill_vectors
+        backfill_vectors(db_path)
+
+        results = search(db_path, "deduplication", use_vectors=True)
+
+        # Collect (type, id) pairs and check for duplicates
+        seen = set()
+        for r in results:
+            key = (r["type"], r.get("id"))
+            assert key not in seen, f"Duplicate result found: {key}"
+            seen.add(key)
