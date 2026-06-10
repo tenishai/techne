@@ -5,7 +5,8 @@
 A single-file SQLite-backed memory store that gives AI agents persistent memory across sessions. Built around the idea that agents need three things to be useful over time: a structured record of *what they did* (sessions and threads), a curated record of *what they learned* (knowledge), and a stable record of *who they are and who they work with* (identity).
 
 ```bash
-pip install techne
+git clone https://github.com/dimartin/techne.git
+cd techne && pip install -e .
 techne init
 ```
 
@@ -29,13 +30,17 @@ The schema and triggers all live in `techne/core/database.py`. Schema migrations
 
 ## Install
 
+techne is in early alpha — installed from source. Public PyPI distribution is on the roadmap.
+
 ```bash
-pip install techne                  # core
-pip install "techne[vectors]"       # adds sqlite-vec + fastembed for semantic search
-pip install "techne[anthropic]"     # if you want to pin Anthropic SDK directly (LiteLLM handles routing by default)
+git clone https://github.com/dimartin/techne.git
+cd techne
+pip install -e .                  # core
+pip install -e ".[vectors]"       # adds sqlite-vec + fastembed for semantic search
+pip install -e ".[anthropic]"     # if you want to pin Anthropic SDK directly (LiteLLM handles routing by default)
 ```
 
-**Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `pip install techne[vectors]` succeeds on 3.14 (installs `sqlite-vec` only); semantic search returns empty gracefully until the ecosystem catches up. FTS5 search works fully on every supported Python (3.11+).
+**Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `pip install -e ".[vectors]"` succeeds on 3.14 (installs `sqlite-vec` only); semantic search returns empty gracefully until the ecosystem catches up. FTS5 search works fully on every supported Python (3.11+).
 
 ---
 
