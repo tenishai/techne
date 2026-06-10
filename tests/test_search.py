@@ -245,6 +245,19 @@ class TestSanitizeFtsQuery:
         result = _sanitize_fts_query("foo~3")
         assert '"foo~3"' == result
 
+    def test_sanitize_hyphen_triggers_quoting(self):
+        """Hyphen is FTS5's NOT operator. Bare `foo -bar` throws a syntax
+        error or silently excludes `bar`; both are wrong for a search box."""
+        result = _sanitize_fts_query("foo -bar")
+        assert result == '"foo" "-bar"'
+
+    def test_sanitize_hyphenated_word_triggers_quoting(self):
+        """A hyphenated word like `pre-compact` is a single literal phrase
+        the user typed; quote it so FTS5 doesn't try to interpret `-compact`
+        as NOT-compact."""
+        result = _sanitize_fts_query("pre-compact")
+        assert result == '"pre-compact"'
+
     def test_sanitize_square_brackets(self):
         """Square brackets trigger quoting."""
         result = _sanitize_fts_query("foo[bar]")

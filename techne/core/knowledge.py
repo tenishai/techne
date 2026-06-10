@@ -3,7 +3,7 @@
 import hashlib
 from pathlib import Path
 
-from techne.core.database import connect
+from techne.core.database import connect, like_escape
 
 VALID_TYPES = ("fact", "decision", "pattern", "evaluation", "procedure")
 VALID_CONFIDENCE = ("high", "medium", "low")
@@ -87,8 +87,8 @@ def list_entries(
             params.append(type)
         if tags:
             for tag in tags.split(","):
-                query += " AND tags LIKE ?"
-                params.append(f"%{tag.strip()}%")
+                query += " AND tags LIKE ? ESCAPE '\\'"
+                params.append(f"%{like_escape(tag.strip())}%")
 
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)

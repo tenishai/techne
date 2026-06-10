@@ -84,3 +84,34 @@ def test_threads_round_trip_with_extensions(tmp_path):
     reloaded = Config.load(out)
     assert reloaded.threads.tool_families == {"X": "y"}
     assert reloaded.threads.entity_patterns == ["foo"]
+
+
+def test_sync_round_trip_preserves_all_fields(tmp_path):
+    """Config.save() previously wrote only sync.adapter (plus url/auth/path if
+    truthy), silently dropping sync.audience and sync.extra. A round-trip on a
+    fully-populated sync block should be lossless."""
+    f = tmp_path / "in.yaml"
+    f.write_text(yaml.dump({
+        "sync": {
+            "adapter": "team-archivist",
+            "url": "https://archivist.example.com",
+            "auth": "token-xyz",
+            "audience": "techne.archivist",
+            "path": "/var/data/sync",
+            "tenant_id": "t-42",  # adapter-specific extra
+            "region": "us-east",  # adapter-specific extra
+        }
+    }))
+    cfg = Config.load(f)
+    assert cfg.sync.audience == "techne.archivist"
+    assert cfg.sync.extra == {"tenant_id": "t-42", "region": "us-east"}
+
+    out = tmp_path / "out.yaml"
+    cfg.save(out)
+    reloaded = Config.load(out)
+    assert reloaded.sync.adapter == "team-archivist"
+    assert reloaded.sync.url == "https://archivist.example.com"
+    assert reloaded.sync.auth == "token-xyz"
+    assert reloaded.sync.audience == "techne.archivist"
+    assert reloaded.sync.path == "/var/data/sync"
+    assert reloaded.sync.extra == {"tenant_id": "t-42", "region": "us-east"}

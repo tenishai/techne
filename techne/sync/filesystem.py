@@ -30,12 +30,21 @@ class FilesystemAdapter:
                     "data": entry.data,
                     "synced_at": datetime.now(timezone.utc).isoformat(),
                 }
-                (out_path / filename).write_text(json.dumps(payload, indent=2))
+                file_path = out_path / filename
+                file_path.write_text(json.dumps(payload, indent=2))
+                # Payloads carry session summaries + project paths — keep them
+                # off world-readable mode 0644.
+                file_path.chmod(0o600)
                 synced += 1
             except Exception as e:
                 errors.append(str(e))
+                # PushResult contract: synced = leading consecutive successes.
+                # Stop on first failure so flush() can mark entries[:synced]
+                # synced and entries[synced:synced+failed] dead, leaving the
+                # rest pending for retry.
+                break
 
-        return PushResult(synced=synced, failed=len(entries) - synced, errors=errors or None)
+        return PushResult(synced=synced, failed=len(errors), errors=errors or None)
 
     def pull(self, query: SyncQuery) -> list[KnowledgeEntry]:
         if not self.base_path or not self.base_path.exists():

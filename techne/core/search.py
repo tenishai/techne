@@ -335,7 +335,16 @@ def _get_embedding_model():
     return _embedding_model
 
 
+_VEC_TABLE_NAMES = frozenset({"threads_vec", "observations_vec", "knowledge_vec"})
+
+
 def _ensure_vec_table(conn: sqlite3.Connection, name: str):
+    # Defense in depth: name is f-string-interpolated into CREATE TABLE below.
+    # Today callers only pass from the hardcoded list in backfill_vectors, but
+    # this is a module-public-looking helper — assert at the SQL construction
+    # site so a future caller can't smuggle in arbitrary identifiers.
+    if name not in _VEC_TABLE_NAMES:
+        raise ValueError(f"unknown vec table {name!r}; expected one of {sorted(_VEC_TABLE_NAMES)}")
     exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone()
@@ -344,8 +353,14 @@ def _ensure_vec_table(conn: sqlite3.Connection, name: str):
 
 
 def _sanitize_fts_query(query: str) -> str:
-    """Sanitize a query string for FTS5. Wraps bare terms in quotes if needed."""
-    special = set('(){}[]"*:^~')
+    """Sanitize a query string for FTS5. Wraps bare terms in quotes if needed.
+
+    `-` is FTS5's NOT operator; bare queries like `foo -bar` either throw a
+    syntax error or silently exclude `bar` from results depending on
+    placement. Treat it the same as the other operator chars: detection
+    triggers per-term quoting so the query is interpreted as literal phrases.
+    """
+    special = set('(){}[]"*:^~-')
     if any(c in query for c in special):
         terms = query.split()
         return " ".join(f'"{t}"' for t in terms if t.strip())

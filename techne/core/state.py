@@ -150,6 +150,11 @@ def end_session(
     See effective_summary() for the read rule.
     """
     column = _resolve_summary_column(source)
+    # Defense in depth at the SQL construction site: `column` is f-string
+    # interpolated below; ensure it's still one of the whitelisted column
+    # names even if _resolve_summary_column is changed in the future.
+    if column not in _SUMMARY_COLUMN_FOR_SOURCE.values():
+        raise ValueError(f"refusing to interpolate unknown column {column!r} into SQL")
     conn = connect(db_path)
     try:
         conn.execute(
@@ -397,8 +402,11 @@ def db_stats(db_path: Path) -> dict:
             "SELECT COUNT(*) FROM threads WHERE status = 'active'"
         ).fetchone()[0]
 
+        # Pre-v2 schema used `synced_at IS NULL` to mean "pending"; v4 schema has
+        # a real status column with values 'pending' | 'synced' | 'dead'. Querying
+        # synced_at IS NULL incorrectly counts dead rows as pending.
         stats["pending_outbox"] = conn.execute(
-            "SELECT COUNT(*) FROM outbox WHERE synced_at IS NULL"
+            "SELECT COUNT(*) FROM outbox WHERE status = 'pending'"
         ).fetchone()[0]
 
         row = conn.execute(

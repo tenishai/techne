@@ -85,8 +85,14 @@ def flush(db_path: Path, adapter: SyncAdapter) -> tuple[int, int]:
                 [now] + synced_ids,
             )
 
-        if failed_ids and result.errors:
-            for fid, err in zip(failed_ids, result.errors or []):
+        if failed_ids:
+            # If the adapter reported more failures than it provided error
+            # messages for, the extra entries previously slipped through
+            # without status update and stayed pending forever. Use a
+            # placeholder so every failed_id gets marked dead.
+            errors = list(result.errors or [])
+            for i, fid in enumerate(failed_ids):
+                err = errors[i] if i < len(errors) else "(adapter reported failure without an error message)"
                 conn.execute(
                     "UPDATE outbox SET status = 'dead', error_message = ? WHERE id = ?",
                     (err, fid),

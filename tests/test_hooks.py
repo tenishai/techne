@@ -2,6 +2,8 @@
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -381,3 +383,52 @@ class TestFindLastTask:
         """Traverses in reverse; returns the last substantive message."""
         msgs = ["first task description", "second task description", "ok"]
         assert _find_last_task(msgs) == "second task description"
+
+
+# ---------------------------------------------------------------------------
+# Hook exit-code invariants
+#
+# Claude Code treats any non-zero hook exit as a hard hook failure at the
+# corresponding lifecycle event. For session_end (Stop) that means a failing
+# hook breaks session teardown. Every error path must exit 0.
+# ---------------------------------------------------------------------------
+
+
+def _run_hook_subprocess(module: str, stdin: str, env_overrides: dict | None = None) -> subprocess.CompletedProcess:
+    env = {**os.environ, **(env_overrides or {})}
+    return subprocess.run(
+        [sys.executable, "-m", module],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+
+class TestSessionEndExitCode:
+    def test_empty_stdin_exits_zero(self):
+        result = _run_hook_subprocess("techne.hooks.session_end", "")
+        assert result.returncode == 0
+
+    def test_missing_session_id_exits_zero(self):
+        result = _run_hook_subprocess("techne.hooks.session_end", "{}")
+        assert result.returncode == 0
+
+    def test_malformed_json_exits_zero(self):
+        result = _run_hook_subprocess("techne.hooks.session_end", "not json {")
+        assert result.returncode == 0
+
+    def test_inner_failure_exits_zero(self, tmp_path: Path):
+        """If the hook reaches the work path but Config/DB/run_session_end fails,
+        it still must exit 0. Point HOME at an empty dir so any DB access fails."""
+        result = _run_hook_subprocess(
+            "techne.hooks.session_end",
+            '{"session_id": "session-that-does-not-exist"}',
+            env_overrides={"HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0, (
+            f"session_end exited {result.returncode} on inner failure — "
+            f"this breaks Claude Code session teardown.\n"
+            f"stderr: {result.stderr}"
+        )

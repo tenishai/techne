@@ -162,6 +162,9 @@ techne status                              # session and storage stats
 
 # Threads
 techne threads [--active] [--topic QUERY] [--limit N]
+techne threads show SESSION_ID [--no-color] [--detector heuristic|llm]
+                                           # per-pair score breakdown for one session:
+                                           # which boundaries the detector saw and why
 techne history [--days N] [--limit N]
 
 # Knowledge

@@ -154,3 +154,86 @@ class TestV2ToV3Migration:
             "SELECT MAX(version) FROM schema_version"
         ).fetchone()[0]
         assert max_version == 3
+
+
+# ---------------------------------------------------------------------------
+# v3 -> v4 migration: split sessions.summary into typed provenance columns
+# (summary_llm, summary_heuristic). Legacy `summary` content stays in place
+# and is read with manual-slot priority by effective_summary().
+# ---------------------------------------------------------------------------
+
+
+V3_SESSIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    project_path TEXT,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,
+    summary TEXT
+);
+"""
+
+
+@pytest.fixture
+def v3_conn(tmp_path):
+    """v3 schema: outbox at v2 shape + sessions with the pre-split `summary`
+    column populated. Used to test v3 -> v4 migration in isolation."""
+    db_path = tmp_path / "v3_test.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(V1_OUTBOX_SCHEMA)
+    conn.executescript(V3_SESSIONS_SCHEMA)
+    conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+    conn.execute(
+        "INSERT INTO sessions (id, project_path, started_at, summary) VALUES (?, ?, ?, ?)",
+        (
+            "session-v3-A",
+            "/home/dev/proj",
+            "2026-01-01T00:00:00+00:00",
+            "**Thread 1: foo**\n3 observations; tools: bash(1), grep(2)",
+        ),
+    )
+    conn.commit()
+    return conn
+
+
+class TestV3ToV4Migration:
+    """v3 -> v4 adds typed summary columns (summary_llm, summary_heuristic)
+    without dropping or rewriting legacy `summary` content."""
+
+    def test_migration_adds_typed_columns(self, v3_conn):
+        _migrate(v3_conn, 3, 4)
+        cols = {row[1] for row in v3_conn.execute("PRAGMA table_info(sessions)")}
+        assert "summary_llm" in cols
+        assert "summary_heuristic" in cols
+
+    def test_legacy_summary_preserved(self, v3_conn):
+        """Pre-split `summary` content stays where it was. effective_summary()
+        will surface it via the manual-slot priority read rule until/unless
+        `techne migrate-summaries` reclassifies it."""
+        _migrate(v3_conn, 3, 4)
+        row = v3_conn.execute(
+            "SELECT summary, summary_llm, summary_heuristic "
+            "FROM sessions WHERE id = 'session-v3-A'"
+        ).fetchone()
+        assert row["summary"].startswith("**Thread 1")
+        assert row["summary_llm"] is None
+        assert row["summary_heuristic"] is None
+
+    def test_schema_version_bumped_to_4(self, v3_conn):
+        _migrate(v3_conn, 3, 4)
+        max_version = v3_conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()[0]
+        assert max_version == 4
+
+    def test_migration_is_idempotent_on_replay(self, v3_conn):
+        """Running the migration when already at v4 should be a no-op, not a
+        column-already-exists error."""
+        _migrate(v3_conn, 3, 4)
+        # Second call with from_version=4 means the v4 branch's gate
+        # (from_version < 4) is false; nothing should run.
+        _migrate(v3_conn, 4, 4)
+        cols = {row[1] for row in v3_conn.execute("PRAGMA table_info(sessions)")}
+        assert "summary_llm" in cols
+        assert "summary_heuristic" in cols

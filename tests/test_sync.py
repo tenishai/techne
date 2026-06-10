@@ -19,11 +19,13 @@ def db_path(tmp_path):
 
 
 class TestNoopAdapter:
-    def test_push(self):
+    def test_push_reports_zero_synced(self):
+        """noop didn't sync — reporting synced=len(entries) would let flush()
+        mark every outbox row 'synced' and silently destroy the backlog."""
         adapter = NoopAdapter()
         entries = [OutboxEntry(id=1, target="test", data={"key": "val"}, content_hash="abc")]
         result = adapter.push(entries)
-        assert result.synced == 1
+        assert result.synced == 0
         assert result.failed == 0
 
     def test_health(self):
@@ -113,13 +115,15 @@ class TestOutbox:
         enqueue(db_path, "knowledge", {"content": "same"}, content_hash="dedupkey")
         assert pending_count(db_path) == 1
 
-    def test_flush_with_noop(self, db_path):
+    def test_flush_with_noop_preserves_backlog(self, db_path):
+        """With noop adapter, flush() must not mark entries synced — they need
+        to remain pending so a later real adapter can pick them up."""
         enqueue(db_path, "knowledge", {"content": "test"})
         adapter = NoopAdapter()
         synced, failed = flush(db_path, adapter)
-        assert synced == 1
+        assert synced == 0
         assert failed == 0
-        assert pending_count(db_path) == 0
+        assert pending_count(db_path) == 1
 
     def test_stats(self, db_path):
         enqueue(db_path, "a", {"x": 1})

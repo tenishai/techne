@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+from techne import __version__
 from techne.config import Config
 
 
@@ -21,8 +22,11 @@ def handle_request(request: dict, config: Config) -> dict:
         return _response(req_id, {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "techne", "version": "0.1.0"},
+            "serverInfo": {"name": "techne", "version": __version__},
         })
+
+    if method == "ping":
+        return _response(req_id, {})
 
     if method == "tools/list":
         return _response(req_id, {"tools": TOOLS})
@@ -63,9 +67,12 @@ def _techne_search(args: dict, config: Config) -> dict:
 
 def _techne_store(args: dict, config: Config) -> dict:
     from techne.core.knowledge import store
+    content = args.get("content")
+    if not content:
+        raise ValueError("techne_store requires 'content' (non-empty string)")
     entry_id = store(
         config.db_path,
-        content=args["content"],
+        content=content,
         type=args.get("type", "fact"),
         tags=args.get("tags", ""),
         confidence=args.get("confidence", "medium"),

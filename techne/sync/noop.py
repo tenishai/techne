@@ -5,7 +5,10 @@ from techne.sync.adapter import KnowledgeEntry, OutboxEntry, PushResult, SyncQue
 
 class NoopAdapter:
     def push(self, entries: list[OutboxEntry]) -> PushResult:
-        return PushResult(synced=len(entries), failed=0)
+        # No-op: we didn't actually sync anything. Returning synced=len(entries)
+        # would mark every outbox row 'synced' in the DB, silently destroying the
+        # backlog that should still be waiting for a real adapter to take it.
+        return PushResult(synced=0, failed=0)
 
     def pull(self, query: SyncQuery) -> list[KnowledgeEntry]:
         return []

@@ -189,11 +189,25 @@ END;
 """
 
 
+def like_escape(s: str) -> str:
+    """Escape `%`, `_`, and `\\` so user input matches literally in a LIKE
+    pattern. Pair with `ESCAPE '\\'` on the LIKE clause. Without this, a tag
+    or key prefix containing `%` matches anything and one containing `_`
+    matches any single character — surprises ranging from harmless wrong
+    results to denial-of-service on large tables."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Wait up to 5s for a lock before raising "database is locked". Multiple
+    # hooks (post_tool_use, session_end) can fire concurrently when Claude Code
+    # streams events, and WAL still serializes writes — without a busy timeout
+    # the concurrent writer raises immediately instead of waiting its turn.
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     _ensure_initialized(conn)
     return conn

@@ -58,7 +58,10 @@ def _parse_transcript(transcript_path: str, max_lines: int = 500) -> dict:
     }
 
     try:
-        lines = Path(transcript_path).read_text().strip().split("\n")
+        # Transcripts are JSONL written by Claude Code; always UTF-8. The
+        # rest of the codebase pins encoding="utf-8" — match it so this
+        # hook doesn't break on a host whose default encoding isn't UTF-8.
+        lines = Path(transcript_path).read_text(encoding="utf-8").strip().split("\n")
         for line in lines[-max_lines:]:
             try:
                 d = json.loads(line)
@@ -95,8 +98,11 @@ def _parse_transcript(transcript_path: str, max_lines: int = 500) -> dict:
 
             except json.JSONDecodeError:
                 continue
-    except Exception:
-        pass
+    except Exception as e:
+        # Don't raise — caller depends on the empty default for a graceful
+        # checkpoint — but surface the failure rather than silently writing
+        # an empty checkpoint as if nothing happened.
+        print(f"techne: pre_compact transcript parse failed: {e}", file=sys.stderr)
 
     return result
 

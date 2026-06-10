@@ -1,0 +1,120 @@
+"""MCP server tests — JSON-RPC routing in handle_request().
+
+Coverage gap noted in v0.5.0 review: handle_request had no direct tests.
+This file exercises the method dispatch, version reporting, ping support,
+and per-tool error paths.
+"""
+
+import pytest
+
+from techne import __version__
+from techne.config import Config
+from techne.core.database import init_db
+from techne.mcp_server import handle_request
+
+
+@pytest.fixture
+def db_path(tmp_path):
+    path = tmp_path / "techne.db"
+    conn = init_db(path)
+    conn.close()
+    return path
+
+
+@pytest.fixture
+def config(db_path):
+    cfg = Config()
+    cfg.db_path = db_path
+    return cfg
+
+
+class TestHandleRequest:
+    def test_initialize_returns_current_version(self, config):
+        """serverInfo.version must come from techne.__version__, not a literal."""
+        response = handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"}, config)
+        assert response["jsonrpc"] == "2.0"
+        assert response["id"] == 1
+        assert response["result"]["serverInfo"] == {"name": "techne", "version": __version__}
+
+    def test_initialize_advertises_tools_capability(self, config):
+        response = handle_request({"id": 1, "method": "initialize"}, config)
+        assert "tools" in response["result"]["capabilities"]
+        assert response["result"]["protocolVersion"] == "2024-11-05"
+
+    def test_ping_returns_empty_result(self, config):
+        """MCP `ping` should return an empty object, not -32601. Without this,
+        clients that probe the server with ping treat it as unreachable."""
+        response = handle_request({"id": 7, "method": "ping"}, config)
+        assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+
+    def test_tools_list_returns_all_tools(self, config):
+        response = handle_request({"id": 2, "method": "tools/list"}, config)
+        tools = response["result"]["tools"]
+        names = {t["name"] for t in tools}
+        assert names == {
+            "techne_search", "techne_store", "techne_threads",
+            "techne_resume", "techne_status", "techne_recall",
+        }
+
+    def test_notifications_initialized_returns_none(self, config):
+        """JSON-RPC notifications get no reply."""
+        response = handle_request({"method": "notifications/initialized"}, config)
+        assert response is None
+
+    def test_unknown_method_returns_minus_32601(self, config):
+        response = handle_request({"id": 3, "method": "totally/made-up"}, config)
+        assert response["error"]["code"] == -32601
+        assert "totally/made-up" in response["error"]["message"]
+
+    def test_unknown_tool_returns_minus_32601(self, config):
+        response = handle_request(
+            {"id": 4, "method": "tools/call", "params": {"name": "nonexistent_tool"}},
+            config,
+        )
+        assert response["error"]["code"] == -32601
+        assert "nonexistent_tool" in response["error"]["message"]
+
+
+class TestTechneStoreContentValidation:
+    def test_missing_content_returns_iserror(self, config):
+        """techne_store schema requires `content`, but the server didn't enforce
+        it pre-fix and would crash with KeyError. After the fix it returns a
+        clean isError response with a descriptive message."""
+        response = handle_request(
+            {
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "techne_store", "arguments": {}},
+            },
+            config,
+        )
+        assert response["result"]["isError"] is True
+        text = response["result"]["content"][0]["text"]
+        assert "content" in text.lower()
+
+    def test_empty_content_returns_iserror(self, config):
+        response = handle_request(
+            {
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "techne_store", "arguments": {"content": ""}},
+            },
+            config,
+        )
+        assert response["result"]["isError"] is True
+
+    def test_valid_content_succeeds(self, config):
+        response = handle_request(
+            {
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "techne_store",
+                    "arguments": {"content": "a real fact", "type": "fact"},
+                },
+            },
+            config,
+        )
+        # No isError, content array carries the success payload as JSON text
+        assert "isError" not in response["result"]
+        assert "content" in response["result"]

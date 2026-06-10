@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from techne.core.database import connect
+from techne.core.database import connect, like_escape
 
 
 def get(db_path: Path, key: str) -> str | None:
@@ -40,8 +40,8 @@ def list_entries(db_path: Path, prefix: str = "") -> list[dict]:
     try:
         if prefix:
             rows = conn.execute(
-                "SELECT key, value, source, updated_at FROM identity WHERE key LIKE ? ORDER BY key",
-                (f"{prefix}%",),
+                "SELECT key, value, source, updated_at FROM identity WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
+                (f"{like_escape(prefix)}%",),
             ).fetchall()
         else:
             rows = conn.execute(

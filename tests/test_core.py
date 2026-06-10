@@ -217,6 +217,26 @@ class TestKnowledge:
         assert h1 == h2
         assert h1 != h3
 
+    def test_tag_filter_escapes_like_wildcards(self, db_path):
+        """A tag containing `%` or `_` must match literally, not as a LIKE
+        wildcard. Without escaping, the `%` in the tag string would expand
+        and return rows whose tags happen to share a prefix or substring."""
+        store(db_path, "literal percent tag", type="fact", tags="50%-cpu,monitoring")
+        store(db_path, "unrelated", type="fact", tags="monitoring,alerts")
+        store(db_path, "underscore tag", type="fact", tags="rate_limit")
+
+        # Without escaping, "50%" would match anything starting with "50".
+        # With escaping, it only matches a tag literally containing "50%".
+        hits = list_entries(db_path, tags="50%")
+        assert len(hits) == 1
+        assert "literal percent" in hits[0]["content"]
+
+        # Underscore is also a LIKE wildcard (single-char). Should not
+        # accidentally match across other tags.
+        hits = list_entries(db_path, tags="rate_limit")
+        assert len(hits) == 1
+        assert "underscore" in hits[0]["content"]
+
 
 class TestIdentity:
     def test_set_and_get(self, db_path):

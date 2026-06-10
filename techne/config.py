@@ -179,7 +179,15 @@ class Config:
             data["sync"]["url"] = self.sync.url
         if self.sync.auth:
             data["sync"]["auth"] = self.sync.auth
+        if self.sync.audience:
+            data["sync"]["audience"] = self.sync.audience
         if self.sync.path:
             data["sync"]["path"] = self.sync.path
+        # Preserve adapter-specific extras that came in via _from_dict's
+        # "kwargs" sweep, so load/save is a real round-trip.
+        if self.sync.extra:
+            for k, v in self.sync.extra.items():
+                if k not in data["sync"]:
+                    data["sync"][k] = v
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
