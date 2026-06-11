@@ -259,6 +259,56 @@ techne calls LLMs via [LiteLLM](https://github.com/BerriAI/litellm), which provi
 
 Switch providers by changing one config line.
 
+### Routing through a LiteLLM proxy
+
+When you're running techne inside a larger system that hosts a [LiteLLM proxy server](https://docs.litellm.ai/docs/proxy/quick_start) for centralized budget enforcement, observability, or model routing, point techne at it:
+
+```yaml
+model: opus                           # whatever alias your proxy declares
+llm_api_base: http://litellm:4000
+llm_api_key: sk-your-virtual-key      # optional; omit to use env var
+```
+
+Unset → LiteLLM falls back to its standard env-var-based provider routing (e.g., calling Anthropic directly via `ANTHROPIC_API_KEY`).
+
+---
+
+## Embedding techne in a custom agent runtime
+
+The `techne.lifecycle` module is the high-level library entry point for runtimes that aren't Claude Code — your own agent process, a notebook, a server-side service. Two patterns:
+
+### Auto-generated session IDs (default)
+
+```python
+import techne
+from techne.lifecycle import run_session_start, run_session_end
+
+config = techne.Config.load()
+session_id = run_session_start(config, project_path="/my/project")
+# ... agent does work, observations get added ...
+run_session_end(config, session_id)
+```
+
+### Caller-supplied session IDs
+
+If your runtime has its own conversation / task / dispatch identifiers (an A2A Task ID, a Slack thread ID, an issue number), bind them 1:1 onto techne sessions:
+
+```python
+from techne.lifecycle import init_session_for_external_id, run_session_end
+
+# Idempotent: safe to call multiple times for the same id (e.g. on agent restart).
+session_id = init_session_for_external_id(
+    config,
+    external_id="a2a-task-abc-123",
+    project_path="/my/project",
+    agent_identity="rook-primus",
+)
+# ... agent does work ...
+run_session_end(config, session_id)
+```
+
+Caller is responsible for namespacing external IDs across runtimes that share a techne DB.
+
 ---
 
 ## Custom sync adapters
@@ -287,6 +337,13 @@ sync:
 
 Semantic versioning. Tagged releases on the repo:
 
+- **v0.6.0** — embedding techne in custom agent runtimes:
+  - **`llm_api_base` + `llm_api_key` config fields** for routing LLM calls through a LiteLLM proxy server (centralized budget enforcement, observability, model routing). Unset → falls back to LiteLLM's standard env-var-based provider routing.
+  - **Caller-supplied session IDs** via `start_session(session_id=...)` and `run_session_start(session_id=...)` — runtimes with their own conversation / task IDs (e.g., A2A Tasks, Slack threads) can map them 1:1 onto techne sessions.
+  - **`techne.lifecycle.init_session_for_external_id(config, external_id, ...)`** — idempotent helper for the caller-supplied-id pattern. Safe to call repeatedly (e.g., on agent restart mid-dispatch).
+  - **`cabal` platform** added to the `Platform` enum.
+  - **`run_session_start` now passes `config.platform` through to `start_session`** (was always defaulting to `claude-code`; harmless but wrong for non-Claude-Code runtimes).
+- **v0.5.1** — review pass: 2 blockers (`session_end` exit code, `NoopAdapter` synced=0), 5 high-priority bugs (MCP version + ping, `db_stats` outbox query, SQL allowlist asserts, `busy_timeout` PRAGMA, `techne_store` content validation), 8 medium-priority cleanups (Filesystem leading-consecutive contract + chmod 0600, outbox failed-without-error handling, LIKE escape, Config sync round-trip, pre_compact utf-8 + stderr log, FTS sanitizer hyphen). +22 net new tests.
 - **v0.5.0** — first public release. Major additions over v0.4.x:
   - **JSONL backfill** (`techne import [PATH] [--no-prompts] [--force]`). Historical Claude Code transcripts at `~/.claude/projects/<slug>/` can be replayed into the database. Captures tool calls and user prompts; idempotent by default with `--force` for partial-overlap sessions.
   - **Dual-column session summary** with provenance routing. `sessions.summary` (manual override), `sessions.summary_llm` (LLM-derived, e.g. Claude Code's `ai-title`), `sessions.summary_heuristic` (auto-detector output). `effective_summary()` returns the highest-priority non-empty slot. Schema bumped to **v4**.

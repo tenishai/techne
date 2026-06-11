@@ -86,6 +86,85 @@ def test_threads_round_trip_with_extensions(tmp_path):
     assert reloaded.threads.entity_patterns == ["foo"]
 
 
+def test_platform_accepts_cabal(tmp_path):
+    """`cabal` is a valid platform value (added in v0.6.0 for Cabal runtime)."""
+    f = tmp_path / "config.yaml"
+    f.write_text(yaml.dump({"platform": "cabal"}))
+    cfg = Config.load(f)
+    assert cfg.platform == "cabal"
+
+
+def test_llm_api_base_and_key_round_trip(tmp_path):
+    """When set, llm_api_base + llm_api_key load and save losslessly. When
+    unset (empty string), they don't appear in the saved YAML."""
+    f = tmp_path / "in.yaml"
+    f.write_text(yaml.dump({
+        "llm_api_base": "http://litellm:4000",
+        "llm_api_key": "sk-cabal-rook-internal-key",
+    }))
+    cfg = Config.load(f)
+    assert cfg.llm_api_base == "http://litellm:4000"
+    assert cfg.llm_api_key == "sk-cabal-rook-internal-key"
+
+    out = tmp_path / "out.yaml"
+    cfg.save(out)
+    text = out.read_text()
+    assert "llm_api_base: http://litellm:4000" in text
+    assert "llm_api_key: sk-cabal-rook-internal-key" in text
+
+    reloaded = Config.load(out)
+    assert reloaded.llm_api_base == cfg.llm_api_base
+    assert reloaded.llm_api_key == cfg.llm_api_key
+
+
+def test_llm_fields_omitted_when_empty(tmp_path):
+    """Default Config (no LiteLLM proxy) shouldn't write llm_api_base / key
+    to YAML — keeps the saved config clean for the common case where techne
+    uses LiteLLM's standard provider routing via env vars."""
+    out = tmp_path / "default.yaml"
+    Config().save(out)
+    text = out.read_text()
+    assert "llm_api_base" not in text
+    assert "llm_api_key" not in text
+
+
+def test_make_generate_fn_passes_proxy_fields(tmp_path, monkeypatch):
+    """_make_generate_fn forwards api_base + api_key to litellm.completion()
+    when configured. Without those, it omits them (relying on litellm's
+    env-var routing)."""
+    from techne.config import Config
+    from techne.core.threads import _make_generate_fn
+
+    captured: dict = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        class _Msg:
+            content = "ok"
+        class _Choice:
+            message = _Msg()
+        class _Resp:
+            choices = [_Choice()]
+        return _Resp()
+
+    import litellm
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    # With proxy fields set: both pass through.
+    cfg = Config()
+    cfg.llm_api_base = "http://litellm:4000"
+    cfg.llm_api_key = "sk-test"
+    _make_generate_fn(cfg)("hi")
+    assert captured["api_base"] == "http://litellm:4000"
+    assert captured["api_key"] == "sk-test"
+
+    # Without proxy fields: neither key appears (lets litellm's defaults win).
+    captured.clear()
+    _make_generate_fn(Config())("hi")
+    assert "api_base" not in captured
+    assert "api_key" not in captured
+
+
 def test_sync_round_trip_preserves_all_fields(tmp_path):
     """Config.save() previously wrote only sync.adapter (plus url/auth/path if
     truthy), silently dropping sync.audience and sync.extra. A round-trip on a

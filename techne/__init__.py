@@ -17,6 +17,7 @@ from techne.lifecycle import (
     run_session_start,
     run_session_end,
     capture_tool_use,
+    init_session_for_external_id,
 )
 
 # Core types
@@ -36,6 +37,7 @@ __all__ = [
     "Config", "Platform", "ThreadConfig", "HookConfig", "SyncConfig",
     # lifecycle
     "run_session_start", "run_session_end", "capture_tool_use",
+    "init_session_for_external_id",
     # core types
     "Thread",
     # db

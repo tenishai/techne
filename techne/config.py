@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import yaml
 
-Platform = Literal["claude-code", "codex", "standalone"]
+Platform = Literal["claude-code", "codex", "standalone", "cabal"]
 
 DEFAULT_DIR = Path.home() / ".techne"
 DEFAULT_DB = DEFAULT_DIR / "techne.db"
@@ -61,6 +61,13 @@ class Config:
     hooks: HookConfig = field(default_factory=HookConfig)
     platform: Platform = "claude-code"
     model: str = "claude-haiku-4-5-20251001"
+    # Optional LiteLLM proxy targeting. When unset, litellm.completion() uses
+    # its standard env-var-based provider routing (ANTHROPIC_API_KEY, etc.).
+    # Set llm_api_base when you're running a LiteLLM proxy server (e.g., for
+    # centralized budget enforcement, observability, or model routing) and
+    # want techne's summarization calls to go through it.
+    llm_api_base: str = ""
+    llm_api_key: str = ""
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -81,14 +88,18 @@ class Config:
         if "identity_dir" in raw:
             cfg.identity_dir = Path(raw["identity_dir"]).expanduser()
         if "platform" in raw:
-            if raw["platform"] not in ("claude-code", "codex", "standalone"):
+            if raw["platform"] not in ("claude-code", "codex", "standalone", "cabal"):
                 raise ValueError(
                     f"Invalid platform '{raw['platform']}'. "
-                    f"Must be one of: claude-code, codex, standalone"
+                    f"Must be one of: claude-code, codex, standalone, cabal"
                 )
             cfg.platform = raw["platform"]
         if "model" in raw:
             cfg.model = raw["model"]
+        if "llm_api_base" in raw:
+            cfg.llm_api_base = str(raw["llm_api_base"])
+        if "llm_api_key" in raw:
+            cfg.llm_api_key = str(raw["llm_api_key"])
 
         if "sync" in raw and isinstance(raw["sync"], dict):
             s = raw["sync"]
@@ -147,7 +158,7 @@ class Config:
     def save(self, path: Path | None = None):
         path = path or DEFAULT_CONFIG
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        data: dict[str, Any] = {
             "db_path": str(self.db_path),
             "data_dir": str(self.data_dir),
             "platform": self.platform,
@@ -171,6 +182,10 @@ class Config:
         }
         if self.identity_dir:
             data["identity_dir"] = str(self.identity_dir)
+        if self.llm_api_base:
+            data["llm_api_base"] = self.llm_api_base
+        if self.llm_api_key:
+            data["llm_api_key"] = self.llm_api_key
         if self.threads.tool_families:
             data["threads"]["tool_families"] = dict(self.threads.tool_families)
         if self.threads.entity_patterns:

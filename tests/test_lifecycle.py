@@ -478,3 +478,95 @@ def test_session_end_with_failing_llm(tmp_path, capsys):
     # Stderr should mention the failure
     captured = capsys.readouterr()
     assert "failed" in captured.err.lower() or "RuntimeError" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# External-id session binding (added in v0.6.0 for runtimes that have their
+# own task / conversation ids — e.g., A2A Task IDs in Cabal).
+# ---------------------------------------------------------------------------
+
+
+def test_start_session_with_explicit_session_id(tmp_path):
+    """Passing session_id= uses it verbatim instead of generating a UUID."""
+    from techne.config import Config
+    from techne.core.state import start_session
+
+    config = Config()
+    config.db_path = tmp_path / "external.db"
+
+    result = start_session(
+        config.db_path,
+        project_path="/some/project",
+        session_id="task-abc-123",
+    )
+    assert result == "task-abc-123"
+
+
+def test_start_session_without_session_id_generates_uuid(tmp_path):
+    """Default path still generates a UUID (no behavior change for existing callers)."""
+    import re
+    from techne.config import Config
+    from techne.core.state import start_session
+
+    config = Config()
+    config.db_path = tmp_path / "uuid.db"
+
+    result = start_session(config.db_path)
+    # UUIDs match this shape; explicit ids like "task-abc-123" wouldn't.
+    assert re.match(r"[0-9a-f-]{36}", result), f"expected UUID, got {result!r}"
+
+
+def test_init_session_for_external_id_is_idempotent(tmp_path):
+    """Calling init_session_for_external_id with the same id twice returns the
+    same id, no PRIMARY KEY violation. This is the contract Cabal-style runtimes
+    need when an agent restarts mid-Task and re-binds the same task_id."""
+    from techne.config import Config
+    from techne.lifecycle import init_session_for_external_id
+
+    config = Config()
+    config.db_path = tmp_path / "idempotent.db"
+
+    first = init_session_for_external_id(config, "cabal-task-xyz")
+    second = init_session_for_external_id(config, "cabal-task-xyz")
+
+    assert first == "cabal-task-xyz"
+    assert second == "cabal-task-xyz"
+
+
+def test_init_session_for_external_id_respects_config_platform(tmp_path):
+    """When config.platform='cabal', the session row's platform column carries
+    'cabal' — not the previous claude-code default."""
+    from techne.config import Config
+    from techne.core.database import connect
+    from techne.lifecycle import init_session_for_external_id
+
+    config = Config()
+    config.db_path = tmp_path / "platform.db"
+    config.platform = "cabal"
+
+    sid = init_session_for_external_id(config, "task-1")
+
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT platform FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["platform"] == "cabal"
+
+
+def test_run_session_start_passes_session_id_through(tmp_path):
+    """The lifecycle wrapper threads session_id down to start_session unchanged."""
+    from techne.config import Config
+    from techne.lifecycle import run_session_start
+
+    config = Config()
+    config.db_path = tmp_path / "rss.db"
+
+    result = run_session_start(
+        config,
+        project_path="/proj",
+        session_id="explicit-id-from-runtime",
+    )
+    assert result == "explicit-id-from-runtime"

@@ -12,10 +12,16 @@ def run_session_start(
     config: Config,
     project_path: str | None = None,
     agent_identity: str | None = None,
+    *,
+    session_id: str | None = None,
 ) -> str:
     """Start a new session. Returns the session_id.
 
     Idempotent w.r.t. DB initialization — calls init_db.
+
+    Pass `session_id` to use a caller-supplied id (e.g., an A2A Task ID, a
+    Slack thread id) instead of a generated UUID. See
+    `init_session_for_external_id` for the idempotent wrapper.
     """
     from techne.core.database import init_db
     from techne.core.state import start_session
@@ -25,6 +31,51 @@ def run_session_start(
         config.db_path,
         project_path=project_path or "",
         agent_identity=agent_identity or "",
+        platform=config.platform,
+        session_id=session_id,
+    )
+
+
+def init_session_for_external_id(
+    config: Config,
+    external_id: str,
+    *,
+    project_path: str | None = None,
+    agent_identity: str | None = None,
+) -> str:
+    """Idempotently bind a caller-supplied identifier to a techne session.
+
+    Used when techne is embedded in a runtime that has its own conversation
+    / task / dispatch IDs (e.g., A2A Task IDs in Cabal, thread IDs in Slack
+    bots) and wants to map them 1:1 onto techne sessions. The external_id is
+    stored verbatim as the session's primary key.
+
+    If a session with this id already exists, return its id without modifying
+    it. This makes it safe to call multiple times during a single dispatch
+    (e.g., on agent restart mid-Task).
+
+    Caller is responsible for namespacing the external_id to avoid collisions
+    across runtimes sharing one techne DB.
+    """
+    from techne.core.database import connect, init_db
+
+    init_db(config.db_path)
+
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id FROM sessions WHERE id = ?", (external_id,)
+        ).fetchone()
+        if row is not None:
+            return external_id
+    finally:
+        conn.close()
+
+    return run_session_start(
+        config,
+        project_path=project_path,
+        agent_identity=agent_identity,
+        session_id=external_id,
     )
 
 

@@ -98,9 +98,20 @@ def start_session(
     project_path: str = "",
     agent_identity: str = "",
     platform: str = "claude-code",
+    *,
+    session_id: str | None = None,
 ) -> str:
-    """Create a new session. Returns the session id."""
-    session_id = str(uuid.uuid4())
+    """Create a new session. Returns the session id.
+
+    If `session_id` is provided, use it verbatim; otherwise generate a UUID.
+    The explicit-id path is for runtimes that have their own conversation /
+    task / dispatch identifiers (e.g., A2A Task IDs) and want a 1:1 mapping
+    onto techne sessions. Caller is responsible for namespacing if collisions
+    are possible; the INSERT fails with a PRIMARY KEY violation on duplicate
+    ids — use `lifecycle.init_session_for_external_id` for idempotent setup.
+    """
+    if session_id is None:
+        session_id = str(uuid.uuid4())
     conn = connect(db_path)
     try:
         conn.execute(

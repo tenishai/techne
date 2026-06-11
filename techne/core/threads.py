@@ -371,14 +371,24 @@ def _make_generate_fn(config: Config):
       - "openai/gpt-4" (OpenAI, needs OPENAI_API_KEY env)
       - "ollama/llama3" (local via Ollama)
       - etc. See LiteLLM docs for the full provider list.
+
+    When `config.llm_api_base` is set, calls are routed through that endpoint
+    (e.g., a LiteLLM proxy server providing centralized budget enforcement
+    and observability). When unset, LiteLLM uses its standard env-var-based
+    provider routing.
     """
     def generate(prompt: str) -> str:
         import litellm
-        resp = litellm.completion(
-            model=config.model,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        kwargs: dict = {
+            "model": config.model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if config.llm_api_base:
+            kwargs["api_base"] = config.llm_api_base
+        if config.llm_api_key:
+            kwargs["api_key"] = config.llm_api_key
+        resp = litellm.completion(**kwargs)
         return resp.choices[0].message.content.strip()
     return generate
 
