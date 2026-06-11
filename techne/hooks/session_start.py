@@ -26,12 +26,31 @@ def main():
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     platform = config.platform
 
-    session_id = start_session(
-        config.db_path,
-        project_path=project_path,
-        agent_identity=agent_identity,
-        platform=platform,
-    )
+    # Use Claude Code's session_id when provided so all downstream hooks
+    # (pre_compact, session_end) see the same ID without needing a side
+    # channel. Fall back to a new UUID when running outside Claude Code.
+    cc_session_id = data.get("session_id") or None
+
+    if cc_session_id:
+        # Idempotent: Claude Code may re-fire session_start on reconnect.
+        from techne.core.database import connect as _connect
+        _conn = _connect(config.db_path)
+        try:
+            _conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, project_path, agent_identity, platform) VALUES (?, ?, ?, ?)",
+                (cc_session_id, project_path, agent_identity, platform),
+            )
+            _conn.commit()
+        finally:
+            _conn.close()
+        session_id = cc_session_id
+    else:
+        session_id = start_session(
+            config.db_path,
+            project_path=project_path,
+            agent_identity=agent_identity,
+            platform=platform,
+        )
 
     # Flush outbox from prior session
     try:

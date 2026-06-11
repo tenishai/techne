@@ -303,11 +303,21 @@ def save_checkpoint(
     trigger: str,
     data: dict,
 ):
-    """Save a pre-compaction checkpoint."""
+    """Save a pre-compaction checkpoint.
+
+    Auto-creates a session row for `session_id` if one doesn't exist yet.
+    This handles the case where the pre_compact hook fires with Claude Code's
+    own session UUID before session_start has had a chance to register it
+    (or when session_start is not configured).
+    """
     import json
 
     conn = connect(db_path)
     try:
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (id) VALUES (?)",
+            (session_id,),
+        )
         conn.execute(
             "INSERT INTO checkpoints (session_id, trigger, data_json) VALUES (?, ?, ?)",
             (session_id, trigger, json.dumps(data)),
@@ -325,7 +335,7 @@ def get_latest_checkpoint(db_path: Path, session_id: str) -> dict | None:
     try:
         row = conn.execute(
             """SELECT data_json, trigger, created_at FROM checkpoints
-               WHERE session_id = ? ORDER BY created_at DESC LIMIT 1""",
+               WHERE session_id = ? ORDER BY id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
         if row:

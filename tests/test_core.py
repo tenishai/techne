@@ -267,6 +267,28 @@ class TestCheckpoints:
         assert cp["trigger"] == "auto"
         assert cp["data"]["last_task"] == "Fix bug"
 
+    def test_save_checkpoint_auto_creates_session_row(self, db_path):
+        """save_checkpoint must not raise when the session_id doesn't exist yet.
+
+        The pre_compact hook receives Claude Code's own session UUID (which was
+        never registered via start_session), so save_checkpoint auto-creates the
+        session row rather than failing the FK constraint.
+        """
+        foreign_session_id = "cc-session-deadbeef-1234-5678-abcd-ef0123456789"
+        # Must not raise sqlite3.IntegrityError
+        save_checkpoint(db_path, foreign_session_id, "compact", {"last_task": "x"})
+        cp = get_latest_checkpoint(db_path, foreign_session_id)
+        assert cp is not None
+        assert cp["trigger"] == "compact"
+
+    def test_save_checkpoint_multiple_for_unknown_session(self, db_path):
+        """Multiple checkpoints for the same auto-created session row work."""
+        sid = "cc-session-unknown-99"
+        save_checkpoint(db_path, sid, "compact", {"n": 1})
+        save_checkpoint(db_path, sid, "compact", {"n": 2})
+        cp = get_latest_checkpoint(db_path, sid)
+        assert cp["data"]["n"] == 2
+
 
 class TestResumeContext:
     def test_empty_db(self, db_path):
