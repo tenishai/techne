@@ -1,0 +1,49 @@
+name: test
+
+# Techne has no private sibling deps — full suite runs on every push/PR.
+# The contract job catches breaking renames before cabal/limenal CI fires.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.13']
+      fail-fast: false
+
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@v4
+        with:
+          path: techne
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: techne/pyproject.toml
+
+      - name: Install
+        working-directory: techne
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff lint
+        working-directory: techne
+        run: ruff check techne tests || true  # lint is advisory until strict pass is done
+
+      - name: Pytest (includes contract assertions)
+        working-directory: techne
+        run: pytest -q
