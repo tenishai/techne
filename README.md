@@ -337,6 +337,16 @@ sync:
 
 Semantic versioning. Tagged releases on the repo:
 
+- **v0.6.1** — correctness + hygiene pass (Fable review):
+  - **FTS crash fix** — double-quoted search terms no longer raise `OperationalError`; embedded `"` are escaped before wrapping.
+  - **Search provenance fix** — `search()` no longer stamps `source = "fts"/"vec"` over the original knowledge provenance; match source is returned in a separate `match_source` field.
+  - **Supersede guard** — re-superseding an already-superseded entry raises a clear error instead of silently orphaning the revision chain.
+  - **Atomic redetect / session-end** — `redetect_threads` and `run_session_end` wrapped in umbrella transactions; a crash mid-operation leaves original history intact. `INSERT OR REPLACE` in `save_threads` replaced with `INSERT … ON CONFLICT UPDATE` that excludes `created_at`.
+  - **Public API contract tests** — CI job asserts that `search.search`, `init_db`, `knowledge.store`, and `lifecycle` module exist with the right signatures. A breaking rename fails CI.
+  - **`VALID_TYPES` exported** from `techne.__init__` so consumers (`limenal.handlers.memory`) import the canonical list instead of duplicating it.
+  - **`lifecycle` module in `__all__`** — callers can now `import techne; techne.lifecycle.run_session_end(...)`.
+  - **`schema_version` race fix** — `UNIQUE` constraint on `version` column + `INSERT OR IGNORE` prevents double-insert on concurrent `connect()` calls.
+  - **`llm_api_key` file permission** — `config.save()` now `chmod 0600`s the YAML after writing when `llm_api_key` is present, matching the filesystem sync adapter.
 - **v0.6.0** — embedding techne in custom agent runtimes:
   - **`llm_api_base` + `llm_api_key` config fields** for routing LLM calls through a LiteLLM proxy server (centralized budget enforcement, observability, model routing). Unset → falls back to LiteLLM's standard env-var-based provider routing.
   - **Caller-supplied session IDs** via `start_session(session_id=...)` and `run_session_start(session_id=...)` — runtimes with their own conversation / task IDs (e.g., A2A Tasks, Slack threads) can map them 1:1 onto techne sessions.
