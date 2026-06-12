@@ -202,27 +202,34 @@ def redetect_threads(
     observations = get_observations(config.db_path, session_id)
     threads, scores = detect_summarize_with_metadata(observations, config)
 
+    # Compute parent links before opening the write connection (link_threads
+    # does read-only FTS queries on its own connection; no conflict).
+    parent_links = link_threads(threads, session_id, config.db_path, config)
+
+    # Delete old rows AND insert new ones in a single transaction so a crash
+    # mid-way never leaves the session with no threads.
+    boundary_a_indices = (
+        boundary_indices_from_segments([t.observation_indices for t in threads])
+        if scores
+        else None
+    )
     conn = connect(config.db_path)
     try:
-        # Clear prior detection output before writing fresh rows.
-        # save_threads uses INSERT OR REPLACE on PK so a same-count rerun would
-        # overwrite cleanly, but a rerun that produces FEWER threads (signal
-        # tightening) would leave orphans behind.
         conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
         conn.execute(
             "DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,)
         )
-        if scores:
-            boundary_a_indices = boundary_indices_from_segments(
-                [t.observation_indices for t in threads]
-            )
-            save_boundaries(conn, session_id, scores, boundary_a_indices)
+        if scores and boundary_a_indices is not None:
+            save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
+        save_threads(
+            threads, session_id, config.db_path, parent_links=parent_links, conn=conn
+        )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
-
-    parent_links = link_threads(threads, session_id, config.db_path, config)
-    save_threads(threads, session_id, config.db_path, parent_links=parent_links)
     set_session_summary(
         config.db_path,
         session_id,

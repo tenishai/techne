@@ -264,9 +264,11 @@ def link_threads(
             candidate_status = r.get("status", "")
             if candidate_status == "stale":
                 continue
-            # BM25 is "lower is better"; convert to a 0-1 similarity score
+            # BM25 is "lower is better"; convert to a 0-1 similarity score.
+            # rank=0 means "no score computed" (unindexed row), not a perfect
+            # match — treat as zero similarity so it never auto-links.
             bm25 = r.get("rank", 0)
-            similarity = 1.0 / (1.0 + abs(bm25)) if bm25 != 0 else 1.0
+            similarity = 1.0 / (1.0 + abs(bm25)) if bm25 else 0.0
             if similarity < config.threads.link_threshold:
                 continue  # not similar enough to link
             parent_id = candidate_id
@@ -282,15 +284,22 @@ def save_threads(
     session_id: str,
     db_path: Path,
     parent_links: list[tuple[str, str | None]] | None = None,
+    conn=None,
 ):
-    """Persist threads to the database."""
+    """Persist threads to the database.
+
+    If `conn` is provided the caller owns the transaction (no commit/close
+    here). Pass a connection to make DELETE + insert atomic in redetection.
+    """
     from techne.core.database import connect
 
     link_map = {}
     if parent_links:
         link_map = {tid: pid for tid, pid in parent_links}
 
-    conn = connect(db_path)
+    owned = conn is None
+    if owned:
+        conn = connect(db_path)
     try:
         for t in threads:
             thread_id = f"{session_id}-{t.thread_num}"
@@ -303,9 +312,11 @@ def save_threads(
                 (thread_id, session_id, t.thread_num, t.label, t.summary,
                  t.resume_points or None, parent_id),
             )
-        conn.commit()
+        if owned:
+            conn.commit()
     finally:
-        conn.close()
+        if owned:
+            conn.close()
 
 
 def age_threads(db_path: Path, config: Config) -> dict[str, int]:

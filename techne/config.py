@@ -30,7 +30,9 @@ Summarizer = Literal["heuristic", "llm"]
 @dataclass
 class ThreadConfig:
     min_observations: int = 15
-    link_threshold: float = 0.85
+    # 0.05 corresponds to |bm25| ≤ 19, which typical FTS5 matches produce.
+    # The old default of 0.85 (|bm25| ≤ 0.18) was unreachable in production.
+    link_threshold: float = 0.05
     stale_after_days: int = 30
     complete_after_hours: int = 48
     # Heuristic detector configuration. Default to heuristic + heuristic so

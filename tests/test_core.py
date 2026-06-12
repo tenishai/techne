@@ -666,3 +666,36 @@ class TestDetectorRouting:
             assert t.summary
         err = capsys.readouterr().err
         assert "per-thread LLM summary failed" in err
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — supersede guard against re-superseding
+# ---------------------------------------------------------------------------
+
+class TestSupersedeGuard:
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        from techne.core.database import init_db
+        path = tmp_path / "test_guard.db"
+        conn = init_db(path)
+        conn.close()
+        return path
+
+    def test_supersede_twice_raises(self, db_path):
+        """Superseding an entry that is already superseded must raise ValueError."""
+        old_id = store(db_path, "original fact", type="fact", source="test")
+        _b_id = supersede(db_path, old_id, "first revision")
+        with pytest.raises(ValueError, match="already superseded"):
+            supersede(db_path, old_id, "second revision")
+
+    def test_supersede_chain_is_valid(self, db_path):
+        """Chaining supersede calls A→B→C must work (supersede the latest)."""
+        a_id = store(db_path, "A", type="fact", source="test")
+        b_id = supersede(db_path, a_id, "B")
+        c_id = supersede(db_path, b_id, "C")
+        assert c_id != b_id
+        entries = list_entries(db_path, include_superseded=False)
+        contents = {e["content"] for e in entries}
+        assert "C" in contents
+        assert "B" not in contents
+        assert "A" not in contents

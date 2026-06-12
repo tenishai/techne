@@ -448,8 +448,9 @@ def merge_pass(
         return [list(s) for s in segments]
 
     segments = [list(s) for s in segments]
+    max_passes = len(segments) * 4 + 4  # safe upper bound; each pass eliminates ≥1 segment
 
-    while True:
+    for _ in range(max_passes):
         changed = False
 
         # Rule 1: tiny segments
@@ -528,7 +529,9 @@ def merge_pass(
             i += 1
 
         if not changed:
-            return segments
+            break
+
+    return segments
 
 
 # --- Label generation ------------------------------------------------------
@@ -837,6 +840,8 @@ def save_boundaries(
     session_id: str,
     scores: list[BoundaryScore],
     boundary_a_indices: set[int],
+    *,
+    commit: bool = True,
 ) -> None:
     """Persist every per-pair score plus its final boundary state.
 
@@ -867,7 +872,8 @@ def save_boundaries(
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def load_boundaries(

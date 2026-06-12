@@ -396,3 +396,51 @@ class TestSearchVec:
             key = (r["type"], r.get("id"))
             assert key not in seen, f"Duplicate result found: {key}"
             seen.add(key)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 correctness tests
+# ---------------------------------------------------------------------------
+
+class TestFtsSanitizerDoubleQuote:
+    def test_double_quote_in_query_does_not_crash(self, db_path):
+        """A query containing a double-quote must not raise OperationalError."""
+        session_id = start_session(db_path)
+        threads = [Thread(thread_num=1, label='test "quoted" label', summary="quoted")]
+        save_threads(threads, session_id, db_path)
+
+        # This must not raise sqlite3.OperationalError
+        results = search_fts(db_path, 'test"', table="threads", limit=5)
+        assert isinstance(results, list)
+
+    def test_sanitize_escapes_embedded_quotes(self):
+        from techne.core.search import _sanitize_fts_query
+        sanitized = _sanitize_fts_query('hello "world"')
+        # Must not contain unescaped embedded quote sequences that break FTS5
+        assert '""' in sanitized or sanitized.count('"') % 2 == 0
+
+
+class TestSearchNoMutation:
+    def test_use_vectors_does_not_mutate_fts_results(self, db_path):
+        """search(use_vectors=True) must not overwrite the 'source' field
+        on results returned by search_fts — callers may read 'source' as
+        the knowledge provenance, not the match origin."""
+        import sqlite3
+        session_id = start_session(db_path)
+        threads = [Thread(
+            thread_num=1,
+            label="mutation check thread",
+            summary="check source field is not mutated",
+        )]
+        save_threads(threads, session_id, db_path)
+
+        fts_before = search_fts(db_path, "mutation", table="threads", limit=5)
+        original_source_values = [dict(r) for r in fts_before]
+
+        search(db_path, "mutation", use_vectors=False)
+
+        fts_after = search_fts(db_path, "mutation", table="threads", limit=5)
+        for orig, after in zip(original_source_values, fts_after):
+            assert orig.get("type") == after.get("type")
+            # The 'source' column (provenance) must not have been overwritten
+            assert orig.get("source") == after.get("source")

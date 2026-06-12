@@ -45,10 +45,16 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
     conn = connect(db_path)
     try:
         old = conn.execute(
-            "SELECT type, tags, confidence FROM knowledge WHERE id = ?", (old_id,)
+            "SELECT type, tags, confidence, superseded_by FROM knowledge WHERE id = ?",
+            (old_id,),
         ).fetchone()
         if old is None:
             raise ValueError(f"Knowledge entry {old_id} not found")
+        if old["superseded_by"] is not None:
+            raise ValueError(
+                f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
+                "supersede the latest revision instead"
+            )
 
         cur = conn.execute(
             """INSERT INTO knowledge (type, content, source, tags, confidence)

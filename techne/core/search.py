@@ -257,14 +257,16 @@ def search(
         key = (r["type"], r.get("id"))
         if key not in seen_ids:
             seen_ids.add(key)
-            r["source"] = "fts"
+            r = dict(r)  # copy before stamping — don't mutate caller's rows
+            r["match_source"] = "fts"
             merged.append(r)
 
     for r in vec_results:
         key = (r["type"], r.get("id"))
         if key not in seen_ids:
             seen_ids.add(key)
-            r["source"] = "vec"
+            r = dict(r)
+            r["match_source"] = "vec"
             merged.append(r)
 
     return merged[:limit]
@@ -363,5 +365,6 @@ def _sanitize_fts_query(query: str) -> str:
     special = set('(){}[]"*:^~-')
     if any(c in query for c in special):
         terms = query.split()
-        return " ".join(f'"{t}"' for t in terms if t.strip())
+        # Escape embedded double-quotes by doubling them (FTS5 phrase literal rule)
+        return " ".join(f'"{t.replace(chr(34), chr(34)*2)}"' for t in terms if t.strip())
     return query
