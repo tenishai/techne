@@ -229,6 +229,40 @@ def search_vec(
         conn.close()
 
 
+RRF_K = 60  # Cormack et al. 2009 — smoothing constant
+
+
+def _rrf_fuse(
+    channels: list[list[tuple]],
+    k: int = RRF_K,
+) -> list[tuple[tuple, float]]:
+    """Reciprocal Rank Fusion across N ranked channels.
+
+    score(d) = sum over channels of 1 / (k + rank_channel(d))
+
+    Items appearing in multiple channels get the sum of their per-channel
+    contributions, naturally boosting them above items appearing in only
+    one channel. RRF is channel-agnostic — it does not require channel
+    scores to be on the same scale, which is exactly why it works for
+    BM25 (negative scores) fused with vector cosine distance (0..1).
+
+    Args:
+        channels: list of ``[(key, rank_position), ...]`` per channel.
+            ``rank_position`` starts at 1 (best). Keys can be any hashable
+            — typically (type, id) tuples so cross-table results don't
+            collide.
+        k: smoothing constant. 60 is the standard from Cormack et al.
+
+    Returns:
+        ``[(key, fused_score), ...]`` sorted by descending score.
+    """
+    scores: dict[object, float] = {}
+    for channel in channels:
+        for key, rank in channel:
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: -x[1])
+
+
 def search(
     db_path: Path,
     query: str,
@@ -236,10 +270,23 @@ def search(
     limit: int = 20,
     use_vectors: bool = True,
 ) -> list[dict]:
-    """Combined search: FTS5 results merged with vector results (if available).
+    """Hybrid search: BM25 (FTS5) + vector (cosine) fused via Reciprocal
+    Rank Fusion.
 
-    FTS results are ranked by bm25; vector results by cosine distance.
-    Results are interleaved by source, deduplicated by id.
+    With ``use_vectors=False``: returns BM25-only results (unchanged
+    legacy behavior).
+
+    With ``use_vectors=True`` and vector deps installed: runs both
+    channels and fuses with RRF. Items present in BOTH channels are
+    boosted above items in just one (the desired property of fusion).
+    Returned rows include:
+
+      - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
+      - ``rrf_score``: the fused score (when fusion ran)
+
+    When vec is requested but no vec results came back (extras not
+    installed, vec tables empty, etc.), falls through to FTS-only —
+    same as the legacy behavior.
     """
     fts_results = search_fts(db_path, query, table=table, limit=limit)
 
@@ -250,26 +297,39 @@ def search(
     if not vec_results:
         return fts_results
 
-    seen_ids = set()
-    merged = []
+    # Build (type, id) → result-row map and per-channel rank lists.
+    # rank position is 1-based (1 = best); _rrf_fuse expects that shape.
+    by_key: dict[tuple, dict] = {}
+    fts_channel: list[tuple[tuple, int]] = []
+    vec_channel: list[tuple[tuple, int]] = []
 
-    for r in fts_results:
-        key = (r["type"], r.get("id"))
-        if key not in seen_ids:
-            seen_ids.add(key)
-            r = dict(r)  # copy before stamping — don't mutate caller's rows
-            r["match_source"] = "fts"
-            merged.append(r)
+    for rank, r in enumerate(fts_results, start=1):
+        key = (r["type"], r["id"])
+        if key not in by_key:
+            row = dict(r)  # copy — don't mutate the caller's rows
+            row["match_source"] = "fts"
+            by_key[key] = row
+        fts_channel.append((key, rank))
 
-    for r in vec_results:
-        key = (r["type"], r.get("id"))
-        if key not in seen_ids:
-            seen_ids.add(key)
-            r = dict(r)
-            r["match_source"] = "vec"
-            merged.append(r)
+    for rank, r in enumerate(vec_results, start=1):
+        key = (r["type"], r["id"])
+        if key not in by_key:
+            row = dict(r)
+            row["match_source"] = "vec"
+            by_key[key] = row
+        else:
+            # Appeared in both channels — RRF will boost it; mark provenance.
+            by_key[key]["match_source"] = "fts+vec"
+        vec_channel.append((key, rank))
 
-    return merged[:limit]
+    fused = _rrf_fuse([fts_channel, vec_channel])
+
+    out: list[dict] = []
+    for key, score in fused[:limit]:
+        row = by_key[key]
+        row["rrf_score"] = score
+        out.append(row)
+    return out
 
 
 def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
