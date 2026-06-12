@@ -8,7 +8,7 @@ SCHEMA_VERSION = 4
 SCHEMA_SQL = """
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER NOT NULL,
+    version INTEGER NOT NULL UNIQUE,
     applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -221,7 +221,7 @@ def _ensure_initialized(conn: sqlite3.Connection) -> None:
     if existing is None:
         conn.executescript(SCHEMA_SQL)
         conn.executescript(FTS_TRIGGERS_SQL)
-        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         conn.commit()
     else:
         row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()

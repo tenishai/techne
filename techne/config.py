@@ -208,3 +208,5 @@ class Config:
                     data["sync"][k] = v
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        if self.llm_api_key:
+            path.chmod(0o600)
