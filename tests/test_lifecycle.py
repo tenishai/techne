@@ -570,3 +570,42 @@ def test_run_session_start_passes_session_id_through(tmp_path):
         session_id="explicit-id-from-runtime",
     )
     assert result == "explicit-id-from-runtime"
+
+
+def test_redetect_threads_never_stamps_ended_at_on_open_session(tmp_path):
+    """redetect_threads must not set ended_at on a session that was never ended.
+
+    Regression guard for issue #3: a future refactor consolidating the write
+    paths could silently stamp ended_at. One observation is enough — the guard
+    is about the write path, not thread detection quality.
+    """
+    from techne.config import Config
+    from techne.core.database import connect, init_db
+    from techne.core.state import start_session
+    from techne.lifecycle import redetect_threads
+
+    db_path = tmp_path / "open_session.db"
+    init_db(db_path)
+    config = Config()
+    config.db_path = db_path
+    config.threads.detector = "heuristic"
+    config.threads.summarizer = "heuristic"
+
+    session_id = start_session(db_path, project_path="/proj", agent_identity="t")
+    conn = connect(db_path)
+    conn.execute(
+        "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+        "VALUES (?, datetime('now'), 'Edit', 'x')",
+        (session_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    redetect_threads(config, session_id)
+
+    conn = connect(db_path)
+    row = conn.execute(
+        "SELECT ended_at FROM sessions WHERE id=?", (session_id,)
+    ).fetchone()
+    conn.close()
+    assert row["ended_at"] is None
