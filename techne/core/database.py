@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -61,6 +61,11 @@ CREATE INDEX IF NOT EXISTS idx_observations_thread ON observations(thread_id);
 CREATE INDEX IF NOT EXISTS idx_observations_tier ON observations(tier);
 
 -- Knowledge (durable facts, decisions, patterns)
+-- `confidence` (text enum: low/medium/high) is the legacy field; readers keep
+-- using it for display. `confidence_numeric` (0..1) is the canonical value the
+-- decay-aware effective_confidence() reads. `last_confirmed_at` powers decay:
+-- score = confidence_numeric * 0.5^(days_since_confirmed / half_life_days).
+-- A re-affirmation bumps last_confirmed_at without creating a new revision.
 CREATE TABLE IF NOT EXISTS knowledge (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type TEXT NOT NULL,
@@ -68,6 +73,8 @@ CREATE TABLE IF NOT EXISTS knowledge (
     source TEXT,
     tags TEXT,
     confidence TEXT NOT NULL DEFAULT 'medium',
+    confidence_numeric REAL NOT NULL DEFAULT 0.6,
+    last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     superseded_by INTEGER REFERENCES knowledge(id),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -293,4 +300,21 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
             ALTER TABLE sessions ADD COLUMN summary_heuristic TEXT;
         """)
         conn.execute("INSERT INTO schema_version (version) VALUES (4)")
+    if from_version < 5 and to_version >= 5:
+        # Add numeric confidence + last_confirmed_at so recall can decay
+        # entries that haven't been re-confirmed. Legacy text `confidence`
+        # stays for display + backward compat.
+        conn.executescript("""
+            ALTER TABLE knowledge ADD COLUMN confidence_numeric REAL NOT NULL DEFAULT 0.6;
+            ALTER TABLE knowledge ADD COLUMN last_confirmed_at TIMESTAMP;
+
+            -- Backfill confidence_numeric from the legacy enum
+            UPDATE knowledge SET confidence_numeric = 0.9 WHERE confidence = 'high';
+            UPDATE knowledge SET confidence_numeric = 0.6 WHERE confidence = 'medium';
+            UPDATE knowledge SET confidence_numeric = 0.3 WHERE confidence = 'low';
+
+            -- last_confirmed_at defaults to created_at for existing rows
+            UPDATE knowledge SET last_confirmed_at = created_at WHERE last_confirmed_at IS NULL;
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (5)")
     conn.commit()

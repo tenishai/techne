@@ -1,12 +1,21 @@
 """Knowledge store — durable facts, decisions, patterns, evaluations, procedures."""
 
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 from techne.core.database import connect, like_escape
 
 VALID_TYPES = ("fact", "decision", "pattern", "evaluation", "procedure")
 VALID_CONFIDENCE = ("high", "medium", "low")
+
+# Mapping the legacy text enum to canonical numeric values (0..1).
+# The migration in core/database.py uses the same values for backfill.
+CONFIDENCE_NUMERIC = {"high": 0.9, "medium": 0.6, "low": 0.3}
+
+# Default half-life for confidence decay (days). Operators can override per
+# call site; agents reading via recall use config.knowledge_confidence_half_life_days.
+DEFAULT_CONFIDENCE_HALF_LIFE_DAYS = 30.0
 
 
 def store(
@@ -17,18 +26,26 @@ def store(
     confidence: str = "medium",
     source: str = "session",
 ) -> int:
-    """Store a knowledge entry. Returns the new entry's id."""
+    """Store a knowledge entry. Returns the new entry's id.
+
+    Writes both the legacy `confidence` text enum (for display + backward
+    compat) and the canonical `confidence_numeric` derived from it. The
+    `last_confirmed_at` defaults to CURRENT_TIMESTAMP so a fresh entry
+    starts at full strength.
+    """
     if type not in VALID_TYPES:
         raise ValueError(f"Invalid knowledge type '{type}'. Must be one of: {VALID_TYPES}")
     if confidence not in VALID_CONFIDENCE:
         raise ValueError(f"Invalid confidence '{confidence}'. Must be one of: {VALID_CONFIDENCE}")
 
+    numeric = CONFIDENCE_NUMERIC[confidence]
     conn = connect(db_path)
     try:
         cur = conn.execute(
-            """INSERT INTO knowledge (type, content, source, tags, confidence)
-               VALUES (?, ?, ?, ?, ?)""",
-            (type, content, source, tags, confidence),
+            """INSERT INTO knowledge
+                 (type, content, source, tags, confidence, confidence_numeric)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (type, content, source, tags, confidence, numeric),
         )
         conn.commit()
         return cur.lastrowid
@@ -132,3 +149,91 @@ def delete(db_path: Path, entry_id: int) -> bool:
 def content_hash(content: str) -> str:
     """Generate a dedup hash for knowledge content."""
     return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+# ---- Decay-aware confidence ----------------------------------------------
+
+
+def effective_confidence(
+    db_path: Path,
+    entry_id: int,
+    *,
+    now: datetime | None = None,
+    half_life_days: float = DEFAULT_CONFIDENCE_HALF_LIFE_DAYS,
+) -> float | None:
+    """Return the decay-adjusted confidence of an entry.
+
+    Formula: ``confidence_numeric * 0.5 ** (days_since_confirmed / half_life_days)``
+
+    A re-affirmed entry (where ``last_confirmed_at`` was bumped recently)
+    holds most of its weight. An entry that hasn't been seen in
+    ``half_life_days`` is at half strength; double that, quarter strength;
+    etc.
+
+    ``half_life_days=0`` disables decay entirely — useful for operators
+    who want the raw stored value, or for entries (like architectural
+    patterns) where staleness isn't meaningful.
+
+    Returns None if no such entry exists.
+    """
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT confidence_numeric, last_confirmed_at
+               FROM knowledge WHERE id = ?""",
+            (entry_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    base = float(row["confidence_numeric"])
+    if half_life_days <= 0:
+        return base
+    last = _parse_timestamp(row["last_confirmed_at"])
+    current = now or datetime.now(timezone.utc)
+    if last.tzinfo is None:
+        # SQLite returns naive timestamps; treat them as UTC.
+        last = last.replace(tzinfo=timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    days_since = max(0.0, (current - last).total_seconds() / 86400.0)
+    return base * (0.5 ** (days_since / half_life_days))
+
+
+def reaffirm(db_path: Path, entry_id: int) -> bool:
+    """Bump ``last_confirmed_at`` to NOW without creating a new revision.
+
+    Use this when an agent re-encounters a fact and finds it still true —
+    refreshes the entry's effective confidence without supersession. Returns
+    True iff the entry exists.
+    """
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            """UPDATE knowledge
+               SET last_confirmed_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (entry_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def _parse_timestamp(value) -> datetime:
+    """Parse a SQLite timestamp value into a datetime. Accepts both string
+    and datetime forms because connect() has detect_types enabled in some
+    paths but not others."""
+    if isinstance(value, datetime):
+        return value
+    # SQLite ISO format: "YYYY-MM-DD HH:MM:SS" (optionally with fractional secs)
+    s = str(value).replace("T", " ").rstrip("Z")
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"could not parse timestamp {value!r}")
