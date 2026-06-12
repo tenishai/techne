@@ -640,7 +640,48 @@ def init(ctx, platform, identity_dir):
     # Save config
     config.save()
     click.echo(f"Config saved: {DEFAULT_CONFIG}")
+
+    # Platform-specific next-steps so the operator isn't left guessing.
+    if platform == "standalone":
+        click.echo("")
+        click.echo("Standalone init complete. Next steps:")
+        click.echo("")
+        click.echo("  Expose techne as an MCP server (over stdio):")
+        click.echo("    techne serve")
+        click.echo("")
+        click.echo("  Or embed techne directly in your agent runtime:")
+        click.echo("    import techne")
+        click.echo("    config = techne.Config.load()")
+        click.echo("    session_id = techne.run_session_start(config, project_path='/work')")
+        click.echo("    techne.capture_tool_use(config, session_id, ...)")
+        click.echo("    techne.run_session_end(config, session_id)")
+        click.echo("")
+        click.echo("  Inspect what's been captured:")
+        click.echo("    techne status")
+        click.echo("    techne search '<query>'")
+        return
+
     click.echo("\ntechne initialized. Run 'techne status' to verify.")
+
+
+@main.command("serve")
+@click.pass_context
+def serve(ctx):
+    """Run techne as an MCP server over stdio.
+
+    Exposes the recall + commit tools to any MCP-speaking client (Claude
+    Desktop, Cursor, Continue, custom agent runtimes). Reads JSON-RPC
+    requests on stdin, writes responses on stdout. Configured by
+    ~/.techne/config.yaml.
+
+    For Claude Code specifically, prefer `techne init --platform
+    claude-code` which registers the MCP server automatically via
+    Claude Code's `.mcp.json`. `techne serve` is the standalone path
+    for everyone else.
+    """
+    from techne.mcp_server import main as run_server
+
+    run_server()
 
 
 @main.command("import-patterns")
