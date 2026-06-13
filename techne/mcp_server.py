@@ -48,7 +48,10 @@ def handle_request(request: dict, config: Config) -> dict:
                 })
         return _error(req_id, -32601, f"Unknown tool: {tool_name}")
 
-    if method == "notifications/initialized":
+    # Per JSON-RPC spec, notifications (requests without an "id" field) must
+    # receive no response. Silently ignore all notification/* methods and any
+    # other request that arrived without an id.
+    if method.startswith("notifications/") or req_id is None:
         return None
 
     return _error(req_id, -32601, f"Unknown method: {method}")
