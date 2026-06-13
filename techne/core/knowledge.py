@@ -6,7 +6,13 @@ from pathlib import Path
 
 from techne.core.database import connect, like_escape
 
-VALID_TYPES = ("fact", "decision", "pattern", "evaluation", "procedure")
+VALID_TYPES = (
+    "fact", "decision", "pattern", "evaluation", "procedure",
+    # Documents — third-party authoritative content mirrored into techne
+    # by the Librarian persona (cabal#5). Tags carry source-specific
+    # metadata (e.g. `source:confluence,kind:runbook`).
+    "document",
+)
 VALID_CONFIDENCE = ("high", "medium", "low")
 
 # Mapping the legacy text enum to canonical numeric values (0..1).
