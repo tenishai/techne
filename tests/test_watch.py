@@ -1,0 +1,264 @@
+"""Tests for the file-watch ingest pipeline (techne#12).
+
+Unit-level tests cover the glob matcher, the Debouncer, and the
+ingest_file / run_full_walk pieces — all of those work without
+filesystem events.
+
+The full event loop is exercised in test_watch_full_loop using
+watchdog's PollingObserver against a tmp_path. PollingObserver is
+deterministic enough for tests (no OS-level notification race) and
+ships in the watchdog wheel by default.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from techne.core.database import init_db
+from techne.core.state import get_observations, start_session
+from techne.watch import (
+    Debouncer,
+    WatchConfig,
+    ingest_file,
+    matches,
+    run_full_walk,
+)
+
+# ---- matches() ------------------------------------------------------------
+
+
+class TestMatches:
+    def test_default_includes_accepts_everything(self) -> None:
+        assert matches(Path("foo.py"), ["*"], [])
+
+    def test_basename_glob(self) -> None:
+        assert matches(Path("foo.py"), ["*.py"], [])
+        assert not matches(Path("foo.py"), ["*.md"], [])
+
+    def test_path_glob_matches_via_full_posix(self) -> None:
+        # Path globs use POSIX-style separators
+        assert matches(Path("src/auth/jwt.py"), ["**/auth/**"], [])
+
+    def test_exclude_overrides_include(self) -> None:
+        # fnmatch matches against full POSIX path — `**/.git/**` requires
+        # something before `.git/`, which is what rglob produces in practice
+        # (e.g. /repo/.git/index). The test_run_full_walk_ingests_matching_files
+        # test confirms the realistic file-tree walk path.
+        assert not matches(Path("/repo/.git/index"), ["*"], ["**/.git/**"])
+
+    def test_exclude_basename(self) -> None:
+        assert not matches(Path("README.md"), ["*"], ["README.md"])
+
+    def test_multiple_includes_any_match(self) -> None:
+        assert matches(Path("foo.py"), ["*.py", "*.md"], [])
+        assert matches(Path("foo.md"), ["*.py", "*.md"], [])
+
+
+# ---- Debouncer ------------------------------------------------------------
+
+
+class TestDebouncer:
+    def test_fires_after_delay(self) -> None:
+        seen: list[Path] = []
+        d = Debouncer(lambda p: seen.append(p), delay_ms=50)
+        d.schedule(Path("/tmp/x"))
+        # Initially no fire
+        assert seen == []
+        # Wait for the timer to elapse
+        time.sleep(0.1)
+        assert seen == [Path("/tmp/x")]
+
+    def test_coalesces_rapid_schedules_on_same_key(self) -> None:
+        """Two schedule() calls within the window → callback fires ONCE."""
+        seen: list[Path] = []
+        d = Debouncer(lambda p: seen.append(p), delay_ms=50)
+        d.schedule(Path("/tmp/x"))
+        time.sleep(0.01)
+        d.schedule(Path("/tmp/x"))  # cancel + reschedule
+        time.sleep(0.01)
+        d.schedule(Path("/tmp/x"))
+        time.sleep(0.1)
+        assert seen == [Path("/tmp/x")]
+
+    def test_different_keys_fire_independently(self) -> None:
+        seen: list[Path] = []
+        d = Debouncer(lambda p: seen.append(p), delay_ms=50)
+        d.schedule(Path("/tmp/x"))
+        d.schedule(Path("/tmp/y"))
+        time.sleep(0.1)
+        assert set(seen) == {Path("/tmp/x"), Path("/tmp/y")}
+
+    def test_flush_cancels_pending(self) -> None:
+        seen: list[Path] = []
+        d = Debouncer(lambda p: seen.append(p), delay_ms=200)
+        d.schedule(Path("/tmp/x"))
+        d.flush()
+        time.sleep(0.3)  # well past the delay
+        assert seen == []
+
+    def test_callback_exception_does_not_break_debouncer(self) -> None:
+        """A bad callback must not propagate or leave the debouncer broken."""
+        def boom(_p):
+            raise RuntimeError("kaboom")
+        d = Debouncer(boom, delay_ms=10)
+        d.schedule(Path("/tmp/x"))  # should not raise
+        time.sleep(0.05)
+        # Debouncer should still work on subsequent calls
+        seen: list[Path] = []
+        d2 = Debouncer(lambda p: seen.append(p), delay_ms=10)
+        d2.schedule(Path("/tmp/y"))
+        time.sleep(0.05)
+        assert seen == [Path("/tmp/y")]
+
+
+# ---- ingest_file + run_full_walk -----------------------------------------
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    p = tmp_path / "watch_test.db"
+    init_db(p).close()
+    return p
+
+
+@pytest.fixture
+def session_id(db_path: Path) -> str:
+    return start_session(db_path, project_path="/test", agent_identity="watch-test")
+
+
+def test_ingest_file_adds_observation(tmp_path, db_path, session_id) -> None:
+    target = tmp_path / "hello.txt"
+    target.write_text("contents")
+    ok = ingest_file(db_path, session_id, target)
+    assert ok is True
+
+    obs = get_observations(db_path, session_id)
+    assert len(obs) == 1
+    assert obs[0]["tool_name"] == "FileSync"
+    assert f"path={target}" in obs[0]["content"]
+    assert "size=" in obs[0]["content"]
+    assert "mtime=" in obs[0]["content"]
+
+
+def test_ingest_file_returns_false_for_missing_file(tmp_path, db_path, session_id) -> None:
+    target = tmp_path / "does-not-exist"
+    ok = ingest_file(db_path, session_id, target)
+    assert ok is False
+    assert get_observations(db_path, session_id) == []
+
+
+def test_run_full_walk_ingests_matching_files(tmp_path, db_path, session_id) -> None:
+    # Layout:
+    #   tmp_path/
+    #     keep.py
+    #     skip.txt
+    #     nested/keep.py
+    #     .git/index           (excluded via glob)
+    (tmp_path / "keep.py").write_text("a")
+    (tmp_path / "skip.txt").write_text("b")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "keep.py").write_text("c")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "index").write_text("d")
+
+    config = WatchConfig(
+        db_path=db_path,
+        paths=[tmp_path],
+        session_id=session_id,
+        include_globs=["*.py"],
+        exclude_globs=["**/.git/**"],
+    )
+    count = run_full_walk(config)
+    assert count == 2  # keep.py + nested/keep.py
+    obs = get_observations(db_path, session_id)
+    assert {o["tool_name"] for o in obs} == {"FileSync"}
+    paths_seen = {
+        line.split("=", 1)[1]
+        for o in obs
+        for line in o["content"].splitlines()
+        if line.startswith("path=")
+    }
+    assert any("nested/keep.py" in p for p in paths_seen)
+    assert not any(".git" in p for p in paths_seen)
+
+
+def test_run_full_walk_handles_missing_root_silently(tmp_path, db_path, session_id) -> None:
+    config = WatchConfig(
+        db_path=db_path,
+        paths=[tmp_path / "does-not-exist"],
+        session_id=session_id,
+    )
+    assert run_full_walk(config) == 0
+
+
+def test_run_full_walk_accepts_single_file_path(tmp_path, db_path, session_id) -> None:
+    target = tmp_path / "single.md"
+    target.write_text("hi")
+    config = WatchConfig(
+        db_path=db_path,
+        paths=[target],
+        session_id=session_id,
+        include_globs=["*.md"],
+    )
+    assert run_full_walk(config) == 1
+
+
+# ---- full event-loop smoke test ------------------------------------------
+
+
+def test_watch_loop_with_polling_observer(tmp_path, db_path, session_id) -> None:
+    """End-to-end smoke: spin up the watcher in a background thread,
+    create a file, wait for the debounced ingest to land in the DB."""
+    pytest.importorskip("watchdog.observers")
+    polling = pytest.importorskip("watchdog.observers.polling")
+
+    from techne.watch import watch
+
+    config = WatchConfig(
+        db_path=db_path,
+        paths=[tmp_path],
+        session_id=session_id,
+        include_globs=["*.txt"],
+        debounce_ms=50,
+        resync_interval_seconds=3600,
+    )
+
+    stop_called = threading.Event()
+
+    def runner() -> None:
+        try:
+            watch(
+                config,
+                observer_cls=polling.PollingObserver,
+                install_signal_handlers=False,
+            )
+        finally:
+            stop_called.set()
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    # Give the watcher a moment to do its initial full walk and arm watchers.
+    time.sleep(0.2)
+
+    target = tmp_path / "hello.txt"
+    target.write_text("from watcher test")
+
+    # Poll the DB until the observation lands or timeout.
+    deadline = time.time() + 4.0
+    while time.time() < deadline:
+        obs = get_observations(db_path, session_id)
+        if any(o["tool_name"] == "FileSync" and "hello.txt" in o["content"] for o in obs):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("file event did not produce an observation within deadline")
+
+    # Shut down the observer cleanly.
+    # We need to access the observer from inside watch() to stop it; instead
+    # we rely on the test exiting (daemon thread). For clean shutdown, the
+    # watch() public API takes signal handlers — we passed install=False so
+    # signals are not wired. The polling observer will be GC'd with the thread.

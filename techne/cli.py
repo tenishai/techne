@@ -664,6 +664,80 @@ def init(ctx, platform, identity_dir):
     click.echo("\ntechne initialized. Run 'techne status' to verify.")
 
 
+@main.command("watch")
+@click.argument(
+    "paths",
+    nargs=-1,
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+)
+@click.option(
+    "--include", "include", multiple=True, default=("*",),
+    help="Glob pattern to include. Repeat for multiple. Defaults to '*' (all).",
+)
+@click.option(
+    "--exclude", "exclude", multiple=True, default=(),
+    help="Glob pattern to exclude. Repeat. e.g. --exclude '**/.git/**'",
+)
+@click.option(
+    "--debounce-ms", type=int, default=500,
+    help="Coalesce file-change bursts within this window (per file).",
+)
+@click.option(
+    "--resync-hours", type=int, default=24,
+    help="Run a full dir-walk every N hours to catch missed events.",
+)
+@click.pass_context
+def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
+    """Watch directories; ingest file changes as FileSync observations.
+
+    Starts a new techne session keyed to the first watched path; every
+    file create/modify within the watched tree (respecting the include/
+    exclude globs) becomes an observation. A background full-walk runs
+    every --resync-hours to catch events the OS-level watcher dropped.
+
+    Long-running. Stops cleanly on SIGTERM / SIGINT.
+
+    Example:
+
+        techne watch ~/work/myproject \\
+            --include '*.py' --include '*.md' \\
+            --exclude '**/.git/**' --exclude '**/.venv/**'
+    """
+    from techne.core.state import start_session
+    from techne.watch import WatchConfig
+    from techne.watch import watch as run_watch
+
+    config = Config.load()
+    resolved_paths = [Path(p).resolve() for p in paths]
+    session_id = start_session(
+        config.db_path,
+        project_path=str(resolved_paths[0]),
+        agent_identity="techne-watch",
+        platform=config.platform,
+    )
+    click.echo(
+        f"Watching {len(resolved_paths)} path(s); session={session_id}",
+        err=True,
+    )
+
+    wc = WatchConfig(
+        db_path=config.db_path,
+        paths=resolved_paths,
+        session_id=session_id,
+        include_globs=list(include),
+        exclude_globs=list(exclude),
+        debounce_ms=debounce_ms,
+        resync_interval_seconds=resync_hours * 3600,
+    )
+    try:
+        run_watch(wc)
+    except RuntimeError as exc:
+        click.echo(f"error: {exc}", err=True)
+        ctx.exit(1)
+    click.echo("Watch terminated.", err=True)
+
+
 @main.command("serve")
 @click.pass_context
 def serve(ctx):

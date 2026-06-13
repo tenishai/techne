@@ -38,6 +38,10 @@ vectors = [
     "fastembed>=0.4.0; python_version < '3.14'",
 ]
 anthropic = ["anthropic>=0.40.0"]
+# `watch` enables `techne watch <dir>` — continuous-ingest mode that
+# observes filesystem changes and adds them as observations. Useful for
+# code agents (the Codex persona) and for keeping a docs corpus current.
+watch = ["watchdog>=4.0"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
