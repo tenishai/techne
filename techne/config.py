@@ -53,6 +53,27 @@ class HookConfig:
     capture_read: bool = False
 
 
+ReflectWriteTo = Literal["candidates", "live"]
+
+
+@dataclass
+class ReflectConfig:
+    # End-of-session reflection: an LLM scans each detected thread and proposes
+    # durable knowledge / identity entries worth keeping. Off by default; opt
+    # in per host. While `write_to="candidates"` the live knowledge / identity
+    # tables are never touched — proposals land in `knowledge_candidates` for
+    # human review via `techne reflect review`.
+    enabled: bool = False
+    min_observations_per_thread: int = 8
+    min_confidence: str = "medium"
+    max_candidates_per_thread: int = 5
+    model: str = ""               # falls back to Config.model when empty
+    include_existing_knowledge: bool = True
+    existing_knowledge_k: int = 10
+    write_to: ReflectWriteTo = "candidates"
+    log_raw_response: bool = True
+
+
 @dataclass
 class Config:
     db_path: Path = DEFAULT_DB
@@ -61,6 +82,7 @@ class Config:
     sync: SyncConfig = field(default_factory=SyncConfig)
     threads: ThreadConfig = field(default_factory=ThreadConfig)
     hooks: HookConfig = field(default_factory=HookConfig)
+    reflect: ReflectConfig = field(default_factory=ReflectConfig)
     platform: Platform = "claude-code"
     model: str = "claude-haiku-4-5-20251001"
     # Optional LiteLLM proxy targeting. When unset, litellm.completion() uses
@@ -155,6 +177,32 @@ class Config:
                 capture_read=h.get("capture_read", False),
             )
 
+        if "reflect" in raw and isinstance(raw["reflect"], dict):
+            r = raw["reflect"]
+            write_to = r.get("write_to", "candidates")
+            if write_to not in ("candidates", "live"):
+                raise ValueError(
+                    f"Invalid reflect.write_to '{write_to}'. "
+                    "Must be 'candidates' or 'live'."
+                )
+            min_conf = r.get("min_confidence", "medium")
+            if min_conf not in ("low", "medium", "high"):
+                raise ValueError(
+                    f"Invalid reflect.min_confidence '{min_conf}'. "
+                    "Must be 'low', 'medium', or 'high'."
+                )
+            cfg.reflect = ReflectConfig(
+                enabled=bool(r.get("enabled", False)),
+                min_observations_per_thread=int(r.get("min_observations_per_thread", 8)),
+                min_confidence=min_conf,
+                max_candidates_per_thread=int(r.get("max_candidates_per_thread", 5)),
+                model=str(r.get("model", "")),
+                include_existing_knowledge=bool(r.get("include_existing_knowledge", True)),
+                existing_knowledge_k=int(r.get("existing_knowledge_k", 10)),
+                write_to=write_to,
+                log_raw_response=bool(r.get("log_raw_response", True)),
+            )
+
         return cfg
 
     def save(self, path: Path | None = None):
@@ -180,6 +228,17 @@ class Config:
                 "post_tool_use": self.hooks.post_tool_use,
                 "capture_bash": self.hooks.capture_bash,
                 "capture_read": self.hooks.capture_read,
+            },
+            "reflect": {
+                "enabled": self.reflect.enabled,
+                "min_observations_per_thread": self.reflect.min_observations_per_thread,
+                "min_confidence": self.reflect.min_confidence,
+                "max_candidates_per_thread": self.reflect.max_candidates_per_thread,
+                "model": self.reflect.model,
+                "include_existing_knowledge": self.reflect.include_existing_knowledge,
+                "existing_knowledge_k": self.reflect.existing_knowledge_k,
+                "write_to": self.reflect.write_to,
+                "log_raw_response": self.reflect.log_raw_response,
             },
         }
         if self.identity_dir:

@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -132,6 +132,31 @@ CREATE TABLE IF NOT EXISTS thread_boundaries (
 );
 CREATE INDEX IF NOT EXISTS idx_thread_boundaries_session
     ON thread_boundaries(session_id, obs_index_a);
+
+-- Knowledge candidates (reflection-pass proposals awaiting promotion).
+-- Populated by the end-of-session reflect pass when config.reflect.enabled.
+-- While config.reflect.write_to='candidates' the live knowledge / identity
+-- tables are never touched — these rows are inspected via the CLI and either
+-- promoted (status='promoted', promoted_to_id set) or discarded.
+CREATE TABLE IF NOT EXISTS knowledge_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,                       -- 'knowledge' | 'identity'
+    type TEXT NOT NULL,                        -- knowledge VALID_TYPES, or identity key path
+    content TEXT NOT NULL,
+    tags TEXT,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    source_session_id TEXT NOT NULL REFERENCES sessions(id),
+    source_thread_id TEXT REFERENCES threads(id),
+    model_used TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    raw_response TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',    -- 'pending' | 'promoted' | 'discarded'
+    promoted_to_id INTEGER,
+    reviewed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
 
 -- FTS5 indexes
 CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
@@ -317,4 +342,30 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
             UPDATE knowledge SET last_confirmed_at = created_at WHERE last_confirmed_at IS NULL;
         """)
         conn.execute("INSERT INTO schema_version (version) VALUES (5)")
+    if from_version < 6 and to_version >= 6:
+        # Reflection-pass output: candidate knowledge / identity entries the
+        # end-of-session reflect pass proposes. Separate from `knowledge` so
+        # the live store is untouched while the feature is under evaluation.
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS knowledge_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tags TEXT,
+                confidence TEXT NOT NULL DEFAULT 'medium',
+                source_session_id TEXT NOT NULL REFERENCES sessions(id),
+                source_thread_id TEXT REFERENCES threads(id),
+                model_used TEXT NOT NULL,
+                prompt_hash TEXT NOT NULL,
+                raw_response TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                promoted_to_id INTEGER,
+                reviewed_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
+            CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (6)")
     conn.commit()
