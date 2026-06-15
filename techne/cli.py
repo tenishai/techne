@@ -805,5 +805,120 @@ def import_patterns(ctx, markdown_file: Path, dry_run: bool, force: bool):
         click.echo("\n[dry-run] no changes written. Re-run without --dry-run to import.")
 
 
+@main.group(invoke_without_command=True)
+@click.pass_context
+def reflect(ctx):
+    """Inspect and manage end-of-session reflection candidates.
+
+    Reflection is an opt-in 2-week-test feature: an LLM scans each detected
+    thread at session_end and proposes durable knowledge / identity entries.
+    While config.reflect.write_to='candidates' the proposals land here for
+    review and do NOT touch the live knowledge / identity tables.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    # Default behavior: show the same as `reflect stats`
+    config = ctx.obj["config"]
+    from techne.core.reflect import candidate_stats
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+    s = candidate_stats(config.db_path)
+    click.echo(f"Reflect enabled: {config.reflect.enabled}")
+    click.echo(f"Write mode: {config.reflect.write_to}")
+    click.echo(f"Pending: {s['pending']}")
+    click.echo(f"Promoted: {s['promoted']}")
+    click.echo(f"Discarded: {s['discarded']}")
+    if s["by_scope"]:
+        click.echo("By scope:")
+        for k, n in sorted(s["by_scope"].items()):
+            click.echo(f"  {k}: {n}")
+
+
+@reflect.command("review")
+@click.option(
+    "--status",
+    type=click.Choice(["pending", "promoted", "discarded", "all"]),
+    default="pending",
+    help="Filter by candidate status",
+)
+@click.option("--limit", default=50, help="Max candidates to show")
+@click.option("--show-raw", is_flag=True, help="Include the raw LLM response")
+@click.pass_context
+def reflect_review(ctx, status, limit, show_raw):
+    """List candidate knowledge / identity entries awaiting review."""
+    config = ctx.obj["config"]
+    from techne.core.reflect import list_candidates
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    rows = list_candidates(config.db_path, status=status, limit=limit)
+    if not rows:
+        click.echo(f"No candidates with status='{status}'.")
+        return
+
+    for r in rows:
+        click.echo(f"#{r['id']}  [{r['status']}]  {r['scope']}/{r['type']}  conf={r['confidence']}")
+        click.echo(f"  {r['content']}")
+        if r["tags"]:
+            click.echo(f"  tags: {r['tags']}")
+        click.echo(
+            f"  src: session={r['source_session_id'][:16]}  "
+            f"thread={r['source_thread_id']}  model={r['model_used']}"
+        )
+        click.echo(f"  created: {r['created_at']}")
+        if r["status"] == "promoted" and r.get("promoted_to_id"):
+            click.echo(f"  promoted_to: knowledge.id={r['promoted_to_id']}")
+        if show_raw and r.get("raw_response"):
+            click.echo("  --- raw LLM response ---")
+            click.echo("  " + (r["raw_response"][:1000].replace("\n", "\n  ")))
+        click.echo()
+
+
+@reflect.command("promote")
+@click.argument("candidate_id", type=int)
+@click.pass_context
+def reflect_promote(ctx, candidate_id):
+    """Promote a pending candidate to the live knowledge or identity store."""
+    config = ctx.obj["config"]
+    from techne.core.reflect import promote_candidate
+    try:
+        new_id = promote_candidate(config.db_path, candidate_id)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+    if new_id is not None:
+        click.echo(f"Promoted candidate #{candidate_id} → knowledge.id={new_id}")
+    else:
+        click.echo(f"Promoted candidate #{candidate_id} → identity")
+
+
+@reflect.command("discard")
+@click.argument("candidate_id", type=int)
+@click.pass_context
+def reflect_discard(ctx, candidate_id):
+    """Discard a pending candidate. The row stays for audit; status flips to 'discarded'."""
+    config = ctx.obj["config"]
+    from techne.core.reflect import discard_candidate
+    try:
+        discard_candidate(config.db_path, candidate_id)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+    click.echo(f"Discarded candidate #{candidate_id}")
+
+
+@reflect.command("stats")
+@click.pass_context
+def reflect_stats(ctx):
+    """Counts of pending / promoted / discarded candidates."""
+    config = ctx.obj["config"]
+    from techne.core.reflect import candidate_stats
+    s = candidate_stats(config.db_path)
+    click.echo(json.dumps(s, indent=2))
+
+
 if __name__ == "__main__":
     main()

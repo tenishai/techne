@@ -141,6 +141,24 @@ def run_session_end(
         })
         queued += 1
 
+    # Reflection pass — opt-in, never blocks session teardown. Writes proposals
+    # to knowledge_candidates for human review (config.reflect.write_to controls
+    # whether they also land in the live knowledge / identity tables).
+    reflect_result: dict = {
+        "threads_considered": 0, "threads_reflected": 0,
+        "candidates_proposed": 0, "candidates_written": 0,
+        "candidates_promoted": 0, "errors": 0,
+    }
+    if config.reflect.enabled:
+        try:
+            from techne.core.reflect import reflect_on_session
+            reflect_result = reflect_on_session(
+                config, session_id, threads, observations
+            )
+        except Exception as e:
+            import sys
+            print(f"techne: reflect pass failed: {e}", file=sys.stderr)
+
     if summary:
         end_session(config.db_path, session_id, summary=summary, source="manual")
     else:
@@ -157,6 +175,7 @@ def run_session_end(
         "aged_completed": aged.get("completed", 0),
         "aged_stale": aged.get("stale", 0),
         "queued": queued,
+        "reflect": reflect_result,
     }
 
 

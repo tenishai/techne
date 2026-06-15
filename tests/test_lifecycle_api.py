@@ -72,12 +72,18 @@ def test_run_session_end_full_lifecycle(config, db_path, monkeypatch):
     result = run_session_end(config, session_id)
 
     # Check the returned dict has all expected keys
-    assert set(result.keys()) == {"threads", "linked", "aged_completed", "aged_stale", "queued"}
+    assert set(result.keys()) == {
+        "threads", "linked", "aged_completed", "aged_stale", "queued", "reflect"
+    }
     assert isinstance(result["threads"], int)
     assert isinstance(result["linked"], int)
     assert isinstance(result["aged_completed"], int)
     assert isinstance(result["aged_stale"], int)
     assert isinstance(result["queued"], int)
+    # reflect is always present; counts are all zero when reflect.enabled=False
+    assert isinstance(result["reflect"], dict)
+    assert result["reflect"]["threads_reflected"] == 0
+    assert result["reflect"]["candidates_written"] == 0
 
     # At least one thread was detected and saved
     assert result["threads"] >= 1
