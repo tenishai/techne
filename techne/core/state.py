@@ -149,6 +149,7 @@ def end_session(
     summary: str = "",
     *,
     source: str = "manual",
+    summary_llm_source: str | None = None,
 ):
     """Mark a session ended and store its summary.
 
@@ -157,6 +158,10 @@ def end_session(
     - 'llm'       → sessions.summary_llm
     - 'heuristic' → sessions.summary_heuristic
     See effective_summary() for the read rule.
+
+    `summary_llm_source` records the provenance of an LLM-derived summary
+    (e.g. 'ai-title', 'parent-model', 'compaction'). Stored only when
+    source='llm'; silently ignored otherwise.
     """
     column = _resolve_summary_column(source)
     # Defense in depth at the SQL construction site: `column` is f-string
@@ -166,10 +171,12 @@ def end_session(
         raise ValueError(f"refusing to interpolate unknown column {column!r} into SQL")
     conn = connect(db_path)
     try:
+        llm_src = summary_llm_source if source == "llm" else None
         conn.execute(
-            f"""UPDATE sessions SET ended_at = CURRENT_TIMESTAMP, {column} = ?
+            f"""UPDATE sessions SET ended_at = CURRENT_TIMESTAMP, {column} = ?,
+                    summary_llm_source = COALESCE(?, summary_llm_source)
                 WHERE id = ?""",
-            (summary or None, session_id),
+            (summary or None, llm_src, session_id),
         )
         conn.commit()
     finally:
@@ -182,16 +189,24 @@ def set_session_summary(
     summary: str,
     *,
     source: str = "manual",
+    summary_llm_source: str | None = None,
 ) -> None:
     """Write a summary to the typed column for `source` without touching
     ended_at. Used by `redetect_threads` and any other path that updates a
-    session summary in place rather than at end-of-session."""
+    session summary in place rather than at end-of-session.
+
+    `summary_llm_source` records provenance ('ai-title', 'parent-model',
+    'compaction', …) when source='llm'; silently ignored otherwise.
+    """
     column = _resolve_summary_column(source)
     conn = connect(db_path)
     try:
+        llm_src = summary_llm_source if source == "llm" else None
         conn.execute(
-            f"UPDATE sessions SET {column} = ? WHERE id = ?",
-            (summary or None, session_id),
+            f"""UPDATE sessions SET {column} = ?,
+                    summary_llm_source = COALESCE(?, summary_llm_source)
+                WHERE id = ?""",
+            (summary or None, llm_src, session_id),
         )
         conn.commit()
     finally:
