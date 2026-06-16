@@ -63,9 +63,7 @@ def init_session_for_external_id(
 
     conn = connect(config.db_path)
     try:
-        row = conn.execute(
-            "SELECT id FROM sessions WHERE id = ?", (external_id,)
-        ).fetchone()
+        row = conn.execute("SELECT id FROM sessions WHERE id = ?", (external_id,)).fetchone()
         if row is not None:
             return external_id
     finally:
@@ -131,32 +129,40 @@ def run_session_end(
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     queued = 0
     for t in threads:
-        enqueue(config.db_path, "thread_summary", {
-            "session_id": session_id,
-            "thread_id": f"{session_id}-{t.thread_num}",
-            "thread_label": t.label,
-            "summary": t.summary,
-            "resume_points": t.resume_points,
-            "agent_identity": agent_identity,
-        })
+        enqueue(
+            config.db_path,
+            "thread_summary",
+            {
+                "session_id": session_id,
+                "thread_id": f"{session_id}-{t.thread_num}",
+                "thread_label": t.label,
+                "summary": t.summary,
+                "resume_points": t.resume_points,
+                "agent_identity": agent_identity,
+            },
+            deliver=False,
+        )
         queued += 1
 
     # Reflection pass — opt-in, never blocks session teardown. Writes proposals
     # to knowledge_candidates for human review (config.reflect.write_to controls
     # whether they also land in the live knowledge / identity tables).
     reflect_result: dict = {
-        "threads_considered": 0, "threads_reflected": 0,
-        "candidates_proposed": 0, "candidates_written": 0,
-        "candidates_promoted": 0, "errors": 0,
+        "threads_considered": 0,
+        "threads_reflected": 0,
+        "candidates_proposed": 0,
+        "candidates_written": 0,
+        "candidates_promoted": 0,
+        "errors": 0,
     }
     if config.reflect.enabled:
         try:
             from techne.core.reflect import reflect_on_session
-            reflect_result = reflect_on_session(
-                config, session_id, threads, observations
-            )
+
+            reflect_result = reflect_on_session(config, session_id, threads, observations)
         except Exception as e:
             import sys
+
             print(f"techne: reflect pass failed: {e}", file=sys.stderr)
 
     if summary:
@@ -228,21 +234,15 @@ def redetect_threads(
     # Delete old rows AND insert new ones in a single transaction so a crash
     # mid-way never leaves the session with no threads.
     boundary_a_indices = (
-        boundary_indices_from_segments([t.observation_indices for t in threads])
-        if scores
-        else None
+        boundary_indices_from_segments([t.observation_indices for t in threads]) if scores else None
     )
     conn = connect(config.db_path)
     try:
         conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
-        conn.execute(
-            "DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,)
-        )
+        conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
         if scores and boundary_a_indices is not None:
             save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
-        save_threads(
-            threads, session_id, config.db_path, parent_links=parent_links, conn=conn
-        )
+        save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -260,14 +260,19 @@ def redetect_threads(
     if sync:
         agent_identity = os.environ.get("TECHNE_IDENTITY", "")
         for t in threads:
-            enqueue(config.db_path, "thread_summary", {
-                "session_id": session_id,
-                "thread_id": f"{session_id}-{t.thread_num}",
-                "thread_label": t.label,
-                "summary": t.summary,
-                "resume_points": t.resume_points,
-                "agent_identity": agent_identity,
-            })
+            enqueue(
+                config.db_path,
+                "thread_summary",
+                {
+                    "session_id": session_id,
+                    "thread_id": f"{session_id}-{t.thread_num}",
+                    "thread_label": t.label,
+                    "summary": t.summary,
+                    "resume_points": t.resume_points,
+                    "agent_identity": agent_identity,
+                },
+                deliver=False,
+            )
             queued += 1
 
     return {
