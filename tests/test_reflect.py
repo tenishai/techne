@@ -2,10 +2,11 @@
 
 import json
 
+import pytest
+
 from techne.config import Config
-from techne.core.database import init_db, connect
+from techne.core.database import connect, init_db
 from techne.core.reflect import (
-    Candidate,
     candidate_stats,
     discard_candidate,
     list_candidates,
@@ -16,27 +17,28 @@ from techne.core.reflect import (
 from techne.core.state import start_session
 from techne.core.threads import Thread
 
-
 # --- parse_response -------------------------------------------------------
 
 
 def test_parse_response_clean_json():
-    raw = json.dumps([
-        {
-            "scope": "knowledge",
-            "type": "decision",
-            "content": "Use Postgres for orders",
-            "tags": "storage",
-            "confidence": "high",
-        },
-        {
-            "scope": "identity",
-            "type": "user.prefers.terse_responses",
-            "content": "Operator wants brief replies",
-            "tags": "style",
-            "confidence": "medium",
-        },
-    ])
+    raw = json.dumps(
+        [
+            {
+                "scope": "knowledge",
+                "type": "decision",
+                "content": "Use Postgres for orders",
+                "tags": "storage",
+                "confidence": "high",
+            },
+            {
+                "scope": "identity",
+                "type": "user.prefers.terse_responses",
+                "content": "Operator wants brief replies",
+                "tags": "style",
+                "confidence": "medium",
+            },
+        ]
+    )
     parsed = parse_response(raw, max_items=10)
     assert len(parsed) == 2
     assert parsed[0].scope == "knowledge"
@@ -45,17 +47,23 @@ def test_parse_response_clean_json():
 
 
 def test_parse_response_tolerates_code_fence():
-    raw = "```json\n" + json.dumps([
-        {"scope": "knowledge", "type": "fact", "content": "x", "confidence": "low"}
-    ]) + "\n```"
+    raw = (
+        "```json\n"
+        + json.dumps([{"scope": "knowledge", "type": "fact", "content": "x", "confidence": "low"}])
+        + "\n```"
+    )
     parsed = parse_response(raw, max_items=10)
     assert len(parsed) == 1
 
 
 def test_parse_response_tolerates_leading_prose():
-    raw = "Here is the JSON you asked for:\n[" + json.dumps(
-        {"scope": "knowledge", "type": "pattern", "content": "y", "confidence": "medium"}
-    ) + "]\nThank you."
+    raw = (
+        "Here is the JSON you asked for:\n["
+        + json.dumps(
+            {"scope": "knowledge", "type": "pattern", "content": "y", "confidence": "medium"}
+        )
+        + "]\nThank you."
+    )
     parsed = parse_response(raw, max_items=10)
     assert len(parsed) == 1
     assert parsed[0].type == "pattern"
@@ -67,17 +75,19 @@ def test_parse_response_rejects_invalid_scope():
 
 
 def test_parse_response_rejects_invalid_knowledge_type():
-    raw = json.dumps([
-        {"scope": "knowledge", "type": "not-a-real-type", "content": "x", "confidence": "high"}
-    ])
+    raw = json.dumps(
+        [{"scope": "knowledge", "type": "not-a-real-type", "content": "x", "confidence": "high"}]
+    )
     assert parse_response(raw, max_items=10) == []
 
 
 def test_parse_response_respects_max_items():
-    raw = json.dumps([
-        {"scope": "knowledge", "type": "fact", "content": f"item {i}", "confidence": "medium"}
-        for i in range(10)
-    ])
+    raw = json.dumps(
+        [
+            {"scope": "knowledge", "type": "fact", "content": f"item {i}", "confidence": "medium"}
+            for i in range(10)
+        ]
+    )
     parsed = parse_response(raw, max_items=3)
     assert len(parsed) == 3
 
@@ -108,9 +118,7 @@ def _mk_config(tmp_path, *, enabled: bool, write_to: str = "candidates"):
 
 
 def _mk_session_with_obs(config, n_obs: int) -> tuple[str, list[dict]]:
-    session_id = start_session(
-        config.db_path, project_path="/tmp/p", agent_identity="test-agent"
-    )
+    session_id = start_session(config.db_path, project_path="/tmp/p", agent_identity="test-agent")
     obs = [
         {"tool_name": "Bash", "content": f"obs {i}", "timestamp": "2026-06-15"}
         for i in range(n_obs)
@@ -123,8 +131,11 @@ def _save_thread_row(config, session_id: str, thread: Thread) -> None:
     Production calls save_threads before reflect_on_session — this mirrors that.
     """
     from techne.core.threads import save_threads
+
     save_threads(
-        [thread], session_id, config.db_path,
+        [thread],
+        session_id,
+        config.db_path,
         parent_links=[(f"{session_id}-{thread.thread_num}", None)],
     )
 
@@ -132,8 +143,7 @@ def _save_thread_row(config, session_id: str, thread: Thread) -> None:
 def test_reflect_disabled_is_noop(tmp_path):
     config = _mk_config(tmp_path, enabled=False)
     session_id, obs = _mk_session_with_obs(config, 5)
-    threads = [Thread(thread_num=1, label="x", summary="x",
-                      observation_indices=list(range(5)))]
+    threads = [Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))]
 
     def boom(_):
         raise AssertionError("generate_fn should not be called when reflect is disabled")
@@ -148,19 +158,32 @@ def test_reflect_writes_candidates_not_live(tmp_path):
     """write_to='candidates' must NOT touch the live knowledge / identity tables."""
     config = _mk_config(tmp_path, enabled=True, write_to="candidates")
     session_id, obs = _mk_session_with_obs(config, 5)
-    threads = [Thread(thread_num=1, label="auth work", summary="auth work",
-                      observation_indices=list(range(5)))]
+    threads = [
+        Thread(
+            thread_num=1, label="auth work", summary="auth work", observation_indices=list(range(5))
+        )
+    ]
     _save_thread_row(config, session_id, threads[0])
 
     def fake_llm(_):
-        return json.dumps([
-            {"scope": "knowledge", "type": "decision",
-             "content": "Use JWT for service auth", "tags": "auth",
-             "confidence": "high"},
-            {"scope": "identity", "type": "user.team.name",
-             "content": "User works solo", "tags": "team",
-             "confidence": "medium"},
-        ])
+        return json.dumps(
+            [
+                {
+                    "scope": "knowledge",
+                    "type": "decision",
+                    "content": "Use JWT for service auth",
+                    "tags": "auth",
+                    "confidence": "high",
+                },
+                {
+                    "scope": "identity",
+                    "type": "user.team.name",
+                    "content": "User works solo",
+                    "tags": "team",
+                    "confidence": "medium",
+                },
+            ]
+        )
 
     result = reflect_on_session(config, session_id, threads, obs, generate_fn=fake_llm)
     assert result["threads_reflected"] == 1
@@ -184,8 +207,7 @@ def test_reflect_skips_thin_threads(tmp_path):
     config = _mk_config(tmp_path, enabled=True)
     config.reflect.min_observations_per_thread = 10
     session_id, obs = _mk_session_with_obs(config, 5)
-    threads = [Thread(thread_num=1, label="x", summary="x",
-                      observation_indices=list(range(5)))]
+    threads = [Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))]
 
     calls = []
 
@@ -203,19 +225,27 @@ def test_reflect_min_confidence_filter(tmp_path):
     config = _mk_config(tmp_path, enabled=True)
     config.reflect.min_confidence = "high"
     session_id, obs = _mk_session_with_obs(config, 5)
-    threads = [Thread(thread_num=1, label="x", summary="x",
-                      observation_indices=list(range(5)))]
+    threads = [Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))]
     _save_thread_row(config, session_id, threads[0])
 
     def fake_llm(_):
-        return json.dumps([
-            {"scope": "knowledge", "type": "fact", "content": "low-conf",
-             "confidence": "low"},
-            {"scope": "knowledge", "type": "fact", "content": "med-conf",
-             "confidence": "medium"},
-            {"scope": "knowledge", "type": "fact", "content": "high-conf",
-             "confidence": "high"},
-        ])
+        return json.dumps(
+            [
+                {"scope": "knowledge", "type": "fact", "content": "low-conf", "confidence": "low"},
+                {
+                    "scope": "knowledge",
+                    "type": "fact",
+                    "content": "med-conf",
+                    "confidence": "medium",
+                },
+                {
+                    "scope": "knowledge",
+                    "type": "fact",
+                    "content": "high-conf",
+                    "confidence": "high",
+                },
+            ]
+        )
 
     result = reflect_on_session(config, session_id, threads, obs, generate_fn=fake_llm)
     assert result["candidates_written"] == 1
@@ -227,8 +257,7 @@ def test_reflect_llm_error_counted_not_raised(tmp_path):
     """Hook contract: an LLM failure must not propagate out of reflect_on_session."""
     config = _mk_config(tmp_path, enabled=True)
     session_id, obs = _mk_session_with_obs(config, 5)
-    threads = [Thread(thread_num=1, label="x", summary="x",
-                      observation_indices=list(range(5)))]
+    threads = [Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))]
 
     def angry_llm(_):
         raise RuntimeError("provider exploded")
@@ -242,15 +271,20 @@ def test_reflect_write_to_live_writes_knowledge(tmp_path):
     """write_to='live' should land entries in the knowledge table directly."""
     config = _mk_config(tmp_path, enabled=True, write_to="live")
     session_id, obs = _mk_session_with_obs(config, 5)
-    threads = [Thread(thread_num=1, label="x", summary="x",
-                      observation_indices=list(range(5)))]
+    threads = [Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))]
     _save_thread_row(config, session_id, threads[0])
 
     def fake_llm(_):
-        return json.dumps([
-            {"scope": "knowledge", "type": "fact",
-             "content": "live-write test", "confidence": "high"},
-        ])
+        return json.dumps(
+            [
+                {
+                    "scope": "knowledge",
+                    "type": "fact",
+                    "content": "live-write test",
+                    "confidence": "high",
+                },
+            ]
+        )
 
     result = reflect_on_session(config, session_id, threads, obs, generate_fn=fake_llm)
     assert result["candidates_promoted"] == 1
@@ -261,9 +295,7 @@ def test_reflect_write_to_live_writes_knowledge(tmp_path):
             "SELECT content FROM knowledge WHERE content = ?", ("live-write test",)
         ).fetchone()
         assert row is not None
-        cand = conn.execute(
-            "SELECT status, promoted_to_id FROM knowledge_candidates"
-        ).fetchone()
+        cand = conn.execute("SELECT status, promoted_to_id FROM knowledge_candidates").fetchone()
         assert cand["status"] == "promoted"
         assert cand["promoted_to_id"] is not None
     finally:
@@ -278,14 +310,18 @@ def _seed_candidate(config, content="seed", scope="knowledge", type_="fact") -> 
     Threads are unique per call so multiple seeds don't share a thread row."""
     # Each seed call gets its own session + thread_num for FK uniqueness
     session_id, obs = _mk_session_with_obs(config, 3)
-    thread = Thread(thread_num=1, label=f"seed-{content}", summary=f"seed {content}",
-                    observation_indices=list(range(3)))
+    thread = Thread(
+        thread_num=1,
+        label=f"seed-{content}",
+        summary=f"seed {content}",
+        observation_indices=list(range(3)),
+    )
     _save_thread_row(config, session_id, thread)
 
     def fake_llm(_):
-        return json.dumps([
-            {"scope": scope, "type": type_, "content": content, "confidence": "high"}
-        ])
+        return json.dumps(
+            [{"scope": scope, "type": type_, "content": content, "confidence": "high"}]
+        )
 
     config.reflect.enabled = True
     reflect_on_session(config, session_id, [thread], obs, generate_fn=fake_llm)
@@ -310,9 +346,7 @@ def test_promote_writes_to_live_and_marks_promoted(tmp_path):
 
     conn = connect(config.db_path)
     try:
-        live = conn.execute(
-            "SELECT content FROM knowledge WHERE id = ?", (new_id,)
-        ).fetchone()
+        live = conn.execute("SELECT content FROM knowledge WHERE id = ?", (new_id,)).fetchone()
         assert live["content"] == "promote me"
         cand = conn.execute(
             "SELECT status, promoted_to_id FROM knowledge_candidates WHERE id = ?",
@@ -334,6 +368,33 @@ def test_promote_rejects_double_promotion(tmp_path):
         assert "already" in str(e)
     else:
         raise AssertionError("expected ValueError on second promotion")
+
+
+def test_promote_no_duplicate_knowledge_row(tmp_path):
+    """Second promote call must not insert a second knowledge row (TOCTOU guard)."""
+    config = _mk_config(tmp_path, enabled=True, write_to="candidates")
+    cand_id = _seed_candidate(config, content="atomic promote test")
+
+    first_id = promote_candidate(config.db_path, cand_id)
+    assert first_id is not None
+
+    with pytest.raises(ValueError, match="already"):
+        promote_candidate(config.db_path, cand_id)
+
+    conn = connect(config.db_path)
+    try:
+        knowledge_rows = conn.execute(
+            "SELECT id FROM knowledge WHERE content = 'atomic promote test'"
+        ).fetchall()
+        assert len(knowledge_rows) == 1, f"Expected 1 knowledge row, got {len(knowledge_rows)}"
+        cand = conn.execute(
+            "SELECT status, promoted_to_id FROM knowledge_candidates WHERE id = ?",
+            (cand_id,),
+        ).fetchone()
+        assert cand["status"] == "promoted"
+        assert cand["promoted_to_id"] == first_id
+    finally:
+        conn.close()
 
 
 def test_discard_flips_status(tmp_path):
@@ -369,6 +430,7 @@ def test_candidate_stats_counts_buckets(tmp_path):
 def test_config_round_trip_reflect_block(tmp_path):
     """ReflectConfig must survive save() → load()."""
     from techne.config import Config
+
     cfg_path = tmp_path / "config.yaml"
     cfg = Config()
     cfg.db_path = tmp_path / "techne.db"
@@ -396,9 +458,7 @@ def test_schema_v6_creates_candidates_table(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_candidates'"
         ).fetchone()
         assert row is not None
-        version = conn.execute(
-            "SELECT MAX(version) FROM schema_version"
-        ).fetchone()[0]
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert version >= 6
     finally:
         conn.close()
