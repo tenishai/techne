@@ -5,9 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from techne.core.database import connect, like_escape
+from techne.core.redaction import redact_credentials
 
 VALID_TYPES = (
-    "fact", "decision", "pattern", "evaluation", "procedure",
+    "fact",
+    "decision",
+    "pattern",
+    "evaluation",
+    "procedure",
     # Documents — third-party authoritative content mirrored into techne
     # by the Librarian persona (cabal#5). Tags carry source-specific
     # metadata (e.g. `source:confluence,kind:runbook`).
@@ -51,7 +56,7 @@ def store(
             """INSERT INTO knowledge
                  (type, content, source, tags, confidence, confidence_numeric)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (type, content, source, tags, confidence, numeric),
+            (type, redact_credentials(content), source, tags, confidence, numeric),
         )
         conn.commit()
         return cur.lastrowid
@@ -82,7 +87,7 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
         cur = conn.execute(
             """INSERT INTO knowledge (type, content, source, tags, confidence)
                VALUES (?, ?, ?, ?, ?)""",
-            (old["type"], new_content, source, old["tags"], old["confidence"]),
+            (old["type"], redact_credentials(new_content), source, old["tags"], old["confidence"]),
         )
         new_id = cur.lastrowid
 

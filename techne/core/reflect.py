@@ -19,6 +19,7 @@ from pathlib import Path
 from techne.config import Config
 from techne.core.database import connect
 from techne.core.knowledge import VALID_TYPES as KNOWLEDGE_TYPES
+from techne.core.redaction import redact_credentials
 from techne.core.threads import Thread, _make_generate_fn
 
 MAX_OBS_FOR_PROMPT = 40
@@ -66,7 +67,7 @@ Output the JSON array and nothing else.
 
 @dataclass
 class Candidate:
-    scope: str          # 'knowledge' | 'identity'
+    scope: str  # 'knowledge' | 'identity'
     type: str
     content: str
     tags: str
@@ -96,6 +97,7 @@ def _existing_knowledge_block(db_path: Path, query: str, k: int) -> str:
         return "(dedup disabled)"
     try:
         from techne.core.search import search_fts
+
         hits = search_fts(db_path, query, table="knowledge", limit=k)
     except Exception:
         return "(no existing knowledge available)"
@@ -119,9 +121,7 @@ def parse_response(raw: str, max_items: int) -> list[Candidate]:
     if text.startswith("```"):
         lines = text.splitlines()
         # drop the first fence line and any trailing fence
-        text = "\n".join(
-            line for line in lines[1:] if not line.startswith("```")
-        ).strip()
+        text = "\n".join(line for line in lines[1:] if not line.startswith("```")).strip()
     # Find the first '[' and matching ']' — handles trailing prose
     start = text.find("[")
     end = text.rfind("]")
@@ -218,14 +218,14 @@ def _insert_candidate(
             (
                 candidate.scope,
                 candidate.type,
-                candidate.content,
+                redact_credentials(candidate.content),
                 candidate.tags,
                 candidate.confidence,
                 session_id,
                 thread_id,
                 model_used,
                 prompt_hash,
-                raw_response,
+                redact_credentials(raw_response) if raw_response else None,
             ),
         )
         conn.commit()
@@ -239,6 +239,7 @@ def _write_live(db_path: Path, candidate: Candidate, source: str) -> int | None:
     config.reflect.write_to='live' — intended for after the test concludes."""
     if candidate.scope == "knowledge":
         from techne.core.knowledge import store
+
         return store(
             db_path,
             candidate.content,
@@ -249,6 +250,7 @@ def _write_live(db_path: Path, candidate: Candidate, source: str) -> int | None:
         )
     if candidate.scope == "identity":
         from techne.core.identity import set_value
+
         set_value(db_path, candidate.type, candidate.content, source=source)
         return None
     return None
@@ -290,6 +292,7 @@ def reflect_on_session(
     if config.reflect.model:
         # Shallow override of config.model for the generate fn only
         import copy
+
         reflect_config = copy.copy(config)
         reflect_config.model = config.reflect.model
     if generate_fn is None:
@@ -330,7 +333,8 @@ def reflect_on_session(
         for c in kept:
             try:
                 cand_id = _insert_candidate(
-                    config.db_path, c,
+                    config.db_path,
+                    c,
                     session_id=session_id,
                     thread_id=thread_id,
                     model_used=reflect_config.model,
@@ -409,9 +413,7 @@ def promote_candidate(db_path: Path, candidate_id: int) -> int | None:
     if row is None:
         raise ValueError(f"Candidate {candidate_id} not found")
     if row["status"] != "pending":
-        raise ValueError(
-            f"Candidate {candidate_id} already {row['status']} — cannot re-promote"
-        )
+        raise ValueError(f"Candidate {candidate_id} already {row['status']} — cannot re-promote")
 
     candidate = Candidate(
         scope=row["scope"],
@@ -421,7 +423,8 @@ def promote_candidate(db_path: Path, candidate_id: int) -> int | None:
         confidence=row["confidence"],
     )
     promoted_to_id = _write_live(
-        db_path, candidate,
+        db_path,
+        candidate,
         source=f"reflect-promote:{row['source_session_id']}:{candidate_id}",
     )
     _mark_promoted(db_path, candidate_id, promoted_to_id)
@@ -438,9 +441,7 @@ def discard_candidate(db_path: Path, candidate_id: int) -> None:
             (candidate_id,),
         )
         if cur.rowcount == 0:
-            raise ValueError(
-                f"Candidate {candidate_id} not found or already reviewed"
-            )
+            raise ValueError(f"Candidate {candidate_id} not found or already reviewed")
         conn.commit()
     finally:
         conn.close()
