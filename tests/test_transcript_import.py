@@ -488,6 +488,84 @@ def test_inline_angle_is_captured(db_path, tmp_path):
     assert result["prompt_obs"] == 1
 
 
+def test_plain_text_assistant_turn_captured_as_assistant_text(db_path, tmp_path):
+    """Assistant records that are pure prose (no tool_use) must produce an
+    AssistantText observation. The previous dead-elif silently dropped them."""
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {
+                "type": "assistant",
+                "sessionId": "sess-fixture",
+                "timestamp": "2026-06-01T10:00:00.000Z",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Here is my reasoning about the change."},
+                    ],
+                },
+            },
+        ],
+    )
+
+    result = import_transcript(db_path, p)
+    assert result["assistant_text_obs"] == 1
+    assert result["tool_obs"] == 0
+    assert result["prompt_obs"] == 0
+
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tool_name, content FROM observations WHERE session_id='sess-fixture'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "AssistantText"
+        assert "reasoning about the change" in rows[0]["content"]
+    finally:
+        conn.close()
+
+
+def test_assistant_text_alongside_tool_use_both_captured(db_path, tmp_path):
+    """Mixed assistant record (text + tool_use) emits BOTH an AssistantText
+    observation and the eventual tool observation when the tool result lands."""
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {
+                "type": "assistant",
+                "sessionId": "sess-fixture",
+                "timestamp": "2026-06-01T10:00:00.000Z",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Let me check the directory."},
+                        {
+                            "type": "tool_use",
+                            "id": "tu_1",
+                            "name": "Bash",
+                            "input": {"command": "ls /tmp"},
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "sessionId": "sess-fixture",
+                "timestamp": "2026-06-01T10:00:01.000Z",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu_1", "content": "file1\nfile2"},
+                    ],
+                },
+            },
+        ],
+    )
+
+    result = import_transcript(db_path, p)
+    assert result["assistant_text_obs"] == 1
+    assert result["tool_obs"] == 1
+
+
 def test_text_alongside_tool_result_is_captured(db_path, tmp_path):
     """When a user message contains BOTH a tool_result and a text block
     (Claude Code emits this when a tool is cancelled and the user follows up),
@@ -519,7 +597,8 @@ def test_text_alongside_tool_result_is_captured(db_path, tmp_path):
     conn = connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT tool_name, content FROM observations WHERE session_id='sess-fixture' ORDER BY id"
+            "SELECT tool_name, content FROM observations "
+            "WHERE session_id='sess-fixture' ORDER BY id"
         ).fetchall()
         names = [r["tool_name"] for r in rows]
         assert "Bash" in names
