@@ -165,6 +165,38 @@ def test_make_generate_fn_passes_proxy_fields(tmp_path, monkeypatch):
     assert "api_key" not in captured
 
 
+def test_heuristic_config_defaults():
+    """HeuristicConfig fields default to the module-constant values."""
+    from techne.config import HeuristicConfig
+    cfg = HeuristicConfig()
+    assert cfg.boundary_threshold == 0.7
+    assert cfg.user_prompt_score == 0.3
+
+
+def test_heuristic_config_loaded_from_yaml(tmp_path):
+    f = tmp_path / "config.yaml"
+    f.write_text(yaml.dump({
+        "heuristic": {
+            "boundary_threshold": 0.5,
+            "user_prompt_score": 0.1,
+        }
+    }))
+    cfg = Config.load(f)
+    assert cfg.heuristic.boundary_threshold == 0.5
+    assert cfg.heuristic.user_prompt_score == 0.1
+
+
+def test_heuristic_config_round_trip(tmp_path):
+    cfg = Config()
+    cfg.heuristic.boundary_threshold = 0.6
+    cfg.heuristic.user_prompt_score = 0.2
+    out = tmp_path / "config.yaml"
+    cfg.save(out)
+    reloaded = Config.load(out)
+    assert reloaded.heuristic.boundary_threshold == 0.6
+    assert reloaded.heuristic.user_prompt_score == 0.2
+
+
 def test_sync_round_trip_preserves_all_fields(tmp_path):
     """Config.save() previously wrote only sync.adapter (plus url/auth/path if
     truthy), silently dropping sync.audience and sync.extra. A round-trip on a

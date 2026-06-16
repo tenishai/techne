@@ -807,3 +807,79 @@ class TestBoundaryPersistence:
         rows_2 = ht.load_boundaries(conn, "sess-2")
         assert len(rows_1) == 1 and rows_1[0]["family_a"] == "x"
         assert len(rows_2) == 1 and rows_2[0]["family_a"] == "y"
+
+
+# --- Config threshold overrides -------------------------------------------
+
+
+class TestConfigThresholds:
+    """Verify detect_threads respects overridden boundary_threshold and
+    user_prompt_score so the [heuristic] config stanza actually changes
+    detection behavior."""
+
+    def _make_user_prompt_adjacent_observations(self) -> list[dict]:
+        """Two clusters of Edit calls with a UserPrompt between them and a
+        medium gap (35 min). At default threshold (0.7) the split happens on
+        the gap alone. With a very high user_prompt_score the UserPrompt
+        amplifies any neighboring gap signal enough to confirm the split.
+        With user_prompt_score=0.0 the prompt signal is zeroed out — but here
+        we test a mid-session scenario where disabling it doesn't itself
+        collapse the split (the 35-min gap_medium=0.6 is below threshold=0.7,
+        so at threshold=0.5 both default and zero-score configs split anyway;
+        a high score case is the meaningful behavioral test)."""
+        return [
+            obs("Edit", content="a", minutes_from_zero=0),
+            obs("Edit", content="a", minutes_from_zero=1),
+            obs("Edit", content="a", minutes_from_zero=2),
+            obs("Edit", content="a", minutes_from_zero=3),
+            obs("UserPrompt", content="new task", minutes_from_zero=35),
+            obs("Edit", content="b", minutes_from_zero=36),
+            obs("Edit", content="b", minutes_from_zero=37),
+            obs("Edit", content="b", minutes_from_zero=38),
+        ]
+
+    def test_boundary_threshold_override_prevents_split(self):
+        """Raising boundary_threshold above what the score produces keeps the
+        session as one thread even when a gap would otherwise split it."""
+        # 2-hour gap → gap_hard (1.0), which normally splits.
+        # With threshold=1.5, that 1.0 score is no longer enough.
+        observations = [
+            obs("Edit", content="x", minutes_from_zero=0),
+            obs("Edit", content="x", minutes_from_zero=1),
+            obs("Edit", content="x", minutes_from_zero=2),
+            obs("Edit", content="x", minutes_from_zero=3),
+            obs("Edit", content="x", minutes_from_zero=120),
+            obs("Edit", content="x", minutes_from_zero=121),
+            obs("Edit", content="x", minutes_from_zero=122),
+            obs("Edit", content="x", minutes_from_zero=123),
+        ]
+        # At default threshold (0.7) this splits into 2 threads.
+        segs_default, _ = ht.detect_threads(observations)
+        assert len(segs_default) == 2
+
+        # At threshold=1.5 (above any single-signal maximum of 1.0) it stays 1.
+        segs_high, _ = ht.detect_threads(observations, boundary_threshold=1.5)
+        assert len(segs_high) == 1
+
+    def test_user_prompt_score_override_tips_boundary(self):
+        """Raising user_prompt_score can push a borderline pair over threshold."""
+        # 30-min gap → gap_medium (0.6). With default user_prompt_score=0.3 and
+        # a UserPrompt right after the gap: 0.6 + 0.3 = 0.9 > 0.7 → split.
+        # With user_prompt_score=0.0: 0.6 < 0.7 → no split (stays one thread).
+        observations = [
+            obs("Edit", content="a", minutes_from_zero=0),
+            obs("Edit", content="a", minutes_from_zero=1),
+            obs("Edit", content="a", minutes_from_zero=2),
+            obs("Edit", content="a", minutes_from_zero=3),
+            obs("UserPrompt", content="switch tasks", minutes_from_zero=33),
+            obs("Edit", content="b", minutes_from_zero=34),
+            obs("Edit", content="b", minutes_from_zero=35),
+            obs("Edit", content="b", minutes_from_zero=36),
+        ]
+        # Default: gap_medium + user_prompt_score tips over threshold → 2 threads.
+        segs_default, _ = ht.detect_threads(observations)
+        assert len(segs_default) == 2
+
+        # Zero user_prompt_score: gap_medium alone (0.6) is below threshold (0.7).
+        segs_zero, _ = ht.detect_threads(observations, user_prompt_score=0.0)
+        assert len(segs_zero) == 1
