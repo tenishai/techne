@@ -7,12 +7,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from techne.config import Config
 from techne.hooks.post_tool_use import SKIP_TOOLS, should_capture, summarize
 from techne.hooks.pre_compact import _find_last_task, _parse_transcript
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -230,17 +227,35 @@ class TestPreCompactTranscriptParsing:
     def test_parse_well_formed_transcript(self):
         """A typical transcript is parsed to extract messages, files, tools, branch."""
         lines = [
-            {"type": "user", "gitBranch": "main", "message": {"content": [
-                {"type": "text", "text": "Please edit the config file"}
-            ]}},
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Edit", "input": {
-                    "file_path": "/foo/bar.py", "old_string": "old", "new_string": "new"
-                }}
-            ]}},
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}
-            ]}},
+            {
+                "type": "user",
+                "gitBranch": "main",
+                "message": {"content": [{"type": "text", "text": "Please edit the config file"}]},
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": {
+                                "file_path": "/foo/bar.py",
+                                "old_string": "old",
+                                "new_string": "new",
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}
+                    ]
+                },
+            },
         ]
         path = _write_transcript(lines)
         try:
@@ -258,7 +273,7 @@ class TestPreCompactTranscriptParsing:
         """Lines that aren't valid JSON are silently skipped; result is still returned."""
         fd, path = tempfile.mkstemp(suffix=".jsonl")
         with os.fdopen(fd, "w") as f:
-            f.write("not valid json\n{also bad\n{\"type\": \"unknown\"}\n")
+            f.write('not valid json\n{also bad\n{"type": "unknown"}\n')
         try:
             result = _parse_transcript(path)
             # Should return the default empty structure, not raise
@@ -278,10 +293,15 @@ class TestPreCompactTranscriptParsing:
     def test_parse_skips_system_text_starting_with_angle_bracket(self):
         """User messages starting with '<' are treated as system noise and skipped."""
         lines = [
-            {"type": "user", "message": {"content": [
-                {"type": "text", "text": "<system>internal message</system>"},
-                {"type": "text", "text": "Real user message here"},
-            ]}}
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "<system>internal message</system>"},
+                        {"type": "text", "text": "Real user message here"},
+                    ]
+                },
+            }
         ]
         path = _write_transcript(lines)
         try:
@@ -294,11 +314,18 @@ class TestPreCompactTranscriptParsing:
     def test_parse_write_tool_adds_to_files_modified(self):
         """Write tool calls are tracked in files_modified just like Edit."""
         lines = [
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Write", "input": {
-                    "file_path": "/foo/new.py", "content": "hello"
-                }}
-            ]}}
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {"file_path": "/foo/new.py", "content": "hello"},
+                        }
+                    ]
+                },
+            }
         ]
         path = _write_transcript(lines)
         try:
@@ -309,9 +336,7 @@ class TestPreCompactTranscriptParsing:
 
     def test_parse_gitbranch_extracted_from_any_line(self):
         """gitBranch field is extracted from whichever line carries it."""
-        lines = [
-            {"type": "assistant", "gitBranch": "feature/foo", "message": {"content": []}}
-        ]
+        lines = [{"type": "assistant", "gitBranch": "feature/foo", "message": {"content": []}}]
         path = _write_transcript(lines)
         try:
             result = _parse_transcript(path)
@@ -322,17 +347,34 @@ class TestPreCompactTranscriptParsing:
     def test_parse_multiple_tool_calls_aggregated(self):
         """Multiple calls to the same tool are counted correctly."""
         lines = [
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Bash", "input": {"command": "pwd"}},
-            ]}},
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
-            ]}},
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Edit", "input": {
-                    "file_path": "/a.py", "old_string": "", "new_string": ""
-                }},
-            ]}},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "pwd"}},
+                    ]
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                    ]
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": {"file_path": "/a.py", "old_string": "", "new_string": ""},
+                        },
+                    ]
+                },
+            },
         ]
         path = _write_transcript(lines)
         try:
@@ -394,7 +436,9 @@ class TestFindLastTask:
 # ---------------------------------------------------------------------------
 
 
-def _run_hook_subprocess(module: str, stdin: str, env_overrides: dict | None = None) -> subprocess.CompletedProcess:
+def _run_hook_subprocess(
+    module: str, stdin: str, env_overrides: dict | None = None
+) -> subprocess.CompletedProcess:
     env = {**os.environ, **(env_overrides or {})}
     return subprocess.run(
         [sys.executable, "-m", module],
@@ -432,3 +476,56 @@ class TestSessionEndExitCode:
             f"this breaks Claude Code session teardown.\n"
             f"stderr: {result.stderr}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestSessionEndFlushSinks
+#
+# Verify that flush_sinks is called in the session_end hook alongside flush().
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndFlushSinks:
+    """flush_sinks must be called from session_end, same as flush(adapter)."""
+
+    def test_flush_sinks_wired_in_session_end_source(self):
+        """flush_sinks import appears in session_end.py — static wiring check."""
+        import inspect
+
+        import techne.hooks.session_end as hook_mod
+
+        src = inspect.getsource(hook_mod)
+        assert "flush_sinks" in src, (
+            "flush_sinks must be called in session_end.py (issue #48)"
+        )
+
+    def test_flush_sinks_deferred_stays_pending(self, tmp_path: Path):
+        """thread_summary rows written during session_end stay pending (ok=False, error=None).
+
+        The deferred handler returns ok=False so flush_sinks leaves them in the
+        outbox for the adapter flush path. Rows must NOT be marked dead or synced.
+        """
+        from techne.core.database import init_db
+        from techne.sync.outbox import enqueue, flush_sinks, stats
+        from techne.sync.sinks import DeliveryResult, OutboxSink, register_sink, use_registry
+
+        db_path = tmp_path / "test.db"
+        conn = init_db(db_path)
+        conn.close()
+
+        deferred_sink = OutboxSink(
+            name="thread_summary",
+            payload_schema=dict,
+            handler=lambda _: DeliveryResult(ok=False, error=None),
+            description="deferred — mirrors lifecycle.py registration",
+        )
+
+        with use_registry({}):
+            register_sink(deferred_sink)
+            enqueue(db_path, "thread_summary", {"content": "queued"}, deliver=False)
+            summary = flush_sinks(db_path)
+
+        s = stats(db_path)
+        assert s["pending"] == 1, "deferred sink must leave rows pending, not mark them synced"
+        assert s["dead"] == 0, "failed flush must not mark rows dead"
+        assert summary["thread_summary"] == (0, 1), "expected (synced=0, failed=1)"
