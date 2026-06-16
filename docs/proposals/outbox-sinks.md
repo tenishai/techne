@@ -121,7 +121,7 @@ def _try_deliver_now(db_path, sink, row_id, data):
 
 The producer that called `enqueue` sees nothing of this — the call is fire-and-forget from their POV. The outbox row is durable evidence the message exists; immediate delivery is an optimization for the happy path.
 
-The `deliver=False` opt-out exists for tests and for bulk-import scenarios where you want to enqueue without firing handlers.
+The `deliver=False` opt-out exists for tests and for bulk-import scenarios where you want to enqueue without firing handlers. Even with `deliver=False`, the target must be registered and the payload validated — no orphan rows can be created.
 
 ### Multiplexed flush
 
@@ -168,9 +168,9 @@ Note: this is **not** the same shape as `flush(adapter)` from today. Today's flu
 A row's `target` determines which path it takes. To avoid ambiguity:
 
 - Sink targets MUST be registered before `enqueue` accepts them — see Migration for legacy rows.
-- `SyncAdapter.push` continues to receive only rows whose target is **not** in the sink registry. The adapter handles unknown-to-it targets the same way it does today.
+- Adapter-bound targets (rows destined for `flush(adapter)` rather than a live handler) MUST also be registered. Their sink handler returns `DeliveryResult(ok=False)` so the row stays `pending`; `flush(adapter)` drains it on the next sync cycle. `lifecycle.py` bootstraps these registrations at startup via `_register_lifecycle_sinks()`.
 
-This split means: existing filesystem-sync flows keep working unchanged. New per-target delivery is additive.
+This split means: existing filesystem-sync flows keep working unchanged. New per-target delivery is additive, and every enqueue path is validated.
 
 ### Transport-agnosticism
 
