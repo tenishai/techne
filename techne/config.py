@@ -57,6 +57,24 @@ ReflectWriteTo = Literal["candidates", "live"]
 
 
 @dataclass
+class TranscriptSourceConfig:
+    """Config for one JsonlTranscriptSource instance."""
+
+    paths: list[str] = field(default_factory=list)
+    include_globs: list[str] = field(default_factory=lambda: ["*.jsonl"])
+    exclude_globs: list[str] = field(default_factory=list)
+    debounce_ms: int = 500
+    adapter_name: str = "jsonl_transcript"
+
+
+@dataclass
+class SourcesConfig:
+    """Config for all source adapters."""
+
+    claude_code_transcripts: TranscriptSourceConfig | None = None
+
+
+@dataclass
 class ReflectConfig:
     # End-of-session reflection: an LLM scans each detected thread and proposes
     # durable knowledge / identity entries worth keeping. Off by default; opt
@@ -67,7 +85,7 @@ class ReflectConfig:
     min_observations_per_thread: int = 8
     min_confidence: str = "medium"
     max_candidates_per_thread: int = 5
-    model: str = ""               # falls back to Config.model when empty
+    model: str = ""  # falls back to Config.model when empty
     include_existing_knowledge: bool = True
     existing_knowledge_k: int = 10
     write_to: ReflectWriteTo = "candidates"
@@ -80,6 +98,7 @@ class Config:
     data_dir: Path = DEFAULT_DIR
     identity_dir: Path | None = None
     sync: SyncConfig = field(default_factory=SyncConfig)
+    sources: SourcesConfig = field(default_factory=SourcesConfig)
     threads: ThreadConfig = field(default_factory=ThreadConfig)
     hooks: HookConfig = field(default_factory=HookConfig)
     reflect: ReflectConfig = field(default_factory=ReflectConfig)
@@ -125,6 +144,20 @@ class Config:
         if "llm_api_key" in raw:
             cfg.llm_api_key = str(raw["llm_api_key"])
 
+        if "sources" in raw and isinstance(raw["sources"], dict):
+            s = raw["sources"]
+            sc = SourcesConfig()
+            if "claude_code_transcripts" in s and isinstance(s["claude_code_transcripts"], dict):
+                t = s["claude_code_transcripts"]
+                sc.claude_code_transcripts = TranscriptSourceConfig(
+                    paths=list(t.get("paths", [])),
+                    include_globs=list(t.get("include_globs", ["*.jsonl"])),
+                    exclude_globs=list(t.get("exclude_globs", [])),
+                    debounce_ms=int(t.get("debounce_ms", 500)),
+                    adapter_name=str(t.get("adapter_name", "jsonl_transcript")),
+                )
+            cfg.sources = sc
+
         if "sync" in raw and isinstance(raw["sync"], dict):
             s = raw["sync"]
             cfg.sync = SyncConfig(
@@ -133,9 +166,11 @@ class Config:
                 auth=s.get("auth", ""),
                 audience=s.get("audience", ""),
                 path=s.get("path", ""),
-                extra={k: v for k, v in s.items() if k not in (
-                    "adapter", "url", "auth", "audience", "path"
-                )},
+                extra={
+                    k: v
+                    for k, v in s.items()
+                    if k not in ("adapter", "url", "auth", "audience", "path")
+                },
             )
 
         if "threads" in raw and isinstance(raw["threads"], dict):
@@ -143,14 +178,12 @@ class Config:
             detector = t.get("detector", "heuristic")
             if detector not in ("heuristic", "llm"):
                 raise ValueError(
-                    f"Invalid threads.detector '{detector}'. "
-                    "Must be 'heuristic' or 'llm'."
+                    f"Invalid threads.detector '{detector}'. Must be 'heuristic' or 'llm'."
                 )
             summarizer = t.get("summarizer", "heuristic")
             if summarizer not in ("heuristic", "llm"):
                 raise ValueError(
-                    f"Invalid threads.summarizer '{summarizer}'. "
-                    "Must be 'heuristic' or 'llm'."
+                    f"Invalid threads.summarizer '{summarizer}'. Must be 'heuristic' or 'llm'."
                 )
             tool_families = t.get("tool_families") or {}
             if not isinstance(tool_families, dict):
@@ -182,8 +215,7 @@ class Config:
             write_to = r.get("write_to", "candidates")
             if write_to not in ("candidates", "live"):
                 raise ValueError(
-                    f"Invalid reflect.write_to '{write_to}'. "
-                    "Must be 'candidates' or 'live'."
+                    f"Invalid reflect.write_to '{write_to}'. Must be 'candidates' or 'live'."
                 )
             min_conf = r.get("min_confidence", "medium")
             if min_conf not in ("low", "medium", "high"):
