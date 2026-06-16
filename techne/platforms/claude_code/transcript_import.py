@@ -203,6 +203,7 @@ def import_transcript(
         pending: dict[str, dict] = {}
         tool_count = 0
         prompt_count = 0
+        assistant_text_count = 0
 
         for rec in records:
             rtype = rec.get("type")
@@ -217,6 +218,15 @@ def import_transcript(
                             "input": b.get("input") or {},
                             "ts": ts,
                         }
+                text = _extract_user_text(blocks)
+                if text:
+                    conn.execute(
+                        """INSERT INTO observations
+                           (session_id, timestamp, tool_name, content, tier, event_at)
+                           VALUES (?, ?, 'AssistantText', ?, 'hot', ?)""",
+                        (session_id, ts, redact_credentials(text[:4000]), ts),
+                    )
+                    assistant_text_count += 1
 
             elif rtype == "user":
                 for b in blocks:
@@ -267,6 +277,7 @@ def import_transcript(
             "project_path": project_path,
             "tool_obs": tool_count,
             "prompt_obs": prompt_count,
+            "assistant_text_obs": assistant_text_count,
             "summary_set": summary_set,
             "skipped": False,
         }
