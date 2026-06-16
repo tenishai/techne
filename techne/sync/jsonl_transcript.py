@@ -189,6 +189,18 @@ def _ingest_records_from_offset(
                                 "ts": ts,
                                 "session_id": session_id,
                             }
+                    text = _extract_user_text(blocks)
+                    if text:
+                        header = _tag_header("transcript", "assistant", session_id, project)
+                        content = redact_credentials(f"{header}\n{text[:4000]}")
+                        _ensure_session(conn, session_id, jsonl_path)
+                        conn.execute(
+                            """INSERT INTO observations
+                               (session_id, timestamp, tool_name, content, tier, event_at)
+                               VALUES (?, ?, 'AssistantText', ?, 'hot', ?)""",
+                            (session_id, ts, content, ts),
+                        )
+                        obs_count += 1
 
                 elif rtype == "user":
                     for b in blocks:
@@ -230,12 +242,6 @@ def _ingest_records_from_offset(
                             (session_id, ts, content, ts),
                         )
                         obs_count += 1
-
-                    # Assistant text turns (non-tool assistant messages)
-                elif rtype == "assistant":
-                    # Handled above for tool_use blocks; skip plain text to
-                    # avoid double-processing (the branch above consumed it).
-                    pass
 
         conn.commit()
         return new_offset, obs_count

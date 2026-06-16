@@ -363,6 +363,71 @@ def test_include_glob_filters_non_jsonl(db_path, tmp_path):
     assert count == 1  # only the .jsonl file
 
 
+# ---------------------------------------------------------------------------
+# Plain-text assistant turns (regression for #47)
+# ---------------------------------------------------------------------------
+
+
+def _rec_assistant_text(text: str, session: str = "sess-1", cwd: str = "/proj/foo") -> dict:
+    return {
+        "type": "assistant",
+        "sessionId": session,
+        "cwd": cwd,
+        "timestamp": "2026-06-01T10:00:05.000Z",
+        "message": {"content": [{"type": "text", "text": text}]},
+    }
+
+
+def _rec_assistant_mixed(text: str, tool_id: str, cmd: str, session: str = "sess-1") -> dict:
+    return {
+        "type": "assistant",
+        "sessionId": session,
+        "timestamp": "2026-06-01T10:00:06.000Z",
+        "message": {
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": cmd}},
+            ]
+        },
+    }
+
+
+def test_plain_text_assistant_emits_one_observation(db_path, tmp_path):
+    p = tmp_path / "sess-1.jsonl"
+    _write_jsonl(p, [_rec_assistant_text("Here is my reasoning.")])
+
+    cfg = JsonlTranscriptConfig(paths=[tmp_path])
+    src = JsonlTranscriptSource(db_path=db_path, config=cfg)
+    count = src.initial_walk()
+
+    assert count == 1
+    contents = _obs_contents(db_path)
+    assert len(contents) == 1
+    assert "role:assistant" in contents[0]
+    assert "Here is my reasoning." in contents[0]
+
+
+def test_mixed_assistant_emits_text_and_registers_tool_use(db_path, tmp_path):
+    p = tmp_path / "sess-1.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _rec_assistant_mixed("Running ls now.", "tu_mix", "ls /tmp"),
+            _rec_tool_result("tu_mix", "file1\nfile2"),
+        ],
+    )
+
+    cfg = JsonlTranscriptConfig(paths=[tmp_path])
+    src = JsonlTranscriptSource(db_path=db_path, config=cfg)
+    count = src.initial_walk()
+
+    # 1 AssistantText obs + 1 tool_result obs
+    assert count == 2
+    contents = _obs_contents(db_path)
+    assert any("role:assistant" in c and "Running ls now." in c for c in contents)
+    assert any("role:tool_result" in c for c in contents)
+
+
 def test_exclude_glob_filters_matching_files(db_path, tmp_path):
     subdir = tmp_path / "tool-results"
     subdir.mkdir()
