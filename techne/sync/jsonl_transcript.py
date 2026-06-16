@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Protocol, runtime_checkable
 
 from techne.core.database import connect
 from techne.core.extension_state import get_state, set_state
@@ -39,38 +38,10 @@ from techne.platforms.claude_code.transcript_import import (
     _should_import,
     _tool_result_text,
 )
+from techne.sync.adapter import SourceAdapter  # noqa: F401 — re-exported for callers
 from techne.watch import Debouncer, matches
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# SourceAdapter Protocol — the ingest-side counterpart to SyncAdapter.
-# Unlike SyncAdapter (push/pull/health for team sync), a SourceAdapter emits
-# observations from a local source into the techne database.
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class SourceAdapter(Protocol):
-    def initial_walk(self) -> int:
-        """Scan source; emit observations for everything not yet indexed.
-
-        Returns count of observations emitted.
-        """
-        ...
-
-    def start_watch(self) -> None:
-        """Begin continuous watch. Non-blocking — returns immediately."""
-        ...
-
-    def stop_watch(self) -> None:
-        """Stop watch and flush any pending debounced events."""
-        ...
-
-    def health(self) -> bool:
-        """Fast probe — is the source reachable?"""
-        ...
 
 
 # ---------------------------------------------------------------------------
