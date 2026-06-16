@@ -315,3 +315,47 @@ class TestPruneOrphans:
 
         assert pruned == 0
         assert stats(db_path)["pending"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _try_deliver_now logging tests
+# ---------------------------------------------------------------------------
+
+
+class TestTryDeliverNowLogging:
+    def test_warning_on_handler_ok_false(self, db_path, caplog):
+        """logger.warning fires when the handler returns ok=False."""
+        import logging
+
+        from techne.sync.outbox import enqueue
+
+        fail_sink = OutboxSink(name="fail", payload_schema=SimplePayload, handler=_fail_handler)
+        with use_registry({}):
+            register_sink(fail_sink)
+            with caplog.at_level(logging.WARNING, logger="techne.sync.outbox"):
+                enqueue(db_path, "fail", {"content": "will fail"})
+
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning_records, "expected a WARNING log record"
+        assert "fail" in warning_records[0].message
+        assert "deliberate failure" in warning_records[0].message
+
+    def test_error_on_update_row_status_raises(self, db_path, caplog):
+        """logger.exception (ERROR) fires when _update_row_status raises."""
+        import logging
+        from unittest.mock import patch
+
+        from techne.sync.outbox import enqueue
+
+        with use_registry({}):
+            register_sink(_simple_sink)
+            with patch(
+                "techne.sync.outbox._update_row_status",
+                side_effect=OSError("disk full"),
+            ):
+                with caplog.at_level(logging.ERROR, logger="techne.sync.outbox"):
+                    enqueue(db_path, "simple", {"content": "hello"})
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, "expected an ERROR log record"
+        assert "simple" in error_records[0].message

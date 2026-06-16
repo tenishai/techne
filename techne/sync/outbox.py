@@ -206,14 +206,21 @@ def _try_deliver_now(db_path: Path, sink, row_id: int, data: dict) -> None:
     Failures leave the row pending for the next flush_sinks cycle.
     The producing caller sees nothing of this.
     """
-    from techne.sync.sinks import DeliveryResult
-
     try:
         result = sink.handler(data)
-    except Exception as e:
-        result = DeliveryResult(ok=False, error=repr(e))
-
-    _update_row_status(db_path, row_id, result)
+        if not result.ok:
+            logger.warning(
+                "_try_deliver_now: handler rejected delivery target=%r error=%r",
+                sink.name,
+                result.error,
+            )
+        _update_row_status(db_path, row_id, result)
+    except Exception:
+        logger.exception(
+            "_try_deliver_now: unexpected error for target=%r row_id=%d",
+            sink.name,
+            row_id,
+        )
 
 
 def _update_row_status(db_path: Path, row_id: int, result) -> None:
