@@ -9,8 +9,8 @@ import json
 from pathlib import Path, PurePosixPath
 
 from techne.core.database import connect
+from techne.core.redaction import redact_credentials
 from techne.hooks.post_tool_use import SKIP_TOOLS, summarize
-
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
@@ -235,7 +235,7 @@ def import_transcript(
                             """INSERT INTO observations
                                (session_id, timestamp, tool_name, content, tier)
                                VALUES (?, ?, ?, ?, 'hot')""",
-                            (session_id, tu["ts"] or ts, tool_name, content),
+                            (session_id, tu["ts"] or ts, tool_name, redact_credentials(content)),
                         )
                         tool_count += 1
 
@@ -250,7 +250,7 @@ def import_transcript(
                             """INSERT INTO observations
                                (session_id, timestamp, tool_name, content, tier)
                                VALUES (?, ?, 'UserPrompt', ?, 'hot')""",
-                            (session_id, ts, text[:4000]),
+                            (session_id, ts, redact_credentials(text[:4000])),
                         )
                         prompt_count += 1
 
@@ -278,15 +278,20 @@ def import_directory(
     results = []
     for jsonl_path in sorted(directory.glob("*.jsonl")):
         try:
-            results.append(import_transcript(
-                db_path, jsonl_path,
-                include_user_prompts=include_user_prompts,
-                force=force,
-            ))
+            results.append(
+                import_transcript(
+                    db_path,
+                    jsonl_path,
+                    include_user_prompts=include_user_prompts,
+                    force=force,
+                )
+            )
         except Exception as e:
-            results.append({
-                "session_id": jsonl_path.stem,
-                "skipped": True,
-                "reason": f"error: {e}",
-            })
+            results.append(
+                {
+                    "session_id": jsonl_path.stem,
+                    "skipped": True,
+                    "reason": f"error: {e}",
+                }
+            )
     return results

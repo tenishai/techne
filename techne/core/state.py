@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 
 from techne.core.database import connect
-
+from techne.core.redaction import redact_credentials
 
 # Heuristic-summary detectors.
 #
@@ -69,9 +69,7 @@ def migrate_legacy_summaries(db_path: Path, *, dry_run: bool = False) -> dict:
             already_has_heuristic = bool((r["summary_heuristic"] or "").strip())
             if not dry_run:
                 if already_has_heuristic:
-                    conn.execute(
-                        "UPDATE sessions SET summary = NULL WHERE id = ?", (r["id"],)
-                    )
+                    conn.execute("UPDATE sessions SET summary = NULL WHERE id = ?", (r["id"],))
                 else:
                     conn.execute(
                         "UPDATE sessions SET summary_heuristic = summary, summary = NULL WHERE id = ?",
@@ -206,6 +204,7 @@ def effective_summary(row) -> str:
     Priority: manual > LLM > heuristic. Empty strings are treated as missing,
     so a session with `summary=""` and `summary_llm="..."` returns the LLM one.
     """
+
     def get(key):
         try:
             v = row[key]
@@ -260,7 +259,7 @@ def add_observation(
         conn.execute(
             """INSERT INTO observations (session_id, tool_name, content, tier)
                VALUES (?, ?, ?, ?)""",
-            (session_id, tool_name, content, tier),
+            (session_id, tool_name, redact_credentials(content), tier),
         )
         conn.commit()
     finally:

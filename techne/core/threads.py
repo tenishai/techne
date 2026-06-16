@@ -6,12 +6,12 @@ unit of continuity — they link across sessions to form a chain of work.
 """
 
 import re
-import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from techne.config import Config
+from techne.core.redaction import redact_credentials
 
 MAX_SAMPLED_OBSERVATIONS = 60
 
@@ -309,8 +309,15 @@ def save_threads(
                    (id, session_id, thread_num, label, summary, resume_points,
                     status, parent_thread_id, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)""",
-                (thread_id, session_id, t.thread_num, t.label, t.summary,
-                 t.resume_points or None, parent_id),
+                (
+                    thread_id,
+                    session_id,
+                    t.thread_num,
+                    redact_credentials(t.label),
+                    redact_credentials(t.summary),
+                    redact_credentials(t.resume_points) if t.resume_points else None,
+                    parent_id,
+                ),
             )
         if owned:
             conn.commit()
@@ -388,8 +395,10 @@ def _make_generate_fn(config: Config):
     and observability). When unset, LiteLLM uses its standard env-var-based
     provider routing.
     """
+
     def generate(prompt: str) -> str:
         import litellm
+
         kwargs: dict = {
             "model": config.model,
             "max_tokens": 4096,
@@ -401,6 +410,7 @@ def _make_generate_fn(config: Config):
             kwargs["api_key"] = config.llm_api_key
         resp = litellm.completion(**kwargs)
         return resp.choices[0].message.content.strip()
+
     return generate
 
 
@@ -423,9 +433,7 @@ def _parse_threads(raw: str) -> list[Thread]:
             line = line.strip()
             if line.lower().startswith("observations:"):
                 idx_str = line.split(":", 1)[1].strip()
-                obs_indices = [
-                    int(x.strip()) for x in idx_str.split(",") if x.strip().isdigit()
-                ]
+                obs_indices = [int(x.strip()) for x in idx_str.split(",") if x.strip().isdigit()]
 
         summary_match = re.search(
             r"Summary:\s*(.+?)(?=\nResume:|\nObservations:|\Z)", body, re.DOTALL
