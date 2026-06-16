@@ -93,6 +93,8 @@ def _detect_summarize_heuristic(
         observations,
         user_families=user_families,
         extra_entity_patterns=extras,
+        boundary_threshold=config.heuristic.boundary_threshold,
+        user_prompt_score=config.heuristic.user_prompt_score,
     )
 
     # Build features once and reuse for label / fallback summary.

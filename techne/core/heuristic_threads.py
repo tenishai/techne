@@ -279,7 +279,12 @@ def _nearest_non_meta(
     return None
 
 
-def _score_signals(a: ObsFeatures, b: ObsFeatures, gap: float) -> dict[str, float]:
+def _score_signals(
+    a: ObsFeatures,
+    b: ObsFeatures,
+    gap: float,
+    user_prompt_score: float = USER_PROMPT_SCORE,
+) -> dict[str, float]:
     """Compute non-family signals — these don't care about meta substitution."""
     signals: dict[str, float] = {}
 
@@ -300,12 +305,15 @@ def _score_signals(a: ObsFeatures, b: ObsFeatures, gap: float) -> dict[str, floa
         signals["zero_file_overlap"] = ZERO_FILE_OVERLAP_SCORE
 
     if b.tool_family == USER_PROMPT_FAMILY:
-        signals["user_prompt"] = USER_PROMPT_SCORE
+        signals["user_prompt"] = user_prompt_score
 
     return signals
 
 
-def score_boundaries(features: list[ObsFeatures]) -> list[BoundaryScore]:
+def score_boundaries(
+    features: list[ObsFeatures],
+    user_prompt_score: float = USER_PROMPT_SCORE,
+) -> list[BoundaryScore]:
     """Score every consecutive pair.
 
     Time gap and other non-family signals are computed on the actual pair.
@@ -318,7 +326,7 @@ def score_boundaries(features: list[ObsFeatures]) -> list[BoundaryScore]:
         a, b = features[i], features[i + 1]
         gap = max(0.0, (b.timestamp - a.timestamp).total_seconds())
 
-        signals = _score_signals(a, b, gap)
+        signals = _score_signals(a, b, gap, user_prompt_score=user_prompt_score)
 
         a_eff = a if not a.is_meta else (_nearest_non_meta(features, i, -1) or a)
         b_eff = b if not b.is_meta else (_nearest_non_meta(features, i + 1, +1) or b)
@@ -792,6 +800,7 @@ def detect_threads(
     user_families: dict[str, str] | None = None,
     extra_entity_patterns: list[re.Pattern[str]] | None = None,
     boundary_threshold: float = BOUNDARY_THRESHOLD,
+    user_prompt_score: float = USER_PROMPT_SCORE,
     min_segment_size: int = MIN_SEGMENT_SIZE,
     fs_check: Callable[[Path, str], bool] | None = None,
 ) -> tuple[list[list[int]], list[BoundaryScore]]:
@@ -808,7 +817,7 @@ def detect_threads(
         extract_features(i, obs, user_families, extra_entity_patterns, fs_check)
         for i, obs in enumerate(observations)
     ]
-    scores = score_boundaries(features)
+    scores = score_boundaries(features, user_prompt_score=user_prompt_score)
     raw_segments = split_at_boundaries(
         len(observations), scores, threshold=boundary_threshold
     )

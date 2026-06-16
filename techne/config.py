@@ -75,6 +75,16 @@ class SourcesConfig:
 
 
 @dataclass
+class HeuristicConfig:
+    # Score threshold for calling a pair-boundary a real thread boundary.
+    # Default matches BOUNDARY_THRESHOLD in heuristic_threads.py.
+    boundary_threshold: float = 0.7
+    # Additive score applied when the next observation is a UserPrompt.
+    # Default matches USER_PROMPT_SCORE in heuristic_threads.py.
+    user_prompt_score: float = 0.3
+
+
+@dataclass
 class ReflectConfig:
     # End-of-session reflection: an LLM scans each detected thread and proposes
     # durable knowledge / identity entries worth keeping. Off by default; opt
@@ -101,6 +111,7 @@ class Config:
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     threads: ThreadConfig = field(default_factory=ThreadConfig)
     hooks: HookConfig = field(default_factory=HookConfig)
+    heuristic: HeuristicConfig = field(default_factory=HeuristicConfig)
     reflect: ReflectConfig = field(default_factory=ReflectConfig)
     platform: Platform = "claude-code"
     model: str = "claude-haiku-4-5-20251001"
@@ -210,6 +221,13 @@ class Config:
                 capture_read=h.get("capture_read", False),
             )
 
+        if "heuristic" in raw and isinstance(raw["heuristic"], dict):
+            h = raw["heuristic"]
+            cfg.heuristic = HeuristicConfig(
+                boundary_threshold=float(h.get("boundary_threshold", 0.7)),
+                user_prompt_score=float(h.get("user_prompt_score", 0.3)),
+            )
+
         if "reflect" in raw and isinstance(raw["reflect"], dict):
             r = raw["reflect"]
             write_to = r.get("write_to", "candidates")
@@ -260,6 +278,10 @@ class Config:
                 "post_tool_use": self.hooks.post_tool_use,
                 "capture_bash": self.hooks.capture_bash,
                 "capture_read": self.hooks.capture_read,
+            },
+            "heuristic": {
+                "boundary_threshold": self.heuristic.boundary_threshold,
+                "user_prompt_score": self.heuristic.user_prompt_score,
             },
             "reflect": {
                 "enabled": self.reflect.enabled,
