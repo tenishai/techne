@@ -3,6 +3,7 @@
 import sqlite3
 
 import pytest
+from click.testing import CliRunner
 
 from techne.core.database import _migrate, _reconcile_columns
 
@@ -391,3 +392,39 @@ class TestSummaryLlmSourceColumn:
         ).fetchone()
         conn.close()
         assert row["summary_llm_source"] is None
+
+
+# ---------------------------------------------------------------------------
+# migrate-summaries CLI: no-op detection (issue #4)
+# ---------------------------------------------------------------------------
+
+
+class TestMigrateSummariesNoop:
+    """When schema >= v4 and no heuristic-shaped rows remain, the command
+    prints 'nothing to do (already migrated)' and exits 0 without touching data."""
+
+    def test_noop_when_already_migrated(self, tmp_path, monkeypatch):
+        """Fresh v4+ db with no heuristic-shaped legacy summary → early exit."""
+        from techne.cli import main
+        from techne.core.database import init_db
+        from techne.core.state import end_session, start_session
+
+        # Point Config.load() at tmp_path so the CLI reads the right db.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+        # Init the db at the default location under the tmp HOME.
+        data_dir = tmp_path / ".techne"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db = data_dir / "techne.db"
+        init_db(db)
+
+        sid = start_session(db, project_path="/proj")
+        # Store a plain manual summary — NOT heuristic-shaped.
+        end_session(db, sid, summary="manually written notes", source="manual")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["migrate-summaries"])
+
+        assert result.exit_code == 0, result.output
+        assert "nothing to do (already migrated)" in result.output

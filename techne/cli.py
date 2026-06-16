@@ -700,9 +700,27 @@ def migrate_summaries_cmd(ctx, dry_run: bool):
     breakdowns. Conservative — only matches the auto-generator's structural
     fingerprint; leaves anything ambiguous alone.
     """
-    from techne.core.state import migrate_legacy_summaries
+    from techne.core.database import connect
+    from techne.core.state import looks_heuristic, migrate_legacy_summaries
 
     config = ctx.obj["config"]
+
+    # Detect already-migrated state: schema >= v4 (typed columns exist) AND
+    # no heuristic-shaped content remains pinned in the legacy `summary` slot.
+    db_conn = connect(config.db_path)
+    try:
+        version_row = db_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        schema_version = version_row[0] if version_row and version_row[0] is not None else 0
+        if schema_version >= 4:
+            legacy_rows = db_conn.execute(
+                "SELECT summary FROM sessions WHERE summary IS NOT NULL AND summary != ''"
+            ).fetchall()
+            if not any(looks_heuristic(r["summary"]) for r in legacy_rows):
+                click.echo("nothing to do (already migrated)")
+                return
+    finally:
+        db_conn.close()
+
     result = migrate_legacy_summaries(config.db_path, dry_run=dry_run)
     moved_verb = "would move" if dry_run else "moved"
     cleared_verb = "would clear" if dry_run else "cleared"
