@@ -1,6 +1,5 @@
 """Tests for sink-boundary credential redaction (issue #17)."""
 
-
 import pytest
 
 from techne.core.database import init_db
@@ -43,6 +42,57 @@ def test_redact_github_pat():
 def test_redact_github_pat_short_no_match():
     text = "ghp_short"
     assert redact_credentials(text) == text
+
+
+def test_redact_github_apps_token():
+    text = "installation token ghs_abcdefghijklmnopqrstuvwxyz1234"
+    result = redact_credentials(text)
+    assert "ghs_" not in result
+    assert "<redacted:github-apps>" in result
+
+
+def test_redact_github_apps_token_short_no_match():
+    text = "ghs_short"
+    assert redact_credentials(text) == text
+
+
+def test_redact_github_fine_grained_pat():
+    text = "token github_pat_abcdefghijklmnopqrstuvwxyz_1234"
+    result = redact_credentials(text)
+    assert "github_pat_" not in result
+    assert "<redacted:github-fine-grained>" in result
+
+
+def test_redact_github_fine_grained_pat_short_no_match():
+    text = "github_pat_short"
+    assert redact_credentials(text) == text
+
+
+def test_redact_stripe_live_key():
+    text = "key: sk-live-abcdefghijklmnopqrstuvwxyz1234"
+    result = redact_credentials(text)
+    assert "sk-live-" not in result
+    assert "<redacted:stripe>" in result
+
+
+def test_redact_stripe_test_key():
+    text = "key: sk-test-abcdefghijklmnopqrstuvwxyz1234"
+    result = redact_credentials(text)
+    assert "sk-test-" not in result
+    assert "<redacted:stripe>" in result
+
+
+def test_redact_stripe_short_no_match():
+    text = "sk-live-tooshort"
+    assert redact_credentials(text) == text
+
+
+def test_stripe_does_not_capture_anthropic_key():
+    # sk-ant- must be caught by the sk-ant pattern, not the Stripe sk-live/test pattern
+    text = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890"
+    result = redact_credentials(text)
+    assert "<redacted:sk-ant>" in result
+    assert "<redacted:stripe>" not in result
 
 
 def test_redact_slack_bot_token():

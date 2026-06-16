@@ -1,8 +1,12 @@
 """Sink-boundary credential redaction.
 
-Pattern-match pass over free-text content before SQLite writes so credentials
-never persist to disk. Each pattern maps to a tagged replacement token so
-downstream consumers know what was stripped.
+Best-effort credential filter applied at SQLite write boundaries. Patterns
+cover well-formed credential tokens in free-text content (LLM/tool output).
+Short structured fields (source, tags, target) are outside the threat model —
+caller-supplied and low-risk by convention. This is NOT a confidentiality
+guarantee; new free-text columns MUST call redact_credentials before
+INSERT/UPDATE. Pattern ordering matters: more-specific prefixes first so
+substrings don't capture broader matches.
 """
 
 import re
@@ -14,8 +18,14 @@ _PATTERNS: list[tuple[str, str]] = [
     # OpenAI-style keys (sk-proj-... and plain sk-...)
     (r"sk-proj-[A-Za-z0-9_-]{20,}", "sk"),
     (r"sk-[A-Za-z0-9]{20,}", "sk"),
-    # GitHub personal access tokens
+    # GitHub personal access tokens (classic)
     (r"ghp_[A-Za-z0-9]{20,}", "github"),
+    # GitHub Apps installation tokens
+    (r"ghs_[A-Za-z0-9]{20,}", "github-apps"),
+    # GitHub fine-grained PATs
+    (r"github_pat_[A-Za-z0-9_]{20,}", "github-fine-grained"),
+    # Stripe secret keys (live and test); must come before plain sk- to avoid conflict
+    (r"sk-(?:live|test)-[A-Za-z0-9]{20,}", "stripe"),
     # Slack bot tokens
     (r"xoxb-[A-Za-z0-9-]+", "slack"),
     # Slack user/app tokens (bonus)
