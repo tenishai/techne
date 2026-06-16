@@ -428,6 +428,47 @@ class TestV3ToCurrentRoundTrip:
         finally:
             conn.close()
 
+    def test_reconciler_creates_fts_triggers(self, v3_db: Path):
+        """All FTS sync triggers are created on v3→current by the reconciler."""
+        expected_triggers = {
+            "threads_ai",
+            "threads_ad",
+            "threads_au",
+            "observations_ai",
+            "observations_ad",
+            "observations_au",
+            "knowledge_ai",
+            "knowledge_ad",
+            "knowledge_au",
+        }
+        conn = connect(v3_db)
+        try:
+            live_triggers = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+            }
+            for name in expected_triggers:
+                assert name in live_triggers, f"trigger {name!r} missing after v3→current migration"
+        finally:
+            conn.close()
+
+    def test_fts_triggers_populate_search_after_upgrade(self, v3_db: Path):
+        """After v3→current upgrade, inserting an observation populates FTS."""
+        conn = connect(v3_db)
+        try:
+            conn.execute("INSERT INTO sessions (id, platform) VALUES ('sess-fts-test', 'test')")
+            conn.execute(
+                "INSERT INTO observations (session_id, timestamp, content, tier) "
+                "VALUES ('sess-fts-test', CURRENT_TIMESTAMP, 'uniqueftsprobetestterm', 'hot')"
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT rowid FROM observations_fts WHERE content MATCH 'uniqueftsprobetestterm'"
+            ).fetchone()
+            assert row is not None, "FTS index not populated after trigger-based insert"
+        finally:
+            conn.close()
+
     def test_connect_is_idempotent(self, v3_db: Path):
         """Calling connect() a second time on an already-migrated db is a no-op."""
         conn1 = connect(v3_db)

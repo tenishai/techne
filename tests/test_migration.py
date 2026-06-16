@@ -5,7 +5,12 @@ import sqlite3
 import pytest
 from click.testing import CliRunner
 
-from techne.core.database import _migrate, _reconcile_columns, _reconcile_tables
+from techne.core.database import (
+    _migrate,
+    _reconcile_columns,
+    _reconcile_tables,
+    _reconcile_triggers,
+)
 
 V1_OUTBOX_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -82,7 +87,7 @@ class TestV1ToV2Migration:
         assert row["error_message"] is None
 
     def test_dead_row_status_and_error(self, v1_conn):
-        """Row with 'DEAD:...' synced_at gets status='dead', error_message set, synced_at cleared."""
+        """Row with 'DEAD:...' synced_at gets status='dead' and error_message set."""
         _migrate(v1_conn, 1, 2)
         row = v1_conn.execute(
             "SELECT status, error_message, synced_at FROM outbox WHERE content_hash = 'hash_dead'"
@@ -713,5 +718,171 @@ class TestReconcileTables:
             # agent_identity added by _reconcile_columns
             cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
             assert "agent_identity" in cols
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_triggers() — creates missing FTS triggers on existing DBs (#45)
+# ---------------------------------------------------------------------------
+
+# A schema with FTS virtual tables present but NO triggers — simulates an
+# existing DB that was upgraded by the #43 reconciler (tables yes, triggers no).
+SCHEMA_FTS_NO_TRIGGERS = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,
+    project_path TEXT,
+    agent_identity TEXT,
+    platform TEXT DEFAULT 'claude-code',
+    summary TEXT,
+    summary_llm TEXT,
+    summary_heuristic TEXT,
+    summary_llm_source TEXT
+);
+
+CREATE TABLE IF NOT EXISTS threads (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    thread_num INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    resume_points TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    parent_thread_id TEXT REFERENCES threads(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    thread_id TEXT REFERENCES threads(id),
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    event_at TIMESTAMP,
+    tool_name TEXT,
+    content TEXT NOT NULL,
+    tier TEXT NOT NULL DEFAULT 'hot',
+    tags TEXT,
+    kind TEXT
+);
+
+CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT,
+    tags TEXT,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    confidence_numeric REAL NOT NULL DEFAULT 0.6,
+    last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_by INTEGER REFERENCES knowledge(id),
+    event_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
+    label, summary, resume_points, content=threads, content_rowid=rowid
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+    content, content=observations, content_rowid=id
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+    content, tags, content=knowledge, content_rowid=id
+);
+"""
+
+
+class TestReconcileTriggers:
+    """_reconcile_triggers() creates FTS triggers present in FTS_TRIGGERS_SQL
+    but absent from the live database."""
+
+    @pytest.fixture
+    def conn_no_triggers(self, tmp_path):
+        """DB with FTS table present but triggers absent."""
+        db = tmp_path / "no_triggers.db"
+        c = sqlite3.connect(str(db))
+        c.row_factory = sqlite3.Row
+        c.executescript(SCHEMA_FTS_NO_TRIGGERS)
+        c.execute("INSERT INTO schema_version (version) VALUES (7)")
+        c.commit()
+        return c
+
+    def test_missing_triggers_created(self, conn_no_triggers):
+        """observations_ai/au/ad absent before reconcile → present after."""
+        triggers_before = {
+            r[0]
+            for r in conn_no_triggers.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        }
+        assert "observations_ai" not in triggers_before
+
+        _reconcile_triggers(conn_no_triggers)
+
+        triggers_after = {
+            r[0]
+            for r in conn_no_triggers.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        }
+        for name in ("observations_ai", "observations_ad", "observations_au"):
+            assert name in triggers_after, f"trigger {name!r} not created by reconciler"
+
+    def test_fts_populated_after_reconcile(self, conn_no_triggers):
+        """INSERT into observations after reconcile populates observations_fts."""
+        _reconcile_triggers(conn_no_triggers)
+
+        conn_no_triggers.execute("INSERT INTO sessions (id, platform) VALUES ('s-trig', 'test')")
+        conn_no_triggers.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier) "
+            "VALUES ('s-trig', CURRENT_TIMESTAMP, 'triggerreconcileprobe', 'hot')"
+        )
+        conn_no_triggers.commit()
+
+        row = conn_no_triggers.execute(
+            "SELECT rowid FROM observations_fts WHERE content MATCH 'triggerreconcileprobe'"
+        ).fetchone()
+        assert row is not None, "FTS not populated after _reconcile_triggers()"
+
+    def test_idempotent(self, conn_no_triggers):
+        """Running _reconcile_triggers() twice raises no error — second pass is a no-op."""
+        _reconcile_triggers(conn_no_triggers)
+        triggers_after_first = {
+            r[0]
+            for r in conn_no_triggers.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        }
+        _reconcile_triggers(conn_no_triggers)
+        triggers_after_second = {
+            r[0]
+            for r in conn_no_triggers.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        }
+        assert triggers_after_first == triggers_after_second
+
+    def test_connect_creates_triggers_on_upgrade(self, tmp_path):
+        """connect() on a DB with FTS tables but no triggers installs all triggers."""
+        from techne.core.database import connect
+
+        # Build a raw DB: schema_version at v7, FTS table present, no triggers.
+        db = tmp_path / "upgrade_no_trig.db"
+        c = sqlite3.connect(str(db))
+        c.executescript(SCHEMA_FTS_NO_TRIGGERS)
+        c.execute("INSERT INTO schema_version (version) VALUES (7)")
+        c.commit()
+        c.close()
+
+        conn = connect(db)
+        try:
+            live_triggers = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+            }
+            assert "observations_ai" in live_triggers
+            assert "observations_ad" in live_triggers
+            assert "observations_au" in live_triggers
         finally:
             conn.close()

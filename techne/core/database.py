@@ -242,6 +242,38 @@ END;
 """
 
 
+def _trigger_statements() -> list[tuple[str, str]]:
+    """Parse FTS_TRIGGERS_SQL and return (trigger_name, create_sql) pairs.
+
+    Each statement spans from ``CREATE TRIGGER IF NOT EXISTS <name>`` through
+    its closing ``END;``.  Multi-line bodies are handled by scanning for the
+    ``END;`` terminator rather than relying on single-line detection.
+    """
+    # Each trigger block: CREATE TRIGGER ... END;
+    pattern = re.compile(
+        r"(CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+(\w+).+?END\s*;)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    return [(m.group(2), m.group(1).strip()) for m in pattern.finditer(FTS_TRIGGERS_SQL)]
+
+
+def _reconcile_triggers(conn: sqlite3.Connection) -> None:
+    """Create any triggers present in FTS_TRIGGERS_SQL but absent from the live DB.
+
+    Uses ``CREATE TRIGGER IF NOT EXISTS`` so double-execution is harmless, but
+    we still diff against sqlite_master first to avoid unnecessary work and to
+    emit accurate log lines.
+    """
+    existing = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+    }
+    for name, create_sql in _trigger_statements():
+        if name not in existing:
+            conn.executescript(create_sql)
+            conn.commit()
+            print(f"[techne] reconcile: CREATE TRIGGER {name}", file=sys.stderr)
+
+
 def _schema_table_statements() -> list[tuple[str, str]]:
     """Parse SCHEMA_SQL and return (table_name, create_sql) pairs.
 
@@ -405,6 +437,7 @@ def _ensure_initialized(conn: sqlite3.Connection) -> None:
         if existing_version < SCHEMA_VERSION:
             _migrate(conn, existing_version, SCHEMA_VERSION)
         _reconcile_tables(conn)
+        _reconcile_triggers(conn)
         _reconcile_columns(conn)
 
 
