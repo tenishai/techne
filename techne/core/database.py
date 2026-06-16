@@ -242,6 +242,81 @@ END;
 """
 
 
+def _schema_table_statements() -> list[tuple[str, str]]:
+    """Parse SCHEMA_SQL and return (table_name, create_sql) pairs.
+
+    Each pair includes the CREATE [VIRTUAL] TABLE statement plus any
+    immediately-following CREATE INDEX / CREATE UNIQUE INDEX lines that
+    belong to that table (i.e., appear before the next CREATE TABLE).
+
+    Virtual tables (FTS5) are included — they match ``CREATE VIRTUAL TABLE``.
+
+    Note: associated triggers (FTS_TRIGGERS_SQL) are NOT included here; they
+    live in FTS_TRIGGERS_SQL and are only created on fresh databases.
+    Index reconciliation (ensuring indexes exist on upgraded DBs) is out of
+    scope for this PR — see follow-up issue.
+    """
+    # Split SCHEMA_SQL into logical chunks separated by blank lines or new
+    # CREATE TABLE / CREATE VIRTUAL TABLE boundaries.  We walk line-by-line,
+    # collecting lines that belong to the current table block.
+    table_re = re.compile(
+        r"CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.IGNORECASE
+    )
+    index_re = re.compile(r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+", re.IGNORECASE)
+
+    results: list[tuple[str, str]] = []
+    current_name: str | None = None
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        if current_name and current_lines:
+            results.append((current_name, "\n".join(current_lines).strip()))
+
+    for line in SCHEMA_SQL.splitlines():
+        m = table_re.match(line.strip())
+        if m:
+            flush()
+            current_name = m.group(1)
+            current_lines = [line]
+        elif current_name is not None:
+            # Append index lines that follow the current table block.
+            if index_re.match(line.strip()) or current_lines:
+                # Stop accumulating for this table when we hit a comment that
+                # starts a new section (lone '--' separator) only if we already
+                # have a complete statement (closing semicolon seen).
+                stmt_so_far = "\n".join(current_lines)
+                if line.strip().startswith("--") and ";" in stmt_so_far:
+                    # A comment after the table is done — belongs to next section.
+                    flush()
+                    current_name = None
+                    current_lines = []
+                else:
+                    current_lines.append(line)
+
+    flush()
+    return results
+
+
+def _reconcile_tables(conn: sqlite3.Connection) -> None:
+    """Create any tables present in SCHEMA_SQL but absent from the live DB.
+
+    Runs BEFORE _reconcile_columns() so newly-created tables don't then need
+    a separate column-reconciliation pass for columns they already define.
+
+    Virtual tables (FTS5) are handled alongside regular tables.
+    Index reconciliation is out of scope for this PR.
+    """
+    existing = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'shadow')")
+    }
+    for name, create_sql in _schema_table_statements():
+        if name not in existing:
+            conn.executescript(create_sql)
+            conn.commit()
+            print(f"[techne] reconcile: CREATE TABLE {name}", file=sys.stderr)
+
+
 def _schema_columns(table: str) -> set[str]:
     """Parse column names for `table` out of SCHEMA_SQL using regex."""
     # Match the CREATE TABLE block for this table name.
@@ -329,6 +404,7 @@ def _ensure_initialized(conn: sqlite3.Connection) -> None:
         existing_version = row[0] if row else 0
         if existing_version < SCHEMA_VERSION:
             _migrate(conn, existing_version, SCHEMA_VERSION)
+        _reconcile_tables(conn)
         _reconcile_columns(conn)
 
 
