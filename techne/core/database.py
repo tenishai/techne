@@ -1,6 +1,8 @@
 """SQLite database schema and connection management for techne."""
 
+import re
 import sqlite3
+import sys
 from pathlib import Path
 
 SCHEMA_VERSION = 6
@@ -221,6 +223,54 @@ END;
 """
 
 
+def _schema_columns(table: str) -> set[str]:
+    """Parse column names for `table` out of SCHEMA_SQL using regex."""
+    # Match the CREATE TABLE block for this table name.
+    pattern = rf"CREATE TABLE IF NOT EXISTS {re.escape(table)}\s*\((.+?)\n\);"
+    m = re.search(pattern, SCHEMA_SQL, re.DOTALL)
+    if not m:
+        return set()
+    block = m.group(1)
+    cols = set()
+    for line in block.splitlines():
+        line = line.strip().rstrip(",")
+        if not line or line.upper().startswith(
+            ("PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "REFERENCES", "--")
+        ):
+            continue
+        col_name = line.split()[0]
+        cols.add(col_name)
+    return cols
+
+
+def _reconcile_columns(conn: sqlite3.Connection) -> None:
+    """Add any columns present in SCHEMA_SQL but absent from the live table."""
+    # Only reconcile regular (non-virtual) tables that appear in SCHEMA_SQL.
+    table_pattern = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\(", re.IGNORECASE)
+    for m in table_pattern.finditer(SCHEMA_SQL):
+        table = m.group(1)
+        live_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not live_cols:
+            continue  # table doesn't exist yet; CREATE TABLE IF NOT EXISTS will handle it
+        for col in _schema_columns(table) - live_cols:
+            block_m = re.search(
+                rf"CREATE TABLE IF NOT EXISTS {re.escape(table)}\s*\((.+?)\n\);",
+                SCHEMA_SQL,
+                re.DOTALL,
+            )
+            col_def = col  # fallback: bare name (SQLite infers NULL affinity)
+            if block_m:
+                for line in block_m.group(1).splitlines():
+                    stripped = line.strip().rstrip(",")
+                    parts = stripped.split()
+                    if parts and parts[0] == col:
+                        col_def = stripped
+                        break
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+            conn.commit()
+            print(f"[techne] reconcile: ALTER TABLE {table} ADD COLUMN {col_def}", file=sys.stderr)
+
+
 def like_escape(s: str) -> str:
     """Escape `%`, `_`, and `\\` so user input matches literally in a LIKE
     pattern. Pair with `ESCAPE '\\'` on the LIKE clause. Without this, a tag
@@ -260,6 +310,7 @@ def _ensure_initialized(conn: sqlite3.Connection) -> None:
         existing_version = row[0] if row else 0
         if existing_version < SCHEMA_VERSION:
             _migrate(conn, existing_version, SCHEMA_VERSION)
+        _reconcile_columns(conn)
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:

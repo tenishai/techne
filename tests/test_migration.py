@@ -4,8 +4,7 @@ import sqlite3
 
 import pytest
 
-from techne.core.database import _migrate
-
+from techne.core.database import _migrate, _reconcile_columns
 
 V1_OUTBOX_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -94,9 +93,7 @@ class TestV1ToV2Migration:
     def test_schema_version_bumped(self, v1_conn):
         """After migration, schema_version contains a row with version=2."""
         _migrate(v1_conn, 1, 2)
-        max_version = v1_conn.execute(
-            "SELECT MAX(version) FROM schema_version"
-        ).fetchone()[0]
+        max_version = v1_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert max_version == 2
 
     def test_dedup_index_recreated(self, v1_conn):
@@ -150,9 +147,7 @@ class TestV2ToV3Migration:
     def test_schema_version_bumped_to_3(self, v1_conn):
         _migrate(v1_conn, 1, 2)
         _migrate(v1_conn, 2, 3)
-        max_version = v1_conn.execute(
-            "SELECT MAX(version) FROM schema_version"
-        ).fetchone()[0]
+        max_version = v1_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert max_version == 3
 
 
@@ -213,8 +208,7 @@ class TestV3ToV4Migration:
         `techne migrate-summaries` reclassifies it."""
         _migrate(v3_conn, 3, 4)
         row = v3_conn.execute(
-            "SELECT summary, summary_llm, summary_heuristic "
-            "FROM sessions WHERE id = 'session-v3-A'"
+            "SELECT summary, summary_llm, summary_heuristic FROM sessions WHERE id = 'session-v3-A'"
         ).fetchone()
         assert row["summary"].startswith("**Thread 1")
         assert row["summary_llm"] is None
@@ -222,9 +216,7 @@ class TestV3ToV4Migration:
 
     def test_schema_version_bumped_to_4(self, v3_conn):
         _migrate(v3_conn, 3, 4)
-        max_version = v3_conn.execute(
-            "SELECT MAX(version) FROM schema_version"
-        ).fetchone()[0]
+        max_version = v3_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert max_version == 4
 
     def test_migration_is_idempotent_on_replay(self, v3_conn):
@@ -237,3 +229,68 @@ class TestV3ToV4Migration:
         cols = {row[1] for row in v3_conn.execute("PRAGMA table_info(sessions)")}
         assert "summary_llm" in cols
         assert "summary_heuristic" in cols
+
+
+# ---------------------------------------------------------------------------
+# Schema reconciliation: auto-ADD missing columns on re-open (#15)
+# ---------------------------------------------------------------------------
+
+# Minimal sessions schema missing the agent_identity column that SCHEMA_SQL has.
+SESSIONS_PRE_AGENT_IDENTITY = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,
+    project_path TEXT,
+    platform TEXT DEFAULT 'claude-code',
+    summary TEXT,
+    summary_llm TEXT,
+    summary_heuristic TEXT
+);
+"""
+
+
+class TestSchemaReconciliation:
+    """_reconcile_columns() adds columns present in SCHEMA_SQL but absent live."""
+
+    @pytest.fixture
+    def old_conn(self, tmp_path):
+        db = tmp_path / "reconcile_test.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SESSIONS_PRE_AGENT_IDENTITY)
+        conn.execute("INSERT INTO schema_version (version) VALUES (6)")
+        conn.execute(
+            "INSERT INTO sessions (id, started_at) VALUES (?, CURRENT_TIMESTAMP)",
+            ("sess-001",),
+        )
+        conn.commit()
+        return conn
+
+    def test_missing_column_added(self, old_conn):
+        """agent_identity is in SCHEMA_SQL but not the live table — reconciler adds it."""
+        cols_before = {row[1] for row in old_conn.execute("PRAGMA table_info(sessions)")}
+        assert "agent_identity" not in cols_before
+
+        _reconcile_columns(old_conn)
+
+        cols_after = {row[1] for row in old_conn.execute("PRAGMA table_info(sessions)")}
+        assert "agent_identity" in cols_after
+
+    def test_existing_row_gets_null(self, old_conn):
+        """The pre-existing session row has NULL for the new column."""
+        _reconcile_columns(old_conn)
+        row = old_conn.execute(
+            "SELECT agent_identity FROM sessions WHERE id = 'sess-001'"
+        ).fetchone()
+        assert row["agent_identity"] is None
+
+    def test_idempotent(self, old_conn):
+        """Running reconcile twice raises no error."""
+        _reconcile_columns(old_conn)
+        _reconcile_columns(old_conn)  # should be a no-op; column already present
