@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from techne import __version__
-from techne.config import Config, DEFAULT_CONFIG
+from techne.config import DEFAULT_CONFIG, Config
 
 
 @click.group()
@@ -69,6 +69,7 @@ def threads(ctx, active, topic, limit):
     try:
         if topic:
             from techne.core.search import search_fts
+
             results = search_fts(config.db_path, topic, table="threads", limit=limit)
             for r in results:
                 status_tag = f" [{r['status']}]" if r["status"] != "active" else ""
@@ -81,7 +82,9 @@ def threads(ctx, active, topic, limit):
             query = "SELECT id, label, summary, resume_points, status, updated_at FROM threads"
             params: list = []
             if active:
-                query += " WHERE status = 'active' AND resume_points IS NOT NULL AND resume_points != ''"
+                query += (
+                    " WHERE status = 'active' AND resume_points IS NOT NULL AND resume_points != ''"
+                )
             query += " ORDER BY updated_at DESC LIMIT ?"
             params.append(limit)
 
@@ -131,8 +134,7 @@ def threads_redetect(ctx, session_id, sync):
     conn = connect(config.db_path)
     try:
         row = conn.execute(
-            "SELECT id FROM sessions WHERE id LIKE ? || '%' "
-            "ORDER BY started_at DESC LIMIT 1",
+            "SELECT id FROM sessions WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
             (session_id,),
         ).fetchone()
     finally:
@@ -239,12 +241,14 @@ def threads_show(ctx, session_id, no_color, detector):
             source_label = "stored"
             segments = _segments_from_boundary_rows(len(observations), stored)
 
-        click.echo(maybe_style(
-            f"Boundary scores ({source_label}): {len(score_rows)} pairs, "
-            f"{sum(1 for r in score_rows if r['is_boundary'])} boundaries, "
-            f"{len(segments)} threads",
-            fg="green",
-        ))
+        click.echo(
+            maybe_style(
+                f"Boundary scores ({source_label}): {len(score_rows)} pairs, "
+                f"{sum(1 for r in score_rows if r['is_boundary'])} boundaries, "
+                f"{len(segments)} threads",
+                fg="green",
+            )
+        )
         click.echo()
 
         threads_by_num = {
@@ -280,9 +284,7 @@ def threads_show(ctx, session_id, no_color, detector):
                 s = scores_by_a.get(i)
                 if s and s["total_score"] > 0:
                     marker = "║" if s["is_boundary"] else "·"
-                    sig_str = " ".join(
-                        f"{k}={v:.1f}" for k, v in sorted(s["signals"].items())
-                    )
+                    sig_str = " ".join(f"{k}={v:.1f}" for k, v in sorted(s["signals"].items()))
                     line = (
                         f"       {marker} score={s['total_score']:.2f}  "
                         f"gap={s['gap_seconds']:.0f}s  [{sig_str}]"
@@ -311,7 +313,9 @@ def _segments_from_boundary_rows(n_obs: int, rows: list[dict]) -> list[list[int]
 
 @main.command()
 @click.argument("query")
-@click.option("--table", type=click.Choice(["all", "threads", "observations", "knowledge"]), default="all")
+@click.option(
+    "--table", type=click.Choice(["all", "threads", "observations", "knowledge"]), default="all"
+)
 @click.option("--limit", default=20)
 @click.pass_context
 def search(ctx, query, table, limit):
@@ -397,7 +401,9 @@ def knowledge(ctx):
 
 
 @knowledge.command("list")
-@click.option("--type", "ktype", type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"]))
+@click.option(
+    "--type", "ktype", type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"])
+)
 @click.option("--tags", default="")
 @click.option("--limit", default=50)
 @click.pass_context
@@ -416,7 +422,12 @@ def knowledge_list(ctx, ktype, tags, limit):
 
 @knowledge.command("add")
 @click.argument("content")
-@click.option("--type", "ktype", type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"]), default="fact")
+@click.option(
+    "--type",
+    "ktype",
+    type=click.Choice(["fact", "decision", "pattern", "evaluation", "procedure"]),
+    default="fact",
+)
 @click.option("--tags", default="")
 @click.option("--confidence", type=click.Choice(["high", "medium", "low"]), default="medium")
 @click.pass_context
@@ -425,7 +436,9 @@ def knowledge_add(ctx, content, ktype, tags, confidence):
     config = ctx.obj["config"]
     from techne.core.knowledge import store
 
-    entry_id = store(config.db_path, content, type=ktype, tags=tags, confidence=confidence, source="manual")
+    entry_id = store(
+        config.db_path, content, type=ktype, tags=tags, confidence=confidence, source="manual"
+    )
     click.echo(f"Stored knowledge entry #{entry_id}")
 
 
@@ -465,7 +478,9 @@ def outbox_status(ctx):
     from techne.sync.outbox import stats
 
     s = stats(config.db_path)
-    click.echo(f"Total: {s['total']}  Pending: {s['pending']}  Synced: {s['synced']}  Dead: {s['dead']}")
+    click.echo(
+        f"Total: {s['total']}  Pending: {s['pending']}  Synced: {s['synced']}  Dead: {s['dead']}"
+    )
 
 
 @outbox.command("flush")
@@ -494,6 +509,95 @@ def outbox_dead(ctx):
         return
     for e in entries:
         click.echo(f"  [{e['id']}] {e['target']}  {e['error_message']}  {e['created_at']}")
+
+
+@outbox.command("flush-sinks")
+@click.pass_context
+def outbox_flush_sinks(ctx):
+    """Flush pending rows to registered sinks (manual trigger)."""
+    config = ctx.obj["config"]
+    from techne.sync.outbox import flush_sinks
+
+    summary = flush_sinks(config.db_path)
+    if not summary:
+        click.echo("No pending rows.")
+        return
+    for target, (synced, failed) in sorted(summary.items()):
+        click.echo(f"  {target}: {synced} synced, {failed} failed")
+
+
+@outbox.command("prune-orphans")
+@click.pass_context
+def outbox_prune_orphans(ctx):
+    """Mark pending rows for unregistered targets as dead."""
+    config = ctx.obj["config"]
+    from techne.sync.outbox import prune_orphans
+
+    pruned = prune_orphans(config.db_path)
+    click.echo(f"Pruned {pruned} orphan row(s).")
+
+
+@main.group()
+@click.pass_context
+def sinks(ctx):
+    """Inspect registered outbox sinks."""
+    pass
+
+
+@sinks.command("list")
+@click.pass_context
+def sinks_list(ctx):
+    """Show all registered sinks: name, description, schema fields."""
+    import dataclasses
+
+    from techne.sync.sinks import list_sinks
+
+    registered = list_sinks()
+    if not registered:
+        click.echo("No sinks registered.")
+        return
+    for s in registered:
+        fields = (
+            ", ".join(f.name for f in dataclasses.fields(s.payload_schema))
+            if dataclasses.is_dataclass(s.payload_schema)
+            else str(s.payload_schema)
+        )
+        click.echo(f"  {s.name}")
+        if s.description:
+            click.echo(f"    {s.description}")
+        click.echo(f"    schema fields: {fields}")
+
+
+@sinks.command("describe")
+@click.argument("name")
+@click.pass_context
+def sinks_describe(ctx, name):
+    """Show full schema field list with types for a named sink."""
+    import dataclasses
+
+    from techne.sync.sinks import get_sink
+
+    sink = get_sink(name)
+    if sink is None:
+        click.echo(f"No sink registered: {name}", err=True)
+        ctx.exit(1)
+        return
+    click.echo(f"Sink: {sink.name}")
+    if sink.description:
+        click.echo(f"  {sink.description}")
+    click.echo("  Schema fields:")
+    if dataclasses.is_dataclass(sink.payload_schema):
+        for f in dataclasses.fields(sink.payload_schema):
+            type_name = (
+                f.type if isinstance(f.type, str) else getattr(f.type, "__name__", str(f.type))
+            )
+            has_default = (
+                f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING
+            )  # type: ignore[misc]
+            opt = " (optional)" if has_default else " (required)"
+            click.echo(f"    {f.name}: {type_name}{opt}")
+    else:
+        click.echo(f"    {sink.payload_schema}")
 
 
 @main.command()
@@ -544,14 +648,20 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
 
     include_prompts = not no_prompts
     results = (
-        [import_transcript(
-            config.db_path, path,
-            include_user_prompts=include_prompts, force=force,
-        )]
+        [
+            import_transcript(
+                config.db_path,
+                path,
+                include_user_prompts=include_prompts,
+                force=force,
+            )
+        ]
         if path.is_file()
         else import_directory(
-            config.db_path, path,
-            include_user_prompts=include_prompts, force=force,
+            config.db_path,
+            path,
+            include_user_prompts=include_prompts,
+            force=force,
         )
     )
 
@@ -605,8 +715,15 @@ def migrate_summaries_cmd(ctx, dry_run: bool):
 
 
 @main.command("init")
-@click.option("--platform", type=click.Choice(["claude-code", "codex", "standalone"]), default="claude-code")
-@click.option("--identity-dir", type=click.Path(exists=True), default=None, help="Directory with identity markdown files")
+@click.option(
+    "--platform", type=click.Choice(["claude-code", "codex", "standalone"]), default="claude-code"
+)
+@click.option(
+    "--identity-dir",
+    type=click.Path(exists=True),
+    default=None,
+    help="Directory with identity markdown files",
+)
 @click.pass_context
 def init(ctx, platform, identity_dir):
     """Initialize techne — create database, register hooks, set up MCP."""
@@ -626,12 +743,14 @@ def init(ctx, platform, identity_dir):
     # Import identity if directory provided
     if config.identity_dir:
         from techne.core.identity import sync_from_markdown
+
         sync_from_markdown(config.db_path, config.identity_dir)
         click.echo(f"Identity imported from: {config.identity_dir}")
 
     # Platform-specific setup
     if platform == "claude-code":
         from techne.platforms.claude_code import register_hooks, register_mcp
+
         register_hooks(config)
         register_mcp(config)
         click.echo("Claude Code hooks registered")
@@ -672,19 +791,29 @@ def init(ctx, platform, identity_dir):
     type=click.Path(exists=True, path_type=Path),
 )
 @click.option(
-    "--include", "include", multiple=True, default=("*",),
+    "--include",
+    "include",
+    multiple=True,
+    default=("*",),
     help="Glob pattern to include. Repeat for multiple. Defaults to '*' (all).",
 )
 @click.option(
-    "--exclude", "exclude", multiple=True, default=(),
+    "--exclude",
+    "exclude",
+    multiple=True,
+    default=(),
     help="Glob pattern to exclude. Repeat. e.g. --exclude '**/.git/**'",
 )
 @click.option(
-    "--debounce-ms", type=int, default=500,
+    "--debounce-ms",
+    type=int,
+    default=500,
     help="Coalesce file-change bursts within this window (per file).",
 )
 @click.option(
-    "--resync-hours", type=int, default=24,
+    "--resync-hours",
+    type=int,
+    default=24,
     help="Run a full dir-walk every N hours to catch missed events.",
 )
 @click.pass_context
@@ -761,13 +890,15 @@ def serve(ctx):
 @main.command("import-patterns")
 @click.argument("markdown_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
-    "--dry-run", is_flag=True,
+    "--dry-run",
+    is_flag=True,
     help="Parse the markdown and print what would be imported; do not write to the corpus.",
 )
 @click.option(
-    "--force", is_flag=True,
+    "--force",
+    is_flag=True,
     help="Import even when a knowledge entry with the same source URL already exists. "
-         "Otherwise duplicates are skipped with a log line.",
+    "Otherwise duplicates are skipped with a log line.",
 )
 @click.pass_context
 def import_patterns(ctx, markdown_file: Path, dry_run: bool, force: bool):
@@ -788,9 +919,7 @@ def import_patterns(ctx, markdown_file: Path, dry_run: bool, force: bool):
     text = markdown_file.read_text(encoding="utf-8")
     parsed = parse(text)
 
-    click.echo(
-        f"Parsed: {len(parsed.patterns)} patterns, {len(parsed.no_lifts)} no-lift entries"
-    )
+    click.echo(f"Parsed: {len(parsed.patterns)} patterns, {len(parsed.no_lifts)} no-lift entries")
 
     result = import_into(config.db_path, parsed, dry_run=dry_run, force=force)
 
@@ -820,6 +949,7 @@ def reflect(ctx):
     # Default behavior: show the same as `reflect stats`
     config = ctx.obj["config"]
     from techne.core.reflect import candidate_stats
+
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init")
         return
@@ -884,6 +1014,7 @@ def reflect_promote(ctx, candidate_id):
     """Promote a pending candidate to the live knowledge or identity store."""
     config = ctx.obj["config"]
     from techne.core.reflect import promote_candidate
+
     try:
         new_id = promote_candidate(config.db_path, candidate_id)
     except ValueError as e:
@@ -902,6 +1033,7 @@ def reflect_discard(ctx, candidate_id):
     """Discard a pending candidate. The row stays for audit; status flips to 'discarded'."""
     config = ctx.obj["config"]
     from techne.core.reflect import discard_candidate
+
     try:
         discard_candidate(config.db_path, candidate_id)
     except ValueError as e:
@@ -916,6 +1048,7 @@ def reflect_stats(ctx):
     """Counts of pending / promoted / discarded candidates."""
     config = ctx.obj["config"]
     from techne.core.reflect import candidate_stats
+
     s = candidate_stats(config.db_path)
     click.echo(json.dumps(s, indent=2))
 
