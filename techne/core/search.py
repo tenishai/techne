@@ -8,6 +8,106 @@ from typing import Literal
 
 from techne.core.database import connect
 
+
+def _cosine_similarity(a, b) -> float:
+    """Cosine similarity between two array-like objects. Returns 0.0 on zero vectors."""
+    import numpy as np
+
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (norm_a * norm_b))
+
+
+def _mmr_reorder(
+    candidates: list[dict],
+    limit: int,
+    mmr_lambda: float,
+    relevance_key: str = "_combined",
+) -> list[dict]:
+    """Greedy MMR second pass over a pre-scored candidate list.
+
+    Each candidate must already have ``relevance_key`` set (higher = better).
+    Embeddings are lazily computed via fastembed (same model as #19 inference)
+    and cached per candidate in ``_emb`` so no row is embedded twice per query.
+
+    When fastembed is not installed the function returns candidates[:limit] in
+    relevance order — identical to the pre-MMR behaviour (graceful degradation).
+
+    Args:
+        candidates: Pre-sorted (desc relevance) candidate dicts.
+        limit:      Number of items to return.
+        mmr_lambda: Diversity weight λ ∈ [0, 1].
+                    0 → pure relevance (no reordering).
+                    1 → pure diversity.
+        relevance_key: Dict key holding each candidate's relevance score.
+    """
+    if not candidates or limit <= 0:
+        return candidates[:limit]
+
+    # λ=0 → pure relevance; skip embedding pass entirely.
+    if mmr_lambda == 0.0:
+        return candidates[:limit]
+
+    try:
+        import numpy as np
+    except ImportError:
+        return candidates[:limit]
+
+    try:
+        model = _get_embedding_model()
+    except Exception:
+        # fastembed not installed or model unavailable — no-op.
+        return candidates[:limit]
+
+    # Embed all candidates that don't already have a cached embedding.
+    needs_embed = [c for c in candidates if "_emb" not in c]
+    if needs_embed:
+        texts = [c.get("content") or c.get("summary") or c.get("label") or "" for c in needs_embed]
+        try:
+            embeddings = list(model.embed(texts))
+            for c, emb in zip(needs_embed, embeddings):
+                c["_emb"] = np.array(emb, dtype="float32")
+        except Exception:
+            # Embedding failed mid-query — degrade to relevance order.
+            for c in candidates:
+                c.pop("_emb", None)
+            return candidates[:limit]
+
+    selected: list[dict] = []
+    remaining = list(candidates)
+
+    while remaining and len(selected) < limit:
+        if not selected:
+            # First pick: highest relevance (list is already sorted desc).
+            best = remaining[0]
+        else:
+            # MMR score = (1-λ)*relevance - λ*max_similarity_to_selected
+            selected_embs = [s["_emb"] for s in selected if "_emb" in s]
+            best = None
+            best_score = float("-inf")
+            for c in remaining:
+                rel = c.get(relevance_key, 0.0)
+                if selected_embs and "_emb" in c:
+                    max_sim = max(_cosine_similarity(c["_emb"], s) for s in selected_embs)
+                else:
+                    max_sim = 0.0
+                score = (1.0 - mmr_lambda) * rel - mmr_lambda * max_sim
+                if score > best_score:
+                    best_score = score
+                    best = c
+
+        selected.append(best)
+        remaining.remove(best)
+
+    # Clean MMR scratch keys.
+    for c in selected + remaining:
+        c.pop("_emb", None)
+
+    return selected
+
+
 SearchTable = Literal["threads", "observations", "knowledge", "all"]
 
 
@@ -32,13 +132,21 @@ def _recency_score(ts_str: str | None, half_life_days: float = 30.0) -> float:
 
 
 def _rerank(
-    candidates: list[dict], limit: int, recency_weight: float, bm25_weight: float
+    candidates: list[dict],
+    limit: int,
+    recency_weight: float,
+    bm25_weight: float,
+    mmr_lambda: float = 0.0,
 ) -> list[dict]:
-    """Second-pass reranker: recency × BM25 combined score → top limit.
+    """Two-stage reranker: (1) recency × BM25 combined score, then (2) optional MMR.
 
-    BM25 from FTS5 is negative (more negative = better match). Normalise to
-    [0..1] across the candidate set so it can be linearly combined with
-    recency_score.  score = recency_weight * recency + bm25_weight * norm_bm25.
+    Stage 1 — BM25 from FTS5 is negative (more negative = better match).
+    Normalise to [0..1] across the candidate set so it can be linearly combined
+    with recency_score.  score = recency_weight * recency + bm25_weight * norm_bm25.
+
+    Stage 2 — Greedy MMR selection from the stage-1 ordered pool.  When
+    mmr_lambda=0 (default) MMR is skipped and pure relevance ordering is kept.
+    When fastembed is unavailable MMR degrades silently to relevance ordering.
     """
     if not candidates:
         return candidates
@@ -61,13 +169,16 @@ def _rerank(
 
     candidates.sort(key=lambda x: -x["_combined"])
 
+    # Stage 2: MMR diversity pass (no-op when mmr_lambda=0 or fastembed absent).
+    result = _mmr_reorder(candidates, limit, mmr_lambda=mmr_lambda, relevance_key="_combined")
+
     # Clean scratch keys before returning.
-    for r in candidates:
+    for r in result:
         r.pop("_norm_bm25", None)
         r.pop("_recency", None)
         r.pop("_combined", None)
 
-    return candidates[:limit]
+    return result
 
 
 def search_fts(
@@ -78,16 +189,23 @@ def search_fts(
     recency_weight: float = 0.3,
     bm25_weight: float = 0.7,
     expansion_ratio: int = 2,
+    mmr_lambda: float = 0.0,
 ) -> list[dict]:
     """Full-text search across techne tables.
 
     Fetches ``expansion_ratio * limit`` BM25 candidates per table, then
-    applies a second-pass recency × BM25 reranker to return ``limit`` results.
+    applies a two-stage reranker:
+      Stage 1 — recency × BM25 combined score.
+      Stage 2 — optional MMR diversity pass (skipped when mmr_lambda=0).
 
     Args:
         recency_weight: Weight for exponential-decay recency score (0..1).
         bm25_weight:    Weight for normalised BM25 score (0..1).
         expansion_ratio: Candidate pool = expansion_ratio * limit per table.
+        mmr_lambda:      MMR diversity weight λ ∈ [0, 1].  0 = pure relevance
+                         (default, matches legacy behaviour).  Requires
+                         fastembed; degrades silently to relevance order if
+                         the dep is not installed.
     """
     if not query.strip():
         return []
@@ -185,7 +303,7 @@ def search_fts(
         if table == "all":
             results.sort(key=lambda x: x.get("rank", 0))
 
-        results = _rerank(results, limit, recency_weight, bm25_weight)
+        results = _rerank(results, limit, recency_weight, bm25_weight, mmr_lambda=mmr_lambda)
 
     finally:
         conn.close()

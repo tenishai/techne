@@ -89,6 +89,7 @@ class SearchConfig:
     recency_weight: float = 0.3
     bm25_weight: float = 0.7
     expansion_ratio: int = 2
+    mmr_lambda: float = 0.3
 
 
 @dataclass
@@ -267,6 +268,7 @@ class Config:
                 recency_weight=float(s.get("recency_weight", 0.3)),
                 bm25_weight=float(s.get("bm25_weight", 0.7)),
                 expansion_ratio=int(s.get("expansion_ratio", 2)),
+                mmr_lambda=float(s.get("mmr_lambda", 0.3)),
             )
 
         return cfg
@@ -310,7 +312,27 @@ class Config:
                 "write_to": self.reflect.write_to,
                 "log_raw_response": self.reflect.log_raw_response,
             },
+            "search": {
+                "recency_weight": self.search.recency_weight,
+                "bm25_weight": self.search.bm25_weight,
+                "expansion_ratio": self.search.expansion_ratio,
+                "mmr_lambda": self.search.mmr_lambda,
+            },
         }
+        # sources: only emit the sub-keys that are configured to avoid
+        # polluting a minimal config with empty stubs.
+        sources_data: dict[str, Any] = {}
+        if self.sources.claude_code_transcripts is not None:
+            t = self.sources.claude_code_transcripts
+            sources_data["claude_code_transcripts"] = {
+                "paths": list(t.paths),
+                "include_globs": list(t.include_globs),
+                "exclude_globs": list(t.exclude_globs),
+                "debounce_ms": t.debounce_ms,
+                "adapter_name": t.adapter_name,
+            }
+        if sources_data:
+            data["sources"] = sources_data
         if self.identity_dir:
             data["identity_dir"] = str(self.identity_dir)
         if self.llm_api_base:
