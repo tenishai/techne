@@ -64,8 +64,14 @@ CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id);
 -- Observations (tool use captures)
 -- tags: whitespace-separated inferred tag tokens (embedding-based, see core/inference.py)
 -- kind: highest-scoring kind label (decision-shaped / fact-shaped / question-shaped)
--- event_at: actual real-world event timestamp (from transcript record). NULL means
---           treat `timestamp` (ingestion time) as the event time.
+-- timestamp: when the tool-use event fired (or when the record was emitted by the
+--            upstream source). Set automatically to the DB write time; for live
+--            captures (hook → DB write is sub-second) this is a faithful event time.
+-- event_at: optional override for the real-world subject-event time. Set explicitly
+--           by ingest paths when known (e.g., importing a transcript dated last year
+--           — `timestamp` is the import time, `event_at` is the transcript's actual
+--           session date). NULL means `timestamp` is the canonical event time.
+--           Query layer uses COALESCE(event_at, timestamp) for event-time ordering.
 CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),

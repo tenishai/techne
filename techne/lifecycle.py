@@ -326,11 +326,20 @@ def capture_tool_use(
     tool_name: str,
     tool_input: dict,
     tool_output: str | None,
+    *,
+    event_at: str | None = None,
 ) -> bool:
     """Capture a tool use as an observation. Returns True if captured, False if filtered.
 
     Applies the same `should_capture` filtering used by the Claude Code hook.
     Also respects config.hooks.post_tool_use — returns False if hook is disabled.
+
+    `event_at` is an optional ISO-8601 timestamp for the real-world event time.
+    For live hook captures the Claude Code post_tool_use payload does not include
+    a distinct tool-event timestamp, so callers may omit it — the observation's
+    `timestamp` column (DB write time, sub-second after the event) is then the
+    canonical event time. Pass it explicitly for replay/import paths where the
+    event time differs meaningfully from the write time.
     """
     from techne.core.state import add_observation
     from techne.hooks.post_tool_use import should_capture, summarize
@@ -340,5 +349,5 @@ def capture_tool_use(
     if not should_capture(config, tool_name):
         return False
     content = summarize(tool_name, tool_input, tool_output)
-    add_observation(config.db_path, session_id, tool_name, content)
+    add_observation(config.db_path, session_id, tool_name, content, event_at=event_at)
     return True
