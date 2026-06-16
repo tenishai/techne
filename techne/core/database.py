@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     platform TEXT DEFAULT 'claude-code',
     summary TEXT,
     summary_llm TEXT,
-    summary_heuristic TEXT
+    summary_heuristic TEXT,
+    summary_llm_source TEXT
 );
 
 -- Threads (the unit of continuity)

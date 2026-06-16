@@ -294,3 +294,100 @@ class TestSchemaReconciliation:
         """Running reconcile twice raises no error."""
         _reconcile_columns(old_conn)
         _reconcile_columns(old_conn)  # should be a no-op; column already present
+
+
+# ---------------------------------------------------------------------------
+# summary_llm_source column (#1) — reconciler adds it; round-trip via state
+# ---------------------------------------------------------------------------
+
+SESSIONS_PRE_LLM_SOURCE = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,
+    project_path TEXT,
+    agent_identity TEXT,
+    platform TEXT DEFAULT 'claude-code',
+    summary TEXT,
+    summary_llm TEXT,
+    summary_heuristic TEXT
+);
+"""
+
+
+class TestSummaryLlmSourceColumn:
+    """summary_llm_source column is added by the reconciler and round-trips."""
+
+    @pytest.fixture
+    def pre_source_conn(self, tmp_path):
+        db = tmp_path / "pre_source.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SESSIONS_PRE_LLM_SOURCE)
+        conn.execute("INSERT INTO schema_version (version) VALUES (7)")
+        conn.execute(
+            "INSERT INTO sessions (id, started_at) VALUES (?, CURRENT_TIMESTAMP)",
+            ("sess-llm-src",),
+        )
+        conn.commit()
+        return conn
+
+    def test_reconciler_adds_column(self, pre_source_conn):
+        """summary_llm_source absent from live table → reconciler adds it."""
+        cols_before = {row[1] for row in pre_source_conn.execute("PRAGMA table_info(sessions)")}
+        assert "summary_llm_source" not in cols_before
+
+        _reconcile_columns(pre_source_conn)
+
+        cols_after = {row[1] for row in pre_source_conn.execute("PRAGMA table_info(sessions)")}
+        assert "summary_llm_source" in cols_after
+
+    def test_existing_row_gets_null(self, pre_source_conn):
+        """Pre-existing session row has NULL for the new column after reconcile."""
+        _reconcile_columns(pre_source_conn)
+        row = pre_source_conn.execute(
+            "SELECT summary_llm_source FROM sessions WHERE id = 'sess-llm-src'"
+        ).fetchone()
+        assert row["summary_llm_source"] is None
+
+    def test_round_trip_via_state(self, tmp_path):
+        """end_session with source='llm' + summary_llm_source persists and reads back."""
+        from techne.core.database import connect
+        from techne.core.state import end_session, start_session
+
+        db = tmp_path / "roundtrip.db"
+        sid = start_session(db, project_path="/proj", platform="test")
+        end_session(
+            db, sid, summary="AI-generated title", source="llm", summary_llm_source="ai-title"
+        )
+
+        conn = connect(db)
+        row = conn.execute(
+            "SELECT summary_llm, summary_llm_source FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()
+        conn.close()
+        assert row["summary_llm"] == "AI-generated title"
+        assert row["summary_llm_source"] == "ai-title"
+
+    def test_non_llm_source_does_not_set_llm_source(self, tmp_path):
+        """summary_llm_source is not touched when source != 'llm'."""
+        from techne.core.database import connect
+        from techne.core.state import end_session, start_session
+
+        db = tmp_path / "non_llm.db"
+        sid = start_session(db)
+        end_session(
+            db, sid, summary="manual override", source="manual", summary_llm_source="ai-title"
+        )
+
+        conn = connect(db)
+        row = conn.execute(
+            "SELECT summary_llm_source FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()
+        conn.close()
+        assert row["summary_llm_source"] is None
