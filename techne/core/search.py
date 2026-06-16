@@ -53,7 +53,9 @@ def _rerank(
         r["_norm_bm25"] = (max_r - r["rank"]) / spread if spread else 1.0
 
     for r in candidates:
-        ts = r.get("updated_at") or r.get("timestamp") or r.get("event_at")
+        # Preferred order: event_at (real-world subject-event time) →
+        # updated_at (last modification) → timestamp (ingestion time).
+        ts = r.get("event_at") or r.get("updated_at") or r.get("timestamp")
         r["_recency"] = _recency_score(ts)
         r["_combined"] = recency_weight * r["_recency"] + bm25_weight * r["_norm_bm25"]
 
@@ -126,7 +128,7 @@ def search_fts(
         if table in ("observations", "all"):
             rows = conn.execute(
                 """SELECT o.id, o.content, o.tool_name, o.session_id,
-                          o.timestamp, o.tier,
+                          o.timestamp, o.event_at, o.tier,
                           bm25(observations_fts) AS rank
                    FROM observations_fts f
                    JOIN observations o ON o.id = f.rowid
@@ -144,6 +146,7 @@ def search_fts(
                         "tool_name": r["tool_name"],
                         "session_id": r["session_id"],
                         "timestamp": r["timestamp"],
+                        "event_at": r["event_at"],
                         "tier": r["tier"],
                         "rank": r["rank"],
                     }

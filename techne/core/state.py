@@ -269,7 +269,19 @@ def add_observation(
     content: str,
     tier: str = "hot",
     config=None,
+    event_at: str | None = None,
 ):
+    """Record a tool-use observation.
+
+    `event_at` is an optional ISO-8601 timestamp for the real-world event time.
+    Leave None for live captures (tool-use → DB write is sub-second, so
+    `timestamp` is already a faithful event time). Supply it explicitly for
+    ingest paths where the record's subject-event time differs from the write
+    time — e.g. importing a transcript dated last year: `timestamp` = now,
+    `event_at` = original session date.
+
+    Query layer uses COALESCE(event_at, timestamp) for event-time ordering.
+    """
     from techne.core.inference import infer
 
     redacted = redact_credentials(content)
@@ -279,9 +291,10 @@ def add_observation(
     conn = connect(db_path)
     try:
         conn.execute(
-            """INSERT INTO observations (session_id, tool_name, content, tier, tags, kind)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_id, tool_name, redacted, tier, tags_str, result.kind),
+            """INSERT INTO observations
+                   (session_id, tool_name, content, tier, tags, kind, event_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, tool_name, redacted, tier, tags_str, result.kind, event_at),
         )
         conn.commit()
     finally:
