@@ -231,11 +231,18 @@ def import_transcript(
                             continue
                         output = _tool_result_text(b.get("content"))
                         content = summarize(tool_name, tu["input"], output)
+                        event_ts = tu["ts"] or ts
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier)
-                               VALUES (?, ?, ?, ?, 'hot')""",
-                            (session_id, tu["ts"] or ts, tool_name, redact_credentials(content)),
+                               (session_id, timestamp, tool_name, content, tier, event_at)
+                               VALUES (?, ?, ?, ?, 'hot', ?)""",
+                            (
+                                session_id,
+                                event_ts,
+                                tool_name,
+                                redact_credentials(content),
+                                event_ts,
+                            ),
                         )
                         tool_count += 1
 
@@ -248,9 +255,9 @@ def import_transcript(
                     if text and not text.startswith("<"):
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier)
-                               VALUES (?, ?, 'UserPrompt', ?, 'hot')""",
-                            (session_id, ts, redact_credentials(text[:4000])),
+                               (session_id, timestamp, tool_name, content, tier, event_at)
+                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?)""",
+                            (session_id, ts, redact_credentials(text[:4000]), ts),
                         )
                         prompt_count += 1
 

@@ -45,7 +45,9 @@ def _tool_result(tool_id: str, output: str, ts: str) -> dict:
         "type": "user",
         "sessionId": "sess-fixture",
         "timestamp": ts,
-        "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "content": output}]},
+        "message": {
+            "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": output}]
+        },
     }
 
 
@@ -66,15 +68,18 @@ def _ai_title(title: str) -> dict:
 @pytest.fixture
 def transcript(tmp_path):
     p = tmp_path / "sess-fixture.jsonl"
-    _write_jsonl(p, [
-        {"type": "mode", "mode": "normal", "sessionId": "sess-fixture"},
-        _user_text("Hello, please run ls", "2026-06-01T10:00:00.000Z"),
-        _bash_use("tu_1", "ls /tmp", "2026-06-01T10:00:01.000Z"),
-        _tool_result("tu_1", "file1\nfile2", "2026-06-01T10:00:02.000Z"),
-        _user_text("Now check disk space", "2026-06-01T10:00:10.000Z"),
-        _bash_use("tu_2", "df -h", "2026-06-01T10:00:11.000Z"),
-        _tool_result("tu_2", "Filesystem  Size  Used", "2026-06-01T10:00:12.000Z"),
-    ])
+    _write_jsonl(
+        p,
+        [
+            {"type": "mode", "mode": "normal", "sessionId": "sess-fixture"},
+            _user_text("Hello, please run ls", "2026-06-01T10:00:00.000Z"),
+            _bash_use("tu_1", "ls /tmp", "2026-06-01T10:00:01.000Z"),
+            _tool_result("tu_1", "file1\nfile2", "2026-06-01T10:00:02.000Z"),
+            _user_text("Now check disk space", "2026-06-01T10:00:10.000Z"),
+            _bash_use("tu_2", "df -h", "2026-06-01T10:00:11.000Z"),
+            _tool_result("tu_2", "Filesystem  Size  Used", "2026-06-01T10:00:12.000Z"),
+        ],
+    )
     return p
 
 
@@ -132,10 +137,13 @@ def test_no_prompts_flag(db_path, transcript):
 
 
 def test_import_directory_skips_empty(db_path, tmp_path):
-    _write_jsonl(tmp_path / "good.jsonl", [
-        _bash_use("tu_x", "echo hi", "2026-06-01T10:00:00.000Z"),
-        _tool_result("tu_x", "hi", "2026-06-01T10:00:01.000Z"),
-    ])
+    _write_jsonl(
+        tmp_path / "good.jsonl",
+        [
+            _bash_use("tu_x", "echo hi", "2026-06-01T10:00:00.000Z"),
+            _tool_result("tu_x", "hi", "2026-06-01T10:00:01.000Z"),
+        ],
+    )
     (tmp_path / "empty.jsonl").write_text("")
 
     results = import_directory(db_path, tmp_path)
@@ -148,12 +156,15 @@ def test_import_directory_skips_empty(db_path, tmp_path):
 
 def test_ai_title_stamps_summary_llm(db_path, tmp_path):
     p = tmp_path / "sess-fixture.jsonl"
-    _write_jsonl(p, [
-        _ai_title("Review fleet-terminal.md file"),
-        _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
-        _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
-        _ai_title("Review fleet-terminal.md file"),  # re-emission, same value
-    ])
+    _write_jsonl(
+        p,
+        [
+            _ai_title("Review fleet-terminal.md file"),
+            _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
+            _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
+            _ai_title("Review fleet-terminal.md file"),  # re-emission, same value
+        ],
+    )
 
     result = import_transcript(db_path, p)
     assert result["summary_set"] is True
@@ -175,29 +186,33 @@ def test_summary_backfills_on_reimport(db_path, tmp_path):
     # First import had no ai-title; later transcript has one.
     # Re-running should stamp summary_llm even though observations are skipped.
     p1 = tmp_path / "no-title.jsonl"
-    _write_jsonl(p1, [
-        _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
-        _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
-    ])
+    _write_jsonl(
+        p1,
+        [
+            _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
+            _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
+        ],
+    )
     first = import_transcript(db_path, p1)
     assert first["summary_set"] is False
     assert first["skipped"] is False
 
     p2 = tmp_path / "with-title.jsonl"
-    _write_jsonl(p2, [
-        _ai_title("Check techne status"),
-        _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
-        _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
-    ])
+    _write_jsonl(
+        p2,
+        [
+            _ai_title("Check techne status"),
+            _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
+            _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
+        ],
+    )
     second = import_transcript(db_path, p2)
     assert second["skipped"] is True
     assert second["summary_set"] is True
 
     conn = connect(db_path)
     try:
-        sess = conn.execute(
-            "SELECT summary_llm FROM sessions WHERE id='sess-fixture'"
-        ).fetchone()
+        sess = conn.execute("SELECT summary_llm FROM sessions WHERE id='sess-fixture'").fetchone()
         assert sess["summary_llm"] == "Check techne status"
     finally:
         conn.close()
@@ -207,11 +222,14 @@ def test_ai_title_coexists_with_heuristic_summary(db_path, tmp_path):
     # Heuristic summary lives in summary_heuristic; ai-title goes to summary_llm.
     # Neither clobbers the other.
     p = tmp_path / "sess-fixture.jsonl"
-    _write_jsonl(p, [
-        _ai_title("Review fleet-terminal.md file"),
-        _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
-        _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
-    ])
+    _write_jsonl(
+        p,
+        [
+            _ai_title("Review fleet-terminal.md file"),
+            _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
+            _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
+        ],
+    )
     # Pre-create with a heuristic summary already populated
     conn = connect(db_path)
     try:
@@ -241,19 +259,21 @@ def test_effective_summary_priority():
     from techne.core.state import effective_summary
 
     # manual wins
-    assert effective_summary({
-        "summary": "manual", "summary_llm": "llm", "summary_heuristic": "h"
-    }) == "manual"
+    assert (
+        effective_summary({"summary": "manual", "summary_llm": "llm", "summary_heuristic": "h"})
+        == "manual"
+    )
     # LLM beats heuristic
-    assert effective_summary({
-        "summary": None, "summary_llm": "llm", "summary_heuristic": "h"
-    }) == "llm"
+    assert (
+        effective_summary({"summary": None, "summary_llm": "llm", "summary_heuristic": "h"})
+        == "llm"
+    )
     # heuristic is the floor
-    assert effective_summary({
-        "summary": "", "summary_llm": None, "summary_heuristic": "h"
-    }) == "h"
+    assert effective_summary({"summary": "", "summary_llm": None, "summary_heuristic": "h"}) == "h"
     # nothing → empty
-    assert effective_summary({"summary": None, "summary_llm": None, "summary_heuristic": None}) == ""
+    assert (
+        effective_summary({"summary": None, "summary_llm": None, "summary_heuristic": None}) == ""
+    )
 
 
 def test_looks_heuristic_patterns():
@@ -300,7 +320,9 @@ def test_migrate_legacy_summaries_moves_heuristic_shapes(db_path):
     conn = connect(db_path)
     try:
         # nothing actually moved
-        row = conn.execute("SELECT summary, summary_heuristic FROM sessions WHERE id='multi'").fetchone()
+        row = conn.execute(
+            "SELECT summary, summary_heuristic FROM sessions WHERE id='multi'"
+        ).fetchone()
         assert row["summary"] == heuristic_multi
         assert row["summary_heuristic"] is None
     finally:
@@ -313,9 +335,10 @@ def test_migrate_legacy_summaries_moves_heuristic_shapes(db_path):
 
     conn = connect(db_path)
     try:
-        rows = {r["id"]: r for r in conn.execute(
-            "SELECT id, summary, summary_heuristic FROM sessions"
-        ).fetchall()}
+        rows = {
+            r["id"]: r
+            for r in conn.execute("SELECT id, summary, summary_heuristic FROM sessions").fetchall()
+        }
         # heuristic-shaped → moved
         assert rows["multi"]["summary"] is None
         assert rows["multi"]["summary_heuristic"] == heuristic_multi
@@ -353,7 +376,9 @@ def test_migrate_legacy_summaries_clears_legacy_when_fresher_exists(db_path):
 
     conn = connect(db_path)
     try:
-        row = conn.execute("SELECT summary, summary_heuristic FROM sessions WHERE id='s'").fetchone()
+        row = conn.execute(
+            "SELECT summary, summary_heuristic FROM sessions WHERE id='s'"
+        ).fetchone()
         # Legacy cleared; fresher heuristic preserved
         assert row["summary"] is None
         assert row["summary_heuristic"] == "fresher heuristic content"
@@ -433,10 +458,16 @@ def test_angle_prefix_filter_suppresses_injected_blocks(db_path, tmp_path):
     changes, this test breaks rather than silently flooding memory with the
     full system-reminder text."""
     p = tmp_path / "sess-fixture.jsonl"
-    _write_jsonl(p, [
-        _user_text("<techne_context>\nsome injected state\n</techne_context>", "2026-06-01T10:00:00.000Z"),
-        _user_text("<system-reminder>do X</system-reminder>", "2026-06-01T10:00:01.000Z"),
-    ])
+    _write_jsonl(
+        p,
+        [
+            _user_text(
+                "<techne_context>\nsome injected state\n</techne_context>",
+                "2026-06-01T10:00:00.000Z",
+            ),
+            _user_text("<system-reminder>do X</system-reminder>", "2026-06-01T10:00:01.000Z"),
+        ],
+    )
 
     result = import_transcript(db_path, p)
     assert result["prompt_obs"] == 0
@@ -446,9 +477,12 @@ def test_inline_angle_is_captured(db_path, tmp_path):
     """Only a leading `<` suppresses — text that merely contains `<` mid-string
     (e.g. a comparison) is a real prompt and must be captured."""
     p = tmp_path / "sess-fixture.jsonl"
-    _write_jsonl(p, [
-        _user_text("verify that x < y for small inputs", "2026-06-01T10:00:00.000Z"),
-    ])
+    _write_jsonl(
+        p,
+        [
+            _user_text("verify that x < y for small inputs", "2026-06-01T10:00:00.000Z"),
+        ],
+    )
 
     result = import_transcript(db_path, p)
     assert result["prompt_obs"] == 1
@@ -460,20 +494,23 @@ def test_text_alongside_tool_result_is_captured(db_path, tmp_path):
     the text block must still become a UserPrompt observation. The previous
     `paired_any` short-circuit silently dropped this text."""
     p = tmp_path / "sess-fixture.jsonl"
-    _write_jsonl(p, [
-        _bash_use("tu_1", "long-running cmd", "2026-06-01T10:00:00.000Z"),
-        {
-            "type": "user",
-            "sessionId": "sess-fixture",
-            "timestamp": "2026-06-01T10:00:01.000Z",
-            "message": {
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "tu_1", "content": "cancelled"},
-                    {"type": "text", "text": "skip that — let's do something else"},
-                ],
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_1", "long-running cmd", "2026-06-01T10:00:00.000Z"),
+            {
+                "type": "user",
+                "sessionId": "sess-fixture",
+                "timestamp": "2026-06-01T10:00:01.000Z",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu_1", "content": "cancelled"},
+                        {"type": "text", "text": "skip that — let's do something else"},
+                    ],
+                },
             },
-        },
-    ])
+        ],
+    )
 
     result = import_transcript(db_path, p)
     assert result["tool_obs"] == 1
@@ -501,9 +538,7 @@ def test_force_bypasses_existing_observations_gate(db_path, tmp_path):
     # Pre-populate the session with a single live-captured observation.
     conn = connect(db_path)
     try:
-        conn.execute(
-            "INSERT INTO sessions (id, platform) VALUES ('sess-fixture', 'claude-code')"
-        )
+        conn.execute("INSERT INTO sessions (id, platform) VALUES ('sess-fixture', 'claude-code')")
         conn.execute(
             "INSERT INTO observations (session_id, timestamp, tool_name, content) "
             "VALUES ('sess-fixture', '2026-06-01T09:59:00.000Z', 'Bash', 'pre-existing')"
@@ -513,10 +548,13 @@ def test_force_bypasses_existing_observations_gate(db_path, tmp_path):
         conn.close()
 
     p = tmp_path / "sess-fixture.jsonl"
-    _write_jsonl(p, [
-        _bash_use("tu_1", "ls /tmp", "2026-06-01T10:00:00.000Z"),
-        _tool_result("tu_1", "file1", "2026-06-01T10:00:01.000Z"),
-    ])
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_1", "ls /tmp", "2026-06-01T10:00:00.000Z"),
+            _tool_result("tu_1", "file1", "2026-06-01T10:00:01.000Z"),
+        ],
+    )
 
     # Default behavior: skipped, no new obs
     default_result = import_transcript(db_path, p)
@@ -538,12 +576,46 @@ def test_force_bypasses_existing_observations_gate(db_path, tmp_path):
         conn.close()
 
 
+def test_event_at_populated_from_transcript_timestamp(db_path, tmp_path):
+    """JSONL ingest threads transcript timestamps through as event_at on observations."""
+    p = tmp_path / "sess-ts.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_ts", "echo hi", "2026-06-01T10:00:01.000Z"),
+            _tool_result("tu_ts", "hi", "2026-06-01T10:00:02.000Z"),
+            _user_text("check something", "2026-06-01T10:00:05.000Z"),
+        ],
+    )
+
+    result = import_transcript(db_path, p)
+    assert result["tool_obs"] == 1
+    assert result["prompt_obs"] == 1
+
+    conn = connect(db_path)
+    try:
+        rows = conn.execute("SELECT tool_name, event_at FROM observations ORDER BY id").fetchall()
+        # Both tool obs and prompt obs must have event_at set from transcript ts.
+        for row in rows:
+            assert row["event_at"] is not None, f"{row['tool_name']} missing event_at"
+        tool_row = next(r for r in rows if r["tool_name"] == "Bash")
+        prompt_row = next(r for r in rows if r["tool_name"] == "UserPrompt")
+        # Tool event_at = assistant ts (tu["ts"]), prompt event_at = user record ts.
+        assert "2026-06-01T10:00:01" in tool_row["event_at"]
+        assert "2026-06-01T10:00:05" in prompt_row["event_at"]
+    finally:
+        conn.close()
+
+
 def test_unpaired_tool_use_does_not_crash(db_path, tmp_path):
     p = tmp_path / "orphan.jsonl"
-    _write_jsonl(p, [
-        _bash_use("tu_orphan", "ls", "2026-06-01T10:00:00.000Z"),
-        # No matching tool_result follows
-    ])
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_orphan", "ls", "2026-06-01T10:00:00.000Z"),
+            # No matching tool_result follows
+        ],
+    )
     result = import_transcript(db_path, p)
     assert result["tool_obs"] == 0
     assert result["skipped"] is False

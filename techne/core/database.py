@@ -52,11 +52,14 @@ CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id);
 -- Observations (tool use captures)
 -- tags: whitespace-separated inferred tag tokens (embedding-based, see core/inference.py)
 -- kind: highest-scoring kind label (decision-shaped / fact-shaped / question-shaped)
+-- event_at: actual real-world event timestamp (from transcript record). NULL means
+--           treat `timestamp` (ingestion time) as the event time.
 CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
     thread_id TEXT REFERENCES threads(id),
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    event_at TIMESTAMP,
     tool_name TEXT,
     content TEXT NOT NULL,
     tier TEXT NOT NULL DEFAULT 'hot',
@@ -73,6 +76,8 @@ CREATE INDEX IF NOT EXISTS idx_observations_tier ON observations(tier);
 -- decay-aware effective_confidence() reads. `last_confirmed_at` powers decay:
 -- score = confidence_numeric * 0.5^(days_since_confirmed / half_life_days).
 -- A re-affirmation bumps last_confirmed_at without creating a new revision.
+-- `event_at`: actual real-world event timestamp. NULL means treat `created_at`
+--             as the event time. Use COALESCE(event_at, created_at) for ordering.
 CREATE TABLE IF NOT EXISTS knowledge (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type TEXT NOT NULL,
@@ -83,6 +88,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
     confidence_numeric REAL NOT NULL DEFAULT 0.6,
     last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     superseded_by INTEGER REFERENCES knowledge(id),
+    event_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
