@@ -1,4 +1,4 @@
-"""SyncAdapter protocol and registry for team backends."""
+"""SyncAdapter and SourceAdapter protocols and registry for team backends."""
 
 from __future__ import annotations
 
@@ -70,6 +70,34 @@ class SyncAdapter(Protocol):
         ...
 
 
+@runtime_checkable
+class SourceAdapter(Protocol):
+    # ---------------------------------------------------------------------------
+    # SourceAdapter Protocol — the ingest-side counterpart to SyncAdapter.
+    # Unlike SyncAdapter (push/pull/health for team sync), a SourceAdapter emits
+    # observations from a local source into the techne database.
+    # ---------------------------------------------------------------------------
+
+    def initial_walk(self) -> int:
+        """Scan source; emit observations for everything not yet indexed.
+
+        Returns count of observations emitted.
+        """
+        ...
+
+    def start_watch(self) -> None:
+        """Begin continuous watch. Non-blocking — returns immediately."""
+        ...
+
+    def stop_watch(self) -> None:
+        """Stop watch and flush any pending debounced events."""
+        ...
+
+    def health(self) -> bool:
+        """Fast probe — is the source reachable?"""
+        ...
+
+
 def load_adapter(name: str, **kwargs) -> SyncAdapter:
     """Load a sync adapter by name from entry points or builtins.
 
@@ -89,6 +117,7 @@ def load_adapter(name: str, **kwargs) -> SyncAdapter:
     if name in builtins:
         module_path, class_name = builtins[name].rsplit(":", 1)
         import importlib
+
         mod = importlib.import_module(module_path)
         cls = getattr(mod, class_name)
         return cls(**kwargs)
