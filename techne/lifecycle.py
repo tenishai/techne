@@ -124,6 +124,7 @@ def run_session_end(
     import os
 
     from techne.core.database import connect
+    from techne.core.extension_state import set_state
     from techne.core.heuristic_threads import (
         boundary_indices_from_segments,
         save_boundaries,
@@ -151,6 +152,10 @@ def run_session_end(
         conn = connect(config.db_path)
         try:
             save_boundaries(conn, session_id, scores, boundary_a_indices)
+            # Persist the observation count processed so external tooling (and
+            # future incremental passes) can tell how far the detector has run.
+            ext_key = f"heuristic_threads.{session_id}"
+            set_state(conn, ext_key, {"last_obs_count": len(observations)})
         finally:
             conn.close()
 

@@ -135,6 +135,14 @@ CREATE TABLE IF NOT EXISTS thread_boundaries (
 CREATE INDEX IF NOT EXISTS idx_thread_boundaries_session
     ON thread_boundaries(session_id, obs_index_a);
 
+-- Extension state (durable key-value sidecar for hooks and adapters).
+-- Thin JSON payload per named extension; upserted on write, read on start.
+CREATE TABLE IF NOT EXISTS extension_state (
+    name TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 -- Knowledge candidates (reflection-pass proposals awaiting promotion).
 -- Populated by the end-of-session reflect pass when config.reflect.enabled.
 -- While config.reflect.write_to='candidates' the live knowledge / identity
