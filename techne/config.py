@@ -85,6 +85,13 @@ class HeuristicConfig:
 
 
 @dataclass
+class SearchConfig:
+    recency_weight: float = 0.3
+    bm25_weight: float = 0.7
+    expansion_ratio: int = 2
+
+
+@dataclass
 class ReflectConfig:
     # End-of-session reflection: an LLM scans each detected thread and proposes
     # durable knowledge / identity entries worth keeping. Off by default; opt
@@ -113,6 +120,7 @@ class Config:
     hooks: HookConfig = field(default_factory=HookConfig)
     heuristic: HeuristicConfig = field(default_factory=HeuristicConfig)
     reflect: ReflectConfig = field(default_factory=ReflectConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
     platform: Platform = "claude-code"
     model: str = "claude-haiku-4-5-20251001"
     # Optional LiteLLM proxy targeting. When unset, litellm.completion() uses
@@ -251,6 +259,14 @@ class Config:
                 existing_knowledge_k=int(r.get("existing_knowledge_k", 10)),
                 write_to=write_to,
                 log_raw_response=bool(r.get("log_raw_response", True)),
+            )
+
+        if "search" in raw and isinstance(raw["search"], dict):
+            s = raw["search"]
+            cfg.search = SearchConfig(
+                recency_weight=float(s.get("recency_weight", 0.3)),
+                bm25_weight=float(s.get("bm25_weight", 0.7)),
+                expansion_ratio=int(s.get("expansion_ratio", 2)),
             )
 
         return cfg

@@ -1,6 +1,8 @@
 """Search across all techne data layers — FTS5 and optional vector search."""
 
+import math
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -9,21 +11,88 @@ from techne.core.database import connect
 SearchTable = Literal["threads", "observations", "knowledge", "all"]
 
 
+def _recency_score(ts_str: str | None, half_life_days: float = 30.0) -> float:
+    """Exponential decay from [0..1] where 1 = now, 0 = very old.
+
+    Uses ``COALESCE(event_at, updated_at, created_at, timestamp)`` logic —
+    caller passes whichever timestamp field is available for the row type.
+    Returns 0.5 on parse failure (neutral, so BM25 still drives ordering).
+    """
+    if not ts_str:
+        return 0.5
+    try:
+        # SQLite timestamps come back as strings: "YYYY-MM-DD HH:MM:SS"
+        dt = datetime.fromisoformat(ts_str.replace(" ", "T"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+        return math.exp(-age_days * math.log(2) / half_life_days)
+    except (ValueError, OSError):
+        return 0.5
+
+
+def _rerank(
+    candidates: list[dict], limit: int, recency_weight: float, bm25_weight: float
+) -> list[dict]:
+    """Second-pass reranker: recency × BM25 combined score → top limit.
+
+    BM25 from FTS5 is negative (more negative = better match). Normalise to
+    [0..1] across the candidate set so it can be linearly combined with
+    recency_score.  score = recency_weight * recency + bm25_weight * norm_bm25.
+    """
+    if not candidates:
+        return candidates
+
+    # BM25 is negative; most-negative = best match.
+    raw_ranks = [r["rank"] for r in candidates]
+    min_r, max_r = min(raw_ranks), max(raw_ranks)
+    spread = max_r - min_r  # >= 0
+
+    for r in candidates:
+        # norm_bm25=1 for best BM25 match (most negative rank = min_r), 0 for worst.
+        r["_norm_bm25"] = (max_r - r["rank"]) / spread if spread else 1.0
+
+    for r in candidates:
+        ts = r.get("updated_at") or r.get("timestamp") or r.get("event_at")
+        r["_recency"] = _recency_score(ts)
+        r["_combined"] = recency_weight * r["_recency"] + bm25_weight * r["_norm_bm25"]
+
+    candidates.sort(key=lambda x: -x["_combined"])
+
+    # Clean scratch keys before returning.
+    for r in candidates:
+        r.pop("_norm_bm25", None)
+        r.pop("_recency", None)
+        r.pop("_combined", None)
+
+    return candidates[:limit]
+
+
 def search_fts(
     db_path: Path,
     query: str,
     table: SearchTable = "all",
     limit: int = 20,
+    recency_weight: float = 0.3,
+    bm25_weight: float = 0.7,
+    expansion_ratio: int = 2,
 ) -> list[dict]:
     """Full-text search across techne tables.
 
-    Returns results ranked by FTS5 relevance (bm25).
+    Fetches ``expansion_ratio * limit`` BM25 candidates per table, then
+    applies a second-pass recency × BM25 reranker to return ``limit`` results.
+
+    Args:
+        recency_weight: Weight for exponential-decay recency score (0..1).
+        bm25_weight:    Weight for normalised BM25 score (0..1).
+        expansion_ratio: Candidate pool = expansion_ratio * limit per table.
     """
     if not query.strip():
         return []
 
     fts_query = _sanitize_fts_query(query)
     conn = connect(db_path)
+    candidate_limit = limit * expansion_ratio
     results = []
 
     try:
@@ -37,20 +106,22 @@ def search_fts(
                    WHERE threads_fts MATCH ?
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, limit),
+                (fts_query, candidate_limit),
             ).fetchall()
             for r in rows:
-                results.append({
-                    "type": "thread",
-                    "id": r["id"],
-                    "label": r["label"],
-                    "summary": r["summary"][:500],
-                    "resume_points": r["resume_points"],
-                    "status": r["status"],
-                    "session_id": r["session_id"],
-                    "updated_at": r["updated_at"],
-                    "rank": r["rank"],
-                })
+                results.append(
+                    {
+                        "type": "thread",
+                        "id": r["id"],
+                        "label": r["label"],
+                        "summary": r["summary"][:500],
+                        "resume_points": r["resume_points"],
+                        "status": r["status"],
+                        "session_id": r["session_id"],
+                        "updated_at": r["updated_at"],
+                        "rank": r["rank"],
+                    }
+                )
 
         if table in ("observations", "all"):
             rows = conn.execute(
@@ -62,19 +133,21 @@ def search_fts(
                    WHERE observations_fts MATCH ?
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, limit),
+                (fts_query, candidate_limit),
             ).fetchall()
             for r in rows:
-                results.append({
-                    "type": "observation",
-                    "id": r["id"],
-                    "content": r["content"][:500],
-                    "tool_name": r["tool_name"],
-                    "session_id": r["session_id"],
-                    "timestamp": r["timestamp"],
-                    "tier": r["tier"],
-                    "rank": r["rank"],
-                })
+                results.append(
+                    {
+                        "type": "observation",
+                        "id": r["id"],
+                        "content": r["content"][:500],
+                        "tool_name": r["tool_name"],
+                        "session_id": r["session_id"],
+                        "timestamp": r["timestamp"],
+                        "tier": r["tier"],
+                        "rank": r["rank"],
+                    }
+                )
 
         if table in ("knowledge", "all"):
             rows = conn.execute(
@@ -87,24 +160,29 @@ def search_fts(
                      AND k.superseded_by IS NULL
                    ORDER BY rank
                    LIMIT ?""",
-                (fts_query, limit),
+                (fts_query, candidate_limit),
             ).fetchall()
             for r in rows:
-                results.append({
-                    "type": "knowledge",
-                    "id": r["id"],
-                    "knowledge_type": r["type"],
-                    "content": r["content"][:500],
-                    "tags": r["tags"],
-                    "confidence": r["confidence"],
-                    "source": r["source"],
-                    "updated_at": r["updated_at"],
-                    "rank": r["rank"],
-                })
+                results.append(
+                    {
+                        "type": "knowledge",
+                        "id": r["id"],
+                        "knowledge_type": r["type"],
+                        "content": r["content"][:500],
+                        "tags": r["tags"],
+                        "confidence": r["confidence"],
+                        "source": r["source"],
+                        "updated_at": r["updated_at"],
+                        "rank": r["rank"],
+                    }
+                )
 
+        # For multi-table ("all"), sort combined pool first so BM25 ordering
+        # is consistent before the reranker normalises across the whole set.
         if table == "all":
             results.sort(key=lambda x: x.get("rank", 0))
-            results = results[:limit]
+
+        results = _rerank(results, limit, recency_weight, bm25_weight)
 
     finally:
         conn.close()
@@ -158,14 +236,16 @@ def search_vec(
                         (row[0],),
                     ).fetchone()
                     if thread:
-                        results.append({
-                            "type": "thread",
-                            "id": thread[0],
-                            "label": thread[1],
-                            "summary": thread[2][:500],
-                            "status": thread[3],
-                            "distance": row[1],
-                        })
+                        results.append(
+                            {
+                                "type": "thread",
+                                "id": thread[0],
+                                "label": thread[1],
+                                "summary": thread[2][:500],
+                                "status": thread[3],
+                                "distance": row[1],
+                            }
+                        )
 
         if table in ("observations", "all"):
             _exists = conn.execute(
@@ -184,15 +264,17 @@ def search_vec(
                         (row[0],),
                     ).fetchone()
                     if obs:
-                        results.append({
-                            "type": "observation",
-                            "id": obs[0],
-                            "content": obs[1][:500],
-                            "tool_name": obs[2],
-                            "session_id": obs[3],
-                            "timestamp": obs[4],
-                            "distance": row[1],
-                        })
+                        results.append(
+                            {
+                                "type": "observation",
+                                "id": obs[0],
+                                "content": obs[1][:500],
+                                "tool_name": obs[2],
+                                "session_id": obs[3],
+                                "timestamp": obs[4],
+                                "distance": row[1],
+                            }
+                        )
 
         if table in ("knowledge", "all"):
             _exists = conn.execute(
@@ -212,15 +294,17 @@ def search_vec(
                         (row[0],),
                     ).fetchone()
                     if k:
-                        results.append({
-                            "type": "knowledge",
-                            "id": k[0],
-                            "knowledge_type": k[1],
-                            "content": k[2][:500],
-                            "tags": k[3],
-                            "confidence": k[4],
-                            "distance": row[1],
-                        })
+                        results.append(
+                            {
+                                "type": "knowledge",
+                                "id": k[0],
+                                "knowledge_type": k[1],
+                                "content": k[2][:500],
+                                "tags": k[3],
+                                "confidence": k[4],
+                                "distance": row[1],
+                            }
+                        )
 
         results.sort(key=lambda x: x.get("distance", 999))
         return results[:limit]
@@ -426,5 +510,5 @@ def _sanitize_fts_query(query: str) -> str:
     if any(c in query for c in special):
         terms = query.split()
         # Escape embedded double-quotes by doubling them (FTS5 phrase literal rule)
-        return " ".join(f'"{t.replace(chr(34), chr(34)*2)}"' for t in terms if t.strip())
+        return " ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in terms if t.strip())
     return query
