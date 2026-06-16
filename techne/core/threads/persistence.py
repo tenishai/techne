@@ -1,14 +1,30 @@
 """Persistence helpers for heuristic thread detection.
 
-save_boundaries, load_boundaries, boundary_indices_from_segments.
+save_boundaries, load_boundaries, boundary_indices_from_segments, bucket_hash.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 
 from techne.core.threads.scoring import BoundaryScore
+
+
+def bucket_hash(session_id: str, first_obs_id: int, boundary_signal: str) -> str:
+    """Deterministic thread ID from (session_id, first_obs_id, boundary_signal).
+
+    Returns a ``t-<16-char-hex>`` string — the ``t-`` prefix makes it
+    visually distinct from legacy UUID-format thread IDs.
+
+    Same inputs always produce the same ID.  Different ``boundary_signal``
+    values produce different IDs, so replay is idempotent and two threads in
+    the same session can't collide even when ``first_obs_id`` is equal.
+    """
+    key = f"{session_id}\x00{first_obs_id}\x00{boundary_signal}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return f"t-{digest}"
 
 
 def boundary_indices_from_segments(segments: list[list[int]]) -> set[int]:

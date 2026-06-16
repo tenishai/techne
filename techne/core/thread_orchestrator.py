@@ -23,6 +23,11 @@ class Thread:
     summary: str
     resume_points: str = ""
     observation_indices: list[int] = field(default_factory=list)
+    # Set by heuristic detector.  When present, save_threads derives the row ID
+    # from bucket_hash(session_id, first_obs_id, boundary_signal) and uses
+    # INSERT OR IGNORE so replay is idempotent.  None means fall back to the
+    # legacy "{session_id}-{thread_num}" format.
+    boundary_signal: str | None = None
 
 
 def detect_and_summarize(
@@ -67,6 +72,50 @@ def detect_summarize_with_metadata(
     return _detect_summarize_llm(observations, config, generate_fn), []
 
 
+def _boundary_signal_from_scores(
+    first_obs_idx: int,
+    scores_by_a: dict[int, object],
+    thread_num: int,
+) -> str:
+    """Derive a stable boundary_signal string for a segment.
+
+    The first segment in a session always gets ``"new_session"``.  For later
+    segments the signal is built from the dominant key(s) in the BoundaryScore
+    that triggered the split (the score whose ``a_index`` equals the *last*
+    observation index of the preceding segment, i.e. ``first_obs_idx - 1``).
+
+    The string is deterministic: same inputs → same string.
+    """
+    if thread_num == 1:
+        return "new_session"
+
+    boundary_score = scores_by_a.get(first_obs_idx - 1)
+    if boundary_score is None:
+        return f"thread:{thread_num}"
+
+    sigs = boundary_score.signals  # type: ignore[attr-defined]
+    if not sigs:
+        return f"thread:{thread_num}"
+
+    # Sort for stability, then take the dominant signal name(s).
+    ranked = sorted(sigs.items(), key=lambda kv: kv[1], reverse=True)
+    top_score = ranked[0][1]
+    # Include all signals tied at the top.
+    top_keys = sorted(k for k, v in ranked if v == top_score)
+    gap_s = boundary_score.gap_seconds  # type: ignore[attr-defined]
+
+    # Produce a human-readable, stable signal string.
+    signal_key = top_keys[0]
+    if signal_key.startswith("gap_"):
+        secs = int(round(gap_s / 60) * 60)  # round to nearest minute
+        return f"long_gap:{secs}s"
+    if signal_key == "repo_change":
+        return "repo_change"
+    if signal_key == "family_change":
+        return "family_change"
+    return signal_key
+
+
 def _detect_summarize_heuristic(
     observations: list[dict],
     config: Config,
@@ -107,12 +156,19 @@ def _detect_summarize_heuristic(
     if use_llm_summary and generate_fn is None:
         generate_fn = _make_generate_fn(config)
 
+    # Index boundary scores by a_index for O(1) lookup in signal derivation.
+    scores_by_a = {s.a_index: s for s in scores}
+
     threads: list[Thread] = []
     for thread_num, segment in enumerate(segments, 1):
         seg_observations = [observations[i] for i in segment]
         seg_features = [features[i] for i in segment]
         label = ht.generate_label(segment, features)
         resume = ht.build_resume_point(seg_observations)
+
+        boundary_signal = _boundary_signal_from_scores(
+            segment[0], scores_by_a, thread_num
+        )
 
         summary = ht.fallback_summary(seg_observations, seg_features)
         if use_llm_summary:
@@ -132,6 +188,7 @@ def _detect_summarize_heuristic(
                 summary=summary,
                 resume_points=resume,
                 observation_indices=segment,
+                boundary_signal=boundary_signal,
             )
         )
 
@@ -292,8 +349,16 @@ def save_threads(
 
     If `conn` is provided the caller owns the transaction (no commit/close
     here). Pass a connection to make DELETE + insert atomic in redetection.
+
+    When a Thread carries a ``boundary_signal`` (set by the heuristic
+    detector) the row ID is derived from
+    ``bucket_hash(session_id, first_obs_id, boundary_signal)`` and the row
+    is written with ``INSERT OR IGNORE`` so that replaying the same session
+    is a no-op.  Threads without a ``boundary_signal`` fall back to the
+    legacy ``"{session_id}-{thread_num}"`` format with ``INSERT OR REPLACE``.
     """
     from techne.core.database import connect
+    from techne.core.threads.persistence import bucket_hash
 
     link_map = {}
     if parent_links:
@@ -304,13 +369,26 @@ def save_threads(
         conn = connect(db_path)
     try:
         for t in threads:
-            thread_id = f"{session_id}-{t.thread_num}"
+            if t.boundary_signal is not None and t.observation_indices:
+                first_obs_id = t.observation_indices[0]
+                thread_id = bucket_hash(session_id, first_obs_id, t.boundary_signal)
+                sql = (
+                    "INSERT OR IGNORE INTO threads"
+                    " (id, session_id, thread_num, label, summary, resume_points,"
+                    "  status, parent_thread_id, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
+                )
+            else:
+                thread_id = f"{session_id}-{t.thread_num}"
+                sql = (
+                    "INSERT OR REPLACE INTO threads"
+                    " (id, session_id, thread_num, label, summary, resume_points,"
+                    "  status, parent_thread_id, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
+                )
             parent_id = link_map.get(thread_id)
             conn.execute(
-                """INSERT OR REPLACE INTO threads
-                   (id, session_id, thread_num, label, summary, resume_points,
-                    status, parent_thread_id, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)""",
+                sql,
                 (
                     thread_id,
                     session_id,
