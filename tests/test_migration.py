@@ -395,6 +395,165 @@ class TestSummaryLlmSourceColumn:
 
 
 # ---------------------------------------------------------------------------
+# event_at bi-temporal column (#8) — reconciler adds it to existing DBs
+# ---------------------------------------------------------------------------
+
+# Minimal observations/knowledge schema WITHOUT event_at (simulates a v7 DB).
+SCHEMA_PRE_EVENT_AT = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,
+    project_path TEXT,
+    agent_identity TEXT,
+    platform TEXT DEFAULT 'claude-code',
+    summary TEXT,
+    summary_llm TEXT,
+    summary_heuristic TEXT,
+    summary_llm_source TEXT
+);
+
+CREATE TABLE IF NOT EXISTS observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    thread_id TEXT REFERENCES threads(id),
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    tool_name TEXT,
+    content TEXT NOT NULL,
+    tier TEXT NOT NULL DEFAULT 'hot',
+    tags TEXT,
+    kind TEXT
+);
+
+CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT,
+    tags TEXT,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    confidence_numeric REAL NOT NULL DEFAULT 0.6,
+    last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_by INTEGER REFERENCES knowledge(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+class TestEventAtColumn:
+    """Reconciler adds event_at to observations and knowledge on existing DBs."""
+
+    @pytest.fixture
+    def pre_event_at_conn(self, tmp_path):
+        db = tmp_path / "pre_event_at.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA_PRE_EVENT_AT)
+        conn.execute("INSERT INTO schema_version (version) VALUES (7)")
+        conn.execute("INSERT INTO sessions (id, started_at) VALUES ('s1', CURRENT_TIMESTAMP)")
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier) "
+            "VALUES ('s1', CURRENT_TIMESTAMP, 'old obs', 'hot')"
+        )
+        conn.execute("INSERT INTO knowledge (type, content) VALUES ('fact', 'old fact')")
+        conn.commit()
+        return conn
+
+    def test_reconciler_adds_event_at_to_observations(self, pre_event_at_conn):
+        cols_before = {r[1] for r in pre_event_at_conn.execute("PRAGMA table_info(observations)")}
+        assert "event_at" not in cols_before
+
+        _reconcile_columns(pre_event_at_conn)
+
+        cols_after = {r[1] for r in pre_event_at_conn.execute("PRAGMA table_info(observations)")}
+        assert "event_at" in cols_after
+
+    def test_reconciler_adds_event_at_to_knowledge(self, pre_event_at_conn):
+        cols_before = {r[1] for r in pre_event_at_conn.execute("PRAGMA table_info(knowledge)")}
+        assert "event_at" not in cols_before
+
+        _reconcile_columns(pre_event_at_conn)
+
+        cols_after = {r[1] for r in pre_event_at_conn.execute("PRAGMA table_info(knowledge)")}
+        assert "event_at" in cols_after
+
+    def test_existing_rows_get_null_event_at(self, pre_event_at_conn):
+        _reconcile_columns(pre_event_at_conn)
+
+        obs = pre_event_at_conn.execute("SELECT event_at FROM observations").fetchone()
+        assert obs["event_at"] is None
+
+        kn = pre_event_at_conn.execute("SELECT event_at FROM knowledge").fetchone()
+        assert kn["event_at"] is None
+
+    def test_insert_with_explicit_event_at_round_trips(self, tmp_path):
+        """INSERT with event_at set persists and reads back correctly."""
+        from techne.core.database import connect
+
+        db = tmp_path / "roundtrip.db"
+        conn = connect(db)
+        try:
+            conn.execute("INSERT INTO sessions (id, platform) VALUES ('s2', 'test')")
+            conn.execute(
+                "INSERT INTO observations (session_id, timestamp, content, tier, event_at) "
+                "VALUES ('s2', '2026-01-01T09:00:00Z', 'test obs', 'hot', '2026-01-01T08:00:00Z')"
+            )
+            conn.execute(
+                "INSERT INTO knowledge (type, content, event_at) "
+                "VALUES ('fact', 'test fact', '2026-01-01T07:00:00Z')"
+            )
+            conn.commit()
+
+            obs = conn.execute("SELECT event_at FROM observations WHERE session_id='s2'").fetchone()
+            assert obs["event_at"] == "2026-01-01T08:00:00Z"
+
+            kn = conn.execute("SELECT event_at FROM knowledge WHERE type='fact'").fetchone()
+            assert kn["event_at"] == "2026-01-01T07:00:00Z"
+        finally:
+            conn.close()
+
+    def test_coalesce_ordering_prefers_event_at(self, tmp_path):
+        """COALESCE(event_at, created_at) orders by event time, not ingestion time.
+
+        Row A: ingested first (created_at earlier), but event happened second.
+        Row B: ingested second, but event happened first.
+        ORDER BY COALESCE(event_at, created_at) should return B then A.
+        """
+        from techne.core.database import connect
+
+        db = tmp_path / "coalesce.db"
+        conn = connect(db)
+        try:
+            conn.execute("INSERT INTO sessions (id, platform) VALUES ('s3', 'test')")
+            # Row A: created_at=09:00, event_at=11:00 (late event, ingested early)
+            conn.execute(
+                "INSERT INTO knowledge (type, content, created_at, event_at) "
+                "VALUES ('fact', 'row-A', '2026-01-01T09:00:00Z', '2026-01-01T11:00:00Z')"
+            )
+            # Row B: created_at=10:00, event_at=08:00 (early event, ingested late)
+            conn.execute(
+                "INSERT INTO knowledge (type, content, created_at, event_at) "
+                "VALUES ('fact', 'row-B', '2026-01-01T10:00:00Z', '2026-01-01T08:00:00Z')"
+            )
+            conn.commit()
+
+            rows = conn.execute(
+                "SELECT content FROM knowledge WHERE type='fact' "
+                "ORDER BY COALESCE(event_at, created_at)"
+            ).fetchall()
+            contents = [r["content"] for r in rows]
+            assert contents == ["row-B", "row-A"]
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
 # migrate-summaries CLI: no-op detection (issue #4)
 # ---------------------------------------------------------------------------
 

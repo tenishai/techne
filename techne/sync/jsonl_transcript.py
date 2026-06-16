@@ -208,11 +208,12 @@ def _ingest_records_from_offset(
                             )
                             content = redact_credentials(f"{header}\n{body}")
                             _ensure_session(conn, tu["session_id"], jsonl_path)
+                            event_ts = tu["ts"] or ts
                             conn.execute(
                                 """INSERT INTO observations
-                                   (session_id, timestamp, tool_name, content, tier)
-                                   VALUES (?, ?, ?, ?, 'hot')""",
-                                (tu["session_id"], tu["ts"] or ts, tool_name, content),
+                                   (session_id, timestamp, tool_name, content, tier, event_at)
+                                   VALUES (?, ?, ?, ?, 'hot', ?)""",
+                                (tu["session_id"], event_ts, tool_name, content, event_ts),
                             )
                             obs_count += 1
 
@@ -224,9 +225,9 @@ def _ingest_records_from_offset(
                         _ensure_session(conn, session_id, jsonl_path)
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier)
-                               VALUES (?, ?, 'UserPrompt', ?, 'hot')""",
-                            (session_id, ts, content),
+                               (session_id, timestamp, tool_name, content, tier, event_at)
+                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?)""",
+                            (session_id, ts, content, ts),
                         )
                         obs_count += 1
 
