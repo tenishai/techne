@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -185,7 +185,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-    content, content=observations, content_rowid=id
+    content, tags, kind, content=observations, content_rowid=id
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
@@ -211,18 +211,18 @@ CREATE TRIGGER IF NOT EXISTS threads_au AFTER UPDATE ON threads BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS observations_ai AFTER INSERT ON observations BEGIN
-    INSERT INTO observations_fts(rowid, content)
-    VALUES (NEW.id, NEW.content);
+    INSERT INTO observations_fts(rowid, content, tags, kind)
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''), COALESCE(NEW.kind, ''));
 END;
 CREATE TRIGGER IF NOT EXISTS observations_ad AFTER DELETE ON observations BEGIN
-    INSERT INTO observations_fts(observations_fts, rowid, content)
-    VALUES ('delete', OLD.id, OLD.content);
+    INSERT INTO observations_fts(observations_fts, rowid, content, tags, kind)
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''), COALESCE(OLD.kind, ''));
 END;
 CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
-    INSERT INTO observations_fts(observations_fts, rowid, content)
-    VALUES ('delete', OLD.id, OLD.content);
-    INSERT INTO observations_fts(rowid, content)
-    VALUES (NEW.id, NEW.content);
+    INSERT INTO observations_fts(observations_fts, rowid, content, tags, kind)
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''), COALESCE(OLD.kind, ''));
+    INSERT INTO observations_fts(rowid, content, tags, kind)
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''), COALESCE(NEW.kind, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
@@ -272,6 +272,53 @@ def _reconcile_triggers(conn: sqlite3.Connection) -> None:
             conn.executescript(create_sql)
             conn.commit()
             print(f"[techne] reconcile: CREATE TRIGGER {name}", file=sys.stderr)
+
+
+_FTS_BACKFILL: dict[str, tuple[str, list[str]]] = {
+    # fts_table: (source_table, [columns to SELECT in (rowid, col…) order])
+    "observations_fts": (
+        "observations",
+        ["id", "content", "COALESCE(tags, '')", "COALESCE(kind, '')"],
+    ),
+    "threads_fts": ("threads", ["rowid", "label", "summary", "resume_points"]),
+    "knowledge_fts": ("knowledge", ["id", "content", "COALESCE(tags, '')"]),
+}
+
+_FTS_INSERT_COLS: dict[str, list[str]] = {
+    "observations_fts": ["rowid", "content", "tags", "kind"],
+    "threads_fts": ["rowid", "label", "summary", "resume_points"],
+    "knowledge_fts": ["rowid", "content", "tags"],
+}
+
+
+def _reconcile_fts_backfill(conn: sqlite3.Connection) -> None:
+    """Backfill any FTS table whose index is empty while the source table has rows.
+
+    Uses the FTS5 shadow ``_docsize`` table to detect an empty index; content-
+    table FTS5 VTs report COUNT(*) from the source table even when the index
+    has never been populated, so COUNT(*) is not a reliable signal here.
+
+    Safe to re-run: once FTS _docsize is non-empty, subsequent calls skip.
+    Called after _reconcile_triggers() so triggers exist for future inserts.
+    """
+    for fts_table, (src_table, src_cols) in _FTS_BACKFILL.items():
+        # _docsize has one row per indexed document; 0 means the index is empty.
+        fts_indexed = conn.execute(f"SELECT COUNT(*) FROM {fts_table}_docsize").fetchone()[0]
+        if fts_indexed > 0:
+            continue
+        src_count = conn.execute(f"SELECT COUNT(*) FROM {src_table}").fetchone()[0]
+        if src_count == 0:
+            continue
+        insert_cols = ", ".join(_FTS_INSERT_COLS[fts_table])
+        select_cols = ", ".join(src_cols)
+        conn.execute(
+            f"INSERT INTO {fts_table}({insert_cols}) SELECT {select_cols} FROM {src_table}"
+        )
+        conn.commit()
+        print(
+            f"[techne] reconcile: backfill {fts_table} ({src_count} rows from {src_table})",
+            file=sys.stderr,
+        )
 
 
 def _schema_table_statements() -> list[tuple[str, str]]:
@@ -438,6 +485,7 @@ def _ensure_initialized(conn: sqlite3.Connection) -> None:
             _migrate(conn, existing_version, SCHEMA_VERSION)
         _reconcile_tables(conn)
         _reconcile_triggers(conn)
+        _reconcile_fts_backfill(conn)
         _reconcile_columns(conn)
 
 
@@ -557,4 +605,27 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
             ALTER TABLE observations ADD COLUMN kind TEXT;
         """)
         conn.execute("INSERT INTO schema_version (version) VALUES (7)")
+    if from_version < 8 and to_version >= 8:
+        # Rebuild observations_fts to index tags + kind (Gap 1 fix: #50).
+        # Virtual table schema changes require DROP + CREATE + reindex; the old
+        # single-column definition is replaced by (content, tags, kind).
+        # Guard: observations table may not exist yet if this DB is being
+        # migrated from a schema that never had it (_reconcile_tables runs after
+        # _migrate). In that case the DROP+CREATE is still safe; INSERT is
+        # skipped — _reconcile_fts_backfill handles it once tables exist.
+        obs_exists = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='observations'"
+        ).fetchone()[0]
+        conn.executescript("""
+            DROP TABLE IF EXISTS observations_fts;
+            CREATE VIRTUAL TABLE observations_fts USING fts5(
+                content, tags, kind, content=observations, content_rowid=id
+            );
+        """)
+        if obs_exists:
+            conn.execute(
+                "INSERT INTO observations_fts(rowid, content, tags, kind) "
+                "SELECT id, content, COALESCE(tags, ''), COALESCE(kind, '') FROM observations"
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (8)")
     conn.commit()

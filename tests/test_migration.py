@@ -793,7 +793,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-    content, content=observations, content_rowid=id
+    content, tags, kind, content=observations, content_rowid=id
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
@@ -886,3 +886,224 @@ class TestReconcileTriggers:
             assert "observations_au" in live_triggers
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Gap 1 (issue #50): observations_fts indexes tags + kind
+# ---------------------------------------------------------------------------
+
+
+class TestObservationFtsTagsKind:
+    """observations_fts must index tags and kind columns (#50 Gap 1)."""
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        from techne.core.database import connect
+
+        p = tmp_path / "fts_tags.db"
+        conn = connect(p)
+        conn.close()
+        return p
+
+    def test_observation_tag_searchable_via_fts(self, db_path):
+        """A tag token written to observations.tags is findable via FTS MATCH."""
+        from techne.core.database import connect
+        from techne.core.search import search_fts
+        from techne.core.state import start_session
+
+        session_id = start_session(db_path)
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier, tags, kind) "
+            "VALUES (?, CURRENT_TIMESTAMP, 'routine status update', 'hot',"
+            " 'arch-decision refactor', 'decision-shaped')",
+            (session_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        results = search_fts(db_path, "arch-decision", table="observations")
+        assert len(results) == 1, "tag token 'arch-decision' not found via FTS"
+
+    def test_observation_kind_searchable_via_fts(self, db_path):
+        """A kind token written to observations.kind is findable via FTS MATCH."""
+        from techne.core.database import connect
+        from techne.core.search import search_fts
+        from techne.core.state import start_session
+
+        session_id = start_session(db_path)
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier, tags, kind) "
+            "VALUES (?, CURRENT_TIMESTAMP, 'checked the logs', 'hot', '', 'question-shaped')",
+            (session_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        results = search_fts(db_path, "question-shaped", table="observations")
+        assert len(results) == 1, "kind token 'question-shaped' not found via FTS"
+
+    def test_null_tags_and_kind_handled(self, db_path):
+        """Observation with NULL tags/kind inserts without error and content is searchable."""
+        from techne.core.database import connect
+        from techne.core.search import search_fts
+        from techne.core.state import start_session
+
+        session_id = start_session(db_path)
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier) "
+            "VALUES (?, CURRENT_TIMESTAMP, 'nulltagsprobe unique', 'hot')",
+            (session_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        results = search_fts(db_path, "nulltagsprobe", table="observations")
+        assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# Gap 2 (issue #50): _reconcile_fts_backfill populates FTS for historical rows
+# ---------------------------------------------------------------------------
+
+# Reuse SCHEMA_FTS_NO_TRIGGERS as the base — it has content tables + FTS tables
+# but no triggers, and the old single-column observations_fts definition.
+# We seed rows before calling the reconciler so they look like "historical" data.
+
+SCHEMA_HISTORICAL_ROWS = SCHEMA_FTS_NO_TRIGGERS
+
+
+class TestReconcileFtsBackfill:
+    """_reconcile_fts_backfill() populates FTS indexes for pre-existing rows (#50 Gap 2)."""
+
+    @pytest.fixture
+    def conn_with_rows(self, tmp_path):
+        """DB at v7: has rows in observations/threads/knowledge, empty FTS indexes."""
+        db = tmp_path / "historical.db"
+        c = sqlite3.connect(str(db))
+        c.row_factory = sqlite3.Row
+        # Use the old single-column observations_fts so we can test backfill into
+        # the new multi-column shape after the migration drops+recreates it.
+        c.executescript(SCHEMA_HISTORICAL_ROWS)
+        c.execute("INSERT INTO schema_version (version) VALUES (7)")
+        # Seed a session + observation row (no triggers, so FTS stays empty)
+        c.execute("INSERT INTO sessions (id, platform) VALUES ('s-hist', 'test')")
+        c.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier, tags, kind) "
+            "VALUES ('s-hist', CURRENT_TIMESTAMP, 'historicalprobe content', 'hot',"
+            " 'backfill-tag', 'fact-shaped')"
+        )
+        # Seed a knowledge row
+        c.execute(
+            "INSERT INTO knowledge"
+            " (type, content, tags, confidence, confidence_numeric, last_confirmed_at) "
+            "VALUES ('fact', 'knowledge-backfill-probe text', 'ktag', 'medium', 0.6,"
+            " CURRENT_TIMESTAMP)"
+        )
+        c.commit()
+        return c
+
+    def test_fts_empty_before_backfill(self, conn_with_rows):
+        """Sanity: FTS index has no indexed docs before reconciler runs.
+
+        Content-table FTS5 VTs report COUNT(*) from the source table even when
+        the index is empty — use the _docsize shadow table instead, which only
+        counts actually-indexed documents.
+        """
+        count = conn_with_rows.execute("SELECT COUNT(*) FROM observations_fts_docsize").fetchone()[
+            0
+        ]
+        assert count == 0
+
+    def test_backfill_populates_observations_fts(self, tmp_path):
+        """connect() on upgraded DB backfills observations_fts for historical rows."""
+        from techne.core.database import connect
+
+        # Build the DB raw (at v7, old schema, rows inserted, no triggers/backfill)
+        db = tmp_path / "backfill_obs.db"
+        c = sqlite3.connect(str(db))
+        c.executescript(SCHEMA_HISTORICAL_ROWS)
+        c.execute("INSERT INTO schema_version (version) VALUES (7)")
+        c.execute("INSERT INTO sessions (id, platform) VALUES ('s-bf', 'test')")
+        c.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier, tags, kind) "
+            "VALUES ('s-bf', CURRENT_TIMESTAMP, 'historicalbfprobe', 'hot', 'bf-tag',"
+            " 'fact-shaped')"
+        )
+        c.commit()
+        c.close()
+
+        # connect() runs _migrate (v7→v8 drops+recreates observations_fts, backfills)
+        # then _reconcile_fts_backfill for any remaining empty FTS tables.
+        conn = connect(db)
+        try:
+            row = conn.execute(
+                "SELECT rowid FROM observations_fts"
+                " WHERE observations_fts MATCH 'historicalbfprobe'"
+            ).fetchone()
+            assert row is not None, "historical observation not found in FTS after backfill"
+
+            # Also verify tags were backfilled into the new multi-column index.
+            # Wrap in quotes so FTS5 treats it as a phrase, not NOT-operator syntax.
+            row_tag = conn.execute(
+                "SELECT rowid FROM observations_fts WHERE observations_fts MATCH '\"bf-tag\"'",
+            ).fetchone()
+            assert row_tag is not None, "historical tag not indexed in FTS after backfill"
+        finally:
+            conn.close()
+
+    def test_backfill_populates_knowledge_fts(self, tmp_path):
+        """connect() on upgraded DB backfills knowledge_fts for historical rows."""
+        from techne.core.database import connect
+
+        db = tmp_path / "backfill_know.db"
+        c = sqlite3.connect(str(db))
+        c.executescript(SCHEMA_HISTORICAL_ROWS)
+        c.execute("INSERT INTO schema_version (version) VALUES (7)")
+        c.execute("INSERT INTO sessions (id, platform) VALUES ('s-kbf', 'test')")
+        c.execute(
+            "INSERT INTO knowledge"
+            " (type, content, tags, confidence, confidence_numeric, last_confirmed_at) "
+            "VALUES ('fact', 'knowledgebfprobe text', 'ktag-bf', 'medium', 0.6, CURRENT_TIMESTAMP)"
+        )
+        c.commit()
+        c.close()
+
+        conn = connect(db)
+        try:
+            row = conn.execute(
+                "SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH 'knowledgebfprobe'"
+            ).fetchone()
+            assert row is not None, "historical knowledge not found in FTS after backfill"
+        finally:
+            conn.close()
+
+    def test_backfill_idempotent(self, tmp_path):
+        """Running connect() twice doesn't duplicate FTS rows."""
+        from techne.core.database import connect
+
+        db = tmp_path / "backfill_idem.db"
+        c = sqlite3.connect(str(db))
+        c.executescript(SCHEMA_HISTORICAL_ROWS)
+        c.execute("INSERT INTO schema_version (version) VALUES (7)")
+        c.execute("INSERT INTO sessions (id, platform) VALUES ('s-idem', 'test')")
+        c.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier) "
+            "VALUES ('s-idem', CURRENT_TIMESTAMP, 'idempotentbfprobe', 'hot')"
+        )
+        c.commit()
+        c.close()
+
+        # First connect: backfills
+        conn1 = connect(db)
+        count1 = conn1.execute("SELECT COUNT(*) FROM observations_fts").fetchone()[0]
+        conn1.close()
+
+        # Second connect: should be a no-op (FTS already populated)
+        conn2 = connect(db)
+        count2 = conn2.execute("SELECT COUNT(*) FROM observations_fts").fetchone()[0]
+        conn2.close()
+
+        assert count1 == count2 == 1, f"idempotency broken: first={count1}, second={count2}"
