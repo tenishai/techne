@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 from click.testing import CliRunner
 
-from techne.core.database import _migrate, _reconcile_columns
+from techne.core.database import _migrate, _reconcile_columns, _reconcile_tables
 
 V1_OUTBOX_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -587,3 +587,131 @@ class TestMigrateSummariesNoop:
 
         assert result.exit_code == 0, result.output
         assert "nothing to do (already migrated)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_tables() — creates missing tables on existing DBs (#43)
+# ---------------------------------------------------------------------------
+
+# A minimal schema with schema_version + sessions only (no extension_state,
+# no checkpoints, no FTS tables — simulates an upgraded DB that pre-dates
+# those tables being added to SCHEMA_SQL).
+SCHEMA_WITHOUT_EXTENSION_STATE = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,
+    project_path TEXT,
+    agent_identity TEXT,
+    platform TEXT DEFAULT 'claude-code',
+    summary TEXT,
+    summary_llm TEXT,
+    summary_heuristic TEXT,
+    summary_llm_source TEXT
+);
+"""
+
+
+class TestReconcileTables:
+    """_reconcile_tables() creates tables present in SCHEMA_SQL but absent live."""
+
+    @pytest.fixture
+    def conn_missing_tables(self, tmp_path):
+        """DB with schema_version + sessions only — all other SCHEMA_SQL tables absent."""
+        db = tmp_path / "missing_tables.db"
+        c = sqlite3.connect(str(db))
+        c.row_factory = sqlite3.Row
+        c.executescript(SCHEMA_WITHOUT_EXTENSION_STATE)
+        c.execute("INSERT INTO schema_version (version) VALUES (7)")
+        c.commit()
+        return c
+
+    def test_missing_table_created(self, conn_missing_tables):
+        """extension_state absent before reconcile → present after."""
+        tables_before = {
+            r[0]
+            for r in conn_missing_tables.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "extension_state" not in tables_before
+
+        _reconcile_tables(conn_missing_tables)
+
+        tables_after = {
+            r[0]
+            for r in conn_missing_tables.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "extension_state" in tables_after
+
+    def test_missing_table_accepts_insert(self, conn_missing_tables):
+        """After reconcile, extension_state accepts a row insert without error."""
+        _reconcile_tables(conn_missing_tables)
+        conn_missing_tables.execute(
+            "INSERT INTO extension_state (name, payload_json, updated_at) VALUES (?, ?, ?)",
+            ("hook.state", '{"k":"v"}', 1718000000),
+        )
+        conn_missing_tables.commit()
+        count = conn_missing_tables.execute("SELECT COUNT(*) FROM extension_state").fetchone()[0]
+        assert count == 1
+
+    def test_virtual_fts_tables_created(self, conn_missing_tables):
+        """FTS virtual tables (threads_fts, observations_fts, knowledge_fts) are created."""
+        # FTS tables depend on their content tables existing; wire the full set.
+        _reconcile_tables(conn_missing_tables)
+        for fts_table in ("threads_fts", "observations_fts", "knowledge_fts"):
+            row = conn_missing_tables.execute(
+                "SELECT name FROM sqlite_master WHERE name=?", (fts_table,)
+            ).fetchone()
+            assert row is not None, f"{fts_table} was not created by _reconcile_tables()"
+
+    def test_idempotent_no_error(self, conn_missing_tables):
+        """Running _reconcile_tables() twice raises no error (IF NOT EXISTS guards)."""
+        _reconcile_tables(conn_missing_tables)
+        _reconcile_tables(conn_missing_tables)  # second pass must be a no-op
+
+    def test_existing_tables_not_touched(self, conn_missing_tables):
+        """The sessions table that was already present survives unchanged."""
+        conn_missing_tables.execute("INSERT INTO sessions (id, platform) VALUES ('s-keep', 'test')")
+        conn_missing_tables.commit()
+
+        _reconcile_tables(conn_missing_tables)
+
+        count = conn_missing_tables.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        assert count == 1
+
+    def test_mixed_missing_table_and_missing_column(self, tmp_path):
+        """Reconciler handles a DB where a table is missing AND an existing
+        table has a missing column — both are fixed in one connect() call."""
+        from techne.core.database import connect
+
+        db = tmp_path / "mixed.db"
+        conn_raw = sqlite3.connect(str(db))
+        # sessions without agent_identity; no extension_state table at all.
+        conn_raw.executescript(
+            SCHEMA_WITHOUT_EXTENSION_STATE.replace("    agent_identity TEXT,\n", "")
+        )
+        conn_raw.execute("INSERT INTO schema_version (version) VALUES (7)")
+        conn_raw.commit()
+        conn_raw.close()
+
+        conn = connect(db)
+        try:
+            # extension_state created by _reconcile_tables
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='extension_state'"
+            ).fetchone()
+            assert row is not None
+
+            # agent_identity added by _reconcile_columns
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+            assert "agent_identity" in cols
+        finally:
+            conn.close()

@@ -379,12 +379,54 @@ class TestV3ToCurrentRoundTrip:
         finally:
             conn.close()
 
-    # NOTE: checkpoints, extension_state, and FTS tables are defined in SCHEMA_SQL
-    # but _ensure_initialized only runs SCHEMA_SQL on a *fresh* (no schema_version
-    # table) database. On an existing v3 DB it runs _migrate() + _reconcile_columns(),
-    # neither of which CREATE TABLE for those tables. They will be absent on a
-    # v3→current migrated DB — this is known behaviour, not a bug. Fresh installs
-    # get the full schema; upgrades get additive column reconciliation only.
+    # ------------------------------------------------------------------
+    # Tables created by the reconciler (no version bump, no _migrate() entry)
+    # ------------------------------------------------------------------
+
+    def test_reconciler_creates_extension_state(self, v3_db: Path):
+        """extension_state (added to SCHEMA_SQL in #18) is created on v3→current."""
+        conn = connect(v3_db)
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='extension_state'"
+            ).fetchone()
+            assert row is not None
+            # Must accept an insert
+            conn.execute(
+                "INSERT INTO extension_state (name, payload_json, updated_at) "
+                "VALUES ('test.key', '{\"x\":1}', 1718000000)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_reconciler_creates_checkpoints(self, v3_db: Path):
+        """checkpoints table is created on v3→current by the reconciler."""
+        conn = connect(v3_db)
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+            ).fetchone()
+            assert row is not None
+            conn.execute(
+                "INSERT INTO checkpoints (session_id, trigger, data_json) "
+                "VALUES ('sess-v3-001', 'test', '{}')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_reconciler_creates_fts_tables(self, v3_db: Path):
+        """FTS virtual tables are created on v3→current by the reconciler."""
+        conn = connect(v3_db)
+        try:
+            for fts_table in ("threads_fts", "observations_fts", "knowledge_fts"):
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name=?", (fts_table,)
+                ).fetchone()
+                assert row is not None, f"{fts_table} missing after v3→current migration"
+        finally:
+            conn.close()
 
     def test_connect_is_idempotent(self, v3_db: Path):
         """Calling connect() a second time on an already-migrated db is a no-op."""
