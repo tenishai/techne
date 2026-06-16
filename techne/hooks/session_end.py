@@ -48,6 +48,13 @@ def main():
         except Exception as e:
             print(f"techne: outbox flush deferred: {e}", file=sys.stderr)
 
+        try:
+            from techne.sync.outbox import flush_sinks
+
+            flush_sinks(config.db_path)
+        except Exception as e:
+            print(f"techne: sink flush deferred: {e}", file=sys.stderr)
+
         print(
             f"techne: session archived ({obs_count} obs, {result['threads']} threads)",
             file=sys.stderr,
