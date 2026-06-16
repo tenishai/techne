@@ -48,6 +48,7 @@ from techne.core.threads.labels import generate_label as generate_label
 from techne.core.threads.persistence import (
     boundary_indices_from_segments as boundary_indices_from_segments,
 )
+from techne.core.threads.persistence import bucket_hash as bucket_hash
 from techne.core.threads.persistence import load_boundaries as load_boundaries
 from techne.core.threads.persistence import save_boundaries as save_boundaries
 
