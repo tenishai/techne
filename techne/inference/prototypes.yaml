@@ -1,0 +1,83 @@
+# Inference prototypes for tag + kind classification.
+# Each entry is a short example sentence per tag/kind.
+# Operator can override or extend by placing a file at
+# ~/.techne/prototypes.yaml (merged at startup, user entries win on conflict).
+#
+# Format: flat mapping of label -> list[str]
+# Labels prefixed with "kind:" are used for kind classification;
+# all others are used as tags.
+
+decision:
+  - "We decided to use PostgreSQL instead of SQLite"
+  - "The team agreed to defer the feature until Q3"
+  - "We chose FastAPI over Flask for the new service"
+  - "Decided to drop backward compat for version 2"
+
+fact:
+  - "The API returns JSON with a status field"
+  - "Port 8080 is used for the local dev server"
+  - "The database connection limit is 20 by default"
+  - "Environment variable TECHNE_DB controls the database path"
+
+question:
+  - "Should we migrate to async handlers?"
+  - "What is the best approach for caching here?"
+  - "How do we handle rate limiting on the public endpoint?"
+  - "Is this pattern thread-safe?"
+
+rationale:
+  - "We chose this approach because it avoids network round-trips"
+  - "The reason for the timeout is to prevent runaway jobs"
+  - "This design was picked to keep zero runtime dependencies"
+  - "The tradeoff here is latency vs. throughput"
+
+todo:
+  - "TODO: add retry logic for transient network errors"
+  - "Need to write tests for the edge case where input is empty"
+  - "Follow up: benchmark this against the current implementation"
+  - "Still need to wire up the auth middleware"
+
+bug-report:
+  - "Crash when the config file is missing the db_path key"
+  - "The search returns duplicates when the query contains special characters"
+  - "Null pointer exception on startup if identity dir is unset"
+  - "Race condition in the file watcher when two events fire simultaneously"
+
+architecture:
+  - "The service uses a layered architecture: API, core, persistence"
+  - "All state lives in SQLite; no external services required"
+  - "The pipeline follows an extract-transform-load pattern"
+  - "Components communicate via message queues, not direct calls"
+
+context:
+  - "Currently working on the authentication module"
+  - "The session started with debugging the import error"
+  - "Exploring options for the new summarization feature"
+  - "In the middle of refactoring the thread detection logic"
+
+# --- Kind classifiers ---
+# These compete against each other; highest score wins.
+
+kind:decision-shaped:
+  - "We decided to use this approach"
+  - "The team agreed on PostgreSQL as the database"
+  - "Chose to defer until next sprint after discussing tradeoffs"
+  - "Final call: drop the legacy endpoint"
+
+kind:fact-shaped:
+  - "The API endpoint returns a JSON object with these fields"
+  - "Default timeout is 30 seconds per the documentation"
+  - "The config file lives at ~/.techne/config.yaml"
+  - "This environment variable controls the log level"
+
+kind:question-shaped:
+  - "How should we handle authentication for external users?"
+  - "What is the right tradeoff between latency and consistency?"
+  - "Should we add caching here or rely on the database index?"
+  - "Is there a simpler way to accomplish this?"
+
+kind:observation-shaped:
+  - "Read file config.py and updated the timeout value"
+  - "Ran the test suite and 3 tests failed"
+  - "Opened the database connection and fetched the row"
+  - "Called the external API and received a 200 response"

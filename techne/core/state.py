@@ -253,13 +253,20 @@ def add_observation(
     tool_name: str,
     content: str,
     tier: str = "hot",
+    config=None,
 ):
+    from techne.core.inference import infer
+
+    redacted = redact_credentials(content)
+    result = infer(redacted, config)
+    tags_str = " ".join(result.tags) if result.tags else None
+
     conn = connect(db_path)
     try:
         conn.execute(
-            """INSERT INTO observations (session_id, tool_name, content, tier)
-               VALUES (?, ?, ?, ?)""",
-            (session_id, tool_name, redact_credentials(content), tier),
+            """INSERT INTO observations (session_id, tool_name, content, tier, tags, kind)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_id, tool_name, redacted, tier, tags_str, result.kind),
         )
         conn.commit()
     finally:
@@ -273,7 +280,7 @@ def get_observations(
 ) -> list[dict]:
     conn = connect(db_path)
     try:
-        query = """SELECT id, session_id, thread_id, timestamp, tool_name, content, tier
+        query = """SELECT id, session_id, thread_id, timestamp, tool_name, content, tier, tags, kind
                    FROM observations WHERE session_id = ? ORDER BY timestamp"""
         params: list = [session_id]
         if limit:

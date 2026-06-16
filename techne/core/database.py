@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);
 CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id);
 
 -- Observations (tool use captures)
+-- tags: whitespace-separated inferred tag tokens (embedding-based, see core/inference.py)
+-- kind: highest-scoring kind label (decision-shaped / fact-shaped / question-shaped)
 CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -56,7 +58,9 @@ CREATE TABLE IF NOT EXISTS observations (
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     tool_name TEXT,
     content TEXT NOT NULL,
-    tier TEXT NOT NULL DEFAULT 'hot'
+    tier TEXT NOT NULL DEFAULT 'hot',
+    tags TEXT,
+    kind TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
 CREATE INDEX IF NOT EXISTS idx_observations_thread ON observations(thread_id);
@@ -427,4 +431,14 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
             CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
         """)
         conn.execute("INSERT INTO schema_version (version) VALUES (6)")
+    if from_version < 7 and to_version >= 7:
+        # Add inferred tag + kind columns to observations.
+        # tags: whitespace-separated token list from embedding-based inference.
+        # kind: highest-scoring kind label (decision-shaped / fact-shaped /
+        #        question-shaped / observation-shaped).
+        conn.executescript("""
+            ALTER TABLE observations ADD COLUMN tags TEXT;
+            ALTER TABLE observations ADD COLUMN kind TEXT;
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (7)")
     conn.commit()
