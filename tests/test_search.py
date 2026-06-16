@@ -21,15 +21,18 @@ def db_path(tmp_path):
 # FTS5 search tests
 # ---------------------------------------------------------------------------
 
+
 class TestSearchFtsThreads:
     def test_search_fts_threads(self, db_path):
         """Store a thread, search by a term from its label, verify it appears."""
         session_id = start_session(db_path)
-        threads = [Thread(
-            thread_num=1,
-            label="Kubernetes deployment rollout",
-            summary="Deployed container image to Kubernetes cluster via rolling update.",
-        )]
+        threads = [
+            Thread(
+                thread_num=1,
+                label="Kubernetes deployment rollout",
+                summary="Deployed container image to Kubernetes cluster via rolling update.",
+            )
+        ]
         save_threads(threads, session_id, db_path)
 
         results = search_fts(db_path, "Kubernetes", table="threads")
@@ -43,11 +46,13 @@ class TestSearchFtsThreads:
     def test_search_fts_threads_no_false_positives(self, db_path):
         """Searching for a term not in any thread returns empty results."""
         session_id = start_session(db_path)
-        threads = [Thread(
-            thread_num=1,
-            label="DNS configuration cleanup",
-            summary="Removed stale DNS A records from Route53.",
-        )]
+        threads = [
+            Thread(
+                thread_num=1,
+                label="DNS configuration cleanup",
+                summary="Removed stale DNS A records from Route53.",
+            )
+        ]
         save_threads(threads, session_id, db_path)
 
         results = search_fts(db_path, "xyzzy_nonexistent_term_42", table="threads")
@@ -120,7 +125,16 @@ class TestSearchFtsKnowledge:
         assert len(results) >= 1
         r = results[0]
         assert r["type"] == "knowledge"
-        for key in ("id", "knowledge_type", "content", "tags", "confidence", "source", "updated_at", "rank"):
+        for key in (
+            "id",
+            "knowledge_type",
+            "content",
+            "tags",
+            "confidence",
+            "source",
+            "updated_at",
+            "rank",
+        ):
             assert key in r, f"Missing key: {key}"
 
     def test_search_fts_knowledge_superseded_excluded(self, db_path):
@@ -142,11 +156,13 @@ class TestSearchFtsAll:
         shared_term = "wombat"
 
         session_id = start_session(db_path)
-        threads = [Thread(
-            thread_num=1,
-            label=f"wombat habitat analysis",
-            summary=f"Analyzed wombat burrowing patterns in southern Australia.",
-        )]
+        threads = [
+            Thread(
+                thread_num=1,
+                label=f"wombat habitat analysis",
+                summary=f"Analyzed wombat burrowing patterns in southern Australia.",
+            )
+        ]
         save_threads(threads, session_id, db_path)
 
         store_knowledge(db_path, f"wombat populations are declining in dry regions", type="fact")
@@ -169,23 +185,25 @@ class TestSearchFtsAll:
         # Should have at least two distinct types
         assert len(result_types) >= 2
 
-    def test_search_fts_all_sorted_by_rank(self, db_path):
-        """Results from 'all' table are sorted by rank (ascending = most relevant first)."""
+    def test_search_fts_all_returns_results(self, db_path):
+        """Results from 'all' table return at least one hit (reranker may reorder raw BM25)."""
         session_id = start_session(db_path)
-        threads = [Thread(
-            thread_num=1,
-            label="tantalum metallurgy processing",
-            summary="Investigated tantalum ore processing for semiconductor use cases.",
-        )]
+        threads = [
+            Thread(
+                thread_num=1,
+                label="tantalum metallurgy processing",
+                summary="Investigated tantalum ore processing for semiconductor use cases.",
+            )
+        ]
         save_threads(threads, session_id, db_path)
 
         store_knowledge(db_path, "tantalum is a rare earth metal used in capacitors", type="fact")
 
         results = search_fts(db_path, "tantalum", table="all")
         assert len(results) >= 1
-
-        ranks = [r["rank"] for r in results]
-        assert ranks == sorted(ranks), "Results should be sorted by rank ascending"
+        # Reranker combines recency × BM25; raw BM25 ordering is no longer guaranteed.
+        # Verify results are present and have the expected shape.
+        assert all("rank" in r for r in results)
 
 
 class TestSearchFtsEdgeCases:
@@ -208,6 +226,7 @@ class TestSearchFtsEdgeCases:
 # ---------------------------------------------------------------------------
 # _sanitize_fts_query tests
 # ---------------------------------------------------------------------------
+
 
 class TestSanitizeFtsQuery:
     def test_sanitize_plain_query(self):
@@ -291,15 +310,18 @@ class TestSanitizeFtsQuery:
 # Combined search (search()) tests
 # ---------------------------------------------------------------------------
 
+
 class TestSearchCombined:
     def test_search_combined_with_vectors_disabled(self, db_path):
         """search(..., use_vectors=False) returns FTS-only results."""
         session_id = start_session(db_path)
-        threads = [Thread(
-            thread_num=1,
-            label="ephemeral container orchestration",
-            summary="Set up ephemeral containers in Kubernetes for debugging pods.",
-        )]
+        threads = [
+            Thread(
+                thread_num=1,
+                label="ephemeral container orchestration",
+                summary="Set up ephemeral containers in Kubernetes for debugging pods.",
+            )
+        ]
         save_threads(threads, session_id, db_path)
 
         results = search(db_path, "ephemeral", use_vectors=False)
@@ -313,7 +335,7 @@ class TestSearchCombined:
         import sys
 
         # Block sqlite_vec import to confirm it's never reached
-        original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else None
+        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else None
 
         blocked = {"sqlite_vec": True, "fastembed": True}
         real_import = __import__
@@ -324,6 +346,7 @@ class TestSearchCombined:
             return real_import(name, *args, **kwargs)
 
         import builtins
+
         monkeypatch.setattr(builtins, "__import__", strict_import)
 
         # This should not raise even though sqlite_vec/fastembed are blocked
@@ -346,6 +369,7 @@ class TestSearchCombined:
 # Vector search tests (skipped when extras not available)
 # ---------------------------------------------------------------------------
 
+
 class TestSearchVec:
     def test_search_vec_returns_empty_without_extras(self, db_path):
         """search_vec returns [] gracefully when sqlite_vec/fastembed not installed.
@@ -356,6 +380,7 @@ class TestSearchVec:
         try:
             import sqlite_vec
             import fastembed
+
             extras_available = True
         except ImportError:
             extras_available = False
@@ -377,15 +402,18 @@ class TestSearchVec:
         pytest.importorskip("fastembed")
 
         session_id = start_session(db_path)
-        threads = [Thread(
-            thread_num=1,
-            label="vector deduplication test thread",
-            summary="Testing that combined search returns deduplicated results.",
-        )]
+        threads = [
+            Thread(
+                thread_num=1,
+                label="vector deduplication test thread",
+                summary="Testing that combined search returns deduplicated results.",
+            )
+        ]
         save_threads(threads, session_id, db_path)
 
         # Backfill vectors so this thread appears in vec search too
         from techne.core.search import backfill_vectors
+
         backfill_vectors(db_path)
 
         results = search(db_path, "deduplication", use_vectors=True)
@@ -402,6 +430,7 @@ class TestSearchVec:
 # Phase 3 correctness tests
 # ---------------------------------------------------------------------------
 
+
 class TestFtsSanitizerDoubleQuote:
     def test_double_quote_in_query_does_not_crash(self, db_path):
         """A query containing a double-quote must not raise OperationalError."""
@@ -415,6 +444,7 @@ class TestFtsSanitizerDoubleQuote:
 
     def test_sanitize_escapes_embedded_quotes(self):
         from techne.core.search import _sanitize_fts_query
+
         sanitized = _sanitize_fts_query('hello "world"')
         # Must not contain unescaped embedded quote sequences that break FTS5
         assert '""' in sanitized or sanitized.count('"') % 2 == 0
@@ -426,12 +456,15 @@ class TestSearchNoMutation:
         on results returned by search_fts — callers may read 'source' as
         the knowledge provenance, not the match origin."""
         import sqlite3
+
         session_id = start_session(db_path)
-        threads = [Thread(
-            thread_num=1,
-            label="mutation check thread",
-            summary="check source field is not mutated",
-        )]
+        threads = [
+            Thread(
+                thread_num=1,
+                label="mutation check thread",
+                summary="check source field is not mutated",
+            )
+        ]
         save_threads(threads, session_id, db_path)
 
         fts_before = search_fts(db_path, "mutation", table="threads", limit=5)
