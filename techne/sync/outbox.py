@@ -31,40 +31,34 @@ def enqueue(
 ):
     """Add an entry to the outbox. Deduplicates by content_hash.
 
-    Raises UnknownSinkError if no sink is registered for *target*.
-    Raises InvalidPayloadError if *data* fails the sink's schema validation.
+    Always validates *target* against the sink registry (raises UnknownSinkError
+    if not registered) and validates *data* against the sink's payload schema
+    (raises InvalidPayloadError on mismatch). No orphan rows can be created.
 
-    When deliver=True (default), calls the sink handler synchronously after
-    inserting — transactional-outbox pattern. Failures leave the row pending
-    for the next flush_sinks cycle; the caller never sees them.
+    deliver=True (default): calls the sink handler synchronously after inserting
+    — transactional-outbox pattern. Failures leave the row pending for the next
+    flush_sinks cycle; the caller never sees them.
 
-    Pass deliver=False for tests or bulk-import scenarios where you want
-    durable rows without triggering immediate delivery.
+    deliver=False: skips immediate delivery; row stays pending for the next
+    flush_sinks call. Use for tests or bulk-import scenarios where you want
+    durable rows without triggering handlers.
     """
     from techne.sync.sinks import (
         InvalidPayloadError,
         UnknownSinkError,
         get_sink,
+        list_sinks,
     )
 
-    # Sink validation and immediate delivery only apply when deliver=True.
-    # Callers that pass deliver=False are on the adapter path (team-backend
-    # sync via flush(adapter)) and don't need a registered sink.
-    sink = None
-    if deliver:
-        sink = get_sink(target)
-        if sink is None:
-            from techne.sync.sinks import list_sinks
+    sink = get_sink(target)
+    if sink is None:
+        available = [s.name for s in list_sinks()]
+        raise UnknownSinkError(f"No sink registered for target={target!r}. Available: {available}")
 
-            available = [s.name for s in list_sinks()]
-            raise UnknownSinkError(
-                f"No sink registered for target={target!r}. Available: {available}"
-            )
-
-        try:
-            sink.payload_schema(**data)
-        except TypeError as e:
-            raise InvalidPayloadError(target, str(e)) from e
+    try:
+        sink.payload_schema(**data)
+    except TypeError as e:
+        raise InvalidPayloadError(target, str(e)) from e
 
     if content_hash is None:
         content_hash = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
@@ -81,7 +75,7 @@ def enqueue(
     finally:
         conn.close()
 
-    if deliver and sink and inserted_id:
+    if deliver and inserted_id:
         _try_deliver_now(db_path, sink, inserted_id, data)
 
 

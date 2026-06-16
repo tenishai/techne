@@ -5,7 +5,39 @@ directly when embedding techne in a runtime that isn't Claude Code (e.g., a
 custom agent process or notebook).
 """
 
+from dataclasses import dataclass
+
 from techne.config import Config
+
+
+@dataclass
+class ThreadSummaryPayload:
+    session_id: str
+    thread_id: str
+    thread_label: str
+    summary: str
+    resume_points: list
+    agent_identity: str
+
+
+def _register_lifecycle_sinks() -> None:
+    """Register adapter-bound sinks that defer to flush(adapter) for delivery.
+
+    These sinks exist solely so enqueue validates the target at call time.
+    The handler returns ok=False so the row stays pending; flush(adapter)
+    drains it via the team-backend path on the next sync cycle.
+    """
+    from techne.sync.sinks import DeliveryResult, OutboxSink, get_sink, register_sink
+
+    if get_sink("thread_summary") is None:
+        register_sink(
+            OutboxSink(
+                name="thread_summary",
+                payload_schema=ThreadSummaryPayload,
+                handler=lambda _: DeliveryResult(ok=False, error=None),
+                description="Thread summaries queued for team-backend sync via flush(adapter).",
+            )
+        )
 
 
 def run_session_start(
@@ -106,6 +138,7 @@ def run_session_end(
     )
     from techne.sync.outbox import enqueue
 
+    _register_lifecycle_sinks()
     observations = get_observations(config.db_path, session_id)
     threads, scores = detect_summarize_with_metadata(observations, config)
 
@@ -140,7 +173,6 @@ def run_session_end(
                 "resume_points": t.resume_points,
                 "agent_identity": agent_identity,
             },
-            deliver=False,
         )
         queued += 1
 
@@ -224,6 +256,7 @@ def redetect_threads(
     )
     from techne.sync.outbox import enqueue
 
+    _register_lifecycle_sinks()
     observations = get_observations(config.db_path, session_id)
     threads, scores = detect_summarize_with_metadata(observations, config)
 
@@ -271,7 +304,6 @@ def redetect_threads(
                     "resume_points": t.resume_points,
                     "agent_identity": agent_identity,
                 },
-                deliver=False,
             )
             queued += 1
 
