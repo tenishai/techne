@@ -7,6 +7,18 @@ from pathlib import Path
 
 SCHEMA_VERSION = 8
 
+# Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
+# See CONTRIBUTING.md for the full decision tree and real examples.
+#
+# Short version:
+#   _migrate()        — data backfill, destructive change (DROP/rebuild), or a migration
+#                       step that must assume a prior structural precondition. Bump
+#                       SCHEMA_VERSION; update SCHEMA_SQL to match post-migration state.
+#   SCHEMA_SQL only   — purely additive: new nullable column, new table, new index, new
+#                       trigger. The reconciler (_reconcile_tables / _reconcile_columns /
+#                       _reconcile_triggers) diffs SCHEMA_SQL against the live DB on every
+#                       connect and applies the delta automatically.
+
 SCHEMA_SQL = """
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
