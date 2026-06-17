@@ -98,7 +98,31 @@ def main():
         output_parts.append("")
 
     if output_parts:
-        print("\n".join(output_parts))
+        summary = "\n".join(output_parts)
+        # SessionStart stdout is added to *Claude's* context but is NOT shown
+        # to the human user. To surface a banner in the terminal we emit a
+        # JSON object: `additionalContext` (nested under hookSpecificOutput)
+        # feeds the model the full summary, while `systemMessage` is a
+        # TOP-LEVEL field — the one documented place that renders a
+        # user-visible message. (It was previously nested under
+        # hookSpecificOutput, where Claude Code silently ignores it, so the
+        # user saw nothing.)
+        #
+        # The user-visible line is just the health banner (first part), not
+        # the full thread/knowledge dump — that detail stays in context for
+        # the model.
+        banner = output_parts[0] if output_parts else summary
+        print(
+            json.dumps(
+                {
+                    "systemMessage": banner,
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": summary,
+                    },
+                }
+            )
+        )
 
     # Store session_id for downstream hooks
     print(json.dumps({"session_id": session_id}), file=sys.stderr)

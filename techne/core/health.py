@@ -48,8 +48,9 @@ def format_banner(health: dict) -> str:
     """Render the terse login banner. Warnings only when something is off."""
     if not health.get("db_ok", False):
         return (
-            f"## techne ⚠️ DB UNREACHABLE\n"
-            f"{health['db_path']}: {health.get('error', 'unknown error')}"
+            f"## techne ⚠️\n"
+            f"> DB UNREACHABLE — {health['db_path']}: "
+            f"{health.get('error', 'unknown error')}"
         )
 
     build = health["build"]
@@ -59,11 +60,14 @@ def format_banner(health: dict) -> str:
     mark = "✅" if healthy else "⚠️"
     build_note = "live" if healthy else "installed — may lag repo HEAD"
 
-    lines = [f"## techne {mark} v{health['version']} · {build_note}"]
+    # techne owns its own heading line (renders bright/high-white in the
+    # terminal markdown); the stats fold into a blockquote beneath it.
+    lines = [f"## techne {mark}"]
 
     last = health.get("last_session") or "—"
+    lines.append(f"> v{health['version']} · {build_note}")
     lines.append(
-        f"{health['observations']} obs · {health['threads']} threads "
+        f"> {health['observations']} obs · {health['threads']} threads "
         f"({health['active_threads']} active) · {health['knowledge']} knowledge "
         f"· last session {last}"
     )
@@ -74,6 +78,6 @@ def format_banner(health: dict) -> str:
     if pending:
         adapter = health["sync_adapter"]
         obx_mark = "⚠️ " if adapter != "noop" else ""
-        lines.append(f"{obx_mark}outbox: {pending} pending (adapter={adapter})")
+        lines.append(f"> {obx_mark}outbox: {pending} pending (adapter={adapter})")
 
     return "\n".join(lines)
