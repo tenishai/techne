@@ -1,0 +1,42 @@
+# Frozen recall-eval tasks (#68). Each task's gold evidence is referenced by a
+# logical key (resolved to a type:id by seed_eval_db.py) plus a phrase rubric.
+# M1: 3 starter tasks. M2 expands to 5-10 and freezes the Phase-0 baseline.
+#
+# All three queries are natural-language / multi-word and deliberately contain
+# a term absent from the gold (no stemming in FTS), so they exercise the #70
+# OR-fallback path that real recall topics hit.
+#
+# NOTE: queries avoid literal FTS5 operator chars (e.g. "#") for now — those
+# crash search() pre-#74. Once #74 hardens _sanitize_fts_query, add a task with
+# "cabal#14" verbatim to lock in the fix.
+
+config:
+  top_k: 10
+
+tasks:
+  - id: cabal14-design
+    category: decision-recall
+    query: "cabal 14 archivist outbox decision and rationale"
+    table: all
+    gold_keys: [cabal14]
+    must_include_phrases: ["mailbox-as-tag-slice"]
+    must_exclude_phrases: []
+    weight: 1.0
+
+  - id: adapter-recency
+    category: activity-recall
+    query: "techne sync adapter py SourceAdapter relocation"
+    table: observations
+    gold_keys: [adapter_touch]
+    must_include_phrases: ["adapter.py"]
+    must_exclude_phrases: []
+    weight: 1.0
+
+  - id: reflect-candidates
+    category: multiword-recall
+    query: "how does the reflect experiment promote candidates"
+    table: all
+    gold_keys: [reflect_candidates]
+    must_include_phrases: ["knowledge_candidates"]
+    must_exclude_phrases: []
+    weight: 1.0

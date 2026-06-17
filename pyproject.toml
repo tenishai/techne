@@ -67,3 +67,9 @@ select = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Keep the recall eval (#68) out of the default unit run — it's run explicitly
+# with `pytest -m eval`. Unit runs stay clean and fast.
+addopts = "-m 'not eval'"
+markers = [
+    "eval: recall-effectiveness eval cases (#68); excluded from default runs",
+]
