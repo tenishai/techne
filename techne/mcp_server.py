@@ -109,8 +109,16 @@ def _techne_resume(args: dict, config: Config) -> dict:
 
 
 def _techne_status(args: dict, config: Config) -> dict:
+    import techne
     from techne.core.state import db_stats
+
     stats = db_stats(config.db_path)
+    # Surface which build is actually live (#71). serverInfo carries the version
+    # in the MCP handshake, but the status payload didn't — leaving "is the
+    # running server current?" unanswerable from a normal tool call. package_path
+    # disambiguates editable-venv vs pipx installs that version-drift.
+    stats["version"] = __version__
+    stats["package_path"] = str(Path(techne.__file__).resolve().parent)
     stats["db_path"] = str(config.db_path)
     stats["sync_adapter"] = config.sync.adapter
     return stats
