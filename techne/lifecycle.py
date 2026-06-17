@@ -40,6 +40,16 @@ def _register_lifecycle_sinks() -> None:
         )
 
 
+def _has_live_consumer(config) -> bool:
+    """True when a real team backend can drain the outbox.
+
+    The thread_summary sink stub never delivers on its own — it defers to the
+    flush(adapter) path. With the noop adapter there is no consumer, so
+    enqueuing only grows an undrainable backlog. Gate enqueue on this.
+    """
+    return config.sync.adapter != "noop"
+
+
 def run_session_start(
     config: Config,
     project_path: str | None = None,
@@ -166,20 +176,21 @@ def run_session_end(
 
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     queued = 0
-    for t in threads:
-        enqueue(
-            config.db_path,
-            "thread_summary",
-            {
-                "session_id": session_id,
-                "thread_id": f"{session_id}-{t.thread_num}",
-                "thread_label": t.label,
-                "summary": t.summary,
-                "resume_points": t.resume_points,
-                "agent_identity": agent_identity,
-            },
-        )
-        queued += 1
+    if _has_live_consumer(config):
+        for t in threads:
+            enqueue(
+                config.db_path,
+                "thread_summary",
+                {
+                    "session_id": session_id,
+                    "thread_id": f"{session_id}-{t.thread_num}",
+                    "thread_label": t.label,
+                    "summary": t.summary,
+                    "resume_points": t.resume_points,
+                    "agent_identity": agent_identity,
+                },
+            )
+            queued += 1
 
     # Reflection pass — opt-in, never blocks session teardown. Writes proposals
     # to knowledge_candidates for human review (config.reflect.write_to controls
@@ -295,7 +306,7 @@ def redetect_threads(
     )
 
     queued = 0
-    if sync:
+    if sync and _has_live_consumer(config):
         agent_identity = os.environ.get("TECHNE_IDENTITY", "")
         for t in threads:
             enqueue(

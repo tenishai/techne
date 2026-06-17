@@ -318,6 +318,34 @@ def flush_sinks(db_path: Path) -> dict[str, tuple[int, int]]:
         conn.close()
 
 
+def purge_pending(db_path: Path, target: str | None = None) -> int:
+    """Delete pending outbox rows. Intentional, CLI-only.
+
+    Unlike prune_orphans (which only touches rows whose *target* has no sink),
+    this drains rows that are pending because no consumer exists to take them —
+    e.g. thread_summary rows under the noop adapter, which the sink stub never
+    delivers and no team backend drains. These rows are regenerable: the next
+    session_end re-enqueues current threads once a real adapter is configured,
+    so deleting the stale backlog loses nothing.
+
+    Pass *target* to restrict to one target; None purges all pending rows.
+    Returns the number of rows deleted.
+    """
+    conn = connect(db_path)
+    try:
+        if target is None:
+            cursor = conn.execute("DELETE FROM outbox WHERE status = 'pending'")
+        else:
+            cursor = conn.execute(
+                "DELETE FROM outbox WHERE status = 'pending' AND target = ?", (target,)
+            )
+        conn.commit()
+        logger.debug("purged %d pending outbox rows (target=%r)", cursor.rowcount, target)
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
 def prune_orphans(db_path: Path) -> int:
     """Mark pending rows for unregistered targets as dead.
 

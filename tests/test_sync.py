@@ -8,7 +8,15 @@ from techne.core.database import init_db
 from techne.sync.adapter import OutboxEntry, PushResult, SyncQuery, load_adapter
 from techne.sync.filesystem import FilesystemAdapter
 from techne.sync.noop import NoopAdapter
-from techne.sync.outbox import dead_count, enqueue, flush, list_dead, pending_count, stats
+from techne.sync.outbox import (
+    dead_count,
+    enqueue,
+    flush,
+    list_dead,
+    pending_count,
+    purge_pending,
+    stats,
+)
 from techne.sync.sinks import DeliveryResult, OutboxSink, use_registry
 
 
@@ -245,6 +253,34 @@ class TestOutbox:
         for e in dead_entries:
             assert e["error_message"] is not None
             assert "connection refused" in e["error_message"]
+
+    def test_purge_pending_all(self, db_path, registered_targets):
+        enqueue(db_path, "a", {"x": 1}, deliver=False)
+        enqueue(db_path, "b", {"y": 2}, deliver=False)
+        assert pending_count(db_path) == 2
+        deleted = purge_pending(db_path)
+        assert deleted == 2
+        assert pending_count(db_path) == 0
+
+    def test_purge_pending_by_target(self, db_path, registered_targets):
+        enqueue(db_path, "a", {"x": 1}, deliver=False)
+        enqueue(db_path, "b", {"y": 2}, deliver=False)
+        deleted = purge_pending(db_path, target="a")
+        assert deleted == 1
+        assert pending_count(db_path) == 1
+        # the 'b' row is untouched
+        assert stats(db_path)["pending"] == 1
+
+    def test_purge_pending_leaves_synced_and_dead(self, db_path, registered_targets):
+        # 'knowledge' sink delivers ok=True → synced; purge must not touch it
+        enqueue(db_path, "knowledge", {"content": "delivered"})
+        enqueue(db_path, "a", {"x": 1}, deliver=False)
+        assert stats(db_path)["synced"] == 1
+        deleted = purge_pending(db_path)
+        assert deleted == 1
+        s = stats(db_path)
+        assert s["synced"] == 1
+        assert s["pending"] == 0
 
     def test_enqueue_unknown_target_raises(self, db_path):
         """After tightening, enqueue with no registered sink raises UnknownSinkError."""

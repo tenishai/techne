@@ -537,6 +537,30 @@ def outbox_prune_orphans(ctx):
     click.echo(f"Pruned {pruned} orphan row(s).")
 
 
+@outbox.command("purge")
+@click.option("--target", default=None, help="Restrict to one target (default: all).")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def outbox_purge(ctx, target, yes):
+    """Delete pending rows that no consumer will drain (e.g. noop adapter).
+
+    Regenerable: the next session re-enqueues current threads once a real
+    adapter is configured.
+    """
+    config = ctx.obj["config"]
+    from techne.sync.outbox import pending_count, purge_pending
+
+    n = pending_count(config.db_path)
+    if n == 0:
+        click.echo("No pending rows to purge.")
+        return
+    scope = f"target={target!r}" if target else "all targets"
+    if not yes:
+        click.confirm(f"Delete {n} pending row(s) ({scope})?", abort=True)
+    deleted = purge_pending(config.db_path, target=target)
+    click.echo(f"Purged {deleted} pending row(s).")
+
+
 @main.group()
 @click.pass_context
 def sinks(ctx):

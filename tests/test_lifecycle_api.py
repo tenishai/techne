@@ -60,6 +60,11 @@ def test_run_session_end_full_lifecycle(config, db_path, monkeypatch):
     # Monkeypatch _make_generate_fn so no real LLM call is made
     monkeypatch.setattr(threads_mod, "_make_generate_fn", lambda cfg: fake_generate)
 
+    # Enqueue is gated on a live consumer (non-noop adapter); opt in so the
+    # queued>=1 assertion below exercises the enqueue path.
+    config.sync.adapter = "filesystem"
+    config.sync.path = str(db_path.parent / "sync-out")
+
     session_id = run_session_start(config)
 
     # Add enough observations to be interesting (above MIN_NEW_OBSERVATIONS=10 in hook,

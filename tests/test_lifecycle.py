@@ -318,6 +318,44 @@ def test_redetect_threads_no_sync_by_default(tmp_path):
     assert pending_count(db_path) == before
 
 
+def test_session_end_noop_adapter_does_not_enqueue(tmp_path):
+    """With the default noop adapter there is no consumer to drain the outbox,
+    so session_end must not enqueue thread summaries — otherwise the queue
+    grows an undrainable backlog (one row per thread, every session)."""
+    from datetime import datetime, timedelta
+
+    from techne.config import Config
+    from techne.core.database import connect, init_db
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+    from techne.sync.outbox import pending_count
+
+    db_path = tmp_path / "noop.db"
+    init_db(db_path)
+    config = Config()  # adapter defaults to "noop"
+    config.db_path = db_path
+    config.threads.detector = "heuristic"
+    config.threads.summarizer = "heuristic"
+    assert config.sync.adapter == "noop"
+
+    session_id = start_session(db_path, project_path="/proj", agent_identity="t")
+    base = datetime(2026, 1, 1, 12, 0)
+    for i in range(4):
+        ts = (base + timedelta(minutes=i)).isoformat()
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+            "VALUES (?, ?, ?, ?)",
+            (session_id, ts, "Edit", f"/proj/a.py {i}"),
+        )
+        conn.commit()
+        conn.close()
+    result = run_session_end(config, session_id, summary="done")
+    assert result["threads"] >= 1  # threads were detected...
+    assert result["queued"] == 0  # ...but nothing was enqueued
+    assert pending_count(db_path) == 0
+
+
 def test_redetect_threads_sync_enqueues_one_per_thread(tmp_path):
     """`sync=True`: one outbox enqueue call per detected thread. The outbox
     itself dedups by content_hash, so identical re-syncs no-op silently;
@@ -336,6 +374,10 @@ def test_redetect_threads_sync_enqueues_one_per_thread(tmp_path):
     config.db_path = db_path
     config.threads.detector = "heuristic"
     config.threads.summarizer = "heuristic"
+    # A live consumer must exist for enqueue to fire (gated on a non-noop
+    # adapter); the gate's value is exercised in its own test below.
+    config.sync.adapter = "filesystem"
+    config.sync.path = str(tmp_path / "sync-out")
 
     session_id = start_session(db_path, project_path="/proj", agent_identity="t")
     base = datetime(2026, 1, 1, 12, 0)
