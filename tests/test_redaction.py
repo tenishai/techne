@@ -205,6 +205,25 @@ def test_redact_aws_full_credential_pair():
     assert "<redacted:aws-secret>" in result
 
 
+def test_redact_aws_secret_json_sdk_form():
+    # boto3/STS responses dump creds as JSON: a quote sits between the label
+    # and the colon, so the separator isn't immediately after "Key".
+    text = '{"AccessKeyId": "AKIAIOSFODNN7EXAMPLE", "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}'
+    result = redact_credentials(text)
+    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
+    assert "<redacted:aws-access-key>" in result
+    assert "<redacted:aws-secret>" in result
+
+
+def test_redact_aws_secret_credentials_file_form():
+    # ~/.aws/credentials INI form: `aws_secret_access_key = <value>`
+    text = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    result = redact_credentials(text)
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
+    assert "<redacted:aws-secret>" in result
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — write with credential, read back redacted
 # ---------------------------------------------------------------------------

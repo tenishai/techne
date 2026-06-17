@@ -35,8 +35,10 @@ _PATTERNS: list[tuple[str, str]] = [
     (r"A(?:KIA|SIA)[0-9A-Z]{16}", "aws-access-key"),
     # AWS secret access keys: 40-char base64. The bare shape is too common
     # (sha1 hex, other tokens) to redact unconditionally, so anchor on a
-    # "secret[ access][ key]: <value>" label immediately preceding it.
-    (r"(?i)secret(?:[ _-]?access)?(?:[ _-]?key)?\s*[:=]\s*['\"]?[A-Za-z0-9/+]{40}", "aws-secret"),
+    # "secret[ access][ key]: <value>" label immediately preceding it. The
+    # optional quote before the separator covers the JSON/SDK form
+    # `"SecretAccessKey": "wJalr…"` (boto3/STS dumps), not just `key: value`.
+    (r"(?i)secret(?:[ _-]?access)?(?:[ _-]?key)?['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9/+]{40}", "aws-secret"),
     # JWT shape: three base64url segments
     (r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", "jwt"),
     # Env-style: SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value
