@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -197,17 +197,23 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
 
--- FTS5 indexes
+-- FTS5 indexes. tokenize='porter unicode61' applies Porter stemming on top of
+-- the unicode61 tokenizer (#77) so morphological variants match: a query for
+-- "optimize" hits "optimization", "index" hits "indexing", "log" hits "logs".
+-- Existing DBs are upgraded to this tokenizer by the v9 migration.
 CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
-    label, summary, resume_points, content=threads, content_rowid=rowid
+    label, summary, resume_points, content=threads, content_rowid=rowid,
+    tokenize='porter unicode61'
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-    content, tags, kind, content=observations, content_rowid=id
+    content, tags, kind, content=observations, content_rowid=id,
+    tokenize='porter unicode61'
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-    content, tags, content=knowledge, content_rowid=id
+    content, tags, content=knowledge, content_rowid=id,
+    tokenize='porter unicode61'
 );
 """
 
@@ -646,4 +652,45 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 "SELECT id, content, COALESCE(tags, ''), COALESCE(kind, '') FROM observations"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (8)")
+    if from_version < 9 and to_version >= 9:
+        # Recreate all FTS tables with Porter stemming (#77). Changing the
+        # tokenizer requires DROP + CREATE + reindex (same constraint as the v8
+        # rebuild). Each rebuild is guarded on its source table existing; when
+        # absent the CREATE still lands and _reconcile_fts_backfill repopulates
+        # once the source table appears (tables are reconciled after _migrate).
+        _fts_rebuild = {
+            "threads_fts": (
+                "label, summary, resume_points, content=threads, content_rowid=rowid",
+                "INSERT INTO threads_fts(rowid, label, summary, resume_points) "
+                "SELECT rowid, label, summary, resume_points FROM threads",
+                "threads",
+            ),
+            "observations_fts": (
+                "content, tags, kind, content=observations, content_rowid=id",
+                "INSERT INTO observations_fts(rowid, content, tags, kind) "
+                "SELECT id, content, COALESCE(tags, ''), COALESCE(kind, '') FROM observations",
+                "observations",
+            ),
+            "knowledge_fts": (
+                "content, tags, content=knowledge, content_rowid=id",
+                "INSERT INTO knowledge_fts(rowid, content, tags) "
+                "SELECT id, content, COALESCE(tags, '') FROM knowledge",
+                "knowledge",
+            ),
+        }
+        for fts_table, (cols, insert_sql, src) in _fts_rebuild.items():
+            src_exists = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (src,),
+            ).fetchone()[0]
+            conn.executescript(
+                f"DROP TABLE IF EXISTS {fts_table};\n"
+                f"CREATE VIRTUAL TABLE {fts_table} USING fts5(\n"
+                f"    {cols},\n"
+                f"    tokenize='porter unicode61'\n"
+                f");"
+            )
+            if src_exists:
+                conn.execute(insert_sql)
+        conn.execute("INSERT INTO schema_version (version) VALUES (9)")
     conn.commit()

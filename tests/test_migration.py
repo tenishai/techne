@@ -10,6 +10,7 @@ from techne.core.database import (
     _reconcile_columns,
     _reconcile_tables,
     _reconcile_triggers,
+    connect,
 )
 
 V1_OUTBOX_SCHEMA = """
@@ -1107,3 +1108,86 @@ class TestReconcileFtsBackfill:
         conn2.close()
 
         assert count1 == count2 == 1, f"idempotency broken: first={count1}, second={count2}"
+
+
+# ---------------------------------------------------------------------------
+# v8 -> v9: FTS5 Porter stemming (issue #77)
+# ---------------------------------------------------------------------------
+
+
+class TestV8ToV9Migration:
+    """v9 recreates all FTS tables with tokenize='porter unicode61' and
+    repopulates them from the content tables, so morphological variants match."""
+
+    @pytest.fixture
+    def v8_db(self, tmp_path):
+        """A v8 DB: non-porter FTS tables + seeded content rows."""
+        db = tmp_path / "v8.db"
+        c = sqlite3.connect(str(db))
+        c.row_factory = sqlite3.Row
+        c.executescript(SCHEMA_FTS_NO_TRIGGERS)  # old (non-porter) FTS definitions
+        c.execute("INSERT INTO schema_version (version) VALUES (8)")
+        c.execute("INSERT INTO sessions (id, platform) VALUES ('s9', 'test')")
+        c.execute(
+            "INSERT INTO observations (session_id, timestamp, content, tier) "
+            "VALUES ('s9', CURRENT_TIMESTAMP, 'database performance optimization notes', 'hot')"
+        )
+        c.execute(
+            "INSERT INTO knowledge (type, content, tags, confidence, confidence_numeric, "
+            "last_confirmed_at) VALUES ('fact', 'structured logging pipelines', 'k', 'medium', "
+            "0.6, CURRENT_TIMESTAMP)"
+        )
+        c.commit()
+        return db, c
+
+    def test_pre_migration_has_no_porter(self, v8_db):
+        _, c = v8_db
+        sql = c.execute(
+            "SELECT sql FROM sqlite_master WHERE name='observations_fts'"
+        ).fetchone()[0]
+        assert "porter" not in sql
+
+    def test_all_fts_tables_get_porter(self, v8_db):
+        _, c = v8_db
+        _migrate(c, 8, 9)
+        for t in ("threads_fts", "observations_fts", "knowledge_fts"):
+            sql = c.execute("SELECT sql FROM sqlite_master WHERE name=?", (t,)).fetchone()[0]
+            assert "porter" in sql, f"{t} missing porter tokenizer"
+
+    def test_schema_version_bumped_to_9(self, v8_db):
+        _, c = v8_db
+        _migrate(c, 8, 9)
+        assert c.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+
+    def test_content_repopulated_and_stemmed_match(self, v8_db):
+        """The core win: a stemmed query ('optimize') matches a row that only
+        contains the inflected form ('optimization') after migration."""
+        _, c = v8_db
+        _migrate(c, 8, 9)
+        # exact term still matches (data survived the rebuild)
+        assert c.execute(
+            "SELECT COUNT(*) FROM observations_fts WHERE observations_fts MATCH 'optimization'"
+        ).fetchone()[0] == 1
+        # stemmed variant now matches too (the new behaviour)
+        assert c.execute(
+            "SELECT COUNT(*) FROM observations_fts WHERE observations_fts MATCH 'optimize'"
+        ).fetchone()[0] == 1
+        # knowledge stemming: 'log' matches 'logging'
+        assert c.execute(
+            "SELECT COUNT(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'log'"
+        ).fetchone()[0] == 1
+
+    def test_idempotent_via_connect(self, v8_db):
+        """connect() replays cleanly: a second open is a no-op, not a re-migration."""
+        db, c = v8_db
+        c.close()
+        conn1 = connect(db)
+        v1 = conn1.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        n1 = conn1.execute("SELECT COUNT(*) FROM observations_fts").fetchone()[0]
+        conn1.close()
+        conn2 = connect(db)
+        v2 = conn2.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        n2 = conn2.execute("SELECT COUNT(*) FROM observations_fts").fetchone()[0]
+        conn2.close()
+        assert v1 == v2 == 9
+        assert n1 == n2 == 1
