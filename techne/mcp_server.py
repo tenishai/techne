@@ -6,7 +6,6 @@ via `techne init`.
 
 import json
 import sys
-from pathlib import Path
 
 from techne import __version__
 from techne.config import Config
@@ -109,19 +108,13 @@ def _techne_resume(args: dict, config: Config) -> dict:
 
 
 def _techne_status(args: dict, config: Config) -> dict:
-    import techne
-    from techne.core.state import db_stats
+    # collect_health (#76) is the single source of truth shared with the
+    # SessionStart banner, so the MCP surface and the login banner can't drift.
+    # It carries version + package_path (#71: "is the running server current?")
+    # plus the editable-vs-installed build hint and a db_ok flag.
+    from techne.core.health import collect_health
 
-    stats = db_stats(config.db_path)
-    # Surface which build is actually live (#71). serverInfo carries the version
-    # in the MCP handshake, but the status payload didn't — leaving "is the
-    # running server current?" unanswerable from a normal tool call. package_path
-    # disambiguates editable-venv vs pipx installs that version-drift.
-    stats["version"] = __version__
-    stats["package_path"] = str(Path(techne.__file__).resolve().parent)
-    stats["db_path"] = str(config.db_path)
-    stats["sync_adapter"] = config.sync.adapter
-    return stats
+    return collect_health(config)
 
 
 def _techne_recall(args: dict, config: Config) -> dict:

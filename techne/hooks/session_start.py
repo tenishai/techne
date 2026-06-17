@@ -67,6 +67,15 @@ def main():
     # Inject context
     output_parts = []
 
+    # Health banner first (#76): a passive at-a-glance confirmation that techne
+    # is running, on which build, and writable — so "is it running & are we
+    # good?" is answered without a manual techne_status call. Always printed,
+    # even on an otherwise-empty (no threads/knowledge) session start.
+    from techne.core.health import collect_health, format_banner
+
+    output_parts.append(format_banner(collect_health(config)))
+    output_parts.append("")
+
     if ctx["active_threads"]:
         output_parts.append("## Active Threads\n")
         for t in ctx["active_threads"]:
