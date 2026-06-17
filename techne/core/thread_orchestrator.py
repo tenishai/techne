@@ -413,11 +413,15 @@ def age_threads(db_path: Path, config: Config) -> dict[str, int]:
     conn = connect(db_path)
     counts = {"completed": 0, "stale": 0}
     try:
-        # Active → completed: no resume points and no activity in complete_after_hours
+        # Active → completed: no activity for complete_after_hours.
+        # (#72) The old `resume_points IS NULL OR = ''` gate never fired — the
+        # heuristic detector populates resume_points on every thread, so it
+        # pinned everything to 'active' forever and starved the stale step too.
+        # Completing only flips status; the resume_points text is preserved and
+        # the thread stays searchable — it just leaves the active working set.
         cur = conn.execute(
             """UPDATE threads SET status = 'completed', updated_at = CURRENT_TIMESTAMP
                WHERE status = 'active'
-               AND (resume_points IS NULL OR resume_points = '')
                AND updated_at < datetime('now', ? || ' hours')""",
             (f"-{config.threads.complete_after_hours}",),
         )
