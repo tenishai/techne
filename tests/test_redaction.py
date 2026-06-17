@@ -158,6 +158,72 @@ def test_multiple_patterns_in_one_string():
     assert "<redacted:github>" in result
 
 
+def test_redact_aws_access_key_id():
+    text = "access key AKIAIOSFODNN7EXAMPLE rotates monthly"
+    result = redact_credentials(text)
+    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "<redacted:aws-access-key>" in result
+
+
+def test_redact_aws_sts_temporary_key():
+    text = "temp creds ASIAY34FZKBOKMUTVV7A from sts"
+    result = redact_credentials(text)
+    assert "ASIAY34FZKBOKMUTVV7A" not in result
+    assert "<redacted:aws-access-key>" in result
+
+
+def test_redact_aws_access_key_short_no_match():
+    # AKIA prefix but fewer than 16 trailing chars — not a key
+    text = "AKIASHORT123"
+    assert redact_credentials(text) == text
+
+
+def test_redact_aws_secret_when_labelled():
+    text = "secret: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY done"
+    result = redact_credentials(text)
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
+    assert "<redacted:aws-secret>" in result
+
+
+def test_aws_secret_unlabelled_40char_not_redacted():
+    # A bare 40-char token with no secret label is too ambiguous (e.g. sha1
+    # hex is 40 chars) — left alone by design to avoid false positives.
+    text = "commit a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 landed"
+    assert redact_credentials(text) == text
+
+
+def test_redact_aws_full_credential_pair():
+    # The functional-scenario string that exposed issue #69.
+    text = (
+        "Test observation for redaction. AWS access key: AKIAIOSFODNN7EXAMPLE "
+        "and secret: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    )
+    result = redact_credentials(text)
+    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
+    assert "<redacted:aws-access-key>" in result
+    assert "<redacted:aws-secret>" in result
+
+
+def test_redact_aws_secret_json_sdk_form():
+    # boto3/STS responses dump creds as JSON: a quote sits between the label
+    # and the colon, so the separator isn't immediately after "Key".
+    text = '{"AccessKeyId": "AKIAIOSFODNN7EXAMPLE", "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}'
+    result = redact_credentials(text)
+    assert "AKIAIOSFODNN7EXAMPLE" not in result
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
+    assert "<redacted:aws-access-key>" in result
+    assert "<redacted:aws-secret>" in result
+
+
+def test_redact_aws_secret_credentials_file_form():
+    # ~/.aws/credentials INI form: `aws_secret_access_key = <value>`
+    text = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    result = redact_credentials(text)
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in result
+    assert "<redacted:aws-secret>" in result
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — write with credential, read back redacted
 # ---------------------------------------------------------------------------
