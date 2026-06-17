@@ -645,34 +645,46 @@ def _ensure_vec_table(conn: sqlite3.Connection, name: str):
         conn.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[384])")
 
 
-def _sanitize_fts_query(query: str) -> str:
-    """Sanitize a query string for FTS5. Wraps bare terms in quotes if needed.
+def _fts_terms(query: str) -> list[str]:
+    """Split ``query`` into FTS5-safe phrase-literal bodies (#74).
 
-    `-` is FTS5's NOT operator; bare queries like `foo -bar` either throw a
-    syntax error or silently exclude `bar` from results depending on
-    placement. Treat it the same as the other operator chars: detection
-    triggers per-term quoting so the query is interpreted as literal phrases.
+    Each returned string is ready to wrap in double quotes as an FTS5 phrase
+    literal: embedded double-quotes are doubled (FTS5's only escape), and
+    backslashes are turned into separators (FTS5 has no backslash escape — a
+    lone ``\\`` raises ``fts5: syntax error`` even inside a phrase). Empty
+    fragments are dropped.
     """
-    special = set('(){}[]"*:^~-')
-    if any(c in query for c in special):
-        terms = query.split()
-        # Escape embedded double-quotes by doubling them (FTS5 phrase literal rule)
-        return " ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in terms if t.strip())
-    return query
+    cleaned = query.replace("\\", " ")
+    return [t.replace('"', '""') for t in cleaned.split() if t.strip()]
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Sanitize a query string for FTS5 by quoting *every* term as a phrase literal.
+
+    Quoting unconditionally — rather than only when an operator char is present
+    (the old behaviour) — means bare boolean keywords (``AND``/``OR``/``NOT``)
+    and FTS5 operator chars (``- : ^ ~ *`` parens) are always read as literal
+    text, never as operators with missing operands. That closes the #74 crash
+    class: a search box can't raise ``fts5: syntax error`` on adversarial input.
+
+    Semantics are unchanged for normal queries: a single-word phrase literal
+    (``"database"``) matches identically to the bare term, and the space
+    between terms is still FTS5 implicit-AND.
+    """
+    return " ".join(f'"{t}"' for t in _fts_terms(query))
 
 
 def _build_or_fts_query(query: str) -> str:
     """Build an OR-of-terms FTS5 query for the #70 empty-result fallback.
 
-    Each term is wrapped as a phrase literal (quoted, embedded quotes doubled)
-    so FTS5 operator chars (``- : ^ ~ *`` parens) inside a term are treated
-    literally, then the terms are joined with ``OR``.
+    Reuses :func:`_fts_terms` so the same phrase-literal escaping (quote
+    doubling + backslash handling, #74) applies, then joins with ``OR``.
 
     Returns ``""`` when the query has fewer than two terms — a single-term
     query is identical under AND and OR, so the fallback would be a redundant
     re-query.
     """
-    terms = [t for t in query.split() if t.strip()]
+    terms = _fts_terms(query)
     if len(terms) < 2:
         return ""
-    return " OR ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in terms)
+    return " OR ".join(f'"{t}"' for t in terms)

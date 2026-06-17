@@ -3,9 +3,15 @@
 import re
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+try:
+    import fcntl  # POSIX only; absent on Windows
+except ImportError:  # pragma: no cover - techne targets macOS/Linux
+    fcntl = None
+
+SCHEMA_VERSION = 9
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -197,17 +203,23 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
 
--- FTS5 indexes
+-- FTS5 indexes. tokenize='porter unicode61' applies Porter stemming on top of
+-- the unicode61 tokenizer (#77) so morphological variants match: a query for
+-- "optimize" hits "optimization", "index" hits "indexing", "log" hits "logs".
+-- Existing DBs are upgraded to this tokenizer by the v9 migration.
 CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
-    label, summary, resume_points, content=threads, content_rowid=rowid
+    label, summary, resume_points, content=threads, content_rowid=rowid,
+    tokenize='porter unicode61'
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-    content, tags, kind, content=observations, content_rowid=id
+    content, tags, kind, content=observations, content_rowid=id,
+    tokenize='porter unicode61'
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-    content, tags, content=knowledge, content_rowid=id
+    content, tags, content=knowledge, content_rowid=id,
+    tokenize='porter unicode61'
 );
 """
 
@@ -482,11 +494,71 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # the concurrent writer raises immediately instead of waiting its turn.
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
-    _ensure_initialized(conn)
+    _ensure_initialized(conn, db_path)
     return conn
 
 
-def _ensure_initialized(conn: sqlite3.Connection) -> None:
+def _backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -> Path | None:
+    """Snapshot the DB to ``<dir>/backups/`` before a migration rewrites it.
+
+    Uses SQLite's online backup API so the copy is consistent even in WAL mode
+    (a plain file copy can miss un-checkpointed WAL frames). Returns the backup
+    path, or ``None`` when there's nothing worth saving (absent/empty DB).
+    Migrations are forward-only, so this backup is the rollback path (#78).
+    """
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return None
+    backup_dir = db_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = backup_dir / f"{db_path.stem}-v{from_v}-to-v{to_v}-{ts}.db.bak"
+    dest = sqlite3.connect(str(backup))
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    return backup
+
+
+def _guarded_migrate(conn: sqlite3.Connection, db_path: Path, existing_version: int) -> None:
+    """Run pending migrations exactly once, even under concurrent processes.
+
+    Claude Code fires session_start + post_tool_use near-simultaneously, so on
+    the first open after a code bump several processes can all see a stale
+    version and race into the migration body. A cross-process file lock
+    serializes them; the loser re-checks the version under the lock and no-ops.
+    We back up first and announce on stderr (#78).
+
+    The lock is filesystem-level (not a SQLite transaction) because the
+    migration's ``executescript`` calls issue their own COMMITs and can't be
+    held inside one outer transaction. Per-machine locking is sufficient —
+    each machine has its own ``~/.techne/techne.db``.
+    """
+    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
+
+    def _do() -> None:
+        # Double-checked: a process we raced may have migrated while we waited.
+        row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        current = row[0] if row else existing_version
+        if current >= SCHEMA_VERSION:
+            return
+        backup = _backup_db(conn, db_path, current, SCHEMA_VERSION)
+        note = f" (backup: {backup})" if backup else ""
+        print(f"[techne] migrating schema v{current} → v{SCHEMA_VERSION}{note}", file=sys.stderr)
+        _migrate(conn, current, SCHEMA_VERSION)
+
+    if fcntl is None:  # no file locking available — run unguarded (legacy behaviour)
+        _do()
+        return
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            _do()
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
     """Initialize the schema if absent. Safe to call repeatedly."""
     existing = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
@@ -500,7 +572,7 @@ def _ensure_initialized(conn: sqlite3.Connection) -> None:
         row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
         existing_version = row[0] if row else 0
         if existing_version < SCHEMA_VERSION:
-            _migrate(conn, existing_version, SCHEMA_VERSION)
+            _guarded_migrate(conn, db_path, existing_version)
         _reconcile_tables(conn)
         _reconcile_triggers(conn)
         _reconcile_fts_backfill(conn)
@@ -646,4 +718,45 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 "SELECT id, content, COALESCE(tags, ''), COALESCE(kind, '') FROM observations"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (8)")
+    if from_version < 9 and to_version >= 9:
+        # Recreate all FTS tables with Porter stemming (#77). Changing the
+        # tokenizer requires DROP + CREATE + reindex (same constraint as the v8
+        # rebuild). Each rebuild is guarded on its source table existing; when
+        # absent the CREATE still lands and _reconcile_fts_backfill repopulates
+        # once the source table appears (tables are reconciled after _migrate).
+        _fts_rebuild = {
+            "threads_fts": (
+                "label, summary, resume_points, content=threads, content_rowid=rowid",
+                "INSERT INTO threads_fts(rowid, label, summary, resume_points) "
+                "SELECT rowid, label, summary, resume_points FROM threads",
+                "threads",
+            ),
+            "observations_fts": (
+                "content, tags, kind, content=observations, content_rowid=id",
+                "INSERT INTO observations_fts(rowid, content, tags, kind) "
+                "SELECT id, content, COALESCE(tags, ''), COALESCE(kind, '') FROM observations",
+                "observations",
+            ),
+            "knowledge_fts": (
+                "content, tags, content=knowledge, content_rowid=id",
+                "INSERT INTO knowledge_fts(rowid, content, tags) "
+                "SELECT id, content, COALESCE(tags, '') FROM knowledge",
+                "knowledge",
+            ),
+        }
+        for fts_table, (cols, insert_sql, src) in _fts_rebuild.items():
+            src_exists = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (src,),
+            ).fetchone()[0]
+            conn.executescript(
+                f"DROP TABLE IF EXISTS {fts_table};\n"
+                f"CREATE VIRTUAL TABLE {fts_table} USING fts5(\n"
+                f"    {cols},\n"
+                f"    tokenize='porter unicode61'\n"
+                f");"
+            )
+            if src_exists:
+                conn.execute(insert_sql)
+        conn.execute("INSERT INTO schema_version (version) VALUES (9)")
     conn.commit()

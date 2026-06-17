@@ -228,6 +228,18 @@ class TestSearchFtsEdgeCases:
         results = search_fts(db_path, "anything", table="all")
         assert results == []
 
+    @pytest.mark.parametrize(
+        "query",
+        ["AND OR NOT", "foo\\bar baz", "*", "-", 'foo"bar', "NOT", "()", "a:b"],
+    )
+    def test_search_fts_adversarial_queries_dont_crash(self, db_path, query):
+        """#74: queries that are operator-free per the old special-char set but
+        still invalid FTS5 used to raise sqlite3.OperationalError. They must now
+        return a (possibly empty) list, never crash."""
+        store_knowledge(db_path, "a fact about pipelines and logs", type="fact")
+        results = search_fts(db_path, query, table="all")
+        assert isinstance(results, list)
+
 
 # ---------------------------------------------------------------------------
 # _sanitize_fts_query tests
@@ -236,14 +248,15 @@ class TestSearchFtsEdgeCases:
 
 class TestSanitizeFtsQuery:
     def test_sanitize_plain_query(self):
-        """Plain query without special chars is returned unchanged."""
+        """Every term is quoted as a phrase literal (#74). Semantically
+        identical to the old bare-term implicit-AND for plain words."""
         result = _sanitize_fts_query("hello world")
-        assert result == "hello world"
+        assert result == '"hello" "world"'
 
     def test_sanitize_single_word(self):
-        """Single plain word is returned unchanged."""
+        """Single plain word is quoted as a phrase literal (#74)."""
         result = _sanitize_fts_query("python")
-        assert result == "python"
+        assert result == '"python"'
 
     def test_sanitize_parens(self):
         """Parentheses trigger quoting of each term."""
@@ -307,9 +320,29 @@ class TestSanitizeFtsQuery:
         assert '"baz"' in result
 
     def test_sanitize_multi_term_no_special(self):
-        """Multi-term query without special chars is unchanged."""
+        """Multi-term plain query: each term quoted as a phrase literal (#74)."""
         result = _sanitize_fts_query("the quick brown fox")
-        assert result == "the quick brown fox"
+        assert result == '"the" "quick" "brown" "fox"'
+
+    # --- #74: queries that used to slip through raw and crash FTS5 ---
+
+    def test_sanitize_bare_boolean_keywords(self):
+        """Bare AND/OR/NOT have no special char, so the old code returned them
+        raw and FTS5 parsed them as operators with missing operands → crash.
+        Now they are quoted literals."""
+        assert _sanitize_fts_query("AND OR NOT") == '"AND" "OR" "NOT"'
+
+    def test_sanitize_backslash_becomes_separator(self):
+        """FTS5 has no backslash escape; a lone `\\` crashes even inside a
+        phrase. Treat it as a separator (#74)."""
+        assert _sanitize_fts_query("foo\\bar baz") == '"foo" "bar" "baz"'
+
+    def test_sanitize_lone_backslash_dropped(self):
+        assert _sanitize_fts_query("\\") == ""
+
+    def test_sanitize_unbalanced_quote(self):
+        """Embedded double-quote is doubled so the phrase literal stays valid."""
+        assert _sanitize_fts_query('foo"bar') == '"foo""bar"'
 
 
 # ---------------------------------------------------------------------------
