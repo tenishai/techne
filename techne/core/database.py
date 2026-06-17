@@ -3,7 +3,13 @@
 import re
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX only; absent on Windows
+except ImportError:  # pragma: no cover - techne targets macOS/Linux
+    fcntl = None
 
 SCHEMA_VERSION = 9
 
@@ -488,11 +494,71 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # the concurrent writer raises immediately instead of waiting its turn.
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
-    _ensure_initialized(conn)
+    _ensure_initialized(conn, db_path)
     return conn
 
 
-def _ensure_initialized(conn: sqlite3.Connection) -> None:
+def _backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -> Path | None:
+    """Snapshot the DB to ``<dir>/backups/`` before a migration rewrites it.
+
+    Uses SQLite's online backup API so the copy is consistent even in WAL mode
+    (a plain file copy can miss un-checkpointed WAL frames). Returns the backup
+    path, or ``None`` when there's nothing worth saving (absent/empty DB).
+    Migrations are forward-only, so this backup is the rollback path (#78).
+    """
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return None
+    backup_dir = db_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = backup_dir / f"{db_path.stem}-v{from_v}-to-v{to_v}-{ts}.db.bak"
+    dest = sqlite3.connect(str(backup))
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    return backup
+
+
+def _guarded_migrate(conn: sqlite3.Connection, db_path: Path, existing_version: int) -> None:
+    """Run pending migrations exactly once, even under concurrent processes.
+
+    Claude Code fires session_start + post_tool_use near-simultaneously, so on
+    the first open after a code bump several processes can all see a stale
+    version and race into the migration body. A cross-process file lock
+    serializes them; the loser re-checks the version under the lock and no-ops.
+    We back up first and announce on stderr (#78).
+
+    The lock is filesystem-level (not a SQLite transaction) because the
+    migration's ``executescript`` calls issue their own COMMITs and can't be
+    held inside one outer transaction. Per-machine locking is sufficient —
+    each machine has its own ``~/.techne/techne.db``.
+    """
+    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
+
+    def _do() -> None:
+        # Double-checked: a process we raced may have migrated while we waited.
+        row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        current = row[0] if row else existing_version
+        if current >= SCHEMA_VERSION:
+            return
+        backup = _backup_db(conn, db_path, current, SCHEMA_VERSION)
+        note = f" (backup: {backup})" if backup else ""
+        print(f"[techne] migrating schema v{current} → v{SCHEMA_VERSION}{note}", file=sys.stderr)
+        _migrate(conn, current, SCHEMA_VERSION)
+
+    if fcntl is None:  # no file locking available — run unguarded (legacy behaviour)
+        _do()
+        return
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            _do()
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
     """Initialize the schema if absent. Safe to call repeatedly."""
     existing = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
@@ -506,7 +572,7 @@ def _ensure_initialized(conn: sqlite3.Connection) -> None:
         row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
         existing_version = row[0] if row else 0
         if existing_version < SCHEMA_VERSION:
-            _migrate(conn, existing_version, SCHEMA_VERSION)
+            _guarded_migrate(conn, db_path, existing_version)
         _reconcile_tables(conn)
         _reconcile_triggers(conn)
         _reconcile_fts_backfill(conn)

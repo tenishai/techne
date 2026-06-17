@@ -1191,3 +1191,117 @@ class TestV8ToV9Migration:
         conn2.close()
         assert v1 == v2 == 9
         assert n1 == n2 == 1
+
+
+# ---------------------------------------------------------------------------
+# Migration hardening: atomic lock + backup + announce (issue #78)
+# ---------------------------------------------------------------------------
+
+import threading  # noqa: E402
+
+
+def _make_v8_db(path):
+    """Write a realistic v8 DB: the full current schema (so reconcile is a
+    no-op on open) with the FTS tables + version marker rolled back to the
+    pre-stemming v8 shape, plus one seeded row. Closed on return.
+
+    Using the full schema (vs a minimal one) keeps the concurrency test honest:
+    a real v8 DB being upgraded already has every table, so the only contention
+    is the migration itself — not a storm of concurrent CREATE TABLE reconciles
+    that wouldn't happen in practice.
+    """
+    c = connect(path)  # full v9 schema, all tables/triggers
+    c.executescript("""
+        DROP TABLE IF EXISTS threads_fts;
+        DROP TABLE IF EXISTS observations_fts;
+        DROP TABLE IF EXISTS knowledge_fts;
+        CREATE VIRTUAL TABLE threads_fts USING fts5(
+            label, summary, resume_points, content=threads, content_rowid=rowid);
+        CREATE VIRTUAL TABLE observations_fts USING fts5(
+            content, tags, kind, content=observations, content_rowid=id);
+        CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+            content, tags, content=knowledge, content_rowid=id);
+        DELETE FROM schema_version;
+        INSERT INTO schema_version (version) VALUES (8);
+    """)
+    c.execute("INSERT INTO sessions (id, platform) VALUES ('s78', 'test')")
+    c.execute(
+        "INSERT INTO observations (session_id, timestamp, content, tier) "
+        "VALUES ('s78', CURRENT_TIMESTAMP, 'backup probe content', 'hot')"
+    )
+    c.commit()
+    c.close()
+
+
+class TestMigrationHardening:
+    """#78: migrations back up the DB, announce on stderr, and run exactly once
+    even under concurrent opens."""
+
+    def test_backup_created_and_restorable(self, tmp_path, capsys):
+        db = tmp_path / "techne.db"
+        _make_v8_db(db)
+
+        conn = connect(db)  # triggers guarded migration 8 -> 9
+        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+        conn.close()
+
+        backups = list((tmp_path / "backups").glob("techne-v8-to-v9-*.db.bak"))
+        assert len(backups) == 1, f"expected one backup, got {backups}"
+
+        # The backup is a real, openable pre-migration snapshot (still v8).
+        b = sqlite3.connect(str(backups[0]))
+        assert b.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+        # ...and the seeded row survived into the snapshot.
+        assert b.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 1
+        b.close()
+
+    def test_announce_on_stderr(self, tmp_path, capsys):
+        db = tmp_path / "techne.db"
+        _make_v8_db(db)
+        connect(db).close()
+        err = capsys.readouterr().err
+        assert "migrating schema v8 → v9" in err
+        assert "backup:" in err
+
+    def test_no_backup_for_fresh_db(self, tmp_path):
+        """A brand-new DB initializes directly at SCHEMA_VERSION — no migration,
+        so no backup file is written."""
+        db = tmp_path / "fresh.db"
+        connect(db).close()
+        assert not (tmp_path / "backups").exists()
+
+    def test_concurrent_open_migrates_once(self, tmp_path):
+        """N threads opening a stale DB at once → the migration body runs once:
+        a single v9 row and a single backup, no duplicate-version rows."""
+        db = tmp_path / "techne.db"
+        _make_v8_db(db)
+
+        barrier = threading.Barrier(6)
+        errors = []
+
+        def worker():
+            try:
+                barrier.wait()  # maximize the race window
+                connect(db).close()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"concurrent connects raised: {errors}"
+
+        check = sqlite3.connect(str(db))
+        assert check.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+        # Exactly one process bumped to v9 (no duplicate rows from a double-run).
+        assert check.execute(
+            "SELECT COUNT(*) FROM schema_version WHERE version = 9"
+        ).fetchone()[0] == 1
+        check.close()
+
+        # Exactly one migration fired → exactly one backup.
+        backups = list((tmp_path / "backups").glob("*.db.bak"))
+        assert len(backups) == 1, f"expected one backup, got {backups}"
