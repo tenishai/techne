@@ -181,6 +181,103 @@ def _rerank(
     return result
 
 
+def _fts_match_rows(
+    conn: sqlite3.Connection,
+    fts_query: str,
+    table: SearchTable,
+    candidate_limit: int,
+) -> list[dict]:
+    """Run the per-table FTS5 MATCH queries for ``fts_query`` and return raw
+    candidate rows (pre-rerank). Shared by the implicit-AND pass and the #70
+    OR fallback so both issue identical SQL.
+    """
+    results: list[dict] = []
+
+    if table in ("threads", "all"):
+        rows = conn.execute(
+            """SELECT t.id, t.label, t.summary, t.resume_points, t.status,
+                      t.session_id, t.updated_at,
+                      bm25(threads_fts) AS rank
+               FROM threads_fts f
+               JOIN threads t ON t.rowid = f.rowid
+               WHERE threads_fts MATCH ?
+               ORDER BY rank
+               LIMIT ?""",
+            (fts_query, candidate_limit),
+        ).fetchall()
+        for r in rows:
+            results.append(
+                {
+                    "type": "thread",
+                    "id": r["id"],
+                    "label": r["label"],
+                    "summary": r["summary"][:500],
+                    "resume_points": r["resume_points"],
+                    "status": r["status"],
+                    "session_id": r["session_id"],
+                    "updated_at": r["updated_at"],
+                    "rank": r["rank"],
+                }
+            )
+
+    if table in ("observations", "all"):
+        rows = conn.execute(
+            """SELECT o.id, o.content, o.tool_name, o.session_id,
+                      o.timestamp, o.event_at, o.tier,
+                      bm25(observations_fts) AS rank
+               FROM observations_fts f
+               JOIN observations o ON o.id = f.rowid
+               WHERE observations_fts MATCH ?
+               ORDER BY rank
+               LIMIT ?""",
+            (fts_query, candidate_limit),
+        ).fetchall()
+        for r in rows:
+            results.append(
+                {
+                    "type": "observation",
+                    "id": r["id"],
+                    "content": r["content"][:500],
+                    "tool_name": r["tool_name"],
+                    "session_id": r["session_id"],
+                    "timestamp": r["timestamp"],
+                    "event_at": r["event_at"],
+                    "tier": r["tier"],
+                    "rank": r["rank"],
+                }
+            )
+
+    if table in ("knowledge", "all"):
+        rows = conn.execute(
+            """SELECT k.id, k.type, k.content, k.tags, k.confidence,
+                      k.source, k.updated_at,
+                      bm25(knowledge_fts) AS rank
+               FROM knowledge_fts f
+               JOIN knowledge k ON k.id = f.rowid
+               WHERE knowledge_fts MATCH ?
+                 AND k.superseded_by IS NULL
+               ORDER BY rank
+               LIMIT ?""",
+            (fts_query, candidate_limit),
+        ).fetchall()
+        for r in rows:
+            results.append(
+                {
+                    "type": "knowledge",
+                    "id": r["id"],
+                    "knowledge_type": r["type"],
+                    "content": r["content"][:500],
+                    "tags": r["tags"],
+                    "confidence": r["confidence"],
+                    "source": r["source"],
+                    "updated_at": r["updated_at"],
+                    "rank": r["rank"],
+                }
+            )
+
+    return results
+
+
 def search_fts(
     db_path: Path,
     query: str,
@@ -213,90 +310,19 @@ def search_fts(
     fts_query = _sanitize_fts_query(query)
     conn = connect(db_path)
     candidate_limit = limit * expansion_ratio
-    results = []
 
     try:
-        if table in ("threads", "all"):
-            rows = conn.execute(
-                """SELECT t.id, t.label, t.summary, t.resume_points, t.status,
-                          t.session_id, t.updated_at,
-                          bm25(threads_fts) AS rank
-                   FROM threads_fts f
-                   JOIN threads t ON t.rowid = f.rowid
-                   WHERE threads_fts MATCH ?
-                   ORDER BY rank
-                   LIMIT ?""",
-                (fts_query, candidate_limit),
-            ).fetchall()
-            for r in rows:
-                results.append(
-                    {
-                        "type": "thread",
-                        "id": r["id"],
-                        "label": r["label"],
-                        "summary": r["summary"][:500],
-                        "resume_points": r["resume_points"],
-                        "status": r["status"],
-                        "session_id": r["session_id"],
-                        "updated_at": r["updated_at"],
-                        "rank": r["rank"],
-                    }
-                )
+        results = _fts_match_rows(conn, fts_query, table, candidate_limit)
 
-        if table in ("observations", "all"):
-            rows = conn.execute(
-                """SELECT o.id, o.content, o.tool_name, o.session_id,
-                          o.timestamp, o.event_at, o.tier,
-                          bm25(observations_fts) AS rank
-                   FROM observations_fts f
-                   JOIN observations o ON o.id = f.rowid
-                   WHERE observations_fts MATCH ?
-                   ORDER BY rank
-                   LIMIT ?""",
-                (fts_query, candidate_limit),
-            ).fetchall()
-            for r in rows:
-                results.append(
-                    {
-                        "type": "observation",
-                        "id": r["id"],
-                        "content": r["content"][:500],
-                        "tool_name": r["tool_name"],
-                        "session_id": r["session_id"],
-                        "timestamp": r["timestamp"],
-                        "event_at": r["event_at"],
-                        "tier": r["tier"],
-                        "rank": r["rank"],
-                    }
-                )
-
-        if table in ("knowledge", "all"):
-            rows = conn.execute(
-                """SELECT k.id, k.type, k.content, k.tags, k.confidence,
-                          k.source, k.updated_at,
-                          bm25(knowledge_fts) AS rank
-                   FROM knowledge_fts f
-                   JOIN knowledge k ON k.id = f.rowid
-                   WHERE knowledge_fts MATCH ?
-                     AND k.superseded_by IS NULL
-                   ORDER BY rank
-                   LIMIT ?""",
-                (fts_query, candidate_limit),
-            ).fetchall()
-            for r in rows:
-                results.append(
-                    {
-                        "type": "knowledge",
-                        "id": r["id"],
-                        "knowledge_type": r["type"],
-                        "content": r["content"][:500],
-                        "tags": r["tags"],
-                        "confidence": r["confidence"],
-                        "source": r["source"],
-                        "updated_at": r["updated_at"],
-                        "rank": r["rank"],
-                    }
-                )
+        # #70: bare space-separated terms are FTS5 implicit-AND, so a multi-word
+        # or natural-language query (recall topics especially) returns nothing
+        # unless one row contains *every* term. When the AND pass is empty, retry
+        # with an OR-of-terms query; BM25 still ranks rows matching more (and
+        # rarer) terms highest, so precision degrades gracefully.
+        if not results:
+            or_query = _build_or_fts_query(query)
+            if or_query:
+                results = _fts_match_rows(conn, or_query, table, candidate_limit)
 
         # For multi-table ("all"), sort combined pool first so BM25 ordering
         # is consistent before the reranker normalises across the whole set.
@@ -633,3 +659,20 @@ def _sanitize_fts_query(query: str) -> str:
         # Escape embedded double-quotes by doubling them (FTS5 phrase literal rule)
         return " ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in terms if t.strip())
     return query
+
+
+def _build_or_fts_query(query: str) -> str:
+    """Build an OR-of-terms FTS5 query for the #70 empty-result fallback.
+
+    Each term is wrapped as a phrase literal (quoted, embedded quotes doubled)
+    so FTS5 operator chars (``- : ^ ~ *`` parens) inside a term are treated
+    literally, then the terms are joined with ``OR``.
+
+    Returns ``""`` when the query has fewer than two terms — a single-term
+    query is identical under AND and OR, so the fallback would be a redundant
+    re-query.
+    """
+    terms = [t for t in query.split() if t.strip()]
+    if len(terms) < 2:
+        return ""
+    return " OR ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in terms)

@@ -3,7 +3,13 @@
 import pytest
 
 from techne.core.database import init_db, connect
-from techne.core.search import search_fts, search_vec, search, _sanitize_fts_query
+from techne.core.search import (
+    search_fts,
+    search_vec,
+    search,
+    _sanitize_fts_query,
+    _build_or_fts_query,
+)
 from techne.core.threads import Thread, save_threads
 from techne.core.knowledge import store as store_knowledge
 from techne.core.state import start_session
@@ -304,6 +310,84 @@ class TestSanitizeFtsQuery:
         """Multi-term query without special chars is unchanged."""
         result = _sanitize_fts_query("the quick brown fox")
         assert result == "the quick brown fox"
+
+
+# ---------------------------------------------------------------------------
+# _build_or_fts_query tests (#70)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildOrFtsQuery:
+    def test_single_term_returns_empty(self):
+        """Single term is identical under AND/OR — fallback is a no-op."""
+        assert _build_or_fts_query("python") == ""
+
+    def test_empty_query_returns_empty(self):
+        assert _build_or_fts_query("   ") == ""
+
+    def test_two_terms_joined_with_or(self):
+        assert _build_or_fts_query("mongoose pattern") == '"mongoose" OR "pattern"'
+
+    def test_multi_term_joined_with_or(self):
+        result = _build_or_fts_query("structured log ingestion")
+        assert result == '"structured" OR "log" OR "ingestion"'
+
+    def test_special_chars_quoted_as_phrase_literals(self):
+        """Operator chars inside a term are neutralised by phrase-quoting."""
+        result = _build_or_fts_query("pre-compact thing")
+        assert result == '"pre-compact" OR "thing"'
+
+    def test_embedded_double_quote_doubled(self):
+        result = _build_or_fts_query('say "hi"')
+        # the bare token `"hi"` has its quotes doubled inside the phrase literal
+        assert '"say"' in result
+        assert ' OR ' in result
+
+
+# ---------------------------------------------------------------------------
+# OR-fallback integration in search_fts (#70)
+# ---------------------------------------------------------------------------
+
+
+class TestOrFallback:
+    def test_multiword_topic_recovered_via_or_fallback(self, db_path):
+        """The canonical #70 case: a natural-language topic where implicit-AND
+        finds nothing (terms differ by stemming / are absent) but OR does."""
+        store_knowledge(
+            db_path,
+            "The mongoose pattern is preferred over the manticore approach "
+            "when ingesting structured logs.",
+            type="pattern",
+        )
+        # AND form requires every term incl. "for", "log" (doc has "logs") and
+        # "ingestion" (doc has "ingesting") — none of which match → AND empty.
+        and_only = search_fts(
+            db_path, "mongoose pattern for structured log ingestion", table="all"
+        )
+        # With the OR fallback wired in, the entry is recovered.
+        assert len(and_only) >= 1
+        assert any("mongoose" in r.get("content", "") for r in and_only)
+
+    def test_or_fallback_does_not_fire_when_and_matches(self, db_path):
+        """When the AND query already matches, results are unchanged (the
+        fallback only runs on an empty AND pass)."""
+        store_knowledge(db_path, "mongoose pattern preferred for logs", type="pattern")
+        results = search_fts(db_path, "mongoose pattern", table="all")
+        assert len(results) >= 1
+        assert any("mongoose" in r.get("content", "") for r in results)
+
+    def test_or_fallback_no_match_still_empty(self, db_path):
+        """A multi-word query with no matching terms stays empty even after the
+        OR fallback (no false positives)."""
+        store_knowledge(db_path, "completely unrelated content here", type="fact")
+        results = search_fts(db_path, "xyzzy plugh frobnitz", table="all")
+        assert results == []
+
+    def test_single_word_query_unaffected(self, db_path):
+        """Single-word queries never hit the fallback and behave as before."""
+        store_knowledge(db_path, "a note about kubernetes scheduling", type="fact")
+        results = search_fts(db_path, "kubernetes", table="knowledge")
+        assert len(results) >= 1
 
 
 # ---------------------------------------------------------------------------
