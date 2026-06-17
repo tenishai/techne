@@ -63,6 +63,24 @@ def seed(db_path: Path) -> dict[str, str]:
         tags="reflect,candidates",
         source="eval",
     )
+    gold["canonical_remote"] = "knowledge:%d" % store(
+        db_path,
+        "techne's canonical git origin is github.com/dimartin/techne. The gitea "
+        "remote was dropped on 2026-06-17 — github is canonical, gitea is a dead "
+        "archive on a divergent v0.5.0 line.",
+        type="decision",
+        tags="git,infra",
+        source="eval",
+    )
+    gold["platform_state"] = "knowledge:%d" % store(
+        db_path,
+        "Platform-state delta since 2026-06-15: mailbox infra designed across "
+        "techne#22 and cabal#14; the rookery-mcp inter-agent mailbox shipped on "
+        "dev02; the techne open queue was cleared.",
+        type="fact",
+        tags="platform-state",
+        source="eval",
+    )
 
     # --- DISTRACTOR knowledge (share words with the gold queries) -----------
     store(db_path, "cabal#11 AbortGraph handles transitive parent->child "
@@ -88,6 +106,36 @@ def seed(db_path: Path) -> dict[str, str]:
         )
         _add_observation_raw(conn, "Ran pytest tests/test_search.py — 44 passed", tool_name="Bash")
         _add_observation_raw(conn, "Read: techne/core/redaction.py credential patterns", tool_name="Read")
+
+        # --- GOLD thread (direct SQL with a fixed id; threads_ai trigger
+        #     populates threads_fts) ---
+        conn.execute(
+            """INSERT INTO threads (id, session_id, thread_num, label, summary,
+                                    resume_points, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+            (
+                "eval-thread-reflect", _SESSION, 1,
+                "Reflect experiment observation window",
+                "Tracking the experiment/reflect-pass branch; reflect.enabled "
+                "stays false during the two-week observation window before any "
+                "candidate is promoted to live knowledge.",
+                "Last action: flipped reflect.write_to=candidates",
+            ),
+        )
+        gold["reflect_thread"] = "thread:eval-thread-reflect"
+
+        # distractor thread
+        conn.execute(
+            """INSERT INTO threads (id, session_id, thread_num, label, summary,
+                                    resume_points, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+            (
+                "eval-thread-search", _SESSION, 2,
+                "Search reranker work",
+                "Implemented MMR diversity and the OR fallback in the FTS path.",
+                "Last action: merged #70",
+            ),
+        )
         conn.commit()
     finally:
         conn.close()

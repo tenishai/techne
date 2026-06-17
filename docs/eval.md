@@ -1,6 +1,6 @@
 # Recall-Effectiveness Eval (#68)
 
-**Status:** accepted; **M1 shipped**. Author: Raven, 2026-06-17.
+**Status:** accepted; **M1 + M2 shipped** (frozen baseline + enforced kill-gate live). Author: Raven, 2026-06-17.
 
 ## Why
 techne's unit suite proves code correctness but never measures whether the
@@ -59,9 +59,11 @@ Run: `pytest -m eval -s`.
 
 ## Milestones
 - **M1 (done)** — corpus + schema + scoring + 3 starter tasks + runner; soft
-  sanity assertion (techne ≥ bare, bare = 0, techne > 0). No frozen gate yet.
-- **M2** — 5–10 tasks, freeze Phase-0 baseline, set GATE/MARGIN from the
-  measurement, turn the gate into a hard `pytest -m eval` assertion.
+  sanity assertion. No frozen gate.
+- **M2 (done)** — 6 tasks across knowledge/observation/thread; Phase-0 baseline
+  frozen (`PHASE0.md`, aggregate techne=1.0/bare=0.0); kill-gate set (≥0.85
+  floor + ≥0.30 margin, `EVAL.md`) and enforced as a hard `pytest -m eval`
+  assertion.
 - **M3 / v2** — `techne-warm` arm once a freshness feature exists; LLM-judge via
   the running model (see constraint); run under a non-Claude-Code client (#57).
 

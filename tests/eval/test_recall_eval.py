@@ -32,9 +32,9 @@ pytestmark = pytest.mark.eval
 ARMS = ("bare", "techne")
 
 
-def _load_tasks() -> tuple[list[dict], int]:
+def _load_baseline() -> tuple[list[dict], dict]:
     doc = yaml.safe_load((_EVAL_DIR / "recall_baseline.yaml").read_text())
-    return doc["tasks"], doc.get("config", {}).get("top_k", 10)
+    return doc["tasks"], doc.get("config", {})
 
 
 def _retrieve(arm: str, db_path: Path, task: dict, top_k: int) -> list[dict]:
@@ -49,7 +49,10 @@ def _retrieve(arm: str, db_path: Path, task: dict, top_k: int) -> list[dict]:
 def test_recall_eval(tmp_path, capsys):
     db_path = tmp_path / "eval.db"
     gold = seed(db_path)
-    tasks, top_k = _load_tasks()
+    tasks, cfg = _load_baseline()
+    top_k = cfg.get("top_k", 10)
+    gate = cfg.get("gate")
+    margin = cfg.get("margin")
 
     rows: list[dict] = []
     agg = {arm: 0.0 for arm in ARMS}
@@ -79,7 +82,7 @@ def test_recall_eval(tmp_path, capsys):
 
     # --- print the table ---
     with capsys.disabled():
-        print(f"\n=== recall eval (#68 M1) — {stamp} ===")
+        print(f"\n=== recall eval (#68) — {stamp} ===")
         print(f"{'task':<20} {'arm':<8} {'score':>6} {'recall':>7} {'cover':>6} {'n':>3}  misses")
         for r in rows:
             print(f"{r['task_id']:<20} {r['arm']:<8} {r['score']:>6} "
@@ -87,11 +90,18 @@ def test_recall_eval(tmp_path, capsys):
         print("-" * 60)
         for arm in ARMS:
             print(f"aggregate[{arm}] = {agg[arm]}")
-        print(f"techne - bare margin = {round(agg['techne'] - agg['bare'], 3)}")
-        print("(M1: no frozen kill-gate yet — see EVAL.md, set at M2)")
+        observed_margin = round(agg["techne"] - agg["bare"], 3)
+        print(f"techne - bare margin = {observed_margin}")
+        print(f"kill-gate: techne >= {gate}  AND  margin >= {margin}  (see EVAL.md)")
 
-    # M1 soft sanity check (NOT the frozen gate): memory must not hurt, and the
-    # tasks must genuinely require memory (bare can't satisfy them).
-    assert agg["techne"] >= agg["bare"], "techne underperformed the bare control"
+    # Sanity: the tasks must genuinely require memory (bare can't satisfy them).
     assert agg["bare"] == 0.0, "a task is answerable without memory — tighten it"
-    assert agg["techne"] > 0.0, "techne retrieved nothing for any task"
+
+    # Kill-gate (#68 M2): a change that drops recall below the floor, or fails to
+    # beat the no-memory control by the margin, fails here and does not merge.
+    assert agg["techne"] >= gate, (
+        f"KILL-GATE: techne aggregate {agg['techne']} < gate {gate} on the frozen baseline"
+    )
+    assert (agg["techne"] - agg["bare"]) >= margin, (
+        f"KILL-GATE: techne beats bare by {observed_margin} < required margin {margin}"
+    )
