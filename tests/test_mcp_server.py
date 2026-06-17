@@ -118,3 +118,29 @@ class TestTechneStoreContentValidation:
         # No isError, content array carries the success payload as JSON text
         assert "isError" not in response["result"]
         assert "content" in response["result"]
+
+
+class TestTechneStatus:
+    def test_status_surfaces_version_and_package_path(self, config):
+        """#71: the status payload must answer 'is the running server current?'
+        — version + resolved package path, not just the initialize handshake."""
+        import json
+        from pathlib import Path
+
+        import techne
+
+        response = handle_request(
+            {
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "techne_status", "arguments": {}},
+            },
+            config,
+        )
+        assert "isError" not in response["result"]
+        payload = json.loads(response["result"]["content"][0]["text"])
+        assert payload["version"] == __version__
+        assert payload["package_path"] == str(Path(techne.__file__).resolve().parent)
+        # pre-existing fields preserved
+        assert payload["db_path"] == str(config.db_path)
+        assert "sync_adapter" in payload
