@@ -12,6 +12,10 @@
 
 config:
   top_k: 10
+  # Kill-gate (#68 M2). See EVAL.md for rationale. gate = frozen Phase-0
+  # aggregate (1.0) minus 0.15 tolerance; margin = techne must beat bare by this.
+  gate: 0.85
+  margin: 0.3
 
 tasks:
   - id: cabal14-design
@@ -38,5 +42,32 @@ tasks:
     table: all
     gold_keys: [reflect_candidates]
     must_include_phrases: ["knowledge_candidates"]
+    must_exclude_phrases: []
+    weight: 1.0
+
+  - id: reflect-thread
+    category: thread-recall
+    query: "threads about the reflect experiment observation window"
+    table: threads
+    gold_keys: [reflect_thread]
+    must_include_phrases: ["reflect-pass"]
+    must_exclude_phrases: []
+    weight: 1.0
+
+  - id: canonical-remote
+    category: decision-recall
+    query: "which git remote is canonical for techne github or gitea"
+    table: all
+    gold_keys: [canonical_remote]
+    must_include_phrases: ["canonical"]
+    must_exclude_phrases: []
+    weight: 1.0
+
+  - id: platform-state-delta
+    category: fact-recall
+    query: "platform state changes delta since 2026-06-15"
+    table: all
+    gold_keys: [platform_state]
+    must_include_phrases: ["rookery-mcp"]
     must_exclude_phrases: []
     weight: 1.0
