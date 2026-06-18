@@ -18,11 +18,14 @@ def handle_request(request: dict, config: Config) -> dict:
     req_id = request.get("id")
 
     if method == "initialize":
-        return _response(req_id, {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "techne", "version": __version__},
-        })
+        return _response(
+            req_id,
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "techne", "version": __version__},
+            },
+        )
 
     if method == "ping":
         return _response(req_id, {})
@@ -37,14 +40,17 @@ def handle_request(request: dict, config: Config) -> dict:
         if handler:
             try:
                 result = handler(arguments, config)
-                return _response(req_id, {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
-                })
+                return _response(
+                    req_id, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+                )
             except Exception as e:
-                return _response(req_id, {
-                    "content": [{"type": "text", "text": f"Error: {e}"}],
-                    "isError": True,
-                })
+                return _response(
+                    req_id,
+                    {
+                        "content": [{"type": "text", "text": f"Error: {e}"}],
+                        "isError": True,
+                    },
+                )
         return _error(req_id, -32601, f"Unknown tool: {tool_name}")
 
     # Per JSON-RPC spec, notifications (requests without an "id" field) must
@@ -58,8 +64,10 @@ def handle_request(request: dict, config: Config) -> dict:
 
 # --- Tool implementations ---
 
+
 def _techne_search(args: dict, config: Config) -> dict:
     from techne.core.search import search
+
     query = args.get("query", "")
     table = args.get("table", "all")
     limit = args.get("limit", 20)
@@ -69,6 +77,7 @@ def _techne_search(args: dict, config: Config) -> dict:
 
 def _techne_store(args: dict, config: Config) -> dict:
     from techne.core.knowledge import store
+
     content = args.get("content")
     if not content:
         raise ValueError("techne_store requires 'content' (non-empty string)")
@@ -83,8 +92,47 @@ def _techne_store(args: dict, config: Config) -> dict:
     return {"id": entry_id, "stored": True}
 
 
+def _techne_observe(args: dict, config: Config) -> dict:
+    """Record an observation from any MCP client — the platform-agnostic capture path.
+
+    This is the MCP equivalent of the Claude Code PostToolUse hook: where Claude
+    Code captures via a subprocess hook, a client without subprocess hooks
+    (opencode's TS plugin, a standalone MCP setup) captures by calling this tool.
+    The client supplies its own `session_id`; techne ensures the session row
+    (stamped with the client's `platform`) and writes the observation through the
+    same redaction + tag/kind-inference path as the hook. (#57)
+    """
+    from techne.core.state import add_observation, ensure_session
+
+    session_id = args.get("session_id")
+    content = args.get("content")
+    if not session_id:
+        raise ValueError("techne_observe requires 'session_id'")
+    if not content:
+        raise ValueError("techne_observe requires 'content' (non-empty string)")
+
+    ensure_session(
+        config.db_path,
+        session_id,
+        project_path=args.get("project_path", ""),
+        agent_identity=args.get("agent_identity", ""),
+        platform=args.get("platform") or config.platform,
+    )
+    add_observation(
+        config.db_path,
+        session_id=session_id,
+        tool_name=args.get("tool_name", "Observation"),
+        content=content,
+        tier=args.get("tier", "hot"),
+        config=config,
+        event_at=args.get("event_at"),
+    )
+    return {"recorded": True, "session_id": session_id}
+
+
 def _techne_threads(args: dict, config: Config) -> list[dict]:
     from techne.core.database import connect
+
     status_filter = args.get("status", "active")
     limit = args.get("limit", 10)
 
@@ -103,6 +151,7 @@ def _techne_threads(args: dict, config: Config) -> list[dict]:
 
 def _techne_resume(args: dict, config: Config) -> dict:
     from techne.core.state import get_resume_context
+
     project_path = args.get("project_path", "")
     return get_resume_context(config.db_path, project_path=project_path)
 
@@ -119,8 +168,8 @@ def _techne_status(args: dict, config: Config) -> dict:
 
 def _techne_recall(args: dict, config: Config) -> dict:
     """Retrieve context for a specific topic — searches all layers."""
-    from techne.core.search import search
     from techne.core.identity import list_entries as list_identity
+    from techne.core.search import search
 
     topic = args.get("topic", "")
     results = search(config.db_path, topic, table="all", limit=10)
@@ -181,6 +230,41 @@ TOOLS = [
         },
     },
     {
+        "name": "techne_observe",
+        "description": (
+            "Record an observation into memory from any client. The platform-agnostic "
+            "capture path — call this on each turn/tool-use when no native hook exists. "
+            "Supply your own session_id; techne ensures the session and tags its platform."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The client's session identifier (1:1 with a techne session)",
+                },
+                "content": {"type": "string", "description": "The observation text to record"},
+                "tool_name": {
+                    "type": "string",
+                    "description": "Tool or event name (e.g. Edit, Bash, turn_complete)",
+                    "default": "Observation",
+                },
+                "platform": {
+                    "type": "string",
+                    "description": "Originating client (e.g. opencode, codex). Stamps the session.",
+                },
+                "project_path": {"type": "string", "default": ""},
+                "agent_identity": {"type": "string", "default": ""},
+                "tier": {"type": "string", "enum": ["hot", "warm", "cold"], "default": "hot"},
+                "event_at": {
+                    "type": "string",
+                    "description": "ISO-8601 event time; omit for live capture (write time is used)",
+                },
+            },
+            "required": ["session_id", "content"],
+        },
+    },
+    {
         "name": "techne_threads",
         "description": "List threads — active, recent, or by status",
         "inputSchema": {
@@ -226,6 +310,7 @@ TOOLS = [
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
+    "techne_observe": _techne_observe,
     "techne_threads": _techne_threads,
     "techne_resume": _techne_resume,
     "techne_status": _techne_status,
@@ -234,6 +319,7 @@ TOOL_HANDLERS = {
 
 
 # --- JSON-RPC helpers ---
+
 
 def _response(req_id, result):
     return {"jsonrpc": "2.0", "id": req_id, "result": result}

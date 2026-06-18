@@ -262,6 +262,37 @@ def list_sessions(db_path: Path, limit: int = 20) -> list[dict]:
         conn.close()
 
 
+def ensure_session(
+    db_path: Path,
+    session_id: str,
+    *,
+    project_path: str = "",
+    agent_identity: str = "",
+    platform: str = "claude-code",
+) -> None:
+    """Idempotently ensure a session row exists, stamped with its platform.
+
+    Unlike `start_session` (which INSERTs and raises on a duplicate id), this is
+    a no-op when the session already exists. Used by capture paths that receive
+    a client-supplied session id and must not assume `run_session_start` ran
+    first — notably the `techne_observe` MCP tool, where a non-Claude-Code
+    client (opencode, standalone) records observations against its own session
+    id. The first observe for a session creates the row and stamps the client's
+    `platform`; later observes no-op. (#57: this is where `sessions.platform`
+    gains meaning for a second client.)
+    """
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO sessions (id, project_path, agent_identity, platform)
+               VALUES (?, ?, ?, ?)""",
+            (session_id, project_path, agent_identity, platform),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def add_observation(
     db_path: Path,
     session_id: str,

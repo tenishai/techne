@@ -52,8 +52,13 @@ class TestHandleRequest:
         tools = response["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == {
-            "techne_search", "techne_store", "techne_threads",
-            "techne_resume", "techne_status", "techne_recall",
+            "techne_search",
+            "techne_store",
+            "techne_observe",
+            "techne_threads",
+            "techne_resume",
+            "techne_status",
+            "techne_recall",
         }
 
     def test_notifications_initialized_returns_none(self, config):
@@ -118,6 +123,107 @@ class TestTechneStoreContentValidation:
         # No isError, content array carries the success payload as JSON text
         assert "isError" not in response["result"]
         assert "content" in response["result"]
+
+
+class TestTechneObserve:
+    """techne_observe — the platform-agnostic capture path (#57)."""
+
+    def _call(self, config, args, req_id=20):
+        return handle_request(
+            {
+                "id": req_id,
+                "method": "tools/call",
+                "params": {"name": "techne_observe", "arguments": args},
+            },
+            config,
+        )
+
+    def test_missing_session_id_returns_iserror(self, config):
+        r = self._call(config, {"content": "x"})
+        assert r["result"]["isError"] is True
+        assert "session_id" in r["result"]["content"][0]["text"]
+
+    def test_missing_content_returns_iserror(self, config):
+        r = self._call(config, {"session_id": "s1"})
+        assert r["result"]["isError"] is True
+        assert "content" in r["result"]["content"][0]["text"].lower()
+
+    def test_records_observation_and_ensures_session(self, config):
+        from techne.core.database import connect
+
+        r = self._call(
+            config,
+            {"session_id": "oc-session-1", "content": "edited foo.ts", "platform": "opencode"},
+        )
+        assert "isError" not in r["result"]
+        import json
+
+        payload = json.loads(r["result"]["content"][0]["text"])
+        assert payload == {"recorded": True, "session_id": "oc-session-1"}
+
+        conn = connect(config.db_path)
+        try:
+            sess = conn.execute(
+                "SELECT platform FROM sessions WHERE id = ?", ("oc-session-1",)
+            ).fetchone()
+            obs = conn.execute(
+                "SELECT content, tool_name FROM observations WHERE session_id = ?",
+                ("oc-session-1",),
+            ).fetchall()
+        finally:
+            conn.close()
+        # session row created and stamped with the client's platform (#57 coupling #4)
+        assert sess["platform"] == "opencode"
+        assert len(obs) == 1
+        assert obs[0]["content"] == "edited foo.ts"
+        assert obs[0]["tool_name"] == "Observation"  # default
+
+    def test_second_observe_reuses_session(self, config):
+        from techne.core.database import connect
+
+        self._call(config, {"session_id": "oc-2", "content": "one", "platform": "opencode"})
+        self._call(config, {"session_id": "oc-2", "content": "two", "platform": "opencode"})
+        conn = connect(config.db_path)
+        try:
+            n_sessions = conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE id = ?", ("oc-2",)
+            ).fetchone()[0]
+            n_obs = conn.execute(
+                "SELECT COUNT(*) FROM observations WHERE session_id = ?", ("oc-2",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n_sessions == 1  # ensure_session is idempotent
+        assert n_obs == 2
+
+    def test_platform_defaults_to_config(self, config):
+        from techne.core.database import connect
+
+        config.platform = "claude-code"
+        self._call(config, {"session_id": "oc-3", "content": "x"})  # no platform arg
+        conn = connect(config.db_path)
+        try:
+            sess = conn.execute("SELECT platform FROM sessions WHERE id = ?", ("oc-3",)).fetchone()
+        finally:
+            conn.close()
+        assert sess["platform"] == "claude-code"
+
+    def test_redaction_applied(self, config):
+        """Capture must go through the same redaction path as the hook."""
+        from techne.core.database import connect
+
+        self._call(
+            config,
+            {"session_id": "oc-4", "content": "key AKIAIOSFODNN7EXAMPLE here", "platform": "x"},
+        )
+        conn = connect(config.db_path)
+        try:
+            content = conn.execute(
+                "SELECT content FROM observations WHERE session_id = ?", ("oc-4",)
+            ).fetchone()["content"]
+        finally:
+            conn.close()
+        assert "AKIAIOSFODNN7EXAMPLE" not in content
 
 
 class TestTechneStatus:
