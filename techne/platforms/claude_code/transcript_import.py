@@ -5,12 +5,18 @@ memory store contains the same shape of observations regardless of capture
 mechanism.
 """
 
-import json
 from pathlib import Path, PurePosixPath
 
 from techne.core.database import connect
 from techne.core.redaction import redact_credentials
-from techne.hooks.post_tool_use import SKIP_TOOLS, summarize
+from techne.hooks.post_tool_use import summarize
+from techne.sync.jsonl_records import (
+    content_blocks,
+    extract_text,
+    iter_jsonl_records,
+    should_import,
+    tool_result_text,
+)
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
@@ -36,70 +42,6 @@ def default_transcripts_dir(cwd: Path | None = None) -> Path:
     return PROJECTS_DIR / project_slug_for_cwd(cwd)
 
 
-def _should_import(tool_name: str) -> bool:
-    """Filter for backfill — looser than the live `should_capture` hook.
-
-    The live hook honors `capture_bash` / `capture_read` flags to bound runtime
-    overhead. The JSONL has those tool calls regardless, and historical memory
-    is more valuable than skipping them, so we only drop the explicit blocklist.
-    """
-    if tool_name in SKIP_TOOLS:
-        return False
-    if tool_name.startswith("mcp__memory__"):
-        return False
-    return True
-
-
-def _iter_records(jsonl_path: Path):
-    with jsonl_path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-
-def _content_blocks(rec: dict) -> list:
-    msg = rec.get("message") or {}
-    content = msg.get("content")
-    if isinstance(content, list):
-        return content
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    return []
-
-
-def _extract_user_text(blocks: list) -> str:
-    parts = []
-    for b in blocks:
-        if not isinstance(b, dict):
-            continue
-        if b.get("type") == "text":
-            t = b.get("text") or ""
-            if t.strip():
-                parts.append(t)
-    return "\n".join(parts).strip()
-
-
-def _tool_result_text(result) -> str:
-    if isinstance(result, str):
-        return result
-    if isinstance(result, list):
-        out = []
-        for b in result:
-            if isinstance(b, dict) and b.get("type") == "text":
-                out.append(b.get("text") or "")
-            elif isinstance(b, dict):
-                out.append(json.dumps(b, default=str))
-            else:
-                out.append(str(b))
-        return "\n".join(out)
-    return json.dumps(result, default=str) if result is not None else ""
-
-
 def import_transcript(
     db_path: Path,
     jsonl_path: Path,
@@ -120,7 +62,7 @@ def import_transcript(
 
     Returns: {session_id, project_path, tool_obs, prompt_obs, summary_set, skipped}.
     """
-    records = list(_iter_records(jsonl_path))
+    records = list(iter_jsonl_records(jsonl_path))
     if not records:
         return {"session_id": None, "skipped": True, "reason": "empty"}
 
@@ -208,7 +150,7 @@ def import_transcript(
         for rec in records:
             rtype = rec.get("type")
             ts = rec.get("timestamp")
-            blocks = _content_blocks(rec)
+            blocks = content_blocks(rec)
 
             if rtype == "assistant":
                 for b in blocks:
@@ -218,7 +160,7 @@ def import_transcript(
                             "input": b.get("input") or {},
                             "ts": ts,
                         }
-                text = _extract_user_text(blocks)
+                text = extract_text(blocks)
                 if text:
                     conn.execute(
                         """INSERT INTO observations
@@ -237,9 +179,9 @@ def import_transcript(
                         if not tu:
                             continue
                         tool_name = tu["name"]
-                        if not _should_import(tool_name):
+                        if not should_import(tool_name):
                             continue
-                        output = _tool_result_text(b.get("content"))
+                        output = tool_result_text(b.get("content"))
                         content = summarize(tool_name, tu["input"], output)
                         event_ts = tu["ts"] or ts
                         conn.execute(
@@ -261,7 +203,7 @@ def import_transcript(
                 # cancelled and the user follows up. Suppressing the prompt
                 # whenever `paired_any` is True silently drops that text.
                 if include_user_prompts:
-                    text = _extract_user_text(blocks)
+                    text = extract_text(blocks)
                     if text and not text.startswith("<"):
                         conn.execute(
                             """INSERT INTO observations

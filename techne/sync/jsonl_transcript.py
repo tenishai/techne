@@ -1,7 +1,7 @@
 """JsonlTranscriptSource — SourceAdapter for continuous Claude Code transcript indexing.
 
 Composes three existing primitives:
-  - JSONL parsing from techne.platforms.claude_code.transcript_import
+  - JSONL block parsing from techne.sync.jsonl_records (neutral primitives)
   - OS-level change detection + debounce from techne.watch
   - Per-file byte-offset cursor from techne.core.extension_state
 
@@ -32,13 +32,13 @@ from techne.core.database import connect
 from techne.core.extension_state import get_state, set_state
 from techne.core.redaction import redact_credentials
 from techne.hooks.post_tool_use import summarize
-from techne.platforms.claude_code.transcript_import import (
-    _content_blocks,
-    _extract_user_text,
-    _should_import,
-    _tool_result_text,
-)
 from techne.sync.adapter import SourceAdapter  # noqa: F401 — re-exported for callers
+from techne.sync.jsonl_records import (
+    content_blocks,
+    extract_text,
+    should_import,
+    tool_result_text,
+)
 from techne.watch import Debouncer, matches
 
 log = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ def _ingest_records_from_offset(
 
                 rtype = rec.get("type")
                 ts = rec.get("timestamp")
-                blocks = _content_blocks(rec)
+                blocks = content_blocks(rec)
 
                 if rtype == "assistant":
                     for b in blocks:
@@ -160,7 +160,7 @@ def _ingest_records_from_offset(
                                 "ts": ts,
                                 "session_id": session_id,
                             }
-                    text = _extract_user_text(blocks)
+                    text = extract_text(blocks)
                     if text:
                         header = _tag_header("transcript", "assistant", session_id, project)
                         content = redact_credentials(f"{header}\n{text[:4000]}")
@@ -182,9 +182,9 @@ def _ingest_records_from_offset(
                             if not tu:
                                 continue
                             tool_name = tu["name"]
-                            if not _should_import(tool_name):
+                            if not should_import(tool_name):
                                 continue
-                            output = _tool_result_text(b.get("content"))
+                            output = tool_result_text(b.get("content"))
                             body = summarize(tool_name, tu["input"], output)
                             header = _tag_header(
                                 "transcript", "tool_result", tu["session_id"], project
@@ -201,7 +201,7 @@ def _ingest_records_from_offset(
                             obs_count += 1
 
                     # User text (prompts)
-                    text = _extract_user_text(blocks)
+                    text = extract_text(blocks)
                     if text and not text.startswith("<"):
                         header = _tag_header("transcript", "user", session_id, project)
                         content = redact_credentials(f"{header}\n{text[:4000]}")
