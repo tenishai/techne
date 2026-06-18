@@ -47,7 +47,7 @@ opencode has no subprocess hooks (plugins are in-process TypeScript), so
 automatic capture shells out to the `techne observe` CLI on each tool
 execution — the analogue of Claude Code's PostToolUse hook.
 
-Add the plugin and point `TECHNE_BIN` at a techne that has the `observe` command:
+Add the plugin to `opencode.jsonc`:
 
 ```jsonc
 {
@@ -55,14 +55,20 @@ Add the plugin and point `TECHNE_BIN` at a techne that has the `observe` command
 }
 ```
 
+The plugin shells out to `techne` on PATH by default. That works as long as the
+installed `techne` has the `observe` command — i.e. it's current with the repo.
+Install techne editable so the CLI tracks HEAD and never drifts:
+
 ```sh
-# In the shell that launches opencode. Use the editable venv to avoid the pipx
-# CLI version-drift (the pipx `techne` may not have `observe` yet).
-export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
+pipx install --force --editable /ABS/PATH/techne   # techne CLI = repo HEAD
 ```
 
-`TECHNE_BIN` must be a single executable (not `python -m techne.cli`). It
-defaults to `techne` on PATH.
+If your `techne` on PATH is pinned/stale and you can't make it editable, override
+the binary instead (must be a single executable, not `python -m techne.cli`):
+
+```sh
+export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
+```
 
 ### What it captures
 
