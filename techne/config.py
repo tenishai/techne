@@ -2,11 +2,17 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import yaml
 
-Platform = Literal["claude-code", "codex", "standalone", "cabal"]
+Platform = Literal["claude-code", "codex", "standalone", "cabal", "opencode"]
+
+# Single source of truth for the valid platform strings. The config validator
+# and the CLI `--platform` choices both derive from this so they can't drift
+# from the Literal (they did — the CLI list was missing entries). Add a new
+# client here and it propagates everywhere.
+PLATFORMS: tuple[str, ...] = get_args(Platform)
 
 DEFAULT_DIR = Path.home() / ".techne"
 DEFAULT_DB = DEFAULT_DIR / "techne.db"
@@ -151,10 +157,9 @@ class Config:
         if "identity_dir" in raw:
             cfg.identity_dir = Path(raw["identity_dir"]).expanduser()
         if "platform" in raw:
-            if raw["platform"] not in ("claude-code", "codex", "standalone", "cabal"):
+            if raw["platform"] not in PLATFORMS:
                 raise ValueError(
-                    f"Invalid platform '{raw['platform']}'. "
-                    f"Must be one of: claude-code, codex, standalone, cabal"
+                    f"Invalid platform '{raw['platform']}'. Must be one of: {', '.join(PLATFORMS)}"
                 )
             cfg.platform = raw["platform"]
         if "model" in raw:

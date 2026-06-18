@@ -1,9 +1,11 @@
 """Tests for Config platform field type enforcement."""
 
+from typing import get_args
+
 import pytest
 import yaml
 
-from techne.config import Config
+from techne.config import PLATFORMS, Config, Platform
 
 
 def test_config_load_rejects_invalid_platform(tmp_path):
@@ -13,12 +15,27 @@ def test_config_load_rejects_invalid_platform(tmp_path):
         Config.load(config_file)
 
 
-def test_config_load_accepts_valid_platforms(tmp_path):
-    for platform in ("claude-code", "codex", "standalone"):
+def test_config_load_accepts_every_declared_platform(tmp_path):
+    # Every platform in the Literal must validate — covers the whole enum, not
+    # a hand-maintained subset, so a newly-added client can't be rejected.
+    for platform in PLATFORMS:
         config_file = tmp_path / f"config_{platform.replace('-', '_')}.yaml"
         config_file.write_text(yaml.dump({"platform": platform}))
         cfg = Config.load(config_file)
         assert cfg.platform == platform
+
+
+def test_platforms_is_single_source_of_truth():
+    # PLATFORMS must equal the Literal's args, and the CLI `--platform` choices
+    # must derive from it — so the three previously-duplicated lists can't drift
+    # (the CLI list was missing 'cabal' before A.2).
+    assert PLATFORMS == get_args(Platform)
+    assert "opencode" in PLATFORMS  # the client validated in #57
+
+    from techne.cli import init
+
+    choice = next(p for p in init.params if p.name == "platform").type
+    assert tuple(choice.choices) == PLATFORMS
 
 
 def test_threads_detector_defaults_to_heuristic():
@@ -29,9 +46,7 @@ def test_threads_detector_defaults_to_heuristic():
 
 def test_threads_detector_loaded_from_yaml(tmp_path):
     f = tmp_path / "config.yaml"
-    f.write_text(yaml.dump({
-        "threads": {"detector": "llm", "summarizer": "llm"}
-    }))
+    f.write_text(yaml.dump({"threads": {"detector": "llm", "summarizer": "llm"}}))
     cfg = Config.load(f)
     assert cfg.threads.detector == "llm"
     assert cfg.threads.summarizer == "llm"
@@ -53,14 +68,18 @@ def test_threads_rejects_invalid_summarizer(tmp_path):
 
 def test_threads_tool_families_loaded(tmp_path):
     f = tmp_path / "config.yaml"
-    f.write_text(yaml.dump({
-        "threads": {
-            "tool_families": {
-                "mcp__claude_ai_Datadog__search": "mcp:datadog",
-                "mcp__slack__post": "mcp:slack",
+    f.write_text(
+        yaml.dump(
+            {
+                "threads": {
+                    "tool_families": {
+                        "mcp__claude_ai_Datadog__search": "mcp:datadog",
+                        "mcp__slack__post": "mcp:slack",
+                    }
+                }
             }
-        }
-    }))
+        )
+    )
     cfg = Config.load(f)
     assert cfg.threads.tool_families["mcp__claude_ai_Datadog__search"] == "mcp:datadog"
     assert cfg.threads.tool_families["mcp__slack__post"] == "mcp:slack"
@@ -68,9 +87,9 @@ def test_threads_tool_families_loaded(tmp_path):
 
 def test_threads_entity_patterns_loaded(tmp_path):
     f = tmp_path / "config.yaml"
-    f.write_text(yaml.dump({
-        "threads": {"entity_patterns": [r"service:([a-z0-9-]+)", r"C[A-Z0-9]{8,12}"]}
-    }))
+    f.write_text(
+        yaml.dump({"threads": {"entity_patterns": [r"service:([a-z0-9-]+)", r"C[A-Z0-9]{8,12}"]}})
+    )
     cfg = Config.load(f)
     assert len(cfg.threads.entity_patterns) == 2
 
@@ -98,10 +117,14 @@ def test_llm_api_base_and_key_round_trip(tmp_path):
     """When set, llm_api_base + llm_api_key load and save losslessly. When
     unset (empty string), they don't appear in the saved YAML."""
     f = tmp_path / "in.yaml"
-    f.write_text(yaml.dump({
-        "llm_api_base": "http://litellm:4000",
-        "llm_api_key": "sk-cabal-rook-internal-key",
-    }))
+    f.write_text(
+        yaml.dump(
+            {
+                "llm_api_base": "http://litellm:4000",
+                "llm_api_key": "sk-cabal-rook-internal-key",
+            }
+        )
+    )
     cfg = Config.load(f)
     assert cfg.llm_api_base == "http://litellm:4000"
     assert cfg.llm_api_key == "sk-cabal-rook-internal-key"
@@ -139,15 +162,20 @@ def test_make_generate_fn_passes_proxy_fields(tmp_path, monkeypatch):
 
     def fake_completion(**kwargs):
         captured.update(kwargs)
+
         class _Msg:
             content = "ok"
+
         class _Choice:
             message = _Msg()
+
         class _Resp:
             choices = [_Choice()]
+
         return _Resp()
 
     import litellm
+
     monkeypatch.setattr(litellm, "completion", fake_completion)
 
     # With proxy fields set: both pass through.
@@ -168,6 +196,7 @@ def test_make_generate_fn_passes_proxy_fields(tmp_path, monkeypatch):
 def test_heuristic_config_defaults():
     """HeuristicConfig fields default to the module-constant values."""
     from techne.config import HeuristicConfig
+
     cfg = HeuristicConfig()
     assert cfg.boundary_threshold == 0.7
     assert cfg.user_prompt_score == 0.3
@@ -175,12 +204,16 @@ def test_heuristic_config_defaults():
 
 def test_heuristic_config_loaded_from_yaml(tmp_path):
     f = tmp_path / "config.yaml"
-    f.write_text(yaml.dump({
-        "heuristic": {
-            "boundary_threshold": 0.5,
-            "user_prompt_score": 0.1,
-        }
-    }))
+    f.write_text(
+        yaml.dump(
+            {
+                "heuristic": {
+                    "boundary_threshold": 0.5,
+                    "user_prompt_score": 0.1,
+                }
+            }
+        )
+    )
     cfg = Config.load(f)
     assert cfg.heuristic.boundary_threshold == 0.5
     assert cfg.heuristic.user_prompt_score == 0.1
@@ -202,17 +235,21 @@ def test_sync_round_trip_preserves_all_fields(tmp_path):
     truthy), silently dropping sync.audience and sync.extra. A round-trip on a
     fully-populated sync block should be lossless."""
     f = tmp_path / "in.yaml"
-    f.write_text(yaml.dump({
-        "sync": {
-            "adapter": "team-archivist",
-            "url": "https://archivist.example.com",
-            "auth": "token-xyz",
-            "audience": "techne.archivist",
-            "path": "/var/data/sync",
-            "tenant_id": "t-42",  # adapter-specific extra
-            "region": "us-east",  # adapter-specific extra
-        }
-    }))
+    f.write_text(
+        yaml.dump(
+            {
+                "sync": {
+                    "adapter": "team-archivist",
+                    "url": "https://archivist.example.com",
+                    "auth": "token-xyz",
+                    "audience": "techne.archivist",
+                    "path": "/var/data/sync",
+                    "tenant_id": "t-42",  # adapter-specific extra
+                    "region": "us-east",  # adapter-specific extra
+                }
+            }
+        )
+    )
     cfg = Config.load(f)
     assert cfg.sync.audience == "techne.archivist"
     assert cfg.sync.extra == {"tenant_id": "t-42", "region": "us-east"}

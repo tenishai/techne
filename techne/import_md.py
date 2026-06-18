@@ -1,8 +1,9 @@
 """Architectural-patterns markdown corpus importer.
 
-Parses a markdown file structured like
-`~/.claude/projects/.../memory/architectural-patterns.md` into knowledge
-entries for the techne knowledge store.
+Parses a markdown file (an `architectural-patterns.md`-style pattern corpus,
+wherever it lives) into knowledge entries for the techne knowledge store. The
+source path is supplied by the caller — this module makes no assumption about
+which client or directory it came from.
 
 Two kinds of sections recognized:
 

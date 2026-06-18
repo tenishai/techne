@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from techne import __version__
-from techne.config import DEFAULT_CONFIG, Config
+from techne.config import DEFAULT_CONFIG, PLATFORMS, Config
 
 
 @click.group()
@@ -757,9 +757,7 @@ def migrate_summaries_cmd(ctx, dry_run: bool):
 
 
 @main.command("init")
-@click.option(
-    "--platform", type=click.Choice(["claude-code", "codex", "standalone"]), default="claude-code"
-)
+@click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
 @click.option(
     "--identity-dir",
     type=click.Path(exists=True),
