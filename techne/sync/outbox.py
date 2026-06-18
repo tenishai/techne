@@ -20,6 +20,14 @@ from techne.sync.adapter import OutboxEntry, SyncAdapter
 
 logger = logging.getLogger(__name__)
 
+# Every outbox target declares its delivery lane via a namespace prefix. The
+# prefix is a permanent property of the row, so which flush path owns it never
+# depends on the sink registry's state at flush time — that's what closes the
+# flush()/flush_sinks race (#51). flush(adapter) drains `sync:%`; flush_sinks
+# drains `sink:%`; the two sets are disjoint by construction.
+SYNC_PREFIX = "sync:"  # adapter-bound — drained by flush(adapter) to the team backend
+SINK_PREFIX = "sink:"  # sink-bound — delivered by flush_sinks via a registered OutboxSink
+
 
 def enqueue(
     db_path: Path,
@@ -31,17 +39,19 @@ def enqueue(
 ):
     """Add an entry to the outbox. Deduplicates by content_hash.
 
-    Always validates *target* against the sink registry (raises UnknownSinkError
-    if not registered) and validates *data* against the sink's payload schema
-    (raises InvalidPayloadError on mismatch). No orphan rows can be created.
+    The *target* must declare its delivery lane via a namespace prefix (#51):
 
-    deliver=True (default): calls the sink handler synchronously after inserting
-    — transactional-outbox pattern. Failures leave the row pending for the next
-    flush_sinks cycle; the caller never sees them.
+    - ``sink:<name>`` — delivered by ``flush_sinks`` through a registered
+      OutboxSink. The sink must be registered (raises UnknownSinkError) and the
+      payload is validated against its schema (InvalidPayloadError on mismatch).
+      ``deliver=True`` (default) attempts immediate synchronous delivery
+      (transactional-outbox); failures leave the row pending for the next
+      ``flush_sinks`` cycle.
+    - ``sync:<name>`` — drained by ``flush(adapter)`` to the team backend. No
+      sink, no payload schema, no immediate delivery — the row waits for a flush.
 
-    deliver=False: skips immediate delivery; row stays pending for the next
-    flush_sinks call. Use for tests or bulk-import scenarios where you want
-    durable rows without triggering handlers.
+    An un-namespaced target is rejected (no orphan rows). ``deliver=False`` skips
+    immediate delivery for sink targets (tests / bulk import).
     """
     from techne.sync.sinks import (
         InvalidPayloadError,
@@ -50,15 +60,23 @@ def enqueue(
         list_sinks,
     )
 
-    sink = get_sink(target)
-    if sink is None:
-        available = [s.name for s in list_sinks()]
-        raise UnknownSinkError(f"No sink registered for target={target!r}. Available: {available}")
-
-    try:
-        sink.payload_schema(**data)
-    except TypeError as e:
-        raise InvalidPayloadError(target, str(e)) from e
+    sink = None
+    if target.startswith(SINK_PREFIX):
+        sink = get_sink(target)
+        if sink is None:
+            available = [s.name for s in list_sinks()]
+            raise UnknownSinkError(
+                f"No sink registered for target={target!r}. Available: {available}"
+            )
+        try:
+            sink.payload_schema(**data)
+        except TypeError as e:
+            raise InvalidPayloadError(target, str(e)) from e
+    elif not target.startswith(SYNC_PREFIX):
+        raise ValueError(
+            f"outbox target must be namespaced {SINK_PREFIX!r} (sink-delivered) or "
+            f"{SYNC_PREFIX!r} (adapter-delivered); got {target!r}"
+        )
 
     if content_hash is None:
         content_hash = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
@@ -75,7 +93,7 @@ def enqueue(
     finally:
         conn.close()
 
-    if deliver and inserted_id:
+    if deliver and inserted_id and sink is not None:
         _try_deliver_now(db_path, sink, inserted_id, data)
 
 
@@ -91,7 +109,7 @@ def flush(db_path: Path, adapter: SyncAdapter) -> tuple[int, int]:
     try:
         rows = conn.execute(
             """SELECT id, target, data_json, content_hash FROM outbox
-               WHERE status = 'pending'
+               WHERE status = 'pending' AND target LIKE 'sync:%'
                ORDER BY created_at LIMIT 100"""
         ).fetchall()
 
@@ -245,7 +263,7 @@ def _update_row_status(db_path: Path, row_id: int, result) -> None:
 def _load_pending_grouped_by_target(conn) -> dict[str, list]:
     rows = conn.execute(
         """SELECT id, target, data_json FROM outbox
-           WHERE status = 'pending'
+           WHERE status = 'pending' AND target LIKE 'sink:%'
            ORDER BY created_at"""
     ).fetchall()
 
@@ -347,16 +365,21 @@ def purge_pending(db_path: Path, target: str | None = None) -> int:
 
 
 def prune_orphans(db_path: Path) -> int:
-    """Mark pending rows for unregistered targets as dead.
+    """Mark pending ``sink:`` rows whose sink isn't registered as dead.
 
-    Only call this intentionally (e.g. via CLI) — leaves-pending is the
-    safe default. Returns the number of rows pruned.
+    Only ``sink:`` targets can orphan — a ``sync:`` row belongs to the adapter
+    by construction (its lane is in the target prefix, not the registry), so it
+    is never an orphan even when no adapter is configured. Only call this
+    intentionally (e.g. via CLI); leaves-pending is the safe default. Returns
+    the number of rows pruned.
     """
     from techne.sync.sinks import get_sink
 
     conn = connect(db_path)
     try:
-        rows = conn.execute("SELECT id, target FROM outbox WHERE status = 'pending'").fetchall()
+        rows = conn.execute(
+            "SELECT id, target FROM outbox WHERE status = 'pending' AND target LIKE 'sink:%'"
+        ).fetchall()
 
         orphan_ids = [r["id"] for r in rows if get_sink(r["target"]) is None]
         if not orphan_ids:

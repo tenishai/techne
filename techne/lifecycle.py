@@ -5,47 +5,19 @@ directly when embedding techne in a runtime that isn't Claude Code (e.g., a
 custom agent process or notebook).
 """
 
-from dataclasses import dataclass
-
 from techne.config import Config
 
-
-@dataclass
-class ThreadSummaryPayload:
-    session_id: str
-    thread_id: str
-    thread_label: str
-    summary: str
-    resume_points: list
-    agent_identity: str
-
-
-def _register_lifecycle_sinks() -> None:
-    """Register adapter-bound sinks that defer to flush(adapter) for delivery.
-
-    These sinks exist solely so enqueue validates the target at call time.
-    The handler returns ok=False so the row stays pending; flush(adapter)
-    drains it via the team-backend path on the next sync cycle.
-    """
-    from techne.sync.sinks import DeliveryResult, OutboxSink, get_sink, register_sink
-
-    if get_sink("thread_summary") is None:
-        register_sink(
-            OutboxSink(
-                name="thread_summary",
-                payload_schema=ThreadSummaryPayload,
-                handler=lambda _: DeliveryResult(ok=False, error=None),
-                description="Thread summaries queued for team-backend sync via flush(adapter).",
-            )
-        )
+# Thread summaries are adapter-bound: enqueued under the `sync:` namespace so
+# flush(adapter) drains them to the team backend, and flush_sinks never touches
+# them (#51). No sink stub needed — the `sync:` prefix declares the lane.
+THREAD_SUMMARY_TARGET = "sync:thread_summary"
 
 
 def _has_live_consumer(config) -> bool:
     """True when a real team backend can drain the outbox.
 
-    The thread_summary sink stub never delivers on its own — it defers to the
-    flush(adapter) path. With the noop adapter there is no consumer, so
-    enqueuing only grows an undrainable backlog. Gate enqueue on this.
+    With the noop adapter there is no consumer for `sync:` rows, so enqueuing
+    only grows an undrainable backlog (#79). Gate enqueue on this.
     """
     return config.sync.adapter != "noop"
 
@@ -149,7 +121,6 @@ def run_session_end(
     )
     from techne.sync.outbox import enqueue
 
-    _register_lifecycle_sinks()
     observations = get_observations(config.db_path, session_id)
     threads, scores = detect_summarize_with_metadata(observations, config)
 
@@ -180,7 +151,7 @@ def run_session_end(
         for t in threads:
             enqueue(
                 config.db_path,
-                "thread_summary",
+                THREAD_SUMMARY_TARGET,
                 {
                     "session_id": session_id,
                     "thread_id": f"{session_id}-{t.thread_num}",
@@ -272,7 +243,6 @@ def redetect_threads(
     )
     from techne.sync.outbox import enqueue
 
-    _register_lifecycle_sinks()
     observations = get_observations(config.db_path, session_id)
     threads, scores = detect_summarize_with_metadata(observations, config)
 
@@ -311,7 +281,7 @@ def redetect_threads(
         for t in threads:
             enqueue(
                 config.db_path,
-                "thread_summary",
+                THREAD_SUMMARY_TARGET,
                 {
                     "session_id": session_id,
                     "thread_id": f"{session_id}-{t.thread_num}",

@@ -1,9 +1,25 @@
 # Proposal: Outbox sinks — typed, registered, schema-validated delivery targets
 
-**Status**: Draft.
+**Status**: Implemented. Routing resolved via target namespaces — see the #51 note below.
 **Author**: Raven (Opus 4.7) + Richard, paired session 2026-06-15.
 **Tracking issue**: [#22](https://github.com/dimartin/techne/issues/22).
 **Motivating consumer**: `cabal/docs/proposals/investigation-engine.md` PR-E (Archivist receiving sub-agent findings). The Archivist is the first sink; this proposal designs the substrate so future sinks (Slack courier, email, TUI notifier, etc.) plug in the same way.
+
+> **Update (#51, 2026-06-17): the two-flush-path race is closed via target namespaces.**
+> The original design left `flush(adapter)` and `flush_sinks` both draining all
+> `status='pending'` rows, racing on any target both accepted — and used a
+> `DeliveryResult(ok=False, error=None)` sink stub as a "defer to the adapter"
+> bridge (the symptom). That ambiguity is gone. **Every outbox target now
+> declares its lane with a prefix:** `sync:<name>` is adapter-bound (drained by
+> `flush(adapter)`); `sink:<name>` is sink-bound (delivered by `flush_sinks` via
+> a registered `OutboxSink`). `enqueue` rejects un-namespaced targets. The two
+> flush queries filter `LIKE 'sync:%'` / `LIKE 'sink:%'`, so the sets are
+> disjoint by construction and ownership is a permanent property of the row —
+> never dependent on registry state at flush time. The `thread_summary` sink
+> stub and `_register_lifecycle_sinks` are removed; thread summaries enqueue as
+> `sync:thread_summary`. `DeliveryResult(ok=False)` now always means "the handler
+> tried and failed." This unblocks the Archivist sink (cabal#14): it registers
+> `sink:archivist` and its rows can never be swept up by an adapter flush.
 
 ---
 

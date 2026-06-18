@@ -495,37 +495,27 @@ class TestSessionEndFlushSinks:
         import techne.hooks.session_end as hook_mod
 
         src = inspect.getsource(hook_mod)
-        assert "flush_sinks" in src, (
-            "flush_sinks must be called in session_end.py (issue #48)"
-        )
+        assert "flush_sinks" in src, "flush_sinks must be called in session_end.py (issue #48)"
 
-    def test_flush_sinks_deferred_stays_pending(self, tmp_path: Path):
-        """thread_summary rows written during session_end stay pending (ok=False, error=None).
-
-        The deferred handler returns ok=False so flush_sinks leaves them in the
-        outbox for the adapter flush path. Rows must NOT be marked dead or synced.
+    def test_sync_rows_invisible_to_flush_sinks(self, tmp_path: Path):
+        """Adapter-bound `sync:` rows (thread summaries) are invisible to
+        flush_sinks — it never touches them, so they stay pending for
+        flush(adapter). This is the #51 fix: the target prefix decides ownership,
+        so the two flush paths run in the same hook without racing. Replaces the
+        old deferred-stub (ok=False) bridge, which was the symptom of the race.
         """
         from techne.core.database import init_db
         from techne.sync.outbox import enqueue, flush_sinks, stats
-        from techne.sync.sinks import DeliveryResult, OutboxSink, register_sink, use_registry
+        from techne.sync.sinks import use_registry
 
         db_path = tmp_path / "test.db"
-        conn = init_db(db_path)
-        conn.close()
+        init_db(db_path).close()
 
-        deferred_sink = OutboxSink(
-            name="thread_summary",
-            payload_schema=dict,
-            handler=lambda _: DeliveryResult(ok=False, error=None),
-            description="deferred — mirrors lifecycle.py registration",
-        )
-
-        with use_registry({}):
-            register_sink(deferred_sink)
-            enqueue(db_path, "thread_summary", {"content": "queued"}, deliver=False)
+        with use_registry({}):  # no sinks registered at all
+            enqueue(db_path, "sync:thread_summary", {"content": "queued"}, deliver=False)
             summary = flush_sinks(db_path)
 
         s = stats(db_path)
-        assert s["pending"] == 1, "deferred sink must leave rows pending, not mark them synced"
-        assert s["dead"] == 0, "failed flush must not mark rows dead"
-        assert summary["thread_summary"] == (0, 1), "expected (synced=0, failed=1)"
+        assert s["pending"] == 1, "flush_sinks must leave sync: rows pending, not touch them"
+        assert s["dead"] == 0
+        assert "sync:thread_summary" not in summary, "flush_sinks must ignore sync: rows entirely"

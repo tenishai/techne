@@ -59,7 +59,7 @@ def _make_sink(name: str) -> OutboxSink:
 @pytest.fixture
 def registered_targets():
     """Register sink stubs for the targets used in TestOutbox, isolated per test."""
-    registry = {name: _make_sink(name) for name in ("knowledge", "a", "b")}
+    registry = {name: _make_sink(name) for name in ("sink:knowledge", "sink:a", "sink:b")}
     with use_registry(registry):
         yield
 
@@ -196,18 +196,22 @@ class TestOutbox:
     def test_enqueue_and_count(self, db_path, registered_targets):
         assert pending_count(db_path) == 0
         # deliver=False: skip immediate delivery so the row stays pending to count
-        enqueue(db_path, "knowledge", {"content": "test fact"}, deliver=False)
+        enqueue(db_path, "sink:knowledge", {"content": "test fact"}, deliver=False)
         assert pending_count(db_path) == 1
 
     def test_dedup(self, db_path, registered_targets):
-        enqueue(db_path, "knowledge", {"content": "same"}, content_hash="dedupkey", deliver=False)
-        enqueue(db_path, "knowledge", {"content": "same"}, content_hash="dedupkey", deliver=False)
+        enqueue(
+            db_path, "sink:knowledge", {"content": "same"}, content_hash="dedupkey", deliver=False
+        )
+        enqueue(
+            db_path, "sink:knowledge", {"content": "same"}, content_hash="dedupkey", deliver=False
+        )
         assert pending_count(db_path) == 1
 
     def test_flush_with_noop_preserves_backlog(self, db_path, registered_targets):
         """With noop adapter, flush() must not mark entries synced — they need
         to remain pending so a later real adapter can pick them up."""
-        enqueue(db_path, "knowledge", {"content": "test"}, deliver=False)
+        enqueue(db_path, "sync:knowledge", {"content": "test"}, deliver=False)
         adapter = NoopAdapter()
         synced, failed = flush(db_path, adapter)
         assert synced == 0
@@ -215,8 +219,8 @@ class TestOutbox:
         assert pending_count(db_path) == 1
 
     def test_stats(self, db_path, registered_targets):
-        enqueue(db_path, "a", {"x": 1}, deliver=False)
-        enqueue(db_path, "b", {"y": 2}, deliver=False)
+        enqueue(db_path, "sink:a", {"x": 1}, deliver=False)
+        enqueue(db_path, "sink:b", {"y": 2}, deliver=False)
         s = stats(db_path)
         assert s["total"] == 2
         assert s["pending"] == 2
@@ -237,8 +241,12 @@ class TestOutbox:
             def pull(self, query):
                 return []
 
-        enqueue(db_path, "knowledge", {"content": "item1"}, content_hash="hash1", deliver=False)
-        enqueue(db_path, "knowledge", {"content": "item2"}, content_hash="hash2", deliver=False)
+        enqueue(
+            db_path, "sync:knowledge", {"content": "item1"}, content_hash="hash1", deliver=False
+        )
+        enqueue(
+            db_path, "sync:knowledge", {"content": "item2"}, content_hash="hash2", deliver=False
+        )
 
         adapter = FailingAdapter()
         synced, failed = flush(db_path, adapter)
@@ -255,17 +263,17 @@ class TestOutbox:
             assert "connection refused" in e["error_message"]
 
     def test_purge_pending_all(self, db_path, registered_targets):
-        enqueue(db_path, "a", {"x": 1}, deliver=False)
-        enqueue(db_path, "b", {"y": 2}, deliver=False)
+        enqueue(db_path, "sink:a", {"x": 1}, deliver=False)
+        enqueue(db_path, "sink:b", {"y": 2}, deliver=False)
         assert pending_count(db_path) == 2
         deleted = purge_pending(db_path)
         assert deleted == 2
         assert pending_count(db_path) == 0
 
     def test_purge_pending_by_target(self, db_path, registered_targets):
-        enqueue(db_path, "a", {"x": 1}, deliver=False)
-        enqueue(db_path, "b", {"y": 2}, deliver=False)
-        deleted = purge_pending(db_path, target="a")
+        enqueue(db_path, "sink:a", {"x": 1}, deliver=False)
+        enqueue(db_path, "sink:b", {"y": 2}, deliver=False)
+        deleted = purge_pending(db_path, target="sink:a")
         assert deleted == 1
         assert pending_count(db_path) == 1
         # the 'b' row is untouched
@@ -273,8 +281,8 @@ class TestOutbox:
 
     def test_purge_pending_leaves_synced_and_dead(self, db_path, registered_targets):
         # 'knowledge' sink delivers ok=True → synced; purge must not touch it
-        enqueue(db_path, "knowledge", {"content": "delivered"})
-        enqueue(db_path, "a", {"x": 1}, deliver=False)
+        enqueue(db_path, "sink:knowledge", {"content": "delivered"})
+        enqueue(db_path, "sink:a", {"x": 1}, deliver=False)
         assert stats(db_path)["synced"] == 1
         deleted = purge_pending(db_path)
         assert deleted == 1
@@ -282,13 +290,77 @@ class TestOutbox:
         assert s["synced"] == 1
         assert s["pending"] == 0
 
-    def test_enqueue_unknown_target_raises(self, db_path):
-        """After tightening, enqueue with no registered sink raises UnknownSinkError."""
+    def test_enqueue_unnamespaced_target_raises(self, db_path):
+        """An un-namespaced target is rejected — every row must declare its lane (#51)."""
+        with pytest.raises(ValueError, match="must be namespaced"):
+            enqueue(db_path, "thread_summary", {})
+        assert stats(db_path)["total"] == 0
+
+    def test_enqueue_sink_target_without_sink_raises(self, db_path):
+        """A `sink:` target with no registered sink raises UnknownSinkError."""
         from techne.sync.sinks import UnknownSinkError, use_registry
 
         with use_registry({}):
             with pytest.raises(UnknownSinkError):
-                enqueue(db_path, "any-old-string", {})
+                enqueue(db_path, "sink:nonexistent", {})
+        assert stats(db_path)["total"] == 0
+
+    def test_enqueue_sync_target_needs_no_sink(self, db_path):
+        """A `sync:` target inserts with no sink registered — it's adapter-bound."""
+        from techne.sync.sinks import use_registry
+
+        with use_registry({}):
+            enqueue(db_path, "sync:thread_summary", {"anything": 1}, deliver=False)
+        assert stats(db_path)["pending"] == 1
+
+    def test_flush_and_flush_sinks_do_not_race(self, db_path):
+        """The #51 guarantee: with both a real adapter AND a real sink configured,
+        flush(adapter) drains ONLY sync: rows and flush_sinks drains ONLY sink:
+        rows — neither steals the other's. The target prefix decides ownership,
+        so registry state at flush time can't misroute a row."""
+        from techne.sync.outbox import flush, flush_sinks
+        from techne.sync.sinks import OutboxSink, use_registry
+
+        @dataclass
+        class _P:
+            content: str = ""
+
+        delivered: list = []
+        archivist = OutboxSink(
+            name="sink:archivist",
+            payload_schema=_P,
+            handler=lambda d: (delivered.append(d), DeliveryResult(ok=True))[1],
+        )
+
+        class CountingAdapter:
+            def __init__(self):
+                self.pushed = []
+
+            def health(self):
+                return True
+
+            def push(self, entries):
+                self.pushed.extend(entries)
+                return PushResult(synced=len(entries), failed=0)
+
+            def pull(self, query):
+                return []
+
+        with use_registry({"sink:archivist": archivist}):
+            enqueue(db_path, "sync:thread_summary", {"content": "for-adapter"}, deliver=False)
+            enqueue(db_path, "sink:archivist", {"content": "for-sink"}, deliver=False)
+
+            adapter = CountingAdapter()
+            synced, _ = flush(db_path, adapter)  # adapter sees only sync: rows
+            summary = flush_sinks(db_path)  # sinks see only sink: rows
+
+        # adapter got exactly the sync row; sink got exactly the sink row
+        assert synced == 1
+        assert [e.target for e in adapter.pushed] == ["sync:thread_summary"]
+        assert summary["sink:archivist"] == (1, 0)
+        assert [d["content"] for d in delivered] == ["for-sink"]
+        # everything delivered, nothing left, nothing double-handled
+        assert stats(db_path)["synced"] == 2
 
 
 class TestAdapterLoader:
