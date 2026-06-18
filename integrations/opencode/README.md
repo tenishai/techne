@@ -84,9 +84,14 @@ export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
 - The first observation for a session creates the session row stamped
   `platform: opencode`.
 
-Deferred: retrieved-context injection (`experimental.chat.system.transform`) —
-inject relevant memory into opencode's prompt the way the Claude Code
-SessionStart banner does.
+And it **injects** memory:
+
+- **`experimental.chat.system.transform`** → prepends a `<techne-memory>` block
+  (active threads + durable facts for the project, via `techne context`) to
+  opencode's system prompt — the read-side analogue of the Claude Code
+  SessionStart banner. So the model is memory-aware by default, not only when it
+  calls a recall tool. Fetched once per session (cached) to avoid a per-turn
+  subprocess.
 
 ### Verify capture end-to-end
 

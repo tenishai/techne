@@ -520,6 +520,43 @@ def get_resume_context(db_path: Path, project_path: str = "", limit: int = 5) ->
         conn.close()
 
 
+def format_resume_context(ctx: dict, project_path: str = "", max_chars: int = 1800) -> str:
+    """Render get_resume_context() output as a compact memory block for prompt
+    injection — the read-side analogue of the SessionStart banner.
+
+    Used by `techne context` (and thence a client plugin, e.g. opencode's
+    experimental.chat.system.transform) to prepend "here's what you were working
+    on + durable facts" to the model's system prompt. Returns "" when there is
+    nothing worth injecting, so callers can skip cleanly. Capped at *max_chars*.
+    """
+    active = ctx.get("active_threads") or []
+    knowledge = ctx.get("knowledge") or []
+    if not active and not knowledge:
+        return ""
+
+    scope = f" for {project_path}" if project_path else ""
+    body = [f"Relevant memory{scope} from your techne store — prior context for this work:"]
+
+    if active:
+        body.append("\nActive threads (what you were working on):")
+        for t in active:
+            label = (t.get("label") or "thread").strip()
+            detail = (t.get("resume_points") or t.get("summary") or "").strip().replace("\n", " ")
+            body.append(f"- {label}: {detail[:200]}".rstrip(": ").rstrip())
+
+    if knowledge:
+        body.append("\nDurable facts:")
+        for k in knowledge:
+            content = (k.get("content") or "").strip().replace("\n", " ")
+            if content:
+                body.append(f"- {content[:200]}")
+
+    inner = "\n".join(body)
+    if len(inner) > max_chars:
+        inner = inner[:max_chars].rstrip() + " …"
+    return f"<techne-memory>\n{inner}\n</techne-memory>"
+
+
 def db_stats(db_path: Path) -> dict:
     """Database statistics for status display."""
     conn = connect(db_path)

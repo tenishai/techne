@@ -164,6 +164,60 @@ class TestSessionEndCommand:
         assert n2 == n1  # idempotent — safe to fire per turn
 
 
+class TestContextCommand:
+    """`techne context` — memory block for prompt injection (#57 read-side)."""
+
+    def test_empty_db_prints_nothing(self, cli_config) -> None:
+        result = CliRunner().invoke(main, ["context"])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == ""
+
+    def test_emits_memory_block_with_active_threads(self, cli_config) -> None:
+        runner = CliRunner()
+        # Seed an opencode session and run session-end to create an active thread.
+        for i in range(8):
+            runner.invoke(
+                main,
+                [
+                    "observe",
+                    "--session-id",
+                    "oc-ctx",
+                    "--platform",
+                    "opencode",
+                    "--project-path",
+                    "/proj",
+                    "--tool-name",
+                    "bash",
+                    "--content",
+                    f"did thing {i}",
+                ],
+            )
+        runner.invoke(main, ["session-end", "oc-ctx"])
+
+        result = runner.invoke(main, ["context", "--project-path", "/proj"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "<techne-memory>" in out and "</techne-memory>" in out
+        assert "Active threads" in out
+
+
+def test_format_resume_context_empty_returns_blank():
+    from techne.core.state import format_resume_context
+
+    assert format_resume_context({"active_threads": [], "knowledge": []}) == ""
+
+
+def test_format_resume_context_caps_length():
+    from techne.core.state import format_resume_context
+
+    big = [{"label": f"t{i}", "resume_points": "x" * 500} for i in range(20)]
+    out = format_resume_context({"active_threads": big, "knowledge": []}, max_chars=300)
+    # Capped body + closing tag; the truncation ellipsis is present.
+    assert out.endswith("</techne-memory>")
+    assert "…" in out
+    assert len(out) < 400
+
+
 def test_serve_command_exists() -> None:
     """`techne serve --help` runs without error — sanity check the
     command is registered and click can build its usage doc."""

@@ -1002,6 +1002,28 @@ def session_end(ctx, session_id, summary):
     )
 
 
+@main.command("context")
+@click.option("--project-path", default="", help="Scope active threads to this project")
+@click.option("--limit", default=5, help="Max threads/facts to include")
+@click.pass_context
+def context(ctx, project_path, limit):
+    """Emit a compact memory block for injecting into a client's prompt.
+
+    The read-side analogue of the Claude Code SessionStart banner: active threads
+    (what you were working on) + durable facts for the project, as a text block a
+    client plugin prepends to the model's system prompt — e.g. opencode's
+    `experimental.chat.system.transform`. Prints nothing when there's no context
+    to inject, so the caller can skip cleanly.
+    """
+    config = ctx.obj["config"]
+    from techne.core.state import format_resume_context, get_resume_context
+
+    data = get_resume_context(config.db_path, project_path=project_path, limit=limit)
+    text = format_resume_context(data, project_path=project_path)
+    if text:
+        click.echo(text)
+
+
 @main.command("import-patterns")
 @click.argument("markdown_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
