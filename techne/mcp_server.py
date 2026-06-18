@@ -268,7 +268,10 @@ TOOLS = [
     },
     {
         "name": "techne_resume",
-        "description": "Get the current resume state — active threads and hot facts for session start",
+        "description": (
+            "Get the current resume state — active threads and hot facts "
+            "for session start"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -283,7 +286,10 @@ TOOLS = [
     },
     {
         "name": "techne_recall",
-        "description": "Retrieve context for a specific topic — searches all layers including identity",
+        "description": (
+            "Retrieve context for a specific topic — searches all layers "
+            "including identity"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
