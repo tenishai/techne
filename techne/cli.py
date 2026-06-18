@@ -929,6 +929,57 @@ def serve(ctx):
     run_server()
 
 
+@main.command("observe")
+@click.option(
+    "--session-id", required=True, help="Client session identifier (1:1 with a techne session)"
+)
+@click.option("--content", default=None, help="Observation text; if omitted, read from stdin")
+@click.option(
+    "--tool-name", default="Observation", help="Tool or event name (e.g. Edit, turn_complete)"
+)
+@click.option(
+    "--platform", default=None, help="Originating client (e.g. opencode); stamps the session"
+)
+@click.option("--project-path", default="", help="Project path for the session row")
+@click.option("--agent-identity", default="", help="Agent identity for the session row")
+@click.option("--tier", default="hot", type=click.Choice(["hot", "warm", "cold"]))
+@click.option("--event-at", default=None, help="ISO-8601 event time; omit for live capture")
+@click.pass_context
+def observe(
+    ctx, session_id, content, tool_name, platform, project_path, agent_identity, tier, event_at
+):
+    """Record an observation — the platform-agnostic capture path.
+
+    The CLI sibling of the techne_observe MCP tool, for clients that drive capture
+    from a plugin/hook (e.g. an opencode TS plugin shelling out per event) rather
+    than letting the model call the MCP tool. Content comes from --content or, if
+    omitted, stdin — so multi-line payloads can be piped in.
+    """
+    import sys
+
+    from techne.core.state import record_observation
+
+    config = ctx.obj["config"]
+    if content is None:
+        content = sys.stdin.read()
+    content = content.strip()
+    if not content:
+        raise click.ClickException("observe requires content (via --content or stdin)")
+
+    result = record_observation(
+        config,
+        session_id,
+        content,
+        tool_name=tool_name,
+        platform=platform,
+        project_path=project_path,
+        agent_identity=agent_identity,
+        tier=tier,
+        event_at=event_at,
+    )
+    click.echo(f"observed session={result['session_id']} tool={tool_name} ({len(content)} chars)")
+
+
 @main.command("import-patterns")
 @click.argument("markdown_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from click.testing import CliRunner
 
@@ -44,6 +42,76 @@ def test_init_claude_code_unchanged(isolated_config) -> None:
     assert result.exit_code == 0, result.output
     assert "Standalone init complete" not in result.output
     assert "techne initialized" in result.output
+
+
+@pytest.fixture
+def cli_config(tmp_path, monkeypatch):
+    """A Config pointed at a fresh tmp db, injected via Config.load()."""
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    db = tmp_path / "techne.db"
+    init_db(db).close()
+    cfg = Config()
+    cfg.db_path = db
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
+    return cfg
+
+
+class TestObserveCommand:
+    """`techne observe` — CLI sibling of the techne_observe MCP tool (#57)."""
+
+    def test_records_via_content_and_stamps_platform(self, cli_config) -> None:
+        from techne.core.database import connect
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "observe",
+                "--session-id",
+                "oc-1",
+                "--content",
+                "edited bar.ts",
+                "--platform",
+                "opencode",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "observed session=oc-1" in result.output
+
+        conn = connect(cli_config.db_path)
+        try:
+            sess = conn.execute("SELECT platform FROM sessions WHERE id = ?", ("oc-1",)).fetchone()
+            obs = conn.execute(
+                "SELECT content FROM observations WHERE session_id = ?", ("oc-1",)
+            ).fetchall()
+        finally:
+            conn.close()
+        assert sess["platform"] == "opencode"  # client platform stamped (#57)
+        assert len(obs) == 1 and obs[0]["content"] == "edited bar.ts"
+
+    def test_reads_content_from_stdin(self, cli_config) -> None:
+        from techne.core.database import connect
+
+        result = CliRunner().invoke(
+            main,
+            ["observe", "--session-id", "oc-2", "--platform", "opencode"],
+            input="multi\nline\nobservation\n",
+        )
+        assert result.exit_code == 0, result.output
+        conn = connect(cli_config.db_path)
+        try:
+            content = conn.execute(
+                "SELECT content FROM observations WHERE session_id = ?", ("oc-2",)
+            ).fetchone()["content"]
+        finally:
+            conn.close()
+        assert content == "multi\nline\nobservation"
+
+    def test_empty_content_errors(self, cli_config) -> None:
+        result = CliRunner().invoke(main, ["observe", "--session-id", "oc-3"], input="   \n")
+        assert result.exit_code != 0
+        assert "content" in result.output.lower()
 
 
 def test_serve_command_exists() -> None:

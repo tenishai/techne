@@ -102,32 +102,19 @@ def _techne_observe(args: dict, config: Config) -> dict:
     (stamped with the client's `platform`) and writes the observation through the
     same redaction + tag/kind-inference path as the hook. (#57)
     """
-    from techne.core.state import add_observation, ensure_session
+    from techne.core.state import record_observation
 
-    session_id = args.get("session_id")
-    content = args.get("content")
-    if not session_id:
-        raise ValueError("techne_observe requires 'session_id'")
-    if not content:
-        raise ValueError("techne_observe requires 'content' (non-empty string)")
-
-    ensure_session(
-        config.db_path,
-        session_id,
+    return record_observation(
+        config,
+        args.get("session_id"),
+        args.get("content"),
+        tool_name=args.get("tool_name", "Observation"),
+        platform=args.get("platform"),
         project_path=args.get("project_path", ""),
         agent_identity=args.get("agent_identity", ""),
-        platform=args.get("platform") or config.platform,
-    )
-    add_observation(
-        config.db_path,
-        session_id=session_id,
-        tool_name=args.get("tool_name", "Observation"),
-        content=content,
         tier=args.get("tier", "hot"),
-        config=config,
         event_at=args.get("event_at"),
     )
-    return {"recorded": True, "session_id": session_id}
 
 
 def _techne_threads(args: dict, config: Config) -> list[dict]:
@@ -258,7 +245,7 @@ TOOLS = [
                 "tier": {"type": "string", "enum": ["hot", "warm", "cold"], "default": "hot"},
                 "event_at": {
                     "type": "string",
-                    "description": "ISO-8601 event time; omit for live capture (write time is used)",
+                    "description": "ISO-8601 event time; omit for live capture",
                 },
             },
             "required": ["session_id", "content"],

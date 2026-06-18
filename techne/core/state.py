@@ -293,6 +293,54 @@ def ensure_session(
         conn.close()
 
 
+def record_observation(
+    config,
+    session_id: str,
+    content: str,
+    *,
+    tool_name: str = "Observation",
+    platform: str | None = None,
+    project_path: str = "",
+    agent_identity: str = "",
+    tier: str = "hot",
+    event_at: str | None = None,
+) -> dict:
+    """Capture one observation: ensure the session, then write it.
+
+    The single platform-agnostic capture path (#57), shared by the
+    ``techne_observe`` MCP tool (model-driven capture) and the ``techne observe``
+    CLI command (plugin/hook-driven capture, e.g. an opencode TS plugin shelling
+    out). Ensures the session row exists — stamped with the client's ``platform``
+    — then writes through ``add_observation`` (redaction + tag/kind inference).
+
+    ``platform`` defaults to ``config.platform``. Returns
+    ``{"recorded": True, "session_id": ...}``. Raises ValueError on a missing
+    session_id or empty content.
+    """
+    if not session_id:
+        raise ValueError("record_observation requires a session_id")
+    if not content:
+        raise ValueError("record_observation requires content (non-empty)")
+
+    ensure_session(
+        config.db_path,
+        session_id,
+        project_path=project_path,
+        agent_identity=agent_identity,
+        platform=platform or config.platform,
+    )
+    add_observation(
+        config.db_path,
+        session_id=session_id,
+        tool_name=tool_name,
+        content=content,
+        tier=tier,
+        config=config,
+        event_at=event_at,
+    )
+    return {"recorded": True, "session_id": session_id}
+
+
 def add_observation(
     db_path: Path,
     session_id: str,
