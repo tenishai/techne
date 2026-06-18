@@ -978,6 +978,30 @@ def observe(
     click.echo(f"observed session={result['session_id']} tool={tool_name} ({len(content)} chars)")
 
 
+@main.command("session-end")
+@click.argument("session_id")
+@click.option("--summary", default=None, help="Optional manual session summary")
+@click.pass_context
+def session_end(ctx, session_id, summary):
+    """Run end-of-session processing on a session — detect threads, summarize, age.
+
+    The CLI sibling of the Claude Code Stop hook, for clients that signal
+    turn/session completion from a plugin (e.g. an opencode plugin firing on
+    `session.idle`). Idempotent: thread IDs are content-addressed and written
+    INSERT-OR-IGNORE, so replaying a session is a no-op — safe to call once per
+    turn. Outbox enqueue stays gated on a live consumer (#79), so a noop adapter
+    won't accumulate a backlog.
+    """
+    config = ctx.obj["config"]
+    from techne.lifecycle import run_session_end
+
+    result = run_session_end(config, session_id, summary=summary)
+    click.echo(
+        f"session-end {session_id}: {result['threads']} threads, "
+        f"{result['linked']} linked, {result['queued']} queued"
+    )
+
+
 @main.command("import-patterns")
 @click.argument("markdown_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(

@@ -114,6 +114,56 @@ class TestObserveCommand:
         assert "content" in result.output.lower()
 
 
+class TestSessionEndCommand:
+    """`techne session-end` — Stop-hook analogue for plugin-driven clients (#57)."""
+
+    def test_detects_threads_and_is_idempotent(self, cli_config) -> None:
+        from techne.core.database import connect
+
+        runner = CliRunner()
+        # Seed a session with enough observations to form a thread.
+        for i in range(8):
+            runner.invoke(
+                main,
+                [
+                    "observe",
+                    "--session-id",
+                    "oc-se",
+                    "--platform",
+                    "opencode",
+                    "--tool-name",
+                    "bash",
+                    "--content",
+                    f"ran command number {i}",
+                ],
+            )
+
+        r1 = runner.invoke(main, ["session-end", "oc-se"])
+        assert r1.exit_code == 0, r1.output
+        assert "session-end oc-se" in r1.output
+
+        conn = connect(cli_config.db_path)
+        try:
+            n1 = conn.execute(
+                "SELECT COUNT(*) FROM threads WHERE session_id = ?", ("oc-se",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n1 >= 1  # threads detected for the opencode session
+
+        # Replay: content-addressed thread IDs → no duplication.
+        r2 = runner.invoke(main, ["session-end", "oc-se"])
+        assert r2.exit_code == 0, r2.output
+        conn = connect(cli_config.db_path)
+        try:
+            n2 = conn.execute(
+                "SELECT COUNT(*) FROM threads WHERE session_id = ?", ("oc-se",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n2 == n1  # idempotent — safe to fire per turn
+
+
 def test_serve_command_exists() -> None:
     """`techne serve --help` runs without error — sanity check the
     command is registered and click can build its usage doc."""
