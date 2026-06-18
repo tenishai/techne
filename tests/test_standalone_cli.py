@@ -138,30 +138,34 @@ class TestSessionEndCommand:
                 ],
             )
 
+        def counts():
+            conn = connect(cli_config.db_path)
+            try:
+                threads = conn.execute(
+                    "SELECT COUNT(*) FROM threads WHERE session_id = ?", ("oc-se",)
+                ).fetchone()[0]
+                # thread_boundaries must NOT accumulate across replays — that was
+                # the unbounded-growth bug masked by checking only thread count.
+                boundaries = conn.execute(
+                    "SELECT COUNT(*) FROM thread_boundaries WHERE session_id = ?", ("oc-se",)
+                ).fetchone()[0]
+                return threads, boundaries
+            finally:
+                conn.close()
+
         r1 = runner.invoke(main, ["session-end", "oc-se"])
         assert r1.exit_code == 0, r1.output
         assert "session-end oc-se" in r1.output
+        t1, b1 = counts()
+        assert t1 >= 1  # threads detected for the opencode session
 
-        conn = connect(cli_config.db_path)
-        try:
-            n1 = conn.execute(
-                "SELECT COUNT(*) FROM threads WHERE session_id = ?", ("oc-se",)
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        assert n1 >= 1  # threads detected for the opencode session
-
-        # Replay: content-addressed thread IDs → no duplication.
-        r2 = runner.invoke(main, ["session-end", "oc-se"])
-        assert r2.exit_code == 0, r2.output
-        conn = connect(cli_config.db_path)
-        try:
-            n2 = conn.execute(
-                "SELECT COUNT(*) FROM threads WHERE session_id = ?", ("oc-se",)
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        assert n2 == n1  # idempotent — safe to fire per turn
+        # Replay twice — content-addressed thread IDs AND DELETE-then-insert
+        # boundaries → fully idempotent, safe to fire per turn.
+        for _ in range(2):
+            assert runner.invoke(main, ["session-end", "oc-se"]).exit_code == 0
+        t3, b3 = counts()
+        assert t3 == t1, "threads must not duplicate on replay"
+        assert b3 == b1, "thread_boundaries must not accumulate on replay (unbounded-growth guard)"
 
 
 class TestContextCommand:

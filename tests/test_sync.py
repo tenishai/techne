@@ -313,7 +313,7 @@ class TestOutbox:
             enqueue(db_path, "sync:thread_summary", {"anything": 1}, deliver=False)
         assert stats(db_path)["pending"] == 1
 
-    def test_flush_and_flush_sinks_do_not_race(self, db_path):
+    def test_flush_and_flush_sinks_partition_by_lane(self, db_path):
         """The #51 guarantee: with both a real adapter AND a real sink configured,
         flush(adapter) drains ONLY sync: rows and flush_sinks drains ONLY sink:
         rows — neither steals the other's. The target prefix decides ownership,

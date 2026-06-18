@@ -132,6 +132,14 @@ def run_session_end(
         )
         conn = connect(config.db_path)
         try:
+            # Replace, don't accumulate. run_session_end fires once per turn
+            # (Claude Code's Stop hook, opencode's session.idle), so re-inserting
+            # the boundary set without clearing the prior one grows
+            # thread_boundaries unboundedly — the #79 backlog pathology on a
+            # different table (seen live: one session at 37k rows). DELETE+insert
+            # keeps it idempotent, mirroring redetect_threads. Same transaction
+            # as save_boundaries (which commits) so there's no empty window.
+            conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
             save_boundaries(conn, session_id, scores, boundary_a_indices)
             # Persist the observation count processed so external tooling (and
             # future incremental passes) can tell how far the detector has run.
