@@ -108,7 +108,7 @@ def _mmr_reorder(
     return selected
 
 
-SearchTable = Literal["threads", "observations", "knowledge", "all"]
+SearchTable = Literal["threads", "observations", "knowledge", "documents", "all"]
 
 
 def _recency_score(ts_str: str | None, half_life_days: float = 30.0) -> float:
@@ -274,6 +274,39 @@ def _fts_match_rows(
                     "rank": r["rank"],
                 }
             )
+
+    if table in ("documents", "all"):
+        # documents_fts may not exist yet on older library dbs; skip gracefully.
+        fts_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='documents_fts'"
+        ).fetchone()
+        if fts_exists:
+            rows = conn.execute(
+                """SELECT d.id, d.source_type, d.source_url, d.title, d.content,
+                          d.meta, d.updated_at,
+                          bm25(documents_fts) AS rank
+                   FROM documents_fts f
+                   JOIN documents d ON d.id = f.rowid
+                   WHERE documents_fts MATCH ?
+                     AND d.superseded_by IS NULL
+                   ORDER BY rank
+                   LIMIT ?""",
+                (fts_query, candidate_limit),
+            ).fetchall()
+            for r in rows:
+                results.append(
+                    {
+                        "type": "document",
+                        "id": r["id"],
+                        "source_type": r["source_type"],
+                        "source_url": r["source_url"],
+                        "title": r["title"],
+                        "content": r["content"][:500],
+                        "meta": r["meta"],
+                        "updated_at": r["updated_at"],
+                        "rank": r["rank"],
+                    }
+                )
 
     return results
 
@@ -453,6 +486,37 @@ def search_vec(
                             }
                         )
 
+        if table in ("documents", "all"):
+            _exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='documents_vec'"
+            ).fetchone()
+            if _exists:
+                rows = conn.execute(
+                    """SELECT v.rowid, v.distance
+                       FROM documents_vec v
+                       WHERE v.embedding MATCH ? AND k = ?""",
+                    (q_bytes, limit),
+                ).fetchall()
+                for row in rows:
+                    d = conn.execute(
+                        """SELECT id, source_type, source_url, title, content, meta
+                           FROM documents WHERE id = ? AND superseded_by IS NULL""",
+                        (row[0],),
+                    ).fetchone()
+                    if d:
+                        results.append(
+                            {
+                                "type": "document",
+                                "id": d[0],
+                                "source_type": d[1],
+                                "source_url": d[2],
+                                "title": d[3],
+                                "content": d[4][:500],
+                                "meta": d[5],
+                                "distance": row[1],
+                            }
+                        )
+
         results.sort(key=lambda x: x.get("distance", 999))
         return results[:limit]
 
@@ -577,13 +641,14 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
 
-    counts = {"threads": 0, "observations": 0, "knowledge": 0}
+    counts = {"threads": 0, "observations": 0, "knowledge": 0, "documents": 0}
 
     try:
         for tbl, content_col, vec_tbl in [
             ("threads", "summary", "threads_vec"),
             ("observations", "content", "observations_vec"),
             ("knowledge", "content", "knowledge_vec"),
+            ("documents", "content", "documents_vec"),
         ]:
             _ensure_vec_table(conn, vec_tbl)
             id_col = "rowid" if tbl == "threads" else "id"
@@ -628,7 +693,7 @@ def _get_embedding_model():
     return _embedding_model
 
 
-_VEC_TABLE_NAMES = frozenset({"threads_vec", "observations_vec", "knowledge_vec"})
+_VEC_TABLE_NAMES = frozenset({"threads_vec", "observations_vec", "knowledge_vec", "documents_vec"})
 
 
 def _ensure_vec_table(conn: sqlite3.Connection, name: str):

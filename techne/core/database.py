@@ -221,6 +221,47 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     content, tags, content=knowledge, content_rowid=id,
     tokenize='porter unicode61'
 );
+
+-- Documents (Librarian domain — external reference corpora).
+-- Each row is one fetched document (e.g. a GitHub issue, arXiv paper,
+-- runbook page). `source_url` is the dedup key: re-fetching the same URL
+-- supersedes the prior row when content has changed, leaving the old row
+-- linked via `superseded_by` for audit. Documents live in their own db
+-- (a library db); they are decoupled from knowledge by design — no FK to
+-- knowledge, provenance is carried in `source_url`.
+--
+-- Deferred: document_chunks (per-chunk vectors for long content); synthesis
+-- operation (documents → knowledge with source_url provenance); other corpus
+-- adapters (arXiv, Jira, Confluence, runbooks); load_source_adapter() factory
+-- + entry-point registration; CLI commands for library management.
+CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    title TEXT,
+    content TEXT NOT NULL,
+    meta TEXT,
+    owned_by TEXT NOT NULL DEFAULT 'librarian',
+    fetched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_by INTEGER REFERENCES documents(id)
+);
+-- Non-unique index on source_url for fast dedup lookups. Uniqueness of the
+-- active row per source_url is enforced programmatically in store_document()
+-- (SELECT + INSERT in the same transaction) rather than via a partial unique
+-- index, because a partial unique index would collide with the FK constraint
+-- during the supersession swap (both rows temporarily have superseded_by IS NULL
+-- at statement time before the UPDATE fires). See documents.py: store_document.
+CREATE INDEX IF NOT EXISTS idx_documents_source_url ON documents(source_url);
+CREATE INDEX IF NOT EXISTS idx_documents_source_type ON documents(source_type);
+CREATE INDEX IF NOT EXISTS idx_documents_superseded ON documents(superseded_by);
+
+-- FTS5 index for documents — content + title, porter stemming.
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+    content, title, content=documents, content_rowid=id,
+    tokenize='porter unicode61'
+);
 """
 
 # Triggers to keep FTS5 indexes in sync with content tables.
@@ -269,6 +310,21 @@ CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
     INSERT INTO knowledge_fts(rowid, content, tags)
     VALUES (NEW.id, NEW.content, NEW.tags);
 END;
+
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO documents_fts(rowid, content, title)
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.title, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, content, title)
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.title, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, content, title)
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.title, ''));
+    INSERT INTO documents_fts(rowid, content, title)
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.title, ''));
+END;
 """
 
 
@@ -287,21 +343,51 @@ def _trigger_statements() -> list[tuple[str, str]]:
     return [(m.group(2), m.group(1).strip()) for m in pattern.finditer(FTS_TRIGGERS_SQL)]
 
 
+def _trigger_source_table(trigger_name: str) -> str | None:
+    """Return the content-table name that trigger_name fires on.
+
+    Derived by extracting ``AFTER {INSERT|UPDATE|DELETE} ON <table>`` from
+    the trigger SQL. Returns None if the table can't be determined (defensive
+    fallback — caller will attempt the CREATE and let SQLite surface the error).
+    """
+    for name, create_sql in _trigger_statements():
+        if name != trigger_name:
+            continue
+        m = re.search(r"AFTER\s+(?:INSERT|UPDATE|DELETE)\s+ON\s+(\w+)", create_sql, re.IGNORECASE)
+        return m.group(1) if m else None
+    return None
+
+
 def _reconcile_triggers(conn: sqlite3.Connection) -> None:
     """Create any triggers present in FTS_TRIGGERS_SQL but absent from the live DB.
 
     Uses ``CREATE TRIGGER IF NOT EXISTS`` so double-execution is harmless, but
     we still diff against sqlite_master first to avoid unnecessary work and to
     emit accurate log lines.
+
+    Skips triggers whose source table does not yet exist (e.g. ``documents_ai``
+    when ``documents`` hasn't been created yet on an older DB). Those triggers
+    will be installed on the next connect() after ``_reconcile_tables()`` adds
+    the source table.
     """
+    existing_tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'shadow')")
+    }
     existing = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
     }
     for name, create_sql in _trigger_statements():
-        if name not in existing:
-            conn.executescript(create_sql)
-            conn.commit()
-            print(f"[techne] reconcile: CREATE TRIGGER {name}", file=sys.stderr)
+        if name in existing:
+            continue
+        src = _trigger_source_table(name)
+        if src is not None and src not in existing_tables:
+            # Source table absent — skip; _reconcile_tables() will create it,
+            # then the next reconcile pass installs the trigger.
+            continue
+        conn.executescript(create_sql)
+        conn.commit()
+        print(f"[techne] reconcile: CREATE TRIGGER {name}", file=sys.stderr)
 
 
 _FTS_BACKFILL: dict[str, tuple[str, list[str]]] = {
@@ -312,12 +398,14 @@ _FTS_BACKFILL: dict[str, tuple[str, list[str]]] = {
     ),
     "threads_fts": ("threads", ["rowid", "label", "summary", "resume_points"]),
     "knowledge_fts": ("knowledge", ["id", "content", "COALESCE(tags, '')"]),
+    "documents_fts": ("documents", ["id", "content", "COALESCE(title, '')"]),
 }
 
 _FTS_INSERT_COLS: dict[str, list[str]] = {
     "observations_fts": ["rowid", "content", "tags", "kind"],
     "threads_fts": ["rowid", "label", "summary", "resume_points"],
     "knowledge_fts": ["rowid", "content", "tags"],
+    "documents_fts": ["rowid", "content", "title"],
 }
 
 
