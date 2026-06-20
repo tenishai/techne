@@ -13,17 +13,22 @@ Public surface:
 
 from techne.probe.canary import (
     CanarySeed,
+    DifferentialVerdict,
     ProbeVerdict,
     new_codeword,
+    run_differential,
     run_probe,
 )
-from techne.probe.runtimes import ClaudeCodeAdapter, RuntimeAdapter
+from techne.probe.runtimes import ClaudeCodeAdapter, NativeCanaryHandle, RuntimeAdapter
 
 __all__ = [
     "CanarySeed",
     "ProbeVerdict",
+    "DifferentialVerdict",
     "RuntimeAdapter",
     "ClaudeCodeAdapter",
+    "NativeCanaryHandle",
     "new_codeword",
     "run_probe",
+    "run_differential",
 ]

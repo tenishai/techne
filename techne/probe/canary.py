@@ -15,16 +15,15 @@ Mechanism (proof by construction):
      off, that can only be the egress push path — a clean #93 acceptance.
 
 Modes:
-  - off-test (default): native OFF, techne pull tools OFF → tests the egress
-    PUSH path specifically. The strongest #93 acceptance.
+  - off-test: native OFF, techne pull tools OFF → tests the egress PUSH path
+    specifically. The strongest #93 acceptance. (run_probe)
   - pull: native OFF, techne pull tools ON → tests that techne is reachable at
-    all (recall), not specifically the push path.
+    all (recall), not specifically the push path. (run_probe)
+  - differential: native ON + a native-only negative control → proves techne is
+    the LEAD (reaches the agent without disabling native), the routine
+    runs-anywhere gate. (run_differential)
 
 Deferred (MVP-cut, documented for the next pass):
-  - Non-destructive DIFFERENTIAL mode: also seed a native-only canary (the
-    negative control) with native memory left ON, ask for both, and use
-    provenance to decide who drives — the routine, runs-anywhere gate. Needs a
-    contamination-proof native seeder per runtime.
   - Additional runtime adapters (opencode, Codex) — see techne/probe/runtimes.py.
 """
 
@@ -76,6 +75,36 @@ class ProbeVerdict:
             f"  surfaced : {self.surfaced}\n"
             f"  provenance: {self.provenance}\n"
             f"  detail   : {self.detail}"
+        )
+
+
+@dataclass
+class DifferentialVerdict:
+    """Outcome of a differential probe — native ON, both canaries seeded.
+
+    passed: techne carried its codeword into context (techne is in the loop, not
+        masked by native memory). The native codeword is the negative control.
+    """
+
+    passed: bool
+    techne_surfaced: bool
+    native_surfaced: bool  # negative control — proves the native push path works
+    techne_provenance: str  # "techne" | "techne?" | "absent"
+    control_ok: bool  # native control surfaced (so a techne miss would be meaningful)
+    techne_codeword: str
+    native_codeword: str
+    output: str
+    detail: str
+
+    def render(self) -> str:
+        status = "PASS ✅" if self.passed else "FAIL ❌"
+        ctrl = "ok" if self.control_ok else "UNAVAILABLE — verdict is advisory"
+        return (
+            f"probe[differential] {status}  (native memory ON)\n"
+            f"  techne canary : surfaced={self.techne_surfaced} "
+            f"provenance={self.techne_provenance}\n"
+            f"  native control: surfaced={self.native_surfaced} ({ctrl})\n"
+            f"  detail        : {self.detail}"
         )
 
 
@@ -213,3 +242,71 @@ def run_probe(config, adapter, *, mode: str = "off-test", cleanup: bool = True) 
             logger.debug(
                 "probe: cleanup canary knowledge#%d deleted=%s", seed.knowledge_id, deleted
             )
+
+
+def run_differential(config, adapter, *, cleanup: bool = True) -> DifferentialVerdict:
+    """Non-destructive differential probe: native memory stays ON.
+
+    Seeds a techne-only canary and (if the adapter supports it) a native-only
+    canary, then spawns a fresh session with native ON and techne pull OFF so the
+    two PUSH paths compete in one context. Because each codeword lives in exactly
+    one store, presence attributes it; the ⟦techne⟧ marker corroborates.
+
+    Passes when techne carries its codeword — proving techne reaches the agent
+    without disabling native memory (the routine "is techne the lead, not the
+    shadow?" gate). The native canary is the negative control: if it doesn't
+    surface, the run can't distinguish a real techne miss from a broken session,
+    so the verdict is marked advisory.
+    """
+    techne_cw, techne_label = new_codeword()
+    native_cw, native_label = new_codeword()
+    seed = seed_canary(config, techne_cw, techne_label)
+
+    has_control = adapter.supports_native_seed()
+    native_handle = adapter.seed_native_canary(native_cw, native_label) if has_control else None
+    try:
+        prompt = (
+            "Two probe codewords were seeded before this session. "
+            f"What is the techne probe codeword (label '{techne_label}') and the native "
+            f"probe codeword (label '{native_label}')? Reply on two lines exactly as "
+            "`techne=<codeword>` and `native=<codeword>`; write MISSING for any you don't have."
+        )
+        logger.debug("probe: differential session (control=%s)", has_control)
+        output = adapter.fresh_session(prompt, disable_native=False, allow_techne_tools=False)
+
+        techne_surfaced, tag_present = evaluate_output(output, techne_cw)
+        native_surfaced = native_cw in output
+        control_ok = native_surfaced if has_control else False
+
+        if techne_surfaced:
+            techne_provenance = "techne" if tag_present else "techne?"
+        else:
+            techne_provenance = "absent"
+
+        if not techne_surfaced and native_surfaced:
+            detail = "techne shadowed — native carried its codeword, techne did not"
+        elif techne_surfaced and not has_control:
+            detail = "techne carried; adapter has no native control, so masking is untested"
+        elif techne_surfaced and not control_ok:
+            detail = "techne carried, but native control didn't surface — verdict advisory"
+        elif techne_surfaced and control_ok:
+            detail = "techne carried alongside live native memory — techne is in the loop"
+        else:
+            detail = "neither codeword surfaced — both push paths failed or session broke"
+
+        return DifferentialVerdict(
+            passed=techne_surfaced,
+            techne_surfaced=techne_surfaced,
+            native_surfaced=native_surfaced,
+            techne_provenance=techne_provenance,
+            control_ok=control_ok,
+            techne_codeword=techne_cw,
+            native_codeword=native_cw,
+            output=output,
+            detail=detail,
+        )
+    finally:
+        if cleanup:
+            delete(config.db_path, seed.knowledge_id)
+            if native_handle is not None:
+                adapter.cleanup_native_canary(native_handle)
