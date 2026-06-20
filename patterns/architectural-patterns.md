@@ -1,6 +1,8 @@
 # Architectural patterns
 
-Generated export from techne architect.db (`techne architect export`). Re-import with `techne architect ingest`. architect.db is canonical — edit there (via the architect persona), not here.
+Shared team corpus of design patterns lifted from other people's code. **How to use**: grep for a source URL before investigating it — if it's below, we've seen it. **To add one**: append a block using the *Template for new entries* at the bottom, then `git commit`. Load into your local store to query with `techne architect ingest patterns/architectural-patterns.md`.
+
+This file round-trips with the Architect store (`architect.db`): `architect ingest` loads it, `architect export` regenerates it. Hand-edits survive a regenerate **as long as you `ingest` before you `export`** (ingest pulls your additions into the store first). See `patterns/README.md`.
 
 ---
 
@@ -2242,3 +2244,22 @@ A three-state machine (`afterNewline` → `sawEscapeChar` → detach) intercepts
 - https://www.npmjs.com/package/fss-link — surveyed 2026-06-13 — hard fork of QwenCode (Gemini CLI lineage); standard SQLite-backed CLI agent, nothing novel beyond what's already in our notes
 - https://github.com/naveenayalla1-CS50/mcp-security-toolkit — surveyed 2026-06-17 — static regex+JSON-tree MCP config scanner; 0 stars, 3 commits, day-of-release; descriptive name will plausibly resurface but all 4 surfaced patterns were standard practice (negative fixtures, exit-code-as-severity, `mkdtemp` isolation, key-name traversal)
 - https://github.com/maximhq/bifrost — surveyed 2026-06-18 — **FULL-EVAL** (see `evaluations/bifrost-evaluation.md`): Go LLM gateway, 23+ providers, MCP client+server, but no A2A and no CEL — overlaps agentgateway's LLM layer and MCP federation but does not replace it. Decision: audit agentgateway's built-in LLM gateway first; use bifrost as LLM-only layer if agentgateway's provider coverage is insufficient. One pattern lifted (code-mode Starlark below).
+
+## Template for new entries
+
+Append a pattern as a block like this (parsed on `architect ingest`):
+
+    ## <Short pattern name>
+
+    - **Source**: <url> — <optional file:line or §section>
+    - **Surveyed**: <YYYY-MM-DD>
+
+    <What it does — 1–2 paragraphs.>
+
+    **Why interesting**: <the non-obvious design choice / trade-off>.
+
+    **Where to apply**: <where in our stack it fits>.
+
+    ---
+
+For a URL you investigated but found nothing to lift, add a bullet under "## Surveyed (no patterns worth saving)": `- <url> — surveyed <date> — <reason>`.

@@ -191,9 +191,16 @@ def export_patterns_md(db_path: Path) -> str:
     out = [
         "# Architectural patterns",
         "",
-        "Generated export from techne architect.db (`techne architect export`). "
-        "Re-import with `techne architect ingest`. architect.db is canonical — "
-        "edit there (via the architect persona), not here.",
+        "Shared team corpus of design patterns lifted from other people's code. "
+        "**How to use**: grep for a source URL before investigating it — if it's "
+        "below, we've seen it. **To add one**: append a block using the *Template "
+        "for new entries* at the bottom, then `git commit`. Load into your local "
+        "store to query with `techne architect ingest patterns/architectural-patterns.md`.",
+        "",
+        "This file round-trips with the Architect store (`architect.db`): "
+        "`architect ingest` loads it, `architect export` regenerates it. Hand-edits "
+        "survive a regenerate **as long as you `ingest` before you `export`** (ingest "
+        "pulls your additions into the store first). See `patterns/README.md`.",
         "",
         "---",
         "",
@@ -215,6 +222,32 @@ def export_patterns_md(db_path: Path) -> str:
             reason = nl["skip_reason"] or "nothing to lift"
             out.append(f"- {nl['url']} — surveyed {nl['surveyed_at']} — {reason}")
         out.append("")
+
+    # The format/schema, embedded so the file is self-documenting. This heading is
+    # in import_md.SKIPPED_HEADINGS (and the body is indented), so it is NOT ingested
+    # as a pattern.
+    out += [
+        "## Template for new entries",
+        "",
+        "Append a pattern as a block like this (parsed on `architect ingest`):",
+        "",
+        "    ## <Short pattern name>",
+        "",
+        "    - **Source**: <url> — <optional file:line or §section>",
+        "    - **Surveyed**: <YYYY-MM-DD>",
+        "",
+        "    <What it does — 1–2 paragraphs.>",
+        "",
+        "    **Why interesting**: <the non-obvious design choice / trade-off>.",
+        "",
+        "    **Where to apply**: <where in our stack it fits>.",
+        "",
+        "    ---",
+        "",
+        'For a URL you investigated but found nothing to lift, add a bullet under '
+        '"## Surveyed (no patterns worth saving)": `- <url> — surveyed <date> — <reason>`.',
+        "",
+    ]
     return "\n".join(out)
 
 
