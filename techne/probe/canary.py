@@ -24,7 +24,8 @@ Modes:
     runs-anywhere gate. (run_differential)
 
 Deferred (MVP-cut, documented for the next pass):
-  - Additional runtime adapters (opencode, Codex) — see techne/probe/runtimes.py.
+  - Adapters for other AI client runtimes techne runs under (Aider, openwebui,
+    MCP-only — the #57 portability set) — see techne/probe/runtimes.py.
 """
 
 from __future__ import annotations

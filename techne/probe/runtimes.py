@@ -6,8 +6,11 @@ memory optionally disabled and techne's pull tools optionally blocked, ask this
 prompt, and give me back what the agent said."
 
 Implemented: ClaudeCodeAdapter (CC headless `claude -p`), OpencodeAdapter
-(`opencode run`). Deferred (same Protocol): CodexAdapter — wraps that runtime's
-headless/one-shot invocation + its native-memory + tool-gating knobs.
+(`opencode run`). Deferred (same Protocol): adapters for other AI *client*
+runtimes techne runs under — e.g. Aider, openwebui, or any MCP-only client (the
+#57 portability set). Each wraps that runtime's headless/one-shot invocation +
+its native-memory + tool-gating knobs. (Not the platform's own "Codex"
+code-storage persona — that's a domain agent, not a client to run techne under.)
 """
 
 from __future__ import annotations
