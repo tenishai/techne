@@ -1477,5 +1477,72 @@ def library_card(ctx, card_id, chars):
         click.echo("\n(pointer did not resolve to a document)")
 
 
+@library.group("cards")
+def library_cards():
+    """Document-card gist fill — the agent-assisted summarization pass (Option D)."""
+
+
+@library_cards.command("emit")
+@click.option("--limit", type=int, default=50, help="Max pending cards to emit.")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the batch JSON here (default: stdout).",
+)
+@click.pass_context
+def library_cards_emit(ctx, limit, output):
+    """Emit summarization prompts for pending cards — the agent writes each `summary`,
+    then `cards ingest` feeds them back (no API key needed)."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.cards import emit_card_summary_batch
+
+    batch = emit_card_summary_batch(config.db_path, limit=limit)
+    payload = json.dumps(batch, indent=2)
+    if output:
+        output.write_text(payload, encoding="utf-8")
+        click.echo(f"Emitted {len(batch)} card prompt(s) -> {output}", err=True)
+    else:
+        click.echo(payload)
+
+
+@library_cards.command("ingest")
+@click.argument("responses_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.pass_context
+def library_cards_ingest(ctx, responses_file):
+    """Fill cards from agent-written gists. RESPONSES_FILE is the emit batch with
+    each `summary` filled in."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.cards import ingest_card_summaries
+
+    items = json.loads(responses_file.read_text(encoding="utf-8"))
+    counts = ingest_card_summaries(config.db_path, items)
+    click.echo(json.dumps(counts, indent=2))
+
+
+@library_cards.command("list")
+@click.option("--limit", type=int, default=50)
+@click.pass_context
+def library_cards_list(ctx, limit):
+    """List cards still awaiting a gist (pending)."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.cards import pending_cards
+
+    rows = pending_cards(config.db_path, limit=limit)
+    click.echo(f"Pending cards: {len(rows)}")
+    for r in rows[:25]:
+        click.echo(f"  #{r['id']}  {r['content'][:70]}")
+
+
 if __name__ == "__main__":
     main()

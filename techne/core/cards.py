@@ -161,3 +161,49 @@ def resolve_card(db_path: Path, card_id: int) -> dict | None:
         return None
     doc_id = card_doc_id(row["tags"])
     return get_document(db_path, doc_id) if doc_id is not None else None
+
+
+# --- agent-assisted gist fill (emit/ingest, same shape as reflect) -------------
+
+_SUMMARY_PROMPT = (
+    "Summarize this document in 2-3 sentences — what it covers and any durable "
+    "decisions or outcomes worth recalling later. Write the gist only, no preamble.\n\n"
+    "# {title}\n\n{content}"
+)
+
+
+def emit_card_summary_batch(
+    db_path: Path, *, limit: int = 50, content_chars: int = 8000
+) -> list[dict]:
+    """Build per-pending-card summarization prompts (no LLM). The agent writes a
+    gist into each `summary` field; ingest_card_summaries feeds them back. The
+    no-API-key path for the Option D gist, mirroring reflect emit/ingest."""
+    batch: list[dict] = []
+    for card in pending_cards(db_path, limit=limit):
+        doc = resolve_card(db_path, card["id"])
+        if doc is None:
+            continue
+        prompt = _SUMMARY_PROMPT.format(
+            title=doc.get("title") or card["source"],
+            content=(doc.get("content") or "")[:content_chars],
+        )
+        batch.append(
+            {"card_id": card["id"], "source": card["source"], "prompt": prompt, "summary": ""}
+        )
+    return batch
+
+
+def ingest_card_summaries(db_path: Path, items: list[dict]) -> dict:
+    """Fill cards from agent-written gists. Items: {card_id, summary}. Blank
+    summaries are skipped (an unanswered card stays pending)."""
+    counts = {"filled": 0, "skipped": 0, "missing": 0}
+    for it in items:
+        summary = (it.get("summary") or "").strip()
+        if not summary:
+            counts["skipped"] += 1
+            continue
+        if fill_card_summary(db_path, it["card_id"], summary):
+            counts["filled"] += 1
+        else:
+            counts["missing"] += 1
+    return counts

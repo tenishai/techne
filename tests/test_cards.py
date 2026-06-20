@@ -102,3 +102,36 @@ def test_document_card_is_pull_only_excluded_from_egress(db):
     injected = [r["id"] for r in select_tier0_injection(db, char_budget=4000)]
     assert fact in injected
     assert card not in injected
+
+
+def test_emit_card_summary_batch(db):
+    doc_id = _doc(db, content="we decided to use SQLite for the store")
+    card_id, _ = upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version="v1", title="storage decision"
+    )
+    from techne.core.cards import emit_card_summary_batch
+
+    batch = emit_card_summary_batch(db)
+    assert len(batch) == 1
+    item = batch[0]
+    assert item["card_id"] == card_id
+    assert item["summary"] == ""  # placeholder for the agent to fill
+    assert "use SQLite" in item["prompt"]  # the doc content is in the prompt
+
+
+def test_ingest_card_summaries_fills_and_skips(db):
+    doc_id = _doc(db)
+    c1, _ = upsert_document_card(db, source_url="u1", doc_id=doc_id, source_version="v1", title="a")
+    c2, _ = upsert_document_card(db, source_url="u2", doc_id=doc_id, source_version="v1", title="b")
+    from techne.core.cards import ingest_card_summaries
+
+    counts = ingest_card_summaries(
+        db,
+        [
+            {"card_id": c1, "summary": "A crisp gist."},
+            {"card_id": c2, "summary": "   "},  # blank → skipped, stays pending
+        ],
+    )
+    assert counts == {"filled": 1, "skipped": 1, "missing": 0}
+    still_pending = {r["id"] for r in pending_cards(db)}
+    assert c1 not in still_pending and c2 in still_pending
