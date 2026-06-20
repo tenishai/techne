@@ -610,3 +610,34 @@ def test_emit_ingest_roundtrip_equals_reflect_on_session(tmp_path):
     manual_rows = list_candidates(cfg_manual.db_path, status="all")
     assert len(auto_rows) == len(manual_rows) == 1
     assert auto_rows[0]["content"] == manual_rows[0]["content"] == "Roundtrip fact"
+
+
+def test_promote_identity_candidate_no_deadlock(tmp_path):
+    """Identity promotion must reuse the caller's open connection — a second
+    connection self-deadlocks against the candidate UPDATE's write lock, which
+    made identity candidates impossible to promote (identity table stuck empty)."""
+    from techne.core.identity import get as identity_get
+    from techne.core.reflect import ingest_reflection_response, promote_candidate
+
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    raw = json.dumps(
+        [
+            {
+                "scope": "identity",
+                "type": "user.prefers.terse",
+                "content": "Operator wants terse replies",
+                "tags": "style",
+                "confidence": "high",
+            }
+        ]
+    )
+    ingest_reflection_response(config, session_id, f"{session_id}-1", "h", raw)
+    cand = list_candidates(config.db_path, status="pending")[0]
+    promote_candidate(config.db_path, cand["id"])  # must not deadlock
+    assert identity_get(config.db_path, "user.prefers.terse") == "Operator wants terse replies"

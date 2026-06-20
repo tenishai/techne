@@ -18,8 +18,13 @@ def get(db_path: Path, key: str) -> str | None:
         conn.close()
 
 
-def set_value(db_path: Path, key: str, value: str, source: str = "config"):
-    conn = connect(db_path)
+def set_value(db_path: Path, key: str, value: str, source: str = "config", conn=None):
+    """Upsert an identity key. If `conn` is provided the caller owns the
+    transaction (no commit/close here) — pass it to avoid a second connection
+    deadlocking against the caller's open write (e.g. promote_candidate)."""
+    owned = conn is None
+    if owned:
+        conn = connect(db_path)
     try:
         conn.execute(
             """INSERT INTO identity (key, value, source, updated_at)
@@ -30,9 +35,11 @@ def set_value(db_path: Path, key: str, value: str, source: str = "config"):
                    updated_at = CURRENT_TIMESTAMP""",
             (key, value, source),
         )
-        conn.commit()
+        if owned:
+            conn.commit()
     finally:
-        conn.close()
+        if owned:
+            conn.close()
 
 
 def list_entries(db_path: Path, prefix: str = "") -> list[dict]:

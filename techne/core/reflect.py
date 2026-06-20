@@ -545,9 +545,10 @@ def promote_candidate(db_path: Path, candidate_id: int) -> int | None:
         elif scope == "identity":
             from techne.core.identity import set_value
 
-            # set_value opens its own connection; call before commit so any
-            # exception still rolls back the candidate status update.
-            set_value(db_path, row["type"], row["content"], source=source)
+            # Use the SAME connection — a second connection would deadlock against
+            # this one's open write (the candidate UPDATE above). Commit happens
+            # below, so an exception still rolls back the status update.
+            set_value(db_path, row["type"], row["content"], source=source, conn=conn)
             promoted_to_id = None
 
         # Update promoted_to_id now that we know the new knowledge row id.
