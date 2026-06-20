@@ -311,6 +311,95 @@ def test_native_seed_deletes_file_it_created(tmp_path):
     assert not mem.exists()
 
 
+# ---------------------------------------------------------------------------
+# OpencodeAdapter (no real opencode session spawned)
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_no_native_seed():
+    from techne.probe import OpencodeAdapter
+
+    a = OpencodeAdapter()
+    assert a.supports_native_seed() is False
+    with pytest.raises(NotImplementedError):
+        a.seed_native_canary("cw", "lbl")
+
+
+def test_opencode_injected_context_includes_canary(config):
+    from techne.probe import OpencodeAdapter
+
+    codeword, label = new_codeword()
+    seed_canary(config, codeword, label)
+    block = OpencodeAdapter().injected_context(config)
+    assert "<techne-memory>" in block
+    assert codeword in block  # fresh high-confidence canary lands in `techne context`
+
+
+def test_opencode_fresh_session_gates_tools(monkeypatch):
+    from techne.probe import runtimes
+
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = "techne=ANSWER"
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        agent_file = Path(kw["cwd"]) / ".opencode" / "agent" / "techne-readonly.md"
+        captured["agent_exists"] = agent_file.exists()
+        captured["agent_body"] = agent_file.read_text() if agent_file.exists() else ""
+        return FakeProc()
+
+    monkeypatch.setattr(runtimes.subprocess, "run", fake_run)
+    out = runtimes.OpencodeAdapter(model="opencode/big-pickle").fresh_session(
+        "q", disable_native=True, allow_techne_tools=False
+    )
+    assert out == "techne=ANSWER"
+    assert captured["argv"][:2] == ["opencode", "run"]
+    assert "--agent" in captured["argv"] and "techne-readonly" in captured["argv"]
+    assert "opencode/big-pickle" in captured["argv"]
+    assert captured["agent_exists"]
+    assert "techne_*: false" in captured["agent_body"]
+
+
+def test_opencode_fresh_session_pull_allowed_no_gating(monkeypatch):
+    from techne.probe import runtimes
+
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(runtimes.subprocess, "run", fake_run)
+    runtimes.OpencodeAdapter().fresh_session("q", disable_native=False, allow_techne_tools=True)
+    assert "--agent" not in captured["argv"]  # no read-only agent when pull is allowed
+
+
+class _NoInjectFake:
+    name = "no-inject"
+
+    def fresh_session(self, prompt, *, disable_native, allow_techne_tools):
+        return "UNREACHABLE"
+
+    def injected_context(self, config):
+        return ""  # nothing injected → off-test precondition must fail
+
+
+def test_offtest_setup_failed_when_canary_not_injected(config):
+    v = run_probe(config, _NoInjectFake(), mode="off-test")
+    assert not v.passed
+    assert v.provenance == "setup-failed"
+    assert "UNREACHABLE" not in v.output  # never spawned the session
+
+
 @pytest.mark.probe
 @pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not on PATH")
 def test_real_offtest_probe_against_live_techne():
@@ -335,3 +424,16 @@ def test_real_differential_probe_against_live_techne():
     verdict = run_differential(cfg, ClaudeCodeAdapter(timeout=240), cleanup=True)
     assert verdict.passed, verdict.render()
     assert verdict.control_ok, verdict.render()
+
+
+@pytest.mark.probe
+@pytest.mark.skipif(shutil.which("opencode") is None, reason="opencode CLI not on PATH")
+def test_real_offtest_probe_opencode():
+    """End-to-end on opencode: fresh `opencode run` with techne MCP tools gated off
+    → the plugin's push injection must carry the codeword. Runs against the real db."""
+    from techne.probe import OpencodeAdapter, run_probe
+
+    cfg = Config.load()
+    verdict = run_probe(cfg, OpencodeAdapter(timeout=300), mode="off-test", cleanup=True)
+    assert verdict.passed, verdict.render()
+    assert verdict.provenance == "techne"

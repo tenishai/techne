@@ -108,3 +108,23 @@ opencode run "list the files in this directory"
 
 You should see fresh `platform='opencode'` observations in the shared db —
 proving memory captured under opencode is readable by the Claude Code client.
+
+## 3. Verify memory portability (the differential-canary probe)
+
+Once the MCP server + plugin are wired, prove that techne memory actually reaches
+the opencode model — the per-runtime acceptance test for egress (techne#94):
+
+```sh
+techne probe --runtime opencode --mode off-test
+```
+
+This seeds a unique codeword into techne only, spawns a fresh `opencode run`
+session with the techne **MCP tools gated off** (a throwaway project-local
+`techne-readonly` agent with `tools: { techne_*: false }`) so the only path left
+is the plugin's `experimental.chat.system.transform` injection, then asks for the
+codeword. Surfacing it proves the **push** path carries memory into opencode.
+Defaults to the keyless `opencode/big-pickle` model; exit 0 = pass. The canary is
+deleted afterward.
+
+(opencode has no native auto-memory, so `--mode differential` has no negative
+control there — `off-test` already isolates the only techne path.)

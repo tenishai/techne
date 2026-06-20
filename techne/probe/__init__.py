@@ -19,7 +19,12 @@ from techne.probe.canary import (
     run_differential,
     run_probe,
 )
-from techne.probe.runtimes import ClaudeCodeAdapter, NativeCanaryHandle, RuntimeAdapter
+from techne.probe.runtimes import (
+    ClaudeCodeAdapter,
+    NativeCanaryHandle,
+    OpencodeAdapter,
+    RuntimeAdapter,
+)
 
 __all__ = [
     "CanarySeed",
@@ -27,6 +32,7 @@ __all__ = [
     "DifferentialVerdict",
     "RuntimeAdapter",
     "ClaudeCodeAdapter",
+    "OpencodeAdapter",
     "NativeCanaryHandle",
     "new_codeword",
     "run_probe",

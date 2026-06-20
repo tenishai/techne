@@ -157,6 +157,18 @@ def canary_in_injection(config: Config, seed: CanarySeed) -> bool:
     return any(r["id"] == seed.knowledge_id for r in rows)
 
 
+def _adapter_injected_context(adapter, config) -> str | None:
+    """Best-effort fetch of what the adapter's runtime injects at session start.
+
+    Returns None when the adapter doesn't implement injected_context (e.g. test
+    fakes) so the caller skips the precondition rather than failing spuriously.
+    """
+    fn = getattr(adapter, "injected_context", None)
+    if fn is None:
+        return None
+    return fn(config)
+
+
 def evaluate_output(output: str, codeword: str) -> tuple[bool, bool]:
     """Return (surfaced, provenance_tag_present).
 
@@ -184,21 +196,25 @@ def run_probe(config, adapter, *, mode: str = "off-test", cleanup: bool = True) 
     codeword, label = new_codeword()
     seed = seed_canary(config, codeword, label)
     try:
-        # Push mode can only work if the canary is in the injected slice.
-        if mode == "off-test" and not canary_in_injection(config, seed):
-            return ProbeVerdict(
-                passed=False,
-                surfaced=False,
-                provenance="setup-failed",
-                codeword=codeword,
-                label=label,
-                mode=mode,
-                output="",
-                detail=(
-                    "canary not in Tier-0 injection slice — raise injection.char_budget "
-                    "or recent_reserve_frac; push path can't be tested otherwise"
-                ),
-            )
+        # Push mode can only work if the canary is actually in what this runtime
+        # injects at session start. Each adapter knows its own push surface; if it
+        # can't tell us (None), we skip the precondition rather than guess.
+        if mode == "off-test":
+            injected = _adapter_injected_context(adapter, config)
+            if injected is not None and codeword not in injected:
+                return ProbeVerdict(
+                    passed=False,
+                    surfaced=False,
+                    provenance="setup-failed",
+                    codeword=codeword,
+                    label=label,
+                    mode=mode,
+                    output="",
+                    detail=(
+                        "canary not in the runtime's injected context — for CC raise "
+                        "injection.char_budget/recent_reserve_frac; push can't be tested otherwise"
+                    ),
+                )
 
         prompt = (
             f"What is the techne probe codeword seeded under the label '{label}'? "
