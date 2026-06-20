@@ -1628,5 +1628,77 @@ def library_cards_list(ctx, limit):
         click.echo(f"  #{r['id']}  {r['content'][:70]}")
 
 
+@main.group(invoke_without_command=True)
+@click.pass_context
+def architect(ctx):
+    """Pattern store (architect.db) — the architectural-patterns corpus (techne#87)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+    from techne.core.architect import architect_db
+    from techne.core.patterns import stats
+
+    s = stats(architect_db(config.db_path))
+    click.echo(
+        f"Patterns: {s['patterns']}  Investigations: {s['investigations']}  Skips: {s['skips']}"
+    )
+
+
+@architect.command("ingest")
+@click.argument("markdown_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.pass_context
+def architect_ingest(ctx, markdown_file):
+    """Seed architect.db from an architectural-patterns.md corpus."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import ingest_patterns_md
+
+    counts = ingest_patterns_md(
+        architect_db(config.db_path), markdown_file.read_text(encoding="utf-8")
+    )
+    click.echo(json.dumps(counts, indent=2))
+
+
+@architect.command("search")
+@click.argument("query")
+@click.option("--limit", default=20)
+@click.pass_context
+def architect_search(ctx, query, limit):
+    """Full-text search the pattern corpus (name + body)."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import search_patterns
+
+    hits = search_patterns(architect_db(config.db_path), query, limit=limit)
+    if not hits:
+        click.echo("No patterns matched.")
+        return
+    for h in hits:
+        click.echo(f"  {h['id']}  {h['name']}")
+        click.echo(f"    {h['source_url']}")
+        click.echo(f"    {(h['body'][:160] or '').strip()}")
+        click.echo()
+
+
+@architect.command("show")
+@click.argument("pattern_id")
+@click.pass_context
+def architect_show(ctx, pattern_id):
+    """Print a pattern's full body + which investigation it came from."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import get_pattern
+
+    p = get_pattern(architect_db(config.db_path), pattern_id)
+    if not p:
+        click.echo(f"No pattern {pattern_id}", err=True)
+        ctx.exit(1)
+    click.echo(f"# {p['name']}  [{p['source_url']}]")
+    click.echo(p["body"])
+
+
 if __name__ == "__main__":
     main()
