@@ -32,10 +32,13 @@ def index_document(
     meta: str | None = None,
     make_card: bool = True,
     backing_mode: str = "mirror",
+    summary: str | None = None,
 ) -> tuple[int, bool]:
     """Store one document (redacted, deduped) and upsert its Option D card.
 
-    The single store+card step shared by every document source. Returns
+    The single store+card step shared by every document source. A `summary` makes
+    the card non-pending at birth (e.g. a transcript's deterministic thread index);
+    omit it to leave the card pending for agent-assisted summarization. Returns
     (doc_id, stored) — stored=True iff a new/changed row was written.
     """
     title = redact_credentials(title or "")
@@ -56,6 +59,7 @@ def index_document(
             source_version=content_hash(content),
             title=title or source_url,
             backing_mode=backing_mode,
+            summary=redact_credentials(summary) if summary else None,
         )
     return doc_id, stored
 

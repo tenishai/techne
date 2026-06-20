@@ -89,6 +89,57 @@ def derive_title(turns: list[TranscriptTurn]) -> str | None:
     return None
 
 
+def build_transcript_gist(db_path: Path, session_id: str) -> str | None:
+    """The honest gist for a (possibly long, multi-topic) transcript: a thread
+    INDEX — what the session covered + when — built from techne's thread detection,
+    not a prose summary that pretends one sentence captures a day's work. Returns
+    None when the session has no detected threads (card stays pending/title)."""
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        sess = conn.execute(
+            "SELECT started_at FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        threads = conn.execute(
+            "SELECT label FROM threads WHERE session_id = ? ORDER BY thread_num", (session_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    if not threads:
+        return None
+    when = sess["started_at"][:16] if sess and sess["started_at"] else "?"
+    labels = "; ".join(t["label"] for t in threads)
+    return f"Session transcript ({when}, {len(threads)} threads): {labels}"
+
+
+def fill_transcript_gists(db_path: Path) -> dict:
+    """(Re)generate the thread-index gist for every active transcript card. Idempotent
+    — run after new sessions/threads land. Returns {filled, skipped}."""
+    from techne.core.cards import CARD_TYPE, fill_card_summary
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT id, source FROM knowledge
+               WHERE type = ? AND superseded_by IS NULL AND source LIKE '%-transcript:%'""",
+            (CARD_TYPE,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    counts = {"filled": 0, "skipped": 0}
+    for r in rows:
+        session_id = r["source"].split("-transcript:", 1)[1]
+        gist = build_transcript_gist(db_path, session_id)
+        if gist and fill_card_summary(db_path, r["id"], gist):
+            counts["filled"] += 1
+        else:
+            counts["skipped"] += 1
+    return counts
+
+
 def index_transcripts(
     db_path: Path,
     source: TranscriptSource,
@@ -122,6 +173,8 @@ def index_transcripts(
             {"platform": t.platform, "id": t.id, "uri": t.uri, "turns": len(t.turns), **t.meta}
         )
         # index_document redacts (content + title), stores, and upserts the card.
+        # Transcript cards are born with the thread-index gist (not pending) — a
+        # prose summary of a long multi-topic session would be dishonest.
         _doc_id, stored = index_document(
             db_path,
             source_type=f"{t.platform}-transcript",
@@ -130,6 +183,7 @@ def index_transcripts(
             content=text,
             meta=meta,
             make_card=make_cards,
+            summary=build_transcript_gist(db_path, t.id) if make_cards else None,
         )
         counts["stored" if stored else "unchanged"] += 1
     return counts

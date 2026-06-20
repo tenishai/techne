@@ -99,3 +99,47 @@ def test_index_respects_limit(tmp_path):
     source = _FakeSource([_t(f"s{i}", [("user", f"msg {i}")]) for i in range(5)])
     counts = index_transcripts(db, source, limit=2)
     assert counts["total"] == 2
+
+
+def test_transcript_gist_is_thread_index(tmp_path):
+    from techne.core.cards import pending_cards
+    from techne.core.library import index_document
+    from techne.core.state import start_session
+    from techne.core.threads import Thread, save_threads
+    from techne.core.transcripts import build_transcript_gist, fill_transcript_gists
+
+    db = tmp_path / "g.db"
+    init_db(db).close()
+    sid = start_session(db, project_path="/p", agent_identity="t")
+    save_threads(
+        [
+            Thread(thread_num=1, label="egress work", summary="s", observation_indices=[0]),
+            Thread(thread_num=2, label="probe work", summary="s", observation_indices=[1]),
+        ],
+        sid,
+        db,
+        parent_links=None,
+    )
+    index_document(
+        db,
+        source_type="claude-code-transcript",
+        source_url=f"claude-code-transcript:{sid}",
+        title="t",
+        content="body",
+    )
+    gist = build_transcript_gist(db, sid)
+    assert "2 threads" in gist and "egress work" in gist and "probe work" in gist
+
+    counts = fill_transcript_gists(db)
+    assert counts["filled"] == 1
+    assert pending_cards(db) == []  # thread-index gist cleared pending
+
+
+def test_transcript_gist_none_without_threads(tmp_path):
+    from techne.core.state import start_session
+    from techne.core.transcripts import build_transcript_gist
+
+    db = tmp_path / "g.db"
+    init_db(db).close()
+    sid = start_session(db, project_path="/p", agent_identity="t")
+    assert build_transcript_gist(db, sid) is None  # no threads → no index

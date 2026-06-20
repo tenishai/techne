@@ -1553,6 +1553,21 @@ def library_cards_ingest(ctx, responses_file):
     click.echo(json.dumps(counts, indent=2))
 
 
+@library_cards.command("gist-transcripts")
+@click.pass_context
+def library_cards_gist_transcripts(ctx):
+    """(Re)generate transcript card gists as a thread index (labels + timeframe).
+    The honest gist for a long multi-topic session — deterministic, no prose."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.transcripts import fill_transcript_gists
+
+    counts = fill_transcript_gists(config.db_path)
+    click.echo(json.dumps(counts, indent=2))
+
+
 @library_cards.command("list")
 @click.option("--limit", type=int, default=50)
 @click.pass_context
