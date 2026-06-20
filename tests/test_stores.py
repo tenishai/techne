@@ -76,6 +76,18 @@ def test_search_like_fallback_without_fts(cfg):
     assert [h["id"] for h in store.search("docs", "beta")] == [1]
 
 
+def test_search_like_fallback_escapes_metachars(cfg):
+    """#104: % and _ in a LIKE-fallback query must match literally, not as wildcards."""
+    store = load_store(cfg, "x")
+    store.migrate("CREATE TABLE IF NOT EXISTS docs (id INTEGER PRIMARY KEY, content TEXT);")
+    store.add("docs", {"id": 1, "content": "alpha beta"})
+    store.add("docs", {"id": 2, "content": "100% done"})
+    # '%' must not behave as a wildcard (would match everything if unescaped)
+    assert [h["id"] for h in store.search("docs", "%")] == [2]
+    # '_' must match a literal underscore, not any single char
+    assert store.search("docs", "a_p") == []
+
+
 def test_unknown_adapter_raises(cfg):
     cfg.stores["architect"] = StoreSpec(adapter="postgres", dsn="postgresql://localhost/x")
     with pytest.raises(ValueError, match="not built yet"):

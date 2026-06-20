@@ -1491,6 +1491,31 @@ def library_migrate_store(ctx):
     click.echo(json.dumps(result, indent=2))
 
 
+@library.command("doctor")
+@click.pass_context
+def library_doctor(ctx):
+    """Cross-db health check: report document cards whose pointer doesn't resolve in
+    librarian.db (dangling) or whose `ver:` no longer matches the live document
+    (stale). techne.db + librarian.db are a consistency set; restore them together."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.cards import find_dangling_cards
+
+    report = find_dangling_cards(config)
+    click.echo(
+        f"{report['total']} document cards · "
+        f"{len(report['dangling'])} dangling · {len(report['stale'])} stale"
+    )
+    for d in report["dangling"]:
+        click.echo(f"  dangling  card #{d['card_id']}  {d['source']}  ({d.get('reason', '')})")
+    for s in report["stale"]:
+        click.echo(f"  stale     card #{s['card_id']}  {s['source']}  → doc #{s['doc_id']}")
+    if report["dangling"] or report["stale"]:
+        ctx.exit(1)  # non-zero so CI / scripts can gate on a clean bill
+
+
 @library.command("show")
 @click.argument("doc_id", type=int)
 @click.option("--chars", default=4000, help="Max content chars to print (0 = all).")

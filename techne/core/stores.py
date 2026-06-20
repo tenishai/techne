@@ -117,9 +117,11 @@ class SqliteStore:
                     (query, limit),
                 ).fetchall()
             else:
+                from techne.core.database import like_escape
+
                 rows = conn.execute(
-                    f"SELECT * FROM {table} WHERE content LIKE ? LIMIT ?",
-                    (f"%{query}%", limit),
+                    f"SELECT * FROM {table} WHERE content LIKE ? ESCAPE '\\' LIMIT ?",
+                    (f"%{like_escape(query)}%", limit),
                 ).fetchall()
             return [dict(r) for r in rows]
         finally:

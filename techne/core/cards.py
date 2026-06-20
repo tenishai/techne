@@ -174,6 +174,46 @@ def resolve_card(config: Config, card_id: int) -> dict | None:
     return librarian_store(config).get("documents", doc_id)
 
 
+def find_dangling_cards(config: Config) -> dict:
+    """Cross-db health check (techne#104): the card→document pointer is a tag-string
+    with no FK (can't have one cross-db), so a librarian.db rebuilt/restored out of
+    sync with techne.db leaves cards that `resolve_card` silently returns None for.
+
+    Reports active document_cards that are `dangling` (pointer doesn't resolve in
+    librarian.db) or `stale` (the live document's content no longer hashes to the
+    card's `ver:`). Returns {total, dangling: [...], stale: [...]}."""
+    from techne.core.knowledge import content_hash
+    from techne.core.librarian import librarian_store
+
+    store = librarian_store(config)
+    conn = connect(config.db_path)
+    try:
+        cards = conn.execute(
+            "SELECT id, source, tags FROM knowledge WHERE type = ? AND superseded_by IS NULL",
+            (CARD_TYPE,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    dangling: list[dict] = []
+    stale: list[dict] = []
+    for c in cards:
+        doc_id = card_doc_id(c["tags"])
+        if doc_id is None:
+            dangling.append({"card_id": c["id"], "source": c["source"], "reason": "no doc pointer"})
+            continue
+        doc = store.get("documents", doc_id)
+        if doc is None:
+            dangling.append(
+                {"card_id": c["id"], "source": c["source"], "doc_id": doc_id, "reason": "missing"}
+            )
+            continue
+        ver = _tag_value(c["tags"], "ver:")
+        if ver and ver != content_hash(doc.get("content") or ""):
+            stale.append({"card_id": c["id"], "source": c["source"], "doc_id": doc_id})
+    return {"total": len(cards), "dangling": dangling, "stale": stale}
+
+
 # --- agent-assisted gist fill (emit/ingest, same shape as reflect) -------------
 
 _SUMMARY_PROMPT = (

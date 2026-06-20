@@ -8,6 +8,7 @@ from techne.config import Config
 from techne.core.cards import (
     card_doc_id,
     fill_card_summary,
+    find_dangling_cards,
     is_pending,
     pending_cards,
     resolve_card,
@@ -16,7 +17,7 @@ from techne.core.cards import (
 from techne.core.database import init_db
 from techne.core.documents import store_document
 from techne.core.egress import select_tier0_injection
-from techne.core.knowledge import store
+from techne.core.knowledge import content_hash, store
 
 
 @pytest.fixture()
@@ -160,3 +161,34 @@ def test_pending_cards_source_prefix_filter(db, config):
     docs_only = pending_cards(db, source_prefix="docs:")
     assert len(all_pending) == 2
     assert len(docs_only) == 1 and docs_only[0]["source"] == "docs:a.md"
+
+
+def test_find_dangling_cards_clean(db, config):
+    content = "the full body to fetch on demand"
+    doc_id = _doc(config, content=content)
+    upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version=content_hash(content), title="x"
+    )
+    report = find_dangling_cards(config)
+    assert report == {"total": 1, "dangling": [], "stale": []}
+
+
+def test_find_dangling_cards_reports_missing_pointer(db, config):
+    """#104: a card whose doc id doesn't exist in librarian.db (e.g. librarian.db
+    rebuilt out of sync) is reported, not silently None."""
+    upsert_document_card(db, source_url="u", doc_id=9999, source_version="v1", title="x")
+    report = find_dangling_cards(config)
+    assert report["total"] == 1
+    assert len(report["dangling"]) == 1 and report["dangling"][0]["doc_id"] == 9999
+    assert report["stale"] == []
+
+
+def test_find_dangling_cards_reports_stale_version(db, config):
+    """A card whose ver: no longer matches the live document content is flagged."""
+    doc_id = _doc(config, content="current body")
+    upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version="hash-of-an-older-body", title="x"
+    )
+    report = find_dangling_cards(config)
+    assert report["dangling"] == []
+    assert len(report["stale"]) == 1 and report["stale"][0]["doc_id"] == doc_id

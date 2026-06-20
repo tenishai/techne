@@ -138,7 +138,13 @@ def migrate_documents_to_librarian(config: Config) -> dict:
 
     src = connect(techne_db_path)
     try:
+        # Backup before dropping (techne#104): the copy is content-verified above, but
+        # a one-statement snapshot in-db makes the cutover fully reversible (the #78
+        # migration-backup machinery doesn't cover this ad-hoc path). Recover with
+        # `INSERT INTO documents SELECT * FROM documents_premigration_backup`.
         src.executescript(
+            "DROP TABLE IF EXISTS documents_premigration_backup; "
+            "CREATE TABLE documents_premigration_backup AS SELECT * FROM documents; "
             "DROP TRIGGER IF EXISTS documents_ai; DROP TRIGGER IF EXISTS documents_ad; "
             "DROP TRIGGER IF EXISTS documents_au; DROP TABLE IF EXISTS documents_fts; "
             "DROP TABLE IF EXISTS documents;"
@@ -146,4 +152,9 @@ def migrate_documents_to_librarian(config: Config) -> dict:
         src.commit()
     finally:
         src.close()
-    return {"moved": len(rows), "dropped": True, "verified": len(rows)}
+    return {
+        "moved": len(rows),
+        "dropped": True,
+        "verified": len(rows),
+        "backup_table": "documents_premigration_backup",
+    }
