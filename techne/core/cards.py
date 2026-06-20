@@ -133,17 +133,20 @@ def fill_card_summary(db_path: Path, card_id: int, summary: str) -> bool:
         conn.close()
 
 
-def pending_cards(db_path: Path, limit: int = 100) -> list[dict]:
-    """Active cards still awaiting an agent-written gist (the emit work-list)."""
+def pending_cards(db_path: Path, limit: int = 100, source_prefix: str | None = None) -> list[dict]:
+    """Active cards still awaiting an agent-written gist (the emit work-list).
+    `source_prefix` filters by pointer prefix (e.g. 'docs:' or 'claude-code-')."""
+    sql = """SELECT id, content, source, tags FROM knowledge
+             WHERE type = ? AND superseded_by IS NULL AND tags LIKE '%pending%'"""
+    params: list = [CARD_TYPE]
+    if source_prefix:
+        sql += " AND source LIKE ?"
+        params.append(f"{source_prefix}%")
+    sql += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(limit)
     conn = connect(db_path)
     try:
-        rows = conn.execute(
-            """SELECT id, content, source, tags FROM knowledge
-               WHERE type = ? AND superseded_by IS NULL AND tags LIKE '%pending%'
-               ORDER BY updated_at DESC LIMIT ?""",
-            (CARD_TYPE, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
 
@@ -173,13 +176,18 @@ _SUMMARY_PROMPT = (
 
 
 def emit_card_summary_batch(
-    db_path: Path, *, limit: int = 50, content_chars: int = 8000
+    db_path: Path,
+    *,
+    limit: int = 50,
+    content_chars: int = 8000,
+    source_prefix: str | None = None,
 ) -> list[dict]:
     """Build per-pending-card summarization prompts (no LLM). The agent writes a
     gist into each `summary` field; ingest_card_summaries feeds them back. The
-    no-API-key path for the Option D gist, mirroring reflect emit/ingest."""
+    no-API-key path for the Option D gist, mirroring reflect emit/ingest.
+    `source_prefix` scopes to one source (e.g. 'docs:')."""
     batch: list[dict] = []
-    for card in pending_cards(db_path, limit=limit):
+    for card in pending_cards(db_path, limit=limit, source_prefix=source_prefix):
         doc = resolve_card(db_path, card["id"])
         if doc is None:
             continue

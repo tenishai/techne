@@ -54,9 +54,7 @@ def test_upsert_creates_pending_card(db):
 
 def test_upsert_idempotent_same_version(db):
     doc_id = _doc(db)
-    a, _ = upsert_document_card(
-        db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
-    )
+    a, _ = upsert_document_card(db, source_url="u", doc_id=doc_id, source_version="v1", title="x")
     b, changed = upsert_document_card(
         db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
     )
@@ -135,3 +133,15 @@ def test_ingest_card_summaries_fills_and_skips(db):
     assert counts == {"filled": 1, "skipped": 1, "missing": 0}
     still_pending = {r["id"] for r in pending_cards(db)}
     assert c1 not in still_pending and c2 in still_pending
+
+
+def test_pending_cards_source_prefix_filter(db):
+    doc = _doc(db)
+    upsert_document_card(db, source_url="docs:a.md", doc_id=doc, source_version="v1", title="a")
+    upsert_document_card(
+        db, source_url="cc-transcript:s1", doc_id=doc, source_version="v1", title="b"
+    )
+    all_pending = pending_cards(db)
+    docs_only = pending_cards(db, source_prefix="docs:")
+    assert len(all_pending) == 2
+    assert len(docs_only) == 1 and docs_only[0]["source"] == "docs:a.md"

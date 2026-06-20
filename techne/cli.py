@@ -1508,6 +1508,9 @@ def library_cards():
 @library_cards.command("emit")
 @click.option("--limit", type=int, default=50, help="Max pending cards to emit.")
 @click.option(
+    "--source", default=None, help="Only cards whose pointer starts with this (e.g. 'docs:')."
+)
+@click.option(
     "-o",
     "--output",
     type=click.Path(dir_okay=False, path_type=Path),
@@ -1515,7 +1518,7 @@ def library_cards():
     help="Write the batch JSON here (default: stdout).",
 )
 @click.pass_context
-def library_cards_emit(ctx, limit, output):
+def library_cards_emit(ctx, limit, source, output):
     """Emit summarization prompts for pending cards — the agent writes each `summary`,
     then `cards ingest` feeds them back (no API key needed)."""
     config = ctx.obj["config"]
@@ -1524,7 +1527,7 @@ def library_cards_emit(ctx, limit, output):
         ctx.exit(1)
     from techne.core.cards import emit_card_summary_batch
 
-    batch = emit_card_summary_batch(config.db_path, limit=limit)
+    batch = emit_card_summary_batch(config.db_path, limit=limit, source_prefix=source)
     payload = json.dumps(batch, indent=2)
     if output:
         output.write_text(payload, encoding="utf-8")
