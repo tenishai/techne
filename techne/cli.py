@@ -1426,6 +1426,29 @@ def library_index_transcripts(ctx, platform, transcripts_dir, limit):
     click.echo("Search them: techne search <query> --table documents")
 
 
+@library.command("index-markdown")
+@click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--source-type",
+    default="markdown",
+    show_default=True,
+    help="source_type label for the documents (e.g. 'docs').",
+)
+@click.pass_context
+def library_index_markdown(ctx, root, source_type):
+    """Index every *.md under ROOT as Librarian documents (+ gist cards) — e.g. the
+    repo's docs/. A second document source alongside transcripts."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.library import index_markdown_dir
+
+    counts = index_markdown_dir(config.db_path, root, source_type=source_type)
+    click.echo(json.dumps(counts, indent=2))
+    click.echo("Search them: techne search <query> --table documents")
+
+
 @library.command("show")
 @click.argument("doc_id", type=int)
 @click.option("--chars", default=4000, help="Max content chars to print (0 = all).")

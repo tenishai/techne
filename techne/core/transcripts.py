@@ -21,9 +21,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from techne.core.documents import store_document
-from techne.core.redaction import redact_credentials
-
 # Normalized roles the renderer labels; a platform maps its own roles onto these.
 _ROLE_LABEL = {"user": "User", "assistant": "Assistant"}
 
@@ -112,39 +109,27 @@ def index_transcripts(
     if limit:
         transcripts = itertools.islice(transcripts, limit)
 
+    from techne.core.library import index_document
+
     for t in transcripts:
         counts["total"] += 1
         text = render_transcript(t.turns)
         if not text:
             counts["empty"] += 1
             continue
-        # Redact the title too — it's derived from the first user line, which can
-        # carry a secret just as the body can.
-        title = redact_credentials(t.title or derive_title(t.turns) or f"transcript {t.id[:12]}")
-        content = redact_credentials(text)
-        source_url = f"{t.platform}-transcript:{t.id}"
+        title = t.title or derive_title(t.turns) or f"transcript {t.id[:12]}"
         meta = json.dumps(
             {"platform": t.platform, "id": t.id, "uri": t.uri, "turns": len(t.turns), **t.meta}
         )
-        doc_id, stored = store_document(
+        # index_document redacts (content + title), stores, and upserts the card.
+        _doc_id, stored = index_document(
             db_path,
             source_type=f"{t.platform}-transcript",
-            source_url=source_url,
+            source_url=f"{t.platform}-transcript:{t.id}",
             title=title,
-            content=content,
+            content=text,
             meta=meta,
+            make_card=make_cards,
         )
         counts["stored" if stored else "unchanged"] += 1
-        if make_cards:
-            from techne.core.cards import upsert_document_card
-            from techne.core.knowledge import content_hash
-
-            upsert_document_card(
-                db_path,
-                source_url=source_url,
-                doc_id=doc_id,
-                source_version=content_hash(content),
-                title=title,
-                backing_mode="mirror",
-            )
     return counts
