@@ -2,7 +2,7 @@
 
 **Agentic memory and knowledge system.**
 
-A single-file SQLite-backed memory store that gives AI agents persistent memory across sessions. Built around the idea that agents need three things to be useful over time: a structured record of *what they did* (sessions and threads), a curated record of *what they learned* (knowledge), and a stable record of *who they are and who they work with* (identity).
+A SQLite-backed memory store that gives AI agents persistent memory across sessions. Its core is a single file (`techne.db`), built around the idea that agents need three things to be useful over time: a structured record of *what they did* (sessions and threads), a curated record of *what they learned* (knowledge), and a stable record of *who they are and who they work with* (identity). Larger or team-scoped domains — documents, patterns, code — get their own SQLite file behind a `StoreAdapter` (db-per-domain), each carrying only its own schema.
 
 ```bash
 git clone https://github.com/dimartin/techne.git
