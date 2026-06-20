@@ -7,8 +7,9 @@ import sys
 
 from techne.config import Config
 from techne.core.database import init_db
-from techne.core.state import start_session, get_resume_context
-from techne.sync.adapter import load_adapter, SyncQuery
+from techne.core.egress import render_tier0_block, select_tier0_injection
+from techne.core.state import get_resume_context, start_session
+from techne.sync.adapter import load_adapter
 from techne.sync.outbox import flush
 
 
@@ -34,6 +35,7 @@ def main():
     if cc_session_id:
         # Idempotent: Claude Code may re-fire session_start on reconnect.
         from techne.core.database import connect as _connect
+
         _conn = _connect(config.db_path)
         try:
             _conn.execute(
@@ -91,11 +93,23 @@ def main():
             output_parts.append(f"- **{t['label']}** {status} — {t['summary'][:200]}")
         output_parts.append("")
 
-    if ctx["knowledge"]:
-        output_parts.append("## Key Knowledge\n")
-        for k in ctx["knowledge"]:
-            output_parts.append(f"- [{k['type']}] {k['content'][:200]}")
-        output_parts.append("")
+    # Tier-0 knowledge injection (techne#93): bounded, priority-ordered selection.
+    # Wraps in try/except so a selection failure never crashes the session start.
+    try:
+        if config.injection.enabled:
+            tier0_rows = select_tier0_injection(
+                config.db_path,
+                char_budget=config.injection.char_budget,
+            )
+            knowledge_block = render_tier0_block(tier0_rows)
+            if knowledge_block:
+                output_parts.append(knowledge_block)
+    except Exception as exc:  # noqa: BLE001
+        import sys as _sys
+
+        print(
+            f"techne: tier-0 injection failed (degraded to no-injection): {exc}", file=_sys.stderr
+        )
 
     if output_parts:
         summary = "\n".join(output_parts)

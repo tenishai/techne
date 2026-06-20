@@ -99,6 +99,21 @@ class SearchConfig:
 
 
 @dataclass
+class InjectionConfig:
+    """Config for Tier-0 knowledge injection at SessionStart (techne#93).
+
+    enabled: when False the ## Key Knowledge block is omitted entirely.
+    char_budget: hard ceiling on characters contributed by the knowledge
+        block (includes the prefix/formatting overhead per line).
+        Default 2000 keeps the injection well within a typical context
+        preamble without crowding thread context or the health banner.
+    """
+
+    enabled: bool = True
+    char_budget: int = 2000
+
+
+@dataclass
 class ReflectConfig:
     # End-of-session reflection: an LLM scans each detected thread and proposes
     # durable knowledge / identity entries worth keeping. Off by default; opt
@@ -128,6 +143,7 @@ class Config:
     heuristic: HeuristicConfig = field(default_factory=HeuristicConfig)
     reflect: ReflectConfig = field(default_factory=ReflectConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    injection: InjectionConfig = field(default_factory=InjectionConfig)
     platform: Platform = "claude-code"
     model: str = "claude-haiku-4-5-20251001"
     # Optional LiteLLM proxy targeting. When unset, litellm.completion() uses
@@ -274,6 +290,13 @@ class Config:
                 bm25_weight=float(s.get("bm25_weight", 0.7)),
                 expansion_ratio=int(s.get("expansion_ratio", 2)),
                 mmr_lambda=float(s.get("mmr_lambda", 0.3)),
+            )
+
+        if "injection" in raw and isinstance(raw["injection"], dict):
+            i = raw["injection"]
+            cfg.injection = InjectionConfig(
+                enabled=bool(i.get("enabled", True)),
+                char_budget=int(i.get("char_budget", 2000)),
             )
 
         return cfg
