@@ -28,18 +28,21 @@ A long arc: techne went from "the understudy" (CC native memory silently carried
 - ☑ Markdown-dir source + shared `index_document` unit; indexed our own `docs/` (and the 18 design docs in `~/working/claude/docs`).
 
 ### db-per-domain — a db file per persona (the big architecture call)
-Decision (knowledge#327): `techne.db` = personal memory; each domain/persona gets its own db file behind a `StoreAdapter`. Design doc `docs/db-per-domain.md`. Reframed #88 (delete domain tables from core, don't register them) and converged #87/#89.
+Decision (knowledge#327): `techne.db` = personal memory; each domain/persona gets its own db file behind a `StoreAdapter`. Design doc `docs/db-per-domain.md`. Reframed #88 (delete domain tables from core, don't register them) and converged #87/#89. **#88 closed 2026-06-20 — delivered**: domain tables gone from core, search no longer names them, and every domain routes through `load_store(config, domain)` (#102) — adding a domain is zero core edits.
 - ☑ **#98 — store registry + SQLite `StoreAdapter`.** `load_store(config, domain)`, `stores:` config, `plain_connect` (domain dbs get ONLY their own schema). Closed.
 - ☑ **#99 — Librarian → `librarian.db`.** Documents left core `SCHEMA_SQL`; cards stay in techne.db and resolve **cross-db** (keyed get, no ATTACH); 6 `search.py` hooks removed; `search_documents`/`techne library search` is the domain search. Live cutover: 57 docs moved, techne.db documents dropped, librarian.db rebuilt documents-only. Closed.
 - ◐ **#87 P1 — Architect → `architect.db`.** Pattern store: `investigations` (lens-aware dedup, url×surveyed_by×lens) + `patterns` + relations/applies + FTS; `ingest_patterns_md` seeds from the corpus. Live: 147 patterns / 87 investigations / 23 skips. Team-scope (queried directly, not carded); persona-agnostic (`surveyed_by`=string, no cabal coupling). **P2** (write-path, wikilink/applies edges, retire flat knowledge type=pattern) + **P3** (Postgres adapter, MCP tools) remain.
 - ◐ **#89 P1 — Codex → `codex.db`.** Code graph: `symbols` + `edges` + FTS; `reachable()` = transitive blast-radius via **recursive CTE** (graph queries without a graph DB — the v1 plan). Tree-sitter parser + graphqlite (optional `techne[codex]`) deferred to when the Codex persona is scoped.
 
-**Chain:** `techne.db` (memory) → `librarian.db` (#99) → `architect.db` (#87 P1) → `codex.db` (#89 P1) — each behind a StoreAdapter, each clean per-db-schema.
+**Chain:** `techne.db` (memory) → `librarian.db` (#99) → `architect.db` (#87 P1) → `codex.db` (#89 P1) — each behind a StoreAdapter, each clean per-db-schema. Routing collapsed onto the registry in **#102** (the keystone: `config.stores` dsn overrides now take effect; `resolve_card` exercises the `StoreAdapter.get` Protocol seam).
+
+### Staff review (2026-06-20) — all fixed + closed
+Staff Python + architect review of the db-per-domain session (knowledge#337). Five issues, all shipped: **#100** (migration verify-by-identity — no silent doc drop on re-run), **#101** (github_issues → librarian.db, stop core-polluting the domain db), **#103** (empty-query FTS guard), **#102** (the keystone above), **#104** (LIKE-escaping + pre-drop backup + `techne library doctor`). 826 tests green; v0.7.0.
 
 ### Issues
-- **Closed:** #91, #92, #93, #94, #95, #98, #99.
-- **Opened:** #96 (other-client transcript adapters), #97 (platform-plugin authoring guide), #98, #99.
-- **Advanced (open):** #87 (P2/P3), #89 (parser/graphqlite), #88 (umbrella — reframed to db-per-domain), #20 (promotion mechanism shipped via the agent-assisted path).
+- **Closed:** #88, #91, #92, #93, #94, #95, #98, #99, #100, #101, #102, #103, #104.
+- **Opened:** #96 (other-client transcript adapters), #97 (platform-plugin authoring guide), #98, #99, #100–#104 (staff review).
+- **Advanced (open):** #87 (P2/P3), #89 (parser/graphqlite), #20 (promotion mechanism shipped via the agent-assisted path).
 
 ---
 
