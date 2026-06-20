@@ -95,13 +95,48 @@ class TestTagPriority:
         assert remainder_id in ids
         assert ids.index(identity_id) < ids.index(remainder_id)
 
-    def test_feedback_before_remaining(self, db_path):
-        """Feedback rows come before non-priority rows."""
+    def test_recent_results_before_feedback(self, db_path):
+        """Fresh decisions/facts (the reserved 'what changed' band) render before
+        the static feedback band — the techne#93 egress-starvation fix."""
         remainder_id = _seed(db_path, "plain fact", type="fact")
         feedback_id = _seed(db_path, "feedback entry", type="fact", tags="memory-type:feedback")
         rows = select_tier0_injection(db_path, char_budget=4000)
         ids = [r["id"] for r in rows]
+        assert remainder_id in ids and feedback_id in ids
+        assert ids.index(remainder_id) < ids.index(feedback_id)
+
+    def test_legacy_ordering_when_reservation_disabled(self, db_path):
+        """recent_reserve_frac=0.0 restores the original feedback→recent order."""
+        remainder_id = _seed(db_path, "plain fact", type="fact")
+        feedback_id = _seed(db_path, "feedback entry", type="fact", tags="memory-type:feedback")
+        rows = select_tier0_injection(db_path, char_budget=4000, recent_reserve_frac=0.0)
+        ids = [r["id"] for r in rows]
         assert ids.index(feedback_id) < ids.index(remainder_id)
+
+    def test_fresh_result_not_starved_by_feedback(self, db_path):
+        """The bug this fixes: a budget small enough to be eaten by feedback must
+        still surface the single freshest result. Seed many feedback rows, then one
+        recent evaluation; under a tight budget it must appear with the fix and be
+        dropped without it."""
+        for n in range(12):
+            _seed(
+                db_path,
+                f"feedback rule number {n} " + "x" * 120,
+                type="fact",
+                tags="memory-type:feedback",
+            )
+        fresh_id = _seed(db_path, "ACCEPTANCE TEST PASSED " + "y" * 120, type="evaluation")
+        tight = 900
+        with_fix = [
+            r["id"]
+            for r in select_tier0_injection(db_path, char_budget=tight, recent_reserve_frac=0.4)
+        ]
+        legacy = [
+            r["id"]
+            for r in select_tier0_injection(db_path, char_budget=tight, recent_reserve_frac=0.0)
+        ]
+        assert fresh_id in with_fix, "reservation must surface the freshest result"
+        assert fresh_id not in legacy, "legacy ordering should reproduce the starvation"
 
 
 # ---------------------------------------------------------------------------
