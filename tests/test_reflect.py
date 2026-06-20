@@ -462,3 +462,151 @@ def test_schema_v6_creates_candidates_table(tmp_path):
         assert version >= 6
     finally:
         conn.close()
+
+
+# --- agent-assisted emit / ingest (techne#92 promotion path) --------------
+
+
+def _candidate_array(content="Use JWT for service auth"):
+    return json.dumps(
+        [
+            {
+                "scope": "knowledge",
+                "type": "decision",
+                "content": content,
+                "tags": "auth",
+                "confidence": "high",
+            }
+        ]
+    )
+
+
+def test_emit_reflection_batch_builds_prompts(tmp_path):
+    from techne.core.reflect import emit_reflection_batch
+
+    config = _mk_config(tmp_path, enabled=False)  # emit must NOT require enabled
+    session_id, obs = _mk_session_with_obs(config, 5)
+    threads = [
+        Thread(thread_num=1, label="auth", summary="auth", observation_indices=list(range(5)))
+    ]
+    batch = emit_reflection_batch(config, session_id, threads, obs)
+    assert len(batch) == 1
+    item = batch[0]
+    assert item["session_id"] == session_id
+    assert item["thread_num"] == 1
+    assert item["thread_id"] == f"{session_id}-1"
+    assert item["prompt_hash"] and item["prompt"]
+    assert "JSON array" in item["prompt"]  # the real reflect prompt
+
+
+def test_emit_respects_min_observations(tmp_path):
+    from techne.core.reflect import emit_reflection_batch
+
+    config = _mk_config(tmp_path, enabled=False)  # min_observations_per_thread = 3
+    session_id, obs = _mk_session_with_obs(config, 5)
+    threads = [
+        Thread(thread_num=1, label="big", summary="big", observation_indices=list(range(5))),
+        Thread(thread_num=2, label="tiny", summary="tiny", observation_indices=[0, 1]),  # < 3
+    ]
+    batch = emit_reflection_batch(config, session_id, threads, obs)
+    assert [b["thread_num"] for b in batch] == [1]
+
+
+def test_ingest_writes_candidates(tmp_path):
+    from techne.core.reflect import ingest_reflection_response
+
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    thread_id = f"{session_id}-1"
+    counts = ingest_reflection_response(
+        config, session_id, thread_id, "deadbeef", _candidate_array()
+    )
+    assert counts["candidates_written"] == 1
+    rows = list_candidates(config.db_path, status="all")
+    assert len(rows) == 1
+    assert rows[0]["model_used"] == "agent-assisted"
+    assert rows[0]["source_thread_id"] == thread_id
+
+
+def test_ingest_write_to_live_promotes(tmp_path):
+    from techne.core.knowledge import list_entries
+    from techne.core.reflect import ingest_reflection_response
+
+    config = _mk_config(tmp_path, enabled=False, write_to="live")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    counts = ingest_reflection_response(
+        config, session_id, f"{session_id}-1", "deadbeef", _candidate_array()
+    )
+    assert counts["candidates_promoted"] == 1
+    live = list_entries(config.db_path, limit=10)
+    assert any("JWT for service auth" in r["content"] for r in live)
+
+
+def test_emit_ingest_heuristic_thread_fk_resolves(tmp_path):
+    """Regression for the silent #92 bug: a heuristic thread (boundary_signal set)
+    gets a content-addressed id, NOT "{session}-{num}". emit must surface that real
+    id and ingest must use it, or the candidates FK fails and inserts vanish."""
+    from techne.core.reflect import emit_reflection_batch, ingest_reflection_response
+    from techne.core.threads import save_threads
+
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, obs = _mk_session_with_obs(config, 5)
+    t = Thread(
+        thread_num=1,
+        label="h",
+        summary="h",
+        observation_indices=list(range(5)),
+        boundary_signal="0.9",  # heuristic → content-addressed id
+    )
+    save_threads([t], session_id, config.db_path, parent_links=None)
+    batch = emit_reflection_batch(config, session_id, [t], obs)
+    assert batch[0]["thread_id"] != f"{session_id}-1"  # the bug's tell
+    counts = ingest_reflection_response(
+        config, session_id, batch[0]["thread_id"], batch[0]["prompt_hash"], _candidate_array()
+    )
+    assert counts["candidates_written"] == 1 and counts["errors"] == 0
+
+
+def test_emit_ingest_roundtrip_equals_reflect_on_session(tmp_path):
+    """emit -> agent-answers -> ingest must produce the same candidates as the
+    automated reflect_on_session with the equivalent generate_fn."""
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        ingest_reflection_response,
+        reflect_on_session,
+    )
+
+    raw = _candidate_array("Roundtrip fact")
+    threads = [Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5)))]
+
+    # Automated path
+    cfg_auto = _mk_config(tmp_path / "auto", enabled=True, write_to="candidates")
+    sid_a, obs_a = _mk_session_with_obs(cfg_auto, 5)
+    _save_thread_row(cfg_auto, sid_a, threads[0])
+    res_auto = reflect_on_session(cfg_auto, sid_a, threads, obs_a, generate_fn=lambda _p: raw)
+
+    # Agent-assisted path: emit (no LLM) then ingest the same raw answer
+    cfg_manual = _mk_config(tmp_path / "manual", enabled=False, write_to="candidates")
+    sid_m, obs_m = _mk_session_with_obs(cfg_manual, 5)
+    _save_thread_row(cfg_manual, sid_m, threads[0])
+    batch = emit_reflection_batch(cfg_manual, sid_m, threads, obs_m)
+    assert len(batch) == 1
+    res_manual = ingest_reflection_response(
+        cfg_manual, sid_m, batch[0]["thread_id"], batch[0]["prompt_hash"], raw
+    )
+
+    assert res_auto["candidates_written"] == res_manual["candidates_written"] == 1
+    auto_rows = list_candidates(cfg_auto.db_path, status="all")
+    manual_rows = list_candidates(cfg_manual.db_path, status="all")
+    assert len(auto_rows) == len(manual_rows) == 1
+    assert auto_rows[0]["content"] == manual_rows[0]["content"] == "Roundtrip fact"

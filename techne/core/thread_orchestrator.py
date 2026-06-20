@@ -338,6 +338,22 @@ def link_threads(
     return links
 
 
+def thread_row_id(session_id: str, t: Thread) -> str:
+    """The threads.id for a Thread — the SINGLE source of truth.
+
+    Any code referencing a thread by FK (knowledge_candidates.source_thread_id,
+    reflect's emit/ingest) must derive the id through here, or it drifts from
+    what save_threads actually wrote. Heuristic-detected threads (carrying a
+    boundary_signal) are content-addressed via bucket_hash; others use the
+    legacy "{session_id}-{thread_num}" format.
+    """
+    from techne.core.threads.persistence import bucket_hash
+
+    if t.boundary_signal is not None and t.observation_indices:
+        return bucket_hash(session_id, t.observation_indices[0], t.boundary_signal)
+    return f"{session_id}-{t.thread_num}"
+
+
 def save_threads(
     threads: list[Thread],
     session_id: str,
@@ -358,7 +374,6 @@ def save_threads(
     legacy ``"{session_id}-{thread_num}"`` format with ``INSERT OR REPLACE``.
     """
     from techne.core.database import connect
-    from techne.core.threads.persistence import bucket_hash
 
     link_map = {}
     if parent_links:
@@ -369,9 +384,8 @@ def save_threads(
         conn = connect(db_path)
     try:
         for t in threads:
+            thread_id = thread_row_id(session_id, t)
             if t.boundary_signal is not None and t.observation_indices:
-                first_obs_id = t.observation_indices[0]
-                thread_id = bucket_hash(session_id, first_obs_id, t.boundary_signal)
                 sql = (
                     "INSERT OR IGNORE INTO threads"
                     " (id, session_id, thread_num, label, summary, resume_points,"
@@ -379,7 +393,6 @@ def save_threads(
                     " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
                 )
             else:
-                thread_id = f"{session_id}-{t.thread_num}"
                 sql = (
                     "INSERT OR REPLACE INTO threads"
                     " (id, session_id, thread_num, label, summary, resume_points,"

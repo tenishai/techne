@@ -1144,6 +1144,112 @@ def reflect_review(ctx, status, limit, show_raw):
         click.echo()
 
 
+@reflect.command("emit")
+@click.option(
+    "--session", "session_id", default=None, help="Session to reflect on (default: latest)."
+)
+@click.option("--limit", default=None, type=int, help="Max threads to emit prompts for.")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the batch JSON here (default: stdout).",
+)
+@click.pass_context
+def reflect_emit(ctx, session_id, limit, output):
+    """Emit per-thread reflection prompts for an agent to answer (no API key).
+
+    The agent-assisted promotion path (#92): techne renders the prompts, an
+    in-session agent (on the operator's OAuth model) answers each as a JSON
+    candidate array, and `techne reflect ingest` feeds them back. Output is a
+    JSON array of {thread_id, session_id, thread_num, prompt_hash, prompt}.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+
+    from techne.core.database import connect
+    from techne.core.reflect import emit_reflection_batch, load_session_for_reflection
+
+    if not session_id:
+        conn = connect(config.db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        session_id = row["id"] if row else None
+    if not session_id:
+        click.echo("No session to reflect on.", err=True)
+        ctx.exit(1)
+
+    threads, observations = load_session_for_reflection(config, session_id)
+    batch = emit_reflection_batch(config, session_id, threads, observations)
+    if limit:
+        batch = batch[:limit]
+    payload = json.dumps(batch, indent=2)
+    if output:
+        output.write_text(payload, encoding="utf-8")
+        click.echo(
+            f"Emitted {len(batch)} thread prompt(s) for session {session_id[:16]} -> {output}",
+            err=True,
+        )
+    else:
+        click.echo(payload)
+
+
+@reflect.command("ingest")
+@click.argument(
+    "responses_file", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.pass_context
+def reflect_ingest(ctx, responses_file):
+    """Ingest agent-produced reflection responses into knowledge_candidates.
+
+    RESPONSES_FILE is a JSON array of {session_id, thread_id, prompt_hash,
+    raw_response}, where thread_id is the value from the emit batch and
+    raw_response is the JSON candidate array (as a string) the agent produced for
+    that thread's emitted prompt. Pairs with `emit`.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+
+    from techne.core.reflect import ingest_reflection_response
+
+    items = json.loads(responses_file.read_text(encoding="utf-8"))
+    totals = {
+        "candidates_proposed": 0,
+        "candidates_written": 0,
+        "candidates_promoted": 0,
+        "errors": 0,
+    }
+    for it in items:
+        raw = it["raw_response"]
+        if not isinstance(raw, str):
+            raw = json.dumps(raw)  # tolerate an inlined array instead of a string
+        counts = ingest_reflection_response(
+            config,
+            it["session_id"],
+            it["thread_id"],
+            it.get("prompt_hash", ""),
+            raw,
+            model_used=it.get("model_used", "agent-assisted"),
+        )
+        for k, v in counts.items():
+            totals[k] += v
+
+    click.echo(json.dumps(totals, indent=2))
+    if config.reflect.write_to == "live":
+        click.echo("write_to=live — candidates promoted straight to knowledge/identity.")
+    else:
+        click.echo("write_to=candidates — review with: techne reflect review")
+
+
 @reflect.command("promote")
 @click.argument("candidate_id", type=int)
 @click.pass_context
