@@ -25,7 +25,6 @@ Out of scope / deferred:
 from __future__ import annotations
 
 import json
-import logging
 import subprocess
 from pathlib import Path
 
@@ -153,6 +152,17 @@ class GitHubIssuesSource:
         if not issues:
             log.info("github_issues_walk_empty", repo=f"{self._owner}/{self._repo}")
             return 0
+
+        # The documents schema lives in the Librarian domain now, not core
+        # SCHEMA_SQL (db-per-domain, techne#99) — ensure it on the library db.
+        from techne.core.librarian import LIBRARIAN_SCHEMA
+
+        _c = connect(self._db_path)
+        try:
+            _c.executescript(LIBRARIAN_SCHEMA)
+            _c.commit()
+        finally:
+            _c.close()
 
         stored = 0
         max_updated_at: str | None = None

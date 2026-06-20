@@ -15,13 +15,11 @@ import pytest
 
 from techne.core.database import connect, init_db
 from techne.core.documents import (
-    _content_hash,
     get_document,
     list_documents,
+    search_documents,
     store_document,
 )
-from techne.core.search import search_fts, search
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,8 +28,8 @@ from techne.core.search import search_fts, search
 
 def _has_vectors() -> bool:
     try:
-        import sqlite_vec  # noqa: F401
         import fastembed  # noqa: F401
+        import sqlite_vec  # noqa: F401
 
         return True
     except ImportError:
@@ -45,8 +43,14 @@ vectors_available = pytest.mark.skipif(
 
 @pytest.fixture()
 def db_path(tmp_path) -> Path:
+    # The documents schema lives in the Librarian domain now (db-per-domain #99),
+    # not core SCHEMA_SQL — apply it so the documents store works on this db.
+    from techne.core.librarian import LIBRARIAN_SCHEMA
+
     path = tmp_path / "library.db"
     conn = init_db(path)
+    conn.executescript(LIBRARIAN_SCHEMA)
+    conn.commit()
     conn.close()
     return path
 
@@ -255,6 +259,9 @@ class TestListDocuments:
 
 
 class TestDocumentsFtsSearch:
+    """Documents search is now the Librarian's domain search (search_documents),
+    not core search — documents moved to librarian.db (db-per-domain #99)."""
+
     def test_fts_finds_document_by_content(self, db_path):
         store_document(
             db_path,
@@ -263,9 +270,8 @@ class TestDocumentsFtsSearch:
             content="The authentication flow is broken on Safari zymurgy",
             title="Safari auth bug",
         )
-        results = search_fts(db_path, "zymurgy", table="documents")
+        results = search_documents(db_path, "zymurgy")
         assert len(results) >= 1
-        assert results[0]["type"] == "document"
         assert "zymurgy" in results[0]["content"]
 
     def test_fts_finds_document_by_title(self, db_path):
@@ -276,31 +282,9 @@ class TestDocumentsFtsSearch:
             content="Body text here",
             title="Unique xylophone title",
         )
-        results = search_fts(db_path, "xylophone", table="documents")
-        assert len(results) >= 1
-        assert results[0]["type"] == "document"
-
-    def test_fts_table_all_includes_documents(self, db_path):
-        """table='all' must return document hits when documents match."""
-        store_document(
-            db_path,
-            source_type="github_issue",
-            source_url="https://github.com/acme/repo/issues/12",
-            content="Harbormaster quuxfoo deployment pipeline",
-            title="Pipeline issue",
-        )
-        results = search_fts(db_path, "quuxfoo", table="all")
-        types = [r["type"] for r in results]
-        assert "document" in types
+        assert len(search_documents(db_path, "xylophone")) >= 1
 
     def test_fts_superseded_docs_excluded(self, db_path):
-        """Superseded rows must not appear in FTS results.
-
-        We use a word ('zarquon') that appears ONLY in the superseded row's
-        content — the replacement row's content is entirely different — so any
-        FTS hit must come from the superseded row, which the query should filter
-        out via ``superseded_by IS NULL``.
-        """
         url = "https://github.com/acme/repo/issues/13"
         store_document(
             db_path,
@@ -316,10 +300,8 @@ class TestDocumentsFtsSearch:
             content="New content entirely rewritten",
             title="Updated issue",
         )
-        results = search_fts(db_path, "zarquon", table="documents")
-        # The only row that contains 'zarquon' is the superseded one (id=1).
-        # The active row (id=2) has no 'zarquon' → results must be empty.
-        assert len(results) == 0
+        # 'zarquon' is only in the superseded row → excluded.
+        assert search_documents(db_path, "zarquon") == []
 
     def test_fts_no_false_positives(self, db_path):
         store_document(
@@ -328,22 +310,7 @@ class TestDocumentsFtsSearch:
             source_url="https://github.com/acme/repo/issues/14",
             content="Ordinary content",
         )
-        results = search_fts(db_path, "xyzzy_nonexistent_42", table="documents")
-        assert results == []
-
-    def test_hybrid_search_includes_documents(self, db_path):
-        """search() (FTS+vec hybrid) must find documents; when vec unavailable,
-        falls back to FTS cleanly."""
-        store_document(
-            db_path,
-            source_type="github_issue",
-            source_url="https://github.com/acme/repo/issues/15",
-            content="frobnicate the widget deployment frobnicator",
-            title="Frobnication issue",
-        )
-        results = search(db_path, "frobnicate", table="documents")
-        assert len(results) >= 1
-        assert any(r["type"] == "document" for r in results)
+        assert search_documents(db_path, "xyzzy_nonexistent_42") == []
 
 
 # ---------------------------------------------------------------------------

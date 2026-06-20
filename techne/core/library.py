@@ -19,6 +19,7 @@ from pathlib import Path
 from techne.core.cards import upsert_document_card
 from techne.core.documents import store_document
 from techne.core.knowledge import content_hash
+from techne.core.librarian import librarian_db
 from techne.core.redaction import redact_credentials
 
 
@@ -43,8 +44,9 @@ def index_document(
     """
     title = redact_credentials(title or "")
     content = redact_credentials(content)
+    # Document → librarian.db (db-per-domain); the gist card → techne.db below.
     doc_id, stored = store_document(
-        db_path,
+        librarian_db(db_path),
         source_type=source_type,
         source_url=source_url,
         title=title,

@@ -315,7 +315,7 @@ def _segments_from_boundary_rows(n_obs: int, rows: list[dict]) -> list[list[int]
 @click.argument("query")
 @click.option(
     "--table",
-    type=click.Choice(["all", "threads", "observations", "knowledge", "documents"]),
+    type=click.Choice(["all", "threads", "observations", "knowledge"]),
     default="all",
 )
 @click.option("--limit", default=20)
@@ -1381,8 +1381,9 @@ def library(ctx):
         click.echo("techne not initialized. Run: techne init")
         return
     from techne.core.documents import list_documents
+    from techne.core.librarian import librarian_db
 
-    docs = list_documents(config.db_path, limit=50)
+    docs = list_documents(librarian_db(config.db_path), limit=50)
     click.echo(f"Documents: {len(docs)}")
     for d in docs[:25]:
         click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
@@ -1423,7 +1424,7 @@ def library_index_transcripts(ctx, platform, transcripts_dir, limit):
 
     counts = index_transcripts(config.db_path, source, limit=limit)
     click.echo(json.dumps(counts, indent=2))
-    click.echo("Search them: techne search <query> --table documents")
+    click.echo("Search them: techne library search <query>")
 
 
 @library.command("index-markdown")
@@ -1446,7 +1447,48 @@ def library_index_markdown(ctx, root, source_type):
 
     counts = index_markdown_dir(config.db_path, root, source_type=source_type)
     click.echo(json.dumps(counts, indent=2))
-    click.echo("Search them: techne search <query> --table documents")
+    click.echo("Search them: techne library search <query>")
+
+
+@library.command("search")
+@click.argument("query")
+@click.option("--limit", default=20)
+@click.pass_context
+def library_search(ctx, query, limit):
+    """Full-text search the Librarian's documents (librarian.db) — domain-scoped.
+    Personal recall is the gist cards (techne search --table knowledge)."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.documents import search_documents
+    from techne.core.librarian import librarian_db
+
+    hits = search_documents(librarian_db(config.db_path), query, limit=limit)
+    if not hits:
+        click.echo("No documents matched.")
+        return
+    for d in hits:
+        click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
+        snippet = (d.get("content", "") or "").replace("\n", " ").strip()
+        click.echo(f"    {snippet[:200]}")
+        click.echo(f"    ↳ full: techne library show {d['id']}")
+        click.echo()
+
+
+@library.command("migrate-store")
+@click.pass_context
+def library_migrate_store(ctx):
+    """One-time: move documents from techne.db into librarian.db (db-per-domain #99).
+    Preserves ids so existing cards resolve; verifies before dropping. Idempotent."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.librarian import migrate_documents_to_librarian
+
+    result = migrate_documents_to_librarian(config.db_path)
+    click.echo(json.dumps(result, indent=2))
 
 
 @library.command("show")
@@ -1457,8 +1499,9 @@ def library_show(ctx, doc_id, chars):
     """Print a stored document's content (the fetch-on-demand half of recall)."""
     config = ctx.obj["config"]
     from techne.core.documents import get_document
+    from techne.core.librarian import librarian_db
 
-    doc = get_document(config.db_path, doc_id)
+    doc = get_document(librarian_db(config.db_path), doc_id)
     if not doc:
         click.echo(f"No document #{doc_id}", err=True)
         ctx.exit(1)

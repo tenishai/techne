@@ -163,7 +163,12 @@ def resolve_card(db_path: Path, card_id: int) -> dict | None:
     if row is None:
         return None
     doc_id = card_doc_id(row["tags"])
-    return get_document(db_path, doc_id) if doc_id is not None else None
+    if doc_id is None:
+        return None
+    # Cross-db: the card lives in techne.db, the document in librarian.db.
+    from techne.core.librarian import librarian_db
+
+    return get_document(librarian_db(db_path), doc_id)
 
 
 # --- agent-assisted gist fill (emit/ingest, same shape as reflect) -------------
