@@ -1,12 +1,18 @@
-"""GitHubIssuesSource — SourceAdapter that ingests GitHub issues into a library db.
+"""GitHubIssuesSource — SourceAdapter that ingests GitHub issues into the Librarian.
 
 Fetches issues via the `gh` CLI (must be authenticated) and stores each one
-as a `documents` row (`source_type='github_issue'`) in the target library db.
-The library db is a standard techne db; the caller supplies an explicit
-`db_path` so this adapter never touches the colony memory db.
+as a `documents` row (`source_type='github_issue'`).
 
-Cursor (last-fetched updatedAt timestamp) is persisted in extension_state
+db-per-domain (techne#99/#101): document rows live in **librarian.db**, reached
+via `librarian_db(techne_db_path)` — the same store transcripts, markdown, and
+`resolve_card` use, so GitHub-issue docs resolve through cards. The adapter takes
+the *core* techne db path and derives librarian.db beside it; it does NOT
+core-initialize the domain db (that pollution was the #101 bug).
+
+Cursor (last-fetched updatedAt timestamp) is persisted in `extension_state`
 under the key ``github_issues:<owner>/<repo>`` so re-walks are incremental.
+`extension_state` is a core table → the cursor lives in the core techne db
+(legitimate sync-cursor state), not in the document domain db.
 
 Dedup: `source_url` (the issue HTML URL) is the dedup key. Re-walking an
 already-indexed issue with unchanged body is a no-op; body changes trigger
@@ -33,6 +39,7 @@ import structlog
 from techne.core.database import connect
 from techne.core.documents import store_document
 from techne.core.extension_state import get_state, set_state
+from techne.core.librarian import librarian_db
 
 log = structlog.get_logger(__name__)
 
@@ -46,14 +53,16 @@ class GitHubIssuesSource:
     Usage::
 
         src = GitHubIssuesSource(
-            db_path=Path("~/.techne/library.db"),
+            techne_db_path=Path("~/.techne/techne.db"),
             owner="owner",
             repo="repo",
         )
-        count = src.initial_walk()
+        count = src.initial_walk()  # docs land in ~/.techne/librarian.db
 
     Args:
-        db_path:  Path to the library db (may differ from the colony memory db).
+        techne_db_path:  Path to the *core* techne db. Documents are written to
+                         `librarian.db` beside it; the cursor (extension_state) is
+                         written to this core db.
         owner:    GitHub organisation or user name.
         repo:     Repository name.
         limit:    Maximum issues to fetch per walk (default 500). Increase for
@@ -62,16 +71,23 @@ class GitHubIssuesSource:
 
     def __init__(
         self,
-        db_path: Path,
+        techne_db_path: Path,
         owner: str,
         repo: str,
         limit: int = _DEFAULT_LIMIT,
     ) -> None:
-        self._db_path = Path(db_path).expanduser()
+        self._techne_db_path = Path(techne_db_path).expanduser()
         self._owner = owner
         self._repo = repo
         self._limit = limit
         self._state_key = f"{_STATE_KEY_PREFIX}:{owner}/{repo}"
+
+    @property
+    def _library_db(self) -> Path:
+        """librarian.db beside the core techne db — where document rows live
+        (db-per-domain #99), the same store cards resolve through. Accessing it
+        migrates librarian.db on first use; no core schema is applied there."""
+        return librarian_db(self._techne_db_path)
 
     # ------------------------------------------------------------------
     # Cursor helpers
@@ -79,7 +95,7 @@ class GitHubIssuesSource:
 
     def _load_cursor(self) -> str | None:
         """Return the stored last-updatedAt cursor (ISO string) or None."""
-        conn = connect(self._db_path)
+        conn = connect(self._techne_db_path)
         try:
             state = get_state(conn, self._state_key) or {}
             return state.get("last_updated_at")
@@ -87,7 +103,7 @@ class GitHubIssuesSource:
             conn.close()
 
     def _save_cursor(self, last_updated_at: str) -> None:
-        conn = connect(self._db_path)
+        conn = connect(self._techne_db_path)
         try:
             state = get_state(conn, self._state_key) or {}
             state["last_updated_at"] = last_updated_at
@@ -153,16 +169,9 @@ class GitHubIssuesSource:
             log.info("github_issues_walk_empty", repo=f"{self._owner}/{self._repo}")
             return 0
 
-        # The documents schema lives in the Librarian domain now, not core
-        # SCHEMA_SQL (db-per-domain, techne#99) — ensure it on the library db.
-        from techne.core.librarian import LIBRARIAN_SCHEMA
-
-        _c = connect(self._db_path)
-        try:
-            _c.executescript(LIBRARIAN_SCHEMA)
-            _c.commit()
-        finally:
-            _c.close()
+        # librarian.db is migrated on first access (no core schema applied) —
+        # resolve it once so store_document writes document rows there.
+        library_db = self._library_db
 
         stored = 0
         max_updated_at: str | None = None
@@ -188,7 +197,7 @@ class GitHubIssuesSource:
             )
 
             _id, was_stored = store_document(
-                self._db_path,
+                library_db,
                 source_type="github_issue",
                 source_url=url,
                 content=body,

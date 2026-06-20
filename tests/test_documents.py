@@ -366,14 +366,31 @@ _MOCK_ISSUES = [
 
 
 @pytest.fixture()
-def github_source(db_path):
+def techne_db(tmp_path) -> Path:
+    """A plain *core* techne db (no librarian schema) — the github source derives
+    librarian.db beside it and keeps its cursor here in extension_state."""
+    path = tmp_path / "techne.db"
+    init_db(path).close()
+    return path
+
+
+@pytest.fixture()
+def lib_db(techne_db) -> Path:
+    """The librarian.db the github source writes documents into."""
+    from techne.core.librarian import librarian_db
+
+    return librarian_db(techne_db)
+
+
+@pytest.fixture()
+def github_source(techne_db):
     from techne.sync.github_issues import GitHubIssuesSource
 
-    return GitHubIssuesSource(db_path=db_path, owner="acme", repo="testrepo")
+    return GitHubIssuesSource(techne_db_path=techne_db, owner="acme", repo="testrepo")
 
 
 class TestGitHubIssuesSource:
-    def test_initial_walk_stores_documents(self, github_source, db_path):
+    def test_initial_walk_stores_documents(self, github_source, lib_db):
         with patch(
             "techne.sync.github_issues.subprocess.run"
         ) as mock_run:
@@ -384,10 +401,43 @@ class TestGitHubIssuesSource:
             count = github_source.initial_walk()
 
         assert count == 2
-        docs = list_documents(db_path, source_type="github_issue")
+        docs = list_documents(lib_db, source_type="github_issue")
         assert len(docs) == 2
 
-    def test_initial_walk_stores_correct_fields(self, github_source, db_path):
+    def test_documents_land_in_librarian_not_core(self, github_source, techne_db, lib_db):
+        """#101 regression: docs go to librarian.db; the core db gets no documents
+        table (no core-pollution of a domain db, and cards resolve via librarian.db).
+
+        Probe with raw sqlite3 — the core `connect()` would itself create the tables
+        we're asserting are absent."""
+        import sqlite3
+
+        with patch("techne.sync.github_issues.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = json.dumps(_MOCK_ISSUES)
+            mock_run.return_value.stderr = ""
+            github_source.initial_walk()
+
+        def _has_table(path, name):
+            raw = sqlite3.connect(str(path))
+            try:
+                return (
+                    raw.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+                    ).fetchone()
+                    is not None
+                )
+            finally:
+                raw.close()
+
+        # core db never grew a documents table (domain content stays out of core)
+        assert not _has_table(techne_db, "documents")
+        # librarian.db never grew core tables (no substrate/domain entanglement)
+        assert not _has_table(lib_db, "observations")
+        assert _has_table(lib_db, "documents")
+        assert len(list_documents(lib_db, source_type="github_issue")) == 2
+
+    def test_initial_walk_stores_correct_fields(self, github_source, lib_db):
         with patch("techne.sync.github_issues.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = json.dumps(_MOCK_ISSUES[:1])
@@ -395,13 +445,13 @@ class TestGitHubIssuesSource:
 
             github_source.initial_walk()
 
-        docs = list_documents(db_path)
+        docs = list_documents(lib_db)
         assert len(docs) == 1
         d = docs[0]
         assert d["source_type"] == "github_issue"
         assert d["source_url"] == "https://github.com/acme/testrepo/issues/1"
 
-        full = get_document(db_path, d["id"])
+        full = get_document(lib_db, d["id"])
         assert full["content"] == "The login page crashes on Safari."
         assert full["title"] == "Fix the login bug"
 
@@ -410,7 +460,7 @@ class TestGitHubIssuesSource:
         assert "bug" in meta["labels"]
         assert meta["number"] == 1
 
-    def test_initial_walk_advances_cursor(self, github_source, db_path):
+    def test_initial_walk_advances_cursor(self, github_source, techne_db):
         from techne.core.database import connect as _connect
         from techne.core.extension_state import get_state
 
@@ -421,7 +471,7 @@ class TestGitHubIssuesSource:
 
             github_source.initial_walk()
 
-        conn = _connect(db_path)
+        conn = _connect(techne_db)  # cursor lives in the core db (extension_state)
         try:
             state = get_state(conn, "github_issues:acme/testrepo")
         finally:
@@ -444,7 +494,7 @@ class TestGitHubIssuesSource:
         assert count_first == 2
         assert count_second == 0  # no content changed → no new rows
 
-    def test_initial_walk_supersedes_on_body_change(self, github_source, db_path):
+    def test_initial_walk_supersedes_on_body_change(self, github_source, lib_db):
         """If issue body changes between walks, old row is superseded."""
         first_walk_issues = [
             {
@@ -475,7 +525,7 @@ class TestGitHubIssuesSource:
         assert count == 1  # one supersession happened
 
         url = _MOCK_ISSUES[0]["url"]
-        conn = connect(db_path)
+        conn = connect(lib_db)
         try:
             active = conn.execute(
                 "SELECT COUNT(*) FROM documents WHERE source_url=? AND superseded_by IS NULL",
