@@ -376,6 +376,17 @@ sync:
 
 Semantic versioning. Tagged releases on the repo:
 
+- **v0.7.0** — db-per-domain + staff review:
+  - **One db file per domain, behind a `StoreAdapter`.** `techne.db` stays personal memory; documents → `librarian.db` (#99), patterns → `architect.db` (#87 P1), code graph → `codex.db` (#89 P1). Domain tables left core's `SCHEMA_SQL` — a memory-only db no longer gets empty unused tables.
+  - **Store registry** (#98) — `load_store(config, domain)`, a `stores:` config block, `dsn:` overrides honored. Adding a domain is a module + `StoreAdapter`, **zero core edits** (umbrella #88 delivered).
+  - **Option D document cards** — a `document_card` (gist + pointer) rides personal recall in `knowledge`; full content fetched cross-db by key (no ATTACH → backend-portable). Transcript + markdown-dir sources via a shared `index_document` unit; a `techne library` command group + `library doctor` cross-db health check.
+  - **Staff-review batch (#100–#104):** migration verifies by (id+content) identity — no silent document drop (#100); `github_issues` source writes to `librarian.db` and stops core-polluting its db (#101); domains route through the registry so `config.stores` `dsn:` actually takes effect, and `resolve_card` exercises the `StoreAdapter.get` Protocol seam (#102, keystone); empty/whitespace query guard across domain searches (#103); LIKE-metachar escaping + reversible pre-drop backup (#104).
+- **v0.6.2** — reliability + recall pass:
+  - **FTS5 hardening** — query sanitizer always-quotes + strips backslashes (#74, kills `fts5: syntax error` on bare `AND`/`OR`/`NOT`/hyphens); Porter stemming (`tokenize='porter unicode61'`) + a v9 rebuild migration (#77).
+  - **SessionStart health banner** + shared `core/health.py::collect_health`, reused by `techne_status` (#76); `version` + `package_path` added to `techne_status` so callers can tell if the server is current (#71).
+  - **Migration hardening** (#78) — flock-serialized, WAL-safe pre-migration backup to `backups/`, stderr announce (lands ahead of #77 so a first v9 migration is backup-protected).
+  - **Outbox gate + purge** (#79) — `enqueue()` gated on a live consumer (`sync.adapter != "noop"`); `outbox.purge_pending` + `techne outbox purge` for regenerable backlog.
+  - Thread-lifecycle fix (#72), FTS OR-fallback for empty implicit-AND recall (#70), AWS redaction incl. JSON/SDK form (#69), and the eval-discipline harness (#68 — 2-arm recall eval + enforced kill-gate via `pytest -m eval`).
 - **v0.6.1** — correctness + hygiene pass (Fable review):
   - **FTS crash fix** — double-quoted search terms no longer raise `OperationalError`; embedded `"` are escaped before wrapping.
   - **Search provenance fix** — `search()` no longer stamps `source = "fts"/"vec"` over the original knowledge provenance; match source is returned in a separate `match_source` field.
