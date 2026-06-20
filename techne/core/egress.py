@@ -8,14 +8,24 @@ flooded regardless of how many high-confidence memories are stored.
 Selection rules:
   1. Eligibility: superseded_by IS NULL AND confidence='high' AND type != 'pattern'
      (patterns are pull-only reference material — never auto-injected)
-  2. Priority order (fills until budget exhausted):
-     a. Identity    — tagged memory-type:user
-     b. Feedback    — tagged memory-type:feedback
-     c. Project state — single most-recent entry tagged memory-type:project
+  2. Bands fill in order; each appends to the render list until the budget runs out:
+     a. Identity      — tagged memory-type:user (the anchor; always first)
+     b. Recent results — the freshest decisions/evaluations/facts NOT in another
+                        band, capped at `recent_reserve_frac` of the budget so the
+                        large, static feedback band can never starve "what changed
+                        since last session" (techne#93 egress-starvation fix).
+     c. Feedback      — tagged memory-type:feedback (stable behavioral anchors)
+     d. Project state — single most-recent entry tagged memory-type:project
                         whose name: tag contains 'platform-state'
-     d. Remaining recent high-confidence decision/fact/evaluation by updated_at DESC
+     e. Leftover recent — any recent rows the reservation in (b) couldn't fit
   3. Each rendered line is prefixed with ⟦techne#<id>⟧ for attribution/traceability.
   4. Budget is config-driven (injection.char_budget, default 2000 chars).
+
+Why the reservation (b): the original order was identity → feedback → project →
+recent, so on a store with many high-confidence feedback facts the budget was
+exhausted before the recency band was ever reached — the single most
+decision-relevant memory (e.g. "the acceptance test just passed") was the most
+likely to be dropped. Reserving a slice for fresh results fixes that inversion.
 
 Deferred (Tier-1, techne#92): relevance ranking against the current query.
 """
@@ -56,12 +66,18 @@ def select_tier0_injection(
     db_path: Path,
     *,
     char_budget: int = 2000,
+    recent_reserve_frac: float = 0.4,
 ) -> list[EgressRow]:
     """Select knowledge rows for Tier-0 session-start injection.
 
-    Returns a list of EgressRow dicts in render order (priority groups first,
-    then recency). Each row's `content` is the full text — truncation happens
-    during rendering, not selection, so callers can inspect the raw content.
+    Returns a list of EgressRow dicts in render order (bands as documented in
+    the module docstring). Each row's `content` is the full text — truncation
+    happens during rendering, not selection, so callers can inspect the raw
+    content.
+
+    `recent_reserve_frac` (0.0-1.0) is the share of `char_budget` reserved for
+    the freshest decisions/evaluations/facts before the feedback band fills; set
+    to 0.0 for the legacy identity→feedback→project→recent ordering.
 
     The returned list is already deduplicated by id.
     """
@@ -106,41 +122,56 @@ def select_tier0_injection(
         else:
             remaining_rows.append(r)
 
-    # Build the ordered candidate list:
-    # identity → feedback → single most-recent platform-state → remaining
     most_recent_project_state = project_state_rows[:1]  # already ordered by updated_at DESC
+    recent_rows = remaining_rows  # decisions/evaluations/facts — the "what changed" band
 
-    candidates = identity_rows + feedback_rows + most_recent_project_state + remaining_rows
-
-    # Fill until budget exhausted.
     selected: list[EgressRow] = []
     seen_ids: set[int] = set()
     chars_used = 0
 
+    # Phase 1 — reserved bands that must not be starved by feedback volume:
+    #   identity (the anchor, always) then the freshest results, capped at a
+    #   reserved fraction of the budget. This is the egress-starvation fix.
+    chars_used = _fill_band(identity_rows, char_budget, selected, seen_ids, chars_used)
+    recent_cap = min(char_budget, chars_used + int(char_budget * recent_reserve_frac))
+    chars_used = _fill_band(recent_rows, recent_cap, selected, seen_ids, chars_used)
+
+    # Phase 2 — fill the remaining budget with stable anchors, then any leftover
+    #   recent rows the reservation couldn't fit: feedback → platform-state → recent.
+    for band in (feedback_rows, most_recent_project_state, recent_rows):
+        chars_used = _fill_band(band, char_budget, selected, seen_ids, chars_used)
+
+    logger.debug(
+        "egress.tier0: selected %d rows, %d chars (budget %d, recent_reserve_frac %.2f)",
+        len(selected),
+        chars_used,
+        char_budget,
+        recent_reserve_frac,
+    )
+    return selected
+
+
+def _fill_band(
+    candidates: list[EgressRow],
+    budget_cap: int,
+    selected: list[EgressRow],
+    seen_ids: set[int],
+    chars_used: int,
+) -> int:
+    """Greedily append rows from *candidates* to *selected* until *budget_cap*
+    (cumulative rendered chars) would be exceeded. Skips already-seen ids and
+    stops at the first row that doesn't fit. Returns the new chars_used total.
+    """
     for r in candidates:
         if r["id"] in seen_ids:
             continue
-        # Estimate rendered size: prefix (≈15 chars) + truncated content + newline
         line = _render_line(r, max_content=200)
-        if chars_used + len(line) > char_budget:
-            logger.debug(
-                "egress.tier0: budget exhausted after %d rows (%d chars)",
-                len(selected),
-                chars_used,
-            )
+        if chars_used + len(line) > budget_cap:
             break
         selected.append(r)
         seen_ids.add(r["id"])
         chars_used += len(line)
-
-    logger.debug(
-        "egress.tier0: selected %d/%d eligible rows, %d chars (budget %d)",
-        len(selected),
-        len(candidates),
-        chars_used,
-        char_budget,
-    )
-    return selected
+    return chars_used
 
 
 def _render_line(row: EgressRow, max_content: int = 200) -> str:

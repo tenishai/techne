@@ -112,6 +112,10 @@ class InjectionConfig:
     thread_char_budget: overall char ceiling for the threads block
         (active + recent combined). Mirrors the knowledge char_budget pattern.
     thread_per_item_chars: per-thread content truncation limit.
+    recent_reserve_frac: fraction of char_budget reserved for the freshest
+        decisions/evaluations/facts ("what changed since last session"), filled
+        before the static feedback band so it can never be starved (techne#93
+        egress-starvation fix). 0.0 disables the reservation (legacy ordering).
     """
 
     enabled: bool = True
@@ -120,6 +124,7 @@ class InjectionConfig:
     max_recent_threads: int = 5
     thread_char_budget: int = 1500
     thread_per_item_chars: int = 200
+    recent_reserve_frac: float = 0.4
 
 
 @dataclass
@@ -313,6 +318,7 @@ class Config:
                 max_recent_threads=int(i.get("max_recent_threads", 5)),
                 thread_char_budget=int(i.get("thread_char_budget", 1500)),
                 thread_per_item_chars=int(i.get("thread_per_item_chars", 200)),
+                recent_reserve_frac=float(i.get("recent_reserve_frac", 0.4)),
             )
 
         if "staleness_hours" in raw:

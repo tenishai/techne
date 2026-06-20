@@ -280,6 +280,7 @@ def main() -> None:
             tier0_rows = select_tier0_injection(
                 config.db_path,
                 char_budget=config.injection.char_budget,
+                recent_reserve_frac=config.injection.recent_reserve_frac,
             )
             knowledge_block = render_tier0_block(tier0_rows)
             if knowledge_block:
