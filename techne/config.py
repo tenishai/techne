@@ -107,10 +107,19 @@ class InjectionConfig:
         block (includes the prefix/formatting overhead per line).
         Default 2000 keeps the injection well within a typical context
         preamble without crowding thread context or the health banner.
+    max_active_threads: cap on active threads injected at session start.
+    max_recent_threads: cap on recent-48h threads injected at session start.
+    thread_char_budget: overall char ceiling for the threads block
+        (active + recent combined). Mirrors the knowledge char_budget pattern.
+    thread_per_item_chars: per-thread content truncation limit.
     """
 
     enabled: bool = True
     char_budget: int = 2000
+    max_active_threads: int = 3
+    max_recent_threads: int = 5
+    thread_char_budget: int = 1500
+    thread_per_item_chars: int = 200
 
 
 @dataclass
@@ -145,6 +154,9 @@ class Config:
     search: SearchConfig = field(default_factory=SearchConfig)
     injection: InjectionConfig = field(default_factory=InjectionConfig)
     platform: Platform = "claude-code"
+    # Staleness alarm: if the prior last_session is older than this many hours,
+    # the banner and collect_health emit a visible warning. Default 12h.
+    staleness_hours: int = 12
     model: str = "claude-haiku-4-5-20251001"
     # Optional LiteLLM proxy targeting. When unset, litellm.completion() uses
     # its standard env-var-based provider routing (ANTHROPIC_API_KEY, etc.).
@@ -297,7 +309,14 @@ class Config:
             cfg.injection = InjectionConfig(
                 enabled=bool(i.get("enabled", True)),
                 char_budget=int(i.get("char_budget", 2000)),
+                max_active_threads=int(i.get("max_active_threads", 3)),
+                max_recent_threads=int(i.get("max_recent_threads", 5)),
+                thread_char_budget=int(i.get("thread_char_budget", 1500)),
+                thread_per_item_chars=int(i.get("thread_per_item_chars", 200)),
             )
+
+        if "staleness_hours" in raw:
+            cfg.staleness_hours = int(raw["staleness_hours"])
 
         return cfg
 
