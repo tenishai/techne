@@ -132,6 +132,8 @@ def search_documents(db_path: Path, query: str, *, limit: int = 20) -> list[dict
     this searches the full content in librarian.db."""
     from techne.core.search import _sanitize_fts_query
 
+    if not query.strip():  # FTS5 MATCH '' is a syntax error (#103)
+        return []
     conn = connect(db_path)
     try:
         rows = conn.execute(

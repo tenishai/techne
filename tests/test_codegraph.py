@@ -44,6 +44,13 @@ def test_search_symbols(db):
     assert [h["id"] for h in hits] == ["x"]
 
 
+def test_search_symbols_blank_query_returns_empty(db):
+    """#103: blank/whitespace must not crash (FTS5 MATCH '' is a syntax error)."""
+    _sym(db, "x", "authenticate", sig="def authenticate(user, token): ...")
+    assert search_symbols(db, "") == []
+    assert search_symbols(db, "   ") == []
+
+
 def test_callers_callees_direct(db):
     _graph(db)
     assert {s["id"] for s in callees(db, "a")} == {"b", "d"}

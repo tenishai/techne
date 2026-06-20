@@ -78,6 +78,14 @@ def test_add_pattern_dedup_and_search(db):
     assert len(list_patterns(db)) == 1
 
 
+def test_search_patterns_blank_query_returns_empty(db):
+    """#103: blank/whitespace must not crash (FTS5 MATCH '' is a syntax error)."""
+    inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="full-eval")
+    add_pattern(db, investigation_id=inv, name="P", source_url="u", body="some body text")
+    assert search_patterns(db, "") == []
+    assert search_patterns(db, "   ") == []
+
+
 def test_ingest_patterns_md(db):
     md = """---
 name: architectural-patterns

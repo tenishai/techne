@@ -102,6 +102,8 @@ class SqliteStore:
 
     def search(self, table: str, query: str, *, limit: int = 20) -> list[dict]:
         """FTS over <table>_fts if it exists; else a LIKE on a `content` column."""
+        if not query.strip():  # FTS5 MATCH '' is a syntax error (#103)
+            return []
         conn = self.connect()
         try:
             has_fts = conn.execute(

@@ -284,6 +284,18 @@ class TestDocumentsFtsSearch:
         )
         assert len(search_documents(db_path, "xylophone")) >= 1
 
+    def test_fts_blank_query_returns_empty(self, db_path):
+        """#103: blank/whitespace must not crash (FTS5 MATCH '' is a syntax error)."""
+        store_document(
+            db_path,
+            source_type="github_issue",
+            source_url="https://github.com/acme/repo/issues/12",
+            content="Body text here",
+            title="A title",
+        )
+        assert search_documents(db_path, "") == []
+        assert search_documents(db_path, "   ") == []
+
     def test_fts_superseded_docs_excluded(self, db_path):
         url = "https://github.com/acme/repo/issues/13"
         store_document(

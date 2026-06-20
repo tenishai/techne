@@ -117,6 +117,8 @@ def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]
     """FTS over active patterns (name + body)."""
     from techne.core.search import _sanitize_fts_query
 
+    if not query.strip():  # FTS5 MATCH '' is a syntax error (#103)
+        return []
     conn = plain_connect(db_path)
     try:
         rows = conn.execute(

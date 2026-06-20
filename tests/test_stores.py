@@ -60,6 +60,15 @@ def test_add_get_search(cfg):
     assert [h["id"] for h in hits] == [1]
 
 
+def test_search_blank_query_returns_empty(cfg):
+    """#103: blank/whitespace must not crash (FTS5 MATCH '' is a syntax error)."""
+    store = load_store(cfg, "librarian")
+    store.migrate(_SCHEMA)
+    store.add("notes", {"id": 1, "content": "decided to use SQLite for the store"})
+    assert store.search("notes", "") == []
+    assert store.search("notes", "   ") == []
+
+
 def test_search_like_fallback_without_fts(cfg):
     store = load_store(cfg, "x")
     store.migrate("CREATE TABLE IF NOT EXISTS docs (id INTEGER PRIMARY KEY, content TEXT);")
