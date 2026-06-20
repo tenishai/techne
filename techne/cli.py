@@ -1190,6 +1190,10 @@ def reflect_emit(ctx, session_id, limit, output):
     batch = emit_reflection_batch(config, session_id, threads, observations)
     if limit:
         batch = batch[:limit]
+    # Placeholder the agent fills in-place with its JSON candidate array per thread,
+    # then feeds the SAME file to `ingest` — no id reconstruction needed.
+    for it in batch:
+        it["raw_response"] = ""
     payload = json.dumps(batch, indent=2)
     if output:
         output.write_text(payload, encoding="utf-8")
@@ -1228,10 +1232,14 @@ def reflect_ingest(ctx, responses_file):
         "candidates_promoted": 0,
         "errors": 0,
     }
+    skipped = 0
     for it in items:
-        raw = it["raw_response"]
+        raw = it.get("raw_response")
         if not isinstance(raw, str):
-            raw = json.dumps(raw)  # tolerate an inlined array instead of a string
+            raw = json.dumps(raw) if raw else ""  # tolerate an inlined array
+        if not raw.strip():
+            skipped += 1  # unanswered thread (placeholder left empty) — not an error
+            continue
         counts = ingest_reflection_response(
             config,
             it["session_id"],
@@ -1244,6 +1252,8 @@ def reflect_ingest(ctx, responses_file):
             totals[k] += v
 
     click.echo(json.dumps(totals, indent=2))
+    if skipped:
+        click.echo(f"skipped {skipped} thread(s) with empty raw_response")
     if config.reflect.write_to == "live":
         click.echo("write_to=live — candidates promoted straight to knowledge/identity.")
     else:
