@@ -1700,5 +1700,69 @@ def architect_show(ctx, pattern_id):
     click.echo(p["body"])
 
 
+@main.group(invoke_without_command=True)
+@click.pass_context
+def codex(ctx):
+    """Code-graph store (codex.db) — symbols + edges, graph queries (techne#89)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+    from techne.core.codegraph import stats
+    from techne.core.codex import codex_db
+
+    s = stats(codex_db(config.db_path))
+    click.echo(f"Symbols: {s['symbols']}  Edges: {s['edges']}  Files: {s['files']}")
+
+
+@codex.command("search")
+@click.argument("query")
+@click.option("--limit", default=20)
+@click.pass_context
+def codex_search(ctx, query, limit):
+    """FTS over symbol names + signatures."""
+    config = ctx.obj["config"]
+    from techne.core.codegraph import search_symbols
+    from techne.core.codex import codex_db
+
+    for s in search_symbols(codex_db(config.db_path), query, limit=limit):
+        click.echo(f"  {s['id']}  [{s['kind']}] {s['name']}  {s.get('signature') or ''}")
+        click.echo(f"    {s['file']}")
+
+
+@codex.command("callers")
+@click.argument("symbol_id")
+@click.pass_context
+def codex_callers(ctx, symbol_id):
+    """Who calls this symbol (direct)."""
+    config = ctx.obj["config"]
+    from techne.core.codegraph import callers
+    from techne.core.codex import codex_db
+
+    for s in callers(codex_db(config.db_path), symbol_id):
+        click.echo(f"  {s['id']}  {s['name']}  ({s['file']})")
+
+
+@codex.command("blast-radius")
+@click.argument("symbol_id")
+@click.option("--direction", type=click.Choice(["out", "in"]), default="out", show_default=True)
+@click.option("--depth", default=5, show_default=True)
+@click.pass_context
+def codex_blast(ctx, symbol_id, direction, depth):
+    """Transitive reachability via recursive CTE — out=dependencies, in=dependents."""
+    config = ctx.obj["config"]
+    from techne.core.codegraph import reachable
+    from techne.core.codex import codex_db
+
+    rows = reachable(codex_db(config.db_path), symbol_id, direction=direction, max_depth=depth)
+    if not rows:
+        click.echo("(nothing reachable)")
+        return
+    for s in rows:
+        click.echo(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']})")
+
+
 if __name__ == "__main__":
     main()
