@@ -57,13 +57,7 @@ class SqliteStore:
     # which would apply techne's core SCHEMA_SQL to the domain db. A domain store
     # gets ONLY its own schema (via migrate); that's the per-db-schema goal.
     def connect(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
-        return conn
+        return plain_connect(self.db_path)
 
     def migrate(self, schema_sql: str) -> None:
         conn = self.connect()
@@ -128,6 +122,19 @@ class SqliteStore:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+
+def plain_connect(db_path: Path) -> sqlite3.Connection:
+    """A pragma'd SQLite connection that does NOT apply techne's core schema.
+    Use for domain dbs (librarian.db, etc.) so they get only their own schema —
+    core.database.connect() would core-initialize them (db-per-domain, techne#99)."""
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 _BUILTIN_ADAPTERS = ("sqlite",)
