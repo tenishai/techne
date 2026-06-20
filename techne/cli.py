@@ -1390,24 +1390,38 @@ def library(ctx):
 
 @library.command("index-transcripts")
 @click.option(
+    "--platform",
+    type=click.Choice(["claude-code"]),
+    default="claude-code",
+    show_default=True,
+    help="Which client's transcripts to index (each is a TranscriptSource adapter).",
+)
+@click.option(
     "--dir",
     "transcripts_dir",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=None,
-    help="Transcript dir to index (default: this cwd's Claude Code project dir).",
+    help="Transcript dir to index (default: the platform's default location).",
 )
 @click.option("--limit", type=int, default=None, help="Max transcripts to index.")
 @click.pass_context
-def library_index_transcripts(ctx, transcripts_dir, limit):
-    """Index Claude Code JSONL transcripts as documents — the conversation prose
-    where decisions are made (the observation lens only sees tool calls)."""
+def library_index_transcripts(ctx, platform, transcripts_dir, limit):
+    """Index a client's transcripts as documents — the conversation prose where
+    decisions are made (the observation lens only sees tool calls)."""
     config = ctx.obj["config"]
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
-    from techne.platforms.claude_code.transcript_library import index_transcripts
+    from techne.core.transcripts import index_transcripts
 
-    counts = index_transcripts(config.db_path, transcripts_dir, limit=limit)
+    if platform == "claude-code":
+        from techne.platforms.claude_code.transcript_library import ClaudeCodeTranscriptSource
+
+        source = ClaudeCodeTranscriptSource(transcripts_dir)
+    else:  # pragma: no cover - guarded by click.Choice
+        raise click.ClickException(f"no transcript source for platform {platform!r}")
+
+    counts = index_transcripts(config.db_path, source, limit=limit)
     click.echo(json.dumps(counts, indent=2))
     click.echo("Search them: techne search <query> --table documents")
 
