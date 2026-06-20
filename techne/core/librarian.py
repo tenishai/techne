@@ -85,7 +85,14 @@ def migrate_documents_to_librarian(techne_db_path: Path) -> dict:
     """One-time cutover: copy any `documents` rows still in techne.db (where they
     used to live) into librarian.db, PRESERVING ids so existing cards resolve, then
     drop the documents tables from techne.db. Idempotent — no documents table in
-    techne.db → no-op. Verifies the copy before dropping."""
+    techne.db → no-op.
+
+    SAFETY (techne#100): cards point at documents by id, so ids MUST be preserved.
+    If librarian.db already holds documents, an autoincrement id can collide and the
+    INSERT OR IGNORE silently skips the legacy row — so we verify EVERY source row
+    landed by **(id + content) identity**, not by row count, and refuse to drop the
+    source if any didn't (a count check would pass while a legacy doc was lost and a
+    card now resolved to the wrong document)."""
     from techne.core.database import connect
 
     src = connect(techne_db_path)
@@ -96,9 +103,6 @@ def migrate_documents_to_librarian(techne_db_path: Path) -> dict:
         if not has:
             return {"moved": 0, "dropped": False, "note": "no documents table in techne.db"}
         rows = [dict(r) for r in src.execute("SELECT * FROM documents").fetchall()]
-        src_active = src.execute(
-            "SELECT COUNT(*) FROM documents WHERE superseded_by IS NULL"
-        ).fetchone()[0]
     finally:
         src.close()
 
@@ -115,15 +119,27 @@ def migrate_documents_to_librarian(techne_db_path: Path) -> dict:
                 f"INSERT OR IGNORE INTO documents ({cols}) VALUES ({ph})", tuple(d.values())
             )
         dest.commit()
-        dest_active = dest.execute(
-            "SELECT COUNT(*) FROM documents WHERE superseded_by IS NULL"
-        ).fetchone()[0]
+        # Verify by identity: every source row must exist in dest with the SAME id
+        # AND the SAME content (an id collision would land a *different* doc at that id).
+        unfaithful = []
+        for d in rows:
+            got = dest.execute(
+                "SELECT content FROM documents WHERE id = ?", (d["id"],)
+            ).fetchone()
+            if got is None or got["content"] != d["content"]:
+                unfaithful.append(d["id"])
     finally:
         dest.close()
 
-    # Only drop the source once the destination has at least as many active rows.
-    if dest_active < src_active:
-        return {"moved": len(rows), "dropped": False, "note": "verify failed — source kept"}
+    if unfaithful:
+        return {
+            "moved": len(rows),
+            "dropped": False,
+            "note": (
+                f"verify failed — {len(unfaithful)} source doc(s) not faithfully copied "
+                f"(id collision in a non-empty librarian.db?). Source KEPT; resolve manually."
+            ),
+        }
 
     src = connect(techne_db_path)
     try:
@@ -135,4 +151,4 @@ def migrate_documents_to_librarian(techne_db_path: Path) -> dict:
         src.commit()
     finally:
         src.close()
-    return {"moved": len(rows), "dropped": True, "active": dest_active}
+    return {"moved": len(rows), "dropped": True, "verified": len(rows)}
