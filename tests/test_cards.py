@@ -1,0 +1,104 @@
+"""Tests for the Librarian Option D document-card layer (techne#91)."""
+
+from __future__ import annotations
+
+import pytest
+
+from techne.core.cards import (
+    card_doc_id,
+    fill_card_summary,
+    is_pending,
+    pending_cards,
+    resolve_card,
+    upsert_document_card,
+)
+from techne.core.database import init_db
+from techne.core.documents import store_document
+from techne.core.egress import select_tier0_injection
+from techne.core.knowledge import store
+
+
+@pytest.fixture()
+def db(tmp_path):
+    p = tmp_path / "cards.db"
+    init_db(p).close()
+    return p
+
+
+def _doc(db, url="claude-code-transcript:s1", content="full transcript body"):
+    doc_id, _ = store_document(
+        db, source_type="claude-code-transcript", source_url=url, content=content, title="t"
+    )
+    return doc_id
+
+
+def test_upsert_creates_pending_card(db):
+    doc_id = _doc(db)
+    card_id, changed = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="decide the backend",
+    )
+    assert changed
+    rows = [r for r in pending_cards(db)]
+    assert len(rows) == 1
+    card = rows[0]
+    assert card["id"] == card_id
+    assert card["content"] == "decide the backend"  # gist = title placeholder
+    assert is_pending(card["tags"])
+    assert card_doc_id(card["tags"]) == doc_id
+    assert "backing:mirror" in card["tags"]
+
+
+def test_upsert_idempotent_same_version(db):
+    doc_id = _doc(db)
+    a, _ = upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
+    )
+    b, changed = upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
+    )
+    assert b == a and changed is False
+
+
+def test_upsert_supersedes_on_version_change(db):
+    doc_id = _doc(db)
+    a, _ = upsert_document_card(db, source_url="u", doc_id=doc_id, source_version="v1", title="x")
+    b, changed = upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version="v2", title="x"
+    )
+    assert changed and b != a
+    # Only one active card per source_url.
+    assert len(pending_cards(db)) == 1
+
+
+def test_fill_card_summary_drops_pending(db):
+    doc_id = _doc(db)
+    card_id, _ = upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
+    )
+    assert fill_card_summary(db, card_id, "A crisp two-line gist of the session.")
+    assert pending_cards(db) == []  # no longer pending
+    resolved = resolve_card(db, card_id)
+    assert resolved["id"] == doc_id  # pointer still resolves
+
+
+def test_resolve_card_fetches_document(db):
+    doc_id = _doc(db, content="the full body to fetch on demand")
+    card_id, _ = upsert_document_card(
+        db, source_url="claude-code-transcript:s1", doc_id=doc_id, source_version="v1", title="x"
+    )
+    doc = resolve_card(db, card_id)
+    assert doc["id"] == doc_id
+    assert "fetch on demand" in doc["content"]
+
+
+def test_document_card_is_pull_only_excluded_from_egress(db):
+    # A high-confidence card must NOT be injected — it's recall-only reference.
+    card = store(db, "card gist", type="document_card", confidence="high", tags="document_card")
+    fact = store(db, "a real fact", type="fact", confidence="high", tags="memory-type:user")
+    injected = [r["id"] for r in select_tier0_injection(db, char_budget=4000)]
+    assert fact in injected
+    assert card not in injected

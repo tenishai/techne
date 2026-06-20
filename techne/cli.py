@@ -1444,5 +1444,38 @@ def library_show(ctx, doc_id, chars):
     click.echo(body if chars == 0 else body[:chars])
 
 
+@library.command("card")
+@click.argument("card_id", type=int)
+@click.option("--chars", default=2000, help="Max document chars to print (0 = all).")
+@click.pass_context
+def library_card(ctx, card_id, chars):
+    """Show a document card's gist, then fetch its full document on demand (Option D)."""
+    config = ctx.obj["config"]
+    from techne.core.cards import CARD_TYPE, resolve_card
+    from techne.core.database import connect
+
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, content, source, tags FROM knowledge WHERE id = ? AND type = ?",
+            (card_id, CARD_TYPE),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        click.echo(f"No document card #{card_id}", err=True)
+        ctx.exit(1)
+    click.echo(f"# card #{card_id}  →  {row['source']}")
+    click.echo(f"gist: {row['content']}")
+    click.echo(f"tags: {row['tags']}")
+    doc = resolve_card(config.db_path, card_id)
+    if doc:
+        click.echo(f"\n--- full document #{doc['id']} [{doc['source_type']}] (on demand) ---")
+        body = doc["content"]
+        click.echo(body if chars == 0 else body[:chars])
+    else:
+        click.echo("\n(pointer did not resolve to a document)")
+
+
 if __name__ == "__main__":
     main()

@@ -92,12 +92,20 @@ def derive_title(turns: list[TranscriptTurn]) -> str | None:
     return None
 
 
-def index_transcripts(db_path: Path, source: TranscriptSource, *, limit: int | None = None) -> dict:
+def index_transcripts(
+    db_path: Path,
+    source: TranscriptSource,
+    *,
+    limit: int | None = None,
+    make_cards: bool = True,
+) -> dict:
     """Index every transcript a `source` yields into the Librarian documents store.
 
     Platform-agnostic: works with ANY TranscriptSource. Content is redacted; rows
     are deduped/superseded by source_url so re-running only rewrites changed
-    sessions. Returns counts {total, stored, unchanged, empty}.
+    sessions. When `make_cards`, each document also gets a pull-only Option D card
+    (gist+pointer, pending) so it rides knowledge recall. Returns counts
+    {total, stored, unchanged, empty}.
     """
     counts = {"total": 0, "stored": 0, "unchanged": 0, "empty": 0}
     transcripts = source.iter_transcripts()
@@ -113,16 +121,30 @@ def index_transcripts(db_path: Path, source: TranscriptSource, *, limit: int | N
         # Redact the title too — it's derived from the first user line, which can
         # carry a secret just as the body can.
         title = redact_credentials(t.title or derive_title(t.turns) or f"transcript {t.id[:12]}")
+        content = redact_credentials(text)
+        source_url = f"{t.platform}-transcript:{t.id}"
         meta = json.dumps(
             {"platform": t.platform, "id": t.id, "uri": t.uri, "turns": len(t.turns), **t.meta}
         )
-        _doc_id, stored = store_document(
+        doc_id, stored = store_document(
             db_path,
             source_type=f"{t.platform}-transcript",
-            source_url=f"{t.platform}-transcript:{t.id}",
+            source_url=source_url,
             title=title,
-            content=redact_credentials(text),
+            content=content,
             meta=meta,
         )
         counts["stored" if stored else "unchanged"] += 1
+        if make_cards:
+            from techne.core.cards import upsert_document_card
+            from techne.core.knowledge import content_hash
+
+            upsert_document_card(
+                db_path,
+                source_url=source_url,
+                doc_id=doc_id,
+                source_version=content_hash(content),
+                title=title,
+                backing_mode="mirror",
+            )
     return counts

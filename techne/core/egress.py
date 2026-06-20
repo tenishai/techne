@@ -6,8 +6,9 @@ queue that fills a hard char budget, ensuring the context window is never
 flooded regardless of how many high-confidence memories are stored.
 
 Selection rules:
-  1. Eligibility: superseded_by IS NULL AND confidence='high' AND type != 'pattern'
-     (patterns are pull-only reference material — never auto-injected)
+  1. Eligibility: superseded_by IS NULL AND confidence='high' AND type NOT IN
+     PULL_ONLY_TYPES (patterns + documents + document cards are pull-only
+     reference material — recall-able but never auto-injected)
   2. Bands fill in order; each appends to the render list until the budget runs out:
      a. Identity      — tagged memory-type:user (the anchor; always first)
      b. Recent results — the freshest decisions/evaluations/facts NOT in another
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from techne.core.database import connect
+from techne.core.knowledge import PULL_ONLY_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -85,13 +87,15 @@ def select_tier0_injection(
     try:
         # Fetch all eligible candidates in one query, ordered by updated_at DESC
         # so within each priority tier we take the most recent entries.
+        placeholders = ",".join("?" * len(PULL_ONLY_TYPES))
         rows = conn.execute(
-            """SELECT id, type, content, tags
+            f"""SELECT id, type, content, tags
                FROM knowledge
                WHERE superseded_by IS NULL
                  AND confidence = 'high'
-                 AND type != 'pattern'
+                 AND type NOT IN ({placeholders})
                ORDER BY updated_at DESC""",
+            PULL_ONLY_TYPES,
         ).fetchall()
     finally:
         conn.close()
