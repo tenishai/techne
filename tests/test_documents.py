@@ -547,3 +547,13 @@ class TestGitHubIssuesSource:
         assert "--state" in called_cmd
         assert "all" in called_cmd
         assert "--json" in called_cmd
+
+
+def test_search_documents_sanitizes_fts_query(db_path):
+    # hyphenated/operator-ish terms must not crash FTS5 (regression).
+    store_document(
+        db_path, source_type="docs", source_url="docs:x.md",
+        content="the db-per-domain design splits stores", title="db-per-domain",
+    )
+    hits = search_documents(db_path, "db-per-domain stores")
+    assert len(hits) == 1

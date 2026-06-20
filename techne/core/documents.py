@@ -130,6 +130,8 @@ def search_documents(db_path: Path, query: str, *, limit: int = 20) -> list[dict
     """FTS over ACTIVE documents (superseded excluded) — the Librarian's domain
     search (db-per-domain #99). Personal recall is the gist cards in techne.db;
     this searches the full content in librarian.db."""
+    from techne.core.search import _sanitize_fts_query
+
     conn = connect(db_path)
     try:
         rows = conn.execute(
@@ -138,7 +140,7 @@ def search_documents(db_path: Path, query: str, *, limit: int = 20) -> list[dict
                FROM documents_fts f JOIN documents d ON d.id = f.rowid
                WHERE documents_fts MATCH ? AND d.superseded_by IS NULL
                ORDER BY rank LIMIT ?""",
-            (query, limit),
+            (_sanitize_fts_query(query), limit),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
