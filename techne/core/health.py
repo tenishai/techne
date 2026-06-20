@@ -48,7 +48,7 @@ def format_banner(health: dict) -> str:
     """Render the terse login banner. Warnings only when something is off."""
     if not health.get("db_ok", False):
         return (
-            f"## techne ⚠️\n"
+            f"\n## techne ⚠️\n"
             f"> DB UNREACHABLE — {health['db_path']}: "
             f"{health.get('error', 'unknown error')}"
         )
@@ -62,7 +62,10 @@ def format_banner(health: dict) -> str:
 
     # techne owns its own heading line (renders bright/high-white in the
     # terminal markdown); the stats fold into a blockquote beneath it.
-    lines = [f"## techne {mark}"]
+    # Lead with a blank line: emitted as the hook's top-level systemMessage,
+    # an ATX heading at char 0 collapses against Claude Code's message chrome,
+    # so the leading \n guarantees the heading breaks onto its own line.
+    lines = [f"\n## techne {mark}"]
 
     last = health.get("last_session") or "—"
     lines.append(f"> v{health['version']} · {build_note}")

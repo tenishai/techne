@@ -41,7 +41,8 @@ def test_banner_healthy_live(config):
     h = collect_health(config)
     h["build"] = "live"
     banner = format_banner(h)
-    assert banner.startswith("## techne ✅")
+    # leads with a blank line so the heading clears Claude Code's systemMessage chrome
+    assert banner.startswith("\n## techne ✅")
     assert "live" in banner
     assert "obs ·" in banner
     assert "threads" in banner
