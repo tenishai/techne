@@ -256,6 +256,117 @@ def _write_live(db_path: Path, candidate: Candidate, source: str) -> int | None:
     return None
 
 
+def _bucket_observations(threads: list[Thread], observations: list[dict]) -> dict[int, list[dict]]:
+    """Map each thread_num to its observation dicts (resolved from indices)."""
+    out: dict[int, list[dict]] = {}
+    for t in threads:
+        out[t.thread_num] = [
+            observations[i] for i in t.observation_indices if 0 <= i < len(observations)
+        ]
+    return out
+
+
+def load_session_for_reflection(config: Config, session_id: str) -> tuple[list[Thread], list[dict]]:
+    """Reconstruct (threads, observations) for a session the same way
+    run_session_end does — heuristic detection, no LLM. Lets the agent-assisted
+    emit/ingest path operate on any past session by id.
+    """
+    from techne.core.state import get_observations
+    from techne.core.thread_orchestrator import detect_summarize_with_metadata
+
+    observations = get_observations(config.db_path, session_id)
+    threads, _scores = detect_summarize_with_metadata(observations, config)
+    return threads, observations
+
+
+def emit_reflection_batch(
+    config: Config,
+    session_id: str,
+    threads: list[Thread],
+    observations: list[dict],
+) -> list[dict]:
+    """Build the per-thread reflection prompts WITHOUT calling an LLM.
+
+    The agent-assisted (no-API-key) half of the reflect pass: techne renders the
+    prompts here, an in-session agent (running on the operator's OAuth model)
+    produces the JSON candidate arrays, and ingest_reflection_response feeds them
+    back. Thread selection mirrors reflect_on_session exactly (same
+    min_observations gate), so emit→agent→ingest is equivalent to the automated
+    pass with the LLM step relocated into the agent loop.
+
+    Returns [{thread_id, session_id, thread_num, prompt_hash, prompt}].
+    """
+    from techne.core.thread_orchestrator import thread_row_id
+
+    obs_by_thread = _bucket_observations(threads, observations)
+    batch: list[dict] = []
+    for t in threads:
+        t_obs = obs_by_thread.get(t.thread_num, [])
+        if len(t_obs) < config.reflect.min_observations_per_thread:
+            continue
+        prompt = _build_prompt(t, t_obs, config.db_path, config)
+        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        batch.append(
+            {
+                # The real FK id save_threads wrote — NOT "{session_id}-{thread_num}",
+                # which silently fails the candidates FK for heuristic threads.
+                "thread_id": thread_row_id(session_id, t),
+                "session_id": session_id,
+                "thread_num": t.thread_num,
+                "prompt_hash": prompt_hash,
+                "prompt": prompt,
+            }
+        )
+    return batch
+
+
+def ingest_reflection_response(
+    config: Config,
+    session_id: str,
+    thread_id: str,
+    prompt_hash: str,
+    raw_response: str,
+    *,
+    model_used: str = "agent-assisted",
+) -> dict:
+    """Process one agent-produced raw response (the JSON array parse_response
+    expects) into knowledge_candidates — and live knowledge when
+    config.reflect.write_to == 'live'. The single insertion path shared with
+    reflect_on_session. `thread_id` is the real threads.id (from thread_row_id /
+    the emit batch), so the candidates FK resolves. Returns per-thread counts.
+    """
+    counts = {
+        "candidates_proposed": 0,
+        "candidates_written": 0,
+        "candidates_promoted": 0,
+        "errors": 0,
+    }
+    candidates = parse_response(raw_response, config.reflect.max_candidates_per_thread)
+    kept = [c for c in candidates if _meets_min_confidence(c, config.reflect.min_confidence)]
+    counts["candidates_proposed"] += len(kept)
+
+    raw_for_store = raw_response if config.reflect.log_raw_response else None
+    for c in kept:
+        try:
+            cand_id = _insert_candidate(
+                config.db_path,
+                c,
+                session_id=session_id,
+                thread_id=thread_id,
+                model_used=model_used,
+                prompt_hash=prompt_hash,
+                raw_response=raw_for_store,
+            )
+            counts["candidates_written"] += 1
+            if config.reflect.write_to == "live":
+                promoted_id = _write_live(config.db_path, c, source=f"reflect:{thread_id}")
+                _mark_promoted(config.db_path, cand_id, promoted_id)
+                counts["candidates_promoted"] += 1
+        except Exception:
+            counts["errors"] += 1
+    return counts
+
+
 def reflect_on_session(
     config: Config,
     session_id: str,
@@ -302,12 +413,9 @@ def reflect_on_session(
             result["errors"] += 1
             return result
 
-    # Bucket observations by thread for prompt construction
-    obs_by_thread: dict[int, list[dict]] = {}
-    for t in threads:
-        obs_by_thread[t.thread_num] = [
-            observations[i] for i in t.observation_indices if 0 <= i < len(observations)
-        ]
+    from techne.core.thread_orchestrator import thread_row_id
+
+    obs_by_thread = _bucket_observations(threads, observations)
 
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
@@ -324,32 +432,15 @@ def reflect_on_session(
             continue
         result["threads_reflected"] += 1
 
-        candidates = parse_response(raw, config.reflect.max_candidates_per_thread)
-        kept = [c for c in candidates if _meets_min_confidence(c, config.reflect.min_confidence)]
-        result["candidates_proposed"] += len(kept)
-
-        thread_id = f"{session_id}-{t.thread_num}"
-        raw_for_store = raw if config.reflect.log_raw_response else None
-        for c in kept:
-            try:
-                cand_id = _insert_candidate(
-                    config.db_path,
-                    c,
-                    session_id=session_id,
-                    thread_id=thread_id,
-                    model_used=reflect_config.model,
-                    prompt_hash=prompt_hash,
-                    raw_response=raw_for_store,
-                )
-                result["candidates_written"] += 1
-                if config.reflect.write_to == "live":
-                    promoted_id = _write_live(
-                        config.db_path, c, source=f"reflect:{session_id}:{t.thread_num}"
-                    )
-                    _mark_promoted(config.db_path, cand_id, promoted_id)
-                    result["candidates_promoted"] += 1
-            except Exception:
-                result["errors"] += 1
+        # Same insertion path as the agent-assisted ingest — one code path. Use
+        # the real threads.id (thread_row_id), or the candidates FK fails for
+        # heuristic-detected threads (the silent-error bug behind starved #92).
+        thread_id = thread_row_id(session_id, t)
+        counts = ingest_reflection_response(
+            config, session_id, thread_id, prompt_hash, raw, model_used=reflect_config.model
+        )
+        for key, val in counts.items():
+            result[key] += val
 
     return result
 
