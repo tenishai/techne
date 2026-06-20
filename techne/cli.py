@@ -314,7 +314,9 @@ def _segments_from_boundary_rows(n_obs: int, rows: list[dict]) -> list[list[int]
 @main.command()
 @click.argument("query")
 @click.option(
-    "--table", type=click.Choice(["all", "threads", "observations", "knowledge"]), default="all"
+    "--table",
+    type=click.Choice(["all", "threads", "observations", "knowledge", "documents"]),
+    default="all",
 )
 @click.option("--limit", default=20)
 @click.pass_context
@@ -342,6 +344,11 @@ def search(ctx, query, table, limit):
             click.echo(f"    [{r.get('tool_name', '')}] {r.get('content', '')[:200]}")
         elif type_tag == "knowledge":
             click.echo(f"    [{r.get('knowledge_type', '')}] {r.get('content', '')[:200]}")
+        elif type_tag == "document":
+            click.echo(f"    #{r.get('id')} {r.get('title', '') or r.get('source_url', '')}")
+            snippet = (r.get("content", "") or "").replace("\n", " ").strip()
+            click.echo(f"    {snippet[:200]}")
+            click.echo(f"    ↳ full: techne library show {r.get('id')}")
         click.echo()
 
 
@@ -1361,6 +1368,66 @@ def probe(ctx, runtime, mode, model, timeout, keep):
         verdict = run_probe(config, adapter, mode=mode, cleanup=not keep)
     click.echo(verdict.render())
     ctx.exit(0 if verdict.passed else 1)
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def library(ctx):
+    """Librarian document store — index + recall full documents (techne#91)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+    from techne.core.documents import list_documents
+
+    docs = list_documents(config.db_path, limit=50)
+    click.echo(f"Documents: {len(docs)}")
+    for d in docs[:25]:
+        click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
+
+
+@library.command("index-transcripts")
+@click.option(
+    "--dir",
+    "transcripts_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Transcript dir to index (default: this cwd's Claude Code project dir).",
+)
+@click.option("--limit", type=int, default=None, help="Max transcripts to index.")
+@click.pass_context
+def library_index_transcripts(ctx, transcripts_dir, limit):
+    """Index Claude Code JSONL transcripts as documents — the conversation prose
+    where decisions are made (the observation lens only sees tool calls)."""
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.platforms.claude_code.transcript_library import index_transcripts
+
+    counts = index_transcripts(config.db_path, transcripts_dir, limit=limit)
+    click.echo(json.dumps(counts, indent=2))
+    click.echo("Search them: techne search <query> --table documents")
+
+
+@library.command("show")
+@click.argument("doc_id", type=int)
+@click.option("--chars", default=4000, help="Max content chars to print (0 = all).")
+@click.pass_context
+def library_show(ctx, doc_id, chars):
+    """Print a stored document's content (the fetch-on-demand half of recall)."""
+    config = ctx.obj["config"]
+    from techne.core.documents import get_document
+
+    doc = get_document(config.db_path, doc_id)
+    if not doc:
+        click.echo(f"No document #{doc_id}", err=True)
+        ctx.exit(1)
+    click.echo(f"# {doc.get('title') or '(untitled)'}  [{doc['source_type']}]  {doc['source_url']}")
+    body = doc["content"]
+    click.echo(body if chars == 0 else body[:chars])
 
 
 if __name__ == "__main__":
