@@ -169,6 +169,55 @@ def stats(db_path: Path) -> dict:
         conn.close()
 
 
+def export_patterns_md(db_path: Path) -> str:
+    """Regenerate an architectural-patterns.md from architect.db — the shareable
+    export (the md becomes a generated artifact; architect.db is canonical). Round-
+    trips with ingest_patterns_md."""
+    conn = plain_connect(db_path)
+    try:
+        pats = conn.execute(
+            """SELECT p.name, p.source_url, p.body, i.surveyed_at
+               FROM patterns p JOIN investigations i ON i.id = p.investigation_id
+               WHERE p.status = 'active'
+               ORDER BY i.surveyed_at, p.name"""
+        ).fetchall()
+        no_lifts = conn.execute(
+            """SELECT url, surveyed_at, skip_reason FROM investigations
+               WHERE verdict LIKE 'skip%' ORDER BY surveyed_at, url"""
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out = [
+        "# Architectural patterns",
+        "",
+        "Generated export from techne architect.db (`techne architect export`). "
+        "Re-import with `techne architect ingest`. architect.db is canonical — "
+        "edit there (via the architect persona), not here.",
+        "",
+        "---",
+        "",
+    ]
+    for p in pats:
+        out.append(f"## {p['name']}")
+        out.append("")
+        out.append(f"- **Source**: {p['source_url']}")
+        out.append(f"- **Surveyed**: {p['surveyed_at']}")
+        out.append("")
+        out.append((p["body"] or "").strip())
+        out.append("")
+        out.append("---")
+        out.append("")
+    if no_lifts:
+        out.append("## Surveyed (no patterns worth saving)")
+        out.append("")
+        for nl in no_lifts:
+            reason = nl["skip_reason"] or "nothing to lift"
+            out.append(f"- {nl['url']} — surveyed {nl['surveyed_at']} — {reason}")
+        out.append("")
+    return "\n".join(out)
+
+
 def ingest_patterns_md(db_path: Path, md_text: str) -> dict:
     """Seed architect.db from architectural-patterns.md (reuses import_md.parse):
     patterns → grouped by url into investigations(verdict=full-eval) + patterns;

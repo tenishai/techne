@@ -1662,6 +1662,29 @@ def architect_ingest(ctx, markdown_file):
     click.echo(json.dumps(counts, indent=2))
 
 
+@architect.command("export")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the markdown export here (default: stdout).",
+)
+@click.pass_context
+def architect_export(ctx, output):
+    """Regenerate a shareable architectural-patterns.md from architect.db."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import export_patterns_md
+
+    md = export_patterns_md(architect_db(config.db_path))
+    if output:
+        output.write_text(md, encoding="utf-8")
+        click.echo(f"Exported to {output} ({md.count(chr(10))} lines)", err=True)
+    else:
+        click.echo(md)
+
+
 @architect.command("search")
 @click.argument("query")
 @click.option("--limit", default=20)

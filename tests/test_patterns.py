@@ -119,3 +119,28 @@ Heuristic first, LLM tiebreaker, graceful fallback.
     counts2 = ingest_patterns_md(db, md)
     assert counts2["patterns_added"] == 0
     assert stats(db)["patterns"] == 2
+
+
+def test_export_roundtrips_with_ingest(db, tmp_path):
+    from techne.core.architect import ARCHITECT_SCHEMA
+    from techne.core.patterns import export_patterns_md
+
+    md = (
+        "## Capability probing\n\n"
+        "- **Source**: https://github.com/x/repo\n"
+        "- **Surveyed**: 2026-06-09\n\n"
+        "Probe for sqlite-vec; branch on availability.\n\n"
+        "---\n\n"
+        "## Surveyed (no patterns worth saving)\n\n"
+        "- https://github.com/z/nope — surveyed 2026-06-10 — generic CRUD\n"
+    )
+    ingest_patterns_md(db, md)
+    exported = export_patterns_md(db)
+
+    # Re-ingest the export into a FRESH db → same shape (the md is a faithful transport).
+    db2 = tmp_path / "architect2.db"
+    SqliteStore("architect", db2).migrate(ARCHITECT_SCHEMA)
+    ingest_patterns_md(db2, exported)
+    assert stats(db2)["patterns"] == 1
+    assert stats(db2)["skips"] == 1
+    assert search_patterns(db2, "sqlite-vec")
