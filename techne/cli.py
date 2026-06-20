@@ -1190,5 +1190,36 @@ def reflect_stats(ctx):
     click.echo(json.dumps(s, indent=2))
 
 
+@main.command()
+@click.option(
+    "--mode",
+    type=click.Choice(["off-test", "pull"]),
+    default="off-test",
+    help="off-test: native+pull off (tests egress push). pull: native off, pull on (reachability).",
+)
+@click.option("--model", default=None, help="Model for the spawned session (default: CC default).")
+@click.option("--timeout", default=180, show_default=True, help="Per-session timeout in seconds.")
+@click.option("--keep", is_flag=True, help="Keep the canary row instead of deleting it after.")
+@click.pass_context
+def probe(ctx, mode, model, timeout, keep):
+    """Run the differential-canary memory-attribution probe (techne#94).
+
+    Seeds a techne-only canary, spawns a fresh Claude Code session, and checks
+    whether techne carried the codeword into context. Exit 0 = pass, 1 = fail.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+
+    from techne.probe import ClaudeCodeAdapter, run_probe
+
+    adapter = ClaudeCodeAdapter(model=model, timeout=timeout)
+    click.echo(f"Running probe (mode={mode}) — spawning a fresh session, this can take a minute…")
+    verdict = run_probe(config, adapter, mode=mode, cleanup=not keep)
+    click.echo(verdict.render())
+    ctx.exit(0 if verdict.passed else 1)
+
+
 if __name__ == "__main__":
     main()
