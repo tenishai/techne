@@ -17,8 +17,16 @@ VALID_TYPES = (
     # by the Librarian persona (cabal#5). Tags carry source-specific
     # metadata (e.g. `source:confluence,kind:runbook`).
     "document",
+    # Document card (Librarian Option D, techne#91) — a compact GIST + pointer to
+    # a row in the `documents` table; full content is fetched on demand, never
+    # injected. Pull-only like pattern. tags carry doc:/ver:/backing:/pending.
+    "document_card",
 )
 VALID_CONFIDENCE = ("high", "medium", "low")
+
+# Types that are reference material — recall-able (pull), but never auto-injected
+# into session-start context (push). egress filters these out.
+PULL_ONLY_TYPES = ("pattern", "document", "document_card")
 
 # Mapping the legacy text enum to canonical numeric values (0..1).
 # The migration in core/database.py uses the same values for backfill.
