@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from techne.config import Config
 from techne.core.database import connect
-from techne.core.documents import get_document
 from techne.core.knowledge import CONFIDENCE_NUMERIC
 
 CARD_TYPE = "document_card"
@@ -151,9 +151,9 @@ def pending_cards(db_path: Path, limit: int = 100, source_prefix: str | None = N
         conn.close()
 
 
-def resolve_card(db_path: Path, card_id: int) -> dict | None:
+def resolve_card(config: Config, card_id: int) -> dict | None:
     """Fetch the full document a card points at — the on-demand half of recall."""
-    conn = connect(db_path)
+    conn = connect(config.db_path)
     try:
         row = conn.execute(
             "SELECT tags FROM knowledge WHERE id = ? AND type = ?", (card_id, CARD_TYPE)
@@ -165,10 +165,13 @@ def resolve_card(db_path: Path, card_id: int) -> dict | None:
     doc_id = card_doc_id(row["tags"])
     if doc_id is None:
         return None
-    # Cross-db: the card lives in techne.db, the document in librarian.db.
-    from techne.core.librarian import librarian_db
+    # Cross-db: the card lives in techne.db, the document in librarian.db. Fetch it
+    # through the Librarian StoreAdapter's generic get() (techne#102) — this is the
+    # live recall path proving the Protocol surface works, so a non-sqlite store
+    # (techne#87) swaps in without rewriting this caller.
+    from techne.core.librarian import librarian_store
 
-    return get_document(librarian_db(db_path), doc_id)
+    return librarian_store(config).get("documents", doc_id)
 
 
 # --- agent-assisted gist fill (emit/ingest, same shape as reflect) -------------
@@ -181,7 +184,7 @@ _SUMMARY_PROMPT = (
 
 
 def emit_card_summary_batch(
-    db_path: Path,
+    config: Config,
     *,
     limit: int = 50,
     content_chars: int = 8000,
@@ -192,8 +195,8 @@ def emit_card_summary_batch(
     no-API-key path for the Option D gist, mirroring reflect emit/ingest.
     `source_prefix` scopes to one source (e.g. 'docs:')."""
     batch: list[dict] = []
-    for card in pending_cards(db_path, limit=limit, source_prefix=source_prefix):
-        doc = resolve_card(db_path, card["id"])
+    for card in pending_cards(config.db_path, limit=limit, source_prefix=source_prefix):
+        doc = resolve_card(config, card["id"])
         if doc is None:
             continue
         prompt = _SUMMARY_PROMPT.format(

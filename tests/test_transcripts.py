@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from techne.config import Config
 from techne.core.database import init_db
 from techne.core.documents import get_document, list_documents
 from techne.core.librarian import librarian_db
@@ -60,6 +61,7 @@ def test_derive_title_first_user_line():
 def test_index_neutral_source_stores_and_dedups(tmp_path):
     db = tmp_path / "t.db"
     init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
     source = _FakeSource(
         [
             _t("s1", [("user", "decide backend"), ("assistant", "use SQLite")]),
@@ -67,28 +69,29 @@ def test_index_neutral_source_stores_and_dedups(tmp_path):
             _t("empty", [("assistant", "")]),  # no text → empty
         ]
     )
-    counts = index_transcripts(db, source)
+    counts = index_transcripts(config, source)
     assert counts == {"total": 3, "stored": 2, "unchanged": 0, "empty": 1}
 
-    docs = list_documents(librarian_db(db), source_type="fake-client-transcript")
+    docs = list_documents(librarian_db(config), source_type="fake-client-transcript")
     assert len(docs) == 2
     urls = {d["source_url"] for d in docs}
     assert urls == {"fake-client-transcript:s1", "fake-client-transcript:s2"}
 
     # Re-index unchanged → no new rows.
-    counts2 = index_transcripts(db, source)
+    counts2 = index_transcripts(config, source)
     assert counts2["stored"] == 0 and counts2["unchanged"] == 2 and counts2["empty"] == 1
 
 
 def test_index_redacts_content_and_title(tmp_path):
     db = tmp_path / "t.db"
     init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
     source = _FakeSource(
         [_t("secret", [("user", "key is AKIA1234567890ABCDEF"), ("assistant", "ok")])]
     )
-    index_transcripts(db, source)
-    doc = list_documents(librarian_db(db), source_type="fake-client-transcript")[0]
-    full = get_document(librarian_db(db), doc["id"])
+    index_transcripts(config, source)
+    doc = list_documents(librarian_db(config), source_type="fake-client-transcript")[0]
+    full = get_document(librarian_db(config), doc["id"])
     # Secret must not survive in content OR the (first-user-line-derived) title.
     assert "AKIA1234567890ABCDEF" not in full["content"]
     assert "AKIA1234567890ABCDEF" not in (doc["title"] or "")
@@ -97,8 +100,9 @@ def test_index_redacts_content_and_title(tmp_path):
 def test_index_respects_limit(tmp_path):
     db = tmp_path / "t.db"
     init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
     source = _FakeSource([_t(f"s{i}", [("user", f"msg {i}")]) for i in range(5)])
-    counts = index_transcripts(db, source, limit=2)
+    counts = index_transcripts(config, source, limit=2)
     assert counts["total"] == 2
 
 
@@ -111,6 +115,7 @@ def test_transcript_gist_is_thread_index(tmp_path):
 
     db = tmp_path / "g.db"
     init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
     sid = start_session(db, project_path="/p", agent_identity="t")
     save_threads(
         [
@@ -122,7 +127,7 @@ def test_transcript_gist_is_thread_index(tmp_path):
         parent_links=None,
     )
     index_document(
-        db,
+        config,
         source_type="claude-code-transcript",
         source_url=f"claude-code-transcript:{sid}",
         title="t",

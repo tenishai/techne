@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from techne.config import Config
+
 # Normalized roles the renderer labels; a platform maps its own roles onto these.
 _ROLE_LABEL = {"user": "User", "assistant": "Assistant"}
 
@@ -141,7 +143,7 @@ def fill_transcript_gists(db_path: Path) -> dict:
 
 
 def index_transcripts(
-    db_path: Path,
+    config: Config,
     source: TranscriptSource,
     *,
     limit: int | None = None,
@@ -176,14 +178,15 @@ def index_transcripts(
         # Transcript cards are born with the thread-index gist (not pending) — a
         # prose summary of a long multi-topic session would be dishonest.
         _doc_id, stored = index_document(
-            db_path,
+            config,
             source_type=f"{t.platform}-transcript",
             source_url=f"{t.platform}-transcript:{t.id}",
             title=title,
             content=text,
             meta=meta,
             make_card=make_cards,
-            summary=build_transcript_gist(db_path, t.id) if make_cards else None,
+            # thread index is built from techne.db (core threads), not the doc store
+            summary=build_transcript_gist(config.db_path, t.id) if make_cards else None,
         )
         counts["stored" if stored else "unchanged"] += 1
     return counts

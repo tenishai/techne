@@ -1383,7 +1383,7 @@ def library(ctx):
     from techne.core.documents import list_documents
     from techne.core.librarian import librarian_db
 
-    docs = list_documents(librarian_db(config.db_path), limit=50)
+    docs = list_documents(librarian_db(config), limit=50)
     click.echo(f"Documents: {len(docs)}")
     for d in docs[:25]:
         click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
@@ -1422,7 +1422,7 @@ def library_index_transcripts(ctx, platform, transcripts_dir, limit):
     else:  # pragma: no cover - guarded by click.Choice
         raise click.ClickException(f"no transcript source for platform {platform!r}")
 
-    counts = index_transcripts(config.db_path, source, limit=limit)
+    counts = index_transcripts(config, source, limit=limit)
     click.echo(json.dumps(counts, indent=2))
     click.echo("Search them: techne library search <query>")
 
@@ -1445,7 +1445,7 @@ def library_index_markdown(ctx, root, source_type):
         ctx.exit(1)
     from techne.core.library import index_markdown_dir
 
-    counts = index_markdown_dir(config.db_path, root, source_type=source_type)
+    counts = index_markdown_dir(config, root, source_type=source_type)
     click.echo(json.dumps(counts, indent=2))
     click.echo("Search them: techne library search <query>")
 
@@ -1464,7 +1464,7 @@ def library_search(ctx, query, limit):
     from techne.core.documents import search_documents
     from techne.core.librarian import librarian_db
 
-    hits = search_documents(librarian_db(config.db_path), query, limit=limit)
+    hits = search_documents(librarian_db(config), query, limit=limit)
     if not hits:
         click.echo("No documents matched.")
         return
@@ -1487,7 +1487,7 @@ def library_migrate_store(ctx):
         ctx.exit(1)
     from techne.core.librarian import migrate_documents_to_librarian
 
-    result = migrate_documents_to_librarian(config.db_path)
+    result = migrate_documents_to_librarian(config)
     click.echo(json.dumps(result, indent=2))
 
 
@@ -1501,7 +1501,7 @@ def library_show(ctx, doc_id, chars):
     from techne.core.documents import get_document
     from techne.core.librarian import librarian_db
 
-    doc = get_document(librarian_db(config.db_path), doc_id)
+    doc = get_document(librarian_db(config), doc_id)
     if not doc:
         click.echo(f"No document #{doc_id}", err=True)
         ctx.exit(1)
@@ -1534,7 +1534,7 @@ def library_card(ctx, card_id, chars):
     click.echo(f"# card #{card_id}  →  {row['source']}")
     click.echo(f"gist: {row['content']}")
     click.echo(f"tags: {row['tags']}")
-    doc = resolve_card(config.db_path, card_id)
+    doc = resolve_card(config, card_id)
     if doc:
         click.echo(f"\n--- full document #{doc['id']} [{doc['source_type']}] (on demand) ---")
         body = doc["content"]
@@ -1570,7 +1570,7 @@ def library_cards_emit(ctx, limit, source, output):
         ctx.exit(1)
     from techne.core.cards import emit_card_summary_batch
 
-    batch = emit_card_summary_batch(config.db_path, limit=limit, source_prefix=source)
+    batch = emit_card_summary_batch(config, limit=limit, source_prefix=source)
     payload = json.dumps(batch, indent=2)
     if output:
         output.write_text(payload, encoding="utf-8")
@@ -1641,7 +1641,7 @@ def architect(ctx):
     from techne.core.architect import architect_db
     from techne.core.patterns import stats
 
-    s = stats(architect_db(config.db_path))
+    s = stats(architect_db(config))
     click.echo(
         f"Patterns: {s['patterns']}  Investigations: {s['investigations']}  Skips: {s['skips']}"
     )
@@ -1657,7 +1657,7 @@ def architect_ingest(ctx, markdown_file):
     from techne.core.patterns import ingest_patterns_md
 
     counts = ingest_patterns_md(
-        architect_db(config.db_path), markdown_file.read_text(encoding="utf-8")
+        architect_db(config), markdown_file.read_text(encoding="utf-8")
     )
     click.echo(json.dumps(counts, indent=2))
 
@@ -1677,7 +1677,7 @@ def architect_export(ctx, output):
     from techne.core.architect import architect_db
     from techne.core.patterns import export_patterns_md
 
-    md = export_patterns_md(architect_db(config.db_path))
+    md = export_patterns_md(architect_db(config))
     if output:
         output.write_text(md, encoding="utf-8")
         click.echo(f"Exported to {output} ({md.count(chr(10))} lines)", err=True)
@@ -1695,7 +1695,7 @@ def architect_search(ctx, query, limit):
     from techne.core.architect import architect_db
     from techne.core.patterns import search_patterns
 
-    hits = search_patterns(architect_db(config.db_path), query, limit=limit)
+    hits = search_patterns(architect_db(config), query, limit=limit)
     if not hits:
         click.echo("No patterns matched.")
         return
@@ -1715,7 +1715,7 @@ def architect_show(ctx, pattern_id):
     from techne.core.architect import architect_db
     from techne.core.patterns import get_pattern
 
-    p = get_pattern(architect_db(config.db_path), pattern_id)
+    p = get_pattern(architect_db(config), pattern_id)
     if not p:
         click.echo(f"No pattern {pattern_id}", err=True)
         ctx.exit(1)
@@ -1736,7 +1736,7 @@ def codex(ctx):
     from techne.core.codegraph import stats
     from techne.core.codex import codex_db
 
-    s = stats(codex_db(config.db_path))
+    s = stats(codex_db(config))
     click.echo(f"Symbols: {s['symbols']}  Edges: {s['edges']}  Files: {s['files']}")
 
 
@@ -1750,7 +1750,7 @@ def codex_search(ctx, query, limit):
     from techne.core.codegraph import search_symbols
     from techne.core.codex import codex_db
 
-    for s in search_symbols(codex_db(config.db_path), query, limit=limit):
+    for s in search_symbols(codex_db(config), query, limit=limit):
         click.echo(f"  {s['id']}  [{s['kind']}] {s['name']}  {s.get('signature') or ''}")
         click.echo(f"    {s['file']}")
 
@@ -1764,7 +1764,7 @@ def codex_callers(ctx, symbol_id):
     from techne.core.codegraph import callers
     from techne.core.codex import codex_db
 
-    for s in callers(codex_db(config.db_path), symbol_id):
+    for s in callers(codex_db(config), symbol_id):
         click.echo(f"  {s['id']}  {s['name']}  ({s['file']})")
 
 
@@ -1779,7 +1779,7 @@ def codex_blast(ctx, symbol_id, direction, depth):
     from techne.core.codegraph import reachable
     from techne.core.codex import codex_db
 
-    rows = reachable(codex_db(config.db_path), symbol_id, direction=direction, max_depth=depth)
+    rows = reachable(codex_db(config), symbol_id, direction=direction, max_depth=depth)
     if not rows:
         click.echo("(nothing reachable)")
         return

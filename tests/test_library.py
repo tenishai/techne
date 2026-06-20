@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from techne.config import Config
 from techne.core.cards import card_doc_id, pending_cards
 from techne.core.database import init_db
 from techne.core.documents import get_document, list_documents
@@ -10,14 +11,16 @@ from techne.core.library import index_document, index_markdown_dir
 
 
 def _db(tmp_path):
-    p = tmp_path / "lib.db"
+    # index_document now takes a Config (registry-routed stores, #102); the core
+    # techne db holds the cards, librarian.db (registry-resolved) holds the docs.
+    p = tmp_path / "techne.db"
     init_db(p).close()
-    return p
+    return Config(db_path=p, data_dir=tmp_path)
 
 
-def _lib(db):
+def _lib(cfg):
     # documents live in librarian.db now (db-per-domain #99)
-    return librarian_db(db)
+    return librarian_db(cfg)
 
 
 def test_index_document_stores_and_cards(tmp_path):
@@ -31,7 +34,7 @@ def test_index_document_stores_and_cards(tmp_path):
     )
     assert stored
     assert get_document(_lib(db), doc_id)["content"] == "how techne is evaluated"
-    cards = pending_cards(db)
+    cards = pending_cards(db.db_path)
     assert len(cards) == 1 and card_doc_id(cards[0]["tags"]) == doc_id
 
 
@@ -55,7 +58,7 @@ def test_index_document_make_card_false(tmp_path):
     index_document(
         db, source_type="docs", source_url="docs:x.md", title="x", content="y", make_card=False
     )
-    assert pending_cards(db) == []
+    assert pending_cards(db.db_path) == []
 
 
 def test_index_markdown_dir(tmp_path):

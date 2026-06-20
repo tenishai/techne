@@ -36,6 +36,7 @@ from pathlib import Path
 
 import structlog
 
+from techne.config import Config
 from techne.core.database import connect
 from techne.core.documents import store_document
 from techne.core.extension_state import get_state, set_state
@@ -52,17 +53,13 @@ class GitHubIssuesSource:
 
     Usage::
 
-        src = GitHubIssuesSource(
-            techne_db_path=Path("~/.techne/techne.db"),
-            owner="owner",
-            repo="repo",
-        )
-        count = src.initial_walk()  # docs land in ~/.techne/librarian.db
+        src = GitHubIssuesSource(config, owner="owner", repo="repo")
+        count = src.initial_walk()  # docs land in the registry's librarian.db
 
     Args:
-        techne_db_path:  Path to the *core* techne db. Documents are written to
-                         `librarian.db` beside it; the cursor (extension_state) is
-                         written to this core db.
+        config:   The techne Config. Documents are written to the registry-resolved
+                  librarian.db (techne#102); the cursor (extension_state) is written
+                  to the core techne db (`config.db_path`).
         owner:    GitHub organisation or user name.
         repo:     Repository name.
         limit:    Maximum issues to fetch per walk (default 500). Increase for
@@ -71,12 +68,12 @@ class GitHubIssuesSource:
 
     def __init__(
         self,
-        techne_db_path: Path,
+        config: Config,
         owner: str,
         repo: str,
         limit: int = _DEFAULT_LIMIT,
     ) -> None:
-        self._techne_db_path = Path(techne_db_path).expanduser()
+        self._config = config
         self._owner = owner
         self._repo = repo
         self._limit = limit
@@ -84,10 +81,10 @@ class GitHubIssuesSource:
 
     @property
     def _library_db(self) -> Path:
-        """librarian.db beside the core techne db — where document rows live
-        (db-per-domain #99), the same store cards resolve through. Accessing it
+        """The registry-resolved librarian.db — where document rows live
+        (db-per-domain #99/#102), the same store cards resolve through. Accessing it
         migrates librarian.db on first use; no core schema is applied there."""
-        return librarian_db(self._techne_db_path)
+        return librarian_db(self._config)
 
     # ------------------------------------------------------------------
     # Cursor helpers
@@ -95,7 +92,7 @@ class GitHubIssuesSource:
 
     def _load_cursor(self) -> str | None:
         """Return the stored last-updatedAt cursor (ISO string) or None."""
-        conn = connect(self._techne_db_path)
+        conn = connect(self._config.db_path)
         try:
             state = get_state(conn, self._state_key) or {}
             return state.get("last_updated_at")
@@ -103,7 +100,7 @@ class GitHubIssuesSource:
             conn.close()
 
     def _save_cursor(self, last_updated_at: str) -> None:
-        conn = connect(self._techne_db_path)
+        conn = connect(self._config.db_path)
         try:
             state = get_state(conn, self._state_key) or {}
             state["last_updated_at"] = last_updated_at

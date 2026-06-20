@@ -378,27 +378,35 @@ _MOCK_ISSUES = [
 
 
 @pytest.fixture()
-def techne_db(tmp_path) -> Path:
-    """A plain *core* techne db (no librarian schema) — the github source derives
-    librarian.db beside it and keeps its cursor here in extension_state."""
+def gh_config(tmp_path):
+    """A Config whose core techne db holds the github cursor; the registry resolves
+    librarian.db beside it for documents (db-per-domain #102)."""
+    from techne.config import Config
+
     path = tmp_path / "techne.db"
     init_db(path).close()
-    return path
+    return Config(db_path=path, data_dir=tmp_path)
 
 
 @pytest.fixture()
-def lib_db(techne_db) -> Path:
+def techne_db(gh_config) -> Path:
+    """The core techne db path (cursor lives here in extension_state)."""
+    return gh_config.db_path
+
+
+@pytest.fixture()
+def lib_db(gh_config) -> Path:
     """The librarian.db the github source writes documents into."""
     from techne.core.librarian import librarian_db
 
-    return librarian_db(techne_db)
+    return librarian_db(gh_config)
 
 
 @pytest.fixture()
-def github_source(techne_db):
+def github_source(gh_config):
     from techne.sync.github_issues import GitHubIssuesSource
 
-    return GitHubIssuesSource(techne_db_path=techne_db, owner="acme", repo="testrepo")
+    return GitHubIssuesSource(gh_config, owner="acme", repo="testrepo")
 
 
 class TestGitHubIssuesSource:

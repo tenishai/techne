@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from techne.core.stores import SqliteStore
+from techne.config import Config
+from techne.core.stores import StoreAdapter, migrated_store
 
 CODEX_SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbols (
@@ -62,16 +63,12 @@ END;
 _migrated: set[Path] = set()
 
 
-def codex_store(techne_db_path: Path) -> SqliteStore:
-    """The Codex store (codex.db, beside the techne db), schema applied. Code lives
-    here, not techne.db. config.stores dsn override is a follow-up (path-derived)."""
-    db = Path(techne_db_path).parent / "codex.db"
-    store = SqliteStore("codex", db)
-    if db not in _migrated:
-        store.migrate(CODEX_SCHEMA)
-        _migrated.add(db)
-    return store
+def codex_store(config: Config) -> StoreAdapter:
+    """The Codex store (codex.db), schema applied. Code lives here, not techne.db.
+    Resolved via the registry, so a `config.stores['codex']` dsn override takes
+    effect (techne#102); default <data_dir>/codex.db."""
+    return migrated_store(config, "codex", CODEX_SCHEMA, _migrated)
 
 
-def codex_db(techne_db_path: Path) -> Path:
-    return codex_store(techne_db_path).db_path
+def codex_db(config: Config) -> Path:
+    return codex_store(config).db_path

@@ -172,3 +172,21 @@ def load_store(config: Config, domain: str) -> StoreAdapter:
         f"Store adapter '{adapter}' for domain '{domain}' is not built yet "
         f"(built-in: {_BUILTIN_ADAPTERS}; postgres/mariadb/clickhouse land in techne#87)."
     )
+
+
+def migrated_store(config: Config, domain: str, schema_sql: str, seen: set) -> StoreAdapter:
+    """`load_store` + apply the domain schema once per (process × store identity).
+
+    The single resolution point every domain accessor (librarian/architect/codex)
+    routes through — so the registry (`config.stores` + `store_path`) is the sole
+    source of a domain's path + adapter, and a `dsn:` override actually takes
+    effect (techne#102). `schema_sql` is the domain's own DDL (CREATE IF NOT
+    EXISTS), idempotent; we still gate it on `seen` to skip re-running executescript
+    on every op. `seen` is the caller module's process-lifetime memo.
+    """
+    store = load_store(config, domain)
+    key = getattr(store, "db_path", domain)
+    if key not in seen:
+        store.migrate(schema_sql)
+        seen.add(key)
+    return store

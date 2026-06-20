@@ -16,6 +16,7 @@ import json
 import re
 from pathlib import Path
 
+from techne.config import Config
 from techne.core.cards import upsert_document_card
 from techne.core.documents import store_document
 from techne.core.knowledge import content_hash
@@ -24,7 +25,7 @@ from techne.core.redaction import redact_credentials
 
 
 def index_document(
-    db_path: Path,
+    config: Config,
     *,
     source_type: str,
     source_url: str,
@@ -41,12 +42,15 @@ def index_document(
     the card non-pending at birth (e.g. a transcript's deterministic thread index);
     omit it to leave the card pending for agent-assisted summarization. Returns
     (doc_id, stored) — stored=True iff a new/changed row was written.
+
+    The document goes to librarian.db (registry-resolved, #102); the gist card goes
+    to techne.db (`config.db_path`) so personal recall surfaces it.
     """
     title = redact_credentials(title or "")
     content = redact_credentials(content)
     # Document → librarian.db (db-per-domain); the gist card → techne.db below.
     doc_id, stored = store_document(
-        librarian_db(db_path),
+        librarian_db(config),
         source_type=source_type,
         source_url=source_url,
         title=title,
@@ -55,7 +59,7 @@ def index_document(
     )
     if make_card:
         upsert_document_card(
-            db_path,
+            config.db_path,
             source_url=source_url,
             doc_id=doc_id,
             source_version=content_hash(content),
@@ -76,7 +80,7 @@ def _markdown_title(text: str, fallback: str) -> str:
 
 
 def index_markdown_dir(
-    db_path: Path,
+    config: Config,
     root: Path,
     *,
     source_type: str = "markdown",
@@ -95,7 +99,7 @@ def index_markdown_dir(
             continue
         rel = md.relative_to(root).as_posix()
         _doc_id, stored = index_document(
-            db_path,
+            config,
             source_type=source_type,
             source_url=f"{source_type}:{rel}",
             title=_markdown_title(text, md.stem),

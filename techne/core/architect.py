@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from techne.core.stores import SqliteStore
+from techne.config import Config
+from techne.core.stores import StoreAdapter, migrated_store
 
 ARCHITECT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS investigations (
@@ -87,17 +88,12 @@ END;
 _migrated: set[Path] = set()
 
 
-def architect_store(techne_db_path: Path) -> SqliteStore:
-    """The Architect's store (architect.db, beside the techne db), schema applied.
-    Patterns route through here, not techne.db. NOTE: config.stores dsn override is
-    a follow-up (same as the Librarian); defaults to <data_dir>/architect.db."""
-    db = Path(techne_db_path).parent / "architect.db"
-    store = SqliteStore("architect", db)
-    if db not in _migrated:
-        store.migrate(ARCHITECT_SCHEMA)
-        _migrated.add(db)
-    return store
+def architect_store(config: Config) -> StoreAdapter:
+    """The Architect's store (architect.db), schema applied. Patterns route through
+    here, not techne.db. Resolved via the registry, so a `config.stores['architect']`
+    dsn override takes effect (techne#102); default <data_dir>/architect.db."""
+    return migrated_store(config, "architect", ARCHITECT_SCHEMA, _migrated)
 
 
-def architect_db(techne_db_path: Path) -> Path:
-    return architect_store(techne_db_path).db_path
+def architect_db(config: Config) -> Path:
+    return architect_store(config).db_path

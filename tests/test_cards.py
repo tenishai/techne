@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from techne.config import Config
 from techne.core.cards import (
     card_doc_id,
     fill_card_summary,
@@ -20,17 +21,24 @@ from techne.core.knowledge import store
 
 @pytest.fixture()
 def db(tmp_path):
-    p = tmp_path / "cards.db"
+    p = tmp_path / "techne.db"
     init_db(p).close()
     return p
 
 
-def _doc(db, url="claude-code-transcript:s1", content="full transcript body"):
+@pytest.fixture()
+def config(db, tmp_path):
+    # Domain stores are registry-resolved from the Config now (#102); cards live in
+    # techne.db (db), documents in the registry's librarian.db.
+    return Config(db_path=db, data_dir=tmp_path)
+
+
+def _doc(config, url="claude-code-transcript:s1", content="full transcript body"):
     # Documents live in librarian.db (db-per-domain #99); cards in the techne db.
     from techne.core.librarian import librarian_db
 
     doc_id, _ = store_document(
-        librarian_db(db),
+        librarian_db(config),
         source_type="claude-code-transcript",
         source_url=url,
         content=content,
@@ -39,8 +47,8 @@ def _doc(db, url="claude-code-transcript:s1", content="full transcript body"):
     return doc_id
 
 
-def test_upsert_creates_pending_card(db):
-    doc_id = _doc(db)
+def test_upsert_creates_pending_card(db, config):
+    doc_id = _doc(config)
     card_id, changed = upsert_document_card(
         db,
         source_url="claude-code-transcript:s1",
@@ -59,8 +67,8 @@ def test_upsert_creates_pending_card(db):
     assert "backing:mirror" in card["tags"]
 
 
-def test_upsert_idempotent_same_version(db):
-    doc_id = _doc(db)
+def test_upsert_idempotent_same_version(db, config):
+    doc_id = _doc(config)
     a, _ = upsert_document_card(db, source_url="u", doc_id=doc_id, source_version="v1", title="x")
     b, changed = upsert_document_card(
         db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
@@ -68,8 +76,8 @@ def test_upsert_idempotent_same_version(db):
     assert b == a and changed is False
 
 
-def test_upsert_supersedes_on_version_change(db):
-    doc_id = _doc(db)
+def test_upsert_supersedes_on_version_change(db, config):
+    doc_id = _doc(config)
     a, _ = upsert_document_card(db, source_url="u", doc_id=doc_id, source_version="v1", title="x")
     b, changed = upsert_document_card(
         db, source_url="u", doc_id=doc_id, source_version="v2", title="x"
@@ -79,23 +87,23 @@ def test_upsert_supersedes_on_version_change(db):
     assert len(pending_cards(db)) == 1
 
 
-def test_fill_card_summary_drops_pending(db):
-    doc_id = _doc(db)
+def test_fill_card_summary_drops_pending(db, config):
+    doc_id = _doc(config)
     card_id, _ = upsert_document_card(
         db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
     )
     assert fill_card_summary(db, card_id, "A crisp two-line gist of the session.")
     assert pending_cards(db) == []  # no longer pending
-    resolved = resolve_card(db, card_id)
+    resolved = resolve_card(config, card_id)
     assert resolved["id"] == doc_id  # pointer still resolves
 
 
-def test_resolve_card_fetches_document(db):
-    doc_id = _doc(db, content="the full body to fetch on demand")
+def test_resolve_card_fetches_document(db, config):
+    doc_id = _doc(config, content="the full body to fetch on demand")
     card_id, _ = upsert_document_card(
         db, source_url="claude-code-transcript:s1", doc_id=doc_id, source_version="v1", title="x"
     )
-    doc = resolve_card(db, card_id)
+    doc = resolve_card(config, card_id)
     assert doc["id"] == doc_id
     assert "fetch on demand" in doc["content"]
 
@@ -109,14 +117,14 @@ def test_document_card_is_pull_only_excluded_from_egress(db):
     assert card not in injected
 
 
-def test_emit_card_summary_batch(db):
-    doc_id = _doc(db, content="we decided to use SQLite for the store")
+def test_emit_card_summary_batch(db, config):
+    doc_id = _doc(config, content="we decided to use SQLite for the store")
     card_id, _ = upsert_document_card(
         db, source_url="u", doc_id=doc_id, source_version="v1", title="storage decision"
     )
     from techne.core.cards import emit_card_summary_batch
 
-    batch = emit_card_summary_batch(db)
+    batch = emit_card_summary_batch(config)
     assert len(batch) == 1
     item = batch[0]
     assert item["card_id"] == card_id
@@ -124,8 +132,8 @@ def test_emit_card_summary_batch(db):
     assert "use SQLite" in item["prompt"]  # the doc content is in the prompt
 
 
-def test_ingest_card_summaries_fills_and_skips(db):
-    doc_id = _doc(db)
+def test_ingest_card_summaries_fills_and_skips(db, config):
+    doc_id = _doc(config)
     c1, _ = upsert_document_card(db, source_url="u1", doc_id=doc_id, source_version="v1", title="a")
     c2, _ = upsert_document_card(db, source_url="u2", doc_id=doc_id, source_version="v1", title="b")
     from techne.core.cards import ingest_card_summaries
@@ -142,8 +150,8 @@ def test_ingest_card_summaries_fills_and_skips(db):
     assert c1 not in still_pending and c2 in still_pending
 
 
-def test_pending_cards_source_prefix_filter(db):
-    doc = _doc(db)
+def test_pending_cards_source_prefix_filter(db, config):
+    doc = _doc(config)
     upsert_document_card(db, source_url="docs:a.md", doc_id=doc, source_version="v1", title="a")
     upsert_document_card(
         db, source_url="cc-transcript:s1", doc_id=doc, source_version="v1", title="b"

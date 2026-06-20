@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from techne.core.stores import SqliteStore
+from techne.config import Config
+from techne.core.stores import StoreAdapter, migrated_store
 
 # The documents schema — moved verbatim out of core SCHEMA_SQL/FTS_TRIGGERS_SQL.
 # Applied to librarian.db via the store's migrate(), not to techne.db.
@@ -58,30 +59,23 @@ END;
 _migrated: set[Path] = set()
 
 
-def librarian_store(techne_db_path: Path) -> SqliteStore:
-    """The Librarian's store (librarian.db, beside the given techne db), schema
-    applied. The documents domain routes all persistence through here instead of
-    techne.db. Reuses #98's SqliteStore (so the registry path is the same default).
+def librarian_store(config: Config) -> StoreAdapter:
+    """The Librarian's store (librarian.db), schema applied. The documents domain
+    routes all persistence through here instead of techne.db.
 
-    NOTE: honoring a config.stores dsn override (a non-default librarian path) is a
-    follow-up — internal callers are db_path-shaped, so we derive the standard
-    `<data_dir>/librarian.db` location, which equals the registry default.
-    """
-    db = Path(techne_db_path).parent / "librarian.db"
-    store = SqliteStore("librarian", db)
-    if db not in _migrated:
-        store.migrate(LIBRARIAN_SCHEMA)
-        _migrated.add(db)
-    return store
+    Resolved via the registry (`migrated_store` → `load_store`), so the path and
+    adapter come from `config.stores['librarian']` — a `dsn:` override takes effect
+    (techne#102). Default is `<data_dir>/librarian.db`."""
+    return migrated_store(config, "librarian", LIBRARIAN_SCHEMA, _migrated)
 
 
-def librarian_db(techne_db_path: Path) -> Path:
+def librarian_db(config: Config) -> Path:
     """Path to the migrated librarian.db — what the low-level documents.py functions
-    (still db_path-shaped) operate on."""
-    return librarian_store(techne_db_path).db_path
+    (db_path-shaped, the SQLite SQL layer) operate on."""
+    return librarian_store(config).db_path
 
 
-def migrate_documents_to_librarian(techne_db_path: Path) -> dict:
+def migrate_documents_to_librarian(config: Config) -> dict:
     """One-time cutover: copy any `documents` rows still in techne.db (where they
     used to live) into librarian.db, PRESERVING ids so existing cards resolve, then
     drop the documents tables from techne.db. Idempotent — no documents table in
@@ -95,6 +89,7 @@ def migrate_documents_to_librarian(techne_db_path: Path) -> dict:
     card now resolved to the wrong document)."""
     from techne.core.database import connect
 
+    techne_db_path = config.db_path
     src = connect(techne_db_path)
     try:
         has = src.execute(
@@ -106,7 +101,7 @@ def migrate_documents_to_librarian(techne_db_path: Path) -> dict:
     finally:
         src.close()
 
-    store = librarian_store(techne_db_path)  # creates + migrates librarian.db
+    store = librarian_store(config)  # creates + migrates librarian.db
     dest = store.connect()
     try:
         # superseded_by self-references mean a row can point at a not-yet-copied id;
