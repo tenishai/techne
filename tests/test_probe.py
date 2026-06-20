@@ -19,6 +19,7 @@ from techne.probe.canary import (
     canary_in_injection,
     evaluate_output,
     new_codeword,
+    run_differential,
     run_probe,
     seed_canary,
 )
@@ -173,6 +174,143 @@ def _run_with_echo(config, adapter, *, mode):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Differential mode (fake adapter mimicking both push paths)
+# ---------------------------------------------------------------------------
+
+
+class DifferentialFake:
+    """Mimics a runtime: techne canary arrives via injection (read from db),
+    native canary via its own seeded value. Flags choose which paths 'fire'."""
+
+    name = "diff-fake"
+
+    def __init__(self, config, *, inject_techne, inject_native, supports_native=True, tag=True):
+        self.config = config
+        self.inject_techne = inject_techne
+        self.inject_native = inject_native
+        self._supports = supports_native
+        self.tag = tag
+        self.native_cw = None
+        self.cleaned = False
+        self.calls: list[dict] = []
+
+    def supports_native_seed(self):
+        return self._supports
+
+    def seed_native_canary(self, codeword, label):
+        from techne.probe.runtimes import NativeCanaryHandle
+
+        self.native_cw = codeword
+        return NativeCanaryHandle(path=Path("/tmp/none"), label=label, created_file=False)
+
+    def cleanup_native_canary(self, handle):
+        self.cleaned = True
+
+    def fresh_session(self, prompt, *, disable_native, allow_techne_tools):
+        self.calls.append(
+            {"disable_native": disable_native, "allow_techne_tools": allow_techne_tools}
+        )
+        from techne.core.knowledge import list_entries
+
+        lines = []
+        if self.inject_techne:
+            for r in list_entries(self.config.db_path, limit=20):
+                if "PROBE CANARY" in r["content"]:
+                    cw = r["content"].split("codeword is ", 1)[1].split(".", 1)[0].strip()
+                    prefix = f"⟦techne#{r['id']}⟧ " if self.tag else ""
+                    lines.append(f"techne={prefix}{cw}")
+                    break
+        else:
+            lines.append("techne=MISSING")
+        lines.append(f"native={self.native_cw}" if self.inject_native else "native=MISSING")
+        return "\n".join(lines)
+
+
+def test_differential_pass_both_paths_live(config):
+    fake = DifferentialFake(config, inject_techne=True, inject_native=True)
+    v = run_differential(config, fake)
+    assert v.passed
+    assert v.techne_surfaced and v.native_surfaced
+    assert v.control_ok
+    assert v.techne_provenance == "techne"
+    assert fake.calls[0] == {"disable_native": False, "allow_techne_tools": False}
+    assert fake.cleaned
+
+
+def test_differential_shadowed_when_only_native(config):
+    fake = DifferentialFake(config, inject_techne=False, inject_native=True)
+    v = run_differential(config, fake)
+    assert not v.passed
+    assert v.native_surfaced and not v.techne_surfaced
+    assert "shadowed" in v.detail
+
+
+def test_differential_advisory_when_control_absent(config):
+    fake = DifferentialFake(config, inject_techne=True, inject_native=False)
+    v = run_differential(config, fake)
+    assert v.passed  # techne carried
+    assert not v.control_ok
+    assert "advisory" in v.detail
+
+
+def test_differential_provenance_unconfirmed_without_tag(config):
+    fake = DifferentialFake(config, inject_techne=True, inject_native=True, tag=False)
+    v = run_differential(config, fake)
+    assert v.passed
+    assert v.techne_provenance == "techne?"
+
+
+def test_differential_without_native_support(config):
+    fake = DifferentialFake(config, inject_techne=True, inject_native=False, supports_native=False)
+    v = run_differential(config, fake)
+    assert v.passed
+    assert not v.control_ok
+    assert "no native control" in v.detail
+    assert not fake.cleaned  # nothing to clean
+
+
+def test_differential_cleans_up_techne_canary(config):
+    fake = DifferentialFake(config, inject_techne=True, inject_native=True)
+    run_differential(config, fake, cleanup=True)
+    from techne.core.knowledge import list_entries
+
+    rows = list_entries(config.db_path, limit=100)
+    assert not any("PROBE CANARY" in r["content"] for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeAdapter native-seed file mechanics (no session spawned)
+# ---------------------------------------------------------------------------
+
+
+def test_native_seed_appends_and_cleanup_removes(tmp_path):
+    from techne.probe.runtimes import ClaudeCodeAdapter
+
+    mem = tmp_path / "MEMORY.md"
+    mem.write_text("# Memory Index\n\n- existing entry\n", encoding="utf-8")
+    adapter = ClaudeCodeAdapter(native_memory_path=mem)
+    handle = adapter.seed_native_canary("NATIVE-CW-1", "lbl-1")
+    body = mem.read_text(encoding="utf-8")
+    assert "NATIVE-CW-1" in body
+    assert not handle.created_file
+    adapter.cleanup_native_canary(handle)
+    after = mem.read_text(encoding="utf-8")
+    assert "NATIVE-CW-1" not in after
+    assert "existing entry" in after  # original content preserved
+
+
+def test_native_seed_deletes_file_it_created(tmp_path):
+    from techne.probe.runtimes import ClaudeCodeAdapter
+
+    mem = tmp_path / "sub" / "MEMORY.md"
+    adapter = ClaudeCodeAdapter(native_memory_path=mem)
+    handle = adapter.seed_native_canary("NATIVE-CW-2", "lbl-2")
+    assert mem.exists() and handle.created_file
+    adapter.cleanup_native_canary(handle)
+    assert not mem.exists()
+
+
 @pytest.mark.probe
 @pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not on PATH")
 def test_real_offtest_probe_against_live_techne():
@@ -184,3 +322,16 @@ def test_real_offtest_probe_against_live_techne():
     verdict = run_probe(cfg, ClaudeCodeAdapter(timeout=240), mode="off-test", cleanup=True)
     assert verdict.passed, verdict.render()
     assert verdict.provenance == "techne"
+
+
+@pytest.mark.probe
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not on PATH")
+def test_real_differential_probe_against_live_techne():
+    """End-to-end: native ON + native-only control. techne must carry its codeword
+    (not be masked), and the control must fire so the verdict is trustworthy."""
+    from techne.probe import ClaudeCodeAdapter, run_differential
+
+    cfg = Config.load()
+    verdict = run_differential(cfg, ClaudeCodeAdapter(timeout=240), cleanup=True)
+    assert verdict.passed, verdict.render()
+    assert verdict.control_ok, verdict.render()

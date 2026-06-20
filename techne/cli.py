@@ -1193,9 +1193,12 @@ def reflect_stats(ctx):
 @main.command()
 @click.option(
     "--mode",
-    type=click.Choice(["off-test", "pull"]),
+    type=click.Choice(["off-test", "pull", "differential"]),
     default="off-test",
-    help="off-test: native+pull off (tests egress push). pull: native off, pull on (reachability).",
+    help=(
+        "off-test: native+pull off (tests egress push). pull: native off, pull on "
+        "(reachability). differential: native ON + native-only control (is techne the lead?)."
+    ),
 )
 @click.option("--model", default=None, help="Model for the spawned session (default: CC default).")
 @click.option("--timeout", default=180, show_default=True, help="Per-session timeout in seconds.")
@@ -1205,18 +1208,22 @@ def probe(ctx, mode, model, timeout, keep):
     """Run the differential-canary memory-attribution probe (techne#94).
 
     Seeds a techne-only canary, spawns a fresh Claude Code session, and checks
-    whether techne carried the codeword into context. Exit 0 = pass, 1 = fail.
+    whether techne carried the codeword into context. `differential` also seeds a
+    native-only control and leaves native memory ON. Exit 0 = pass, 1 = fail.
     """
     config = ctx.obj["config"]
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.probe import ClaudeCodeAdapter, run_probe
+    from techne.probe import ClaudeCodeAdapter, run_differential, run_probe
 
     adapter = ClaudeCodeAdapter(model=model, timeout=timeout)
     click.echo(f"Running probe (mode={mode}) — spawning a fresh session, this can take a minute…")
-    verdict = run_probe(config, adapter, mode=mode, cleanup=not keep)
+    if mode == "differential":
+        verdict = run_differential(config, adapter, cleanup=not keep)
+    else:
+        verdict = run_probe(config, adapter, mode=mode, cleanup=not keep)
     click.echo(verdict.render())
     ctx.exit(0 if verdict.passed else 1)
 
