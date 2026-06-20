@@ -29,6 +29,16 @@ class SyncConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class StoreSpec:
+    """One domain store (db-per-domain, techne#88/#98). `adapter` selects the
+    backend (sqlite day one; postgres/etc. later via techne#87). Empty `dsn`
+    defaults to <data_dir>/<domain>.db."""
+
+    adapter: str = "sqlite"
+    dsn: str = ""
+
+
 Detector = Literal["heuristic", "llm"]
 Summarizer = Literal["heuristic", "llm"]
 
@@ -151,6 +161,10 @@ class Config:
     data_dir: Path = DEFAULT_DIR
     identity_dir: Path | None = None
     sync: SyncConfig = field(default_factory=SyncConfig)
+    # Domain stores (db-per-domain, techne#88/#98): domain name → StoreSpec.
+    # techne.db (db_path) is the implicit personal-memory store; these are the
+    # separate domain dbs (librarian, architect, codex). Empty = no domains.
+    stores: dict[str, StoreSpec] = field(default_factory=dict)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     threads: ThreadConfig = field(default_factory=ThreadConfig)
     hooks: HookConfig = field(default_factory=HookConfig)
@@ -201,6 +215,14 @@ class Config:
             cfg.llm_api_base = str(raw["llm_api_base"])
         if "llm_api_key" in raw:
             cfg.llm_api_key = str(raw["llm_api_key"])
+
+        if "stores" in raw and isinstance(raw["stores"], dict):
+            for domain, spec in raw["stores"].items():
+                if isinstance(spec, dict):
+                    cfg.stores[str(domain)] = StoreSpec(
+                        adapter=str(spec.get("adapter", "sqlite")),
+                        dsn=str(spec.get("dsn", "")),
+                    )
 
         if "sources" in raw and isinstance(raw["sources"], dict):
             s = raw["sources"]
@@ -396,6 +418,11 @@ class Config:
             data["threads"]["tool_families"] = dict(self.threads.tool_families)
         if self.threads.entity_patterns:
             data["threads"]["entity_patterns"] = list(self.threads.entity_patterns)
+        if self.stores:
+            data["stores"] = {
+                domain: {"adapter": spec.adapter, "dsn": spec.dsn}
+                for domain, spec in self.stores.items()
+            }
         if self.sync.url:
             data["sync"]["url"] = self.sync.url
         if self.sync.auth:
