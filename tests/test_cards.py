@@ -26,8 +26,15 @@ def db(tmp_path):
 
 
 def _doc(db, url="claude-code-transcript:s1", content="full transcript body"):
+    # Documents live in librarian.db (db-per-domain #99); cards in the techne db.
+    from techne.core.librarian import librarian_db
+
     doc_id, _ = store_document(
-        db, source_type="claude-code-transcript", source_url=url, content=content, title="t"
+        librarian_db(db),
+        source_type="claude-code-transcript",
+        source_url=url,
+        content=content,
+        title="t",
     )
     return doc_id
 

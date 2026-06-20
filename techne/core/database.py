@@ -222,46 +222,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     tokenize='porter unicode61'
 );
 
--- Documents (Librarian domain — external reference corpora).
--- Each row is one fetched document (e.g. a GitHub issue, arXiv paper,
--- runbook page). `source_url` is the dedup key: re-fetching the same URL
--- supersedes the prior row when content has changed, leaving the old row
--- linked via `superseded_by` for audit. Documents live in their own db
--- (a library db); they are decoupled from knowledge by design — no FK to
--- knowledge, provenance is carried in `source_url`.
---
--- Deferred: document_chunks (per-chunk vectors for long content); synthesis
--- operation (documents → knowledge with source_url provenance); other corpus
--- adapters (arXiv, Jira, Confluence, runbooks); load_source_adapter() factory
--- + entry-point registration; CLI commands for library management.
-CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_type TEXT NOT NULL,
-    source_url TEXT NOT NULL,
-    title TEXT,
-    content TEXT NOT NULL,
-    meta TEXT,
-    owned_by TEXT NOT NULL DEFAULT 'librarian',
-    fetched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    superseded_by INTEGER REFERENCES documents(id)
-);
--- Non-unique index on source_url for fast dedup lookups. Uniqueness of the
--- active row per source_url is enforced programmatically in store_document()
--- (SELECT + INSERT in the same transaction) rather than via a partial unique
--- index, because a partial unique index would collide with the FK constraint
--- during the supersession swap (both rows temporarily have superseded_by IS NULL
--- at statement time before the UPDATE fires). See documents.py: store_document.
-CREATE INDEX IF NOT EXISTS idx_documents_source_url ON documents(source_url);
-CREATE INDEX IF NOT EXISTS idx_documents_source_type ON documents(source_type);
-CREATE INDEX IF NOT EXISTS idx_documents_superseded ON documents(superseded_by);
-
--- FTS5 index for documents — content + title, porter stemming.
-CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-    content, title, content=documents, content_rowid=id,
-    tokenize='porter unicode61'
-);
+-- NOTE: the `documents` domain moved out of core to its own db (librarian.db)
+-- under db-per-domain (techne#99). Its schema now lives in core/librarian.py
+-- (LIBRARIAN_SCHEMA), applied via the store registry — NOT here. techne.db is
+-- personal memory only.
 """
 
 # Triggers to keep FTS5 indexes in sync with content tables.
@@ -310,21 +274,8 @@ CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
     INSERT INTO knowledge_fts(rowid, content, tags)
     VALUES (NEW.id, NEW.content, NEW.tags);
 END;
-
-CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-    INSERT INTO documents_fts(rowid, content, title)
-    VALUES (NEW.id, NEW.content, COALESCE(NEW.title, ''));
-END;
-CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, content, title)
-    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.title, ''));
-END;
-CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, content, title)
-    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.title, ''));
-    INSERT INTO documents_fts(rowid, content, title)
-    VALUES (NEW.id, NEW.content, COALESCE(NEW.title, ''));
-END;
+-- documents_* triggers moved to core/librarian.py (LIBRARIAN_SCHEMA) — the
+-- documents domain lives in librarian.db now (techne#99).
 """
 
 
@@ -398,14 +349,12 @@ _FTS_BACKFILL: dict[str, tuple[str, list[str]]] = {
     ),
     "threads_fts": ("threads", ["rowid", "label", "summary", "resume_points"]),
     "knowledge_fts": ("knowledge", ["id", "content", "COALESCE(tags, '')"]),
-    "documents_fts": ("documents", ["id", "content", "COALESCE(title, '')"]),
 }
 
 _FTS_INSERT_COLS: dict[str, list[str]] = {
     "observations_fts": ["rowid", "content", "tags", "kind"],
     "threads_fts": ["rowid", "label", "summary", "resume_points"],
     "knowledge_fts": ["rowid", "content", "tags"],
-    "documents_fts": ["rowid", "content", "title"],
 }
 
 

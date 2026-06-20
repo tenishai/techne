@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from techne.core.database import init_db
 from techne.core.documents import get_document, list_documents
+from techne.core.librarian import librarian_db
 from techne.core.transcripts import (
     Transcript,
     TranscriptTurn,
@@ -69,7 +70,7 @@ def test_index_neutral_source_stores_and_dedups(tmp_path):
     counts = index_transcripts(db, source)
     assert counts == {"total": 3, "stored": 2, "unchanged": 0, "empty": 1}
 
-    docs = list_documents(db, source_type="fake-client-transcript")
+    docs = list_documents(librarian_db(db), source_type="fake-client-transcript")
     assert len(docs) == 2
     urls = {d["source_url"] for d in docs}
     assert urls == {"fake-client-transcript:s1", "fake-client-transcript:s2"}
@@ -86,8 +87,8 @@ def test_index_redacts_content_and_title(tmp_path):
         [_t("secret", [("user", "key is AKIA1234567890ABCDEF"), ("assistant", "ok")])]
     )
     index_transcripts(db, source)
-    doc = list_documents(db, source_type="fake-client-transcript")[0]
-    full = get_document(db, doc["id"])
+    doc = list_documents(librarian_db(db), source_type="fake-client-transcript")[0]
+    full = get_document(librarian_db(db), doc["id"])
     # Secret must not survive in content OR the (first-user-line-derived) title.
     assert "AKIA1234567890ABCDEF" not in full["content"]
     assert "AKIA1234567890ABCDEF" not in (doc["title"] or "")

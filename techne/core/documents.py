@@ -124,6 +124,25 @@ def store_document(
         conn.close()
 
 
+def search_documents(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
+    """FTS over ACTIVE documents (superseded excluded) — the Librarian's domain
+    search (db-per-domain #99). Personal recall is the gist cards in techne.db;
+    this searches the full content in librarian.db."""
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT d.id, d.source_type, d.source_url, d.title, d.content, d.meta,
+                      d.updated_at, bm25(documents_fts) AS rank
+               FROM documents_fts f JOIN documents d ON d.id = f.rowid
+               WHERE documents_fts MATCH ? AND d.superseded_by IS NULL
+               ORDER BY rank LIMIT ?""",
+            (query, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def get_document(db_path: Path, doc_id: int) -> dict | None:
     """Fetch one document by id (any revision, including superseded)."""
     conn = connect(db_path)

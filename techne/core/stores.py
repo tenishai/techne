@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from techne.config import Config
-from techne.core.database import connect
 
 
 @runtime_checkable
@@ -53,9 +52,18 @@ class SqliteStore:
 
     # SQLite-specific escape hatch — bespoke domain SQL (FTS5 triggers, supersede)
     # runs against this. Not in the Protocol; backend-agnostic domains use add/get.
+    #
+    # A PLAIN connection (pragmas + row_factory) — deliberately NOT core's connect(),
+    # which would apply techne's core SCHEMA_SQL to the domain db. A domain store
+    # gets ONLY its own schema (via migrate); that's the per-db-schema goal.
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        return connect(self.db_path)
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def migrate(self, schema_sql: str) -> None:
         conn = self.connect()

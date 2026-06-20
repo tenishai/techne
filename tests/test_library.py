@@ -5,6 +5,7 @@ from __future__ import annotations
 from techne.core.cards import card_doc_id, pending_cards
 from techne.core.database import init_db
 from techne.core.documents import get_document, list_documents
+from techne.core.librarian import librarian_db
 from techne.core.library import index_document, index_markdown_dir
 
 
@@ -12,6 +13,11 @@ def _db(tmp_path):
     p = tmp_path / "lib.db"
     init_db(p).close()
     return p
+
+
+def _lib(db):
+    # documents live in librarian.db now (db-per-domain #99)
+    return librarian_db(db)
 
 
 def test_index_document_stores_and_cards(tmp_path):
@@ -24,7 +30,7 @@ def test_index_document_stores_and_cards(tmp_path):
         content="how techne is evaluated",
     )
     assert stored
-    assert get_document(db, doc_id)["content"] == "how techne is evaluated"
+    assert get_document(_lib(db), doc_id)["content"] == "how techne is evaluated"
     cards = pending_cards(db)
     assert len(cards) == 1 and card_doc_id(cards[0]["tags"]) == doc_id
 
@@ -38,8 +44,8 @@ def test_index_document_redacts(tmp_path):
         title="AKIA1234567890ABCDEF",
         content="key AKIA1234567890ABCDEF here",
     )
-    doc = list_documents(db, source_type="docs")[0]
-    full = get_document(db, doc["id"])
+    doc = list_documents(_lib(db), source_type="docs")[0]
+    full = get_document(_lib(db), doc["id"])
     assert "AKIA1234567890ABCDEF" not in full["content"]
     assert "AKIA1234567890ABCDEF" not in (doc["title"] or "")
 
@@ -63,7 +69,7 @@ def test_index_markdown_dir(tmp_path):
     counts = index_markdown_dir(db, root, source_type="docs")
     assert counts == {"total": 3, "stored": 2, "unchanged": 0, "empty": 1}
 
-    docs = list_documents(db, source_type="docs")
+    docs = list_documents(_lib(db), source_type="docs")
     urls = {d["source_url"] for d in docs}
     assert urls == {"docs:eval.md", "docs:proposals/outbox.md"}
     titles = {d["title"] for d in docs}
