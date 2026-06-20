@@ -1192,34 +1192,53 @@ def reflect_stats(ctx):
 
 @main.command()
 @click.option(
+    "--runtime",
+    type=click.Choice(["claude-code", "opencode"]),
+    default="claude-code",
+    show_default=True,
+    help="Which runtime to spawn the fresh session on.",
+)
+@click.option(
     "--mode",
     type=click.Choice(["off-test", "pull", "differential"]),
     default="off-test",
     help=(
-        "off-test: native+pull off (tests egress push). pull: native off, pull on "
+        "off-test: native+pull off (tests push). pull: native off, pull on "
         "(reachability). differential: native ON + native-only control (is techne the lead?)."
     ),
 )
-@click.option("--model", default=None, help="Model for the spawned session (default: CC default).")
-@click.option("--timeout", default=180, show_default=True, help="Per-session timeout in seconds.")
+@click.option(
+    "--model", default=None, help="Model for the spawned session (default: runtime default)."
+)
+@click.option("--timeout", default=240, show_default=True, help="Per-session timeout in seconds.")
 @click.option("--keep", is_flag=True, help="Keep the canary row instead of deleting it after.")
 @click.pass_context
-def probe(ctx, mode, model, timeout, keep):
+def probe(ctx, runtime, mode, model, timeout, keep):
     """Run the differential-canary memory-attribution probe (techne#94).
 
-    Seeds a techne-only canary, spawns a fresh Claude Code session, and checks
-    whether techne carried the codeword into context. `differential` also seeds a
-    native-only control and leaves native memory ON. Exit 0 = pass, 1 = fail.
+    Seeds a techne-only canary, spawns a fresh session on the chosen runtime, and
+    checks whether techne carried the codeword into context. `differential` also
+    seeds a native-only control and leaves native memory ON. Exit 0 = pass, 1 = fail.
+
+    Note: opencode has no native auto-memory, so `differential` there has no
+    control and `off-test` already proves the only techne path (the plugin push).
     """
     config = ctx.obj["config"]
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.probe import ClaudeCodeAdapter, run_differential, run_probe
+    from techne.probe import ClaudeCodeAdapter, OpencodeAdapter, run_differential, run_probe
 
-    adapter = ClaudeCodeAdapter(model=model, timeout=timeout)
-    click.echo(f"Running probe (mode={mode}) — spawning a fresh session, this can take a minute…")
+    if runtime == "opencode":
+        adapter = OpencodeAdapter(timeout=timeout, **({"model": model} if model else {}))
+    else:
+        adapter = ClaudeCodeAdapter(model=model, timeout=timeout)
+
+    click.echo(
+        f"Running probe (runtime={runtime}, mode={mode}) — spawning a fresh session, "
+        "this can take a minute…"
+    )
     if mode == "differential":
         verdict = run_differential(config, adapter, cleanup=not keep)
     else:

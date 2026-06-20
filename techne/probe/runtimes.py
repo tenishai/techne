@@ -5,9 +5,9 @@ needs to answer one question: "spawn a genuinely fresh session, with native
 memory optionally disabled and techne's pull tools optionally blocked, ask this
 prompt, and give me back what the agent said."
 
-Implemented: ClaudeCodeAdapter (CC headless `claude -p`).
-Deferred (same Protocol): OpencodeAdapter, CodexAdapter — each wraps that
-runtime's headless/one-shot invocation + its native-memory + tool-gating knobs.
+Implemented: ClaudeCodeAdapter (CC headless `claude -p`), OpencodeAdapter
+(`opencode run`). Deferred (same Protocol): CodexAdapter — wraps that runtime's
+headless/one-shot invocation + its native-memory + tool-gating knobs.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -77,6 +78,14 @@ class RuntimeAdapter(Protocol):
     def cleanup_native_canary(self, handle: NativeCanaryHandle) -> None:
         ...
 
+    def injected_context(self, config) -> str | None:
+        """Return the text this runtime injects at session start (for the
+        off-test precondition: 'is the canary actually in the pushed surface?').
+        Runtimes inject via different selectors, so each adapter answers for its
+        own. Return None if the adapter can't compute it (precondition skipped).
+        """
+        ...
+
 
 class ClaudeCodeAdapter:
     """Drive a fresh headless Claude Code session via `claude -p`."""
@@ -108,6 +117,18 @@ class ClaudeCodeAdapter:
         """
         slug = re.sub(r"[/.]", "-", str(Path(cwd).resolve()))
         return Path.home() / ".claude" / "projects" / slug / "memory" / "MEMORY.md"
+
+    def injected_context(self, config) -> str:
+        """CC's push surface is the SessionStart hook's Tier-0 ## Key Knowledge
+        block — exactly what select_tier0_injection renders."""
+        from techne.core.egress import render_tier0_block, select_tier0_injection
+
+        rows = select_tier0_injection(
+            config.db_path,
+            char_budget=config.injection.char_budget,
+            recent_reserve_frac=config.injection.recent_reserve_frac,
+        )
+        return render_tier0_block(rows)
 
     # --- native-memory negative control (differential mode) ----------------
 
@@ -194,3 +215,115 @@ class ClaudeCodeAdapter:
         if proc.returncode != 0:
             logger.warning("ClaudeCodeAdapter: non-zero exit %d: %s", proc.returncode, proc.stderr)
         return proc.stdout or ""
+
+
+class OpencodeAdapter:
+    """Drive a fresh headless opencode session via `opencode run` (techne#57/#94).
+
+    opencode has no native auto-memory — techne IS its memory — so:
+      - disable_native is a no-op (nothing to turn off).
+      - supports_native_seed() is False (no native store → no differential control;
+        differential degrades to a push/reachability test).
+
+    techne's push on opencode is the capture plugin's
+    `experimental.chat.system.transform` hook, which prepends a <techne-memory>
+    block built by `techne context`. To test that push in isolation (pull off) we
+    can't use `--pure` (it kills the plugin too); instead we run under a
+    project-local agent that disables the techne MCP tools (`tools: techne_*:
+    false`) — verified to remove them from the model while the plugin still fires.
+
+    Runs in a throwaway temp workspace so the gating agent file never touches a
+    real repo; techne knowledge isn't project-scoped, so the canary still injects.
+    Defaults to the built-in keyless model `opencode/big-pickle`.
+    """
+
+    name = "opencode"
+    READONLY_AGENT = "techne-readonly"
+
+    def __init__(
+        self,
+        *,
+        model: str | None = "opencode/big-pickle",
+        timeout: int = 240,
+        opencode_bin: str = "opencode",
+    ):
+        self.model = model
+        self.timeout = timeout
+        self.opencode_bin = opencode_bin
+
+    # opencode has no native auto-memory — the negative control isn't applicable.
+    def supports_native_seed(self) -> bool:
+        return False
+
+    def seed_native_canary(self, codeword: str, label: str) -> NativeCanaryHandle:
+        raise NotImplementedError("opencode has no native auto-memory to seed")
+
+    def cleanup_native_canary(self, handle: NativeCanaryHandle) -> None:  # pragma: no cover
+        return None
+
+    def injected_context(self, config) -> str:
+        """opencode's push surface = the plugin's `techne context` block. Compute
+        it directly (the plugin shells the same get_resume_context/format pair)."""
+        from techne.core.state import format_resume_context, get_resume_context
+
+        data = get_resume_context(config.db_path)
+        return format_resume_context(data)
+
+    def _write_readonly_agent(self, cwd: Path) -> None:
+        agent_dir = cwd / ".opencode" / "agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        (agent_dir / f"{self.READONLY_AGENT}.md").write_text(
+            "---\n"
+            "description: techne plugin injection active; techne MCP tools disabled (probe)\n"
+            "mode: primary\n"
+            "tools:\n"
+            "  techne_*: false\n"
+            "---\n"
+            "Answer concisely with only what was asked.\n",
+            encoding="utf-8",
+        )
+
+    def fresh_session(
+        self,
+        prompt: str,
+        *,
+        disable_native: bool,
+        allow_techne_tools: bool,
+    ) -> str:
+        # disable_native is intentionally ignored: opencode has no native memory.
+        with tempfile.TemporaryDirectory(prefix="techne-probe-oc-") as workdir:
+            cwd = Path(workdir)
+            argv = [self.opencode_bin, "run", "--dir", str(cwd)]
+            if self.model:
+                argv += ["-m", self.model]
+            if not allow_techne_tools:
+                self._write_readonly_agent(cwd)
+                argv += ["--agent", self.READONLY_AGENT]
+            argv.append(prompt)
+
+            logger.debug(
+                "OpencodeAdapter: opencode run (allow_techne_tools=%s, model=%s)",
+                allow_techne_tools,
+                self.model,
+            )
+            try:
+                proc = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"`{self.opencode_bin}` not found — the probe needs the opencode CLI on PATH"
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"probe session timed out after {self.timeout}s") from exc
+
+            if proc.returncode != 0:
+                logger.warning(
+                    "OpencodeAdapter: non-zero exit %d: %s", proc.returncode, proc.stderr
+                )
+            return proc.stdout or ""
