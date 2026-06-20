@@ -25,6 +25,7 @@ techne init
 | **Identity** | Key-value store for who-the-agent-is and who-it-works-with. Ingests structured markdown (`contacts.md`, `invariants.md`) and YAML on init. |
 | **Outbox** | Pluggable sync for shipping curated knowledge to a team-memory backend. Default adapter is `noop`; ships with a `filesystem` adapter; the protocol is open for custom adapters via entry points. |
 | **Search** | FTS5 across all content layers. Optional vector search via `sqlite-vec` + `fastembed` for semantic similarity. |
+| **Domain stores** | `techne.db` is personal memory; larger/team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **Librarian** (`librarian.db`, documents), **Architect** (`architect.db`, patterns), **Codex** (`codex.db`, code graph). Each db carries only its own schema. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
 
 The schema and triggers all live in `techne/core/database.py`. Schema migrations are tracked in a `schema_version` table; `connect()` is lazy-init so library callers don't need to remember to call `init_db()` first.
 
@@ -202,7 +203,45 @@ techne migrate-summaries [--dry-run]       # one-shot: reclassify pre-v4 session
                                            # summary_heuristic column (so the manual slot
                                            # stops winning the priority read against newer
                                            # LLM/heuristic signals). Safe to re-run.
+
+# Domain stores — db-per-domain (each in its own db file beside techne.db)
+# Librarian (librarian.db) — documents: transcripts + markdown; recall the gist, fetch full on demand
+techne library                             # document + card counts
+techne library index-transcripts [--platform claude-code] [--dir DIR]
+techne library index-markdown DIR [--source-type docs]
+techne library search QUERY                # full-text over document content
+techne library show DOC_ID                 # full document (the fetch-on-demand half)
+techne library card CARD_ID                # gist + resolve the document cross-db
+techne library cards emit|ingest|list|gist-transcripts
+                                           # agent-assisted gist fill (no API key)
+techne library migrate-store               # one-time: move documents techne.db → librarian.db
+
+# Architect (architect.db) — the architectural-patterns corpus
+techne architect                           # pattern / investigation counts
+techne architect ingest PATTERNS_MD        # seed from an architectural-patterns.md corpus
+techne architect search QUERY
+techne architect show PATTERN_ID
+
+# Codex (codex.db) — code graph (symbols + call/import/def-use edges)
+#   NOTE: the repo parser (Tree-sitter) is not built yet — the store + graph queries
+#   work, but populating it from a real repo is pending the Codex persona (techne#89).
+techne codex                               # symbol / edge counts
+techne codex search QUERY
+techne codex callers SYMBOL_ID
+techne codex blast-radius SYMBOL_ID [--direction out|in] [--depth N]
 ```
+
+---
+
+## Domain stores (db-per-domain)
+
+`techne.db` holds **personal memory** (sessions, threads, observations, knowledge, identity). Larger or team-scoped domains live in their **own db file** beside it, behind a `StoreAdapter` — kept clean (each db carries only its own schema). Configure non-default locations under `stores:` in `~/.techne/config.yaml`; the default is `<data_dir>/<domain>.db`. Full design: [`docs/db-per-domain.md`](docs/db-per-domain.md).
+
+- **Librarian** (`librarian.db`) — **documents**: your session *transcripts* (the conversation prose, not just tool calls) and *markdown directories*. Recall returns a compact **gist card** that rides normal knowledge recall; the full document is fetched on demand via the card's pointer (a cross-db lookup). Long multi-topic transcripts get a deterministic **thread-index** gist; single-topic docs get an agent-written prose gist (`cards emit/ingest`, no API key).
+- **Architect** (`architect.db`) — the **architectural-patterns** corpus: `investigations` (lens-aware dedup, keyed `url × surveyed_by × lens`, so two reviewer lenses on one URL is a join) + the `patterns` lifted from them. Team-scope — queried directly, not folded into personal recall. Seed from the existing markdown with `architect ingest`.
+- **Codex** (`codex.db`) — a **code graph**: `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade). The store and graph queries are in place; real-repo ingest (a Tree-sitter `SourceAdapter`) is pending.
+
+Personal `techne.db` deliberately stays raw-SQLite and local-only. The `StoreAdapter` is SQLite today; Postgres/others are config-selected later, per domain, without touching callers.
 
 ---
 
