@@ -140,6 +140,70 @@ def _save_thread_row(config, session_id: str, thread: Thread) -> None:
     )
 
 
+def test_persisted_thread_id_recovers_from_drift(tmp_path):
+    """#106: when the recomputed id doesn't match the stored row (boundary_signal
+    drift on reload), resolve via (session_id, thread_num) instead of failing."""
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 3)
+    # A thread persisted under the content-addressed scheme: thread_num=1's stored
+    # id is a t-hash, not "{session}-1".
+    conn = connect(config.db_path)
+    conn.execute(
+        "INSERT INTO threads (id, session_id, thread_num, label, summary) VALUES (?,?,?,?,?)",
+        ("t-deadbeef00", session_id, 1, "L", "S"),
+    )
+    conn.commit()
+    conn.close()
+
+    from techne.core.thread_orchestrator import persisted_thread_id, thread_row_id
+
+    # A reloaded Thread whose recomputed id drifts to the legacy form.
+    t = Thread(thread_num=1, label="L", summary="S", observation_indices=[0, 1, 2])
+    assert thread_row_id(session_id, t) == f"{session_id}-1"  # the drifted (wrong) id
+    assert persisted_thread_id(config.db_path, session_id, t) == "t-deadbeef00"  # recovered
+
+
+def test_persisted_thread_id_none_when_unpersisted(tmp_path):
+    """No persisted row for the thread → None (caller stores a NULL FK)."""
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 3)
+    from techne.core.thread_orchestrator import persisted_thread_id
+
+    t = Thread(thread_num=9, label="L", summary="S", observation_indices=[0, 1, 2])
+    assert persisted_thread_id(config.db_path, session_id, t) is None
+
+
+def test_insert_candidate_nulls_missing_thread_fk(tmp_path):
+    """#106 safety net: a stale/missing thread FK must NOT drop the candidate — it
+    lands with a NULL thread id instead of raising an FK error."""
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 3)
+    from techne.core.reflect import Candidate, _insert_candidate
+
+    cid = _insert_candidate(
+        config.db_path,
+        Candidate(
+            scope="knowledge", type="fact", content="a durable fact", tags="t", confidence="high"
+        ),
+        session_id=session_id,
+        thread_id="t-does-not-exist",  # no such threads row
+        model_used="agent-assisted",
+        prompt_hash="abc123",
+        raw_response="[]",
+    )
+    assert cid is not None
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT source_thread_id, source_session_id FROM knowledge_candidates WHERE id=?",
+            (cid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["source_thread_id"] is None  # FK nulled, not rejected
+    assert row["source_session_id"] == session_id  # session provenance preserved
+
+
 def test_reflect_disabled_is_noop(tmp_path):
     config = _mk_config(tmp_path, enabled=False)
     session_id, obs = _mk_session_with_obs(config, 5)
@@ -486,14 +550,14 @@ def test_emit_reflection_batch_builds_prompts(tmp_path):
 
     config = _mk_config(tmp_path, enabled=False)  # emit must NOT require enabled
     session_id, obs = _mk_session_with_obs(config, 5)
-    threads = [
-        Thread(thread_num=1, label="auth", summary="auth", observation_indices=list(range(5)))
-    ]
-    batch = emit_reflection_batch(config, session_id, threads, obs)
+    thread = Thread(thread_num=1, label="auth", summary="auth", observation_indices=list(range(5)))
+    _save_thread_row(config, session_id, thread)  # production saves threads before reflect
+    batch = emit_reflection_batch(config, session_id, [thread], obs)
     assert len(batch) == 1
     item = batch[0]
     assert item["session_id"] == session_id
     assert item["thread_num"] == 1
+    # The resolved, persisted FK id (techne#106) — matches the saved threads row.
     assert item["thread_id"] == f"{session_id}-1"
     assert item["prompt_hash"] and item["prompt"]
     assert "JSON array" in item["prompt"]  # the real reflect prompt

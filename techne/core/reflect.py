@@ -209,6 +209,12 @@ def _insert_candidate(
 ) -> int:
     conn = connect(db_path)
     try:
+        # FK safety net (techne#106): never let a stale/missing thread id drop a
+        # candidate — fall back to a NULL FK (loses provenance) rather than raising.
+        if thread_id is not None and not conn.execute(
+            "SELECT 1 FROM threads WHERE id = ?", (thread_id,)
+        ).fetchone():
+            thread_id = None
         cur = conn.execute(
             """INSERT INTO knowledge_candidates
                  (scope, type, content, tags, confidence,
@@ -296,7 +302,7 @@ def emit_reflection_batch(
 
     Returns [{thread_id, session_id, thread_num, prompt_hash, prompt}].
     """
-    from techne.core.thread_orchestrator import thread_row_id
+    from techne.core.thread_orchestrator import persisted_thread_id
 
     obs_by_thread = _bucket_observations(threads, observations)
     batch: list[dict] = []
@@ -308,9 +314,10 @@ def emit_reflection_batch(
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         batch.append(
             {
-                # The real FK id save_threads wrote — NOT "{session_id}-{thread_num}",
-                # which silently fails the candidates FK for heuristic threads.
-                "thread_id": thread_row_id(session_id, t),
+                # The real persisted FK id — resolved against the threads table, not
+                # recomputed (techne#106: a re-detected thread hashes differently than
+                # the saved row on legacy sessions). None → candidate gets a NULL FK.
+                "thread_id": persisted_thread_id(config.db_path, session_id, t),
                 "session_id": session_id,
                 "thread_num": t.thread_num,
                 "prompt_hash": prompt_hash,

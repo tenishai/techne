@@ -354,6 +354,35 @@ def thread_row_id(session_id: str, t: Thread) -> str:
     return f"{session_id}-{t.thread_num}"
 
 
+def persisted_thread_id(db_path, session_id: str, t: Thread) -> str | None:
+    """Resolve the ACTUAL `threads.id` for a Thread, preferring the persisted row
+    over a recomputed hash (techne#106).
+
+    `thread_row_id` is a pure function of the Thread's *current* fields, so it
+    drifts when a thread is re-detected at reflection time with a different
+    `boundary_signal` than it was saved with (legacy/pre-heuristic sessions were
+    saved as `{session}-{num}` but reload as a content-addressed `t-<hash>`). That
+    drift made the candidates FK reject the row. Here we trust the database: use
+    the computed id only if it actually exists; else fall back to the natural key
+    `(session_id, thread_num)`; return None if no row is persisted (the caller
+    then stores a NULL FK rather than losing the candidate).
+    """
+    from techne.core.database import connect
+
+    computed = thread_row_id(session_id, t)
+    conn = connect(db_path)
+    try:
+        if conn.execute("SELECT 1 FROM threads WHERE id = ?", (computed,)).fetchone():
+            return computed
+        row = conn.execute(
+            "SELECT id FROM threads WHERE session_id = ? AND thread_num = ?",
+            (session_id, t.thread_num),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def save_threads(
     threads: list[Thread],
     session_id: str,
