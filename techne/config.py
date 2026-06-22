@@ -271,11 +271,15 @@ class Config:
             entity_patterns = t.get("entity_patterns") or []
             if not isinstance(entity_patterns, list):
                 raise ValueError("threads.entity_patterns must be a list")
+            # Fallbacks read from the dataclass defaults so a YAML block that
+            # omits a field can never drift from the in-code default (#82 — the
+            # old literal 0.85 fallback silently overrode the 0.05 default).
+            _td = ThreadConfig()
             cfg.threads = ThreadConfig(
-                min_observations=t.get("min_observations", 15),
-                link_threshold=t.get("link_threshold", 0.85),
-                stale_after_days=t.get("stale_after_days", 30),
-                complete_after_hours=t.get("complete_after_hours", 48),
+                min_observations=t.get("min_observations", _td.min_observations),
+                link_threshold=t.get("link_threshold", _td.link_threshold),
+                stale_after_days=t.get("stale_after_days", _td.stale_after_days),
+                complete_after_hours=t.get("complete_after_hours", _td.complete_after_hours),
                 detector=detector,
                 summarizer=summarizer,
                 tool_families={str(k): str(v) for k, v in tool_families.items()},

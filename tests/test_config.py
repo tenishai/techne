@@ -44,6 +44,21 @@ def test_threads_detector_defaults_to_heuristic():
     assert cfg.threads.summarizer == "heuristic"
 
 
+def test_threads_empty_block_inherits_dataclass_defaults(tmp_path):
+    # #82: a `threads:` block that omits a field must fall back to the dataclass
+    # default, not a drifted literal. The old loader hardcoded link_threshold's
+    # fallback at the unreachable 0.85 while the default was 0.05 — so a config
+    # with `threads: {}` silently disabled all cross-thread linking.
+    f = tmp_path / "config.yaml"
+    f.write_text(yaml.dump({"threads": {}}))
+    loaded = Config.load(f)
+    defaults = Config().threads
+    assert loaded.threads.link_threshold == defaults.link_threshold == 0.05
+    assert loaded.threads.min_observations == defaults.min_observations
+    assert loaded.threads.stale_after_days == defaults.stale_after_days
+    assert loaded.threads.complete_after_hours == defaults.complete_after_hours
+
+
 def test_threads_detector_loaded_from_yaml(tmp_path):
     f = tmp_path / "config.yaml"
     f.write_text(yaml.dump({"threads": {"detector": "llm", "summarizer": "llm"}}))
