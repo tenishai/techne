@@ -17,6 +17,20 @@ _HOOK_LAST_RUN_KEY = "hook:session_start:last_run"
 _HOOK_LAST_ERROR_KEY = "hook:session_start:last_error"
 
 
+def _parse_ts(ts: str):
+    """Parse a SQLite/ISO timestamp string to an aware UTC datetime, or None.
+
+    SQLite stores timestamps as strings — either ``CURRENT_TIMESTAMP`` form or
+    ISO-8601. Try the common shapes without pulling in dateutil.
+    """
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def collect_health(config: Config) -> dict:
     """Assemble the full health/status payload.
 
@@ -27,8 +41,14 @@ def collect_health(config: Config) -> dict:
     New fields added by techne#95:
       hook_last_run  — ISO timestamp of last session_start hook run (or None)
       hook_last_error — {ts, stage, msg} of last hook failure (or None)
-      stale          — True when prior last_session is older than staleness_hours
-      capture_alive  — True when observations table has grown in the last 48h
+      last_capture   — ISO timestamp of the newest observation (event-time), or None
+      stale          — True when capture has gone quiet longer than staleness_hours
+      capture_alive  — True when capture is current (last observation within staleness_hours)
+
+    Staleness keys on the last *observation*, NOT the last session row. A single
+    long-lived or repeatedly-resumed session (common over tmux/remote) inserts
+    one session row but keeps capturing, so MAX(started_at) would falsely read
+    as a multi-day gap while capture is in fact healthy.
     """
     import techne
     from techne.core.state import db_stats
@@ -47,6 +67,7 @@ def collect_health(config: Config) -> dict:
         # Hook health fields (techne#95) — populated below when DB is reachable.
         "hook_last_run": None,
         "hook_last_error": None,
+        "last_capture": None,
         "stale": False,
         "capture_alive": False,
     }
@@ -76,44 +97,35 @@ def collect_health(config: Config) -> dict:
     except Exception:  # noqa: BLE001
         pass  # Non-fatal: extension_state unreadable degrades gracefully
 
-    # Staleness: compare prior last_session to now (techne#95).
-    try:
-        last_session_str = health.get("last_session")
-        if last_session_str:
-            # SQLite stores timestamps as strings — may be ISO or SQLite CURRENT_TIMESTAMP.
-            # Parse the most common formats without pulling in dateutil.
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-                try:
-                    last_dt = datetime.strptime(last_session_str, fmt).replace(tzinfo=timezone.utc)
-                    break
-                except ValueError:
-                    continue
-            else:
-                last_dt = None
-
-            if last_dt is not None:
-                age = datetime.now(tz=timezone.utc) - last_dt
-                health["stale"] = age > timedelta(hours=config.staleness_hours)
-        else:
-            # No sessions at all — treat as potentially stale but don't alarm on
-            # a brand-new installation.
-            health["stale"] = False
-    except Exception:  # noqa: BLE001
-        health["stale"] = False
-
-    # capture_alive: did observations grow in the last 48h? Cheap single query.
+    # last_capture: newest observation event-time — the true "is capture alive?"
+    # signal. Keyed on observations, NOT session rows (see collect_health docstring).
     try:
         from techne.core.database import connect as _connect
 
         _conn = _connect(config.db_path)
         try:
             row = _conn.execute(
-                "SELECT COUNT(*) FROM observations WHERE timestamp > datetime('now', '-48 hours')"
+                "SELECT MAX(COALESCE(event_at, timestamp)) FROM observations"
             ).fetchone()
-            health["capture_alive"] = (row[0] if row else 0) > 0
+            health["last_capture"] = row[0] if row and row[0] else None
         finally:
             _conn.close()
     except Exception:  # noqa: BLE001
+        health["last_capture"] = None
+
+    # Staleness alarm: capture has gone quiet longer than staleness_hours.
+    # capture_alive is its inverse — current capture, within the window.
+    last_capture = health.get("last_capture")
+    if last_capture:
+        last_dt = _parse_ts(last_capture)
+        if last_dt is not None:
+            age = datetime.now(tz=timezone.utc) - last_dt
+            health["stale"] = age > timedelta(hours=config.staleness_hours)
+            health["capture_alive"] = not health["stale"]
+    else:
+        # No observations at all — brand-new install; don't alarm as stale,
+        # but capture is not yet proven alive either.
+        health["stale"] = False
         health["capture_alive"] = False
 
     return health
@@ -158,12 +170,13 @@ def format_banner(health: dict) -> str:
         obx_mark = "⚠️ " if adapter != "noop" else ""
         lines.append(f"> {obx_mark}outbox: {pending} pending (adapter={adapter})")
 
-    # Staleness alarm (techne#95): visible warning when last_session is stale.
+    # Staleness alarm (techne#95): warning when capture has gone quiet. Keyed on
+    # the last observation, not session rows — a long/resumed session is normal.
     if health.get("stale"):
-        last_session_str = health.get("last_session") or "unknown"
+        last_capture_str = health.get("last_capture") or "unknown"
         lines.append(
-            f"> ⚠️ techne capture gap: no sessions for {_format_age(last_session_str)}"
-            f" — hook may have been down"
+            f"> ⚠️ techne capture gap: no observations for {_format_age(last_capture_str)}"
+            f" — hook may be down"
         )
 
     # Hook error surfacing (techne#95): surface last persisted failure.
@@ -177,17 +190,14 @@ def format_banner(health: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_age(last_session_str: str) -> str:
-    """Return a human-readable duration string for the time since last_session_str."""
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-        try:
-            last_dt = datetime.strptime(last_session_str, fmt).replace(tzinfo=timezone.utc)
-            age = datetime.now(tz=timezone.utc) - last_dt
-            total_hours = int(age.total_seconds() // 3600)
-            if total_hours < 48:
-                return f"{total_hours}h"
-            days = total_hours // 24
-            return f"{days}d"
-        except ValueError:
-            continue
-    return "unknown duration"
+def _format_age(ts_str: str) -> str:
+    """Return a human-readable duration string for the time since ts_str."""
+    last_dt = _parse_ts(ts_str)
+    if last_dt is None:
+        return "unknown duration"
+    age = datetime.now(tz=timezone.utc) - last_dt
+    total_hours = int(age.total_seconds() // 3600)
+    if total_hours < 48:
+        return f"{total_hours}h"
+    days = total_hours // 24
+    return f"{days}d"

@@ -45,7 +45,11 @@ def config(tmp_path: Path) -> Config:
 
 
 def _make_old_session(db_path: Path, hours_ago: int = 25) -> None:
-    """Insert a session with a started_at timestamp in the past."""
+    """Seed a session whose last observation (capture) is in the past.
+
+    Staleness keys on the last observation, not the session row, so we stamp an
+    observation at the target time too.
+    """
     old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=hours_ago)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -55,13 +59,18 @@ def _make_old_session(db_path: Path, hours_ago: int = 25) -> None:
             "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
             ("old-session-id", old_ts),
         )
+        conn.execute(
+            "INSERT INTO observations (session_id, tool_name, content, timestamp) "
+            "VALUES (?, ?, ?, ?)",
+            ("old-session-id", "Observation", "old capture", old_ts),
+        )
         conn.commit()
     finally:
         conn.close()
 
 
 def _make_recent_session(db_path: Path, hours_ago: int = 1) -> None:
-    """Insert a session with a started_at timestamp recently."""
+    """Seed a session whose last observation (capture) is recent."""
     recent_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=hours_ago)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -70,6 +79,11 @@ def _make_recent_session(db_path: Path, hours_ago: int = 1) -> None:
         conn.execute(
             "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
             ("recent-session-id", recent_ts),
+        )
+        conn.execute(
+            "INSERT INTO observations (session_id, tool_name, content, timestamp) "
+            "VALUES (?, ?, ?, ?)",
+            ("recent-session-id", "Observation", "recent capture", recent_ts),
         )
         conn.commit()
     finally:
@@ -259,55 +273,83 @@ class TestExtensionStatePersistence:
 
 
 class TestStalenessAlarm:
-    def test_stale_banner_when_last_session_old(self, config: Config):
-        """When prior last_session is older than staleness_hours, banner has ⚠️ gap line."""
+    def test_stale_banner_when_capture_old(self, config: Config):
+        """When the last observation is older than staleness_hours, banner has ⚠️ gap line."""
         config.staleness_hours = 12
         _make_old_session(config.db_path, hours_ago=25)
 
-        from techne.core.state import db_stats
-
-        prior = db_stats(config.db_path)
         health = collect_health(config)
-        # Override last_session with prior value (simulating hook Phase 5 behaviour).
-        health["last_session"] = prior["last_session"]
-        health["stale"] = True  # force stale since we know it is
-
         banner = format_banner(health)
         assert "⚠️ techne capture gap" in banner
-        assert "hook may have been down" in banner
+        assert "no observations for" in banner
+        assert "hook may be down" in banner
 
-    def test_no_stale_warning_when_last_session_fresh(self, config: Config):
-        """When last_session is recent, no staleness warning in banner."""
+    def test_no_stale_warning_when_capture_fresh(self, config: Config):
+        """A recently-captured observation means no staleness warning."""
         config.staleness_hours = 12
         _make_recent_session(config.db_path, hours_ago=1)
 
         health = collect_health(config)
-        health["stale"] = False
-
         banner = format_banner(health)
         assert "capture gap" not in banner
 
+    def test_long_session_with_recent_capture_not_stale(self, config: Config):
+        """A long-lived session (old started_at) with recent capture must NOT alarm.
+
+        This is the false-positive the capture-based alarm fixes: one session row
+        spanning days while observations keep flowing.
+        """
+        config.staleness_hours = 12
+        # Old session row, but a fresh observation under it (resumed/long session).
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=60)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        recent_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+                ("long-session", old_ts),
+            )
+            conn.execute(
+                "INSERT INTO observations (session_id, tool_name, content, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                ("long-session", "Observation", "fresh work", recent_ts),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        health = collect_health(config)
+        assert health["stale"] is False
+        assert health["capture_alive"] is True
+
     def test_collect_health_stale_flag_set(self, config: Config):
-        """collect_health returns stale=True when last_session is beyond staleness_hours."""
+        """collect_health returns stale=True when last capture is beyond staleness_hours."""
         config.staleness_hours = 12
         _make_old_session(config.db_path, hours_ago=25)
 
         health = collect_health(config)
         assert health["stale"] is True
+        assert health["capture_alive"] is False
 
     def test_collect_health_stale_flag_not_set_for_fresh(self, config: Config):
-        """collect_health returns stale=False for a recent session."""
+        """collect_health returns stale=False for a recent capture."""
         config.staleness_hours = 12
         _make_recent_session(config.db_path, hours_ago=1)
 
         health = collect_health(config)
         assert health["stale"] is False
+        assert health["capture_alive"] is True
 
     def test_no_stale_on_empty_db(self, config: Config):
-        """Empty DB (no sessions at all) should not alarm as stale."""
+        """Empty DB (no observations at all) should not alarm as stale."""
         health = collect_health(config)
-        # No sessions → last_session is None → not stale.
+        # No observations → last_capture is None → not stale, capture not yet alive.
         assert health["stale"] is False
+        assert health["capture_alive"] is False
 
 
 # ---------------------------------------------------------------------------

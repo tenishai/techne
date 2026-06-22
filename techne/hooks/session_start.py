@@ -93,9 +93,9 @@ def main() -> None:
     cc_session_id = data.get("session_id") or None
 
     # ------------------------------------------------------------------
-    # Phase 2: Capture prior last_session BEFORE inserting the new one.
-    # This is used by the staleness alarm so we see the gap the user
-    # actually experienced, not the post-insert value.
+    # Phase 2: Capture prior last_session BEFORE inserting the new one, so the
+    # banner's "last session" line shows when work last happened rather than the
+    # row this hook is about to insert (which would read as "now").
     # ------------------------------------------------------------------
     prior_last_session: str | None = None
     try:
@@ -181,34 +181,13 @@ def main() -> None:
     try:
         from techne.core.health import collect_health, format_banner
 
-        # Pass the prior_last_session into the health dict so the staleness
-        # alarm reflects the gap the user actually experienced.
         health = collect_health(config)
-        health["last_session"] = prior_last_session  # use pre-insert value
-        # Re-evaluate stale with corrected last_session.
-        from datetime import timedelta
-
-        stale = False
-        if prior_last_session:
-            for fmt in (
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%dT%H:%M:%S.%f",
-            ):
-                try:
-                    from datetime import datetime, timezone
-
-                    last_dt = datetime.strptime(prior_last_session, fmt).replace(
-                        tzinfo=timezone.utc
-                    )
-                    stale = datetime.now(tz=timezone.utc) - last_dt > timedelta(
-                        hours=config.staleness_hours
-                    )
-                    break
-                except ValueError:
-                    continue
-        health["stale"] = stale
-
+        # Display the pre-insert session time as "last session" — this hook just
+        # inserted the current row, which would otherwise read as "now".
+        health["last_session"] = prior_last_session
+        # Staleness is capture-based (last observation), computed inside
+        # collect_health. It is independent of the session row just inserted,
+        # so no recompute is needed here.
         banner = format_banner(health)
         output_parts.append(banner)
         output_parts.append("")
