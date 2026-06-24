@@ -118,8 +118,10 @@ class ClaudeCodeAdapter:
 
         The slug is the absolute cwd with '/' and '.' replaced by '-'.
         """
+        from techne.platforms.claude_code.paths import claude_projects_dir
+
         slug = re.sub(r"[/.]", "-", str(Path(cwd).resolve()))
-        return Path.home() / ".claude" / "projects" / slug / "memory" / "MEMORY.md"
+        return claude_projects_dir() / slug / "memory" / "MEMORY.md"
 
     def injected_context(self, config) -> str:
         """CC's push surface is the SessionStart hook's Tier-0 ## Key Knowledge

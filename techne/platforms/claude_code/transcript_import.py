@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from techne.core.database import connect
 from techne.core.redaction import redact_credentials
 from techne.hooks.post_tool_use import summarize
+from techne.platforms.claude_code.paths import claude_projects_dir
 from techne.sync.jsonl_records import (
     content_blocks,
     extract_text,
@@ -18,7 +19,8 @@ from techne.sync.jsonl_records import (
     tool_result_text,
 )
 
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
+# Import-time snapshot; honors CLAUDE_CONFIG_DIR set before launch (techne#113).
+PROJECTS_DIR = claude_projects_dir()
 
 
 def project_slug_for_cwd(cwd: Path | None = None) -> str:
