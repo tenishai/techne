@@ -222,6 +222,29 @@ def test_rotation_new_inode_restarts_from_zero(db_path, tmp_path):
     assert _obs_count(db_path) == 3  # 1 original + 2 after rotation
 
 
+def test_rotation_reused_inode_detected_via_head(db_path, tmp_path):
+    """Rotation must be detected even when the inode is RECYCLED. An in-place
+    truncate-and-rewrite keeps the same inode (as unlink+recreate does on some
+    filesystems, e.g. Linux/CI), so the inode-only check would miss it; the head
+    signature catches the replacement. Deterministic on every filesystem."""
+    p = tmp_path / "sess-1.jsonl"
+    _write_jsonl(p, [_rec_user("original content")])
+
+    cfg = JsonlTranscriptConfig(paths=[tmp_path])
+    src = JsonlTranscriptSource(db_path=db_path, config=cfg)
+    src.initial_walk()
+    inode_before = p.stat().st_ino
+    assert _obs_count(db_path) == 1
+
+    # Rewrite in place — same path, no unlink → guaranteed same inode.
+    _write_jsonl(p, [_rec_user("rotated new content"), _rec_user("second line")])
+    assert p.stat().st_ino == inode_before  # the inode really was reused
+
+    count = src.initial_walk()
+    assert count == 2
+    assert _obs_count(db_path) == 3  # 1 original + 2 after rotation
+
+
 # ---------------------------------------------------------------------------
 # Tagging: kind, role, session, project all present in content
 # ---------------------------------------------------------------------------
