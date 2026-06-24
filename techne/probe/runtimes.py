@@ -118,8 +118,15 @@ class ClaudeCodeAdapter:
 
         The slug is the absolute cwd with '/' and '.' replaced by '-'.
         """
+        # Resolve at call time (unlike the import-time snapshots in hooks.py /
+        # transcript_import.py): the probe is a longer-lived differential-test
+        # harness that may target different runtimes within one process, so it
+        # re-reads CLAUDE_CONFIG_DIR per call. The deferred local import also
+        # avoids a probe->platforms import cycle.
+        from techne.platforms.claude_code.paths import claude_projects_dir
+
         slug = re.sub(r"[/.]", "-", str(Path(cwd).resolve()))
-        return Path.home() / ".claude" / "projects" / slug / "memory" / "MEMORY.md"
+        return claude_projects_dir() / slug / "memory" / "MEMORY.md"
 
     def injected_context(self, config) -> str:
         """CC's push surface is the SessionStart hook's Tier-0 ## Key Knowledge
