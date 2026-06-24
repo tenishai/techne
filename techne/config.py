@@ -170,6 +170,11 @@ class ReflectConfig:
 
 @dataclass
 class Config:
+    # These bind the import-time snapshot, so a bare Config() does NOT honor a
+    # TECHNE_HOME set after import. Config.load() and _from_dict() both overwrite
+    # db_path/data_dir from techne_home() at call time, so every runtime path is
+    # correct; only direct Config() construction sees the snapshot. Always go
+    # through Config.load() when the env knob must apply.
     db_path: Path = DEFAULT_DB
     data_dir: Path = DEFAULT_DIR
     identity_dir: Path | None = None

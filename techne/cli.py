@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from techne import __version__
-from techne.config import DEFAULT_CONFIG, PLATFORMS, Config
+from techne.config import PLATFORMS, Config, techne_home
 
 
 @click.group()
@@ -803,9 +803,11 @@ def init(ctx, platform, identity_dir):
         click.echo("Claude Code hooks registered")
         click.echo("MCP server registered")
 
-    # Save config
-    config.save()
-    click.echo(f"Config saved: {DEFAULT_CONFIG}")
+    # Save config. Report the resolved path save() actually wrote to (honors
+    # TECHNE_HOME), not the import-time DEFAULT_CONFIG snapshot.
+    saved_path = techne_home() / "config.yaml"
+    config.save(saved_path)
+    click.echo(f"Config saved: {saved_path}")
 
     # Platform-specific next-steps so the operator isn't left guessing.
     if platform == "standalone":
