@@ -24,6 +24,7 @@ Out of scope (deferred):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from pathlib import Path
@@ -84,6 +85,23 @@ def _session_from_path(jsonl_path: Path) -> str:
 
 def _tag_header(kind: str, role: str, session: str, project: str) -> str:
     return f"kind:{kind} role:{role} session:{session} project:{project}"
+
+
+def _head_signature(path: Path, nbytes: int = 256) -> str:
+    """Fingerprint the file's first line (capped at *nbytes*), to detect
+    replacement even when the inode is recycled. Filesystems may reuse an inode
+    on unlink+recreate (common on Linux/CI), so an inode-only rotation check
+    misses the replacement; a changed head signature catches it.
+
+    Uses the first LINE, not the first N bytes: appending records never alters
+    the first line, so a normal tail-append keeps the signature stable (whereas
+    a raw byte-prefix would change for a file shorter than nbytes as it grows,
+    false-triggering a rotation). Returns "" if the file can't be read."""
+    try:
+        with path.open("rb") as fh:
+            return hashlib.sha1(fh.readline(nbytes)).hexdigest()
+    except OSError:
+        return ""
 
 
 def _ingest_records_from_offset(
@@ -259,7 +277,7 @@ class JsonlTranscriptSource:
     # ------------------------------------------------------------------
 
     def _load_cursors(self) -> dict[str, dict]:
-        """Return {file_path: {offset, inode}} dict from extension_state."""
+        """Return {file_path: {offset, inode, head}} dict from extension_state."""
         conn = connect(self._db_path)
         try:
             state = get_state(conn, self._cfg.adapter_name) or {}
@@ -284,7 +302,11 @@ class JsonlTranscriptSource:
         """Ingest new records from *path*, updating *cursors* in place.
 
         Returns (updated_cursors, obs_count).
-        Handles rotation: if inode changed, restart from byte 0.
+
+        Handles rotation (file replaced by a new session) → restart from byte 0,
+        detected via any of: inode change (the common case); inode REUSE where
+        the head bytes changed (filesystems that recycle inodes on
+        unlink+recreate, e.g. Linux/CI); or truncation below the saved offset.
         """
         key = str(path)
         try:
@@ -295,18 +317,25 @@ class JsonlTranscriptSource:
         cur = cursors.get(key, {})
         saved_inode = cur.get("inode")
         saved_offset = cur.get("offset", 0)
+        saved_head = cur.get("head")
+        head = _head_signature(path)
 
-        # Rotation: new inode means the file was replaced (new session).
+        rotated_reason = None
         if saved_inode is not None and saved_inode != st.st_ino:
-            log.info(
-                "jsonl_rotated path=%s old_inode=%d new_inode=%d", path, saved_inode, st.st_ino
-            )
+            rotated_reason = f"inode {saved_inode}->{st.st_ino}"
+        elif saved_offset > 0 and st.st_size < saved_offset:
+            rotated_reason = f"truncated (size {st.st_size} < offset {saved_offset})"
+        elif saved_offset > 0 and saved_head and head and saved_head != head:
+            rotated_reason = "head changed (inode reused)"
+
+        if rotated_reason is not None:
+            log.info("jsonl_rotated path=%s %s — restarting from byte 0", path, rotated_reason)
             saved_offset = 0
 
         new_offset, count = _ingest_records_from_offset(
             self._db_path, path, saved_offset, self._cfg.adapter_name
         )
-        cursors[key] = {"offset": new_offset, "inode": st.st_ino}
+        cursors[key] = {"offset": new_offset, "inode": st.st_ino, "head": head}
         return cursors, count
 
     def _walk_and_ingest(self) -> int:
