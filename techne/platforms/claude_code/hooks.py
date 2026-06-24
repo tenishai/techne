@@ -6,9 +6,13 @@ import sys
 from pathlib import Path
 
 from techne.config import Config
+from techne.platforms.claude_code.paths import claude_config_dir, claude_json_path
 
-SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-MCP_CONFIG_PATH = Path.home() / ".claude.json"
+# Import-time snapshots, honoring CLAUDE_CONFIG_DIR set before launch. The hook
+# installer runs as a fresh `techne` process per invocation, so the env is fixed
+# by then; tests monkeypatch these module attributes directly.
+SETTINGS_PATH = claude_config_dir() / "settings.json"
+MCP_CONFIG_PATH = claude_json_path()
 
 
 def _hook_command(module: str) -> str:
