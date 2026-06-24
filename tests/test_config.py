@@ -1,11 +1,38 @@
 """Tests for Config platform field type enforcement."""
 
+from pathlib import Path
 from typing import get_args
 
 import pytest
 import yaml
 
-from techne.config import PLATFORMS, Config, Platform
+from techne.config import PLATFORMS, Config, Platform, techne_home
+
+
+def test_techne_home_unset_keeps_default(monkeypatch):
+    """Unset TECHNE_HOME → the historical ~/.techne root (backward compatible)."""
+    monkeypatch.delenv("TECHNE_HOME", raising=False)
+    assert techne_home() == Path.home() / ".techne"
+
+
+def test_techne_home_env_relocates_root(monkeypatch, tmp_path):
+    """TECHNE_HOME relocates db_path/data_dir when no config.yaml exists, so each
+    agent on one OS user can own a separate store (techne#112)."""
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    cfg = Config.load()
+    assert cfg.db_path == tmp_path / "techne.db"
+    assert cfg.data_dir == tmp_path
+
+
+def test_techne_home_explicit_db_path_still_wins(monkeypatch, tmp_path):
+    """An explicit db_path in config.yaml overrides the TECHNE_HOME default;
+    an absent data_dir falls back to the TECHNE_HOME root."""
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    explicit = tmp_path / "custom" / "mem.db"
+    (tmp_path / "config.yaml").write_text(yaml.dump({"db_path": str(explicit)}))
+    cfg = Config.load()
+    assert cfg.db_path == explicit
+    assert cfg.data_dir == tmp_path
 
 
 def test_config_load_rejects_invalid_platform(tmp_path):
