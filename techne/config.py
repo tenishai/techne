@@ -1,5 +1,6 @@
 """Configuration management for techne."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -14,7 +15,19 @@ Platform = Literal["claude-code", "codex", "standalone", "cabal", "opencode"]
 # client here and it propagates everywhere.
 PLATFORMS: tuple[str, ...] = get_args(Platform)
 
-DEFAULT_DIR = Path.home() / ".techne"
+
+def techne_home() -> Path:
+    """Root dir for techne state. TECHNE_HOME overrides the default ~/.techne so
+    multiple agents on one OS user can each own a separate store — an agent's
+    root is env/identity-defined, not equal to the user's home (techne#112)."""
+    env = os.environ.get("TECHNE_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".techne"
+
+
+# Import-time snapshots, kept for back-compat with external importers. Code that
+# must honor a TECHNE_HOME set after import — the MCP server, CLI, and hooks, all
+# of which go through Config.load() — resolves via techne_home() at call time.
+DEFAULT_DIR = techne_home()
 DEFAULT_DB = DEFAULT_DIR / "techne.db"
 DEFAULT_CONFIG = DEFAULT_DIR / "config.yaml"
 
@@ -187,20 +200,25 @@ class Config:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
-        path = path or DEFAULT_CONFIG
+        home = techne_home()
+        path = path or (home / "config.yaml")
         if not path.exists():
-            return cls()
+            cfg = cls()
+            cfg.db_path = home / "techne.db"
+            cfg.data_dir = home
+            return cfg
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
-        return cls._from_dict(raw)
+        return cls._from_dict(raw, home=home)
 
     @classmethod
-    def _from_dict(cls, raw: dict) -> "Config":
+    def _from_dict(cls, raw: dict, home: Path | None = None) -> "Config":
+        home = home or techne_home()
         cfg = cls()
-        if "db_path" in raw:
-            cfg.db_path = Path(raw["db_path"]).expanduser()
-        if "data_dir" in raw:
-            cfg.data_dir = Path(raw["data_dir"]).expanduser()
+        # Absent db_path/data_dir default to the (possibly TECHNE_HOME-relocated)
+        # root rather than the import-time snapshot, so the env knob takes effect.
+        cfg.db_path = Path(raw["db_path"]).expanduser() if "db_path" in raw else home / "techne.db"
+        cfg.data_dir = Path(raw["data_dir"]).expanduser() if "data_dir" in raw else home
         if "identity_dir" in raw:
             cfg.identity_dir = Path(raw["identity_dir"]).expanduser()
         if "platform" in raw:
@@ -353,7 +371,7 @@ class Config:
         return cfg
 
     def save(self, path: Path | None = None):
-        path = path or DEFAULT_CONFIG
+        path = path or (techne_home() / "config.yaml")
         path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
             "db_path": str(self.db_path),
