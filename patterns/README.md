@@ -1,58 +1,60 @@
-# Architectural patterns — shared team corpus
+# Architectural patterns — the pattern store
 
-`architectural-patterns.md` is the team's borrowable-patterns corpus: design patterns
-lifted from other people's code, tagged by source URL + survey date, with where-to-apply
-notes. It's a **plain-markdown file you can edit by hand** *and* the import/export format for
-the Architect pattern store (`architect.db`, techne#87). Markdown diffs merge cleanly, so the
-whole team can contribute.
+Patterns lifted from other people's code live in **`architect.db`** (techne#87), the
+**single source of truth**. Query and write via the `techne architect` CLI.
 
-## Add a pattern (anyone)
+There is **no hand-edited markdown corpus**. The old `architectural-patterns.md` transport
+(and the operator's `~/.claude` copy) were retired 2026-06-25: a hand-edited file silently
+drifts out of sync with the db and gets treated as canonical by accident — which is exactly
+how 14 patterns ended up only in the markdown and never in the store. Don't reintroduce one.
 
-1. Open `architectural-patterns.md`, append a block using the **Template for new entries** at
-   the bottom of the file:
-   ```
-   ## <Short pattern name>
+## Add a pattern
 
-   - **Source**: <url> — <optional file:line / §section>
-   - **Surveyed**: <YYYY-MM-DD>
-
-   <What it does — 1–2 paragraphs.>
-
-   **Why interesting**: <the non-obvious design choice / trade-off>.
-
-   **Where to apply**: <where in our stack it fits>.
-
-   ---
-   ```
-   (A URL you investigated but found nothing to lift → a bullet under
-   `## Surveyed (no patterns worth saving)`.)
-2. `git commit && git push`.
-
-Grep for a source URL before investigating it — if it's already in the file, we've seen it.
-
-## Query it (load into your local store)
+Preferred: the `/investigate-url` skill surfaces candidates from a URL, filters, and ingests
+the kept patterns straight into `architect.db`. To add one by hand, write a minimal block to a
+temp file and ingest it (the **Source line must contain an `http(s)://` URL**, else it's skipped):
 
 ```sh
-git pull
-techne architect ingest patterns/architectural-patterns.md   # idempotent (content-hash dedup)
-techne architect search "<topic>"
+cat > /tmp/p.md <<'EOF'
+## <Short pattern name>
+
+- **Source**: <https-url> — <optional file:line / §section>
+- **Surveyed**: <YYYY-MM-DD>
+
+<What it does — 1–2 paragraphs.>
+
+**Why interesting**: <the non-obvious design choice / trade-off>.
+
+**Where to apply**: <where in our stack it fits>.
+
+---
+EOF
+techne architect ingest /tmp/p.md      # idempotent (content-hash dedup)
+```
+
+A URL investigated with nothing to lift → a `## Surveyed (no patterns worth saving)` bullet
+in the temp md: `- <url> — surveyed YYYY-MM-DD — <reason>`.
+
+A cross-source *synthesis* (no single source URL) belongs in techne knowledge
+(`techne_store`, type=pattern), not here — the pattern schema requires a real Source URL.
+
+## Query it
+
+```sh
+techne architect search "<topic>"      # also: dedup a URL before investigating it
 techne architect show <PATTERN_ID>
 ```
 
-## Regenerating the file (`architect export`)
+## Backup
 
-`architect.db` and the markdown round-trip: `architect ingest` loads the md, `architect
-export` regenerates it. If you regenerate (e.g. after building patterns via an
-`investigate-url` flow into your own `architect.db`), **`ingest` the current file first**, then
-`export` — ingest pulls everyone's hand-added patterns into your store so the regenerate
-doesn't drop them:
+`architect.db` is binary and lives at `~/.techne/architect.db`. Back it up by **copying the db
+file** — never by exporting a markdown corpus (that reintroduces the drift foot-gun):
 
 ```sh
-git pull
-techne architect ingest patterns/architectural-patterns.md   # absorb others' hand-edits
-# … add your own patterns to architect.db via investigate-url …
-techne architect export -o patterns/architectural-patterns.md
-git commit && git push
+mkdir -p ~/.techne/backups
+cp ~/.techne/architect.db ~/.techne/backups/architect.db.$(date +%Y%m%d)
 ```
 
-For casual additions, just hand-edit the file (step 1 above) — no `architect` commands needed.
+`techne architect export -o <file>` still exists for a one-off human-readable dump, but treat
+any exported md as a throwaway snapshot — never a file you ingest back, hand-edit, or commit
+as canonical.
