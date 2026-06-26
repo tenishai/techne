@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """SessionStart hook — injects relevant context at session beginning.
 
-Fail-safe design (techne#95):
+Fail-safe design (techne#95, techne#119):
   1. Session registration runs first in a minimal, isolated block.
   2. Every subsequent feature runs in its own try/except.
   3. Risky imports (egress, sync adapter) are lazy — an ImportError degrades
      to "no injection" instead of crashing the hook entirely.
   4. The hook NEVER exits non-zero. Worst case: minimal banner noting the failure.
   5. All failures are persisted to extension_state so they survive stderr-swallowing.
+  6. A hard SIGALRM timeout (bounded_hook) ensures the hook cannot wedge the
+     agent turn — phases 2-9 run inside the budget; any overrun exits 0.
 """
 
 from __future__ import annotations
@@ -87,6 +89,43 @@ def main() -> None:
         )
         return
 
+    # ------------------------------------------------------------------
+    # Phases 2-9: All potentially-blocking work runs inside bounded_hook.
+    #
+    # If the wall-clock budget expires (SQLite contention, slow network,
+    # etc.) HookTimeout propagates to the outer except, which exits 0.
+    # The agent turn is never wedged.  (techne#119)
+    # ------------------------------------------------------------------
+    from techne.hooks._timeout import bounded_hook
+
+    try:
+        with bounded_hook(config.hooks.timeout_s):
+            _run_phases_2_to_9(
+                config,
+                data,
+                run_ts=run_ts,
+                db_path=db_path,
+                output_parts=output_parts,
+                failures=_failures,
+            )
+    except Exception as exc:  # noqa: BLE001  — catches HookTimeout too
+        print(f"techne: session_start degraded: {exc}", file=sys.stderr)
+        sys.exit(0)
+
+
+def _run_phases_2_to_9(
+    config,
+    data: dict,
+    *,
+    run_ts: str,
+    db_path,
+    output_parts: list[str],
+    failures: list[str],
+) -> None:
+    """Inner helper containing phases 2-9 so bounded_hook wraps them cleanly."""
+    hook_error: dict | None = None
+    session_id: str | None = None
+
     project_path = data.get("cwd", os.getcwd())
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     platform = config.platform
@@ -104,7 +143,7 @@ def main() -> None:
         prior_stats = db_stats(config.db_path)
         prior_last_session = prior_stats.get("last_session")
     except Exception as exc:  # noqa: BLE001
-        _failures.append(f"prior last_session read: {exc}")
+        failures.append(f"prior last_session read: {exc}")
 
     # ------------------------------------------------------------------
     # Phase 3: Session registration (required; must succeed or we bail)
@@ -169,10 +208,10 @@ def main() -> None:
         if synced:
             print(f"techne: flushed {synced} outbox entries", file=sys.stderr)
     except ImportError as exc:
-        _failures.append(f"outbox flush (import): {exc}")
+        failures.append(f"outbox flush (import): {exc}")
         print(f"techne: outbox flush skipped (import error): {exc}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001
-        _failures.append(f"outbox flush: {exc}")
+        failures.append(f"outbox flush: {exc}")
         print(f"techne: outbox flush failed: {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------------
@@ -192,7 +231,7 @@ def main() -> None:
         output_parts.append(banner)
         output_parts.append("")
     except Exception as exc:  # noqa: BLE001
-        _failures.append(f"health banner: {exc}")
+        failures.append(f"health banner: {exc}")
         print(f"techne: health banner failed: {exc}", file=sys.stderr)
         output_parts.append("\n## techne ⚠️\n> Banner generation failed")
         output_parts.append("")
@@ -246,7 +285,7 @@ def main() -> None:
             output_parts.extend(recent_lines)
             output_parts.append("")
     except Exception as exc:  # noqa: BLE001
-        _failures.append(f"resume context: {exc}")
+        failures.append(f"resume context: {exc}")
         print(f"techne: resume context failed: {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------------
@@ -265,13 +304,13 @@ def main() -> None:
             if knowledge_block:
                 output_parts.append(knowledge_block)
     except ImportError as exc:
-        _failures.append(f"knowledge injection (import): {exc}")
+        failures.append(f"knowledge injection (import): {exc}")
         print(
             f"techne: tier-0 injection skipped (import error): {exc}",
             file=sys.stderr,
         )
     except Exception as exc:  # noqa: BLE001
-        _failures.append(f"knowledge injection: {exc}")
+        failures.append(f"knowledge injection: {exc}")
         print(
             f"techne: tier-0 injection failed (degraded to no-injection): {exc}",
             file=sys.stderr,
@@ -280,9 +319,9 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Phase 8: Determine hook error status and persist state
     # ------------------------------------------------------------------
-    if _failures:
+    if failures:
         # Non-fatal failures — record the first one as the error signal.
-        hook_error = {"ts": run_ts, "stage": "degraded", "msg": "; ".join(_failures)[:200]}
+        hook_error = {"ts": run_ts, "stage": "degraded", "msg": "; ".join(failures)[:200]}
     else:
         hook_error = None  # clean run — clear any prior error
 

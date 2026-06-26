@@ -24,28 +24,35 @@ def main():
     if not session_id:
         sys.exit(0)
 
+    from techne.hooks._timeout import bounded_hook
+
     config = Config.load()
 
-    # Parse transcript for state
-    transcript_data = {}
-    if transcript_path:
-        transcript_path = os.path.expanduser(transcript_path)
-        if Path(transcript_path).exists():
-            transcript_data = _parse_transcript(transcript_path)
+    try:
+        with bounded_hook(config.hooks.timeout_s):
+            # Parse transcript for state
+            transcript_data: dict = {}
+            if transcript_path:
+                transcript_path = os.path.expanduser(transcript_path)
+                if Path(transcript_path).exists():
+                    transcript_data = _parse_transcript(transcript_path)
 
-    # Build checkpoint
-    checkpoint = {
-        "trigger": trigger,
-        "session_id": session_id,
-        "files_modified": list(transcript_data.get("files_modified", set())),
-        "tools_used": dict(transcript_data.get("tools_used", {})),
-        "recent_commands": transcript_data.get("bash_commands", [])[-5:],
-        "last_task": _find_last_task(transcript_data.get("user_messages", [])),
-        "git_branch": transcript_data.get("git_branch", ""),
-    }
+            # Build checkpoint
+            checkpoint = {
+                "trigger": trigger,
+                "session_id": session_id,
+                "files_modified": list(transcript_data.get("files_modified", set())),
+                "tools_used": dict(transcript_data.get("tools_used", {})),
+                "recent_commands": transcript_data.get("bash_commands", [])[-5:],
+                "last_task": _find_last_task(transcript_data.get("user_messages", [])),
+                "git_branch": transcript_data.get("git_branch", ""),
+            }
 
-    save_checkpoint(config.db_path, session_id, trigger, checkpoint)
-    print(f"techne: checkpoint saved ({trigger})", file=sys.stderr)
+            save_checkpoint(config.db_path, session_id, trigger, checkpoint)
+            print(f"techne: checkpoint saved ({trigger})", file=sys.stderr)
+    except Exception as e:
+        print(f"techne: pre_compact failed: {e}", file=sys.stderr)
+        sys.exit(0)
 
 
 def _parse_transcript(transcript_path: str, max_lines: int = 500) -> dict:

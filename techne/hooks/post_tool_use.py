@@ -72,11 +72,14 @@ def main():
     if not session_id or not tool_name:
         sys.exit(0)
 
+    from techne.hooks._timeout import bounded_hook
+
     config = Config.load()
 
     try:
-        from techne.lifecycle import capture_tool_use
-        capture_tool_use(config, session_id, tool_name, tool_input, tool_output)
+        with bounded_hook(config.hooks.timeout_s):
+            from techne.lifecycle import capture_tool_use
+            capture_tool_use(config, session_id, tool_name, tool_input, tool_output)
     except Exception as e:
         print(f"techne: capture failed: {e}", file=sys.stderr)
         sys.exit(0)  # don't fail the tool call
