@@ -59,6 +59,8 @@ class TestHandleRequest:
             "techne_resume",
             "techne_status",
             "techne_recall",
+            "codex_search",
+            "codex_blast_radius",
         }
 
     def test_notifications_initialized_returns_none(self, config):

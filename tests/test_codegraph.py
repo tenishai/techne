@@ -1,4 +1,9 @@
-"""Tests for the Codex code-graph store over codex.db (techne#89)."""
+"""Tests for the Codex code-graph store over codex.db (techne#89).
+
+v1 edges are name-based: add_edge takes to_name (the callee name string), NOT
+to_symbol. Graph traversal resolves callee symbols by name match when to_symbol
+is NULL (the v1 default — resolution is a future pass).
+"""
 
 from __future__ import annotations
 
@@ -29,13 +34,15 @@ def _sym(db, sid, name, kind="function", sig=None):
 
 
 def _graph(db):
-    # a → b → c ;  a → d ;  d → c   (call edges)
+    # a(main) → b(load) → c(connect);  a(main) → d(parse) → c(connect)
+    # Edges stored as to_name (v1 name-based model):
+    #   a calls "load" and "parse"; b calls "connect"; d calls "connect"
     for sid, nm in [("a", "main"), ("b", "load"), ("c", "connect"), ("d", "parse")]:
         _sym(db, sid, nm, sig=f"def {nm}(): ...")
-    add_edge(db, "a", "b", "call")
-    add_edge(db, "b", "c", "call")
-    add_edge(db, "a", "d", "call")
-    add_edge(db, "d", "c", "call")
+    add_edge(db, "a", "load", "call")
+    add_edge(db, "b", "connect", "call")
+    add_edge(db, "a", "parse", "call")
+    add_edge(db, "d", "connect", "call")
 
 
 def test_search_symbols(db):
@@ -53,9 +60,12 @@ def test_search_symbols_blank_query_returns_empty(db):
 
 def test_callers_callees_direct(db):
     _graph(db)
+    # callees of "a" (main) → symbols named "load" (b) and "parse" (d)
     assert {s["id"] for s in callees(db, "a")} == {"b", "d"}
+    # callers of "c" (connect) → symbols that call "connect": b and d
     assert {s["id"] for s in callers(db, "c")} == {"b", "d"}
-    assert {s["id"] for s in callers(db, "a")} == set()  # nothing calls main
+    # nothing calls "main"
+    assert {s["id"] for s in callers(db, "a")} == set()
 
 
 def test_reachable_out_is_blast_radius(db):
@@ -82,7 +92,8 @@ def test_reachable_respects_depth_and_excludes_anchor(db):
 def test_reachable_kind_filter(db):
     _graph(db)
     add_symbol(db, id="m", file="m.py", name="mod", kind="module")
-    add_edge(db, "a", "m", "import")  # a imports m (not a call)
+    # Import edge: "a" imports name "mod"
+    add_edge(db, "a", "mod", "import")
     calls_only = reachable(db, "a", direction="out", kinds=["call"])
     assert "m" not in {s["id"] for s in calls_only}  # import edge not followed
     with_imports = reachable(db, "a", direction="out", kinds=["call", "import"])

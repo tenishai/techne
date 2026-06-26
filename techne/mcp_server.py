@@ -298,7 +298,76 @@ TOOLS = [
             "required": ["topic"],
         },
     },
+    {
+        "name": "codex_search",
+        "description": (
+            "Search Codex symbols (functions, classes, methods) by name or signature. "
+            "Requires `techne codex index <repo>` to have been run first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Symbol name or signature fragment to search",
+                },
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "codex_blast_radius",
+        "description": (
+            "Compute the transitive reachability (blast radius) of a Codex symbol — "
+            "out=what this symbol reaches (dependencies), in=what reaches this symbol "
+            "(dependents). Uses recursive CTE BFS over the call/import graph."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol_id": {
+                    "type": "string",
+                    "description": "Symbol id (file::name::kind::line) from codex_search",
+                },
+                "depth": {"type": "integer", "default": 5},
+                "direction": {
+                    "type": "string",
+                    "enum": ["out", "in"],
+                    "default": "out",
+                    "description": (
+                        "out=dependencies (what this reaches), "
+                        "in=dependents (what reaches this)"
+                    ),
+                },
+            },
+            "required": ["symbol_id"],
+        },
+    },
 ]
+
+def _codex_search(args: dict, config: Config) -> dict:
+    """FTS over Codex symbols — search across all indexed repos."""
+    from techne.core.codegraph import search_symbols
+    from techne.core.codex import codex_db
+
+    query = args.get("query", "")
+    limit = args.get("limit", 20)
+    hits = search_symbols(codex_db(config), query, limit=limit)
+    return {"results": hits, "count": len(hits)}
+
+
+def _codex_blast_radius(args: dict, config: Config) -> dict:
+    """Transitive reachability (blast-radius / dependency walk) for a symbol."""
+    from techne.core.codegraph import reachable
+    from techne.core.codex import codex_db
+
+    symbol_id = args.get("symbol_id", "")
+    depth = args.get("depth", 5)
+    direction = args.get("direction", "out")
+    rows = reachable(codex_db(config), symbol_id, direction=direction, max_depth=depth)
+    return {"symbol_id": symbol_id, "direction": direction, "depth": depth, "nodes": rows}
+
 
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
@@ -308,6 +377,8 @@ TOOL_HANDLERS = {
     "techne_resume": _techne_resume,
     "techne_status": _techne_status,
     "techne_recall": _techne_recall,
+    "codex_search": _codex_search,
+    "codex_blast_radius": _codex_blast_radius,
 }
 
 

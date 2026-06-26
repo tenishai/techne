@@ -1767,6 +1767,52 @@ def codex(ctx):
     click.echo(f"Symbols: {s['symbols']}  Edges: {s['edges']}  Files: {s['files']}")
 
 
+@codex.command("index")
+@click.argument("repo", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--language",
+    "languages",
+    default="python,typescript",
+    show_default=True,
+    help="Comma-separated list of languages to index (python,typescript).",
+)
+@click.pass_context
+def codex_index(ctx, repo, languages):
+    """Walk REPO and index Python + TypeScript symbols into codex.db.
+
+    Uses tree-sitter for parsing; requires `pip install techne[codex]`.
+    Incremental: files whose SHA-256 hash is unchanged are skipped.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.codex.source import RepoSource
+    from techne.core.codex import codex_db
+
+    lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
+    db_path = codex_db(config)
+    src = RepoSource(db_path, repo, languages=lang_list)
+    count = src.initial_walk()
+    from techne.core.codegraph import stats
+
+    s = stats(db_path)
+    click.echo(f"Indexed: {count} symbols from {repo}")
+    click.echo(f"Totals:  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
+
+
+@codex.command("stats")
+@click.pass_context
+def codex_stats(ctx):
+    """Show codex.db symbol/edge/file counts."""
+    config = ctx.obj["config"]
+    from techne.core.codegraph import stats
+    from techne.core.codex import codex_db
+
+    s = stats(codex_db(config))
+    click.echo(json.dumps(s, indent=2))
+
+
 @codex.command("search")
 @click.argument("query")
 @click.option("--limit", default=20)
