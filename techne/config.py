@@ -80,6 +80,11 @@ class HookConfig:
     post_tool_use: bool = True
     capture_bash: bool = False
     capture_read: bool = False
+    # Hard wall-clock budget for any single hook process.  If the hook exceeds
+    # this many seconds (SQLite contention, slow LLM call, stalled network) a
+    # SIGALRM fires and the hook exits 0 silently.  Overrides the
+    # TECHNE_HOOK_TIMEOUT env-var default (5.0 s) when set explicitly.
+    timeout_s: float = 5.0
 
 
 ReflectWriteTo = Literal["candidates", "live"]
@@ -311,10 +316,12 @@ class Config:
 
         if "hooks" in raw and isinstance(raw["hooks"], dict):
             h = raw["hooks"]
+            _hd = HookConfig()
             cfg.hooks = HookConfig(
                 post_tool_use=h.get("post_tool_use", True),
                 capture_bash=h.get("capture_bash", False),
                 capture_read=h.get("capture_read", False),
+                timeout_s=float(h.get("timeout_s", _hd.timeout_s)),
             )
 
         if "heuristic" in raw and isinstance(raw["heuristic"], dict):
@@ -398,6 +405,7 @@ class Config:
                 "post_tool_use": self.hooks.post_tool_use,
                 "capture_bash": self.hooks.capture_bash,
                 "capture_read": self.hooks.capture_read,
+                "timeout_s": self.hooks.timeout_s,
             },
             "heuristic": {
                 "boundary_threshold": self.heuristic.boundary_threshold,
