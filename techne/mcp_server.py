@@ -366,6 +366,42 @@ TOOLS = [
             "required": ["symbol_id"],
         },
     },
+    {
+        "name": "pattern_search",
+        "description": (
+            "Search the Architect's architectural-pattern corpus (architect.db) — design "
+            "patterns lifted from other projects' code, the team-shared 'what's worth "
+            "stealing' store. Optionally scope to patterns that apply to a project "
+            "(target=techne|cabal|limenal|agent-infra); with a target and no query, lists "
+            "all patterns for that project."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Full-text query over name + body"},
+                "target": {
+                    "type": "string",
+                    "description": "Restrict to patterns applying to this project",
+                },
+                "limit": {"type": "integer", "default": 20},
+            },
+        },
+    },
+    {
+        "name": "pattern_related",
+        "description": (
+            "Given a pattern id (from pattern_search), return the patterns it links to and "
+            "from via the [[wikilink]] relation graph — outbound (incl. unresolved/dangling "
+            "refs) and inbound (resolved)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern_id": {"type": "string", "description": "Pattern id from pattern_search"},
+            },
+            "required": ["pattern_id"],
+        },
+    },
 ]
 
 def _codex_search(args: dict, config: Config) -> dict:
@@ -391,6 +427,35 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     return {"symbol_id": symbol_id, "direction": direction, "depth": depth, "nodes": rows}
 
 
+def _pattern_search(args: dict, config: Config) -> dict:
+    """FTS over the Architect's pattern corpus (architect.db). Optionally scoped to
+    patterns that apply to a given project target."""
+    from techne.core.architect import architect_db
+    from techne.core.patterns import patterns_for_target, search_patterns
+
+    db = architect_db(config)
+    query = args.get("query", "")
+    limit = args.get("limit", 20)
+    target = args.get("target")
+    if target and not query:
+        hits = patterns_for_target(db, target, limit=limit)
+    else:
+        hits = search_patterns(db, query, limit=limit)
+        if target:
+            allowed = {p["id"] for p in patterns_for_target(db, target, limit=1000)}
+            hits = [h for h in hits if h["id"] in allowed]
+    return {"results": hits, "count": len(hits)}
+
+
+def _pattern_related(args: dict, config: Config) -> dict:
+    """Patterns linked to/from a given pattern via the [[wikilink]] relation graph."""
+    from techne.core.architect import architect_db
+    from techne.core.patterns import related_patterns
+
+    pattern_id = args.get("pattern_id", "")
+    return {"pattern_id": pattern_id, **related_patterns(architect_db(config), pattern_id)}
+
+
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
@@ -401,6 +466,8 @@ TOOL_HANDLERS = {
     "techne_recall": _techne_recall,
     "codex_search": _codex_search,
     "codex_blast_radius": _codex_blast_radius,
+    "pattern_search": _pattern_search,
+    "pattern_related": _pattern_related,
 }
 
 
