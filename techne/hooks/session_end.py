@@ -28,7 +28,7 @@ def main():
 
     # Load config before arming the timer — reading a local YAML file is fast
     # and we need config.hooks.timeout_s to set the correct budget.
-    from techne.hooks._timeout import DEFAULT_TIMEOUT_S, bounded_hook
+    from techne.hooks._timeout import bounded_hook
 
     try:
         from techne.config import Config

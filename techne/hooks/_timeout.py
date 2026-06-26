@@ -1,9 +1,14 @@
 """Bounded-execution guard for techne hook sidecar processes.
 
 A hook that blocks an agent turn is worse than a hook that silently skips a
-capture.  This module provides a SIGALRM-based hard-kill backstop so no hook
-process can wedge indefinitely — not from slow SQLite WAL contention, not from
-a hung LLM API call, not from a stalled sync adapter.
+capture.  This module provides a SIGALRM-based hard-kill backstop that bounds a
+hook's blocking section — slow SQLite WAL contention, a hung LLM API call, a
+stalled sync adapter — to a timeout instead of letting it run unbounded.
+
+SIGALRM only fires when Python regains control between bytecodes, so a hook
+blocked inside a single long, signal-deaf C call isn't interrupted until that
+call returns; in practice the blocking paths here (SQLite busy-waits, socket
+I/O) are interruptible, so the realistic wedge cases are covered.
 
 Usage in a hook module::
 
