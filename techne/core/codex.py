@@ -141,8 +141,15 @@ def _apply_codex_migration(db_path: Path) -> None:
             #    Check whether the new column already exists (race-safe double-check).
             edges_cols = {row[1] for row in conn.execute("PRAGMA table_info(edges)")}
             if "to_name" not in edges_cols:
-                # executescript issues its own COMMIT before running.
+                # Snapshot before the destructive rebuild (parity with the core
+                # db's _guarded_migrate), then rebuild ATOMICALLY: the whole
+                # CREATE→INSERT→DROP→RENAME runs inside one BEGIN/COMMIT, so a
+                # crash can never leave `edges` dropped-but-not-renamed.
+                # DROP IF EXISTS guards a re-run after a crash mid-rebuild.
+                _backup_codex_db(db_path)
                 conn.executescript("""
+                    BEGIN;
+                    DROP TABLE IF EXISTS edges_v1;
                     CREATE TABLE edges_v1 (
                         from_symbol       TEXT NOT NULL REFERENCES symbols(id),
                         to_name           TEXT NOT NULL,
@@ -166,6 +173,7 @@ def _apply_codex_migration(db_path: Path) -> None:
                     CREATE INDEX IF NOT EXISTS idx_edges_to_name   ON edges(to_name);
                     CREATE INDEX IF NOT EXISTS idx_edges_to_symbol ON edges(to_symbol);
                     CREATE INDEX IF NOT EXISTS idx_edges_src_hash  ON edges(src_file_hash);
+                    COMMIT;
                 """)
             else:
                 # to_name already present (e.g. partial migration) — ensure indexes.
@@ -189,6 +197,25 @@ def _apply_codex_migration(db_path: Path) -> None:
             _do()
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _backup_codex_db(db_path: Path) -> None:
+    """Snapshot codex.db before a destructive migration step (parity with the
+    core db's _guarded_migrate / #78). Best-effort: a failed backup is logged
+    but does not block the migration — the rebuild is itself atomic, so the
+    backup is belt-and-suspenders for an already-populated store."""
+    if not db_path.exists():
+        return
+    import shutil
+    from datetime import datetime, timezone
+
+    backups = db_path.parent / "backups"
+    try:
+        backups.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(db_path, backups / f"{db_path.stem}-v0-to-v1-{stamp}.db.bak")
+    except OSError as exc:
+        print(f"[techne/codex] pre-migration backup failed: {exc}", file=sys.stderr)
 
 
 def codex_store(config: Config) -> StoreAdapter:

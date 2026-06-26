@@ -41,7 +41,10 @@ log = logging.getLogger(__name__)
 _EXT_LANGUAGE: dict[str, str] = {
     ".py": "python",
     ".ts": "typescript",
-    ".tsx": "typescript",
+    # .tsx deferred to a follow-up: it needs tree-sitter's `language_tsx()`
+    # grammar. The plain typescript grammar parses JSX into ERROR nodes, which
+    # silently swallow surrounding symbol/call captures — worse than honestly
+    # not supporting it.
 }
 
 # Directories to skip during repo walk (covers .git, node_modules, venvs, caches).
@@ -146,8 +149,15 @@ _GRAMMAR = _GrammarCache()
 
 
 def _is_method_python(fn_node) -> bool:
-    """True if a Python function_definition node is a method (inside a class body)."""
+    """True if a Python function_definition node is a method (inside a class body).
+
+    A decorated method's parent is `decorated_definition` (whose parent is the
+    class `block`), so hop through it — else @property/@staticmethod methods get
+    mis-classified as plain functions.
+    """
     p = fn_node.parent
+    if p is not None and p.type == "decorated_definition":
+        p = p.parent
     return (
         p is not None
         and p.type == "block"
@@ -444,7 +454,10 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
         if old_hash:
             conn.execute("DELETE FROM edges WHERE src_file_hash = ?", (old_hash,))
         conn.execute("DELETE FROM symbols WHERE file = ?", (file_str,))
-        conn.commit()
+        # NB: deliberately no commit here — delete + re-insert share one
+        # transaction. A parse that yields nothing (or raises) rolls back the
+        # deletes via finally/close, so the file keeps its prior good rows
+        # rather than briefly "vanishing" from the graph.
 
         # Parse.
         symbols, edges = _parse_file(file_path, language, file_str, file_hash, source_bytes)
@@ -485,8 +498,10 @@ def _walk_repo(root: Path, languages: set[str]) -> Iterator[Path]:
     """Yield source files under *root*, skipping ignored directories."""
     exts = {ext for ext, lang in _EXT_LANGUAGE.items() if lang in languages}
     for path in root.rglob("*"):
-        # Check if any path component is in the skip list.
-        if any(part in _SKIP_DIRS for part in path.parts):
+        # Skip ignored dirs by the path RELATIVE to the repo root. Testing
+        # path.parts would also match the repo's own ancestors (a repo under
+        # ~/build/ or a monorepo under target/), silently yielding zero files.
+        if any(part in _SKIP_DIRS for part in path.relative_to(root).parts):
             continue
         if path.is_file() and path.suffix.lower() in exts:
             yield path
@@ -534,10 +549,30 @@ class RepoSource:
     def initial_walk(self) -> int:
         """Walk the repo, index all source files. Returns total symbol count."""
         total = 0
+        files = 0
         for path in _walk_repo(self._root, self._languages):
-            n = _index_file(self._db_path, path, self._root)
-            total += n
-        log.info("codex_initial_walk root=%s symbols=%d", self._root, total)
+            files += 1
+            total += _index_file(self._db_path, path, self._root)
+        log.info("codex_initial_walk root=%s files=%d symbols=%d", self._root, files, total)
+        # No-silent-failures guard: a non-empty repo that produces an empty graph
+        # means grammars are missing or the layout is unsupported. total==0 alone
+        # is normal on a fully-unchanged re-index, so check the store itself.
+        if files and total == 0:
+            from techne.core.stores import plain_connect
+
+            conn = plain_connect(self._db_path)
+            try:
+                count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+            finally:
+                conn.close()
+            if count == 0:
+                log.warning(
+                    "codex: walked %d source file(s) under %s but produced an empty "
+                    "graph — tree-sitter grammars missing (`pip install 'techne[codex]'`) "
+                    "or an unsupported repo layout?",
+                    files,
+                    self._root,
+                )
         return total
 
     def start_watch(self) -> None:

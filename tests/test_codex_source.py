@@ -71,6 +71,20 @@ def _make_source(db_path: Path, repo_root: Path, languages=None):
 
 
 @pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
+def test_walk_repo_under_skip_named_parent(tmp_path):
+    """Regression: a repo whose root lives under a skip-dir name (e.g. ~/build/repo)
+    must still index — _walk_repo filters by path RELATIVE to the root, not by
+    absolute parts (else the repo's own ancestor silently yields zero files)."""
+    repo = tmp_path / "build" / "myrepo"  # 'build' is in _SKIP_DIRS
+    repo.mkdir(parents=True)
+    (repo / "mod.py").write_text(
+        "def alpha():\n    return beta()\n\n\ndef beta():\n    return 1\n"
+    )
+    db = _make_db(tmp_path)
+    assert _make_source(db, repo).initial_walk() > 0  # 0 before the relative-parts fix
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
 def test_initial_walk_returns_positive_count(tmp_path):
     db = _make_db(tmp_path)
     src = _make_source(db, FIXTURES)
