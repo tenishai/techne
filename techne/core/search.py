@@ -363,9 +363,14 @@ def search_vec(
     q_bytes = q_emb.astype("float32").tobytes()
 
     conn = connect(db_path)
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except (AttributeError, sqlite3.OperationalError, sqlite3.NotSupportedError):
+        # Interpreter built without loadable-extension support — degrade to FTS.
+        conn.close()
+        return []
 
     results = []
     try:
@@ -578,9 +583,14 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
 
     model = _get_embedding_model()
     conn = connect(db_path)
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except (AttributeError, sqlite3.OperationalError, sqlite3.NotSupportedError):
+        # Interpreter built without loadable-extension support — degrade gracefully.
+        conn.close()
+        return {}
 
     counts = {"threads": 0, "observations": 0, "knowledge": 0}
 
