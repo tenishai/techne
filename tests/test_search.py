@@ -510,6 +510,91 @@ class TestSearchVec:
             # If extras are somehow available, just confirm it returns a list
             pytest.skip("Vector extras are installed; skipping graceful-degradation test")
 
+    def test_search_vec_degrades_on_attribute_error(self, db_path, monkeypatch):
+        """#84: AttributeError from enable_load_extension (interpreter compiled
+        without loadable-extension support) must return [] not crash."""
+        import techne.core.search as _search_mod
+        from techne.core.database import connect as _real_connect
+
+        pytest.importorskip("sqlite_vec")
+
+        class _NoExtConn:
+            """Proxy that delegates all connection ops except enable_load_extension."""
+
+            def __init__(self, real):
+                self._real = real
+
+            def enable_load_extension(self, enabled):
+                raise AttributeError("enable_load_extension not available")
+
+            def close(self):
+                self._real.close()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        monkeypatch.setattr(_search_mod, "connect", lambda path: _NoExtConn(_real_connect(path)))
+
+        results = search_vec(db_path, "anything")
+        assert results == []
+
+    def test_search_vec_degrades_on_operational_error(self, db_path, monkeypatch):
+        """#84: sqlite3.OperationalError from enable_load_extension must return []."""
+        import sqlite3 as _sqlite3
+        import techne.core.search as _search_mod
+        from techne.core.database import connect as _real_connect
+
+        pytest.importorskip("sqlite_vec")
+
+        class _OpErrConn:
+            def __init__(self, real):
+                self._real = real
+
+            def enable_load_extension(self, enabled):
+                raise _sqlite3.OperationalError("not authorized")
+
+            def close(self):
+                self._real.close()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        monkeypatch.setattr(_search_mod, "connect", lambda path: _OpErrConn(_real_connect(path)))
+
+        results = search_vec(db_path, "anything")
+        assert results == []
+
+    def test_search_degrades_to_fts_when_vec_extension_unavailable(self, db_path, monkeypatch):
+        """#84: search(..., use_vectors=True) falls through to FTS-only results
+        when enable_load_extension raises AttributeError (vec returns [])."""
+        import techne.core.search as _search_mod
+        from techne.core.database import connect as _real_connect
+
+        pytest.importorskip("sqlite_vec")
+
+        from techne.core.knowledge import store as store_knowledge
+
+        store_knowledge(db_path, "graceful degradation under extension failure", type="fact")
+
+        class _NoExtConn:
+            def __init__(self, real):
+                self._real = real
+
+            def enable_load_extension(self, enabled):
+                raise AttributeError("enable_load_extension not available")
+
+            def close(self):
+                self._real.close()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        monkeypatch.setattr(_search_mod, "connect", lambda path: _NoExtConn(_real_connect(path)))
+
+        results = search(db_path, "graceful degradation", use_vectors=True)
+        assert isinstance(results, list)
+        assert len(results) >= 1
+
     def test_search_combined_dedupes(self, db_path):
         """Combined search deduplicates results that appear in both FTS and vec.
 
