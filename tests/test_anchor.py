@@ -106,6 +106,27 @@ def test_classify_moved(git_repo):
     assert detail == "subdir/renamed.py"
 
 
+def test_classify_unknown_on_ls_files_failure(git_repo, monkeypatch):
+    """Contract: if the moved-scan's `git ls-files` itself fails (vs. completing
+    empty), classify returns `unknown`, not a possibly-wrong `deleted`."""
+    import techne.core.anchor as anchor
+
+    _repo, f = git_repo
+    r = resolve_anchor(str(f))
+    f.unlink()  # file gone → take the moved-scan branch
+    real_git = anchor._git
+
+    def _failing_git(root, *args, **kwargs):
+        if args and args[0] == "ls-files":
+            return False, ""  # simulate a git failure / timeout
+        return real_git(root, *args, **kwargs)
+
+    monkeypatch.setattr(anchor, "_git", _failing_git)
+    state, detail = anchor.classify(str(f), r["content_hash"], r["git_sha"])
+    assert state == "unknown"
+    assert detail
+
+
 def test_classify_unknown_no_repo(tmp_path):
     """Anchor path outside any git repo → unknown, never falsely fresh/deleted."""
     f = tmp_path / "loose.txt"

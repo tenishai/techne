@@ -126,18 +126,25 @@ def resolve_anchor(path: str) -> dict | None:
     return {"repo_rel_path": repo_rel_path, "content_hash": content_hash, "git_sha": head}
 
 
-def _find_moved(repo_root: Path, original_rel: str | None, stored_content_hash: str) -> str | None:
+def _find_moved(
+    repo_root: Path, original_rel: str | None, stored_content_hash: str
+) -> tuple[str | None, bool]:
     """Best-effort: find a tracked file whose sha256 matches *stored_content_hash*
-    at a path different from *original_rel*. Returns the new repo-relative path,
-    or None. See the module docstring's `moved` note for the judgment call.
+    at a path different from *original_rel*.
+
+    Returns ``(new_repo_rel_path_or_None, scan_ok)``. ``scan_ok`` is False ONLY
+    when the ``git ls-files`` call itself failed/timed out — so the caller emits
+    ``unknown`` (per the contract) instead of a possibly-wrong ``deleted``. A
+    completed-but-empty scan (incl. the deliberate too-large degrade) returns
+    ``(None, True)`` → ``deleted``.
     """
     ok, listing = _git(repo_root, "ls-files")
     if not ok:
-        return None
+        return None, False  # git failure → caller emits `unknown`, not `deleted`
     rel_paths = [line for line in listing.splitlines() if line]
     if len(rel_paths) > MAX_MOVED_SCAN_FILES:
-        # Too large to scan on a recall — degrade to `deleted` (caller's default).
-        return None
+        # Too large to scan on a recall — documented degrade to `deleted`.
+        return None, True
     for rel in rel_paths:
         if rel == original_rel:
             continue
@@ -146,10 +153,10 @@ def _find_moved(repo_root: Path, original_rel: str | None, stored_content_hash: 
             continue
         try:
             if _sha256_file(candidate) == stored_content_hash:
-                return rel
+                return rel, True
         except OSError:
             continue
-    return None
+    return None, True
 
 
 def classify(
@@ -201,9 +208,13 @@ def classify(
         except ValueError:
             original_rel = None
 
-        new_path = _find_moved(repo_root, original_rel, stored_content_hash)
+        new_path, scan_ok = _find_moved(repo_root, original_rel, stored_content_hash)
         if new_path is not None:
             return "moved", new_path
+        if not scan_ok:
+            # ls-files itself failed — we didn't finish looking, so honor the
+            # contract: `unknown`, not a possibly-wrong `deleted`.
+            return "unknown", "git ls-files failed while checking for a moved file"
         return "deleted", ""
     except Exception as e:  # noqa: BLE001 — hard guarantee: no crash escapes recall
         return "unknown", f"anchor classification failed: {e}"

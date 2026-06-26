@@ -305,11 +305,12 @@ TOOLS = [
         "name": "techne_recall",
         "description": (
             "Retrieve context for a specific topic — searches all layers "
-            "including identity. Evidence-anchored knowledge results carry an "
-            "explicit `freshness` tag (unchanged/modified/moved/deleted/unknown); "
-            "spend verification effort only on entries flagged modified or moved "
-            "rather than re-checking every result by hand. Entries without a "
-            "`freshness` tag are non-anchored and need no file verification."
+            "including identity. Git-anchored knowledge results that need "
+            "attention carry an explicit `freshness` tag (modified/moved/"
+            "deleted/unknown) — spend verification effort only on those rather "
+            "than re-checking every result by hand. An entry with no `freshness` "
+            "tag needs no file check: it is either non-anchored or "
+            "anchored-and-unchanged (anchored entries carry an `anchor_path` field)."
         ),
         "inputSchema": {
             "type": "object",
