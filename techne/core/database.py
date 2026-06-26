@@ -11,7 +11,7 @@ try:
 except ImportError:  # pragma: no cover - techne targets macOS/Linux
     fcntl = None
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -113,6 +113,15 @@ CREATE TABLE IF NOT EXISTS knowledge (
     last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     superseded_by INTEGER REFERENCES knowledge(id),
     event_at TIMESTAMP,
+    -- Evidence anchor (techne#90): a memory that points into a repo carries the
+    -- file path (+ optional symbol after "::"), the sha256 of the file's bytes
+    -- at write time, and the git HEAD sha then. All NULL for non-anchored
+    -- (behavioral/relational) memory, which is the majority — those rows are
+    -- never staleness-checked. See core/anchor.py for classification at recall.
+    anchor_path TEXT,
+    anchor_symbol TEXT,
+    content_hash TEXT,
+    anchor_git_sha TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -819,4 +828,20 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                    AND target NOT LIKE 'sink:%'
             """)
         conn.execute("INSERT INTO schema_version (version) VALUES (10)")
+    if from_version < 11 and to_version >= 11:
+        # Evidence-anchored memory (techne#90): add the nullable anchor columns
+        # so a memory pointing into a repo can store its file path/symbol plus a
+        # content hash + git HEAD sha at write time. All adds are purely additive
+        # and NULL-defaulting — non-anchored rows are unaffected and never
+        # staleness-checked. Guard on the knowledge table existing (some migration
+        # paths reconcile it later); the version bump still applies if absent.
+        knowledge_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge'"
+        ).fetchone()
+        if knowledge_exists:
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(knowledge)")}
+            for col in ("anchor_path", "anchor_symbol", "content_hash", "anchor_git_sha"):
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE knowledge ADD COLUMN {col} TEXT")
+        conn.execute("INSERT INTO schema_version (version) VALUES (11)")
     conn.commit()

@@ -44,6 +44,7 @@ def store(
     tags: str = "",
     confidence: str = "medium",
     source: str = "session",
+    anchor: str | None = None,
 ) -> int:
     """Store a knowledge entry. Returns the new entry's id.
 
@@ -51,20 +52,57 @@ def store(
     compat) and the canonical `confidence_numeric` derived from it. The
     `last_confirmed_at` defaults to CURRENT_TIMESTAMP so a fresh entry
     starts at full strength.
+
+    `anchor` (techne#90) optionally pins the memory to evidence in a repo. Pass
+    a path, or "path::symbol" to also record the symbol. When given, the file's
+    sha256 + the git HEAD sha are captured so recall can grade staleness. If the
+    path doesn't resolve to a file in a git repo, the anchor_path/symbol are
+    still recorded but the hash/sha stay NULL → recall reports `unknown` (off-git
+    or portable host) rather than falsely asserting freshness. Omitting `anchor`
+    leaves all anchor columns NULL and behaves exactly as before — non-anchored
+    memory is never staleness-checked.
     """
     if type not in VALID_TYPES:
         raise ValueError(f"Invalid knowledge type '{type}'. Must be one of: {VALID_TYPES}")
     if confidence not in VALID_CONFIDENCE:
         raise ValueError(f"Invalid confidence '{confidence}'. Must be one of: {VALID_CONFIDENCE}")
 
+    anchor_path: str | None = None
+    anchor_symbol: str | None = None
+    anchor_content_hash: str | None = None
+    anchor_git_sha: str | None = None
+    if anchor:
+        from techne.core.anchor import resolve_anchor
+
+        anchor_path, _, symbol = anchor.partition("::")
+        anchor_path = anchor_path or None
+        anchor_symbol = symbol or None
+        if anchor_path:
+            resolved = resolve_anchor(anchor_path)
+            if resolved is not None:
+                anchor_content_hash = resolved["content_hash"]
+                anchor_git_sha = resolved["git_sha"]
+
     numeric = CONFIDENCE_NUMERIC[confidence]
     conn = connect(db_path)
     try:
         cur = conn.execute(
             """INSERT INTO knowledge
-                 (type, content, source, tags, confidence, confidence_numeric)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (type, redact_credentials(content), source, tags, confidence, numeric),
+                 (type, content, source, tags, confidence, confidence_numeric,
+                  anchor_path, anchor_symbol, content_hash, anchor_git_sha)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                type,
+                redact_credentials(content),
+                source,
+                tags,
+                confidence,
+                numeric,
+                anchor_path,
+                anchor_symbol,
+                anchor_content_hash,
+                anchor_git_sha,
+            ),
         )
         conn.commit()
         return cur.lastrowid
