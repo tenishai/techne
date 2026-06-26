@@ -803,12 +803,20 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         # Only rewrite `pending` rows — `synced`/`dead` are terminal and never
         # re-read by any flush path, so touching them is unnecessary churn.
         # Already-namespaced rows (sync:* or sink:*) are left alone.
-        conn.execute("""
-            UPDATE outbox
-               SET target = 'sync:' || target
-             WHERE status = 'pending'
-               AND target NOT LIKE 'sync:%'
-               AND target NOT LIKE 'sink:%'
-        """)
+        # Guard: in some migration paths (e.g. reconcile from a pre-outbox
+        # schema) the outbox table is created later by schema reconciliation,
+        # so it may not exist yet here — and an absent table has no rows to
+        # migrate. Skip the UPDATE in that case; the version bump still applies.
+        outbox_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbox'"
+        ).fetchone()
+        if outbox_exists:
+            conn.execute("""
+                UPDATE outbox
+                   SET target = 'sync:' || target
+                 WHERE status = 'pending'
+                   AND target NOT LIKE 'sync:%'
+                   AND target NOT LIKE 'sink:%'
+            """)
         conn.execute("INSERT INTO schema_version (version) VALUES (10)")
     conn.commit()

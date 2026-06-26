@@ -6,6 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from techne.core.database import (
+    SCHEMA_VERSION,
     _migrate,
     _reconcile_columns,
     _reconcile_tables,
@@ -1189,7 +1190,7 @@ class TestV8ToV9Migration:
         v2 = conn2.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         n2 = conn2.execute("SELECT COUNT(*) FROM observations_fts").fetchone()[0]
         conn2.close()
-        assert v1 == v2 == 9
+        assert v1 == v2 == SCHEMA_VERSION
         assert n1 == n2 == 1
 
 
@@ -1241,11 +1242,11 @@ class TestMigrationHardening:
         db = tmp_path / "techne.db"
         _make_v8_db(db)
 
-        conn = connect(db)  # triggers guarded migration 8 -> 9
-        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+        conn = connect(db)  # triggers guarded migration 8 -> latest
+        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         conn.close()
 
-        backups = list((tmp_path / "backups").glob("techne-v8-to-v9-*.db.bak"))
+        backups = list((tmp_path / "backups").glob(f"techne-v8-to-v{SCHEMA_VERSION}-*.db.bak"))
         assert len(backups) == 1, f"expected one backup, got {backups}"
 
         # The backup is a real, openable pre-migration snapshot (still v8).
@@ -1260,7 +1261,7 @@ class TestMigrationHardening:
         _make_v8_db(db)
         connect(db).close()
         err = capsys.readouterr().err
-        assert "migrating schema v8 → v9" in err
+        assert f"migrating schema v8 → v{SCHEMA_VERSION}" in err
         assert "backup:" in err
 
     def test_no_backup_for_fresh_db(self, tmp_path):
@@ -1295,10 +1296,11 @@ class TestMigrationHardening:
         assert not errors, f"concurrent connects raised: {errors}"
 
         check = sqlite3.connect(str(db))
-        assert check.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
-        # Exactly one process bumped to v9 (no duplicate rows from a double-run).
+        assert check.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+        # Exactly one process bumped to the latest version (no duplicate rows
+        # from a double-run).
         assert check.execute(
-            "SELECT COUNT(*) FROM schema_version WHERE version = 9"
+            f"SELECT COUNT(*) FROM schema_version WHERE version = {SCHEMA_VERSION}"
         ).fetchone()[0] == 1
         check.close()
 
