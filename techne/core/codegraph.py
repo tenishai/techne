@@ -2,8 +2,12 @@
 
 Symbols + edges CRUD, FTS over signatures, and graph queries (callers/callees/
 blast-radius) as hand-rolled recursive CTEs — graph reachability WITHOUT a graph DB
-(the v1 plan; graphqlite Cypher/algorithms is an optional upgrade later). plain_connect
-keeps codex.db code-only (no techne core tables).
+(the v1 plan; graphqlite Cypher/algorithms is an optional upgrade later).
+
+v1 edge model: edges are name-based (to_name = callee name string, always known;
+to_symbol = resolved id, NULL until a future resolver pass). Traversal matches
+callee symbols by name (prefer to_symbol join when set, else match symbols.name =
+edges.to_name). plain_connect keeps codex.db code-only (no techne core tables).
 """
 
 from __future__ import annotations
@@ -23,14 +27,16 @@ def add_symbol(
     signature: str | None = None,
     span: str | None = None,
     language: str | None = None,
+    file_hash: str | None = None,
 ) -> str:
     """Upsert a symbol by id. Returns the id."""
     conn = plain_connect(db_path)
     try:
         conn.execute(
-            """INSERT OR REPLACE INTO symbols (id, file, name, kind, signature, span, language)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (id, file, name, kind, signature, span, language),
+            """INSERT OR REPLACE INTO symbols
+               (id, file, name, kind, signature, span, language, file_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, file, name, kind, signature, span, language, file_hash),
         )
         conn.commit()
         return id
@@ -38,13 +44,29 @@ def add_symbol(
         conn.close()
 
 
-def add_edge(db_path: Path, from_symbol: str, to_symbol: str, kind: str) -> bool:
-    """Add a directed edge (call|import|def-use). Idempotent (PK). Returns True if new."""
+def add_edge(
+    db_path: Path,
+    from_symbol: str,
+    to_name: str,
+    kind: str,
+    *,
+    to_symbol: str | None = None,
+    src_file_hash: str | None = None,
+    resolution_status: str = "unresolved",
+) -> bool:
+    """Add a directed name-based edge (call|import|def-use). Idempotent (PK).
+
+    to_name is the callee/imported name string — always required in v1.
+    to_symbol is the resolved symbol id; NULL until a future resolver pass.
+    Returns True if the row was newly inserted.
+    """
     conn = plain_connect(db_path)
     try:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO edges (from_symbol, to_symbol, kind) VALUES (?, ?, ?)",
-            (from_symbol, to_symbol, kind),
+            """INSERT OR IGNORE INTO edges
+               (from_symbol, to_name, to_symbol, kind, src_file_hash, resolution_status)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (from_symbol, to_name, to_symbol, kind, src_file_hash, resolution_status),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -80,28 +102,53 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
         conn.close()
 
 
-def _neighbors(db_path: Path, symbol_id: str, *, incoming: bool, kind: str | None) -> list[dict]:
-    on, where = ("from_symbol", "to_symbol") if incoming else ("to_symbol", "from_symbol")
-    sql = f"SELECT s.* FROM edges e JOIN symbols s ON s.id = e.{on} WHERE e.{where} = ?"
-    params: list = [symbol_id]
-    if kind:
-        sql += " AND e.kind = ?"
-        params.append(kind)
+def callers(db_path: Path, symbol_id: str) -> list[dict]:
+    """Direct callers — which symbols call this one.
+
+    Finds edges where to_symbol = symbol_id (resolved) OR
+    to_name = symbol.name (unresolved name match).
+    """
     conn = plain_connect(db_path)
     try:
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        rows = conn.execute(
+            """SELECT s.*
+               FROM edges e
+               JOIN symbols s ON s.id = e.from_symbol
+               WHERE e.kind = 'call'
+                 AND (
+                     e.to_symbol = ?
+                     OR (e.to_symbol IS NULL
+                         AND e.to_name = (SELECT name FROM symbols WHERE id = ?))
+                 )""",
+            (symbol_id, symbol_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
 
-def callers(db_path: Path, symbol_id: str) -> list[dict]:
-    """Direct callers — who calls this symbol."""
-    return _neighbors(db_path, symbol_id, incoming=True, kind="call")
-
-
 def callees(db_path: Path, symbol_id: str) -> list[dict]:
-    """Direct callees — what this symbol calls."""
-    return _neighbors(db_path, symbol_id, incoming=False, kind="call")
+    """Direct callees — which symbols this one calls.
+
+    Resolves targets by to_symbol when set, else by symbols.name = to_name.
+    Multiple symbols may share a name; all are returned.
+    """
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.*
+               FROM edges e
+               JOIN symbols s ON (
+                   s.id = e.to_symbol
+                   OR (e.to_symbol IS NULL AND s.name = e.to_name)
+               )
+               WHERE e.from_symbol = ?
+                 AND e.kind = 'call'""",
+            (symbol_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def reachable(
@@ -115,20 +162,45 @@ def reachable(
 ) -> list[dict]:
     """Transitive reachability via a recursive CTE — the blast-radius query, dep-free.
 
-    direction='out' follows from→to (dependencies / what this reaches);
-    direction='in' follows to→from (dependents / what reaches this). Each result
-    carries its minimum `depth` from the anchor. The anchor itself is excluded.
-    """
-    if direction == "out":
-        step = "SELECT e.to_symbol, r.depth + 1 FROM edges e JOIN reach r ON e.from_symbol = r.id"
-    else:
-        step = "SELECT e.from_symbol, r.depth + 1 FROM edges e JOIN reach r ON e.to_symbol = r.id"
+    direction='out' follows from→to (dependencies / what this reaches).
+    direction='in'  follows to→from (dependents / what reaches this).
 
+    Name-based traversal: when to_symbol IS NULL, resolves callee by matching
+    symbols.name = edges.to_name. Each result carries its minimum `depth` from
+    the anchor. The anchor itself is excluded.
+
+    UNION (not UNION ALL) deduplicates (id, depth) pairs, which naturally
+    terminates cycles without requiring explicit visited-set tracking.
+    """
     params: list = [symbol_id, max_depth]
     kind_filter = ""
     if kinds:
         kind_filter = " AND e.kind IN (%s)" % ", ".join("?" * len(kinds))
         params.extend(kinds)
+
+    if direction == "out":
+        # Step: from anchor id, follow edges out, resolve to_name → symbol id.
+        step = f"""
+            SELECT COALESCE(e.to_symbol, s2.id), r.depth + 1
+            FROM reach r
+            JOIN edges e ON e.from_symbol = r.id
+            LEFT JOIN symbols s2 ON s2.name = e.to_name AND e.to_symbol IS NULL
+            WHERE r.depth < ?{kind_filter}
+              AND COALESCE(e.to_symbol, s2.id) IS NOT NULL
+        """
+    else:
+        # Step: from anchor id, walk edges backwards, caller is from_symbol.
+        step = f"""
+            SELECT e.from_symbol, r.depth + 1
+            FROM reach r
+            JOIN symbols rs ON rs.id = r.id
+            JOIN edges e ON (
+                e.to_symbol = r.id
+                OR (e.to_symbol IS NULL AND e.to_name = rs.name)
+            )
+            WHERE r.depth < ?{kind_filter}
+        """
+
     params.extend([symbol_id, limit])
 
     sql = f"""
@@ -136,7 +208,6 @@ def reachable(
             SELECT ?, 0
             UNION
             {step}
-            WHERE r.depth < ?{kind_filter}
         )
         SELECT s.*, MIN(r.depth) AS depth
         FROM reach r JOIN symbols s ON s.id = r.id
