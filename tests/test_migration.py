@@ -1441,8 +1441,115 @@ class TestV9ToV10Migration:
         try:
             row = conn.execute("SELECT target FROM outbox WHERE status='pending'").fetchone()
             assert row["target"] == "sync:thread_summary"
+            # connect() migrates to the latest schema, not just v10 — anchor on
+            # SCHEMA_VERSION so this tracks future bumps instead of breaking.
             assert (
-                conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 10
+                conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+            )
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# v10 -> v11: evidence-anchor columns on knowledge (issue #90)
+# ---------------------------------------------------------------------------
+
+
+# A v10-shape knowledge table — the pre-#90 columns only, no anchor fields.
+SCHEMA_V10_KNOWLEDGE = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT,
+    tags TEXT,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    confidence_numeric REAL NOT NULL DEFAULT 0.6,
+    last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_by INTEGER REFERENCES knowledge(id),
+    event_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+@pytest.fixture
+def v10_knowledge_conn(tmp_path):
+    """A v10 DB whose knowledge table predates the #90 anchor columns, with one
+    non-anchored row seeded so we can prove it survives untouched."""
+    db_path = tmp_path / "v10_knowledge.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA_V10_KNOWLEDGE)
+    conn.execute("INSERT INTO schema_version (version) VALUES (10)")
+    conn.execute(
+        "INSERT INTO knowledge (type, content, confidence) VALUES (?, ?, ?)",
+        ("fact", "behavioral memory with no anchor", "high"),
+    )
+    conn.commit()
+    return conn
+
+
+class TestV10ToV11Migration:
+    """v11 adds the four nullable evidence-anchor columns to knowledge (#90).
+
+    All assertions are anchored on the SCHEMA_VERSION constant, never a
+    hardcoded integer, so this test tracks the schema as it evolves.
+    """
+
+    def test_anchor_columns_added(self, v10_knowledge_conn):
+        cols_before = {row[1] for row in v10_knowledge_conn.execute("PRAGMA table_info(knowledge)")}
+        assert "anchor_path" not in cols_before
+
+        _migrate(v10_knowledge_conn, 10, SCHEMA_VERSION)
+
+        cols_after = {row[1] for row in v10_knowledge_conn.execute("PRAGMA table_info(knowledge)")}
+        for col in ("anchor_path", "anchor_symbol", "content_hash", "anchor_git_sha"):
+            assert col in cols_after
+
+    def test_existing_row_survives_with_null_anchor(self, v10_knowledge_conn):
+        """A pre-#90 row is preserved and its new anchor columns default NULL —
+        non-anchored memory is never staleness-checked."""
+        _migrate(v10_knowledge_conn, 10, SCHEMA_VERSION)
+        row = v10_knowledge_conn.execute(
+            "SELECT content, anchor_path, content_hash, anchor_git_sha FROM knowledge"
+        ).fetchone()
+        assert row["content"] == "behavioral memory with no anchor"
+        assert row["anchor_path"] is None
+        assert row["content_hash"] is None
+        assert row["anchor_git_sha"] is None
+
+    def test_schema_version_bumped(self, v10_knowledge_conn):
+        _migrate(v10_knowledge_conn, 10, SCHEMA_VERSION)
+        max_v = v10_knowledge_conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()[0]
+        assert max_v == SCHEMA_VERSION
+
+    def test_migration_via_connect(self, tmp_path):
+        """connect() on a v10 DB runs the migration automatically and reaches
+        the current SCHEMA_VERSION with the anchor columns present."""
+        db_path = tmp_path / "v10_connect.db"
+        raw = sqlite3.connect(str(db_path))
+        raw.executescript(SCHEMA_V10_KNOWLEDGE)
+        raw.execute("INSERT INTO schema_version (version) VALUES (10)")
+        raw.commit()
+        raw.close()
+
+        conn = connect(db_path)
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(knowledge)")}
+            assert "anchor_path" in cols
+            assert (
+                conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
             )
         finally:
             conn.close()

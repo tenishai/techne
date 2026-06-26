@@ -88,6 +88,7 @@ def _techne_store(args: dict, config: Config) -> dict:
         tags=args.get("tags", ""),
         confidence=args.get("confidence", "medium"),
         source=args.get("source", "agent"),
+        anchor=args.get("anchor"),
     )
     return {"id": entry_id, "stored": True}
 
@@ -155,11 +156,17 @@ def _techne_status(args: dict, config: Config) -> dict:
 
 def _techne_recall(args: dict, config: Config) -> dict:
     """Retrieve context for a specific topic — searches all layers."""
+    from techne.core.anchor import annotate_freshness
     from techne.core.identity import list_entries as list_identity
     from techne.core.search import search
 
     topic = args.get("topic", "")
     results = search(config.db_path, topic, table="all", limit=10)
+    # Graded staleness (techne#90): grade anchored knowledge results against the
+    # current working tree and attach a freshness tag. Non-anchored results are
+    # untouched; this fires only here, on the surfacing path — never on
+    # touch/relevance updates.
+    annotate_freshness(config.db_path, results)
 
     # Also search identity
     identity_results = []
@@ -212,6 +219,16 @@ TOOLS = [
                     "default": "medium",
                 },
                 "source": {"type": "string", "default": "agent"},
+                "anchor": {
+                    "type": "string",
+                    "description": (
+                        "Optional evidence anchor pinning this memory to a repo file. "
+                        "Pass a path, or 'path::symbol' to also record the symbol. "
+                        "Captures the file's content hash + git HEAD sha so recall can "
+                        "grade staleness (unchanged/modified/moved/deleted). Omit for "
+                        "behavioral/relational memory — those are never staleness-checked."
+                    ),
+                },
             },
             "required": ["content"],
         },
@@ -288,7 +305,12 @@ TOOLS = [
         "name": "techne_recall",
         "description": (
             "Retrieve context for a specific topic — searches all layers "
-            "including identity"
+            "including identity. Git-anchored knowledge results that need "
+            "attention carry an explicit `freshness` tag (modified/moved/"
+            "deleted/unknown) — spend verification effort only on those rather "
+            "than re-checking every result by hand. An entry with no `freshness` "
+            "tag needs no file check: it is either non-anchored or "
+            "anchored-and-unchanged (anchored entries carry an `anchor_path` field)."
         ),
         "inputSchema": {
             "type": "object",
