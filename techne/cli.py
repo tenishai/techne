@@ -1061,6 +1061,14 @@ def import_patterns(ctx, markdown_file: Path, dry_run: bool, force: bool):
     """
     from techne.import_md import import_into, parse
 
+    click.echo(
+        "DEPRECATED (techne#87 P2): the pattern corpus now lives in architect.db, not "
+        "techne.db knowledge. Use `techne architect ingest` instead; these type='pattern' "
+        "rows leak team patterns into personal recall and `architect retire-legacy` removes "
+        "them.",
+        err=True,
+    )
+
     config = Config.load()
     text = markdown_file.read_text(encoding="utf-8")
     parsed = parse(text)
@@ -1748,6 +1756,76 @@ def architect_show(ctx, pattern_id):
         ctx.exit(1)
     click.echo(f"# {p['name']}  [{p['source_url']}]")
     click.echo(p["body"])
+
+
+@architect.command("related")
+@click.argument("pattern_id")
+@click.pass_context
+def architect_related(ctx, pattern_id):
+    """Show the patterns linked to/from PATTERN_ID via [[wikilink]] edges."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import related_patterns
+
+    rel = related_patterns(architect_db(config), pattern_id)
+    if not rel["outbound"] and not rel["inbound"]:
+        click.echo("No relations.")
+        return
+    if rel["outbound"]:
+        click.echo("→ outbound:")
+        for r in rel["outbound"]:
+            if r["resolution_status"] == "resolved":
+                click.echo(f"  [{r['kind']}] {r['dst_pattern_id']}  {r['dst_pattern_name']}")
+            else:
+                click.echo(f"  [{r['kind']}] (unresolved) {r['dst_name']}")
+    if rel["inbound"]:
+        click.echo("← inbound:")
+        for r in rel["inbound"]:
+            click.echo(f"  [{r['kind']}] {r['src_pattern_id']}  {r['src_pattern_name']}")
+
+
+@architect.command("applies")
+@click.argument("target")
+@click.option("--limit", default=100)
+@click.pass_context
+def architect_applies(ctx, target, limit):
+    """List patterns tagged as applying to TARGET (techne|cabal|limenal|agent-infra)."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import patterns_for_target
+
+    hits = patterns_for_target(architect_db(config), target, limit=limit)
+    if not hits:
+        click.echo(f"No patterns apply to {target!r}.")
+        return
+    for h in hits:
+        click.echo(f"  {h['id']}  {h['name']}")
+
+
+@architect.command("backfill")
+@click.pass_context
+def architect_backfill(ctx):
+    """Re-derive the relation/applies graph from pattern bodies (idempotent)."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import backfill_graph
+
+    counts = backfill_graph(architect_db(config))
+    click.echo(json.dumps(counts, indent=2))
+
+
+@architect.command("retire-legacy")
+@click.option("--dry-run", is_flag=True, help="Report the count without deleting.")
+@click.pass_context
+def architect_retire_legacy(ctx, dry_run):
+    """Delete the superseded type='pattern' rows from techne.db (now owned by
+    architect.db). They otherwise leak team patterns into personal recall."""
+    config = ctx.obj["config"]
+    from techne.core.patterns import retire_legacy_pattern_knowledge
+
+    n = retire_legacy_pattern_knowledge(config.db_path, dry_run=dry_run)
+    verb = "would delete" if dry_run else "deleted"
+    click.echo(f"{verb} {n} legacy type='pattern' knowledge rows from techne.db")
 
 
 @main.group(invoke_without_command=True)

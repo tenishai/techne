@@ -11,6 +11,7 @@ SRE-vs-infra comparison a join. Patterns hang off an investigation.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 from techne.core.stores import plain_connect
@@ -18,6 +19,69 @@ from techne.core.stores import plain_connect
 
 def _hash(*parts: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+# --- graph extraction (techne#87 P2) ----------------------------------------
+#
+# The relationship signals are already embedded in pattern *bodies* — lifted by
+# the investigate-url skill — they just were never materialized into rows:
+#   * `[[architectural-patterns#<name>]]` wikilinks  → pattern_relations edges
+#   * `**in <target>**:` markers in the where-to-apply line → pattern_applies
+# Backfill parses those out and writes the edges; resolution mirrors codex#89
+# (resolve by name, keep `unresolved` + the raw name when it doesn't match).
+
+_WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+# A pattern's target project is named on its "Where to apply" line as
+# `…where to apply in <target>…` (the live corpus folds it into the bold heading,
+# `**Where to apply in techne**:`). We anchor on that exact phrase and capture the
+# single token that follows "apply in" — so neither descriptive prose elsewhere
+# (`**built in techne**`) nor a comparison later in the same heading
+# (`…in techne (vs cabal)`) manufactures a spurious applies row (Prudence, PR#130).
+# A target named only in non-bold prose after the colon is not extracted — an
+# honest under-reach, not a false positive.
+_APPLY_RE = re.compile(
+    r"where\s+(?:to|it might|this)\s+appl\w*\s+in\s+([a-z][a-z0-9-]*)", re.IGNORECASE
+)
+_KNOWN_TARGETS = {"techne", "cabal", "limenal", "agent-infra"}
+
+
+def _wikilink_targets(body: str) -> list[str]:
+    """Extract the referenced pattern names from `[[...]]` links in *body*.
+
+    Links look like `[[architectural-patterns#Hybrid rank fusion: BM25 + vec]]`
+    (an Obsidian file#heading ref). We want the heading after the last `#`; a
+    bare `[[Name]]` (no `#`) is taken whole. Self/empty refs are dropped by the
+    caller via name resolution. Deduped, order-preserved.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in _WIKILINK_RE.findall(body or ""):
+        name = raw.rsplit("#", 1)[-1].strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out
+
+
+def _apply_targets(body: str) -> list[str]:
+    """Extract canonical project targets from `where to apply in <target>` phrases
+    in *body*. Only the token immediately after "apply in" is taken; unknown tokens
+    are dropped. Deduped, order-preserved."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in _APPLY_RE.findall(body or ""):
+        t = raw.lower()
+        if t in _KNOWN_TARGETS and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _norm(name: str) -> str:
+    """Normalize a pattern name for fuzzy resolution: lowercase, collapse runs of
+    non-alphanumerics to a single space, strip. So `BM25 + vec` ~ `bm25 vec`."""
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
 def upsert_investigation(
@@ -78,6 +142,164 @@ def add_pattern(
         )
         conn.commit()
         return pid, True
+    finally:
+        conn.close()
+
+
+def _name_index(conn) -> dict[str, str]:
+    """Map normalized pattern name → id for resolution. On a name collision the
+    first (lowest rowid) wins — deterministic, and name dupes are rare."""
+    index: dict[str, str] = {}
+    for row in conn.execute(
+        "SELECT id, name FROM patterns WHERE status = 'active' ORDER BY rowid"
+    ):
+        key = _norm(row["name"])
+        index.setdefault(key, row["id"])
+    return index
+
+
+def add_relation(
+    db_path: Path, *, src_pattern_id: str, dst_name: str, kind: str = "related"
+) -> tuple[str | None, bool]:
+    """Record one pattern→pattern edge, resolving *dst_name* against active
+    patterns. Returns (dst_pattern_id_or_None, resolved). Idempotent on
+    (src, dst_name, kind); re-running upgrades unresolved→resolved as the corpus
+    grows. A self-edge (dst resolves back to src) is dropped."""
+    conn = plain_connect(db_path)
+    try:
+        dst_id = _name_index(conn).get(_norm(dst_name))
+        if dst_id == src_pattern_id:  # self-reference — not an edge
+            return src_pattern_id, True
+        status = "resolved" if dst_id else "unresolved"
+        conn.execute(
+            """INSERT INTO pattern_relations
+                 (src_pattern_id, dst_name, dst_pattern_id, kind, resolution_status)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(src_pattern_id, dst_name, kind) DO UPDATE SET
+                 dst_pattern_id = excluded.dst_pattern_id,
+                 resolution_status = excluded.resolution_status""",
+            (src_pattern_id, dst_name, dst_id, kind, status),
+        )
+        conn.commit()
+        return dst_id, dst_id is not None
+    finally:
+        conn.close()
+
+
+def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
+    """Tag a pattern as applying to a project target (techne|cabal|limenal|…).
+    Idempotent. Returns True if a new row was inserted."""
+    conn = plain_connect(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO pattern_applies (pattern_id, target) VALUES (?, ?)",
+            (pattern_id, target),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def backfill_graph(db_path: Path) -> dict:
+    """Populate pattern_relations + pattern_applies from the signals already in
+    pattern bodies (techne#87 P2). Parses `[[wikilinks]]` → relations and
+    `**in <target>**` → applies for every active pattern, in one transaction.
+
+    Idempotent and incremental: edges upsert on (src, dst_name, kind), so a
+    re-run after new patterns land upgrades previously-`unresolved` edges to
+    `resolved`. Returns counts for reporting."""
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, name, body FROM patterns WHERE status = 'active'"
+        ).fetchall()
+        index = _name_index(conn)
+        rel_total = rel_resolved = applies_total = 0
+        for r in rows:
+            src = r["id"]
+            for dst_name in _wikilink_targets(r["body"]):
+                dst_id = index.get(_norm(dst_name))
+                if dst_id == src:  # self-reference
+                    continue
+                status = "resolved" if dst_id else "unresolved"
+                conn.execute(
+                    """INSERT INTO pattern_relations
+                         (src_pattern_id, dst_name, dst_pattern_id, kind, resolution_status)
+                       VALUES (?, ?, ?, 'related', ?)
+                       ON CONFLICT(src_pattern_id, dst_name, kind) DO UPDATE SET
+                         dst_pattern_id = excluded.dst_pattern_id,
+                         resolution_status = excluded.resolution_status""",
+                    (src, dst_name, dst_id, status),
+                )
+                rel_total += 1
+                rel_resolved += int(dst_id is not None)
+            for target in _apply_targets(r["body"]):
+                conn.execute(
+                    "INSERT OR IGNORE INTO pattern_applies (pattern_id, target) VALUES (?, ?)",
+                    (src, target),
+                )
+                applies_total += 1
+        conn.commit()
+        # All counts are TOTALS over the corpus (not per-run deltas), so the
+        # numbers are stable across idempotent re-runs.
+        return {
+            "relations": rel_total,
+            "resolved": rel_resolved,
+            "unresolved": rel_total - rel_resolved,
+            "applies": applies_total,
+        }
+    finally:
+        conn.close()
+
+
+def related_patterns(db_path: Path, pattern_id: str) -> dict:
+    """Edges touching *pattern_id*, both directions. Returns
+    {'outbound': [...], 'inbound': [...]}. Outbound includes unresolved edges
+    (dst_id NULL, dst_name carries the dangling reference); inbound is resolved
+    edges only (an unresolved edge has no known source-of-truth target)."""
+    conn = plain_connect(db_path)
+    try:
+        outbound = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT r.dst_name, r.dst_pattern_id, r.kind, r.resolution_status,
+                          p.name AS dst_pattern_name
+                   FROM pattern_relations r
+                   LEFT JOIN patterns p ON p.id = r.dst_pattern_id
+                   WHERE r.src_pattern_id = ?
+                   ORDER BY r.resolution_status, r.dst_name""",
+                (pattern_id,),
+            )
+        ]
+        inbound = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT r.src_pattern_id, r.kind, p.name AS src_pattern_name
+                   FROM pattern_relations r JOIN patterns p ON p.id = r.src_pattern_id
+                   WHERE r.dst_pattern_id = ? ORDER BY p.name""",
+                (pattern_id,),
+            )
+        ]
+        return {"outbound": outbound, "inbound": inbound}
+    finally:
+        conn.close()
+
+
+def patterns_for_target(db_path: Path, target: str, *, limit: int = 100) -> list[dict]:
+    """All active patterns tagged as applying to *target* (techne|cabal|limenal|…)."""
+    conn = plain_connect(db_path)
+    try:
+        return [
+            dict(r)
+            for r in conn.execute(
+                """SELECT p.id, p.name, p.source_url, p.confidence
+                   FROM pattern_applies a JOIN patterns p ON p.id = a.pattern_id
+                   WHERE a.target = ? AND p.status = 'active'
+                   ORDER BY p.name LIMIT ?""",
+                (target, limit),
+            )
+        ]
     finally:
         conn.close()
 
@@ -167,6 +389,28 @@ def stats(db_path: Path) -> dict:
                 "SELECT COUNT(*) FROM investigations WHERE verdict LIKE 'skip%'"
             ).fetchone()[0],
         }
+    finally:
+        conn.close()
+
+
+def retire_legacy_pattern_knowledge(techne_db_path: Path, *, dry_run: bool = False) -> int:
+    """Delete the legacy `type='pattern'` rows from techne.db (techne#87 P2).
+
+    Before the pattern store existed, lifted patterns were dumped into personal
+    memory as `knowledge` rows with `type='pattern'`. They're now fully owned by
+    architect.db, but recall/search don't filter by type — so these dupes leak
+    *team* patterns into *personal* recall. They're superseded; delete them. Uses
+    the migrated core connection so the knowledge FTS triggers stay consistent.
+    Returns the count removed (or that *would* be removed under dry_run)."""
+    from techne.core.database import connect
+
+    conn = connect(techne_db_path)
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM knowledge WHERE type = 'pattern'").fetchone()[0]
+        if not dry_run and n:
+            conn.execute("DELETE FROM knowledge WHERE type = 'pattern'")
+            conn.commit()
+        return n
     finally:
         conn.close()
 
@@ -277,4 +521,7 @@ def ingest_patterns_md(db_path: Path, md_text: str) -> dict:
             verdict="skip-with-flag",
             skip_reason=nl.reason,
         )
-    return {"patterns_added": patterns_added, **stats(db_path)}
+    # Materialize the relation/applies graph from the bodies we just stored, and
+    # re-resolve any edges that earlier ingests left dangling (P2 write-path).
+    graph = backfill_graph(db_path)
+    return {"patterns_added": patterns_added, "graph": graph, **stats(db_path)}
