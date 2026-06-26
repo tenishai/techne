@@ -259,15 +259,36 @@ No new lifecycle entry points. The transactional-outbox sync-after-enqueue path 
 
 ## Migration
 
-Existing `outbox` rows have arbitrary `target` strings — they predate sink validation. Two cases:
+### Namespace backfill (schema v10, issue #80)
 
-### Case 1: rows with targets a registered sink claims
+Pre-#51 rows have bare `target` strings (e.g. `thread_summary`). After #51 both flush paths
+filter by prefix (`sync:%` / `sink:%`), so bare-pending rows are permanently invisible.
+
+Schema v10 ships a one-shot migration that runs automatically on `connect()`:
+
+```sql
+UPDATE outbox
+   SET target = 'sync:' || target
+ WHERE status = 'pending'
+   AND target NOT LIKE 'sync:%'
+   AND target NOT LIKE 'sink:%';
+```
+
+Only `pending` rows are rewritten — `synced`/`dead` are terminal and never re-read.
+Already-namespaced rows are left alone. The migration is idempotent.
+
+### Orphan rows (unregistered targets)
+
+After the namespace backfill, two cases remain for any surviving pending rows:
+
+#### Case 1: rows with targets a registered sink claims
 
 These are normal pending rows. The first `flush_sinks` call picks them up and delivers.
 
-### Case 2: rows with unregistered targets ("orphan rows")
+#### Case 2: rows with unregistered targets ("orphan rows")
 
-Today's `NoopAdapter` returns `synced=0` for these (correct — nothing was actually delivered) but they remain pending. Two options:
+Today's `NoopAdapter` returns `synced=0` for these (correct — nothing was actually delivered)
+but they remain pending. Two options:
 
 - **Leave them pending.** If a sink is registered later for that target, they get delivered. Safe; no data loss.
 - **Drain via `prune_orphans`.** Operator-invoked CLI command marks pending rows whose target isn't currently registered as `dead` with error `"no sink registered for target"`. Useful when a target name was changed and the old rows are now junk.

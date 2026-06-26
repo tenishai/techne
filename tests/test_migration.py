@@ -1305,3 +1305,142 @@ class TestMigrationHardening:
         # Exactly one migration fired → exactly one backup.
         backups = list((tmp_path / "backups").glob("*.db.bak"))
         assert len(backups) == 1, f"expected one backup, got {backups}"
+
+
+# ---------------------------------------------------------------------------
+# v9 -> v10: rewrite bare (un-namespaced) pending outbox targets (issue #80)
+# ---------------------------------------------------------------------------
+
+
+# Minimal schema to exercise the outbox namespace migration in isolation.
+# Includes the outbox table at its current (v9) shape.
+SCHEMA_V9_OUTBOX = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    content_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    synced_at TIMESTAMP
+);
+"""
+
+
+@pytest.fixture
+def v9_outbox_conn(tmp_path):
+    """A v9 DB with a mix of outbox rows covering all target/status cases."""
+    db_path = tmp_path / "v9_outbox.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA_V9_OUTBOX)
+    conn.execute("INSERT INTO schema_version (version) VALUES (9)")
+
+    # bare target — pending → must be rewritten to 'sync:thread_summary'
+    conn.execute(
+        "INSERT INTO outbox (target, data_json, content_hash, status) VALUES (?, ?, ?, ?)",
+        ("thread_summary", '{"x":1}', "hash_bare_pending", "pending"),
+    )
+    # already-namespaced sync: target — pending → must NOT be double-prefixed
+    conn.execute(
+        "INSERT INTO outbox (target, data_json, content_hash, status) VALUES (?, ?, ?, ?)",
+        ("sync:thread_summary", '{"x":2}', "hash_sync_pending", "pending"),
+    )
+    # sink: target — pending → must NOT be touched (different namespace lane)
+    conn.execute(
+        "INSERT INTO outbox (target, data_json, content_hash, status) VALUES (?, ?, ?, ?)",
+        ("sink:rookery", '{"x":3}', "hash_sink_pending", "pending"),
+    )
+    # bare target — synced → terminal row, must NOT be rewritten
+    conn.execute(
+        "INSERT INTO outbox (target, data_json, content_hash, status, synced_at) VALUES (?, ?, ?, ?, ?)",
+        ("thread_summary", '{"x":4}', "hash_bare_synced", "synced", "2026-01-01T00:00:00Z"),
+    )
+    # bare target — dead → terminal row, must NOT be rewritten
+    conn.execute(
+        "INSERT INTO outbox (target, data_json, content_hash, status, error_message) VALUES (?, ?, ?, ?, ?)",
+        ("thread_summary", '{"x":5}', "hash_bare_dead", "dead", "delivery failed"),
+    )
+    conn.commit()
+    return conn
+
+
+class TestV9ToV10Migration:
+    """v10 rewrites bare pending outbox targets to the sync: namespace (#80)."""
+
+    def test_bare_pending_target_gets_sync_prefix(self, v9_outbox_conn):
+        """A bare pending target like 'thread_summary' becomes 'sync:thread_summary'."""
+        _migrate(v9_outbox_conn, 9, 10)
+        row = v9_outbox_conn.execute(
+            "SELECT target FROM outbox WHERE content_hash = 'hash_bare_pending'"
+        ).fetchone()
+        assert row["target"] == "sync:thread_summary"
+
+    def test_already_namespaced_sync_row_untouched(self, v9_outbox_conn):
+        """A pending row already prefixed 'sync:' is not double-prefixed."""
+        _migrate(v9_outbox_conn, 9, 10)
+        row = v9_outbox_conn.execute(
+            "SELECT target FROM outbox WHERE content_hash = 'hash_sync_pending'"
+        ).fetchone()
+        assert row["target"] == "sync:thread_summary"
+
+    def test_sink_namespaced_row_untouched(self, v9_outbox_conn):
+        """A pending row with a 'sink:' prefix is left alone."""
+        _migrate(v9_outbox_conn, 9, 10)
+        row = v9_outbox_conn.execute(
+            "SELECT target FROM outbox WHERE content_hash = 'hash_sink_pending'"
+        ).fetchone()
+        assert row["target"] == "sink:rookery"
+
+    def test_synced_terminal_row_untouched(self, v9_outbox_conn):
+        """A bare target on a synced (terminal) row is not rewritten."""
+        _migrate(v9_outbox_conn, 9, 10)
+        row = v9_outbox_conn.execute(
+            "SELECT target FROM outbox WHERE content_hash = 'hash_bare_synced'"
+        ).fetchone()
+        assert row["target"] == "thread_summary"
+
+    def test_dead_terminal_row_untouched(self, v9_outbox_conn):
+        """A bare target on a dead (terminal) row is not rewritten."""
+        _migrate(v9_outbox_conn, 9, 10)
+        row = v9_outbox_conn.execute(
+            "SELECT target FROM outbox WHERE content_hash = 'hash_bare_dead'"
+        ).fetchone()
+        assert row["target"] == "thread_summary"
+
+    def test_schema_version_bumped_to_10(self, v9_outbox_conn):
+        """schema_version reaches 10 after the migration."""
+        _migrate(v9_outbox_conn, 9, 10)
+        max_v = v9_outbox_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert max_v == 10
+
+    def test_migration_via_connect(self, tmp_path):
+        """connect() on a v9 DB runs the migration automatically."""
+        from techne.core.database import connect
+
+        db_path = tmp_path / "v9_connect.db"
+        raw = sqlite3.connect(str(db_path))
+        raw.executescript(SCHEMA_V9_OUTBOX)
+        raw.execute("INSERT INTO schema_version (version) VALUES (9)")
+        raw.execute(
+            "INSERT INTO outbox (target, data_json, status) VALUES (?, ?, ?)",
+            ("thread_summary", '{"x":1}', "pending"),
+        )
+        raw.commit()
+        raw.close()
+
+        conn = connect(db_path)
+        try:
+            row = conn.execute("SELECT target FROM outbox WHERE status='pending'").fetchone()
+            assert row["target"] == "sync:thread_summary"
+            assert (
+                conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 10
+            )
+        finally:
+            conn.close()

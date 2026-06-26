@@ -11,7 +11,7 @@ try:
 except ImportError:  # pragma: no cover - techne targets macOS/Linux
     fcntl = None
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -796,4 +796,19 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
             if src_exists:
                 conn.execute(insert_sql)
         conn.execute("INSERT INTO schema_version (version) VALUES (9)")
+    if from_version < 10 and to_version >= 10:
+        # Rewrite bare (un-namespaced) pending outbox targets to the sync: lane.
+        # Pre-#51 rows used bare names like "thread_summary"; after #51 both
+        # flush paths filter by prefix and such rows are permanently undrainable.
+        # Only rewrite `pending` rows — `synced`/`dead` are terminal and never
+        # re-read by any flush path, so touching them is unnecessary churn.
+        # Already-namespaced rows (sync:* or sink:*) are left alone.
+        conn.execute("""
+            UPDATE outbox
+               SET target = 'sync:' || target
+             WHERE status = 'pending'
+               AND target NOT LIKE 'sync:%'
+               AND target NOT LIKE 'sink:%'
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (10)")
     conn.commit()
