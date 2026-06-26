@@ -1,0 +1,59 @@
+# techne-watch.service — systemd user unit for `techne watch`
+#
+# Installation (user service — no root required):
+#
+#   1. Copy this file to ~/.config/systemd/user/techne-watch.service
+#   2. Edit ExecStart to set the absolute path to your virtualenv's `techne`
+#      binary and the directory (or directories) you want watched.
+#   3. Optionally set TECHNE_HOME if you keep techne state outside ~/.techne.
+#   4. Enable and start:
+#
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now techne-watch.service
+#        journalctl --user -u techne-watch -f   # follow logs
+#
+# System-wide alternative:
+#   Copy to /etc/systemd/system/techne-watch.service, change User= and
+#   Group= to the account that owns the corpus, and install with
+#   `systemctl enable --now techne-watch`.
+
+[Unit]
+Description=techne filesystem watcher — continuous ingest daemon
+Documentation=https://github.com/dimartin/techne
+After=network.target
+
+[Service]
+Type=simple
+
+# --- Adjust these three lines for your environment -------------------------
+
+# Absolute path to the techne binary inside your virtualenv, followed by
+# the directory tree(s) to watch.  Add --include / --exclude globs as needed:
+#
+#   ExecStart=/home/you/myproject/.venv/bin/techne watch /home/you/corpus \
+#       --exclude '**/.git/**' --exclude '**/node_modules/**'
+ExecStart=/ABSOLUTE/PATH/TO/.venv/bin/techne watch /PATH/TO/CORPUS
+
+# Working directory (can be the corpus root or the project root).
+WorkingDirectory=/PATH/TO/CORPUS
+
+# techne state directory.  Defaults to ~/.techne when unset.
+# Override here if you run multiple independent techne instances on the same
+# OS user (see TECHNE_HOME in the README).
+Environment=TECHNE_HOME=%h/.techne
+
+# ---------------------------------------------------------------------------
+
+Restart=on-failure
+RestartSec=5s
+
+# Give the watchdog time to flush pending events before the kernel kills it.
+TimeoutStopSec=10s
+
+# Surface structured logs through the journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=techne-watch
+
+[Install]
+WantedBy=default.target
