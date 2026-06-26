@@ -442,7 +442,10 @@ def _pattern_search(args: dict, config: Config) -> dict:
     else:
         hits = search_patterns(db, query, limit=limit)
         if target:
-            allowed = {p["id"] for p in patterns_for_target(db, target, limit=1000)}
+            # Post-filter FTS hits to the target's pattern set. The cap is a high
+            # ceiling vs. the corpus (hundreds), not a real bound; revisit if a
+            # single target ever exceeds it (it would silently drop valid hits).
+            allowed = {p["id"] for p in patterns_for_target(db, target, limit=100_000)}
             hits = [h for h in hits if h["id"] in allowed]
     return {"results": hits, "count": len(hits)}
 

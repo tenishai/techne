@@ -54,15 +54,26 @@ def test_wikilink_targets_empty():
     assert _wikilink_targets("") == []
 
 
-def test_apply_targets_canonical_only():
-    body = "**in techne**: do x. **In Limenal**: do y. **in widgets**: ignore me."
-    assert _apply_targets(body) == ["techne", "limenal"]
-
-
 def test_apply_targets_live_heading_form():
     # The live corpus folds the target into the heading bold span.
     body = "**Where to apply in techne**: gate vec0.\n**Where to apply in cabal**: route."
     assert _apply_targets(body) == ["techne", "cabal"]
+
+
+def test_apply_targets_ignores_prose_bold_false_positives():
+    # Bold prose NOT on a where-to-apply line must not manufacture an apply
+    # (Prudence, PR#130). `**built in techne**` is a description, not a target.
+    assert _apply_targets("This was **built in techne** last year.") == []
+    # An unknown token inside a real heading is dropped.
+    assert _apply_targets("**Where to apply in widgets**: nope.") == []
+
+
+def test_apply_targets_prose_after_colon_not_extracted():
+    # Honest under-reach: a target mentioned only in the prose AFTER the bold
+    # heading (e.g. a comparison) is not turned into an apply.
+    assert _apply_targets("**Where to apply in techne**: similar to limenal's gate.") == [
+        "techne"
+    ]
 
 
 def test_norm_collapses_noise():
@@ -124,9 +135,9 @@ def test_backfill_graph_counts_and_queries(db):
     a = _mk(
         db,
         "Alpha",
-        "Uses [[architectural-patterns#Beta]].\n\n**in techne**: gate.",
+        "Uses [[architectural-patterns#Beta]].\n\n**Where to apply in techne**: gate.",
     )
-    b = _mk(db, "Beta", "Refs [[Nonexistent]].\n\n**in limenal**: handle.")
+    b = _mk(db, "Beta", "Refs [[Nonexistent]].\n\n**Where to apply in limenal**: handle.")
     res = backfill_graph(db)
     assert res == {"relations": 2, "resolved": 1, "unresolved": 1, "applies": 2}
 
@@ -144,7 +155,7 @@ def test_backfill_graph_counts_and_queries(db):
 
 
 def test_backfill_graph_idempotent(db):
-    _mk(db, "Alpha", "[[Beta]] **in techne**: x")
+    _mk(db, "Alpha", "[[Beta]] **Where to apply in techne**: x")
     _mk(db, "Beta", "y")
     first = backfill_graph(db)
     second = backfill_graph(db)
@@ -199,9 +210,9 @@ def test_reconcile_relations_noop_on_fresh_schema(db):
 def test_ingest_md_populates_graph(db):
     md = (
         "## Alpha\n\n- **Source**: http://x/a\n- **Surveyed**: 2026-06-26\n\n"
-        "Uses [[architectural-patterns#Beta]].\n\n**in techne**: gate.\n\n---\n\n"
+        "Uses [[architectural-patterns#Beta]].\n\n**Where to apply in techne**: gate.\n\n---\n\n"
         "## Beta\n\n- **Source**: http://x/b\n- **Surveyed**: 2026-06-26\n\n"
-        "A second pattern.\n\n**in limenal**: handle.\n\n---\n"
+        "A second pattern.\n\n**Where to apply in limenal**: handle.\n\n---\n"
     )
     result = ingest_patterns_md(db, md)
     assert "graph" in result

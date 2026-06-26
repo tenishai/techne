@@ -32,11 +32,17 @@ def _hash(*parts: str) -> str:
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
-# The "where to apply" line names the target project inside a bold span. The live
-# corpus folds it into the heading (`**Where to apply in techne**:`); the clean
-# template form is `**in techne**`. Match both: the target is the last `in <word>`
-# before the closing `**`. Canonical targets only.
-_APPLY_RE = re.compile(r"\*\*(?:[^*]*\bin)\s+([a-z][a-z0-9-]*)\s*\*\*", re.IGNORECASE)
+# A pattern's target project is named on its "Where to apply" line as
+# `…where to apply in <target>…` (the live corpus folds it into the bold heading,
+# `**Where to apply in techne**:`). We anchor on that exact phrase and capture the
+# single token that follows "apply in" — so neither descriptive prose elsewhere
+# (`**built in techne**`) nor a comparison later in the same heading
+# (`…in techne (vs cabal)`) manufactures a spurious applies row (Prudence, PR#130).
+# A target named only in non-bold prose after the colon is not extracted — an
+# honest under-reach, not a false positive.
+_APPLY_RE = re.compile(
+    r"where\s+(?:to|it might|this)\s+appl\w*\s+in\s+([a-z][a-z0-9-]*)", re.IGNORECASE
+)
 _KNOWN_TARGETS = {"techne", "cabal", "limenal", "agent-infra"}
 
 
@@ -59,7 +65,9 @@ def _wikilink_targets(body: str) -> list[str]:
 
 
 def _apply_targets(body: str) -> list[str]:
-    """Extract canonical project targets from `**in <target>**` markers in *body*."""
+    """Extract canonical project targets from `where to apply in <target>` phrases
+    in *body*. Only the token immediately after "apply in" is taken; unknown tokens
+    are dropped. Deduped, order-preserved."""
     out: list[str] = []
     seen: set[str] = set()
     for raw in _APPLY_RE.findall(body or ""):

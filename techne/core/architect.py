@@ -99,9 +99,14 @@ def _reconcile_relations(db_path: Path) -> None:
     resolved-only edge with no room for a dangling `[[wikilink]]`. P2 needs the
     unresolved-edge model (`dst_name` + nullable `dst_pattern_id` +
     `resolution_status`, the same shape codex#89 uses for call edges). The table
-    ships empty in every existing db (relations were never populated), so a DROP +
-    recreate is data-safe. Guard on the presence of the new `dst_name` column so
-    this is idempotent and a no-op on a fresh (already-new-shape) db.
+    ships empty in every existing db (relations were never populated — no code
+    path wrote a row before this PR), so a DROP + recreate is data-safe. Guard on
+    the presence of the new `dst_name` column so this is idempotent and a no-op on
+    a fresh (already-new-shape) db.
+
+    No cross-process lock (unlike core's `_guarded_migrate`): two racing processes
+    could both DROP+CREATE, but since the table is provably empty there is nothing
+    to lose, and the final state is identical either way.
     """
     conn = plain_connect(db_path)
     try:
