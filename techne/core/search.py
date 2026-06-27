@@ -632,7 +632,8 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             # and skip superseded rows when embedding so they're never (re-)added.
             # NB: nothing auto-runs backfill_vectors in production today, so this cleanup
             # only fires on a manual/explicit backfill — the query-time over-fetch in
-            # search_vec (_VEC_SUPERSEDE_OVERFETCH) is the guarantee that holds regardless.
+            # search_vec (_VEC_SUPERSEDE_OVERFETCH) is the always-on guard, sound up to
+            # that factor of stale neighbours.
             if tbl == "knowledge" and _purge_superseded_knowledge_vec(conn):
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"
