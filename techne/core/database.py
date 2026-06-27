@@ -223,10 +223,20 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
     status TEXT NOT NULL DEFAULT 'pending',    -- 'pending' | 'promoted' | 'discarded'
     promoted_to_id INTEGER,
     reviewed_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Sleep/dream consolidation (techne#108). Additive (reconciled, no migration).
+    -- action: what promote does with this proposal. target_ids: JSON array of the
+    -- knowledge.id rows it acts on (NULL for plain adds). origin: which pass made it.
+    action TEXT NOT NULL DEFAULT 'add',         -- add | supersede | merge | connect
+    target_ids TEXT,
+    origin TEXT NOT NULL DEFAULT 'reflect',     -- reflect | consolidate | dream
+    -- Decision-provenance: who/what reviewed and why (free-text, not a DB enum).
+    decided_by TEXT,
+    decision_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
+CREATE INDEX IF NOT EXISTS idx_kc_action_status ON knowledge_candidates(action, status);
 
 -- FTS5 indexes. tokenize='porter unicode61' applies Porter stemming on top of
 -- the unicode61 tokenizer (#77) so morphological variants match: a query for

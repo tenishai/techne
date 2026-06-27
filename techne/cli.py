@@ -1224,14 +1224,19 @@ def reflect_ingest(ctx, responses_file):
 
 @reflect.command("promote")
 @click.argument("candidate_id", type=int)
+@click.option("--by", "decided_by", default="human", help="Who/what decided (audit trail).")
+@click.option("--reason", "decision_reason", default=None, help="Why (audit trail).")
 @click.pass_context
-def reflect_promote(ctx, candidate_id):
+def reflect_promote(ctx, candidate_id, decided_by, decision_reason):
     """Promote a pending candidate to the live knowledge or identity store."""
     config = ctx.obj["config"]
     from techne.core.reflect import promote_candidate
 
     try:
-        new_id = promote_candidate(config.db_path, candidate_id)
+        new_id = promote_candidate(
+            config.db_path, candidate_id,
+            decided_by=decided_by, decision_reason=decision_reason,
+        )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         ctx.exit(1)
@@ -1243,14 +1248,19 @@ def reflect_promote(ctx, candidate_id):
 
 @reflect.command("discard")
 @click.argument("candidate_id", type=int)
+@click.option("--by", "decided_by", default="human", help="Who/what decided (audit trail).")
+@click.option("--reason", "decision_reason", default=None, help="Why (audit trail).")
 @click.pass_context
-def reflect_discard(ctx, candidate_id):
+def reflect_discard(ctx, candidate_id, decided_by, decision_reason):
     """Discard a pending candidate. The row stays for audit; status flips to 'discarded'."""
     config = ctx.obj["config"]
     from techne.core.reflect import discard_candidate
 
     try:
-        discard_candidate(config.db_path, candidate_id)
+        discard_candidate(
+            config.db_path, candidate_id,
+            decided_by=decided_by, decision_reason=decision_reason,
+        )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         ctx.exit(1)
