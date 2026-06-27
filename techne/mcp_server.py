@@ -412,6 +412,59 @@ TOOLS = [
             "required": ["pattern_id"],
         },
     },
+    {
+        "name": "techne_reflect_emit",
+        "description": (
+            "Consolidate a finished session into durable memory using YOUR OWN model "
+            "(no API key, no sampling). techne renders one reflection prompt per thread of "
+            "work; answer each `prompt` in the returned batch as a JSON candidate array "
+            "(scope/type/content/tags/confidence), then call techne_reflect_ingest once per "
+            "thread with your answer. Run this when wrapping up a chunk of work, or when the "
+            "SessionStart banner flags a session with unreflected threads. Defaults to the "
+            "most recent session."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": (
+                        "Session to reflect on (default: most recent). Prefer passing an "
+                        "explicit id — e.g. the one from the SessionStart nudge — when "
+                        "consolidating a FINISHED session, so a freshly-started session "
+                        "isn't reflected while still empty."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max threads to emit prompts for (default: all).",
+                },
+            },
+        },
+    },
+    {
+        "name": "techne_reflect_ingest",
+        "description": (
+            "Feed back one thread's reflection answer produced by techne_reflect_emit. "
+            "`response` is the JSON candidate array (as a string) you wrote for that thread's "
+            "`prompt`; `thread_id` and `prompt_hash` come from the emit batch item. Proposals "
+            "land in knowledge_candidates for review (techne reflect review). Call once per "
+            "answered thread."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "From the emit batch item."},
+                "thread_id": {"type": "string", "description": "From the emit batch item."},
+                "prompt_hash": {"type": "string", "description": "From the emit batch item."},
+                "response": {
+                    "type": "string",
+                    "description": "Your JSON candidate array (string) answering the prompt.",
+                },
+            },
+            "required": ["session_id", "thread_id", "response"],
+        },
+    },
 ]
 
 def _codex_search(args: dict, config: Config) -> dict:
@@ -469,6 +522,80 @@ def _pattern_related(args: dict, config: Config) -> dict:
     return {"pattern_id": pattern_id, **related_patterns(architect_db(config), pattern_id)}
 
 
+def _techne_reflect_emit(args: dict, config: Config) -> dict:
+    """Render a session's reflection prompts for the agent to answer with its OWN model.
+
+    The resident-model extraction path (techne#19): techne groups a session's
+    observations into threads and renders one prompt per thread; the in-session agent
+    answers each `prompt` as a JSON candidate array, then feeds them back via
+    techne_reflect_ingest. No API key, no MCP sampling — the model already running this
+    session does the work. Defaults to the most recent session.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import emit_reflection_batch, load_session_for_reflection
+
+    session_id = args.get("session_id")
+    if not session_id:
+        conn = connect(config.db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        session_id = row["id"] if row else None
+    if not session_id:
+        return {"batch": [], "count": 0, "note": "no session to reflect on"}
+
+    threads, observations = load_session_for_reflection(config, session_id)
+    batch = emit_reflection_batch(config, session_id, threads, observations)
+    limit = args.get("limit")
+    if limit:
+        # NB: the marker below covers the WHOLE session, so threads beyond `limit`
+        # won't be re-surfaced by the auto-trigger — call without a limit, or re-emit
+        # with an explicit session_id, to reflect the rest.
+        batch = batch[:limit]
+
+    # Mark the session emitted so the SessionStart auto-trigger won't re-nudge it,
+    # even if the agent's answers ultimately yield zero durable candidates (techne#19).
+    conn = connect(config.db_path)
+    try:
+        set_state(conn, f"reflect:emitted:{session_id}", {"count": len(batch)})
+    finally:
+        conn.close()
+
+    return {"session_id": session_id, "count": len(batch), "batch": batch}
+
+
+def _techne_reflect_ingest(args: dict, config: Config) -> dict:
+    """Persist one thread's agent-produced reflection answer (techne#19).
+
+    `response` is the JSON candidate array (as a string) the agent produced for a
+    `prompt` from techne_reflect_emit; `thread_id` and `prompt_hash` are the values
+    from that emit batch item. Candidates land in knowledge_candidates for review
+    (`techne reflect review`); they only touch live knowledge/identity when
+    config.reflect.write_to == 'live'. Call once per answered thread.
+    """
+    from techne.core.reflect import ingest_reflection_response
+
+    response = args.get("response", "")
+    if not isinstance(response, str):
+        response = json.dumps(response) if response else ""
+    if not response.strip():
+        return {"candidates_proposed": 0, "candidates_written": 0,
+                "candidates_promoted": 0, "note": "empty response — nothing to ingest"}
+
+    return ingest_reflection_response(
+        config,
+        args.get("session_id", ""),
+        args.get("thread_id", ""),
+        args.get("prompt_hash", ""),
+        response,
+        model_used=args.get("model_used", "agent-assisted"),
+    )
+
+
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
@@ -481,6 +608,8 @@ TOOL_HANDLERS = {
     "codex_blast_radius": _codex_blast_radius,
     "pattern_search": _pattern_search,
     "pattern_related": _pattern_related,
+    "techne_reflect_emit": _techne_reflect_emit,
+    "techne_reflect_ingest": _techne_reflect_ingest,
 }
 
 
