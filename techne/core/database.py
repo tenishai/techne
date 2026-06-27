@@ -355,8 +355,10 @@ def _guarded_migrate(conn: sqlite3.Connection, db_path: Path, existing_version: 
     racing loser a true no-op."""
 
     def _read(c: sqlite3.Connection) -> int:
+        # Literal move of the old double-check read (MAX(version) always returns a
+        # row, so this is row[0]); existing_version is the documented fallback.
         row = c.execute("SELECT MAX(version) FROM schema_version").fetchone()
-        return row[0] if row and row[0] is not None else existing_version
+        return row[0] if row else existing_version
 
     migrator.guarded_migrate(
         conn,
