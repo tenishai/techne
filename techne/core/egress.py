@@ -132,7 +132,10 @@ def select_tier0_injection(
         else:
             remaining_rows.append(r)
 
-    most_recent_project_state = project_state_rows[:1]  # already ordered by updated_at DESC
+    # current-first then updated_at DESC (the SELECT's ORDER) — so if a current and
+    # an uncertain platform-state row are both live, this deliberately prefers the
+    # trustworthy one over a strictly-newer uncertain one (techne#117).
+    most_recent_project_state = project_state_rows[:1]
     recent_rows = remaining_rows  # decisions/evaluations/facts — the "what changed" band
 
     selected: list[EgressRow] = []
