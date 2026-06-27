@@ -150,8 +150,10 @@ def claims_emit(
         from techne.sync.cc_memory import CCMemorySource
 
         CCMemorySource(config, cwd=cwd).initial_walk()
-    except Exception:
-        log.debug("claims_emit_drain_failed", slug=slug)
+    except Exception as exc:
+        # warning (not debug): a recurring drain failure means --claims silently judges a
+        # stale/empty drain — surface it without changing the degrade-to-read behavior.
+        log.warning("claims_emit_drain_failed", slug=slug, error=str(exc))
 
     memory_rows = live_curated_memory(config.db_path, slug=slug)
     if not memory_rows:

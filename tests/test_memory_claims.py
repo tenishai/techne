@@ -56,7 +56,13 @@ def test_claims_emit_auto_drains_disk_without_prior_sync(tmp_path, monkeypatch):
 
 @pytest.fixture
 def project(tmp_path):
-    """A tmp project cwd + a redirected CC config dir, so discovery is hermetic."""
+    """A tmp project cwd + a tmp CC config dir.
+
+    NOTE: callers that reach the drain (claims_emit auto-drains via initial_walk →
+    find_curated_memory_files → paths.project_slug) MUST `monkeypatch.setenv(
+    "CLAUDE_CONFIG_DIR", str(config_dir))` to stay hermetic — otherwise the walk reads
+    the developer's REAL ~/.claude/projects/<slug>/memory. (Monkeypatching
+    mc.project_slug is NOT enough; the walk uses paths.project_slug.)"""
     cwd = tmp_path / "proj"
     cwd.mkdir()
     config_dir = tmp_path / "ccconfig"
