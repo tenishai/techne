@@ -69,21 +69,22 @@ def test_redact_github_fine_grained_pat_short_no_match():
 
 
 def test_redact_stripe_live_key():
-    text = "key: sk-live-abcdefghijklmnopqrstuvwxyz1234"
+    # techne#134: real Stripe secret keys use underscores (sk_live_…), not hyphens.
+    text = "key: sk_live_abcdefghijklmnopqrstuvwxyz1234"
     result = redact_credentials(text)
-    assert "sk-live-" not in result
+    assert "sk_live_abcdefghijklmnopqrstuvwxyz1234" not in result
     assert "<redacted:stripe>" in result
 
 
 def test_redact_stripe_test_key():
-    text = "key: sk-test-abcdefghijklmnopqrstuvwxyz1234"
+    text = "key: sk_test_abcdefghijklmnopqrstuvwxyz1234"
     result = redact_credentials(text)
-    assert "sk-test-" not in result
+    assert "sk_test_abcdefghijklmnopqrstuvwxyz1234" not in result
     assert "<redacted:stripe>" in result
 
 
 def test_redact_stripe_short_no_match():
-    text = "sk-live-tooshort"
+    text = "sk_live_tooshort"
     assert redact_credentials(text) == text
 
 
