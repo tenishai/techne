@@ -399,6 +399,44 @@ def get_observations(
         conn.close()
 
 
+def deed_log(
+    db_path: Path,
+    *,
+    project_path: str | None = None,
+    since_days: int | None = None,
+    limit: int = 2000,
+) -> list[dict]:
+    """The raw deed-log: observations ACROSS sessions (techne#107 reconciliation).
+
+    Unlike ``get_observations`` (single session), this windows the whole ledger —
+    optionally scoped to a project via ``sessions.project_path`` and to the last
+    ``since_days`` — so reconciliation can diff curated memory against everything that
+    actually happened. Newest first; capped at ``limit`` (raise it if a window
+    legitimately exceeds the cap). Returns observation dicts.
+    """
+    conn = connect(db_path)
+    try:
+        parts = ["SELECT o.id, o.session_id, o.timestamp, o.tool_name, o.content",
+                 "FROM observations o"]
+        wheres: list[str] = []
+        params: list = []
+        if project_path is not None:
+            parts.append("JOIN sessions s ON s.id = o.session_id")
+            wheres.append("s.project_path = ?")
+            params.append(project_path)
+        if since_days is not None:
+            wheres.append("o.timestamp >= datetime('now', ?)")
+            params.append(f"-{int(since_days)} days")
+        if wheres:
+            parts.append("WHERE " + " AND ".join(wheres))
+        parts.append("ORDER BY o.timestamp DESC LIMIT ?")
+        params.append(limit)
+        rows = conn.execute(" ".join(parts), params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def observation_count(db_path: Path, session_id: str) -> int:
     conn = connect(db_path)
     try:
