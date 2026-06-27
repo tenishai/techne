@@ -40,6 +40,19 @@ def _seed(
     return store(db_path, content, type=type, tags=tags, confidence=confidence)
 
 
+def _mark_uncertain(db_path: Path, kid: int) -> None:
+    """Flip a row to status='uncertain' directly (the cascade does this via a
+    superseded dependency; egress tests only need the resulting state)."""
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        conn.execute("UPDATE knowledge SET status = 'uncertain' WHERE id = ?", (kid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _insert_legacy_pattern(db_path: Path, content: str, *, tags: str = "") -> int:
     """Insert a legacy `type='pattern'` row directly. store() rejects this type
     post techne#137, but egress must still exclude rows that predate the cleanup
@@ -175,6 +188,50 @@ class TestSupersededExclusion:
         ids = [r["id"] for r in rows]
         assert old_id not in ids
         assert new_id in ids
+
+
+# ---------------------------------------------------------------------------
+# Uncertain de-prioritization (techne#117 recall gate)
+# ---------------------------------------------------------------------------
+
+
+class TestUncertainDeprioritization:
+    def test_uncertain_row_still_eligible(self, db_path):
+        """An uncertain row is live (not superseded) — it must still be selected,
+        just marked. The fix annotates, it does not hide."""
+        kid = _seed(db_path, "derived fact", type="fact", tags="memory-type:user")
+        _mark_uncertain(db_path, kid)
+        rows = select_tier0_injection(db_path, char_budget=4000)
+        assert any(r["id"] == kid for r in rows)
+
+    def test_uncertain_row_rendered_with_marker(self, db_path):
+        """The rendered line for an uncertain row carries an [uncertain] marker so it
+        is never auto-injected as a confident fact."""
+        kid = _seed(db_path, "shaky fact", type="fact", tags="memory-type:user")
+        _mark_uncertain(db_path, kid)
+        rows = select_tier0_injection(db_path, char_budget=4000)
+        block = render_tier0_block(rows)
+        line = next(ln for ln in block.splitlines() if f"⟦techne#{kid}⟧" in ln)
+        assert "[uncertain]" in line
+
+    def test_current_row_has_no_marker(self, db_path):
+        """A plain current row renders without the uncertain marker."""
+        kid = _seed(db_path, "solid fact", type="fact", tags="memory-type:user")
+        rows = select_tier0_injection(db_path, char_budget=4000)
+        block = render_tier0_block(rows)
+        line = next(ln for ln in block.splitlines() if f"⟦techne#{kid}⟧" in ln)
+        assert "[uncertain]" not in line
+
+    def test_uncertain_sorts_after_current_within_band(self, db_path):
+        """Within a band, an uncertain row trails an otherwise-equal current row —
+        the down-rank. Both are remainder ('what changed') rows here."""
+        current_id = _seed(db_path, "trustworthy fact", type="fact")
+        uncertain_id = _seed(db_path, "shaky fact", type="fact")
+        _mark_uncertain(db_path, uncertain_id)
+        rows = select_tier0_injection(db_path, char_budget=4000)
+        ids = [r["id"] for r in rows]
+        assert current_id in ids and uncertain_id in ids
+        assert ids.index(current_id) < ids.index(uncertain_id)
 
 
 # ---------------------------------------------------------------------------
