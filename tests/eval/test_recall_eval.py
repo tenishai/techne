@@ -31,7 +31,11 @@ from seed_eval_db import seed  # noqa: E402
 
 pytestmark = pytest.mark.eval
 
-ARMS = ("bare", "techne")
+# The three control variants (techne#118). RECALL_ARMS feed the per-category
+# kill-gate; raw-source-dump is judged on the COST axis only (it recalls
+# everything, so folding it into the recall gate would mask regressions).
+ARMS = ("bare", "techne", "raw-source-dump")
+RECALL_ARMS = ("bare", "techne")
 
 
 def _load_baseline() -> tuple[list[dict], dict]:
@@ -39,9 +43,38 @@ def _load_baseline() -> tuple[list[dict], dict]:
     return doc["tasks"], doc.get("config", {})
 
 
+def _all_rows(db_path: Path, cap: int = 500) -> list[dict]:
+    """raw-source-dump arm: every stored row, no query, no curation — INCLUDING
+    superseded knowledge. A raw dump has no freshness filter, which is exactly why
+    it leaks stale revisions on a tracking task (and loses on the cost axis)."""
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        rows: list[dict] = []
+        for r in conn.execute("SELECT id, content FROM knowledge"):
+            rows.append({"type": "knowledge", "id": r["id"], "content": r["content"]})
+        for r in conn.execute("SELECT id, content FROM observations"):
+            rows.append({"type": "observation", "id": r["id"], "content": r["content"]})
+        for r in conn.execute("SELECT id, label, summary FROM threads"):
+            rows.append({"type": "thread", "id": r["id"], "label": r["label"],
+                         "summary": r["summary"]})
+        # No silent cap: if the corpus ever outgrows `cap`, raw-dump would drop rows
+        # (maybe gold), silently shifting the precision ratio + token_cost. Fail loud.
+        assert len(rows) <= cap, (
+            f"raw-source-dump corpus {len(rows)} exceeds cap {cap}; raise the cap so "
+            "the dump stays complete (techne#118)"
+        )
+        return rows
+    finally:
+        conn.close()
+
+
 def _retrieve(arm: str, db_path: Path, task: dict, top_k: int) -> list[dict]:
     if arm == "bare":
-        return []  # control: no memory
+        return []  # no-memory control
+    if arm == "raw-source-dump":
+        return _all_rows(db_path)  # stuff the whole corpus in, uncurated
     # use_vectors=False → deterministic FTS path (v1 measures the FTS retriever;
     # vector fusion is a later eval dimension and needs fastembed).
     return search(db_path, task["query"], table=task.get("table", "all"),
@@ -51,19 +84,22 @@ def _retrieve(arm: str, db_path: Path, task: dict, top_k: int) -> list[dict]:
 def test_recall_eval(tmp_path, capsys):
     db_path = tmp_path / "eval.db"
     gold = seed(db_path)
-    tasks, cfg = _load_baseline()
+    all_tasks, cfg = _load_baseline()
     top_k = cfg.get("top_k", 10)
-    gate = cfg.get("gate")
-    margin = cfg.get("margin")
+    gates = cfg.get("gates", {})
+    cost_ratio = cfg.get("cost_precision_ratio", 3.0)
+
+    # Stage 1 only — absence/deletion/cascade (stage 2) need the LLM answerer
+    # (techne#118 PR3+); they're authored in the YAML for taxonomy completeness.
+    tasks = [t for t in all_tasks if t.get("stage", 1) == 1]
+    deferred = [t for t in all_tasks if t.get("stage", 1) != 1]
 
     rows: list[dict] = []
-    agg = {arm: 0.0 for arm in ARMS}
-    total_weight = sum(t.get("weight", 1.0) for t in tasks)
-
-    # Per-category accumulators (techne#118 — the MeME taxonomy made legible). The
-    # legacy six tasks are all `exact-recall`; aggregation/tracking/… land in PR2.
     cat_score: dict[tuple[str, str], float] = defaultdict(float)
     cat_weight: dict[str, float] = defaultdict(float)
+    # Cost-axis accumulators (techne#118 thesis): precision + token_cost per arm.
+    cost_precision: dict[str, float] = defaultdict(float)
+    cost_tokens: dict[str, int] = defaultdict(int)
 
     for task in tasks:
         w = task.get("weight", 1.0)
@@ -74,8 +110,9 @@ def test_recall_eval(tmp_path, capsys):
             retrieved = _retrieve(arm, db_path, task, top_k)
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             score, detail = score_task(task, retrieved, gold)
-            agg[arm] += score * w
             cat_score[(category, arm)] += score * w
+            cost_precision[arm] += detail["precision"]
+            cost_tokens[arm] += detail["token_cost"]
             rows.append({
                 # `variant` is a TASK-CORPUS dimension (curated vs raw-dump vs the
                 # reserved cold/warm), not an arm property — so it reads the same on
@@ -85,8 +122,13 @@ def test_recall_eval(tmp_path, capsys):
                 "score": score, "weight": w, "latency_ms": latency_ms, **detail,
             })
 
-    for arm in ARMS:
-        agg[arm] = round(agg[arm] / total_weight, 3) if total_weight else 0.0
+    n_tasks = len(tasks) or 1
+    mean_prec = {a: cost_precision[a] / n_tasks for a in ARMS}
+    mean_tok = {a: cost_tokens[a] / n_tasks for a in ARMS}
+
+    def cat_agg(category: str, arm: str) -> float:
+        cw = cat_weight[category]
+        return round(cat_score[(category, arm)] / cw, 3) if cw else 0.0
 
     # --- write JSONL results ---
     results_dir = _EVAL_DIR / "results"
@@ -96,36 +138,45 @@ def test_recall_eval(tmp_path, capsys):
         for r in rows:
             f.write(json.dumps({"run_at": stamp, **r}) + "\n")
 
-    # --- print the table ---
+    # --- print the report ---
     with capsys.disabled():
-        print(f"\n=== recall eval (#68) — {stamp} ===")
-        print(f"{'task':<20} {'arm':<8} {'score':>6} {'recall':>7} {'cover':>6} {'n':>3}  misses")
+        print(f"\n=== memory eval (#118) — {stamp} ===")
+        print(f"{'task':<22} {'arm':<16} {'score':>6} {'recall':>7} {'prec':>6} {'n':>4}")
         for r in rows:
-            print(f"{r['task_id']:<20} {r['arm']:<8} {r['score']:>6} "
-                  f"{r['recall']:>7} {r['coverage']:>6} {r['n_results']:>3}  {r['misses']}")
-        print("-" * 60)
+            print(f"{r['task_id']:<22} {r['arm']:<16} {r['score']:>6} "
+                  f"{r['recall']:>7} {r['precision']:>6} {r['n_results']:>4}")
+        print("-" * 64)
+        print("per-category recall (kill-gated on bare/techne):")
         for category in sorted(cat_weight):
-            cw = cat_weight[category]
-            per = " ".join(
-                f"{arm}={round(cat_score[(category, arm)] / cw, 3) if cw else 0.0}"
-                for arm in ARMS
-            )
-            print(f"category[{category}]  {per}")
-        print("-" * 60)
-        for arm in ARMS:
-            print(f"aggregate[{arm}] = {agg[arm]}")
-        observed_margin = round(agg["techne"] - agg["bare"], 3)
-        print(f"techne - bare margin = {observed_margin}")
-        print(f"kill-gate: techne >= {gate}  AND  margin >= {margin}  (see EVAL.md)")
+            per = "  ".join(f"{arm}={cat_agg(category, arm)}" for arm in ARMS)
+            print(f"  [{category}]  {per}")
+        print("cost axis (the curated-beats-raw thesis):")
+        for arm in ("techne", "raw-source-dump"):
+            print(f"  {arm:<16} mean_precision={round(mean_prec[arm], 3)}  "
+                  f"mean_token_cost={round(mean_tok[arm])}")
+        if deferred:
+            print(f"deferred to Stage 2 (LLM judge): {[t['id'] for t in deferred]}")
 
-    # Sanity: the tasks must genuinely require memory (bare can't satisfy them).
-    assert agg["bare"] == 0.0, "a task is answerable without memory — tighten it"
+    # --- per-category kill-gates (techne#118) — positive categories only ---
+    for category in sorted(cat_weight):
+        g = gates.get(category)
+        assert g is not None, f"no gate configured for category '{category}'"
+        bare, techne = cat_agg(category, "bare"), cat_agg(category, "techne")
+        assert bare == 0.0, f"[{category}] answerable without memory (bare={bare}) — tighten it"
+        assert techne >= g["floor"], (
+            f"KILL-GATE [{category}]: techne {techne} < floor {g['floor']}"
+        )
+        assert (techne - bare) >= g["margin"], (
+            f"KILL-GATE [{category}]: margin {round(techne - bare, 3)} < {g['margin']}"
+        )
 
-    # Kill-gate (#68 M2): a change that drops recall below the floor, or fails to
-    # beat the no-memory control by the margin, fails here and does not merge.
-    assert agg["techne"] >= gate, (
-        f"KILL-GATE: techne aggregate {agg['techne']} < gate {gate} on the frozen baseline"
+    # --- cost-axis thesis: curated recall is far more precise + cheaper than a raw
+    #     dump. Gated here (raw-dump is kept OUT of the recall gate by design). ---
+    assert mean_prec["techne"] >= cost_ratio * mean_prec["raw-source-dump"], (
+        f"THESIS: curated precision {round(mean_prec['techne'], 3)} not >= {cost_ratio}× "
+        f"raw-dump {round(mean_prec['raw-source-dump'], 3)}"
     )
-    assert (agg["techne"] - agg["bare"]) >= margin, (
-        f"KILL-GATE: techne beats bare by {observed_margin} < required margin {margin}"
+    assert mean_tok["techne"] < mean_tok["raw-source-dump"], (
+        f"THESIS: curated token_cost {round(mean_tok['techne'])} not < raw-dump "
+        f"{round(mean_tok['raw-source-dump'])}"
     )

@@ -12,10 +12,16 @@
 
 config:
   top_k: 10
-  # Kill-gate (#68 M2). See EVAL.md for rationale. gate = frozen Phase-0
-  # aggregate (1.0) minus 0.15 tolerance; margin = techne must beat bare by this.
-  gate: 0.85
-  margin: 0.3
+  # Per-category kill-gates (techne#118). floor = that category's frozen aggregate
+  # minus 0.15 tolerance; margin = techne must beat the no-memory control by this.
+  # Legacy `exact-recall` keeps the #68 M2 values byte-for-byte. See EVAL.md/PHASE0.md.
+  gates:
+    exact-recall: {floor: 0.85, margin: 0.3}
+    tracking:     {floor: 0.85, margin: 0.3}
+    aggregation:  {floor: 0.85, margin: 0.3}
+  # The raw-source-dump arm must lose decisively to curated on the cost axis (the
+  # techne thesis): curated precision >= this multiple of raw-dump precision.
+  cost_precision_ratio: 3.0
 
 tasks:
   - id: cabal14-design
@@ -69,5 +75,61 @@ tasks:
     table: all
     gold_keys: [platform_state]
     must_include_phrases: ["rookery-mcp"]
+    must_exclude_phrases: []
+    weight: 1.0
+
+  # --- tracking (techne#118): supersession freshness — return the LATEST revision,
+  #     never the stale ones. The #90 acceptance test. must_exclude is checked over
+  #     the whole result list (scoring.py), so a stale leak at any rank fails.
+  - id: deploy-target-current
+    category: tracking
+    query: "what is the current eval-stack deploy target host"
+    table: all
+    gold_keys: [deploy_target]
+    must_include_phrases: ["dev03-current"]
+    must_exclude_phrases: ["dev01-old", "dev02-mid"]
+    weight: 1.0
+
+  # --- aggregation (techne#118): one topic, N pieces — ALL must be recalled.
+  - id: eval-runbook-steps
+    category: aggregation
+    query: "eval rollout runbook steps freeze gate archive"
+    table: all
+    gold_keys: [agg_step1, agg_step2, agg_step3]
+    must_include_phrases: ["runbook"]
+    must_exclude_phrases: []
+    weight: 1.0
+
+  # --- Stage 2 (techne#118 PR3+): authored for taxonomy completeness, SKIPPED by
+  #     the runner (`stage: 2`). Their real failure — the model ASSERTS an absent /
+  #     deleted / should-be-uncertain fact — deterministic search() cannot exhibit;
+  #     they need the LLM answerer + defensive judge. cascade also waits on #117.
+  - id: absent-feature
+    category: absence
+    stage: 2
+    query: "does techne auto-bisect regressions across git history"
+    table: all
+    gold_keys: []
+    must_include_phrases: []
+    must_exclude_phrases: []
+    weight: 1.0
+
+  - id: deleted-fact
+    category: deletion
+    stage: 2
+    query: "the deleted eval scratch note about the abandoned vector index"
+    table: all
+    gold_keys: []
+    must_include_phrases: []
+    must_exclude_phrases: []
+    weight: 1.0
+
+  - id: cascade-uncertain
+    category: cascade
+    stage: 2
+    query: "is the derived eval deploy path still trustworthy after its source changed"
+    table: all
+    gold_keys: []
+    must_include_phrases: []
     must_exclude_phrases: []
     weight: 1.0
