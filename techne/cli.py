@@ -1033,61 +1033,6 @@ def context(ctx, project_path, limit):
         click.echo(text)
 
 
-@main.command("import-patterns")
-@click.argument("markdown_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Parse the markdown and print what would be imported; do not write to the corpus.",
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Import even when a knowledge entry with the same source URL already exists. "
-    "Otherwise duplicates are skipped with a log line.",
-)
-@click.pass_context
-def import_patterns(ctx, markdown_file: Path, dry_run: bool, force: bool):
-    """Import an architectural-patterns markdown corpus into techne knowledge.
-
-    The expected markdown shape is the one this repo's
-    architectural-patterns memory file uses: `## <Pattern Name>` sections
-    with `- **Source**:` and `- **Surveyed**:` preambles, plus a final
-    `## Surveyed (no patterns worth saving)` bullet list.
-
-    Each pattern lands as a knowledge entry with type=pattern and source
-    set to its URL. No-lift bullets land with confidence=low and tag
-    `surveyed-no-lift` so the corpus still remembers we surveyed them.
-    """
-    from techne.import_md import import_into, parse
-
-    click.echo(
-        "DEPRECATED (techne#87 P2): the pattern corpus now lives in architect.db, not "
-        "techne.db knowledge. Use `techne architect ingest` instead; these type='pattern' "
-        "rows leak team patterns into personal recall and `architect retire-legacy` removes "
-        "them.",
-        err=True,
-    )
-
-    config = Config.load()
-    text = markdown_file.read_text(encoding="utf-8")
-    parsed = parse(text)
-
-    click.echo(f"Parsed: {len(parsed.patterns)} patterns, {len(parsed.no_lifts)} no-lift entries")
-
-    result = import_into(config.db_path, parsed, dry_run=dry_run, force=force)
-
-    verb = "would add" if dry_run else "added"
-    skip_verb = "would skip" if dry_run else "skipped"
-    click.echo(
-        f"{verb}: {result.patterns_added} patterns, {result.no_lifts_added} no-lifts; "
-        f"{skip_verb} (already present): {result.patterns_skipped_existing} patterns, "
-        f"{result.no_lifts_skipped_existing} no-lifts"
-    )
-    if dry_run:
-        click.echo("\n[dry-run] no changes written. Re-run without --dry-run to import.")
-
-
 @main.group(invoke_without_command=True)
 @click.pass_context
 def reflect(ctx):

@@ -128,6 +128,28 @@ class TestTechneStoreContentValidation:
         assert "isError" not in response["result"]
         assert "content" in response["result"]
 
+    def test_pattern_type_not_exposed_and_rejected(self, config):
+        """techne#137: `pattern` is a team-domain type — not in the techne_store enum,
+        and a write attempt is rejected (it belongs in architect.db)."""
+        from techne.mcp_server import TOOLS
+
+        store_tool = next(t for t in TOOLS if t["name"] == "techne_store")
+        assert "pattern" not in store_tool["inputSchema"]["properties"]["type"]["enum"]
+
+        response = handle_request(
+            {
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "techne_store",
+                    "arguments": {"content": "a lifted pattern", "type": "pattern"},
+                },
+            },
+            config,
+        )
+        assert response["result"]["isError"] is True
+        assert "architect" in response["result"]["content"][0]["text"].lower()
+
 
 class TestTechneObserve:
     """techne_observe — the platform-agnostic capture path (#57)."""

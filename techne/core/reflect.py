@@ -1,7 +1,7 @@
 """End-of-session reflection.
 
 For each freshly detected thread, ask an LLM whether anything in it is worth
-keeping across sessions (durable facts, decisions, patterns about the project;
+keeping across sessions (durable facts, decisions, procedures about the project;
 durable identity claims about the operator). Proposals are written to
 `knowledge_candidates` for human review; while config.reflect.write_to is
 'candidates' the live knowledge / identity tables are never touched.
