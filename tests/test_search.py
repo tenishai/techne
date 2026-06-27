@@ -390,7 +390,7 @@ class TestOrFallback:
             db_path,
             "The mongoose pattern is preferred over the manticore approach "
             "when ingesting structured logs.",
-            type="pattern",
+            type="fact",
         )
         # AND form requires every term incl. "for", "log" (doc has "logs") and
         # "ingestion" (doc has "ingesting") — none of which match → AND empty.
@@ -404,7 +404,7 @@ class TestOrFallback:
     def test_or_fallback_does_not_fire_when_and_matches(self, db_path):
         """When the AND query already matches, results are unchanged (the
         fallback only runs on an empty AND pass)."""
-        store_knowledge(db_path, "mongoose pattern preferred for logs", type="pattern")
+        store_knowledge(db_path, "mongoose pattern preferred for logs", type="fact")
         results = search_fts(db_path, "mongoose pattern", table="all")
         assert len(results) >= 1
         assert any("mongoose" in r.get("content", "") for r in results)

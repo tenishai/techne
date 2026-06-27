@@ -60,13 +60,22 @@ def test_parse_response_tolerates_leading_prose():
     raw = (
         "Here is the JSON you asked for:\n["
         + json.dumps(
-            {"scope": "knowledge", "type": "pattern", "content": "y", "confidence": "medium"}
+            {"scope": "knowledge", "type": "decision", "content": "y", "confidence": "medium"}
         )
         + "]\nThank you."
     )
     parsed = parse_response(raw, max_items=10)
     assert len(parsed) == 1
-    assert parsed[0].type == "pattern"
+    assert parsed[0].type == "decision"
+
+
+def test_parse_response_rejects_team_domain_pattern():
+    """techne#137: reflect must not promote a `pattern` candidate into personal
+    memory — patterns belong in architect.db, not the reflection pass."""
+    raw = json.dumps(
+        [{"scope": "knowledge", "type": "pattern", "content": "x", "confidence": "high"}]
+    )
+    assert parse_response(raw, max_items=10) == []
 
 
 def test_parse_response_rejects_invalid_scope():

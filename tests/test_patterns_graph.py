@@ -230,8 +230,17 @@ def test_retire_legacy_pattern_knowledge(tmp_path):
 
     techne_db = tmp_path / "techne.db"
     store(techne_db, "a real fact", type="fact")
-    store(techne_db, "a lifted pattern", type="pattern")
-    store(techne_db, "another lifted pattern", type="pattern")
+    # Legacy type='pattern' rows are inserted directly — store() rejects the type
+    # post techne#137; retirement targets rows that predate that boundary.
+    conn = connect(techne_db)
+    try:
+        conn.execute("INSERT INTO knowledge (type, content) VALUES ('pattern', 'a lifted pattern')")
+        conn.execute(
+            "INSERT INTO knowledge (type, content) VALUES ('pattern', 'another lifted pattern')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     def _count(typ):
         conn = connect(techne_db)
