@@ -305,6 +305,94 @@ class TestSchemaReconciliation:
 
 
 # ---------------------------------------------------------------------------
+# techne#132 — reconciler must handle columns with inline `-- …` comments
+# ---------------------------------------------------------------------------
+
+# An outbox table missing `status` — which in SCHEMA_SQL carries an inline comment
+# AND a DEFAULT. Pre-fix, _reconcile_columns copied the comment + mid-line comma
+# into the ALTER and crashed with a syntax error.
+OUTBOX_PRE_STATUS = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    content_hash TEXT,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    synced_at TIMESTAMP
+);
+"""
+
+
+class TestReconcileCommentedColumn:
+    """A SCHEMA_SQL column with an inline `-- …` comment reconciles cleanly."""
+
+    @pytest.fixture
+    def pre_status_conn(self, tmp_path):
+        db = tmp_path / "pre_status.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        conn.executescript(OUTBOX_PRE_STATUS)
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+        conn.execute(
+            "INSERT INTO outbox (target, data_json) VALUES ('s', '{}')",
+        )
+        conn.commit()
+        return conn
+
+    def test_commented_column_added_without_crashing(self, pre_status_conn):
+        cols_before = {r[1] for r in pre_status_conn.execute("PRAGMA table_info(outbox)")}
+        assert "status" not in cols_before
+
+        _reconcile_columns(pre_status_conn)  # pre-#132: OperationalError near ","
+
+        cols_after = {r[1] for r in pre_status_conn.execute("PRAGMA table_info(outbox)")}
+        assert "status" in cols_after
+        # The NOT NULL DEFAULT applied to the pre-existing row — comment stripped,
+        # default preserved.
+        row = pre_status_conn.execute("SELECT status FROM outbox").fetchone()
+        assert row["status"] == "pending"
+
+    def test_strip_sql_comment_helper(self):
+        from techne.core.database import _strip_sql_comment
+
+        line = "    status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'synced'"
+        assert _strip_sql_comment(line) == "    status TEXT NOT NULL DEFAULT 'pending',"
+        assert _strip_sql_comment("    plain TEXT") == "    plain TEXT"
+
+    def test_not_null_without_default_is_skipped_not_crashed(self, tmp_path, monkeypatch):
+        """A NOT NULL column with no DEFAULT can't be added to a populated table;
+        the reconciler must skip+warn rather than raise (#132 related)."""
+        import techne.core.database as dbmod
+
+        db = tmp_path / "nn.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            "CREATE TABLE widget (id INTEGER PRIMARY KEY, name TEXT);"
+        )
+        conn.execute("INSERT INTO widget (name) VALUES ('x')")
+        conn.commit()
+        # Inject a SCHEMA_SQL whose widget table adds a NOT NULL column with no DEFAULT.
+        monkeypatch.setattr(
+            dbmod,
+            "SCHEMA_SQL",
+            "CREATE TABLE IF NOT EXISTS widget (\n"
+            "    id INTEGER PRIMARY KEY,\n"
+            "    name TEXT,\n"
+            "    required TEXT NOT NULL\n"
+            ");\n",
+        )
+        _reconcile_columns(conn)  # must not raise
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(widget)")}
+        assert "required" not in cols  # skipped, not forced
+
+
+# ---------------------------------------------------------------------------
 # summary_llm_source column (#1) — reconciler adds it; round-trip via state
 # ---------------------------------------------------------------------------
 
