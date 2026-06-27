@@ -14,6 +14,8 @@ yet (M2); M1 only soft-asserts that techne does not underperform bare.
 
 import json
 import sys
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,15 +60,26 @@ def test_recall_eval(tmp_path, capsys):
     agg = {arm: 0.0 for arm in ARMS}
     total_weight = sum(t.get("weight", 1.0) for t in tasks)
 
+    # Per-category accumulators (techne#118 — the MeME taxonomy made legible). The
+    # legacy six tasks are all `exact-recall`; aggregation/tracking/… land in PR2.
+    cat_score: dict[tuple[str, str], float] = defaultdict(float)
+    cat_weight: dict[str, float] = defaultdict(float)
+
     for task in tasks:
         w = task.get("weight", 1.0)
+        category = task.get("category", "exact-recall")
+        cat_weight[category] += w
         for arm in ARMS:
+            t0 = time.perf_counter()
             retrieved = _retrieve(arm, db_path, task, top_k)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             score, detail = score_task(task, retrieved, gold)
             agg[arm] += score * w
+            cat_score[(category, arm)] += score * w
             rows.append({
-                "task_id": task["id"], "arm": arm, "score": score,
-                "weight": w, **detail,
+                "task_id": task["id"], "category": category,
+                "variant": task.get("variant", "curated"), "arm": arm,
+                "score": score, "weight": w, "latency_ms": latency_ms, **detail,
             })
 
     for arm in ARMS:
@@ -87,6 +100,14 @@ def test_recall_eval(tmp_path, capsys):
         for r in rows:
             print(f"{r['task_id']:<20} {r['arm']:<8} {r['score']:>6} "
                   f"{r['recall']:>7} {r['coverage']:>6} {r['n_results']:>3}  {r['misses']}")
+        print("-" * 60)
+        for category in sorted(cat_weight):
+            cw = cat_weight[category]
+            per = " ".join(
+                f"{arm}={round(cat_score[(category, arm)] / cw, 3) if cw else 0.0}"
+                for arm in ARMS
+            )
+            print(f"category[{category}]  {per}")
         print("-" * 60)
         for arm in ARMS:
             print(f"aggregate[{arm}] = {agg[arm]}")

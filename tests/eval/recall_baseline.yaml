@@ -19,7 +19,7 @@ config:
 
 tasks:
   - id: cabal14-design
-    category: decision-recall
+    category: exact-recall
     query: "cabal 14 archivist outbox decision and rationale"
     table: all
     gold_keys: [cabal14]
@@ -28,7 +28,7 @@ tasks:
     weight: 1.0
 
   - id: adapter-recency
-    category: activity-recall
+    category: exact-recall
     query: "techne sync adapter py SourceAdapter relocation"
     table: observations
     gold_keys: [adapter_touch]
@@ -37,7 +37,7 @@ tasks:
     weight: 1.0
 
   - id: reflect-candidates
-    category: multiword-recall
+    category: exact-recall
     query: "how does the reflect experiment promote candidates"
     table: all
     gold_keys: [reflect_candidates]
@@ -46,7 +46,7 @@ tasks:
     weight: 1.0
 
   - id: reflect-thread
-    category: thread-recall
+    category: exact-recall
     query: "threads about the reflect experiment observation window"
     table: threads
     gold_keys: [reflect_thread]
@@ -55,7 +55,7 @@ tasks:
     weight: 1.0
 
   - id: canonical-remote
-    category: decision-recall
+    category: exact-recall
     query: "which git remote is canonical for techne github or gitea"
     table: all
     gold_keys: [canonical_remote]
@@ -64,7 +64,7 @@ tasks:
     weight: 1.0
 
   - id: platform-state-delta
-    category: fact-recall
+    category: exact-recall
     query: "platform state changes delta since 2026-06-15"
     table: all
     gold_keys: [platform_state]

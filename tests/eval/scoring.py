@@ -13,7 +13,9 @@ def _text_of(r: dict) -> str:
     return r.get("content") or r.get("summary") or r.get("label") or ""
 
 
-def score_task(task: dict, retrieved: list[dict], gold_resolver: dict[str, str]) -> tuple[float, dict]:
+def score_task(
+    task: dict, retrieved: list[dict], gold_resolver: dict[str, str]
+) -> tuple[float, dict]:
     """Score one task's retrieved results. Returns (score, detail)."""
     gold_ids = {gold_resolver[k] for k in task.get("gold_keys", [])}
     got_ids = {f"{r['type']}:{r['id']}" for r in retrieved}
@@ -28,13 +30,23 @@ def score_task(task: dict, retrieved: list[dict], gold_resolver: dict[str, str])
     top_text = _text_of(retrieved[0]).lower() if retrieved else ""
     killed = any(f.lower() in top_text for f in forb)
 
+    # Cost/precision axis (techne#118) — observability only, NOT part of the score.
+    # precision = gold hits per result returned (curated recall is precise + cheap;
+    # a raw-source-dump arm recalls everything but precision craters); token_cost is
+    # a char-count proxy for what the arm would cost to inject.
+    n_results = len(retrieved)
+    precision = (len(hits) / n_results) if n_results else 0.0
+    token_cost = sum(len(_text_of(r)) for r in retrieved)
+
     detail = {
         "recall": round(recall, 3),
         "coverage": round(coverage, 3),
+        "precision": round(precision, 3),
+        "token_cost": token_cost,
         "hits": sorted(hits),
         "misses": sorted(gold_ids - got_ids),
         "killed_by_exclude": killed,
-        "n_results": len(retrieved),
+        "n_results": n_results,
     }
     if killed:
         return 0.0, detail
