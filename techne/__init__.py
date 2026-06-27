@@ -40,7 +40,11 @@ from techne.lifecycle import (
 # Route structlog to STDERR (configure-once, after imports so E402 stays clean).
 # Unconfigured, structlog prints to stdout — which would corrupt the MCP server's stdout
 # JSON-RPC stream and any CLI `--json` output (techne#107). Logs belong on stderr.
-_structlog.configure(logger_factory=_structlog.PrintLoggerFactory(file=_sys.stderr))
+# Guard on is_configured() so a consumer (e.g. limenal) that set up structlog before
+# importing techne keeps its own config; in techne's own MCP/CLI process nothing else
+# configures it, so the guard is False and the stderr fix still applies.
+if not _structlog.is_configured():
+    _structlog.configure(logger_factory=_structlog.PrintLoggerFactory(file=_sys.stderr))
 
 __all__ = [
     "__version__",

@@ -165,7 +165,8 @@ class TestClaimsEmit:
         assert result["prompt"] == ""
         assert result["prompt_hash"] == ""
         assert result["deed_count"] == 0
-        assert result["claim_candidates"] == 0
+        assert result["deed_log_capped"] is False
+        assert result["memory_files"] == []
 
     def test_with_memory_and_deeds_returns_memory_present_true(
         self, db, project, monkeypatch
@@ -192,7 +193,33 @@ class TestClaimsEmit:
         assert len(result["prompt"]) > 0
         assert len(result["prompt_hash"]) == 16
         assert result["deed_count"] > 0
+        assert result["deed_log_capped"] is False
         assert len(result["memory_files"]) == 1
+
+    def test_deed_log_cap_is_surfaced(self, db, project, monkeypatch):
+        """Hitting the deed pull cap is surfaced (deed_log_capped + a prompt CAPPED note),
+        not silently dropped — else an off-window deed reads as false uncorroborated
+        (techne#107 PR3 review)."""
+        cwd, _ = project
+        proj_path = str(cwd.resolve())
+
+        import techne.core.memory_claims as mc
+
+        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "DEED_DIGEST_CAP", 2)
+
+        _write_memory(db, cwd, "uses redis")
+        _session(db, "s1", proj_path)
+        for i in range(3):
+            _obs(db, "s1", "Write", f"Wrote: /proj/f{i}.py")
+
+        from techne.config import Config
+
+        cfg = Config()
+        cfg.db_path = db
+        result = claims_emit(cfg, cwd=cwd)
+        assert result["deed_log_capped"] is True
+        assert "CAPPED" in result["prompt"]
 
     def test_prompt_contains_memory_content(self, db, project, monkeypatch):
         cwd, _ = project
@@ -387,6 +414,8 @@ class TestClaimsIngest:
         }
         assert result["total"] == 3
         assert len(result["claims"]) == 3
+        # The honesty caveat rides along with the data (so --json consumers see it too).
+        assert "uncorroborated" in result["caveat"] and "NOT" in result["caveat"]
 
     def test_empty_response_returns_zero_counts(self, db):
         from techne.config import Config

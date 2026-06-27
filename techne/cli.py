@@ -1060,7 +1060,8 @@ def _memory_doctor_claims(ctx, config, *, since_days, as_json):
         click.echo(_NO_MEMORY_MSG)
         return
 
-    # Automated path: if config.model is set, try the operator LLM.
+    # Automated path: if config.model is set, try the operator LLM (litellm — this path,
+    # unlike the resident-model MCP path, may need provider credentials).
     result = None
     if getattr(config, "model", None):
         try:
@@ -1069,8 +1070,13 @@ def _memory_doctor_claims(ctx, config, *, since_days, as_json):
             gen = _make_generate_fn(config)
             raw = gen(report["prompt"])
             result = claims_ingest(config, report["prompt_hash"], raw)
-        except Exception:
-            result = None  # fall through to manual instructions
+        except Exception as exc:  # noqa: BLE001 — fall back to manual, but never silently
+            click.echo(
+                f"Automated path unavailable ({type(exc).__name__}: {exc}); "
+                "falling back to the resident-model (MCP) instructions.",
+                err=True,
+            )
+            result = None
 
     if result is not None:
         if as_json:
@@ -1090,6 +1096,11 @@ def _memory_doctor_claims(ctx, config, *, since_days, as_json):
             f"  NOTE: {report['deed_count']} deed(s) — deed-log is ~500-char truncated; "
             "'uncorroborated' = no deed evidence, NOT false."
         )
+        if report.get("deed_log_capped"):
+            click.echo(
+                "  ⚠ deed-log CAPPED — older deeds omitted; some 'uncorroborated' "
+                "may just be off-window. Narrow with --since."
+            )
         if counts["contradicted"]:
             click.echo("\n! contradicted — a deed conflicts with these claims:")
             for c in result["claims"]:

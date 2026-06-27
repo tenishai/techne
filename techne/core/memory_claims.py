@@ -28,8 +28,12 @@ from techne.platforms.claude_code.paths import project_slug
 
 log = structlog.get_logger(__name__)
 
-MEMORY_BUDGET = 8000  # max chars of curated-memory content fed to the prompt
-DEED_LIMIT = 2000     # max deed rows pulled per project-path candidate
+MEMORY_BUDGET = 8000   # max chars of curated-memory content fed to the prompt
+DEED_DIGEST_CAP = 200  # deeds pulled AND shown per project-path candidate (newest-first)
+# Pull == show: capping the pull at the digest size means every deed the model receives is
+# accounted for, and hitting the cap is surfaced as report["deed_log_capped"] rather than
+# silently dropping older deeds (which would read as false `uncorroborated`). Narrow the
+# window with --since to fully cover a busy project.
 
 
 FIDELITY_CAVEAT = (
@@ -48,7 +52,7 @@ You are reviewing a curated memory snapshot against a raw deed-log.
 # Curated Memory
 {memory_content}
 
-# Deed-Log Digest (last {deed_count} deed(s) considered)
+# Deed-Log Digest ({deed_count} deed(s) considered{capped_note})
 {deed_digest}
 
 # Your Task
@@ -130,9 +134,9 @@ def claims_emit(
       memory_present  — False when no curated memory is found for this project
       prompt          — the full prompt (empty string when memory_present=False)
       prompt_hash     — sha256[:16] of the prompt (empty string when absent)
-      deed_count      — number of deeds considered
-      memory_files    — list of source_path strings (present only when memory_present=True)
-      claim_candidates — 0 (present only when memory_present=False, for symmetry)
+      deed_count      — number of deeds considered (pulled == shown)
+      deed_log_capped — True when the pull cap was hit (older deeds omitted; narrow --since)
+      memory_files    — list of source_path strings ([] when memory_present=False)
     """
     cwd = Path(cwd) if cwd else Path.cwd()
     slug = project_slug(cwd)
@@ -145,28 +149,37 @@ def claims_emit(
             "prompt": "",
             "prompt_hash": "",
             "deed_count": 0,
-            "claim_candidates": 0,
+            "deed_log_capped": False,
+            "memory_files": [],
         }
 
     # Scope deeds to this project — union both resolved and raw cwd paths, mirroring
     # memory_doctor.reconcile's candidate scoping (the capture hook may store either form).
+    # capped: a candidate hit the pull cap, so older deeds were not considered — surfaced
+    # (not silently dropped) so an uncorroborated claim isn't mistaken for a false one.
     candidates = {str(cwd), str(cwd.resolve())}
     deeds_by_id: dict[int, dict] = {}
+    capped = False
     for proj in candidates:
         batch = deed_log(
-            config.db_path, project_path=proj, since_days=since_days, limit=DEED_LIMIT
+            config.db_path, project_path=proj, since_days=since_days, limit=DEED_DIGEST_CAP
         )
+        if len(batch) >= DEED_DIGEST_CAP:
+            capped = True
         for d in batch:
             deeds_by_id[d["id"]] = d
     deed_list = list(deeds_by_id.values())
 
     memory_content = _build_memory_block(memory_rows)
-    digest = _deed_digest(deed_list)
+    # Show every pulled deed (pull is already bounded by DEED_DIGEST_CAP).
+    digest = _deed_digest(deed_list, max_deeds=len(deed_list) or 1)
+    capped_note = " — CAPPED, older deeds omitted; narrow with --since" if capped else ""
 
     prompt = CLAIMS_PROMPT.format(
         fidelity_caveat=FIDELITY_CAVEAT,
         memory_content=memory_content,
         deed_count=len(deed_list),
+        capped_note=capped_note,
         deed_digest=digest if digest else "(no deeds found for this project)",
     )
 
@@ -177,6 +190,7 @@ def claims_emit(
         slug=slug,
         memory_files=len(memory_rows),
         deed_count=len(deed_list),
+        deed_log_capped=capped,
         prompt_hash=prompt_hash,
     )
     return {
@@ -184,6 +198,7 @@ def claims_emit(
         "prompt": prompt,
         "prompt_hash": prompt_hash,
         "deed_count": len(deed_list),
+        "deed_log_capped": capped,
         "memory_files": [r["source_path"] for r in memory_rows],
     }
 
@@ -253,4 +268,6 @@ def claims_ingest(config: Config, prompt_hash: str, response: str) -> dict:
         "claims": claims,
         "counts": counts,
         "total": len(claims),
+        # Carry the honesty framing alongside the data so a --json consumer sees it too.
+        "caveat": FIDELITY_CAVEAT,
     }
