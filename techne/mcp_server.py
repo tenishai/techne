@@ -780,6 +780,13 @@ def main():
         except json.JSONDecodeError:
             continue
 
+        # A well-formed JSON scalar/array (e.g. `null`, `42`, `[]`) parses fine but
+        # isn't a JSON-RPC request object; handle_request does request.get(...) and
+        # would crash the whole server on it. Skip anything that isn't an object.
+        # (techne#166)
+        if not isinstance(request, dict):
+            continue
+
         response = handle_request(request, config)
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")

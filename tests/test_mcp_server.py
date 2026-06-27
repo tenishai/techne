@@ -5,6 +5,11 @@ This file exercises the method dispatch, version reporting, ping support,
 and per-tool error paths.
 """
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
 from techne import __version__
@@ -282,3 +287,36 @@ class TestTechneStatus:
         # pre-existing fields preserved
         assert payload["db_path"] == str(config.db_path)
         assert "sync_adapter" in payload
+
+
+class TestMainLoopNonDictGuard:
+    """techne#166: the stdio loop must not crash on well-formed JSON that isn't a
+    request object. `null`, `42`, and `[]` all parse via json.loads but have no
+    .get(), so handle_request would AttributeError and kill the whole server,
+    dropping every subsequent valid request on the connection."""
+
+    def test_non_dict_lines_skipped_valid_request_still_served(self, tmp_path):
+        # Mixed stdin: a JSON null, a JSON int, a JSON array, then a real request.
+        # The server must ignore the first three and answer the initialize.
+        stdin = "\n".join([
+            "null",
+            "42",
+            "[1, 2, 3]",
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+        ]) + "\n"
+        env = {**os.environ, "TECHNE_HOME": str(tmp_path)}
+        result = subprocess.run(
+            [sys.executable, "-m", "techne.mcp_server"],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"server crashed: {result.stderr}"
+        # Exactly one response line — the non-dict lines produced none.
+        out_lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+        assert len(out_lines) == 1, f"expected 1 response, got {out_lines!r}"
+        resp = json.loads(out_lines[0])
+        assert resp["id"] == 1
+        assert resp["result"]["serverInfo"]["name"] == "techne"

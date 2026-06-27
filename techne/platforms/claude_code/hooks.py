@@ -1,6 +1,7 @@
 """Claude Code platform adapter — hook registration and MCP setup."""
 
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -89,8 +90,15 @@ def register_mcp(config: Config):
 
 def unregister(config: Config):
     """Remove techne hooks and MCP registration."""
-    # Remove hooks (handle both wrapped and legacy shapes)
-    settings = _load_json(SETTINGS_PATH)
+    # Remove hooks (handle both wrapped and legacy shapes). Uninstall must be
+    # resilient: a corrupt settings.json shouldn't strand the user — _load_json
+    # raises on it (correct for register, which must not clobber), but here we
+    # warn and press on so the MCP-config cleanup below still runs (techne#166).
+    try:
+        settings = _load_json(SETTINGS_PATH)
+    except RuntimeError as e:
+        print(f"techne: skipping hook cleanup: {e}", file=sys.stderr)
+        settings = None
     if settings:
         hooks = settings.get("hooks", {})
         for event in list(hooks.keys()):
@@ -100,7 +108,11 @@ def unregister(config: Config):
         _save_json(SETTINGS_PATH, settings)
 
     # Remove MCP server
-    mcp_config = _load_json(MCP_CONFIG_PATH)
+    try:
+        mcp_config = _load_json(MCP_CONFIG_PATH)
+    except RuntimeError as e:
+        print(f"techne: skipping MCP cleanup: {e}", file=sys.stderr)
+        mcp_config = None
     if mcp_config:
         servers = mcp_config.get("mcpServers", {})
         servers.pop("techne", None)
@@ -108,14 +120,28 @@ def unregister(config: Config):
 
 
 def _load_json(path: Path) -> dict | None:
+    """Load a JSON config. Returns None ONLY when the file genuinely does not exist
+    (caller starts fresh). An EXISTING-but-unparseable file RAISES — returning None
+    there would make register_hooks treat it as empty and OVERWRITE the user's real
+    Claude Code settings with just ours (techne#166). Fail loud, lose nothing."""
     if not path.exists():
         return None
     try:
         return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(
+            f"{path} exists but could not be read/parsed ({e}); refusing to overwrite it. "
+            "Fix or remove the file, then re-run."
+        ) from e
 
 
 def _save_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    # Atomic write: a crash mid-write must never leave the file truncated/empty — the
+    # next _load_json would then (now) raise, or pre-#166 silently wipe the user's
+    # settings. Write a sibling temp then os.replace (POSIX-atomic rename). The pid
+    # suffix keeps two racing writers (e.g. concurrent `techne init`) from sharing
+    # one temp and interleaving bytes.
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)

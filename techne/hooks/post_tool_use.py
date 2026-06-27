@@ -74,7 +74,14 @@ def main():
 
     from techne.hooks._timeout import bounded_hook
 
-    config = Config.load()
+    # Config.load() can raise (corrupt/unreadable config, bad TOML, perms). A hook
+    # that throws here would surface as a tool-call failure in the user's session;
+    # a memory hook must NEVER break the host. Degrade to a no-op. (techne#166)
+    try:
+        config = Config.load()
+    except Exception as e:
+        print(f"techne: config load failed, skipping capture: {e}", file=sys.stderr)
+        sys.exit(0)
 
     try:
         with bounded_hook(config.hooks.timeout_s):
