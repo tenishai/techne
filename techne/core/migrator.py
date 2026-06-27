@@ -374,13 +374,18 @@ def reconcile_indexes(conn: sqlite3.Connection, schema_sql: str) -> None:
     *table* was missing, so an index added to an already-existing table never
     landed on upgraded dbs. Runs LAST — after column reconciliation — so an index
     can reference a column the column pass just added. ``CREATE INDEX IF NOT
-    EXISTS`` is idempotent; we diff first only to skip work + log accurately."""
+    EXISTS`` is idempotent; we diff first only to skip work + log accurately.
+
+    Additive by index *name*: if an index's definition changes under the same
+    name it is NOT reconciled (the name is already present) — that's a redefinition
+    and, per the SCHEMA_SQL-only-is-additive convention, requires a numbered
+    migration + version bump, not the reconciler."""
     existing = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
     }
     for name, create_sql in _index_statements(schema_sql):
         if name in existing:
             continue
-        conn.executescript(create_sql)
+        conn.execute(create_sql)  # one statement per entry; matches reconcile_columns
         conn.commit()
         print(f"[techne] reconcile: CREATE INDEX {name}", file=sys.stderr)
