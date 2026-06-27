@@ -19,6 +19,13 @@ config:
     exact-recall: {floor: 0.85, margin: 0.3}
     tracking:     {floor: 0.85, margin: 0.3}
     aggregation:  {floor: 0.85, margin: 0.3}
+    # Stage-2 (LLM-judged) negative-polarity categories — techne#118 PR3+.
+    # Conservative floors (0.5): these are model-judged so variance is higher
+    # than the deterministic Stage-1 rubric. margin=0.0 (no bare-arm baseline
+    # to compare against; the assertion is about answer quality, not retrieval).
+    absence:      {floor: 0.5, margin: 0.0}
+    deletion:     {floor: 0.5, margin: 0.0}
+    cascade:      {floor: 0.5, margin: 0.0}
   # The raw-source-dump arm must lose decisively to curated on the cost axis (the
   # techne thesis): curated precision >= this multiple of raw-dump precision.
   cost_precision_ratio: 3.0

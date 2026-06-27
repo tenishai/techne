@@ -78,8 +78,9 @@ select = ["E", "F", "I", "W"]
 testpaths = ["tests"]
 # Keep the recall eval (#68) out of the default unit run — it's run explicitly
 # with `pytest -m eval`. Unit runs stay clean and fast.
-addopts = "-m 'not eval and not probe'"
+addopts = "-m 'not eval and not probe and not eval_llm'"
 markers = [
     "eval: recall-effectiveness eval cases (#68); excluded from default runs",
     "probe: memory-attribution probe that spawns a real session (#94); excluded from default runs",
+    "eval_llm: LLM-judged eval cases (#118 Stage 2); needs a reachable model, else skipped",
 ]
