@@ -1,6 +1,10 @@
 """techne — agentic memory and knowledge system."""
 
-from importlib.metadata import version as _pkg_version, PackageNotFoundError as _PackageNotFoundError
+import sys as _sys
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
+import structlog as _structlog
 
 try:
     __version__ = _pkg_version("techne")
@@ -10,30 +14,37 @@ except _PackageNotFoundError:
 # Public API. Stable for library consumers.
 
 # Configuration
-from techne.config import Config, Platform, ThreadConfig, HookConfig, SyncConfig
+from techne import lifecycle
+from techne.config import Config, HookConfig, Platform, SyncConfig, ThreadConfig
 
-# Lifecycle (the highest-level library entry points)
-from techne.lifecycle import (
-    run_session_start,
-    run_session_end,
-    capture_tool_use,
-    init_session_for_external_id,
-)
-
-# Core types
-from techne.core.threads import Thread
+# Knowledge store (namespaced — call as techne.knowledge.store(...))
+from techne.core import identity, knowledge, search
 
 # Database initialization
-from techne.core.database import init_db, connect
+from techne.core.database import connect, init_db
 
 # Knowledge type vocabulary (stable contract for consumers like limenal)
 from techne.core.knowledge import VALID_TYPES
 
-# Knowledge store (namespaced — call as techne.knowledge.store(...))
-from techne.core import knowledge
-from techne.core import identity
-from techne.core import search
-from techne import lifecycle
+# Core types
+from techne.core.threads import Thread
+
+# Lifecycle (the highest-level library entry points)
+from techne.lifecycle import (
+    capture_tool_use,
+    init_session_for_external_id,
+    run_session_end,
+    run_session_start,
+)
+
+# Route structlog to STDERR (configure-once, after imports so E402 stays clean).
+# Unconfigured, structlog prints to stdout — which would corrupt the MCP server's stdout
+# JSON-RPC stream and any CLI `--json` output (techne#107). Logs belong on stderr.
+# Guard on is_configured() so a consumer (e.g. limenal) that set up structlog before
+# importing techne keeps its own config; in techne's own MCP/CLI process nothing else
+# configures it, so the guard is False and the stderr fix still applies.
+if not _structlog.is_configured():
+    _structlog.configure(logger_factory=_structlog.PrintLoggerFactory(file=_sys.stderr))
 
 __all__ = [
     "__version__",
