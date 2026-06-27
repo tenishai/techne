@@ -140,7 +140,9 @@ def load_store(config: Config, domain: str) -> StoreAdapter:
     )
 
 
-def migrated_store(config: Config, domain: str, schema_sql: str, seen: set) -> StoreAdapter:
+def migrated_store(
+    config: Config, domain: str, schema_sql: str, seen: set, *, reconcile: bool = False
+) -> StoreAdapter:
     """`load_store` + apply the domain schema once per (process × store identity).
 
     The single resolution point every domain accessor (librarian/architect/codex)
@@ -149,10 +151,32 @@ def migrated_store(config: Config, domain: str, schema_sql: str, seen: set) -> S
     effect (techne#102). `schema_sql` is the domain's own DDL (CREATE IF NOT
     EXISTS), idempotent; we still gate it on `seen` to skip re-running executescript
     on every op. `seen` is the caller module's process-lifetime memo.
+
+    `reconcile=True` (techne#136) additionally converges an EXISTING db toward
+    `schema_sql` via `migrator.reconcile_schema` — adding any new table/column/
+    index/trigger the bare `CREATE IF NOT EXISTS` would skip on an upgraded db. Use
+    it for purely-additive domains (librarian). Do NOT use it for a domain with a
+    destructive/numbered migration (architect/codex) — that runs its versioned step
+    under `guarded_migrate` separately, and a structure-diffing reconcile would
+    mangle an old-shape table the numbered step means to rebuild.
     """
     store = load_store(config, domain)
     key = getattr(store, "db_path", domain)
     if key not in seen:
-        store.migrate(schema_sql)
+        if reconcile:
+            # reconcile_schema provisions a fresh db AND converges an existing one,
+            # in the load-bearing order (columns before indexes). It REPLACES the
+            # blanket executescript here on purpose: executescript runs the whole
+            # DDL in text order, so a new `CREATE INDEX` over a column the upgraded
+            # table doesn't have yet would fail before any reconcile could add it.
+            from techne.core import migrator
+
+            conn = store.connect()
+            try:
+                migrator.reconcile_schema(conn, schema_sql, triggers_sql=schema_sql)
+            finally:
+                conn.close()
+        else:
+            store.migrate(schema_sql)
         seen.add(key)
     return store
