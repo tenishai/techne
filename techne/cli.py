@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from techne import __version__
-from techne.config import PLATFORMS, Config, techne_home
+from techne.config import PLATFORMS, Config, PostureConfig, techne_home
 
 
 @click.group()
@@ -34,6 +34,8 @@ def status(ctx):
 
     click.echo(f"Database: {config.db_path}")
     click.echo(f"Platform: {config.platform}")
+    posture_mode = getattr(getattr(config, "posture", None), "mode", "observe")
+    click.echo(f"Posture: {posture_mode}")
     click.echo(f"Sync adapter: {config.sync.adapter}")
     click.echo()
     click.echo(f"Sessions: {stats['sessions']}")
@@ -771,10 +773,22 @@ def migrate_summaries_cmd(ctx, dry_run: bool):
     default=None,
     help="Directory with identity markdown files",
 )
+@click.option(
+    "--posture",
+    type=click.Choice(["auto", "observe", "spool-primary"]),
+    default="auto",
+    help=(
+        "Coexistence posture with CC curated memory. "
+        "'auto' detects CC memory and picks spool-primary if found, else observe. "
+        "'spool-primary' forces downstream-only mode (reflect advisory). "
+        "'observe' keeps techne independent."
+    ),
+)
 @click.pass_context
-def init(ctx, platform, identity_dir):
+def init(ctx, platform, identity_dir, posture):
     """Initialize techne — create database, register hooks, set up MCP."""
     from techne.core.database import init_db
+    from techne.core.memory_doctor import find_curated_memory_files
 
     config = Config.load()
     config.platform = platform
@@ -802,6 +816,31 @@ def init(ctx, platform, identity_dir):
         register_mcp(config)
         click.echo("Claude Code hooks registered")
         click.echo("MCP server registered")
+
+    # Resolve coexistence posture (techne#107 PR4).
+    cc = bool(find_curated_memory_files())
+    if posture == "auto":
+        resolved_mode = "spool-primary" if cc else "observe"
+    else:
+        resolved_mode = posture
+    config.posture = PostureConfig(mode=resolved_mode, cc_memory_detected=cc)
+    if resolved_mode == "spool-primary":
+        click.echo(
+            "Posture: spool-primary — CC authors curated memory; techne drains + reconciles"
+            " downstream and keeps its own reflect ADVISORY (proposals only, no auto-promote)."
+            " Applies to ALL techne projects on this machine (global config)."
+            " Run `techne memory sync` / `techne memory doctor`."
+        )
+    else:
+        # Be honest about why we landed on observe (detected-none vs forced-despite-CC).
+        cc_note = (
+            "CC curated memory WAS detected, but observe was requested"
+            if cc else "no CC curated memory detected"
+        )
+        click.echo(
+            "Posture: observe — techne captures + (if you enable reflect) may author its own"
+            f" knowledge ({cc_note})."
+        )
 
     # Save config. Report the resolved path save() actually wrote to (honors
     # TECHNE_HOME), not the import-time DEFAULT_CONFIG snapshot.
