@@ -150,9 +150,17 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
     """
     conn = connect(db_path)
     try:
+        # Take the write lock before the liveness read (read→write TOCTOU; matches
+        # curated.ingest_memory_file's guard, techne#108 staff review). The promote
+        # dispatch uses _supersede_in_conn directly under its own held lock, so this
+        # only guards direct public callers.
+        conn.execute("BEGIN IMMEDIATE")
         new_id = _supersede_in_conn(conn, old_id, new_content, source)
         conn.commit()
         return new_id
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -255,12 +263,17 @@ def merge_into(
     numeric = CONFIDENCE_NUMERIC.get(confidence, CONFIDENCE_NUMERIC["medium"])
     conn = connect(db_path)
     try:
+        # Write lock before the liveness reads (TOCTOU guard, matches supersede above).
+        conn.execute("BEGIN IMMEDIATE")
         new_id = _merge_in_conn(
             conn, old_ids, merged_content,
             ktype=type, confidence=confidence, numeric=numeric, tags=tags, source=source,
         )
         conn.commit()
         return new_id
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

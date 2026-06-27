@@ -141,6 +141,20 @@ def claims_emit(
     cwd = Path(cwd) if cwd else Path.cwd()
     slug = project_slug(cwd)
 
+    # Auto-drain CC's memory files into curated_memory FIRST, so the claim-gate reads a
+    # fresh drain. Without this the drain only fills on a manual `techne memory sync`, and
+    # --claims would falsely report "no curated memory" when files sit on disk where
+    # `memory doctor` (which reads disk) just found them (staff-review C1/C2). Best-effort:
+    # a drain failure falls back to whatever is already stored. Idempotent (content-hash).
+    try:
+        from techne.sync.cc_memory import CCMemorySource
+
+        CCMemorySource(config, cwd=cwd).initial_walk()
+    except Exception as exc:
+        # warning (not debug): a recurring drain failure means --claims silently judges a
+        # stale/empty drain — surface it without changing the degrade-to-read behavior.
+        log.warning("claims_emit_drain_failed", slug=slug, error=str(exc))
+
     memory_rows = live_curated_memory(config.db_path, slug=slug)
     if not memory_rows:
         log.debug("claims_emit_no_memory", slug=slug)

@@ -226,8 +226,8 @@ def _insert_candidate(
             """INSERT INTO knowledge_candidates
                  (scope, type, content, tags, confidence,
                   source_session_id, source_thread_id,
-                  model_used, prompt_hash, raw_response)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  model_used, prompt_hash, raw_response, origin)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reflect')""",
             (
                 candidate.scope,
                 candidate.type,
