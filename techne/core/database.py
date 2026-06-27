@@ -1,15 +1,9 @@
 """SQLite database schema and connection management for techne."""
 
-import re
 import sqlite3
-import sys
-from datetime import datetime
 from pathlib import Path
 
-try:
-    import fcntl  # POSIX only; absent on Windows
-except ImportError:  # pragma: no cover - techne targets macOS/Linux
-    fcntl = None
+from techne.core import migrator
 
 SCHEMA_VERSION = 11
 
@@ -288,66 +282,9 @@ END;
 """
 
 
-def _trigger_statements() -> list[tuple[str, str]]:
-    """Parse FTS_TRIGGERS_SQL and return (trigger_name, create_sql) pairs.
-
-    Each statement spans from ``CREATE TRIGGER IF NOT EXISTS <name>`` through
-    its closing ``END;``.  Multi-line bodies are handled by scanning for the
-    ``END;`` terminator rather than relying on single-line detection.
-    """
-    # Each trigger block: CREATE TRIGGER ... END;
-    pattern = re.compile(
-        r"(CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+(\w+).+?END\s*;)",
-        re.IGNORECASE | re.DOTALL,
-    )
-    return [(m.group(2), m.group(1).strip()) for m in pattern.finditer(FTS_TRIGGERS_SQL)]
-
-
-def _trigger_source_table(trigger_name: str) -> str | None:
-    """Return the content-table name that trigger_name fires on.
-
-    Derived by extracting ``AFTER {INSERT|UPDATE|DELETE} ON <table>`` from
-    the trigger SQL. Returns None if the table can't be determined (defensive
-    fallback — caller will attempt the CREATE and let SQLite surface the error).
-    """
-    for name, create_sql in _trigger_statements():
-        if name != trigger_name:
-            continue
-        m = re.search(r"AFTER\s+(?:INSERT|UPDATE|DELETE)\s+ON\s+(\w+)", create_sql, re.IGNORECASE)
-        return m.group(1) if m else None
-    return None
-
-
 def _reconcile_triggers(conn: sqlite3.Connection) -> None:
-    """Create any triggers present in FTS_TRIGGERS_SQL but absent from the live DB.
-
-    Uses ``CREATE TRIGGER IF NOT EXISTS`` so double-execution is harmless, but
-    we still diff against sqlite_master first to avoid unnecessary work and to
-    emit accurate log lines.
-
-    Skips triggers whose source table does not yet exist (e.g. ``documents_ai``
-    when ``documents`` hasn't been created yet on an older DB). Those triggers
-    will be installed on the next connect() after ``_reconcile_tables()`` adds
-    the source table.
-    """
-    existing_tables = {
-        row[0]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'shadow')")
-    }
-    existing = {
-        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
-    }
-    for name, create_sql in _trigger_statements():
-        if name in existing:
-            continue
-        src = _trigger_source_table(name)
-        if src is not None and src not in existing_tables:
-            # Source table absent — skip; _reconcile_tables() will create it,
-            # then the next reconcile pass installs the trigger.
-            continue
-        conn.executescript(create_sql)
-        conn.commit()
-        print(f"[techne] reconcile: CREATE TRIGGER {name}", file=sys.stderr)
+    """Core shim → migrator.reconcile_triggers against FTS_TRIGGERS_SQL (techne#136)."""
+    migrator.reconcile_triggers(conn, FTS_TRIGGERS_SQL)
 
 
 _FTS_BACKFILL: dict[str, tuple[str, list[str]]] = {
@@ -368,183 +305,23 @@ _FTS_INSERT_COLS: dict[str, list[str]] = {
 
 
 def _reconcile_fts_backfill(conn: sqlite3.Connection) -> None:
-    """Backfill any FTS table whose index is empty while the source table has rows.
-
-    Uses the FTS5 shadow ``_docsize`` table to detect an empty index; content-
-    table FTS5 VTs report COUNT(*) from the source table even when the index
-    has never been populated, so COUNT(*) is not a reliable signal here.
-
-    Safe to re-run: once FTS _docsize is non-empty, subsequent calls skip.
-    Called after _reconcile_triggers() so triggers exist for future inserts.
-    """
-    for fts_table, (src_table, src_cols) in _FTS_BACKFILL.items():
-        # _docsize has one row per indexed document; 0 means the index is empty.
-        fts_indexed = conn.execute(f"SELECT COUNT(*) FROM {fts_table}_docsize").fetchone()[0]
-        if fts_indexed > 0:
-            continue
-        src_count = conn.execute(f"SELECT COUNT(*) FROM {src_table}").fetchone()[0]
-        if src_count == 0:
-            continue
-        insert_cols = ", ".join(_FTS_INSERT_COLS[fts_table])
-        select_cols = ", ".join(src_cols)
-        conn.execute(
-            f"INSERT INTO {fts_table}({insert_cols}) SELECT {select_cols} FROM {src_table}"
-        )
-        conn.commit()
-        print(
-            f"[techne] reconcile: backfill {fts_table} ({src_count} rows from {src_table})",
-            file=sys.stderr,
-        )
-
-
-def _schema_table_statements() -> list[tuple[str, str]]:
-    """Parse SCHEMA_SQL and return (table_name, create_sql) pairs.
-
-    Each pair includes the CREATE [VIRTUAL] TABLE statement plus any
-    immediately-following CREATE INDEX / CREATE UNIQUE INDEX lines that
-    belong to that table (i.e., appear before the next CREATE TABLE).
-
-    Virtual tables (FTS5) are included — they match ``CREATE VIRTUAL TABLE``.
-
-    Note: associated triggers (FTS_TRIGGERS_SQL) are NOT included here; they
-    live in FTS_TRIGGERS_SQL and are only created on fresh databases.
-    Index reconciliation (ensuring indexes exist on upgraded DBs) is out of
-    scope for this PR — see follow-up issue.
-    """
-    # Split SCHEMA_SQL into logical chunks separated by blank lines or new
-    # CREATE TABLE / CREATE VIRTUAL TABLE boundaries.  We walk line-by-line,
-    # collecting lines that belong to the current table block.
-    table_re = re.compile(
-        r"CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.IGNORECASE
-    )
-    index_re = re.compile(r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+", re.IGNORECASE)
-
-    results: list[tuple[str, str]] = []
-    current_name: str | None = None
-    current_lines: list[str] = []
-
-    def flush() -> None:
-        if current_name and current_lines:
-            results.append((current_name, "\n".join(current_lines).strip()))
-
-    for line in SCHEMA_SQL.splitlines():
-        m = table_re.match(line.strip())
-        if m:
-            flush()
-            current_name = m.group(1)
-            current_lines = [line]
-        elif current_name is not None:
-            # Append index lines that follow the current table block.
-            if index_re.match(line.strip()) or current_lines:
-                # Stop accumulating for this table when we hit a comment that
-                # starts a new section (lone '--' separator) only if we already
-                # have a complete statement (closing semicolon seen).
-                stmt_so_far = "\n".join(current_lines)
-                if line.strip().startswith("--") and ";" in stmt_so_far:
-                    # A comment after the table is done — belongs to next section.
-                    flush()
-                    current_name = None
-                    current_lines = []
-                else:
-                    current_lines.append(line)
-
-    flush()
-    return results
+    """Core shim → migrator.reconcile_fts_backfill (techne#136)."""
+    migrator.reconcile_fts_backfill(conn, _FTS_BACKFILL, _FTS_INSERT_COLS)
 
 
 def _reconcile_tables(conn: sqlite3.Connection) -> None:
-    """Create any tables present in SCHEMA_SQL but absent from the live DB.
-
-    Runs BEFORE _reconcile_columns() so newly-created tables don't then need
-    a separate column-reconciliation pass for columns they already define.
-
-    Virtual tables (FTS5) are handled alongside regular tables.
-    Index reconciliation is out of scope for this PR.
-    """
-    existing = {
-        row[0]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'shadow')")
-    }
-    for name, create_sql in _schema_table_statements():
-        if name not in existing:
-            conn.executescript(create_sql)
-            conn.commit()
-            print(f"[techne] reconcile: CREATE TABLE {name}", file=sys.stderr)
+    """Core shim → migrator.reconcile_tables against SCHEMA_SQL (techne#136)."""
+    migrator.reconcile_tables(conn, SCHEMA_SQL)
 
 
 def _strip_sql_comment(line: str) -> str:
-    """Drop an inline ``-- …`` comment from a SCHEMA_SQL line.
-
-    Column lines may carry a trailing comment (e.g.
-    ``status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'synced'``). The
-    reconciler copies the column definition verbatim into an ``ALTER TABLE … ADD
-    COLUMN``; leaving the comment (and the mid-line comma before it) in produces
-    invalid DDL and crashes the universal ``connect()`` (techne#132).
-
-    Naive line-level strip: assumes no column's ``DEFAULT``/``CHECK`` carries a
-    literal ``--`` inside a string (e.g. ``CHECK (x <> 'a--b')``). Verified true of
-    the current SCHEMA_SQL; revisit if that ever changes.
-    """
-    return re.sub(r"\s*--.*$", "", line)
-
-
-def _schema_columns(table: str) -> set[str]:
-    """Parse column names for `table` out of SCHEMA_SQL using regex."""
-    # Match the CREATE TABLE block for this table name.
-    pattern = rf"CREATE TABLE IF NOT EXISTS {re.escape(table)}\s*\((.+?)\n\);"
-    m = re.search(pattern, SCHEMA_SQL, re.DOTALL)
-    if not m:
-        return set()
-    block = m.group(1)
-    cols = set()
-    for line in block.splitlines():
-        line = _strip_sql_comment(line).strip().rstrip(",")
-        if not line or line.upper().startswith(
-            ("PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "REFERENCES", "--")
-        ):
-            continue
-        col_name = line.split()[0]
-        cols.add(col_name)
-    return cols
+    """Core shim → migrator._strip_sql_comment (techne#136; kept for test import)."""
+    return migrator._strip_sql_comment(line)
 
 
 def _reconcile_columns(conn: sqlite3.Connection) -> None:
-    """Add any columns present in SCHEMA_SQL but absent from the live table."""
-    # Only reconcile regular (non-virtual) tables that appear in SCHEMA_SQL.
-    table_pattern = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\(", re.IGNORECASE)
-    for m in table_pattern.finditer(SCHEMA_SQL):
-        table = m.group(1)
-        live_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if not live_cols:
-            continue  # table doesn't exist yet; CREATE TABLE IF NOT EXISTS will handle it
-        for col in _schema_columns(table) - live_cols:
-            block_m = re.search(
-                rf"CREATE TABLE IF NOT EXISTS {re.escape(table)}\s*\((.+?)\n\);",
-                SCHEMA_SQL,
-                re.DOTALL,
-            )
-            col_def = col  # fallback: bare name (SQLite infers NULL affinity)
-            if block_m:
-                for line in block_m.group(1).splitlines():
-                    stripped = _strip_sql_comment(line).strip().rstrip(",")
-                    parts = stripped.split()
-                    if parts and parts[0] == col:
-                        col_def = stripped
-                        break
-            # SQLite cannot ADD a NOT NULL column without a DEFAULT to an existing
-            # (possibly populated) table. Skip + warn rather than crash connect();
-            # such a column needs a numbered migration, not the additive path.
-            upper = col_def.upper()
-            if "NOT NULL" in upper and "DEFAULT" not in upper:
-                print(
-                    f"[techne] reconcile: SKIP {table}.{col} — NOT NULL without DEFAULT "
-                    "cannot be added to an existing table; use a numbered migration",
-                    file=sys.stderr,
-                )
-                continue
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-            conn.commit()
-            print(f"[techne] reconcile: ALTER TABLE {table} ADD COLUMN {col_def}", file=sys.stderr)
+    """Core shim → migrator.reconcile_columns against SCHEMA_SQL (techne#136)."""
+    migrator.reconcile_columns(conn, SCHEMA_SQL)
 
 
 def like_escape(s: str) -> str:
@@ -571,64 +348,26 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -> Path | None:
-    """Snapshot the DB to ``<dir>/backups/`` before a migration rewrites it.
-
-    Uses SQLite's online backup API so the copy is consistent even in WAL mode
-    (a plain file copy can miss un-checkpointed WAL frames). Returns the backup
-    path, or ``None`` when there's nothing worth saving (absent/empty DB).
-    Migrations are forward-only, so this backup is the rollback path (#78).
-    """
-    if not db_path.exists() or db_path.stat().st_size == 0:
-        return None
-    backup_dir = db_path.parent / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = backup_dir / f"{db_path.stem}-v{from_v}-to-v{to_v}-{ts}.db.bak"
-    dest = sqlite3.connect(str(backup))
-    try:
-        conn.backup(dest)
-    finally:
-        dest.close()
-    return backup
-
-
 def _guarded_migrate(conn: sqlite3.Connection, db_path: Path, existing_version: int) -> None:
-    """Run pending migrations exactly once, even under concurrent processes.
+    """Core shim → migrator.guarded_migrate with the `schema_version` table
+    accessor (techne#136). `run_steps=_migrate` owns version-writing (it inserts a
+    schema_version row per step), and the engine's in-lock double-check makes a
+    racing loser a true no-op."""
 
-    Claude Code fires session_start + post_tool_use near-simultaneously, so on
-    the first open after a code bump several processes can all see a stale
-    version and race into the migration body. A cross-process file lock
-    serializes them; the loser re-checks the version under the lock and no-ops.
-    We back up first and announce on stderr (#78).
+    def _read(c: sqlite3.Connection) -> int:
+        # Literal move of the old double-check read (MAX(version) always returns a
+        # row, so this is row[0]); existing_version is the documented fallback.
+        row = c.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        return row[0] if row else existing_version
 
-    The lock is filesystem-level (not a SQLite transaction) because the
-    migration's ``executescript`` calls issue their own COMMITs and can't be
-    held inside one outer transaction. Per-machine locking is sufficient —
-    each machine has its own ``~/.techne/techne.db``.
-    """
-    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
-
-    def _do() -> None:
-        # Double-checked: a process we raced may have migrated while we waited.
-        row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
-        current = row[0] if row else existing_version
-        if current >= SCHEMA_VERSION:
-            return
-        backup = _backup_db(conn, db_path, current, SCHEMA_VERSION)
-        note = f" (backup: {backup})" if backup else ""
-        print(f"[techne] migrating schema v{current} → v{SCHEMA_VERSION}{note}", file=sys.stderr)
-        _migrate(conn, current, SCHEMA_VERSION)
-
-    if fcntl is None:  # no file locking available — run unguarded (legacy behaviour)
-        _do()
-        return
-    with open(lock_path, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            _do()
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    migrator.guarded_migrate(
+        conn,
+        db_path,
+        target_version=SCHEMA_VERSION,
+        read_version=_read,
+        run_steps=_migrate,
+        label="schema",
+    )
 
 
 def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
