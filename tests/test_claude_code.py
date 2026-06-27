@@ -205,9 +205,31 @@ class TestConfigSafety:
         # consumed it) and the result must be valid JSON.
         claude_code.register_hooks(cfg)
         path = claude_code.SETTINGS_PATH
-        tmp = path.with_name(path.name + ".tmp")
-        assert not tmp.exists(), "atomic-write temp file leaked"
+        leaked = list(path.parent.glob(path.name + ".tmp*"))
+        assert not leaked, f"atomic-write temp file(s) leaked: {leaked}"
         json.loads(path.read_text())  # parses cleanly
+
+    def test_unregister_corrupt_settings_still_cleans_mcp(self, fake_home, cfg):
+        # techne#166 nit: uninstall must be resilient — a corrupt settings.json
+        # warns and presses on so the MCP-config cleanup still runs (otherwise a
+        # corrupt settings file strands the user, unable to remove techne at all).
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        settings_path = hooks_mod.SETTINGS_PATH
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text("{corrupt not json")
+
+        mcp_path = hooks_mod.MCP_CONFIG_PATH
+        mcp_path.write_text(json.dumps({"mcpServers": {"techne": {"command": "x"}, "other": {}}}))
+
+        # Must NOT raise — degrade past the unreadable settings, clean the MCP half.
+        claude_code.unregister(cfg)
+
+        mcp = json.loads(mcp_path.read_text())
+        assert "techne" not in mcp["mcpServers"]
+        assert "other" in mcp["mcpServers"]  # foreign server preserved
+        # The corrupt settings file is left untouched for the user to hand-fix.
+        assert settings_path.read_text() == "{corrupt not json"
 
     def test_save_json_roundtrip(self, tmp_path):
         from techne.platforms.claude_code import hooks as hooks_mod
