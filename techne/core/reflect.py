@@ -501,7 +501,9 @@ def reflect_on_session(
 
 def _mark_promoted(db_path: Path, candidate_id: int, promoted_to_id: int | None) -> None:
     """Mark a candidate promoted by the write_to='live' auto-path. Stamps
-    decided_by='reflect-auto' for the audit trail (techne#108) — no human reviewed it."""
+    decided_by='reflect-auto' for the audit trail (techne#108) — no human reviewed it.
+    A separate UPDATE from promote_candidate's dispatch (this path never applies an
+    action); decision_reason is left NULL — there's no human reason on the auto-path."""
     conn = connect(db_path)
     try:
         conn.execute(
@@ -618,7 +620,9 @@ def promote_candidate(
         if row is None:
             raise ValueError(f"Candidate {candidate_id} not found")
 
-        action = row["action"] or "add"  # legacy NULL → add
+        # action is NOT NULL DEFAULT 'add' (reconciler backfills pre-#108 rows), so
+        # this `or` never actually fires — defensive only.
+        action = row["action"] or "add"
         applier = _APPLIERS.get(action)
         if applier is None:
             raise ValueError(f"Candidate {candidate_id} has unknown action {action!r}")
