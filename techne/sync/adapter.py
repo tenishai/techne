@@ -75,7 +75,16 @@ class SourceAdapter(Protocol):
     # ---------------------------------------------------------------------------
     # SourceAdapter Protocol — the ingest-side counterpart to SyncAdapter.
     # Unlike SyncAdapter (push/pull/health for team sync), a SourceAdapter emits
-    # observations from a local source into the techne database.
+    # into the techne database (observations, or — for CCMemorySource — the
+    # curated_memory drain).
+    #
+    # CONVENTION (not a structural member): adapters MAY declare a class attribute
+    #   provides: ClassVar[frozenset[str]]   # {'curated'} | {'raw'} | both
+    # so the #107 reconciler can route them. It is read via getattr(a, 'provides',
+    # frozenset()) — deliberately NOT annotated on this Protocol, because newer
+    # CPython (the runtime_checkable non-method-member check, 3.12+) enforces a
+    # declared data member in isinstance(), which would break existing adapters
+    # that don't declare it (e.g. the isinstance check in test_jsonl_transcript).
     # ---------------------------------------------------------------------------
 
     def initial_walk(self) -> int:
