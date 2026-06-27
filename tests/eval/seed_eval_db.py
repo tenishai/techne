@@ -13,7 +13,7 @@ if insertion order ever changes.
 from pathlib import Path
 
 from techne.core.database import connect, init_db
-from techne.core.knowledge import store, supersede
+from techne.core.knowledge import add_dependency, delete, store, supersede
 
 _SESSION = "eval-sess"
 
@@ -166,5 +166,63 @@ def seed(db_path: Path) -> dict[str, str]:
         conn.commit()
     finally:
         conn.close()
+
+    # -----------------------------------------------------------------------
+    # Stage-2 negative-polarity seeds (techne#118 PR3+)
+    # -----------------------------------------------------------------------
+
+    # --- deletion (`deleted-fact`): store then immediately hard-delete so the
+    #     row is absent from live recall.  The answerer must not surface it.
+    _scratch_id = store(
+        db_path,
+        "Scratch note: the abandoned vector index used a custom FAISS wrapper "
+        "with an in-process index; the experiment was scrapped in favour of "
+        "sqlite-vec (techne#19). [EVAL SCRATCH — to be deleted]",
+        type="fact",
+        tags="vector,index,scratch",
+        source="eval",
+    )
+    delete(db_path, _scratch_id)
+    # _scratch_id is NOT added to gold — the answer for deleted-fact should
+    # be "I don't know" / "it's been deleted".
+
+    # --- cascade (`cascade-uncertain`): seed a trigger fact + a derived fact
+    #     that depends on it, then supersede the trigger so the derived row
+    #     goes status='uncertain' via the cascade (#117). Recall annotates it
+    #     uncertain; the answerer should flag uncertainty rather than asserting
+    #     the derived value as current.
+    _trigger_id = store(
+        db_path,
+        "Eval deploy pipeline config (v1): deploy path is /opt/eval/v1 on dev02.",
+        type="fact",
+        tags="deploy,eval,pipeline",
+        source="eval",
+    )
+    _derived_id = store(
+        db_path,
+        "Derived: the eval stack log archive is at /opt/eval/v1/logs — "
+        "inferred from the pipeline deploy path (eval deploy path v1 config).",
+        type="fact",
+        tags="deploy,eval,logs",
+        source="eval",
+    )
+    add_dependency(db_path, _derived_id, _trigger_id)
+    # Superseding the trigger cascades `uncertain` to the derived row.
+    supersede(
+        db_path,
+        _trigger_id,
+        "Eval deploy pipeline config (v2): deploy path is /opt/eval/v2 on dev03 "
+        "(migrated from dev02 in the infra reshuffle).",
+        source="eval",
+    )
+    # _derived_id is live (superseded_by IS NULL, status='uncertain') — search
+    # returns it with an uncertainty annotation; the answerer must flag that.
+    # Not in gold_keys for the cascade task (gold_keys=[]) because the assertion
+    # is about the *answer quality* (flagging uncertainty), not retrieval.
+
+    # --- absence (`absent-feature`): intentionally NO seed data.
+    #     Techne does NOT have auto-bisect functionality; the absence IS the
+    #     test.  A model with no relevant memory should reply "I don't know."
+    #     Adding a row here would defeat the task (it would be a positive hint).
 
     return gold
