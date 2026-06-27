@@ -65,6 +65,8 @@ class TestHandleRequest:
             "pattern_related",
             "techne_reflect_emit",
             "techne_reflect_ingest",
+            "techne_consolidate_emit",
+            "techne_consolidate_ingest",
         }
 
     def test_notifications_initialized_returns_none(self, config):

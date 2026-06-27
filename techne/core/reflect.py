@@ -584,11 +584,54 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
     return None
 
 
+def _apply_supersede(conn, row, db_path: Path) -> int | None:
+    """Apply a 'supersede' proposal (techne#108 consolidate): replace ONE existing
+    row (target_ids[0]) with the proposal's corrected/clarified content, inheriting
+    the old row's type/tags/anchor (supersede semantics). Returns the new knowledge.id."""
+    from techne.core.knowledge import _supersede_in_conn
+
+    targets = json.loads(row["target_ids"] or "[]")
+    if len(targets) != 1:
+        raise ValueError(
+            f"supersede candidate {row['id']} needs exactly one target_id, got {targets}"
+        )
+    source = f"consolidate-supersede:{row['id']}"
+    return _supersede_in_conn(conn, targets[0], redact_credentials(row["content"]), source)
+
+
+def _apply_merge(conn, row, db_path: Path) -> int | None:
+    """Apply a 'merge' proposal (techne#108 consolidate): collapse N existing rows
+    (target_ids) into one merged row carrying the proposal's explicitly chosen
+    type/confidence/tags. Returns the new knowledge.id."""
+    from techne.core.knowledge import (
+        CONFIDENCE_NUMERIC,
+        VALID_CONFIDENCE,
+        VALID_TYPES,
+        _merge_in_conn,
+    )
+
+    targets = json.loads(row["target_ids"] or "[]")
+    if len(targets) < 2:
+        raise ValueError(
+            f"merge candidate {row['id']} needs at least two target_ids, got {targets}"
+        )
+    conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
+    ktype = row["type"] if row["type"] in VALID_TYPES else "fact"
+    return _merge_in_conn(
+        conn, targets, redact_credentials(row["content"]),
+        ktype=ktype, confidence=conf, numeric=CONFIDENCE_NUMERIC[conf],
+        tags=row["tags"] or "", source=f"consolidate-merge:{row['id']}",
+    )
+
+
 # Per-action appliers (techne#108). promote_candidate owns the transaction + status
 # guard; each applier takes the open conn + the candidate row and returns the new
-# knowledge.id (or None). PR1 ships 'add' only; consolidate adds supersede/merge.
+# knowledge.id (or None). 'add' is reflect's original path; 'supersede'/'merge' are
+# the consolidate pass. ('connect' / dream is the deferred PR3.)
 _APPLIERS = {
     "add": _apply_add,
+    "supersede": _apply_supersede,
+    "merge": _apply_merge,
 }
 
 
