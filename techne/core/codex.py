@@ -18,15 +18,10 @@ Schema versions (PRAGMA user_version on codex.db):
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-try:
-    import fcntl  # POSIX only; absent on Windows
-except ImportError:  # pragma: no cover - techne targets macOS/Linux
-    fcntl = None
-
 from techne.config import Config
+from techne.core import migrator
 from techne.core.stores import StoreAdapter, load_store, plain_connect
 
 CODEX_VERSION = 1
@@ -91,131 +86,94 @@ _migrated: set[Path] = set()
 _migration_done: set[Path] = set()
 
 
-def _apply_codex_migration(db_path: Path) -> None:
-    """Run pending codex schema migrations under a cross-process file lock.
+def _codex_v0_to_v1(conn, current: int, target: int) -> None:
+    """codex.db v0 → v1 run-step (techne#136): symbols.file_hash + name-based edges.
 
-    Mirrors database.py's _guarded_migrate pattern: fcntl.flock serialises
-    concurrent process races; a double-checked version read under the lock
-    makes the loser a safe no-op.
-
-    v0 → v1
-    -------
-    * ALTER TABLE symbols ADD COLUMN file_hash TEXT  (if absent)
-    * Rebuild edges: create edges_v1 with (from_symbol, to_name, to_symbol,
-      kind, src_file_hash, resolution_status); migrate existing rows deriving
-      to_name from the target symbol's name with status 'import_resolved';
-      DROP old table, RENAME, re-create indexes.
-    * PRAGMA user_version = 1
-
-    Fresh DBs (no symbols table yet) are a no-op here — CODEX_SCHEMA
-    applied afterwards by codex_store() creates the v1 tables directly.
+    Idempotency is STRUCTURAL (column-presence), not version-based — a
+    retrofit-versioned db reads ``user_version = 0`` regardless of its actual
+    shape, so a destructive rebuild must guard on the columns, never the version.
     """
-    lock_path = db_path.with_suffix(db_path.suffix + ".migrate.lock")
+    # 1. Add file_hash to symbols.
+    sym_cols = {row[1] for row in conn.execute("PRAGMA table_info(symbols)")}
+    if "file_hash" not in sym_cols:
+        conn.execute("ALTER TABLE symbols ADD COLUMN file_hash TEXT")
+        conn.commit()
 
-    def _do() -> None:
-        conn = plain_connect(db_path)
-        try:
-            # Fast path: nothing here yet — codex_store() will apply full schema.
-            has_symbols = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='symbols'"
-            ).fetchone()
-            if not has_symbols:
-                conn.execute(f"PRAGMA user_version = {CODEX_VERSION}")
-                conn.commit()
-                return
+    # 2. Rebuild edges to the name-based shape, ATOMICALLY (the whole
+    #    CREATE→INSERT→DROP→RENAME runs inside one BEGIN/COMMIT script, so a crash
+    #    can never leave `edges` dropped-but-not-renamed). DROP IF EXISTS guards a
+    #    re-run after a crash mid-rebuild. The engine took the pre-migration backup.
+    edges_cols = {row[1] for row in conn.execute("PRAGMA table_info(edges)")}
+    if "to_name" not in edges_cols:
+        conn.executescript("""
+            BEGIN;
+            DROP TABLE IF EXISTS edges_v1;
+            CREATE TABLE edges_v1 (
+                from_symbol       TEXT NOT NULL REFERENCES symbols(id),
+                to_name           TEXT NOT NULL,
+                to_symbol         TEXT REFERENCES symbols(id),
+                kind              TEXT NOT NULL,
+                src_file_hash     TEXT,
+                resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+                PRIMARY KEY (from_symbol, to_name, kind)
+            );
 
-            # Double-checked under lock.
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version >= CODEX_VERSION:
-                return
+            INSERT OR IGNORE INTO edges_v1
+                   (from_symbol, to_name, to_symbol, kind, resolution_status)
+            SELECT e.from_symbol, s.name, e.to_symbol, e.kind, 'import_resolved'
+            FROM   edges e
+            JOIN   symbols s ON s.id = e.to_symbol;
 
-            print("[techne/codex] migrating schema v0 → v1", file=sys.stderr)
+            DROP TABLE edges;
+            ALTER TABLE edges_v1 RENAME TO edges;
 
-            # 1. Add file_hash to symbols (idempotent — check first).
-            sym_cols = {row[1] for row in conn.execute("PRAGMA table_info(symbols)")}
-            if "file_hash" not in sym_cols:
-                conn.execute("ALTER TABLE symbols ADD COLUMN file_hash TEXT")
-                conn.commit()
+            CREATE INDEX IF NOT EXISTS idx_edges_from      ON edges(from_symbol);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_name   ON edges(to_name);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_symbol ON edges(to_symbol);
+            CREATE INDEX IF NOT EXISTS idx_edges_src_hash  ON edges(src_file_hash);
+            COMMIT;
+        """)
+    else:
+        # to_name already present (e.g. partial migration) — ensure indexes.
+        conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_edges_to_name   ON edges(to_name);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_symbol ON edges(to_symbol);
+            CREATE INDEX IF NOT EXISTS idx_edges_src_hash  ON edges(src_file_hash);
+        """)
 
-            # 2. Rebuild edges with name-based shape.
-            #    Check whether the new column already exists (race-safe double-check).
-            edges_cols = {row[1] for row in conn.execute("PRAGMA table_info(edges)")}
-            if "to_name" not in edges_cols:
-                # Snapshot before the destructive rebuild (parity with the core
-                # db's _guarded_migrate), then rebuild ATOMICALLY: the whole
-                # CREATE→INSERT→DROP→RENAME runs inside one BEGIN/COMMIT, so a
-                # crash can never leave `edges` dropped-but-not-renamed.
-                # DROP IF EXISTS guards a re-run after a crash mid-rebuild.
-                _backup_codex_db(db_path)
-                conn.executescript("""
-                    BEGIN;
-                    DROP TABLE IF EXISTS edges_v1;
-                    CREATE TABLE edges_v1 (
-                        from_symbol       TEXT NOT NULL REFERENCES symbols(id),
-                        to_name           TEXT NOT NULL,
-                        to_symbol         TEXT REFERENCES symbols(id),
-                        kind              TEXT NOT NULL,
-                        src_file_hash     TEXT,
-                        resolution_status TEXT NOT NULL DEFAULT 'unresolved',
-                        PRIMARY KEY (from_symbol, to_name, kind)
-                    );
-
-                    INSERT OR IGNORE INTO edges_v1
-                           (from_symbol, to_name, to_symbol, kind, resolution_status)
-                    SELECT e.from_symbol, s.name, e.to_symbol, e.kind, 'import_resolved'
-                    FROM   edges e
-                    JOIN   symbols s ON s.id = e.to_symbol;
-
-                    DROP TABLE edges;
-                    ALTER TABLE edges_v1 RENAME TO edges;
-
-                    CREATE INDEX IF NOT EXISTS idx_edges_from      ON edges(from_symbol);
-                    CREATE INDEX IF NOT EXISTS idx_edges_to_name   ON edges(to_name);
-                    CREATE INDEX IF NOT EXISTS idx_edges_to_symbol ON edges(to_symbol);
-                    CREATE INDEX IF NOT EXISTS idx_edges_src_hash  ON edges(src_file_hash);
-                    COMMIT;
-                """)
-            else:
-                # to_name already present (e.g. partial migration) — ensure indexes.
-                conn.executescript("""
-                    CREATE INDEX IF NOT EXISTS idx_edges_to_name   ON edges(to_name);
-                    CREATE INDEX IF NOT EXISTS idx_edges_to_symbol ON edges(to_symbol);
-                    CREATE INDEX IF NOT EXISTS idx_edges_src_hash  ON edges(src_file_hash);
-                """)
-
-            conn.execute(f"PRAGMA user_version = {CODEX_VERSION}")
-            conn.commit()
-        finally:
-            conn.close()
-
-    if fcntl is None:  # pragma: no cover
-        _do()
-        return
-    with open(lock_path, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            _do()
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    migrator.user_version_io.write(conn, target)
+    conn.commit()
 
 
-def _backup_codex_db(db_path: Path) -> None:
-    """Snapshot codex.db before a destructive migration step (parity with the
-    core db's _guarded_migrate / #78). Best-effort: a failed backup is logged
-    but does not block the migration — the rebuild is itself atomic, so the
-    backup is belt-and-suspenders for an already-populated store."""
-    if not db_path.exists():
-        return
-    import shutil
-    from datetime import datetime, timezone
+def _apply_codex_migration(db_path: Path) -> None:
+    """Run pending codex schema migrations via the shared engine (techne#136 —
+    replacing the hand-rolled fcntl-lock + shutil.copy2 backup with
+    migrator.guarded_migrate's lock + online backup).
 
-    backups = db_path.parent / "backups"
+    A fresh store (no symbols table) just gets its version stamped — CODEX_SCHEMA,
+    applied next by codex_store(), creates the v1 tables directly. Kept as a named
+    entrypoint (tests call it directly).
+    """
+    conn = plain_connect(db_path)
     try:
-        backups.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        shutil.copy2(db_path, backups / f"{db_path.stem}-v0-to-v1-{stamp}.db.bak")
-    except OSError as exc:
-        print(f"[techne/codex] pre-migration backup failed: {exc}", file=sys.stderr)
+        # Fast path: nothing here yet — codex_store() applies the full v1 schema.
+        has_symbols = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='symbols'"
+        ).fetchone()
+        if not has_symbols:
+            migrator.user_version_io.write(conn, CODEX_VERSION)
+            conn.commit()
+            return
+        migrator.guarded_migrate(
+            conn,
+            db_path,
+            target_version=CODEX_VERSION,
+            read_version=migrator.user_version_io.read,
+            run_steps=_codex_v0_to_v1,
+            label="codex schema",
+        )
+    finally:
+        conn.close()
 
 
 def codex_store(config: Config) -> StoreAdapter:
