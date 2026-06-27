@@ -177,11 +177,12 @@ class ReflectConfig:
 class PostureConfig:
     """Coexistence posture with Claude Code's curated memory (techne#107 PR4).
 
-    mode='spool-primary': CC authors curated memory; techne is downstream-only.
-        reflect's auto-promote (write_to='live') is silenced — proposals land in
-        candidates, never auto-written to live knowledge, so techne can't drift
-        from CC's authoritative store. techne_store and human promote_candidate
-        are intentional acts and remain ungated.
+    mode='spool-primary': CC authors curated memory; techne silences its own
+        UNATTENDED authoring — reflect's auto-promote (write_to='live') is forced to
+        candidates, so no background pass can drift from CC's authoritative store.
+        Scope is deliberately narrow: this gates the one unattended live writer.
+        techne_store and human promote_candidate are INTENTIONAL acts and remain
+        ungated (the operator chose to write them).
     mode='observe' (default): techne operates independently; reflect.write_to
         is honored as-is.
     cc_memory_detected: recorded at init time — True iff CC memory files were

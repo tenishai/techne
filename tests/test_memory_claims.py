@@ -12,6 +12,8 @@ import json
 
 import pytest
 
+from techne.config import Config
+from techne.core.curated import live_curated_memory
 from techne.core.database import connect, init_db
 from techne.core.memory_claims import (
     _deed_digest,
@@ -19,6 +21,33 @@ from techne.core.memory_claims import (
     claims_ingest,
     parse_claims_response,
 )
+from techne.platforms.claude_code.paths import project_slug
+
+
+def test_claims_emit_auto_drains_disk_without_prior_sync(tmp_path, monkeypatch):
+    """Staff-review C1/C2: --claims must find curated memory sitting on disk even with NO
+    prior `techne memory sync` — claims_emit auto-drains the files into the drain first,
+    so it no longer falsely reports 'no curated memory' when `memory doctor` (which reads
+    disk) would have found them."""
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    config_dir = tmp_path / "ccfg"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    # A real on-disk CC memory file under the REAL slug (not monkeypatched), and an EMPTY
+    # drain table — exactly the "files exist but never synced" state.
+    mem_dir = config_dir / "projects" / project_slug(cwd) / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "MEMORY.md").write_text("The eval pipeline deploys to /opt/eval/v1.\n")
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    cfg = Config()
+    cfg.db_path = db
+
+    assert live_curated_memory(db) == []  # drain empty before
+    result = claims_emit(cfg, cwd=cwd)
+    assert result["memory_present"] is True  # found it via the auto-drain
+    assert live_curated_memory(db)  # and the drain got populated as a side effect
 
 # ---------------------------------------------------------------------------
 # Fixtures — mirror test_memory_doctor.py
