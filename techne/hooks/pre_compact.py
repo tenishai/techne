@@ -26,7 +26,13 @@ def main():
 
     from techne.hooks._timeout import bounded_hook
 
-    config = Config.load()
+    # Config.load() can raise (corrupt/unreadable config). A hook that throws here
+    # would break the host's compaction; degrade to a no-op. (techne#166)
+    try:
+        config = Config.load()
+    except Exception as e:
+        print(f"techne: config load failed, skipping checkpoint: {e}", file=sys.stderr)
+        sys.exit(0)
 
     try:
         with bounded_hook(config.hooks.timeout_s):

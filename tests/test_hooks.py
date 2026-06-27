@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from techne.config import Config
 from techne.hooks.post_tool_use import SKIP_TOOLS, should_capture, summarize
 from techne.hooks.pre_compact import _find_last_task, _parse_transcript
@@ -413,7 +415,7 @@ class TestFindLastTask:
         for filler in fillers:
             # Pad the filler to be 10+ chars so short-length check doesn't apply
             padded = filler + " " * (10 - len(filler) + 1)
-            result = _find_last_task([padded])
+            _find_last_task([padded])
             # Filler-like words are skipped even if long enough (checked by .lower())
             # Only the exact filler strings are skipped; padded ones with spaces may not be
             # — verify empirically:
@@ -483,6 +485,67 @@ class TestSessionEndExitCode:
 #
 # Verify that flush_sinks is called in the session_end hook alongside flush().
 # ---------------------------------------------------------------------------
+
+
+class TestPostToolUseExitCode:
+    """techne#166: PostToolUse must never break the host tool call.
+
+    Config.load() was called OUTSIDE the try/except, so a corrupt/unreadable
+    config.yaml would raise and surface as a non-zero hook exit — i.e. a failed
+    tool call in the user's session. A memory hook must degrade to a no-op.
+    """
+
+    def test_malformed_json_exits_zero(self):
+        result = _run_hook_subprocess("techne.hooks.post_tool_use", "not json {")
+        assert result.returncode == 0
+
+    def test_missing_fields_exits_zero(self):
+        result = _run_hook_subprocess("techne.hooks.post_tool_use", "{}")
+        assert result.returncode == 0
+
+    def test_corrupt_config_exits_zero(self, tmp_path: Path):
+        """A corrupt config.yaml makes Config.load() raise — the hook must still
+        exit 0 (degrade to a no-op), not fail the tool call."""
+        (tmp_path / "config.yaml").write_text("{[not: valid yaml::")
+        payload = json.dumps({
+            "session_id": "s1",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/x"},
+            "tool_response": "ok",
+        })
+        result = _run_hook_subprocess(
+            "techne.hooks.post_tool_use",
+            payload,
+            env_overrides={"TECHNE_HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0, (
+            f"post_tool_use exited {result.returncode} on corrupt config — "
+            f"this would fail the host tool call.\nstderr: {result.stderr}"
+        )
+        assert "config load failed" in result.stderr
+
+
+class TestCompactHooksExitCode:
+    """techne#166: pre_compact / post_compact had the SAME unguarded Config.load()
+    (outside the try/except) as post_tool_use — a corrupt config.yaml would raise
+    and break the host's (Pre/Post)Compact lifecycle. They must degrade to no-ops."""
+
+    @pytest.mark.parametrize("module", [
+        "techne.hooks.pre_compact",
+        "techne.hooks.post_compact",
+    ])
+    def test_corrupt_config_exits_zero(self, module, tmp_path: Path):
+        (tmp_path / "config.yaml").write_text("{[not: valid yaml::")
+        # Both hooks exit early without a session_id, so include one to reach Config.load().
+        payload = json.dumps({"session_id": "s1", "transcript_path": ""})
+        result = _run_hook_subprocess(
+            module, payload, env_overrides={"TECHNE_HOME": str(tmp_path)}
+        )
+        assert result.returncode == 0, (
+            f"{module} exited {result.returncode} on corrupt config — "
+            f"this breaks the host compaction lifecycle.\nstderr: {result.stderr}"
+        )
+        assert "config load failed" in result.stderr
 
 
 class TestSessionEndFlushSinks:
