@@ -158,6 +158,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
     """Retrieve context for a specific topic — searches all layers."""
     from techne.core.anchor import annotate_freshness
     from techne.core.identity import list_entries as list_identity
+    from techne.core.knowledge import annotate_uncertain
     from techne.core.search import search
 
     topic = args.get("topic", "")
@@ -167,6 +168,11 @@ def _techne_recall(args: dict, config: Config) -> dict:
     # untouched; this fires only here, on the surfacing path — never on
     # touch/relevance updates.
     annotate_freshness(config.db_path, results)
+    # Dependency uncertainty (techne#117): a row whose basis was superseded is
+    # still returned (it's live) but must not read as confidently current —
+    # attach an `uncertainty` marker. Distinct key from `freshness`; a row can
+    # carry both.
+    annotate_uncertain(config.db_path, results)
 
     # Also search identity
     identity_results = []
