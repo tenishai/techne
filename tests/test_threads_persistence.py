@@ -58,6 +58,30 @@ def test_heuristic_parent_link_persists_to_real_row(tmp_path):
     ).fetchone()
     assert row[0] == parent_id  # persisted, not NULL
 
+
+def test_link_threads_skips_same_session_heuristic_candidate(tmp_path):
+    """techne#165 follow-up: a heuristic thread must not link to its OWN same-session
+    prior row. The id is `t-<hash>` (no session prefix), so the old prefix-based self-skip
+    let it self-link once the keys agreed (#172); now skipped by exact session_id match."""
+    db = tmp_path / "t.db"
+    conn = connect(db)
+    conn.execute("INSERT INTO sessions (id, project_path) VALUES ('cur', '/p')")
+    conn.commit()
+    conn.close()
+    # Persist a heuristic thread in 'cur' so it's in threads_fts.
+    t1 = Thread(thread_num=1, label="redis caching layer",
+                summary="the redis caching layer design", observation_indices=[0],
+                boundary_signal="sig")
+    save_threads([t1], "cur", db)
+    # Re-detect the same content in the SAME session → must NOT link to its own row.
+    redetected = Thread(thread_num=1, label="redis caching layer",
+                        summary="the redis caching layer design", observation_indices=[0],
+                        boundary_signal="sig")
+    cfg = Config()
+    cfg.threads.link_threshold = 0.0
+    links = link_threads([redetected], "cur", db, cfg)
+    assert links[0][1] is None  # no parent — same-session self-link skipped
+
 # ---------------------------------------------------------------------------
 # bucket_hash unit tests
 # ---------------------------------------------------------------------------

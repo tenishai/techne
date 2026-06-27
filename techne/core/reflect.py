@@ -429,7 +429,9 @@ def ingest_reflection_response(
             )
             counts["candidates_written"] += 1
             if effective_write_to(config) == "live":
-                promoted_id = _write_live(config.db_path, c, source=f"reflect:{thread_id}")
+                promoted_id = _write_live(
+                    config.db_path, c, source=f"reflect:{thread_id or 'unknown'}"
+                )
                 _mark_promoted(config.db_path, cand_id, promoted_id)
                 counts["candidates_promoted"] += 1
         except Exception:

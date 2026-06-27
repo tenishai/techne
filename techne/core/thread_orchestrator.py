@@ -322,7 +322,12 @@ def link_threads(
 
         for r in results:
             candidate_id = r.get("id", "")
-            if candidate_id.startswith(session_id):
+            # Skip same-session candidates by session_id, NOT an id-prefix check: a
+            # heuristic id is `t-<hash>` and does NOT start with the session id, so the
+            # old prefix guard let a thread link to its OWN prior row (e.g. redetect_threads
+            # links before the DELETE) — a self-referential parent. Unmasked now that the
+            # link keys agree (techne#165). The exact session match covers both id forms.
+            if r.get("session_id") == session_id:
                 continue
             candidate_status = r.get("status", "")
             if candidate_status == "stale":
