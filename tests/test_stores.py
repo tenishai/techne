@@ -139,3 +139,40 @@ def test_migrated_store_reconcile_adds_missing_column_and_index(cfg):
         conn.close()
     assert "kind" in cols
     assert "idx_docs_kind" in idx
+
+
+def test_reconcile_schema_fresh_creates_fts_vtable_and_triggers(cfg):
+    """The invariant PR4 rests on (techne#136): reconcile_schema fully provisions a
+    FRESH db — FTS virtual table + triggers + indexes — equivalent to the old
+    executescript(LIBRARIAN_SCHEMA), and the FTS path actually works end-to-end."""
+    from techne.core import migrator
+    from techne.core.librarian import LIBRARIAN_SCHEMA
+
+    store = load_store(cfg, "lib_fresh")
+    conn = store.connect()
+    try:
+        migrator.reconcile_schema(conn, LIBRARIAN_SCHEMA, triggers_sql=LIBRARIAN_SCHEMA)
+        objs = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+        for name in (
+            "documents",
+            "documents_fts",
+            "documents_ai",
+            "documents_ad",
+            "documents_au",
+            "idx_documents_source_url",
+            "idx_documents_source_type",
+            "idx_documents_superseded",
+        ):
+            assert name in objs, f"reconcile_schema did not create {name}"
+        # End-to-end: insert fires documents_ai → FTS populated → MATCH finds it.
+        conn.execute(
+            "INSERT INTO documents (source_type, source_url, content) "
+            "VALUES ('web', 'http://x', 'hello world from the librarian')"
+        )
+        conn.commit()
+        hit = conn.execute(
+            "SELECT rowid FROM documents_fts WHERE documents_fts MATCH 'librarian'"
+        ).fetchone()
+        assert hit is not None
+    finally:
+        conn.close()
