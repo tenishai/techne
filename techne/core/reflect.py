@@ -35,6 +35,9 @@ Decide what (if anything) should be saved for the agent's future sessions.
 {summary}
 
 # Observations (truncated; ordered by time)
+# Each line is `- [tool|kind] text`; `kind` is an inferred shape. Weight
+# `decision-shaped` and `fact-shaped` observations most — they most often carry
+# the durable decisions/facts worth keeping.
 {observations}
 
 # What the agent already knows (do NOT restate any of these)
@@ -82,10 +85,14 @@ def _render_observations(observations: list[dict]) -> str:
     lines = []
     for o in chunk:
         tool = o.get("tool_name") or "?"
+        # Part A's inferred kind (techne#33) is the second field — it tells the model
+        # which observations are decision-/fact-shaped and worth extracting (techne#19).
+        kind = o.get("kind") or ""
+        label = f"{tool}|{kind}" if kind else tool
         content = (o.get("content") or "").replace("\n", " ")
         if len(content) > MAX_OBS_CONTENT_CHARS:
             content = content[:MAX_OBS_CONTENT_CHARS] + "…"
-        lines.append(f"- [{tool}] {content}")
+        lines.append(f"- [{label}] {content}")
     if len(observations) > MAX_OBS_FOR_PROMPT:
         lines.append(f"… ({len(observations) - MAX_OBS_FOR_PROMPT} more elided)")
     return "\n".join(lines)
@@ -283,6 +290,46 @@ def load_session_for_reflection(config: Config, session_id: str) -> tuple[list[T
     observations = get_observations(config.db_path, session_id)
     threads, _scores = detect_summarize_with_metadata(observations, config)
     return threads, observations
+
+
+def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
+    """Recent sessions that look reflectable but haven't been emitted yet (techne#19).
+
+    A cheap SessionStart heuristic for the auto-trigger: a session with at least
+    ``reflect.min_observations_per_thread`` observations and no
+    ``reflect:emitted:<id>`` marker. It deliberately COUNTS observations rather than
+    running full thread detection (too costly for the bounded hook) — the emit
+    round-trip self-corrects: ``techne_reflect_emit`` sets the marker even when it
+    yields an empty batch, so a non-reflectable session is nudged at most once.
+
+    Returns the unemitted sessions among the ``limit`` most-recent (newest first),
+    each ``{"session_id", "observations"}`` — the marker filter runs *after* the
+    LIMIT, so a genuinely-old unemitted session past that window is intentionally not
+    surfaced (newest-unreflected is what the nudge cares about; explicit emit always
+    works). Empty when nothing is pending.
+    """
+    from techne.core.extension_state import get_state
+
+    min_obs = config.reflect.min_observations_per_thread
+    conn = connect(config.db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.id AS session_id, COUNT(o.id) AS n
+                 FROM sessions s
+                 JOIN observations o ON o.session_id = s.id
+             GROUP BY s.id
+               HAVING n >= ?
+             ORDER BY s.started_at DESC
+                LIMIT ?""",
+            (min_obs, limit),
+        ).fetchall()
+        return [
+            {"session_id": r["session_id"], "observations": r["n"]}
+            for r in rows
+            if get_state(conn, f"reflect:emitted:{r['session_id']}") is None
+        ]
+    finally:
+        conn.close()
 
 
 def emit_reflection_batch(
