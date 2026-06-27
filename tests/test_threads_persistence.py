@@ -6,9 +6,81 @@ from pathlib import Path
 
 import pytest
 
+from techne.config import Config
 from techne.core.database import connect
-from techne.core.thread_orchestrator import Thread, save_threads
+from techne.core.thread_orchestrator import (
+    Thread,
+    link_threads,
+    save_threads,
+    thread_row_id,
+)
 from techne.core.threads.persistence import bucket_hash
+
+
+def test_heuristic_parent_link_persists_to_real_row(tmp_path):
+    """techne#165 regression: a heuristic (boundary_signal) thread's parent link must
+    resolve to the parent's real `t-<hash>` id. link_threads keyed the (thread_id,
+    parent) tuple by the legacy `{session}-{num}` form, so save_threads' link_map lookup
+    (which uses thread_row_id) silently missed → parent_thread_id was NULL for every
+    heuristic (default-detector) session."""
+    db = tmp_path / "t.db"
+    conn = connect(db)
+    conn.execute("INSERT INTO sessions (id, project_path) VALUES ('prior', '/p')")
+    conn.execute("INSERT INTO sessions (id, project_path) VALUES ('cur', '/p')")
+    conn.commit()
+    conn.close()
+
+    # Parent from a PRIOR session — persisted + FTS-indexed so link_threads can find it.
+    parent = Thread(thread_num=1, label="postgres migration planning",
+                    summary="planning the postgres migration", observation_indices=[0],
+                    boundary_signal="sig")
+    save_threads([parent], "prior", db)
+    parent_id = thread_row_id("prior", parent)
+
+    # A new heuristic thread in the current session with matching content.
+    child = Thread(thread_num=2, label="postgres migration planning",
+                   summary="continue the postgres migration", observation_indices=[5],
+                   boundary_signal="sig")
+    cfg = Config()
+    cfg.threads.link_threshold = 0.0  # any FTS match links — deterministic for the test
+
+    links = link_threads([child], "cur", db, cfg)
+    child_key, linked_parent = links[0]
+    # The fix: the link is keyed by the hash id, NOT the legacy "{session}-{num}".
+    assert child_key == thread_row_id("cur", child)
+    assert child_key != "cur-2"
+    assert linked_parent == parent_id
+
+    save_threads([child], "cur", db, parent_links=links)
+    row = connect(db).execute(
+        "SELECT parent_thread_id FROM threads WHERE id = ?",
+        (thread_row_id("cur", child),),
+    ).fetchone()
+    assert row[0] == parent_id  # persisted, not NULL
+
+
+def test_link_threads_skips_same_session_heuristic_candidate(tmp_path):
+    """techne#165 follow-up: a heuristic thread must not link to its OWN same-session
+    prior row. The id is `t-<hash>` (no session prefix), so the old prefix-based self-skip
+    let it self-link once the keys agreed (#172); now skipped by exact session_id match."""
+    db = tmp_path / "t.db"
+    conn = connect(db)
+    conn.execute("INSERT INTO sessions (id, project_path) VALUES ('cur', '/p')")
+    conn.commit()
+    conn.close()
+    # Persist a heuristic thread in 'cur' so it's in threads_fts.
+    t1 = Thread(thread_num=1, label="redis caching layer",
+                summary="the redis caching layer design", observation_indices=[0],
+                boundary_signal="sig")
+    save_threads([t1], "cur", db)
+    # Re-detect the same content in the SAME session → must NOT link to its own row.
+    redetected = Thread(thread_num=1, label="redis caching layer",
+                        summary="the redis caching layer design", observation_indices=[0],
+                        boundary_signal="sig")
+    cfg = Config()
+    cfg.threads.link_threshold = 0.0
+    links = link_threads([redetected], "cur", db, cfg)
+    assert links[0][1] is None  # no parent — same-session self-link skipped
 
 # ---------------------------------------------------------------------------
 # bucket_hash unit tests
