@@ -98,6 +98,48 @@ class TestLoadPrototypes:
         cfg.data_dir = tmp_path
         assert load_prototypes(cfg) is not load_prototypes(None)
 
+    def test_get_prototype_embeddings_populated_path_and_two_slots(self):
+        """techne#168: exercise the REAL _get_prototype_embeddings body (the populated
+        path, normally gated behind fastembed+numpy) with injected fakes. Guards the
+        `_embed_cache[key] = result` write: an `_embed_cache = result` rebind WITHOUT a
+        `global` (as a careless refactor would write) makes the name local and the
+        top-of-function `_embed_cache.get(key)` raise UnboundLocalError — so reaching the
+        body at all is the regression guard. Also asserts the two embed-cache slots are
+        independent."""
+        import types
+
+        from techne.core import inference
+
+        class _FakeArr:
+            def __init__(self, vals):
+                self._vals = vals
+
+            def mean(self, axis=0):
+                return ("centroid", tuple(self._vals))
+
+        fake_np = types.SimpleNamespace(stack=lambda lst: _FakeArr(lst))
+        fake_fastembed = types.SimpleNamespace(TextEmbedding=object)
+
+        class _FakeModel:
+            def embed(self, sentences):
+                return [len(s) for s in sentences]
+
+        _reset_cache()
+        with (
+            patch.dict(sys.modules, {"numpy": fake_np, "fastembed": fake_fastembed}),
+            patch("techne.core.search._get_embedding_model", return_value=_FakeModel()),
+        ):
+            protos = {"decision": ["a sentence"], "fact": ["b"], "empty": []}
+            out_false = inference._get_prototype_embeddings(protos, key=False)
+            # Populated (no UnboundLocalError); empty-sentence label skipped.
+            assert set(out_false) == {"decision", "fact"}
+            # Same key → cached same object.
+            assert inference._get_prototype_embeddings(protos, key=False) is out_false
+            # Other slot is independent.
+            out_true = inference._get_prototype_embeddings({"fact": ["c"]}, key=True)
+            assert out_true is not out_false
+            assert set(out_true) == {"fact"}
+
 
 class TestInferNoFastembed:
     def test_graceful_degradation_on_import_error(self):
