@@ -81,9 +81,10 @@ class SourceAdapter(Protocol):
     # CONVENTION (not a structural member): adapters MAY declare a class attribute
     #   provides: ClassVar[frozenset[str]]   # {'curated'} | {'raw'} | both
     # so the #107 reconciler can route them. It is read via getattr(a, 'provides',
-    # frozenset()) — deliberately NOT annotated on this Protocol, because a
-    # ClassVar on a @runtime_checkable Protocol is enforced by isinstance() on
-    # Python 3.14+ and would break existing adapters that don't declare it.
+    # frozenset()) — deliberately NOT annotated on this Protocol, because newer
+    # CPython (the runtime_checkable non-method-member check, 3.12+) enforces a
+    # declared data member in isinstance(), which would break existing adapters
+    # that don't declare it (e.g. the isinstance check in test_jsonl_transcript).
     # ---------------------------------------------------------------------------
 
     def initial_walk(self) -> int:

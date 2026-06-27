@@ -121,6 +121,46 @@ def test_ingest_changed_content_supersede(db, tmp_path):
         conn.close()
 
 
+def test_concurrent_ingest_of_changed_file_keeps_one_live_row(db, tmp_path):
+    """Two concurrent ingests of the same changed path must leave exactly ONE live row.
+    BEGIN IMMEDIATE serializes the read→write so the second writer re-reads the
+    freshly-superseded row instead of capturing a stale old_id (techne#107 / #3)."""
+    import threading
+
+    f = tmp_path / "MEMORY.md"
+    f.write_text("# v1\n")
+    ingest_memory_file(db, f, slug="s")  # establish the live v1 row
+    f.write_text("# v2\n")  # now changed — both workers will ingest this
+
+    barrier = threading.Barrier(2)
+    errors: list = []
+
+    def worker():
+        try:
+            barrier.wait()  # maximize the race
+            ingest_memory_file(db, f, slug="s")
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    conn = connect(db)
+    try:
+        live = conn.execute(
+            "SELECT COUNT(*) FROM curated_memory "
+            "WHERE source_path=? AND superseded_by IS NULL",
+            (str(f),),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert live == 1
+
+
 def test_ingest_content_kwarg_bypasses_disk(db, tmp_path):
     """Passing content= directly skips disk read (useful for in-memory callers)."""
     f = tmp_path / "no_such_file.md"  # does NOT exist on disk

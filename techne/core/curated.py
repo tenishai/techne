@@ -11,6 +11,11 @@ knowledge.store:
                                            return (new_id, True).
 
 This is the read foundation for PR3 (claim-gate).
+
+Faithfulness caveat: the mirror is full-content but redaction-NORMALIZED —
+``redact_credentials`` runs before hashing/storing, so a secret in the source file is
+masked here (storing it raw would be worse). A consequence: if redaction rules ever
+change, an otherwise-unchanged file re-hashes and spuriously supersedes once.
 """
 
 from __future__ import annotations
@@ -91,6 +96,14 @@ def ingest_memory_file(
 
     conn = connect(db_path)
     try:
+        # Take the write lock BEFORE the read (BEGIN IMMEDIATE): with the default
+        # isolation a bare SELECT opens no transaction, so two concurrent ingests of
+        # the same changed path could both capture the same stale `old_id` and leave
+        # TWO live rows — breaking the one-live-row-per-source_path invariant the whole
+        # table rests on (the read→write TOCTOU; cf. techne#3). The second writer now
+        # blocks here and re-reads the freshly-superseded row. (Unreachable today —
+        # sync is single-threaded — but start_watch will eventually overlap.)
+        conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             """SELECT id, content_hash FROM curated_memory
                WHERE source_path = ? AND superseded_by IS NULL""",
@@ -99,6 +112,7 @@ def ingest_memory_file(
 
         if existing is not None:
             if existing["content_hash"] == new_hash:
+                conn.commit()  # release the lock; nothing changed
                 log.debug(
                     "curated_memory_unchanged",
                     path=source_str,
@@ -149,6 +163,9 @@ def ingest_memory_file(
         )
         return new_id, True
 
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
