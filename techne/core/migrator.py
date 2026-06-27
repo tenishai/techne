@@ -355,3 +355,37 @@ def reconcile_columns(conn: sqlite3.Connection, schema_sql: str) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
             conn.commit()
             print(f"[techne] reconcile: ALTER TABLE {table} ADD COLUMN {col_def}", file=sys.stderr)
+
+
+def _index_statements(schema_sql: str) -> list[tuple[str, str]]:
+    """Parse *schema_sql* for standalone ``CREATE [UNIQUE] INDEX IF NOT EXISTS``
+    statements (multi-line supported — a negated class matches across newlines up
+    to the terminating ``;``). Returns (index_name, create_sql) pairs."""
+    pattern = re.compile(
+        r"(CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)[^;]*;)",
+        re.IGNORECASE,
+    )
+    return [(m.group(2), m.group(1).strip()) for m in pattern.finditer(schema_sql)]
+
+
+def reconcile_indexes(conn: sqlite3.Connection, schema_sql: str) -> None:
+    """Create any index present in *schema_sql* but absent from the live DB
+    (techne#138). The pre-#138 reconciler only emitted a table's indexes when the
+    *table* was missing, so an index added to an already-existing table never
+    landed on upgraded dbs. Runs LAST — after column reconciliation — so an index
+    can reference a column the column pass just added. ``CREATE INDEX IF NOT
+    EXISTS`` is idempotent; we diff first only to skip work + log accurately.
+
+    Additive by index *name*: if an index's definition changes under the same
+    name it is NOT reconciled (the name is already present) — that's a redefinition
+    and, per the SCHEMA_SQL-only-is-additive convention, requires a numbered
+    migration + version bump, not the reconciler."""
+    existing = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    for name, create_sql in _index_statements(schema_sql):
+        if name in existing:
+            continue
+        conn.execute(create_sql)  # one statement per entry; matches reconcile_columns
+        conn.commit()
+        print(f"[techne] reconcile: CREATE INDEX {name}", file=sys.stderr)

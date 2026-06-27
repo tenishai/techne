@@ -1641,3 +1641,70 @@ class TestV10ToV11Migration:
             )
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# techne#138 — reconcile_indexes: indexes converge on already-existing tables
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileIndexes:
+    """An index added to SCHEMA_SQL must land on an upgraded DB whose table
+    already exists (the pre-#138 reconciler only created a table's indexes when
+    the *table* was missing)."""
+
+    def test_missing_index_created(self, tmp_path):
+        from techne.core import migrator
+
+        conn = sqlite3.connect(str(tmp_path / "idx.db"))
+        conn.executescript("CREATE TABLE t (a INTEGER, b INTEGER);")  # table, no index
+        before = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "idx_t_a" not in before
+
+        schema = (
+            "CREATE TABLE IF NOT EXISTS t (a INTEGER, b INTEGER);\n"
+            "CREATE INDEX IF NOT EXISTS idx_t_a ON t(a);\n"
+        )
+        migrator.reconcile_indexes(conn, schema)
+
+        after = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "idx_t_a" in after
+        # Idempotent — a second pass is a no-op, no error.
+        migrator.reconcile_indexes(conn, schema)
+        conn.close()
+
+    def test_multiline_and_unique_index(self, tmp_path):
+        from techne.core import migrator
+
+        conn = sqlite3.connect(str(tmp_path / "idx2.db"))
+        conn.executescript("CREATE TABLE u (x INTEGER, y INTEGER);")
+        schema = (
+            "CREATE TABLE IF NOT EXISTS u (x INTEGER, y INTEGER);\n"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_u_xy\n"
+            "    ON u(x, y);\n"
+        )
+        migrator.reconcile_indexes(conn, schema)
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "idx_u_xy" in names
+        conn.close()
+
+    def test_all_schema_indexes_present_after_connect(self, tmp_path):
+        """Convergence: drop a real SCHEMA_SQL index from a current-version DB,
+        reopen, and the reconciler restores it (#138)."""
+        from techne.core import migrator
+        from techne.core.database import SCHEMA_SQL
+
+        db_path = tmp_path / "converge.db"
+        conn = connect(db_path)  # fresh DB at current schema — all indexes present
+        expected = {name for name, _ in migrator._index_statements(SCHEMA_SQL)}
+        assert "idx_knowledge_type" in expected  # sanity: we parsed real indexes
+        conn.execute("DROP INDEX idx_knowledge_type")
+        conn.commit()
+        conn.close()
+
+        conn = connect(db_path)  # reopen → _reconcile_indexes restores it
+        try:
+            live = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+            assert expected <= live  # every SCHEMA_SQL index exists
+        finally:
+            conn.close()
