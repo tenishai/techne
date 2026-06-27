@@ -428,7 +428,12 @@ TOOLS = [
             "properties": {
                 "session_id": {
                     "type": "string",
-                    "description": "Session to reflect on (default: most recent).",
+                    "description": (
+                        "Session to reflect on (default: most recent). Prefer passing an "
+                        "explicit id — e.g. the one from the SessionStart nudge — when "
+                        "consolidating a FINISHED session, so a freshly-started session "
+                        "isn't reflected while still empty."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
@@ -547,6 +552,9 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     batch = emit_reflection_batch(config, session_id, threads, observations)
     limit = args.get("limit")
     if limit:
+        # NB: the marker below covers the WHOLE session, so threads beyond `limit`
+        # won't be re-surfaced by the auto-trigger — call without a limit, or re-emit
+        # with an explicit session_id, to reflect the rest.
         batch = batch[:limit]
 
     # Mark the session emitted so the SessionStart auto-trigger won't re-nudge it,

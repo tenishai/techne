@@ -302,8 +302,11 @@ def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
     round-trip self-corrects: ``techne_reflect_emit`` sets the marker even when it
     yields an empty batch, so a non-reflectable session is nudged at most once.
 
-    Returns the most-recent unemitted sessions (newest first), each
-    ``{"session_id", "observations"}``. Empty when nothing is pending.
+    Returns the unemitted sessions among the ``limit`` most-recent (newest first),
+    each ``{"session_id", "observations"}`` — the marker filter runs *after* the
+    LIMIT, so a genuinely-old unemitted session past that window is intentionally not
+    surfaced (newest-unreflected is what the nudge cares about; explicit emit always
+    works). Empty when nothing is pending.
     """
     from techne.core.extension_state import get_state
 
