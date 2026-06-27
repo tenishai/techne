@@ -174,6 +174,25 @@ class ReflectConfig:
 
 
 @dataclass
+class PostureConfig:
+    """Coexistence posture with Claude Code's curated memory (techne#107 PR4).
+
+    mode='spool-primary': CC authors curated memory; techne is downstream-only.
+        reflect's auto-promote (write_to='live') is silenced — proposals land in
+        candidates, never auto-written to live knowledge, so techne can't drift
+        from CC's authoritative store. techne_store and human promote_candidate
+        are intentional acts and remain ungated.
+    mode='observe' (default): techne operates independently; reflect.write_to
+        is honored as-is.
+    cc_memory_detected: recorded at init time — True iff CC memory files were
+        found in the project directory during `techne init`.
+    """
+
+    mode: Literal["observe", "spool-primary"] = "observe"
+    cc_memory_detected: bool = False
+
+
+@dataclass
 class Config:
     # These bind the import-time snapshot, so a bare Config() does NOT honor a
     # TECHNE_HOME set after import. Config.load() and _from_dict() both overwrite
@@ -195,6 +214,7 @@ class Config:
     reflect: ReflectConfig = field(default_factory=ReflectConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     injection: InjectionConfig = field(default_factory=InjectionConfig)
+    posture: PostureConfig = field(default_factory=PostureConfig)
     platform: Platform = "claude-code"
     # Staleness alarm: if the prior last_session is older than this many hours,
     # the banner and collect_health emit a visible warning. Default 12h.
@@ -380,6 +400,16 @@ class Config:
         if "staleness_hours" in raw:
             cfg.staleness_hours = int(raw["staleness_hours"])
 
+        if "posture" in raw and isinstance(raw["posture"], dict):
+            p = raw["posture"]
+            mode = p.get("mode", "observe")
+            if mode not in ("observe", "spool-primary"):
+                mode = "observe"
+            cfg.posture = PostureConfig(
+                mode=mode,
+                cc_memory_detected=bool(p.get("cc_memory_detected", False)),
+            )
+
         return cfg
 
     def save(self, path: Path | None = None):
@@ -427,6 +457,10 @@ class Config:
                 "bm25_weight": self.search.bm25_weight,
                 "expansion_ratio": self.search.expansion_ratio,
                 "mmr_lambda": self.search.mmr_lambda,
+            },
+            "posture": {
+                "mode": self.posture.mode,
+                "cc_memory_detected": self.posture.cc_memory_detected,
             },
         }
         # sources: only emit the sub-keys that are configured to avoid

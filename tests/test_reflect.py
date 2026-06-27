@@ -4,11 +4,13 @@ import json
 
 import pytest
 
-from techne.config import Config
+from techne.config import Config, PostureConfig
 from techne.core.database import connect, init_db
 from techne.core.reflect import (
     candidate_stats,
     discard_candidate,
+    effective_write_to,
+    ingest_reflection_response,
     list_candidates,
     parse_response,
     promote_candidate,
@@ -714,3 +716,68 @@ def test_promote_identity_candidate_no_deadlock(tmp_path):
     cand = list_candidates(config.db_path, status="pending")[0]
     promote_candidate(config.db_path, cand["id"])  # must not deadlock
     assert identity_get(config.db_path, "user.prefers.terse") == "Operator wants terse replies"
+
+
+# --- effective_write_to (techne#107 PR4) -----------------------------------
+
+
+def test_effective_write_to_observe_honours_reflect_write_to():
+    """Under observe posture (default), effective_write_to == reflect.write_to."""
+    cfg = Config()
+    cfg.reflect.write_to = "candidates"
+    assert effective_write_to(cfg) == "candidates"
+
+    cfg.reflect.write_to = "live"
+    assert effective_write_to(cfg) == "live"
+
+
+def test_effective_write_to_spool_primary_overrides_to_candidates():
+    """spool-primary forces candidates regardless of reflect.write_to."""
+    cfg = Config()
+    cfg.posture = PostureConfig(mode="spool-primary", cc_memory_detected=True)
+    cfg.reflect.write_to = "live"
+    assert effective_write_to(cfg) == "candidates"
+
+    # Also holds when write_to is already candidates
+    cfg.reflect.write_to = "candidates"
+    assert effective_write_to(cfg) == "candidates"
+
+
+def test_effective_write_to_defensive_no_posture_attr():
+    """A Config object without a posture attr (old code) falls through to reflect.write_to."""
+    cfg = Config()
+    cfg.reflect.write_to = "live"
+    del cfg.posture  # simulate old config
+    assert effective_write_to(cfg) == "live"
+
+
+def test_spool_primary_blocks_live_write_via_ingest(tmp_path):
+    """Integration: posture=spool-primary + reflect.write_to='live' must write a
+    candidate but NOT touch the live knowledge table (effective_write_to gate)."""
+    config = _mk_config(tmp_path, enabled=False, write_to="live")
+    config.posture = PostureConfig(mode="spool-primary", cc_memory_detected=True)
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    counts = ingest_reflection_response(
+        config,
+        session_id,
+        f"{session_id}-1",
+        "deadbeef",
+        _candidate_array("spool-primary live-gate test"),
+    )
+    assert counts["candidates_written"] == 1
+    assert counts["candidates_promoted"] == 0  # gate blocked
+
+    conn = connect(config.db_path)
+    try:
+        knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+        assert knowledge_count == 0  # live table untouched
+        rows = list_candidates(config.db_path, status="all")
+        assert len(rows) == 1
+        assert rows[0]["content"] == "spool-primary live-gate test"
+    finally:
+        conn.close()
