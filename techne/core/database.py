@@ -324,6 +324,11 @@ def _reconcile_columns(conn: sqlite3.Connection) -> None:
     migrator.reconcile_columns(conn, SCHEMA_SQL)
 
 
+def _reconcile_indexes(conn: sqlite3.Connection) -> None:
+    """Core shim → migrator.reconcile_indexes against SCHEMA_SQL (techne#138)."""
+    migrator.reconcile_indexes(conn, SCHEMA_SQL)
+
+
 def like_escape(s: str) -> str:
     """Escape `%`, `_`, and `\\` so user input matches literally in a LIKE
     pattern. Pair with `ESCAPE '\\'` on the LIKE clause. Without this, a tag
@@ -389,6 +394,7 @@ def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
         _reconcile_triggers(conn)
         _reconcile_fts_backfill(conn)
         _reconcile_columns(conn)
+        _reconcile_indexes(conn)  # last: an index may reference a just-added column (#138)
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
