@@ -31,7 +31,7 @@ A long arc: techne went from "the understudy" (CC native memory silently carried
 Decision (knowledge#327): `techne.db` = personal memory; each domain/persona gets its own db file behind a `StoreAdapter`. Design doc `docs/db-per-domain.md`. Reframed #88 (delete domain tables from core, don't register them) and converged #87/#89. **#88 closed 2026-06-20 — delivered**: domain tables gone from core, search no longer names them, and every domain routes through `load_store(config, domain)` (#102) — adding a domain is zero core edits.
 - ☑ **#98 — store registry + SQLite `StoreAdapter`.** `load_store(config, domain)`, `stores:` config, `plain_connect` (domain dbs get ONLY their own schema). Closed.
 - ☑ **#99 — Librarian → `librarian.db`.** Documents left core `SCHEMA_SQL`; cards stay in techne.db and resolve **cross-db** (keyed get, no ATTACH); 6 `search.py` hooks removed; `search_documents`/`techne library search` is the domain search. Live cutover: 57 docs moved, techne.db documents dropped, librarian.db rebuilt documents-only. Closed.
-- ◐ **#87 P1 — Architect → `architect.db`.** Pattern store: `investigations` (lens-aware dedup, url×surveyed_by×lens) + `patterns` + relations/applies + FTS; `ingest_patterns_md` seeds from the corpus. Live: 147 patterns / 87 investigations / 23 skips. Team-scope (queried directly, not carded); persona-agnostic (`surveyed_by`=string, no cabal coupling). **P2** (write-path, wikilink/applies edges, retire flat knowledge type=pattern) + **P3** (Postgres adapter, MCP tools) remain.
+- ☑ **#87 — Architect → `architect.db`.** Pattern store: `investigations` (lens-aware dedup, url×surveyed_by×lens) + `patterns` + relations/applies + FTS; `ingest_patterns_md` seeds from the corpus. Team-scope (queried directly, not carded); persona-agnostic (`surveyed_by`=string, no cabal coupling). **P1** (store + schema) and **P2** (write-path, wikilink/applies graph, retire flat `type=pattern` rows, MCP `pattern_search`/`pattern_related`) shipped. **P3 (Postgres adapter) retired** — techne is SQLite-only by decision (techne#135); the `StoreAdapter` portability seam was unused and removed.
 - ◐ **#89 P1 — Codex → `codex.db`.** Code graph: `symbols` + `edges` + FTS; `reachable()` = transitive blast-radius via **recursive CTE** (graph queries without a graph DB — the v1 plan). Tree-sitter parser + graphqlite (optional `techne[codex]`) deferred to when the Codex persona is scoped.
 
 **Chain:** `techne.db` (memory) → `librarian.db` (#99) → `architect.db` (#87 P1) → `codex.db` (#89 P1) — each behind a StoreAdapter, each clean per-db-schema. Routing collapsed onto the registry in **#102** (the keystone: `config.stores` dsn overrides now take effect; `resolve_card` exercises the `StoreAdapter.get` Protocol seam).
@@ -42,7 +42,7 @@ Staff Python + architect review of the db-per-domain session (knowledge#337). Fi
 ### Issues
 - **Closed:** #88, #91, #92, #93, #94, #95, #98, #99, #100, #101, #102, #103, #104.
 - **Opened:** #96 (other-client transcript adapters), #97 (platform-plugin authoring guide), #98, #99, #100–#104 (staff review).
-- **Advanced (open):** #87 (P2/P3), #89 (parser/graphqlite), #20 (promotion mechanism shipped via the agent-assisted path).
+- **Advanced (open):** #89 (graphqlite storage layer; tree-sitter parser shipped in #128), #20 (promotion mechanism shipped via the agent-assisted path). #87 fully shipped (P3 retired, techne#135).
 
 ---
 

@@ -46,11 +46,11 @@ A document's **gist card** is personal recall (it's *your* memory that this thin
 ```yaml
 stores:
   librarian: { adapter: sqlite, dsn: "sqlite:///~/.techne/librarian.db" }
-  architect: { adapter: sqlite, dsn: "sqlite:///~/.techne/architect.db" }   # → postgres later, by config
+  architect: { adapter: sqlite, dsn: "sqlite:///~/.techne/architect.db" }
   codex:     { adapter: sqlite, dsn: "sqlite:///~/.techne/codex.db" }
 ```
 
-`load_store("librarian")` returns the domain's `StoreAdapter` (mirrors `load_adapter(config.sync.adapter)`). `StoreAdapter` (per #87) is the per-domain persistence interface: `migrate / health / capabilities / add / get / search / ...`. SQLite is the day-one backend for all of them; a domain leaps to Postgres/ClickHouse by config when it deploys, without touching core.
+`load_store("librarian")` returns the domain's `StoreAdapter` (mirrors `load_adapter(config.sync.adapter)`). `StoreAdapter` is the per-domain persistence handle: `migrate / health / get`, plus `connect()` for the domain's own SQL. **SQLite-only by decision (techne#135)** — an earlier design advertised a backend-agnostic `add`/`search` so domains could "leap to Postgres," but every domain bypassed it to raw SQLite and those methods had no callers, so they were removed. techne is local-first; a server backend would be designed against a real driver if/when one is ever needed.
 
 ### Unified recall, cross-db fetch — the crux
 
@@ -61,9 +61,9 @@ The hard question: if `documents` leaves `techne.db`, how does recall stay unifi
 
 This is the elegant part: **the card model makes federation a keyed `get`, not a federated search.** You never need to rank across dbs at query time — the rankable gist is already in personal recall; the boundary is only crossed to fetch one known document.
 
-> **Why not SQLite `ATTACH`?** ATTACH would let one connection query across domain dbs in a single SQL statement — convenient while everything is SQLite, but it breaks the moment a domain (patterns) moves to Postgres (#87's whole point). Separate connections behind `StoreAdapter` keep backend portability. The card-in-recall model removes the only reason we'd have wanted ATTACH.
+> **Why not SQLite `ATTACH`?** ATTACH would couple recall to a single connection spanning every domain db — and to the physical layout (one machine, all files co-located). Separate connections behind `StoreAdapter` keep the domains independently movable/syncable and each db's schema self-contained. The card-in-recall model removes the only reason we'd have wanted ATTACH (no cross-db ranking at query time).
 
-**Domain-local search** (e.g. full-text over *all* of `librarian.db`'s content, not just the gists) is a `StoreAdapter.search()` call against that one store — a deliberate, domain-scoped operation (`techne library search`), separate from personal recall.
+**Domain-local search** (e.g. full-text over *all* of `librarian.db`'s content, not just the gists) is the domain's own search function (e.g. `documents.search_documents`) running its native SQL against `store.connect()` — a deliberate, domain-scoped operation (`techne library search`), separate from personal recall.
 
 ### Per-db breakdown
 
@@ -76,7 +76,7 @@ This is the elegant part: **the card model makes federation a keyed `get`, not a
 
 Sequenced; the Librarian goes first because it's already built and working — the cleanest proof of the pattern.
 
-1. **Store registry + SQLite `StoreAdapter`** — `load_store(domain)`, config `stores:` block, a SQLite adapter that opens/migrates a domain db file. (Smallest possible — `add/get/search` + `migrate`.)
+1. **Store registry + SQLite `StoreAdapter`** — `load_store(domain)`, config `stores:` block, a SQLite adapter that opens/migrates a domain db file. (Smallest possible — `migrate / health / get` + `connect()`.)
 2. **Librarian → `librarian.db`**:
    - Move the `documents`/`_fts`/`_vec` schema out of core `SCHEMA_SQL` into the Librarian domain (applied to `librarian.db`).
    - `documents.py` (`store_document`/`get_document`/search) operate on the librarian store, not `config.db_path`.
@@ -91,7 +91,7 @@ Sequenced; the Librarian goes first because it's already built and working — t
 - **`techne search --table documents`**: keep it (route to the librarian store) or move to a domain-scoped `techne library search`? (Leaning: domain-scoped; personal recall is the cards.)
 - **Vector search** across domains: each domain owns its own vec index in its store; personal recall vec-searches only `techne.db`. Confirm no cross-db vec need.
 - **Config defaults**: do domain dbs default to existing (`~/.techne/<domain>.db`) and auto-create on first use, or require explicit enable? (Leaning: explicit enable, so a memory-only install stays one file.)
-- **Backend portability proof**: validate the SQLite→Postgres `StoreAdapter` swap on `architect.db` (per #87) once a domain actually needs it — don't build Postgres day one.
+- ~~**Backend portability proof**: validate the SQLite→Postgres `StoreAdapter` swap~~ — **resolved (techne#135): retired.** techne is SQLite-only; the seam was unused and removed. Design a server backend against a real driver only if a concrete deploy/multi-writer need ever appears.
 
 ## How this reframes the issues
 

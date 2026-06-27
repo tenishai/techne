@@ -2,14 +2,20 @@
 
 db-per-domain (`docs/db-per-domain.md`): `techne.db` is personal memory; each domain
 (librarian, architect, codex) gets its own store, routed by config via `load_store()`.
-SQLite is the day-one backend; the `StoreAdapter` Protocol is shaped so Postgres /
-MariaDB / ClickHouse (techne#87) slot in later without touching callers — those
-backends are NOT built here.
 
-The first consumer is the Librarian migration (techne#99): it moves `documents` out
-of techne core into `librarian.db` via a `SqliteStore`. Domains with bespoke SQL
-(documents' FTS5 + supersede logic) use `SqliteStore.connect()`; backend-agnostic
-domains use the Protocol's `add`/`get`/`search`.
+**SQLite-only, by decision (techne#135).** This is a per-domain *path + schema
+registry*, NOT a backend-portability seam. An earlier design advertised a
+backend-agnostic `add`/`search` Protocol so Postgres/MariaDB/ClickHouse could "slot
+in later" — but every domain bypasses it to raw SQLite (FTS5, `bm25`, recursive
+CTEs, triggers) and those methods had zero callers, so they were removed. techne is
+local-first (no network/key/server); team domains share via files/git, not a server.
+If a server-class backend ever becomes a real need, design the seam *then* against an
+actual driver — guessing its shape now produced only indirection. See techne#135.
+
+Domains run their own SQL against `SqliteStore.connect()` (a `plain_connect` that
+applies ONLY the domain's schema, never techne core's). The Protocol carries the
+genuinely cross-domain surface: schema lifecycle (`migrate`/`health`) and a keyed
+`get` (the Librarian card federation in `cards.py`).
 """
 
 from __future__ import annotations
@@ -23,35 +29,34 @@ from techne.config import Config
 
 @runtime_checkable
 class StoreAdapter(Protocol):
-    """Primary persistence for one domain — the 4th adapter shape (techne#87).
-
-    Backend-agnostic surface only. SQLite-specific access (a raw connection for
-    FTS5/bespoke SQL) is an extra on the SQLite impl, not part of the Protocol, so
-    a Postgres store can satisfy this without exposing a sqlite connection.
+    """A domain's persistence handle (techne#88/#98) — schema lifecycle plus a keyed
+    lookup. Deliberately minimal: only the surface that is actually shared across
+    domains. Domains do their real reads/writes against `SqliteStore.connect()` with
+    their own SQL (FTS5, supersede, graph CTEs), which is not — and need not be —
+    portable. `add`/`search` were removed (techne#135): they had no callers and a
+    portable full-text/ranking surface was never real.
     """
 
     domain: str
 
     def migrate(self, schema_sql: str) -> None: ...
     def health(self) -> bool: ...
-    def add(self, table: str, record: dict, *, key: str = "id") -> str: ...
     def get(self, table: str, row_id, *, key: str = "id") -> dict | None: ...
-    def search(self, table: str, query: str, *, limit: int = 20) -> list[dict]: ...
 
 
 class SqliteStore:
     """A domain store backed by a single SQLite file. Reuses techne's `connect()`
     (WAL, busy_timeout, row_factory), so a domain db behaves like the core db.
 
-    Table names passed to add/get/search come from internal domain code, never user
-    input — they're interpolated into SQL (values are always parameterized)."""
+    Table names passed to get() come from internal domain code, never user input —
+    they're interpolated into SQL (values are always parameterized)."""
 
     def __init__(self, domain: str, db_path: Path):
         self.domain = domain
         self.db_path = Path(db_path)
 
-    # SQLite-specific escape hatch — bespoke domain SQL (FTS5 triggers, supersede)
-    # runs against this. Not in the Protocol; backend-agnostic domains use add/get.
+    # The domain's working connection — all bespoke domain SQL (FTS5 triggers,
+    # supersede, graph CTEs) runs against this.
     #
     # A PLAIN connection (pragmas + row_factory) — deliberately NOT core's connect(),
     # which would apply techne's core SCHEMA_SQL to the domain db. A domain store
@@ -78,60 +83,11 @@ class SqliteStore:
         except Exception:
             return False
 
-    def add(self, table: str, record: dict, *, key: str = "id") -> str:
-        cols = ", ".join(record)
-        placeholders = ", ".join("?" * len(record))
-        conn = self.connect()
-        try:
-            cur = conn.execute(
-                f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})",
-                tuple(record.values()),
-            )
-            conn.commit()
-            return str(record.get(key, cur.lastrowid))
-        finally:
-            conn.close()
-
     def get(self, table: str, row_id, *, key: str = "id") -> dict | None:
         conn = self.connect()
         try:
             row = conn.execute(f"SELECT * FROM {table} WHERE {key} = ?", (row_id,)).fetchone()
             return dict(row) if row else None
-        finally:
-            conn.close()
-
-    def search(self, table: str, query: str, *, limit: int = 20) -> list[dict]:
-        """FTS over <table>_fts if it exists; else a LIKE on a `content` column."""
-        if not query.strip():  # FTS5 MATCH '' is a syntax error (#103)
-            return []
-        conn = self.connect()
-        try:
-            has_fts = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-                (f"{table}_fts",),
-            ).fetchone()
-            if has_fts:
-                # Sanitize before MATCH so operator-bearing input (`foo-`, `a OR`,
-                # an unbalanced quote) can't raise fts5 syntax errors (#74) on this
-                # public StoreAdapter surface — mirrors documents/patterns search.
-                from techne.core.search import _sanitize_fts_query
-
-                match = _sanitize_fts_query(query)
-                if not match:  # all-punctuation/backslash input → no terms; MATCH '' errors (#103)
-                    return []
-                rows = conn.execute(
-                    f"""SELECT t.* FROM {table}_fts f JOIN {table} t ON t.id = f.rowid
-                        WHERE {table}_fts MATCH ? LIMIT ?""",
-                    (match, limit),
-                ).fetchall()
-            else:
-                from techne.core.database import like_escape
-
-                rows = conn.execute(
-                    f"SELECT * FROM {table} WHERE content LIKE ? ESCAPE '\\' LIMIT ?",
-                    (f"%{like_escape(query)}%", limit),
-                ).fetchall()
-            return [dict(r) for r in rows]
         finally:
             conn.close()
 
@@ -171,16 +127,16 @@ def load_store(config: Config, domain: str) -> StoreAdapter:
     """Return the StoreAdapter for a domain, mirroring `load_adapter` for sync.
 
     Defaults to a SqliteStore even when the domain isn't in config.stores (so a
-    domain works out of the box at <data_dir>/<domain>.db). Non-sqlite adapters are
-    declared but not yet implemented (techne#87).
+    domain works out of the box at <data_dir>/<domain>.db). SQLite is the only
+    backend (techne#135); a non-sqlite `adapter` in config is a configuration error.
     """
     spec = config.stores.get(domain)
     adapter = spec.adapter if spec else "sqlite"
     if adapter == "sqlite":
         return SqliteStore(domain, store_path(config, domain))
     raise ValueError(
-        f"Store adapter '{adapter}' for domain '{domain}' is not built yet "
-        f"(built-in: {_BUILTIN_ADAPTERS}; postgres/mariadb/clickhouse land in techne#87)."
+        f"Store adapter '{adapter}' for domain '{domain}' is not supported — techne "
+        f"is SQLite-only (techne#135). Built-in: {_BUILTIN_ADAPTERS}."
     )
 
 
