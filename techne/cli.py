@@ -828,6 +828,7 @@ def init(ctx, platform, identity_dir, posture):
         click.echo(
             "Posture: spool-primary — CC authors curated memory; techne drains + reconciles"
             " downstream and keeps its own reflect ADVISORY (proposals only, no auto-promote)."
+            " Applies to ALL techne projects on this machine (global config)."
             " Run `techne memory sync` / `techne memory doctor`."
         )
     else:
