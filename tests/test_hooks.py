@@ -485,6 +485,44 @@ class TestSessionEndExitCode:
 # ---------------------------------------------------------------------------
 
 
+class TestPostToolUseExitCode:
+    """techne#166: PostToolUse must never break the host tool call.
+
+    Config.load() was called OUTSIDE the try/except, so a corrupt/unreadable
+    config.yaml would raise and surface as a non-zero hook exit — i.e. a failed
+    tool call in the user's session. A memory hook must degrade to a no-op.
+    """
+
+    def test_malformed_json_exits_zero(self):
+        result = _run_hook_subprocess("techne.hooks.post_tool_use", "not json {")
+        assert result.returncode == 0
+
+    def test_missing_fields_exits_zero(self):
+        result = _run_hook_subprocess("techne.hooks.post_tool_use", "{}")
+        assert result.returncode == 0
+
+    def test_corrupt_config_exits_zero(self, tmp_path: Path):
+        """A corrupt config.yaml makes Config.load() raise — the hook must still
+        exit 0 (degrade to a no-op), not fail the tool call."""
+        (tmp_path / "config.yaml").write_text("{[not: valid yaml::")
+        payload = json.dumps({
+            "session_id": "s1",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/x"},
+            "tool_response": "ok",
+        })
+        result = _run_hook_subprocess(
+            "techne.hooks.post_tool_use",
+            payload,
+            env_overrides={"TECHNE_HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0, (
+            f"post_tool_use exited {result.returncode} on corrupt config — "
+            f"this would fail the host tool call.\nstderr: {result.stderr}"
+        )
+        assert "config load failed" in result.stderr
+
+
 class TestSessionEndFlushSinks:
     """flush_sinks must be called from session_end, same as flush(adapter)."""
 

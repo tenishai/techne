@@ -1,6 +1,7 @@
 """Claude Code platform adapter — hook registration and MCP setup."""
 
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -108,14 +109,26 @@ def unregister(config: Config):
 
 
 def _load_json(path: Path) -> dict | None:
+    """Load a JSON config. Returns None ONLY when the file genuinely does not exist
+    (caller starts fresh). An EXISTING-but-unparseable file RAISES — returning None
+    there would make register_hooks treat it as empty and OVERWRITE the user's real
+    Claude Code settings with just ours (techne#166). Fail loud, lose nothing."""
     if not path.exists():
         return None
     try:
         return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(
+            f"{path} exists but could not be read/parsed ({e}); refusing to overwrite it. "
+            "Fix or remove the file, then re-run."
+        ) from e
 
 
 def _save_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    # Atomic write: a crash mid-write must never leave the file truncated/empty — the
+    # next _load_json would then (now) raise, or pre-#166 silently wipe the user's
+    # settings. Write a sibling temp then os.replace (POSIX-atomic rename).
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)

@@ -2,8 +2,6 @@
 
 import json
 import sys
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -149,3 +147,74 @@ class TestRegisterMCP:
         techne_server = config["mcpServers"]["techne"]
         assert techne_server["command"] == sys.executable
         assert techne_server["args"] == ["-m", "techne.mcp_server"]
+
+
+class TestConfigSafety:
+    """techne#166: register_* must never destroy a user's real Claude Code config.
+
+    The pre-#166 bug: _load_json treated an existing-but-corrupt file as "no file"
+    (returned None), so register_hooks started from {} and OVERWROTE settings.json
+    with only techne's hooks — wiping every other hook, permission, and setting the
+    user had. And _save_json wrote in place, so a crash mid-write left the file
+    truncated, which the next load would then treat as empty too.
+    """
+
+    def test_corrupt_settings_raises_and_preserves_file(self, fake_home, cfg):
+        # An existing-but-unparseable settings.json must make register_hooks RAISE,
+        # never silently start from {} and clobber the user's real settings.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        corrupt = '{"hooks": {"SessionStart": [  <<< not json'
+        path.write_text(corrupt)
+
+        with pytest.raises(RuntimeError, match="could not be read/parsed"):
+            claude_code.register_hooks(cfg)
+
+        # The bytes on disk are exactly what we wrote — nothing was overwritten.
+        assert path.read_text() == corrupt
+
+    def test_register_preserves_foreign_settings(self, fake_home, cfg):
+        # Non-hook top-level keys and foreign hooks must survive a re-register.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "permissions": {"allow": ["Bash(ls:*)"]},
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]}
+                ]
+            },
+        }))
+
+        claude_code.register_hooks(cfg)
+        settings = json.loads(path.read_text())
+
+        # Foreign setting preserved verbatim.
+        assert settings["permissions"] == {"allow": ["Bash(ls:*)"]}
+        # Foreign hook preserved.
+        assert settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "/usr/bin/true"
+        # techne hooks added.
+        assert "SessionStart" in settings["hooks"]
+
+    def test_save_is_atomic_no_tmp_left_behind(self, fake_home, cfg):
+        # After a successful save the sibling .tmp file must be gone (os.replace
+        # consumed it) and the result must be valid JSON.
+        claude_code.register_hooks(cfg)
+        path = claude_code.SETTINGS_PATH
+        tmp = path.with_name(path.name + ".tmp")
+        assert not tmp.exists(), "atomic-write temp file leaked"
+        json.loads(path.read_text())  # parses cleanly
+
+    def test_save_json_roundtrip(self, tmp_path):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        target = tmp_path / "sub" / "x.json"
+        hooks_mod._save_json(target, {"a": 1, "b": [2, 3]})
+        assert json.loads(target.read_text()) == {"a": 1, "b": [2, 3]}
+        # _load_json returns the same dict; a missing file returns None.
+        assert hooks_mod._load_json(target) == {"a": 1, "b": [2, 3]}
+        assert hooks_mod._load_json(tmp_path / "nope.json") is None
