@@ -106,6 +106,12 @@ CREATE TABLE IF NOT EXISTS knowledge (
     confidence_numeric REAL NOT NULL DEFAULT 0.6,
     last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     superseded_by INTEGER REFERENCES knowledge(id),
+    -- Dependency-driven staleness (techne#117). `current` is the default. A
+    -- reconcile-time cascade flips a row to `uncertain` when a fact it depends on
+    -- (via knowledge_deps) is superseded — "stop trusting this until reconfirmed".
+    -- Orthogonal to superseded_by (direct replacement). Recall annotates/down-ranks
+    -- `uncertain`, sharing the #90 staleness gate. reconfirm() clears it.
+    status TEXT NOT NULL DEFAULT 'current',
     event_at TIMESTAMP,
     -- Evidence anchor (techne#90): a memory that points into a repo carries the
     -- file path (+ optional symbol after "::"), the sha256 of the file's bytes
@@ -121,6 +127,20 @@ CREATE TABLE IF NOT EXISTS knowledge (
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge(type);
 CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by);
+
+-- Dependency edges between knowledge entries (techne#117). A junction table, NOT
+-- a graph engine: `dependent_id` is derived from / depends on `trigger_id`; when
+-- the trigger is superseded, the cascade marks the dependent `uncertain`. Edges are
+-- written explicitly (add_dependency) at extraction/reconcile time, never inferred
+-- on the hot ingest path. idx on trigger_id powers the cascade lookup.
+CREATE TABLE IF NOT EXISTS knowledge_deps (
+    dependent_id INTEGER NOT NULL REFERENCES knowledge(id),
+    trigger_id   INTEGER NOT NULL REFERENCES knowledge(id),
+    kind         TEXT NOT NULL DEFAULT 'derived_from',
+    created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (dependent_id, trigger_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_deps_trigger ON knowledge_deps(trigger_id);
 
 -- Identity (key-value store for agent identity)
 CREATE TABLE IF NOT EXISTS identity (
