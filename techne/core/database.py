@@ -472,6 +472,18 @@ def _reconcile_tables(conn: sqlite3.Connection) -> None:
             print(f"[techne] reconcile: CREATE TABLE {name}", file=sys.stderr)
 
 
+def _strip_sql_comment(line: str) -> str:
+    """Drop an inline ``-- …`` comment from a SCHEMA_SQL line.
+
+    Column lines may carry a trailing comment (e.g.
+    ``status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'synced'``). The
+    reconciler copies the column definition verbatim into an ``ALTER TABLE … ADD
+    COLUMN``; leaving the comment (and the mid-line comma before it) in produces
+    invalid DDL and crashes the universal ``connect()`` (techne#132).
+    """
+    return re.sub(r"\s*--.*$", "", line)
+
+
 def _schema_columns(table: str) -> set[str]:
     """Parse column names for `table` out of SCHEMA_SQL using regex."""
     # Match the CREATE TABLE block for this table name.
@@ -482,7 +494,7 @@ def _schema_columns(table: str) -> set[str]:
     block = m.group(1)
     cols = set()
     for line in block.splitlines():
-        line = line.strip().rstrip(",")
+        line = _strip_sql_comment(line).strip().rstrip(",")
         if not line or line.upper().startswith(
             ("PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "REFERENCES", "--")
         ):
@@ -510,11 +522,22 @@ def _reconcile_columns(conn: sqlite3.Connection) -> None:
             col_def = col  # fallback: bare name (SQLite infers NULL affinity)
             if block_m:
                 for line in block_m.group(1).splitlines():
-                    stripped = line.strip().rstrip(",")
+                    stripped = _strip_sql_comment(line).strip().rstrip(",")
                     parts = stripped.split()
                     if parts and parts[0] == col:
                         col_def = stripped
                         break
+            # SQLite cannot ADD a NOT NULL column without a DEFAULT to an existing
+            # (possibly populated) table. Skip + warn rather than crash connect();
+            # such a column needs a numbered migration, not the additive path.
+            upper = col_def.upper()
+            if "NOT NULL" in upper and "DEFAULT" not in upper:
+                print(
+                    f"[techne] reconcile: SKIP {table}.{col} — NOT NULL without DEFAULT "
+                    "cannot be added to an existing table; use a numbered migration",
+                    file=sys.stderr,
+                )
+                continue
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
             conn.commit()
             print(f"[techne] reconcile: ALTER TABLE {table} ADD COLUMN {col_def}", file=sys.stderr)

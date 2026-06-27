@@ -24,8 +24,10 @@ _PATTERNS: list[tuple[str, str]] = [
     (r"ghs_[A-Za-z0-9]{20,}", "github-apps"),
     # GitHub fine-grained PATs
     (r"github_pat_[A-Za-z0-9_]{20,}", "github-fine-grained"),
-    # Stripe secret keys (live and test); must come before plain sk- to avoid conflict
-    (r"sk-(?:live|test)-[A-Za-z0-9]{20,}", "stripe"),
+    # Stripe secret keys use UNDERSCORES: sk_live_… / sk_test_… (techne#134 — the
+    # old hyphen shape `sk-live-` never matched a real key). Distinct `sk_` prefix,
+    # so no conflict with the plain `sk-` pattern above.
+    (r"sk_(?:live|test)_[A-Za-z0-9]{20,}", "stripe"),
     # Slack bot tokens
     (r"xoxb-[A-Za-z0-9-]+", "slack"),
     # Slack user/app tokens (bonus)

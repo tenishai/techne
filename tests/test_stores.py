@@ -69,6 +69,17 @@ def test_search_blank_query_returns_empty(cfg):
     assert store.search("notes", "   ") == []
 
 
+@pytest.mark.parametrize("q", ["foo-", "a OR", 'unbalanced "quote', "NOT", "a AND", "*("])
+def test_search_operator_bearing_query_does_not_crash(cfg, q):
+    """techne#133: the FTS branch must sanitize, so operator/punctuation input
+    can't raise an fts5 syntax error on this public StoreAdapter surface."""
+    store = load_store(cfg, "librarian")
+    store.migrate(_SCHEMA)
+    store.add("notes", {"id": 1, "content": "SQLite store notes"})
+    # Must return a list (possibly empty), never raise.
+    assert isinstance(store.search("notes", q), list)
+
+
 def test_search_like_fallback_without_fts(cfg):
     store = load_store(cfg, "x")
     store.migrate("CREATE TABLE IF NOT EXISTS docs (id INTEGER PRIMARY KEY, content TEXT);")

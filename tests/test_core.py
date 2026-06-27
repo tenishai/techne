@@ -206,6 +206,25 @@ class TestKnowledge:
         assert len(current) == 1
         assert current[0]["id"] == new_id
 
+    def test_supersede_preserves_confidence_numeric(self, db_path):
+        """techne#131: superseding must carry confidence_numeric, not reset it to
+        the 0.6 schema default. A `high` fact stays at 0.9 after supersession."""
+        from techne.core.database import connect
+
+        old_id = store(db_path, "high-confidence fact", type="fact", confidence="high")
+        new_id = supersede(db_path, old_id, "high-confidence fact, revised")
+
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT confidence, confidence_numeric FROM knowledge WHERE id = ?",
+                (new_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["confidence"] == "high"
+        assert row["confidence_numeric"] == 0.9  # not the 0.6 default
+
     def test_invalid_type(self, db_path):
         with pytest.raises(ValueError):
             store(db_path, "test", type="invalid")

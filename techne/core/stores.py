@@ -111,10 +111,15 @@ class SqliteStore:
                 (f"{table}_fts",),
             ).fetchone()
             if has_fts:
+                # Sanitize before MATCH so operator-bearing input (`foo-`, `a OR`,
+                # an unbalanced quote) can't raise fts5 syntax errors (#74) on this
+                # public StoreAdapter surface — mirrors documents/patterns search.
+                from techne.core.search import _sanitize_fts_query
+
                 rows = conn.execute(
                     f"""SELECT t.* FROM {table}_fts f JOIN {table} t ON t.id = f.rowid
                         WHERE {table}_fts MATCH ? LIMIT ?""",
-                    (query, limit),
+                    (_sanitize_fts_query(query), limit),
                 ).fetchall()
             else:
                 from techne.core.database import like_escape

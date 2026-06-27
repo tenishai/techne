@@ -113,13 +113,23 @@ def store(
 def supersede(db_path: Path, old_id: int, new_content: str, source: str = "session") -> int:
     """Replace an existing knowledge entry with updated content.
 
-    Marks the old entry as superseded and creates a new one inheriting
-    the old entry's type, tags, and confidence.
+    Marks the old entry as superseded and creates a new one inheriting the old
+    entry's type, tags, and confidence — including `confidence_numeric` (the value
+    that actually drives ranking/decay), which must stay in sync with the text
+    enum (techne#131; a prior version dropped it, silently demoting every
+    superseded fact to the 0.6 default). `last_confirmed_at` is intentionally NOT
+    carried: superseding is a fresh confirmation, so the decay clock resets to now.
+
+    An evidence anchor (techne#90) is carried forward to the new revision, but its
+    hash/sha are RE-RESOLVED against the current file state (mirroring store()) —
+    the new content is a fresh snapshot of the same anchored evidence, not an
+    inheritance of the old, now-stale snapshot. Off-git/missing → NULL → `unknown`.
     """
     conn = connect(db_path)
     try:
         old = conn.execute(
-            "SELECT type, tags, confidence, superseded_by FROM knowledge WHERE id = ?",
+            "SELECT type, tags, confidence, anchor_path, anchor_symbol, superseded_by "
+            "FROM knowledge WHERE id = ?",
             (old_id,),
         ).fetchone()
         if old is None:
@@ -130,10 +140,39 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
                 "supersede the latest revision instead"
             )
 
+        # Re-derive numeric from the enum so the two can't drift (self-heals any
+        # row a pre-#131 supersede left inconsistent). Fall back to medium if the
+        # stored enum is somehow unknown.
+        numeric = CONFIDENCE_NUMERIC.get(old["confidence"], CONFIDENCE_NUMERIC["medium"])
+
+        # Re-resolve the carried anchor (if any) against the current working tree.
+        content_hash: str | None = None
+        anchor_git_sha: str | None = None
+        if old["anchor_path"]:
+            from techne.core.anchor import resolve_anchor
+
+            resolved = resolve_anchor(old["anchor_path"])
+            if resolved is not None:
+                content_hash = resolved["content_hash"]
+                anchor_git_sha = resolved["git_sha"]
+
         cur = conn.execute(
-            """INSERT INTO knowledge (type, content, source, tags, confidence)
-               VALUES (?, ?, ?, ?, ?)""",
-            (old["type"], redact_credentials(new_content), source, old["tags"], old["confidence"]),
+            """INSERT INTO knowledge
+                 (type, content, source, tags, confidence, confidence_numeric,
+                  anchor_path, anchor_symbol, content_hash, anchor_git_sha)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                old["type"],
+                redact_credentials(new_content),
+                source,
+                old["tags"],
+                old["confidence"],
+                numeric,
+                old["anchor_path"],
+                old["anchor_symbol"],
+                content_hash,
+                anchor_git_sha,
+            ),
         )
         new_id = cur.lastrowid
 
