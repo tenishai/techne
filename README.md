@@ -223,8 +223,7 @@ techne architect search QUERY
 techne architect show PATTERN_ID
 
 # Codex (codex.db) — code graph (symbols + call/import/def-use edges)
-#   NOTE: the repo parser (Tree-sitter) is not built yet — the store + graph queries
-#   work, but populating it from a real repo is pending the Codex persona (techne#89).
+techne codex index PATH                    # ingest a repo (Tree-sitter; pip install 'techne[codex]')
 techne codex                               # symbol / edge counts
 techne codex search QUERY
 techne codex callers SYMBOL_ID
@@ -239,9 +238,9 @@ techne codex blast-radius SYMBOL_ID [--direction out|in] [--depth N]
 
 - **Librarian** (`librarian.db`) — **documents**: your session *transcripts* (the conversation prose, not just tool calls) and *markdown directories*. Recall returns a compact **gist card** that rides normal knowledge recall; the full document is fetched on demand via the card's pointer (a cross-db lookup). Long multi-topic transcripts get a deterministic **thread-index** gist; single-topic docs get an agent-written prose gist (`cards emit/ingest`, no API key). **New here, or setting up a teammate's machine? → [Using the Librarian](docs/librarian-guide.md)** (the documents↔cards model, getting your transcripts in, and an agent-instructions block).
 - **Architect** (`architect.db`) — the **architectural-patterns** corpus: `investigations` (lens-aware dedup, keyed `url × surveyed_by × lens`, so two reviewer lenses on one URL is a join) + the `patterns` lifted from them. Team-scope — queried directly, not folded into personal recall. **Bootstrap your store from the shared corpus:** `techne architect ingest patterns/architectural-patterns.md` (the corpus is a generated export — `architect export` regenerates it; see [`patterns/README.md`](patterns/README.md) for the one-writer/many-readers workflow).
-- **Codex** (`codex.db`) — a **code graph**: `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade). The store and graph queries are in place; real-repo ingest (a Tree-sitter `SourceAdapter`) is pending.
+- **Codex** (`codex.db`) — a **code graph**: `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest shipped — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, `pip install 'techne[codex]'`).
 
-Personal `techne.db` deliberately stays raw-SQLite and local-only. The `StoreAdapter` is SQLite today; Postgres/others are config-selected later, per domain, without touching callers.
+Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **SQLite-only by decision** (techne#135): the domains are isolated db files behind a thin path/schema registry, not a backend-portability seam.
 
 ---
 
