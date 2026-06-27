@@ -77,6 +77,9 @@ def test_recall_eval(tmp_path, capsys):
             agg[arm] += score * w
             cat_score[(category, arm)] += score * w
             rows.append({
+                # `variant` is a TASK-CORPUS dimension (curated vs raw-dump vs the
+                # reserved cold/warm), not an arm property — so it reads the same on
+                # the bare control row. The arm is the separate `arm` field.
                 "task_id": task["id"], "category": category,
                 "variant": task.get("variant", "curated"), "arm": arm,
                 "score": score, "weight": w, "latency_ms": latency_ms, **detail,
