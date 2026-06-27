@@ -1,6 +1,7 @@
 """Configuration management for techne."""
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -404,8 +405,14 @@ class Config:
         if "posture" in raw and isinstance(raw["posture"], dict):
             p = raw["posture"]
             mode = p.get("mode", "observe")
+            # Raise on an invalid mode rather than silently clamping to 'observe'
+            # — a typo'd posture would otherwise un-gate the unattended writer
+            # without telling anyone. Consistent with every other enum validator
+            # here (platform, detector, write_to). (techne#167)
             if mode not in ("observe", "spool-primary"):
-                mode = "observe"
+                raise ValueError(
+                    f"Invalid posture.mode '{mode}'. Must be one of: observe, spool-primary"
+                )
             cfg.posture = PostureConfig(
                 mode=mode,
                 cc_memory_detected=bool(p.get("cc_memory_detected", False)),
@@ -463,6 +470,19 @@ class Config:
                 "mode": self.posture.mode,
                 "cc_memory_detected": self.posture.cc_memory_detected,
             },
+            # injection + staleness_hours are parsed by _from_dict but were
+            # previously NOT serialized here, so re-running `techne init` (the only
+            # save() caller) silently reset any customization. (techne#167)
+            "injection": {
+                "enabled": self.injection.enabled,
+                "char_budget": self.injection.char_budget,
+                "max_active_threads": self.injection.max_active_threads,
+                "max_recent_threads": self.injection.max_recent_threads,
+                "thread_char_budget": self.injection.thread_char_budget,
+                "thread_per_item_chars": self.injection.thread_per_item_chars,
+                "recent_reserve_frac": self.injection.recent_reserve_frac,
+            },
+            "staleness_hours": self.staleness_hours,
         }
         # sources: only emit the sub-keys that are configured to avoid
         # polluting a minimal config with empty stubs.
@@ -507,7 +527,21 @@ class Config:
             for k, v in self.sync.extra.items():
                 if k not in data["sync"]:
                     data["sync"][k] = v
-        with open(path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-        if self.llm_api_key:
-            path.chmod(0o600)
+        # Write atomically with owner-only perms FROM CREATION. The config can hold
+        # secrets (llm_api_key, sync.auth); the old open()+chmod() created the file
+        # world-readable (≈0644) and only narrowed it afterward — a TOCTOU window in
+        # which another local user could read the key. tempfile.mkstemp creates the
+        # temp 0600, and os.replace preserves that mode on the final file, so the key
+        # is never world-readable for any instant. Always 0600 (not just when a key
+        # is present) so sync.auth and future secrets are covered too. (techne#167)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
