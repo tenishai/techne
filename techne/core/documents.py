@@ -62,6 +62,13 @@ def store_document(
     """
     conn = connect(db_path)
     try:
+        # BEGIN IMMEDIATE serializes writers so the SELECT→INSERT below is atomic:
+        # without it two concurrent callers both see "no active row" and both INSERT,
+        # leaving TWO active rows for one source_url (the invariant this function
+        # exists to keep). A partial UNIQUE(source_url) WHERE superseded_by IS NULL
+        # can't be used here because the insert-first supersede path is transiently
+        # two-active, which such an index would reject. (techne#170)
+        conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             """SELECT id, content FROM documents
                WHERE source_url = ? AND superseded_by IS NULL""",
@@ -75,13 +82,12 @@ def store_document(
                     source_url=source_url,
                     id=existing["id"],
                 )
+                conn.commit()  # release the write lock; nothing changed
                 return existing["id"], False
 
             # Content changed — supersede the old row.
-            # Insert the new revision first (no unique-per-source_url constraint
-            # to block it — uniqueness is enforced programmatically via the
-            # SELECT above). Then mark the old row as superseded. This mirrors
-            # the knowledge.supersede() pattern.
+            # Insert the new revision first, then mark the old row as superseded
+            # (mirrors knowledge.supersede()). Safe under the held write lock.
             old_id = existing["id"]
             cur = conn.execute(
                 """INSERT INTO documents
@@ -122,6 +128,9 @@ def store_document(
         )
         return new_id, True
 
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

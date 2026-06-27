@@ -87,6 +87,11 @@ def upsert_document_card(
 
     conn = connect(db_path)
     try:
+        # BEGIN IMMEDIATE serializes writers so the SELECT→INSERT is atomic — else two
+        # concurrent callers both see no active card and both insert, leaving two
+        # active cards per (type, source_url). A partial unique index can't be used:
+        # the insert-first supersede path is transiently two-active. (techne#170)
+        conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             """SELECT id, tags FROM knowledge
                WHERE type = ? AND source = ? AND superseded_by IS NULL""",
@@ -94,6 +99,7 @@ def upsert_document_card(
         ).fetchone()
 
         if existing is not None and _tag_value(existing["tags"], "ver:") == str(source_version):
+            conn.commit()  # release the write lock; nothing changed
             return existing["id"], False
 
         new_id = _insert_card(conn, content, source_url, tags, confidence)
@@ -105,6 +111,9 @@ def upsert_document_card(
             )
         conn.commit()
         return new_id, True
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
