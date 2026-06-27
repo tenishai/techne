@@ -248,7 +248,15 @@ def _cascade_uncertain(conn, trigger_id: int) -> int:
 def cascade_uncertain(db_path: Path, trigger_id: int) -> int:
     """Standalone/reconcile entry point for the dependency cascade (techne#117) —
     mark live dependents of *trigger_id* `uncertain`. supersede() runs the same
-    cascade inline when it supersedes an entry. Returns the count flipped."""
+    cascade inline when it supersedes an entry. Returns the count flipped.
+
+    Two deliberate Stage-1 boundaries (a junction table, not a graph engine):
+      * ONE-HOP: flipping a dependent to `uncertain` is not itself a supersession,
+        so it does not re-fire — if A depends on B depends on C, superseding C marks
+        B, not A. Transitive propagation is out of scope.
+      * Edges reference a specific revision id and do NOT auto-migrate across a
+        supersession chain; re-extraction re-points them at the current revision.
+    """
     conn = connect(db_path)
     try:
         n = _cascade_uncertain(conn, trigger_id)
