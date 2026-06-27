@@ -67,6 +67,8 @@ class TestHandleRequest:
             "techne_reflect_ingest",
             "techne_consolidate_emit",
             "techne_consolidate_ingest",
+            "techne_memory_claims_emit",
+            "techne_memory_claims_ingest",
         }
 
     def test_notifications_initialized_returns_none(self, config):

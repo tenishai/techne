@@ -510,6 +510,51 @@ TOOLS = [
             "required": ["target_ids", "cluster_hash", "response"],
         },
     },
+    {
+        "name": "techne_memory_claims_emit",
+        "description": (
+            "Extract claims from curated memory and judge each against the deed-log using "
+            "YOUR OWN model (techne#107 PR3 — no API key, no sampling). "
+            "FIDELITY CAVEAT: the deed-log contains truncated ~500-char summaries — file "
+            "paths are reliable but claim text is lossy. 'uncorroborated' means no deed "
+            "evidence found, NOT that the claim is false. "
+            "Returns the emit dict (prompt + metadata); answer the prompt with your model "
+            "and feed the response to techne_memory_claims_ingest. Output is ephemeral — "
+            "nothing is persisted."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since_days": {
+                    "type": "integer",
+                    "description": "Only consider deeds from the last N days (default: all).",
+                },
+            },
+        },
+    },
+    {
+        "name": "techne_memory_claims_ingest",
+        "description": (
+            "Feed back the claim-judgement JSON array from techne_memory_claims_emit. "
+            "`response` is your JSON array of claim objects (each with `claim`, `status`, "
+            "`evidence`). Returns an ephemeral report with per-claim verdicts and counts "
+            "(corroborated / uncorroborated / contradicted). Nothing is persisted."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt_hash": {
+                    "type": "string",
+                    "description": "From the emit result (advisory; for round-trip tracking).",
+                },
+                "response": {
+                    "type": "string",
+                    "description": "Your JSON claim-judgement array answering the emit prompt.",
+                },
+            },
+            "required": ["response"],
+        },
+    },
 ]
 
 def _codex_search(args: dict, config: Config) -> dict:
@@ -669,6 +714,27 @@ def _techne_consolidate_ingest(args: dict, config: Config) -> dict:
     )
 
 
+def _techne_memory_claims_emit(args: dict, config: Config) -> dict:
+    """Emit the claim-reconciliation prompt for the agent to answer with its own model
+    (techne#107 PR3). Returns the prompt + metadata; feed the response back via
+    techne_memory_claims_ingest. Output is ephemeral."""
+    from techne.core.memory_claims import claims_emit
+
+    return claims_emit(config, since_days=args.get("since_days"))
+
+
+def _techne_memory_claims_ingest(args: dict, config: Config) -> dict:
+    """Process the agent's claim-judgement response (techne#107 PR3). Returns an
+    ephemeral report with per-claim verdicts and counts. Nothing is persisted."""
+    from techne.core.memory_claims import claims_ingest
+
+    response = args.get("response", "")
+    if not isinstance(response, str):
+        response = json.dumps(response) if response else ""
+
+    return claims_ingest(config, args.get("prompt_hash", ""), response)
+
+
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
@@ -685,6 +751,8 @@ TOOL_HANDLERS = {
     "techne_reflect_ingest": _techne_reflect_ingest,
     "techne_consolidate_emit": _techne_consolidate_emit,
     "techne_consolidate_ingest": _techne_consolidate_ingest,
+    "techne_memory_claims_emit": _techne_memory_claims_emit,
+    "techne_memory_claims_ingest": _techne_memory_claims_ingest,
 }
 
 

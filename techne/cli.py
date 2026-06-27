@@ -1039,21 +1039,116 @@ def memory(ctx):
     """Reconcile the client's curated memory against techne's raw deed-log (techne#107)."""
 
 
+def _memory_doctor_claims(ctx, config, *, since_days, as_json):
+    """Claim-level reconciliation branch for `memory doctor --claims` (techne#107 PR3).
+
+    Separated from the main command handler so the non-claims path is untouched.
+    Uses the resident-model emit/ingest pattern: the agent answers the emitted prompt
+    with its own model (no API key). Falls back to manual instructions when no
+    operator model is configured or the automated call fails.
+    """
+    from techne.core.memory_claims import claims_emit, claims_ingest
+
+    _NO_MEMORY_MSG = (
+        f"No curated memory found for this project (looked under the CC slug for "
+        f"{Path.cwd()}). Nothing to reconcile — is this a Claude Code project with "
+        "memory files?"
+    )
+
+    report = claims_emit(config, since_days=since_days)
+    if not report["memory_present"]:
+        click.echo(_NO_MEMORY_MSG)
+        return
+
+    # Automated path: if config.model is set, try the operator LLM.
+    result = None
+    if getattr(config, "model", None):
+        try:
+            from techne.core.thread_orchestrator import _make_generate_fn
+
+            gen = _make_generate_fn(config)
+            raw = gen(report["prompt"])
+            result = claims_ingest(config, report["prompt_hash"], raw)
+        except Exception:
+            result = None  # fall through to manual instructions
+
+    if result is not None:
+        if as_json:
+            click.echo(json.dumps(result, indent=2))
+            return
+        counts = result["counts"]
+        click.echo(
+            f"memory doctor --claims — {report['deed_count']} deed(s) considered"
+        )
+        click.echo(
+            f"  {counts['corroborated']} corroborated  "
+            f"{counts['uncorroborated']} uncorroborated  "
+            f"{counts['contradicted']} contradicted  "
+            f"(total {result['total']} claim(s))"
+        )
+        click.echo(
+            f"  NOTE: {report['deed_count']} deed(s) — deed-log is ~500-char truncated; "
+            "'uncorroborated' = no deed evidence, NOT false."
+        )
+        if counts["contradicted"]:
+            click.echo("\n! contradicted — a deed conflicts with these claims:")
+            for c in result["claims"]:
+                if c["status"] == "contradicted":
+                    click.echo(f"  - {c['claim']}")
+                    if c["evidence"] and c["evidence"] != "none":
+                        click.echo(f"    evidence: {c['evidence']}")
+        if counts["uncorroborated"]:
+            click.echo("\n? uncorroborated — no deed evidence (not necessarily false):")
+            for c in result["claims"]:
+                if c["status"] == "uncorroborated":
+                    click.echo(f"  - {c['claim']}")
+        return
+
+    # Manual / no-model path: print caveat + instructions; do NOT dump the full prompt.
+    click.echo(
+        "Claim reconciliation uses the resident model (your own model — no API key).\n"
+        "FIDELITY CAVEAT: deed-log is ~500-char truncated; 'uncorroborated' means no "
+        "deed evidence, NOT false.\n\n"
+        "To run claim reconciliation:\n"
+        "  1. Call the MCP tool: techne_memory_claims_emit (optionally with since_days)\n"
+        "  2. Answer the returned prompt with your model\n"
+        "  3. Feed the response to: techne_memory_claims_ingest\n"
+    )
+    if as_json:
+        click.echo(json.dumps({"memory_present": True,
+                               "deed_count": report["deed_count"],
+                               "memory_files": report.get("memory_files", []),
+                               "note": "no-model path; use MCP tools to complete"}, indent=2))
+
+
 @memory.command("doctor")
 @click.option("--since", "since_days", type=int, default=None,
               help="Only consider deeds from the last N days (default: all).")
 @click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+@click.option("--claims", "do_claims", is_flag=True,
+              help="Claim-level reconciliation via the resident model (techne#107 PR3).")
 @click.pass_context
-def memory_doctor_cmd(ctx, since_days, as_json):
+def memory_doctor_cmd(ctx, since_days, as_json, do_claims):
     """Diff the client's curated memory against techne's deed-log.
 
     Read-only. Surfaces files you worked on but never noted (omissions) and files your
     memory cites but no deed touched (unbacked). File-reference grain (techne#107 PR1).
+
+    Add --claims for claim-level reconciliation: each discrete fact in curated memory
+    is judged corroborated / uncorroborated / contradicted against the deed-log.
+    Requires the resident model (uses YOUR model; no API key). Fidelity caveat: the
+    deed-log is truncated to ~500 chars — "uncorroborated" means no deed evidence,
+    NOT false.
     """
     config = ctx.obj["config"]
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
+
+    if do_claims:
+        _memory_doctor_claims(ctx, config, since_days=since_days, as_json=as_json)
+        return
+
     from techne.core.memory_doctor import reconcile
 
     report = reconcile(config.db_path, since_days=since_days)
