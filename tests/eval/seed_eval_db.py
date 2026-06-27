@@ -13,7 +13,7 @@ if insertion order ever changes.
 from pathlib import Path
 
 from techne.core.database import connect, init_db
-from techne.core.knowledge import store
+from techne.core.knowledge import store, supersede
 
 _SESSION = "eval-sess"
 
@@ -86,11 +86,37 @@ def seed(db_path: Path) -> dict[str, str]:
     store(db_path, "cabal#11 AbortGraph handles transitive parent->child "
           "cancellation across nested dispatch.", type="decision", tags="cabal", source="eval")
     store(db_path, "cabal#12 covers A2A streaming foundations: message/stream and "
-          "tasks/resubscribe with cursor-based replay.", type="decision", tags="cabal", source="eval")
+          "tasks/resubscribe with cursor-based replay.",
+          type="decision", tags="cabal", source="eval")
     store(db_path, "The MMR reranker adds diversity to search results via a greedy "
           "second pass over BM25 candidates.", type="fact", tags="search", source="eval")
     store(db_path, "Outbox routing should close the flush/flush_sinks race via "
           "enqueue-time target namespacing.", type="decision", tags="outbox", source="eval")
+
+    # --- GOLD: tracking (supersede chain → only the latest revision is live) ---
+    # techne#118: the deterministic acceptance test for #90 supersession. search()
+    # filters `superseded_by IS NULL` (search.py), so a query for the current value
+    # must return v3 and NEVER the stale v1/v2. A regression that breaks supersession
+    # filtering would surface a stale revision and fail this task's must_exclude.
+    _v1 = store(db_path, "The eval-stack deploy target is host dev01-old (initial).",
+                type="fact", tags="deploy", source="eval")
+    _v2 = supersede(db_path, _v1, "The eval-stack deploy target is host dev02-mid (migrated).")
+    _v3 = supersede(db_path, _v2, "The eval-stack deploy target is host dev03-current (live).")
+    gold["deploy_target"] = "knowledge:%d" % _v3
+
+    # --- GOLD: aggregation (one topic, N pieces — ALL must be recalled) ---
+    gold["agg_step1"] = "knowledge:%d" % store(
+        db_path, "Eval rollout runbook step one: freeze the synthetic corpus and tag the baseline.",
+        type="procedure", tags="runbook", source="eval")
+    gold["agg_step2"] = "knowledge:%d" % store(
+        db_path, "Eval rollout runbook step two: run the kill-gate and compare to the "
+        "frozen aggregate.", type="procedure", tags="runbook", source="eval")
+    gold["agg_step3"] = "knowledge:%d" % store(
+        db_path, "Eval rollout runbook step three: archive last_run.jsonl and refresh PHASE0.",
+        type="procedure", tags="runbook", source="eval")
+    # same-topic distractor so aggregation isn't a ceiling task (partial recall reachable)
+    store(db_path, "Draft eval runbook (abandoned): the single-pass approach was replaced "
+          "by the three-step rollout.", type="procedure", tags="runbook", source="eval")
 
     # --- GOLD + DISTRACTOR observations -------------------------------------
     conn = connect(db_path)
@@ -105,7 +131,8 @@ def seed(db_path: Path) -> dict[str, str]:
             "implicit-AND FTS queries"
         )
         _add_observation_raw(conn, "Ran pytest tests/test_search.py — 44 passed", tool_name="Bash")
-        _add_observation_raw(conn, "Read: techne/core/redaction.py credential patterns", tool_name="Read")
+        _add_observation_raw(
+            conn, "Read: techne/core/redaction.py credential patterns", tool_name="Read")
 
         # --- GOLD thread (direct SQL with a fixed id; threads_ai trigger
         #     populates threads_fts) ---

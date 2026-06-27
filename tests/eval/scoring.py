@@ -2,7 +2,8 @@
 
 Per-task score in [0,1]:
     0.7 * evidence_recall@K  +  0.3 * phrase_coverage
-zeroed if a `must_exclude_phrases` entry appears in the top result (anti-relevance).
+zeroed if a `must_exclude_phrases` entry appears anywhere in the results
+(anti-relevance, whole-list since techne#118 — a stale leak at any rank fails).
 
 Honest because gold ids/phrases are authored against the committed synthetic
 corpus, where "correct" is knowable.
@@ -26,9 +27,11 @@ def score_task(
     musts = task.get("must_include_phrases", []) or []
     coverage = (sum(1 for p in musts if p.lower() in blob) / len(musts)) if musts else 1.0
 
+    # Anti-relevance, checked over ALL retrieved results, not just the top one
+    # (techne#118): a stale revision leaking in at rank 2 must fail a tracking task
+    # too. No effect on existing tasks — they carry no must_exclude_phrases.
     forb = task.get("must_exclude_phrases", []) or []
-    top_text = _text_of(retrieved[0]).lower() if retrieved else ""
-    killed = any(f.lower() in top_text for f in forb)
+    killed = any(f.lower() in blob for f in forb)
 
     # Cost/precision axis (techne#118) — observability only, NOT part of the score.
     # precision = gold hits per result returned (curated recall is precise + cheap;
