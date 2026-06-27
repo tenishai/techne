@@ -197,8 +197,89 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
             "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (new_id, old_id),
         )
+        # Dependency cascade (techne#117): a fact that depended on the now-superseded
+        # entry can no longer be trusted at face value — flip live dependents to
+        # `uncertain`, atomically in this transaction. The replacement value is NOT
+        # auto-propagated; a dependent stays uncertain until reconfirm()ed. supersede
+        # is a deliberate update, so this is off the hot ingest path.
+        _cascade_uncertain(conn, old_id)
         conn.commit()
         return new_id
+    finally:
+        conn.close()
+
+
+# --- dependency-driven staleness (techne#117) -------------------------------
+
+
+def add_dependency(
+    db_path: Path, dependent_id: int, trigger_id: int, kind: str = "derived_from"
+) -> None:
+    """Record that *dependent_id* depends on *trigger_id*. When the trigger is later
+    superseded, the cascade marks the dependent `uncertain`. Explicit edge written
+    at extraction/reconcile time (never inferred on the hot path); idempotent."""
+    if dependent_id == trigger_id:
+        raise ValueError("a knowledge entry cannot depend on itself")
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO knowledge_deps (dependent_id, trigger_id, kind) "
+            "VALUES (?, ?, ?)",
+            (dependent_id, trigger_id, kind),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _cascade_uncertain(conn, trigger_id: int) -> int:
+    """Flip live (non-superseded, currently-current) dependents of *trigger_id* to
+    `uncertain`. Operates on a caller-owned connection so supersede() can run it in
+    its own transaction. Returns the count changed."""
+    cur = conn.execute(
+        """UPDATE knowledge SET status = 'uncertain', updated_at = CURRENT_TIMESTAMP
+           WHERE superseded_by IS NULL AND status = 'current'
+             AND id IN (SELECT dependent_id FROM knowledge_deps WHERE trigger_id = ?)""",
+        (trigger_id,),
+    )
+    return cur.rowcount
+
+
+def cascade_uncertain(db_path: Path, trigger_id: int) -> int:
+    """Standalone/reconcile entry point for the dependency cascade (techne#117) —
+    mark live dependents of *trigger_id* `uncertain`. supersede() runs the same
+    cascade inline when it supersedes an entry. Returns the count flipped.
+
+    Two deliberate Stage-1 boundaries (a junction table, not a graph engine):
+      * ONE-HOP: flipping a dependent to `uncertain` is not itself a supersession,
+        so it does not re-fire — if A depends on B depends on C, superseding C marks
+        B, not A. Transitive propagation is out of scope.
+      * Edges reference a specific revision id and do NOT auto-migrate across a
+        supersession chain; re-extraction re-points them at the current revision.
+    """
+    conn = connect(db_path)
+    try:
+        n = _cascade_uncertain(conn, trigger_id)
+        conn.commit()
+        return n
+    finally:
+        conn.close()
+
+
+def reconfirm(db_path: Path, knowledge_id: int) -> bool:
+    """Clear an `uncertain` flag — the dependent was re-verified (techne#117). Sets
+    status back to `current` and bumps last_confirmed_at. Returns True if a row
+    changed (i.e. it was uncertain)."""
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            """UPDATE knowledge SET status = 'current',
+                 last_confirmed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status = 'uncertain'""",
+            (knowledge_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 
@@ -213,7 +294,10 @@ def list_entries(
     """List knowledge entries with optional filters."""
     conn = connect(db_path)
     try:
-        query = "SELECT id, type, content, tags, confidence, source, created_at, updated_at FROM knowledge WHERE 1=1"
+        query = (
+            "SELECT id, type, content, tags, confidence, source, created_at, updated_at "
+            "FROM knowledge WHERE 1=1"
+        )
         params: list = []
 
         if not include_superseded:
