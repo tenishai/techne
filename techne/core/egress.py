@@ -52,10 +52,17 @@ class EgressRow(TypedDict):
 
 
 def _tag_contains(tags: str | None, fragment: str) -> bool:
-    """Check whether *fragment* appears as a complete comma-delimited token in *tags*."""
+    """Check whether *fragment* appears as a complete comma-delimited token in *tags*.
+
+    Exact-token match only: the prior ``startswith`` clause contradicted this
+    docstring and meant a future tag prefixed with a band classifier (e.g.
+    ``memory-type:projectX``) would silently match the ``memory-type:project`` band.
+    Prefix routing has its own helper, ``_tag_has_prefix`` — keep the two distinct.
+    (techne#168)
+    """
     if not tags:
         return False
-    return any(t.strip() == fragment or t.strip().startswith(fragment) for t in tags.split(","))
+    return any(t.strip() == fragment for t in tags.split(","))
 
 
 def _tag_has_prefix(tags: str | None, prefix: str) -> bool:

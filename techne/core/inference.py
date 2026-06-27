@@ -29,10 +29,13 @@ log = logging.getLogger(__name__)
 
 _BUNDLED_PROTOTYPES = Path(__file__).parent.parent / "inference" / "prototypes.yaml"
 
-# Module-level cache: prototypes + their embeddings.
+# Module-level caches: prototypes + their embeddings. Two-slot, keyed on whether
+# operator overrides were merged (techne#168): a first call with config=None (e.g. a
+# test path) must NOT cache a bundled-only result that later poisons a config-bearing
+# call — and the embed cache is keyed identically so the two never diverge.
 # Reset by calling _reset_cache() (used in tests).
-_proto_cache: dict | None = None
-_embed_cache: dict | None = None  # label -> np.ndarray (mean of prototype embeds)
+_proto_cache: dict[bool, dict] = {}
+_embed_cache: dict[bool, dict] = {}  # override_active -> {label: np.ndarray mean}
 
 
 @dataclass
@@ -44,48 +47,65 @@ class InferenceResult:
 
 
 def _reset_cache():
-    global _proto_cache, _embed_cache
-    _proto_cache = None
-    _embed_cache = None
+    _proto_cache.clear()
+    _embed_cache.clear()
+
+
+def _override_active(config: "Config | None") -> bool:
+    """True iff an operator prototypes.yaml exists to merge for this config.
+
+    The cache key for both prototype and embedding caches, so a config=None call
+    (key False) and a config-with-overrides call (key True) never share a slot.
+    """
+    if config is None:
+        return False
+    return (config.data_dir / "prototypes.yaml").exists()
 
 
 def load_prototypes(config: "Config | None" = None) -> dict[str, list[str]]:
     """Load bundled prototypes, optionally merged with operator overrides."""
-    global _proto_cache
-    if _proto_cache is not None:
-        return _proto_cache
+    key = _override_active(config)
+    cached = _proto_cache.get(key)
+    if cached is not None:
+        return cached
 
     with open(_BUNDLED_PROTOTYPES) as f:
         merged: dict[str, list[str]] = yaml.safe_load(f) or {}
 
-    if config is not None:
+    if key:  # config is not None and the override file exists
         user_path = config.data_dir / "prototypes.yaml"
-        if user_path.exists():
-            with open(user_path) as f:
-                user = yaml.safe_load(f) or {}
-            for label, sentences in user.items():
-                if isinstance(sentences, list):
-                    merged[label] = sentences  # user wins on conflict
+        with open(user_path) as f:
+            user = yaml.safe_load(f) or {}
+        for label, sentences in user.items():
+            if isinstance(sentences, list):
+                merged[label] = sentences  # user wins on conflict
 
-    _proto_cache = merged
+    _proto_cache[key] = merged
     return merged
 
 
 def _get_prototype_embeddings(
     prototypes: dict[str, list[str]],
+    *,
+    key: bool = False,
 ) -> dict:
-    """Embed each prototype label's sentences and cache mean vectors."""
-    global _embed_cache
-    if _embed_cache is not None:
-        return _embed_cache
+    """Embed each prototype label's sentences and cache mean vectors.
+
+    *key* selects the cache slot (same key as load_prototypes — whether operator
+    overrides are active) so the embeddings always match the prototype set they
+    were built from. (techne#168)
+    """
+    cached = _embed_cache.get(key)
+    if cached is not None:
+        return cached
 
     try:
         import numpy as np
         from fastembed import TextEmbedding
     except ImportError:
         log.debug("fastembed not available; tag inference disabled")
-        _embed_cache = {}
-        return _embed_cache
+        _embed_cache[key] = {}
+        return _embed_cache[key]
 
     # Reuse the already-loaded singleton from search.py if available.
     # Import here to avoid circular imports.
@@ -100,7 +120,7 @@ def _get_prototype_embeddings(
         vecs = np.stack(list(model.embed(sentences)))  # (N, 384)
         result[label] = vecs.mean(axis=0)  # centroid
 
-    _embed_cache = result
+    _embed_cache[key] = result
     return result
 
 
@@ -137,8 +157,9 @@ def infer(
 
     from techne.core.search import _get_embedding_model
 
+    key = _override_active(config)
     prototypes = load_prototypes(config)
-    proto_embs = _get_prototype_embeddings(prototypes)
+    proto_embs = _get_prototype_embeddings(prototypes, key=key)
     if not proto_embs:
         return InferenceResult()
 

@@ -70,6 +70,34 @@ class TestLoadPrototypes:
         p2 = load_prototypes()
         assert p1 is p2
 
+    def test_config_none_does_not_poison_later_override(self, tmp_path):
+        """techne#168: a first call with config=None cached a bundled-only result
+        that every later config-bearing call then returned — silently dropping
+        operator overrides. The two-slot cache (keyed on override-active) fixes it."""
+        # 1st: bundled-only (config=None) — caches under the False slot.
+        bundled = load_prototypes(None)
+        assert "my-custom-tag" not in bundled
+
+        # 2nd: a real config WITH an override file — must NOT return the poisoned slot.
+        user_proto = tmp_path / "prototypes.yaml"
+        user_proto.write_text("my-custom-tag:\n  - custom tag sentence\n")
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        merged = load_prototypes(cfg)
+        assert "my-custom-tag" in merged  # override applied despite the earlier None call
+        assert "decision" in merged       # bundled still present
+
+        # And the bundled-only slot is untouched (still no override).
+        assert "my-custom-tag" not in load_prototypes(None)
+
+    def test_override_cache_slot_distinct_from_bundled(self, tmp_path):
+        """The two cache slots are independent objects, never aliased."""
+        user_proto = tmp_path / "prototypes.yaml"
+        user_proto.write_text("my-custom-tag:\n  - s\n")
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        assert load_prototypes(cfg) is not load_prototypes(None)
+
 
 class TestInferNoFastembed:
     def test_graceful_degradation_on_import_error(self):
