@@ -324,12 +324,14 @@ CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
 END;
 
 -- knowledge_* use COALESCE(tags,'') to match the value the backfill/rebuild paths
--- index (COALESCE(tags,'') — see SCHEMA_FTS_BACKFILL / step 9). A NULL tags fed to
--- the external-content 'delete' command would otherwise not match the indexed ''
--- and corrupt/stale the FTS row (techne#169). NOTE: trigger-BODY changes here do NOT
--- reach existing DBs — reconcile_triggers is name-only (intentional, so it can't
--- clobber a user-modified trigger). A body change MUST also ship a numbered
--- migration step that DROPs + re-CREATEs the trigger (see step 12).
+-- index ('' — see step 9) and to stay consistent with observations_* above. This
+-- honours the FTS5 external-content contract (the 'delete' command should pass the
+-- same values that were indexed). In practice NULL and '' tokenize identically for
+-- this column, so the prior bare NEW.tags/OLD.tags caused no demonstrable corruption
+-- — this is consistency/contract hygiene, not a fix for a reproduced bug (techne#169).
+-- NOTE: trigger-BODY changes here do NOT reach existing DBs — reconcile_triggers is
+-- name-only (intentional, so it can't clobber a user-modified trigger). A body change
+-- MUST also ship a numbered migration step that DROPs + re-CREATEs the trigger (step 12).
 CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
     INSERT INTO knowledge_fts(rowid, content, tags)
     VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''));
@@ -698,13 +700,20 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                     conn.execute(f"ALTER TABLE knowledge ADD COLUMN {col} TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (11)")
     if from_version < 12 and to_version >= 12:
-        # The knowledge_ai/ad/au FTS triggers shipped without COALESCE(tags, '') —
-        # a NULL tags value mismatches the COALESCE'd value the backfill/rebuild
-        # paths index, so the external-content 'delete' command (fired on UPDATE/
-        # DELETE) doesn't match the indexed row and corrupts/stales the FTS index
-        # (techne#169). reconcile_triggers is name-only, so editing FTS_TRIGGERS_SQL
-        # alone won't reach existing DBs — redeploy via DROP + CREATE here, then
-        # rebuild knowledge_fts to repair any drift the old triggers already caused.
+        # Bring the knowledge_ai/ad/au FTS triggers into line with observations_*
+        # (and the backfill/rebuild paths): COALESCE(tags, '') instead of bare
+        # NEW.tags/OLD.tags. This honours the FTS5 external-content contract — the
+        # 'delete' command's values should match what was indexed — where the backfill
+        # indexes '' but the old trigger passed NULL. (techne#169.)
+        #
+        # HONESTY: I could NOT reproduce actual corruption from the mismatch — for the
+        # `tags` column NULL and '' both tokenize to zero tokens, so FTS5 treats them
+        # identically and the index stays consistent in every case I tried. So this is
+        # a consistency / contract-compliance / future-proofing fix, NOT a repair for a
+        # demonstrated live bug — hence no index rebuild, just the trigger redeploy.
+        #
+        # The redeploy is still required: reconcile_triggers is name-only, so editing
+        # FTS_TRIGGERS_SQL alone never reaches an existing DB — DROP + CREATE here.
         knowledge_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge'"
         ).fetchone()
@@ -728,23 +737,5 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                     VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''));
                 END;
             """)
-            # Rebuild knowledge_fts so any stale/orphaned rows from the pre-fix
-            # triggers are cleared. Guarded on the FTS table existing; the INSERT
-            # mirrors the step-9 repopulate (COALESCE(tags, '')).
-            kfts_exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
-            ).fetchone()
-            if kfts_exists:
-                conn.executescript("""
-                    DROP TABLE IF EXISTS knowledge_fts;
-                    CREATE VIRTUAL TABLE knowledge_fts USING fts5(
-                        content, tags, content=knowledge, content_rowid=id,
-                        tokenize='porter unicode61'
-                    );
-                """)
-                conn.execute(
-                    "INSERT INTO knowledge_fts(rowid, content, tags) "
-                    "SELECT id, content, COALESCE(tags, '') FROM knowledge"
-                )
         conn.execute("INSERT INTO schema_version (version) VALUES (12)")
     conn.commit()

@@ -1803,36 +1803,32 @@ class TestStep12KnowledgeTriggerCoalesce:
         finally:
             conn.close()
 
-    def test_null_tags_update_leaves_no_stale_fts_row(self, tmp_path):
-        """The concrete payoff: a NULL-tags row indexed via the backfill convention
-        ('') then mutated must not leave a stale FTS entry. The corrected trigger
-        deletes COALESCE('')='' (matching the index); the old trigger deleted NULL."""
-        db = tmp_path / "k.db"
-        conn = connect(db)  # v12, COALESCE triggers
+    def test_null_tags_row_indexes_and_updates_cleanly(self, tmp_path):
+        """Behaviour lock (NOT a bug differentiator): a NULL-tags knowledge row must
+        insert, search, and update through the corrected triggers without leaving a
+        stale FTS row. NB: this passes on the OLD bare-NEW.tags triggers too — for the
+        `tags` column NULL and '' tokenize identically, which is exactly why the
+        missing COALESCE caused no demonstrable corruption (techne#169). The real
+        guarantee is the redeploy test above asserting the COALESCE body ships."""
+        conn = connect(tmp_path / "k.db")  # v12, COALESCE triggers
         try:
             conn.execute(
                 "INSERT INTO knowledge (type, content, confidence, tags) "
                 "VALUES ('fact', 'alpha apple', 'high', NULL)"
             )
             kid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            # Re-index via the backfill convention so the indexed tags value is '' .
-            conn.execute("INSERT INTO knowledge_fts(knowledge_fts) VALUES('delete-all')")
-            conn.execute(
-                "INSERT INTO knowledge_fts(rowid, content, tags) "
-                "SELECT id, content, COALESCE(tags, '') FROM knowledge"
-            )
             conn.commit()
-            # Mutate via the trigger; the corrected delete ('') matches the index.
+            assert conn.execute(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'apple'"
+            ).fetchone()[0] == 1
+
             conn.execute("UPDATE knowledge SET content = 'beta banana' WHERE id = ?", (kid,))
             conn.commit()
-
-            apple = conn.execute(
+            assert conn.execute(
                 "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'apple'"
-            ).fetchone()[0]
-            banana = conn.execute(
+            ).fetchone()[0] == 0  # no stale row
+            assert conn.execute(
                 "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'banana'"
-            ).fetchone()[0]
-            assert apple == 0, "stale FTS row survived the update"
-            assert banana == 1
+            ).fetchone()[0] == 1
         finally:
             conn.close()
