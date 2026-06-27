@@ -70,6 +70,76 @@ class TestLoadPrototypes:
         p2 = load_prototypes()
         assert p1 is p2
 
+    def test_config_none_does_not_poison_later_override(self, tmp_path):
+        """techne#168: a first call with config=None cached a bundled-only result
+        that every later config-bearing call then returned — silently dropping
+        operator overrides. The two-slot cache (keyed on override-active) fixes it."""
+        # 1st: bundled-only (config=None) — caches under the False slot.
+        bundled = load_prototypes(None)
+        assert "my-custom-tag" not in bundled
+
+        # 2nd: a real config WITH an override file — must NOT return the poisoned slot.
+        user_proto = tmp_path / "prototypes.yaml"
+        user_proto.write_text("my-custom-tag:\n  - custom tag sentence\n")
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        merged = load_prototypes(cfg)
+        assert "my-custom-tag" in merged  # override applied despite the earlier None call
+        assert "decision" in merged       # bundled still present
+
+        # And the bundled-only slot is untouched (still no override).
+        assert "my-custom-tag" not in load_prototypes(None)
+
+    def test_override_cache_slot_distinct_from_bundled(self, tmp_path):
+        """The two cache slots are independent objects, never aliased."""
+        user_proto = tmp_path / "prototypes.yaml"
+        user_proto.write_text("my-custom-tag:\n  - s\n")
+        cfg = Config()
+        cfg.data_dir = tmp_path
+        assert load_prototypes(cfg) is not load_prototypes(None)
+
+    def test_get_prototype_embeddings_populated_path_and_two_slots(self):
+        """techne#168: exercise the REAL _get_prototype_embeddings body (the populated
+        path, normally gated behind fastembed+numpy) with injected fakes. Guards the
+        `_embed_cache[key] = result` write: an `_embed_cache = result` rebind WITHOUT a
+        `global` (as a careless refactor would write) makes the name local and the
+        top-of-function `_embed_cache.get(key)` raise UnboundLocalError — so reaching the
+        body at all is the regression guard. Also asserts the two embed-cache slots are
+        independent."""
+        import types
+
+        from techne.core import inference
+
+        class _FakeArr:
+            def __init__(self, vals):
+                self._vals = vals
+
+            def mean(self, axis=0):
+                return ("centroid", tuple(self._vals))
+
+        fake_np = types.SimpleNamespace(stack=lambda lst: _FakeArr(lst))
+        fake_fastembed = types.SimpleNamespace(TextEmbedding=object)
+
+        class _FakeModel:
+            def embed(self, sentences):
+                return [len(s) for s in sentences]
+
+        _reset_cache()
+        with (
+            patch.dict(sys.modules, {"numpy": fake_np, "fastembed": fake_fastembed}),
+            patch("techne.core.search._get_embedding_model", return_value=_FakeModel()),
+        ):
+            protos = {"decision": ["a sentence"], "fact": ["b"], "empty": []}
+            out_false = inference._get_prototype_embeddings(protos, key=False)
+            # Populated (no UnboundLocalError); empty-sentence label skipped.
+            assert set(out_false) == {"decision", "fact"}
+            # Same key → cached same object.
+            assert inference._get_prototype_embeddings(protos, key=False) is out_false
+            # Other slot is independent.
+            out_true = inference._get_prototype_embeddings({"fact": ["c"]}, key=True)
+            assert out_true is not out_false
+            assert set(out_true) == {"fact"}
+
 
 class TestInferNoFastembed:
     def test_graceful_degradation_on_import_error(self):
