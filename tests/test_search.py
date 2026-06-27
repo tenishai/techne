@@ -651,6 +651,65 @@ class TestFtsSanitizerDoubleQuote:
         # Must not contain unescaped embedded quote sequences that break FTS5
         assert '""' in sanitized or sanitized.count('"') % 2 == 0
 
+    def test_backslash_only_query_does_not_crash(self, db_path):
+        """techne#168: a query of only escape chars (e.g. '\\') survives the
+        query.strip() guard but sanitizes to an empty MATCH string, which would
+        raise sqlite3.OperationalError. Must return [] instead of crashing."""
+        session_id = start_session(db_path)
+        save_threads([Thread(thread_num=1, label="real thread", summary="x")], session_id, db_path)
+        assert search_fts(db_path, "\\", table="threads", limit=5) == []
+        assert search_fts(db_path, "\\\\\\", table="all", limit=5) == []
+        # A real term still works after the guard.
+        assert isinstance(search_fts(db_path, "real", table="threads", limit=5), list)
+
+
+class TestPurgeSupersededKnowledgeVec:
+    """techne#168: superseded knowledge must not keep an ANN embedding, or it
+    occupies search_vec top-k slots and starves live rows (search_vec filters
+    superseded only post-cut)."""
+
+    def test_purge_removes_only_superseded(self, db_path):
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        import struct
+
+        from techne.core.knowledge import store, supersede
+        from techne.core.search import _ensure_vec_table, _purge_superseded_knowledge_vec
+
+        live_id = store(db_path, "live fact", type="fact", confidence="high")
+        old_id = store(db_path, "old fact", type="fact", confidence="high")
+        new_id = supersede(db_path, old_id, "superseding fact")  # old_id now superseded
+
+        conn = connect(db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            _ensure_vec_table(conn, "knowledge_vec")
+            emb = struct.pack("384f", *([0.1] * 384))
+            for rid in (live_id, old_id, new_id):
+                conn.execute(
+                    "INSERT INTO knowledge_vec(rowid, embedding) VALUES (?, ?)", (rid, emb)
+                )
+            conn.commit()
+
+            removed = _purge_superseded_knowledge_vec(conn)
+            assert removed == 1  # only old_id
+
+            remaining = {r[0] for r in conn.execute("SELECT rowid FROM knowledge_vec").fetchall()}
+            assert old_id not in remaining
+            assert live_id in remaining and new_id in remaining
+        finally:
+            conn.close()
+
+    def test_purge_no_vec_table_is_noop(self, db_path):
+        from techne.core.search import _purge_superseded_knowledge_vec
+
+        conn = connect(db_path)
+        try:
+            assert _purge_superseded_knowledge_vec(conn) == 0  # table never created
+        finally:
+            conn.close()
+
 
 class TestSearchNoMutation:
     def test_use_vectors_does_not_mutate_fts_results(self, db_path):

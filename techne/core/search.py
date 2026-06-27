@@ -311,6 +311,12 @@ def search_fts(
         return []
 
     fts_query = _sanitize_fts_query(query)
+    if not fts_query:
+        # A query made only of escape/operator chars (e.g. "\" — backslashes are
+        # stripped by _fts_terms) survives the query.strip() guard above but
+        # sanitizes to an empty MATCH string, which raises sqlite3.OperationalError
+        # and crashes recall/search. Treat it as "no terms". (techne#168)
+        return []
     conn = connect(db_path)
     candidate_limit = limit * expansion_ratio
 
@@ -338,6 +344,15 @@ def search_fts(
         conn.close()
 
     return results
+
+
+# Knowledge is the only vec table whose rows can be superseded after embedding,
+# and search_vec drops superseded rows AFTER the ANN k-nearest cut — so a stale
+# embedding eats a top-k slot and starves a live result. backfill_vectors purges
+# stale embeddings, but nothing auto-runs it in production, so this query-time
+# over-fetch is the guarantee that actually fires: pull k×factor neighbours, then
+# keep the closest `limit` LIVE ones. (techne#168)
+_VEC_SUPERSEDE_OVERFETCH = 3
 
 
 def search_vec(
@@ -436,12 +451,16 @@ def search_vec(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_vec'"
             ).fetchone()
             if _exists:
+                # Over-fetch (k×factor) then keep the closest `limit` LIVE rows, so
+                # superseded embeddings still in the index can't starve live results
+                # (techne#168 — see _VEC_SUPERSEDE_OVERFETCH).
                 rows = conn.execute(
                     """SELECT v.rowid, v.distance
                        FROM knowledge_vec v
                        WHERE v.embedding MATCH ? AND k = ?""",
-                    (q_bytes, limit),
+                    (q_bytes, limit * _VEC_SUPERSEDE_OVERFETCH),
                 ).fetchall()
+                live = 0
                 for row in rows:
                     k = conn.execute(
                         """SELECT id, type, content, tags, confidence
@@ -460,6 +479,9 @@ def search_vec(
                                 "distance": row[1],
                             }
                         )
+                        live += 1
+                        if live >= limit:
+                            break
 
         # documents vector search lives with the Librarian store now (techne#99).
 
@@ -601,10 +623,24 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             ("knowledge", "content", "knowledge_vec"),
         ]:
             _ensure_vec_table(conn, vec_tbl)
+            # Superseded/merged knowledge must NOT have a live ANN embedding: search_vec
+            # filters superseded rows only AFTER the k-nearest cut, so a stale embedding
+            # occupies a top-k slot (techne#168). The audit suggested deleting from
+            # _supersede_in_conn, but that connection can't touch a vec0 table (connect()
+            # never loads sqlite_vec); backfill_vectors is the one place the extension is
+            # loaded, so the index-side cleanup lives here: sweep existing stale embeddings
+            # and skip superseded rows when embedding so they're never (re-)added.
+            # NB: nothing auto-runs backfill_vectors in production today, so this cleanup
+            # only fires on a manual/explicit backfill — the query-time over-fetch in
+            # search_vec (_VEC_SUPERSEDE_OVERFETCH) is the always-on guard, sound up to
+            # that factor of stale neighbours.
+            if tbl == "knowledge" and _purge_superseded_knowledge_vec(conn):
+                conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"
+            extra_where = " AND t.superseded_by IS NULL" if tbl == "knowledge" else ""
             rows = conn.execute(
                 f"""SELECT t.{id_col}, t.{content_col} FROM {tbl} t
-                    WHERE t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl})
+                    WHERE t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl}){extra_where}
                     ORDER BY t.{id_col} DESC LIMIT ?""",
                 (batch_size,),
             ).fetchall()
@@ -641,6 +677,26 @@ def _get_embedding_model():
             cache_dir=str(cache_dir),
         )
     return _embedding_model
+
+
+def _purge_superseded_knowledge_vec(conn: sqlite3.Connection) -> int:
+    """Delete ANN embeddings of superseded/merged knowledge rows (techne#168).
+
+    search_vec filters superseded rows only AFTER the k-nearest cut, so a stale
+    embedding occupies a top-k slot and starves a live result. Lives here (called
+    from backfill_vectors, where sqlite_vec is loaded) rather than in supersede:
+    connect() never loads sqlite_vec, so a plain supersede connection can't touch a
+    vec0 table. No-op if knowledge_vec was never created. Returns rows removed."""
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_vec'"
+    ).fetchone()
+    if not exists:
+        return 0
+    cur = conn.execute(
+        "DELETE FROM knowledge_vec WHERE rowid IN "
+        "(SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)"
+    )
+    return cur.rowcount
 
 
 _VEC_TABLE_NAMES = frozenset({"threads_vec", "observations_vec", "knowledge_vec"})

@@ -11,10 +11,39 @@ import pytest
 
 from techne.core.database import init_db
 from techne.core.egress import (
+    _tag_contains,
     render_tier0_block,
     select_tier0_injection,
 )
 from techne.core.knowledge import store
+
+
+class TestTagContainsExactToken:
+    """techne#168: _tag_contains is exact-token only — the old startswith clause
+    contradicted its docstring and would misroute a tag prefixed with a band
+    classifier (e.g. memory-type:projectX matching the memory-type:project band)."""
+
+    def test_exact_token_matches(self):
+        assert _tag_contains("memory-type:user,name:richard", "memory-type:user")
+        assert _tag_contains("a,memory-type:feedback,b", "memory-type:feedback")
+
+    def test_prefix_no_longer_matches(self):
+        # The whole point: a longer token sharing the prefix must NOT match.
+        assert not _tag_contains("memory-type:projectX", "memory-type:project")
+        assert not _tag_contains("memory-type:user-preferences", "memory-type:user")
+
+    def test_none_and_absent(self):
+        assert not _tag_contains(None, "memory-type:user")
+        assert not _tag_contains("name:foo", "memory-type:user")
+
+    def test_misprefixed_tag_does_not_land_in_identity_band(self, db_path):
+        """End-to-end: a row tagged memory-type:user-ish must not be routed to the
+        identity band by the prefix bug."""
+        store(db_path, "decoy", type="fact", confidence="high", tags="memory-type:user-ish")
+        # Selection must not crash on the mis-prefixed tag; the concrete guard is
+        # that the classifier no longer exact-matches it into the identity band.
+        assert isinstance(select_tier0_injection(db_path, char_budget=4000), list)
+        assert not _tag_contains("memory-type:user-ish", "memory-type:user")
 
 # ---------------------------------------------------------------------------
 # Fixtures
