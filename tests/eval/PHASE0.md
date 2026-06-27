@@ -1,35 +1,49 @@
-# Phase-0 Frozen Baseline (#68)
+# Phase-0 Frozen Baseline (#68, re-frozen #118)
 
-**Frozen:** 2026-06-17, on `feat/68-eval-m2` (techne 0.6.1, post #69/#70/#71/#72).
-**Corpus:** `seed_eval_db.py` (synthetic, deterministic). **Tasks:** 6, in `recall_baseline.yaml`.
+**Re-frozen:** 2026-06-27 for techne#118 (MeME taxonomy + 3-variant cost control).
+Original freeze 2026-06-17 (#68 M2). **Corpus:** `seed_eval_db.py` (synthetic,
+deterministic). **Stage-1 tasks:** 8, in `recall_baseline.yaml` (exact-recall ×6,
+tracking ×1, aggregation ×1). Stage-2 (`absence`/`deletion`/`cascade`) are authored
+but skipped — they need the LLM answerer (#118 PR3+).
 
-This is the reference measurement the kill-gate is set against. It does not
+This is the reference the per-category kill-gates are set against. It does not
 change without a documented re-freeze (see EVAL.md → "Changing the baseline").
 
-## Measurement (`pytest -m eval -s`)
+## Per-category recall (`pytest -m eval -s`)
 
-| task | category | bare | techne |
-|---|---|---|---|
-| cabal14-design | decision-recall | 0.0 | 1.0 |
-| adapter-recency | activity-recall | 0.0 | 1.0 |
-| reflect-candidates | multiword-recall | 0.0 | 1.0 |
-| reflect-thread | thread-recall | 0.0 | 1.0 |
-| canonical-remote | decision-recall | 0.0 | 1.0 |
-| platform-state-delta | fact-recall | 0.0 | 1.0 |
-| **aggregate** | | **0.0** | **1.0** |
+| category | tasks | bare | techne | floor | margin |
+|---|---|---|---|---|---|
+| exact-recall | 6 | 0.0 | 1.0 | 0.85 | 0.30 |
+| tracking | 1 | 0.0 | 1.0 | 0.85 | 0.30 |
+| aggregation | 1 | 0.0 | 1.0 | 0.85 | 0.30 |
 
-margin (techne − bare) = **1.0**
+Every positive category: `bare = 0` (the task needs memory) and `techne = 1.0`.
+Floors = category aggregate − 0.15 tolerance; legacy `exact-recall` keeps the #68
+M2 gate byte-for-byte. The `tracking` task (`deploy-target-current`) is the
+acceptance test for **#90 supersession** — `techne` returns only the live revision
+and excludes the stale ones (checked over the whole result list).
 
-## Gate derived from this baseline
-- floor: **techne ≥ 0.85** (= 1.0 − 0.15 tolerance)
-- margin: **techne − bare ≥ 0.30**
+## Cost axis — the "curated beats raw" thesis (gated)
+
+| arm | mean_precision | mean_token_cost |
+|---|---|---|
+| techne (curated) | 0.426 | 693 |
+| raw-source-dump | 0.06 | 2082 |
+
+Curated recall is **~7× more precise** and **~3× cheaper** than dumping the raw
+corpus — and on the `tracking` task the raw dump scores **0.0** (it leaks the stale
+revisions a curated, supersession-filtered search excludes). Gate: curated
+precision ≥ `cost_precision_ratio` (3.0) × raw-dump precision, and curated
+token_cost < raw-dump. raw-source-dump is deliberately kept OUT of the recall gate
+(it recalls everything, so folding it in would mask regressions).
 
 ## Honest caveats
-- The synthetic corpus is deliberately *findable* — every gold entry is
-  retrievable, so a perfect 1.0 is expected here and is **not** evidence the
-  real recall layer is perfect. The baseline's job is regression detection, not
-  an absolute quality claim.
-- All six queries currently route through the #70 OR-fallback (each contains a
-  term absent from its gold). That's intentional coverage of the real recall
-  path, but it means the baseline is partly a test of that fallback. As harder
-  tasks are added, expect the aggregate to drop below 1.0 and the floor to rise.
+- The synthetic corpus is deliberately *findable* — a perfect 1.0 on the positive
+  categories is expected and is **not** evidence the real recall layer is perfect.
+  The baseline's job is regression detection, not an absolute quality claim. The
+  cost axis and the tracking/supersession test are the discriminating signals.
+- Most exact-recall queries route through the #70 OR-fallback (each contains a term
+  absent from its gold) — intentional coverage of the real recall path.
+- `adapter-recency` / `platform-state-delta` are currently `exact-recall`; they read
+  semantically like tracking/aggregation and are candidates to reclassify if the
+  taxonomy is refined (noted in PR1 review).
