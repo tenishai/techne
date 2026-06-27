@@ -5,12 +5,12 @@ memory store contains the same shape of observations regardless of capture
 mechanism.
 """
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from techne.core.database import connect
 from techne.core.redaction import redact_credentials
 from techne.hooks.post_tool_use import summarize
-from techne.platforms.claude_code.paths import claude_projects_dir
+from techne.platforms.claude_code.paths import claude_projects_dir, project_slug
 from techne.sync.jsonl_records import (
     content_blocks,
     extract_text,
@@ -24,19 +24,14 @@ PROJECTS_DIR = claude_projects_dir()
 
 
 def project_slug_for_cwd(cwd: Path | None = None) -> str:
-    """Encode a POSIX cwd into Claude Code's project-dir slug.
+    """Encode a cwd into Claude Code's project-dir slug.
 
-    Claude Code stores transcripts under ``~/.claude/projects/<slug>/`` where the
-    slug is the absolute path with ``/`` → ``-`` and a leading ``-``. Works the
-    same on macOS and Linux. (Claude Code on Windows uses a different convention
-    and is out of scope.)
+    Thin wrapper over the single authoritative ``paths.project_slug`` (techne#167);
+    kept for its callers and for the None→cwd default. The earlier local copy
+    diverged from the reconciliation path (replaced only ``/`` and skipped realpath),
+    so the two could disagree on the same cwd — now they cannot.
     """
-    # Do NOT call .resolve() — it dereferences symlinks/firmlinks (macOS APFS
-    # turns /home into /System/Volumes/Data/home), producing a slug that does
-    # not match the cwd Claude Code recorded. Path.cwd() is already absolute.
-    cwd = (cwd or Path.cwd()).absolute()
-    posix = PurePosixPath(cwd.as_posix())
-    return "-" + str(posix).lstrip("/").replace("/", "-")
+    return project_slug(cwd or Path.cwd())
 
 
 def default_transcripts_dir(cwd: Path | None = None) -> Path:

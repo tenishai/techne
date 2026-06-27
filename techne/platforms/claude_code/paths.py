@@ -15,17 +15,42 @@ read its own state instead of the default agent's (techne#113).
 
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 
 def project_slug(cwd: Path | str) -> str:
-    """CC's per-project slug: the absolute cwd with '/' and '.' replaced by '-'.
+    """CC's per-project transcript/projects slug for ``~/.claude/projects/<slug>/``.
 
-    OBSERVED, not documented (same caveat as the rest of this module). Shared by the
-    native-memory probe and the #107 memory-reconciliation discovery so the fragile
-    formula lives in exactly one place.
+    Replicates Claude Code's ``kS`` function (verified against the compiled
+    ``@anthropic-ai/claude-code`` source, v2.1.195 — techne#167):
+
+        slug = re.sub(r'[^a-zA-Z0-9]', '-', NFC(realpath(cwd)))
+
+    Three things the prior two divergent copies each got wrong:
+    1. EVERY non-alphanumeric char is replaced — not just ``/`` (transcript_import)
+       and not just ``/`` and ``.`` (this fn previously). ``_``, spaces, ``@`` etc.
+       all become ``-``.
+    2. The path IS realpath'd first (CC calls ``fs.realpathSync``), so symlinks/
+       firmlinks are dereferenced — ``.resolve()`` is correct, ``.absolute()`` was
+       not. (On macOS ``/tmp`` → ``/private/tmp``, ``/home`` → a firmlink target.)
+    3. NFC-normalize so non-ASCII path components match CC's ``.normalize("NFC")``.
+
+    This is the single source of truth: the native-memory probe, the #107 memory-
+    reconciliation discovery, and transcript import all route through it.
+
+    NOTE: CC truncates slugs >200 chars and appends a djb2 hash; that edge is not
+    replicated here (real project paths are far shorter), so a >200-char cwd would
+    resolve to the wrong dir. Tracked as a known limitation.
     """
-    return re.sub(r"[/.]", "-", str(Path(cwd).resolve()))
+    p = Path(cwd)
+    try:
+        resolved = str(p.resolve())
+    except OSError:
+        # Mirror CC's realpathSync try/catch: fall back to the unresolved absolute
+        # path when the cwd can't be stat'd (e.g. it no longer exists).
+        resolved = str(p.absolute())
+    return re.sub(r"[^a-zA-Z0-9]", "-", unicodedata.normalize("NFC", resolved))
 
 
 def claude_config_dir() -> Path:
