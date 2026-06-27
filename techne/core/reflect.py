@@ -500,13 +500,18 @@ def reflect_on_session(
 
 
 def _mark_promoted(db_path: Path, candidate_id: int, promoted_to_id: int | None) -> None:
+    """Mark a candidate promoted by the write_to='live' auto-path. Stamps
+    decided_by='reflect-auto' for the audit trail (techne#108) — no human reviewed it.
+    A separate UPDATE from promote_candidate's dispatch (this path never applies an
+    action); decision_reason is left NULL — there's no human reason on the auto-path."""
     conn = connect(db_path)
     try:
         conn.execute(
             """UPDATE knowledge_candidates
                   SET status = 'promoted',
                       promoted_to_id = ?,
-                      reviewed_at = CURRENT_TIMESTAMP
+                      reviewed_at = CURRENT_TIMESTAMP,
+                      decided_by = 'reflect-auto'
                 WHERE id = ?""",
             (promoted_to_id, candidate_id),
         )
@@ -545,18 +550,68 @@ def list_candidates(
         conn.close()
 
 
-def promote_candidate(db_path: Path, candidate_id: int) -> int | None:
+def _apply_add(conn, row, db_path: Path) -> int | None:
+    """Apply an additive candidate — the original reflect promotion path, verbatim.
+
+    Runs inside promote_candidate's open transaction (techne#108 dispatch); a
+    failure here rolls back the status flip too. Returns the new knowledge.id, or
+    None for an identity entry.
+    """
+    from techne.core.knowledge import CONFIDENCE_NUMERIC, VALID_CONFIDENCE, VALID_TYPES
+
+    scope = row["scope"]
+    source = f"reflect-promote:{row['source_session_id']}:{row['id']}"
+    if scope == "knowledge":
+        content = redact_credentials(row["content"])
+        conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
+        numeric = CONFIDENCE_NUMERIC[conf]
+        ktype = row["type"] if row["type"] in VALID_TYPES else "fact"
+        tags = row["tags"] or ""
+        cur2 = conn.execute(
+            """INSERT INTO knowledge
+                 (type, content, source, tags, confidence, confidence_numeric)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (ktype, content, source, tags, conf, numeric),
+        )
+        return cur2.lastrowid
+    if scope == "identity":
+        from techne.core.identity import set_value
+
+        # Use the SAME connection — a second connection would deadlock against
+        # this one's open write (the candidate status UPDATE).
+        set_value(db_path, row["type"], row["content"], source=source, conn=conn)
+        return None
+    return None
+
+
+# Per-action appliers (techne#108). promote_candidate owns the transaction + status
+# guard; each applier takes the open conn + the candidate row and returns the new
+# knowledge.id (or None). PR1 ships 'add' only; consolidate adds supersede/merge.
+_APPLIERS = {
+    "add": _apply_add,
+}
+
+
+def promote_candidate(
+    db_path: Path,
+    candidate_id: int,
+    *,
+    decided_by: str | None = None,
+    decision_reason: str | None = None,
+) -> int | None:
     """Promote a candidate to live knowledge / identity. Returns the new
     knowledge.id (or None for identity entries). Raises if already reviewed.
 
     Atomic: a single connection performs the status guard (UPDATE WHERE
-    status='pending'), the live-table INSERT, and the promoted_to_id update
+    status='pending'), the action-specific apply, and the promoted_to_id update
     inside one transaction.  Concurrent callers that both see 'pending' will
     race on the UPDATE; the loser gets rowcount==0 and raises immediately
     without writing a duplicate knowledge row.
-    """
-    from techne.core.knowledge import CONFIDENCE_NUMERIC, VALID_CONFIDENCE, VALID_TYPES
 
+    The `action` column (techne#108) selects how the proposal is applied; a NULL
+    action (legacy rows) routes to 'add'. `decided_by`/`decision_reason` record the
+    review provenance.
+    """
     conn = connect(db_path)
     try:
         row = conn.execute(
@@ -565,47 +620,29 @@ def promote_candidate(db_path: Path, candidate_id: int) -> int | None:
         if row is None:
             raise ValueError(f"Candidate {candidate_id} not found")
 
+        # action is NOT NULL DEFAULT 'add' (reconciler backfills pre-#108 rows), so
+        # this `or` never actually fires — defensive only.
+        action = row["action"] or "add"
+        applier = _APPLIERS.get(action)
+        if applier is None:
+            raise ValueError(f"Candidate {candidate_id} has unknown action {action!r}")
+
         # Atomic guard: only one concurrent caller can flip status from pending.
         cur = conn.execute(
             """UPDATE knowledge_candidates
-                  SET status = 'promoted', reviewed_at = CURRENT_TIMESTAMP
+                  SET status = 'promoted', reviewed_at = CURRENT_TIMESTAMP,
+                      decided_by = ?, decision_reason = ?
                 WHERE id = ? AND status = 'pending'""",
-            (candidate_id,),
+            (decided_by, decision_reason, candidate_id),
         )
         if cur.rowcount == 0:
             raise ValueError(
                 f"Candidate {candidate_id} already {row['status']} — cannot re-promote"
             )
 
-        # Write to the live table using the same connection so a failure
-        # here rolls back the status update too.
-        scope = row["scope"]
-        source = f"reflect-promote:{row['source_session_id']}:{candidate_id}"
-        promoted_to_id: int | None = None
+        # Apply on the SAME connection so a failure here rolls back the status flip.
+        promoted_to_id = applier(conn, row, db_path)
 
-        if scope == "knowledge":
-            content = redact_credentials(row["content"])
-            conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
-            numeric = CONFIDENCE_NUMERIC[conf]
-            ktype = row["type"] if row["type"] in VALID_TYPES else "fact"
-            tags = row["tags"] or ""
-            cur2 = conn.execute(
-                """INSERT INTO knowledge
-                     (type, content, source, tags, confidence, confidence_numeric)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (ktype, content, source, tags, conf, numeric),
-            )
-            promoted_to_id = cur2.lastrowid
-        elif scope == "identity":
-            from techne.core.identity import set_value
-
-            # Use the SAME connection — a second connection would deadlock against
-            # this one's open write (the candidate UPDATE above). Commit happens
-            # below, so an exception still rolls back the status update.
-            set_value(db_path, row["type"], row["content"], source=source, conn=conn)
-            promoted_to_id = None
-
-        # Update promoted_to_id now that we know the new knowledge row id.
         conn.execute(
             "UPDATE knowledge_candidates SET promoted_to_id = ? WHERE id = ?",
             (promoted_to_id, candidate_id),
@@ -619,14 +656,21 @@ def promote_candidate(db_path: Path, candidate_id: int) -> int | None:
         conn.close()
 
 
-def discard_candidate(db_path: Path, candidate_id: int) -> None:
+def discard_candidate(
+    db_path: Path,
+    candidate_id: int,
+    *,
+    decided_by: str | None = None,
+    decision_reason: str | None = None,
+) -> None:
     conn = connect(db_path)
     try:
         cur = conn.execute(
             """UPDATE knowledge_candidates
-                  SET status = 'discarded', reviewed_at = CURRENT_TIMESTAMP
+                  SET status = 'discarded', reviewed_at = CURRENT_TIMESTAMP,
+                      decided_by = ?, decision_reason = ?
                 WHERE id = ? AND status = 'pending'""",
-            (candidate_id,),
+            (decided_by, decision_reason, candidate_id),
         )
         if cur.rowcount == 0:
             raise ValueError(f"Candidate {candidate_id} not found or already reviewed")
