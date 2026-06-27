@@ -317,6 +317,31 @@ def _run_phases_2_to_9(
         )
 
     # ------------------------------------------------------------------
+    # Phase 7.5: Reflection nudge (non-fatal; opt-in via reflect.enabled)
+    #   The agent-assisted reflect path runs only while an agent is live, so the
+    #   trigger fires at the start of the NEXT session — nudging the agent to
+    #   consolidate the prior one with its own model (techne#19).
+    # ------------------------------------------------------------------
+    try:
+        if config.reflect.enabled:
+            from techne.core.reflect import pending_reflection
+
+            pend = pending_reflection(config)
+            if pend:
+                sid = pend[0]["session_id"]
+                extra = f" (+{len(pend) - 1} more)" if len(pend) > 1 else ""
+                output_parts.append(
+                    "\n## techne — pending reflection\n"
+                    f"> Session {sid[:16]} has unreflected work "
+                    f"({pend[0]['observations']} observations){extra}. Call "
+                    f'techne_reflect_emit(session_id="{sid}"), answer each prompt with '
+                    "your own model, then techne_reflect_ingest."
+                )
+                output_parts.append("")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"reflection nudge: {exc}")
+
+    # ------------------------------------------------------------------
     # Phase 8: Determine hook error status and persist state
     # ------------------------------------------------------------------
     if failures:

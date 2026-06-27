@@ -63,6 +63,8 @@ class TestHandleRequest:
             "codex_blast_radius",
             "pattern_search",
             "pattern_related",
+            "techne_reflect_emit",
+            "techne_reflect_ingest",
         }
 
     def test_notifications_initialized_returns_none(self, config):
