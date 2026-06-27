@@ -6,7 +6,7 @@ from typing import get_args
 import pytest
 import yaml
 
-from techne.config import PLATFORMS, Config, Platform, techne_home
+from techne.config import PLATFORMS, Config, Platform, PostureConfig, techne_home
 
 
 def test_techne_home_unset_keeps_default(monkeypatch):
@@ -305,3 +305,44 @@ def test_sync_round_trip_preserves_all_fields(tmp_path):
     assert reloaded.sync.audience == "techne.archivist"
     assert reloaded.sync.path == "/var/data/sync"
     assert reloaded.sync.extra == {"tenant_id": "t-42", "region": "us-east"}
+
+
+def test_posture_config_defaults():
+    """PostureConfig defaults are observe/False."""
+    p = PostureConfig()
+    assert p.mode == "observe"
+    assert p.cc_memory_detected is False
+
+    cfg = Config()
+    assert cfg.posture.mode == "observe"
+    assert cfg.posture.cc_memory_detected is False
+
+
+def test_posture_config_round_trip(tmp_path):
+    """posture block survives save() → load() without loss (techne#107 PR4)."""
+    cfg = Config()
+    cfg.posture.mode = "spool-primary"
+    cfg.posture.cc_memory_detected = True
+    out = tmp_path / "config.yaml"
+    cfg.save(out)
+    reloaded = Config.load(out)
+    assert reloaded.posture.mode == "spool-primary"
+    assert reloaded.posture.cc_memory_detected is True
+
+
+def test_posture_invalid_mode_falls_back_to_observe(tmp_path):
+    """An unrecognised posture.mode in YAML falls back to 'observe' instead of raising."""
+    f = tmp_path / "config.yaml"
+    f.write_text(yaml.dump({"posture": {"mode": "banana", "cc_memory_detected": True}}))
+    cfg = Config.load(f)
+    assert cfg.posture.mode == "observe"
+    assert cfg.posture.cc_memory_detected is True
+
+
+def test_posture_absent_block_gives_defaults(tmp_path):
+    """A config.yaml that predates posture must load cleanly with default values."""
+    f = tmp_path / "config.yaml"
+    f.write_text(yaml.dump({"platform": "claude-code"}))
+    cfg = Config.load(f)
+    assert cfg.posture.mode == "observe"
+    assert cfg.posture.cc_memory_detected is False

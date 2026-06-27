@@ -374,6 +374,22 @@ def emit_reflection_batch(
     return batch
 
 
+def effective_write_to(config: Config) -> str:
+    """Return the effective write_to mode honoring the coexistence posture.
+
+    When posture.mode == 'spool-primary', reflect is ADVISORY: proposals land in
+    candidates, never auto-promoted into live knowledge that could drift from CC's
+    curated memory. techne#107 PR4.
+
+    Under posture 'observe' (default), returns config.reflect.write_to as-is so
+    existing behaviour is preserved exactly.
+    """
+    posture = getattr(config, "posture", None)
+    if posture is not None and posture.mode == "spool-primary":
+        return "candidates"
+    return config.reflect.write_to
+
+
 def ingest_reflection_response(
     config: Config,
     session_id: str,
@@ -412,7 +428,7 @@ def ingest_reflection_response(
                 raw_response=raw_for_store,
             )
             counts["candidates_written"] += 1
-            if config.reflect.write_to == "live":
+            if effective_write_to(config) == "live":
                 promoted_id = _write_live(config.db_path, c, source=f"reflect:{thread_id}")
                 _mark_promoted(config.db_path, cand_id, promoted_id)
                 counts["candidates_promoted"] += 1
