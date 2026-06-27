@@ -425,6 +425,9 @@ def deed_log(
             wheres.append("s.project_path = ?")
             params.append(project_path)
         if since_days is not None:
+            # Lexical TEXT compare against datetime('now',…); both UTC for live captures.
+            # Imported deeds store ISO ('…T…Z'), so windowing is day-accurate, not
+            # hour-accurate, for those — fine for a coarse reconciliation window.
             wheres.append("o.timestamp >= datetime('now', ?)")
             params.append(f"-{int(since_days)} days")
         if wheres:

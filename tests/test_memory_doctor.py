@@ -113,6 +113,18 @@ def test_only_write_edit_count_as_touched(db):
     assert _deed_touched_files(deeds) == {"a.py", "b.py"}
 
 
+def test_multiedit_notebookedit_touched_via_json_file_path(db):
+    """MultiEdit/NotebookEdit render 'Tool: …\\nInput: {json}' (no Wrote:/Edited: prefix),
+    so the path is read from the json's file_path — else they'd falsely read as unbacked."""
+    deeds = [
+        {"tool_name": "MultiEdit",
+         "content": 'Tool: MultiEdit\nInput: {"file_path": "/p/multi.py", "edits": [...]}'},
+        {"tool_name": "NotebookEdit",
+         "content": 'Tool: NotebookEdit\nInput: {"file_path": "/p/nb.ipynb", "cell": 1}'},
+    ]
+    assert _deed_touched_files(deeds) == {"multi.py", "nb.ipynb"}
+
+
 # ---- discovery ------------------------------------------------------------
 
 
@@ -153,6 +165,47 @@ def test_reconcile_no_memory_present(project, db, monkeypatch):
     report = reconcile(db, cwd=cwd)
     assert report["memory_present"] is False
     assert report["unbacked"] == [] and report["corroborated"] == []
+
+
+def test_reconcile_flags_capped_deed_log(project, db, monkeypatch):
+    """When the deed-log hits the cap, the report says so — silent truncation would drop
+    the oldest deeds and read as false `unbacked`."""
+    from techne.core import memory_doctor as md
+
+    cwd, config_dir = project
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(md, "DEED_LIMIT", 2)
+    proj = str(cwd.resolve())
+    _session(db, "s1", proj)
+    for i in range(3):
+        _obs(db, "s1", "Write", f"Wrote: /proj/f{i}.py")
+    _write_memory(config_dir, cwd, "# m\n")
+    report = md.reconcile(db, cwd=cwd)
+    assert report["deed_log_capped"] is True
+
+
+def test_cli_doctor_json(project, db, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    cwd, config_dir = project
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    cfg = Config()
+    cfg.db_path = db
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+    _session(db, "s1", str(cwd.resolve()))
+    _obs(db, "s1", "Write", "Wrote: /proj/a.py")
+    _write_memory(config_dir, cwd, "uses a.py and z.py")
+    monkeypatch.chdir(cwd)
+
+    res = CliRunner().invoke(main, ["memory", "doctor", "--json"])
+    assert res.exit_code == 0
+    import json as _json
+
+    rpt = _json.loads(res.output)
+    assert rpt["corroborated"] == ["a.py"] and rpt["unbacked"] == ["z.py"]
 
 
 def test_reconcile_scopes_to_project(project, db, monkeypatch):

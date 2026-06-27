@@ -22,6 +22,11 @@ from pathlib import Path
 
 from techne.core.state import deed_log
 from techne.core.threads.features import extract_file_paths
+from techne.platforms.claude_code.paths import project_slug  # noqa: F401 (re-exported)
+
+# Cap on deeds pulled per project-path candidate. Surfaced via report["deed_log_capped"]
+# rather than silently dropping the oldest deeds (which would read as false `unbacked`).
+DEED_LIMIT = 2000
 
 # Bare filename tokens with a known source/config extension — catches `a.py` mentioned
 # in prose, which the absolute-path FILE_PATH_RE (reused below) misses. Non-capturing
@@ -31,15 +36,13 @@ _FILE_TOKEN_RE = re.compile(
     r"ini|rb|java|cpp|hpp|[ch])\b"
 )
 
-# Deed observations whose first line names the file actually touched (post_tool_use
-# renders Write as "Wrote: <fp>\n…" and Edit as "Edited: <fp>\n…").
+# Deed observations whose summary names the file actually touched. post_tool_use renders
+# Write as "Wrote: <fp>\n…" and Edit as "Edited: <fp>\n…" (first-line prefix);
+# MultiEdit/NotebookEdit fall through to "Tool: …\nInput: {json}", so their path is read
+# from the json's "file_path" instead (see _deed_touched_files).
 _TOUCH_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-_TOUCH_PREFIXES = ("Wrote:", "Edited:", "Created:")
-
-
-def project_slug(cwd: Path) -> str:
-    """CC's per-project slug: the absolute cwd with '/' and '.' replaced by '-'."""
-    return re.sub(r"[/.]", "-", str(Path(cwd).resolve()))
+_TOUCH_PREFIXES = ("Wrote:", "Edited:")
+_FILE_PATH_JSON_RE = re.compile(r'"file_path"\s*:\s*"([^"]+)"')
 
 
 def find_curated_memory_files(cwd: Path | None = None) -> list[Path]:
@@ -65,20 +68,26 @@ def _file_basenames(text: str) -> set[str]:
 
 def _deed_touched_files(deeds: list[dict]) -> set[str]:
     """Basenames of files actually WRITTEN/EDITED in the deed-log (the authoritative
-    'touched' signal) — read off each Write/Edit deed's first line, not the whole
-    (truncated) body, so a file merely mentioned in output isn't counted as touched."""
+    'touched' signal). For Write/Edit the path is the first-line prefix; for
+    MultiEdit/NotebookEdit (no prefix) it's the `file_path` in the rendered json. Reads
+    the target path, not the truncated body, so a file merely mentioned isn't counted."""
     touched: set[str] = set()
     for d in deeds:
         if d.get("tool_name") not in _TOUCH_TOOLS:
             continue
         content = d.get("content") or ""
+        path: str | None = None
         first = content.splitlines()[0] if content else ""
         for pre in _TOUCH_PREFIXES:
             if first.startswith(pre):
                 path = first[len(pre):].strip()
-                if path:
-                    touched.add(path.rsplit("/", 1)[-1])
                 break
+        if path is None:  # MultiEdit/NotebookEdit render "Tool: …\nInput: {json}"
+            m = _FILE_PATH_JSON_RE.search(content)
+            if m:
+                path = m.group(1)
+        if path:
+            touched.add(path.rsplit("/", 1)[-1])
     return touched
 
 
@@ -103,8 +112,12 @@ def reconcile(db_path: Path, *, cwd: Path | None = None, since_days: int | None 
     # capture hook may store either form in sessions.project_path.
     candidates = {str(cwd), str(cwd.resolve())}
     deeds: dict[int, dict] = {}
+    capped = False
     for proj in candidates:
-        for d in deed_log(db_path, project_path=proj, since_days=since_days):
+        batch = deed_log(db_path, project_path=proj, since_days=since_days, limit=DEED_LIMIT)
+        if len(batch) >= DEED_LIMIT:
+            capped = True  # oldest deeds dropped → omissions/unbacked may be incomplete
+        for d in batch:
             deeds[d["id"]] = d
     deed_list = list(deeds.values())
     touched = _deed_touched_files(deed_list)
@@ -114,6 +127,7 @@ def reconcile(db_path: Path, *, cwd: Path | None = None, since_days: int | None 
         "memory_files": [str(f) for f in files],
         "deed_count": len(deed_list),
         "window_days": since_days,
+        "deed_log_capped": capped,
         "corroborated": sorted(memory_refs & touched),
         "omissions": sorted(touched - memory_refs),
         "unbacked": sorted(memory_refs - touched),

@@ -1067,6 +1067,14 @@ def memory_doctor_cmd(ctx, since_days, as_json):
             "memory files?"
         )
         return
+    if report["deed_count"] == 0:
+        # Distinct from "your memory is all wrong": we found no deeds to compare against.
+        click.echo(
+            "Found curated memory but NO deeds for this project — the deed-log scoping "
+            "likely missed them (path mismatch / nothing captured yet). Not reconciling; "
+            "every reference would read as unbacked."
+        )
+        return
     win = f"last {report['window_days']}d" if report["window_days"] else "all time"
     click.echo(
         f"memory doctor — {len(report['memory_files'])} memory file(s) vs "
@@ -1076,6 +1084,11 @@ def memory_doctor_cmd(ctx, since_days, as_json):
         f"  corroborated: {len(report['corroborated'])}  "
         f"omissions: {len(report['omissions'])}  unbacked: {len(report['unbacked'])}"
     )
+    if report.get("deed_log_capped"):
+        click.echo(
+            "  ⚠ deed-log hit the cap — oldest deeds dropped; results may be "
+            "incomplete. Narrow with --since."
+        )
     if report["unbacked"]:
         click.echo("\n⚠ unbacked — cited in memory, no deed touched them:")
         for f in report["unbacked"]:
