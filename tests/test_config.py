@@ -330,13 +330,53 @@ def test_posture_config_round_trip(tmp_path):
     assert reloaded.posture.cc_memory_detected is True
 
 
-def test_posture_invalid_mode_falls_back_to_observe(tmp_path):
-    """An unrecognised posture.mode in YAML falls back to 'observe' instead of raising."""
+def test_posture_invalid_mode_raises(tmp_path):
+    """techne#167: an unrecognised posture.mode RAISES, like every other enum
+    validator — silently clamping to 'observe' would mask a typo that left the
+    unattended writer un-gated."""
     f = tmp_path / "config.yaml"
     f.write_text(yaml.dump({"posture": {"mode": "banana", "cc_memory_detected": True}}))
-    cfg = Config.load(f)
-    assert cfg.posture.mode == "observe"
-    assert cfg.posture.cc_memory_detected is True
+    with pytest.raises(ValueError, match="Invalid posture.mode"):
+        Config.load(f)
+
+
+def test_injection_and_staleness_round_trip(tmp_path):
+    """techne#167: save() previously dropped injection + staleness_hours (parsed by
+    _from_dict but never serialized), so re-running `techne init` silently reset any
+    customization. They must now survive save() → load()."""
+    cfg = Config()
+    cfg.injection.enabled = False
+    cfg.injection.char_budget = 4096
+    cfg.injection.recent_reserve_frac = 0.25
+    cfg.staleness_hours = 36
+    out = tmp_path / "config.yaml"
+    cfg.save(out)
+    reloaded = Config.load(out)
+    assert reloaded.injection.enabled is False
+    assert reloaded.injection.char_budget == 4096
+    assert reloaded.injection.recent_reserve_frac == 0.25
+    assert reloaded.staleness_hours == 36
+
+
+def test_save_is_owner_only(tmp_path):
+    """techne#167 SECURITY: the config can hold secrets (llm_api_key, sync.auth);
+    save() must create the file owner-only (0600) from the start — never a
+    world-readable window. Verified even when no key is set (sync.auth, future
+    secrets)."""
+    import stat
+
+    out = tmp_path / "config.yaml"
+    cfg = Config()
+    cfg.llm_api_key = "sk-secret-value"
+    cfg.save(out)
+    mode = stat.S_IMODE(out.stat().st_mode)
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    # No leftover temp from the atomic write.
+    assert not list(out.parent.glob(out.name + ".tmp*"))
+    # And a key-less config is still 0600.
+    out2 = tmp_path / "nokey.yaml"
+    Config().save(out2)
+    assert stat.S_IMODE(out2.stat().st_mode) == 0o600
 
 
 def test_posture_absent_block_gives_defaults(tmp_path):

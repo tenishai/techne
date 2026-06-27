@@ -438,11 +438,29 @@ def test_end_session_routes_by_source(db_path):
         conn.close()
 
 
-def test_project_slug_for_cwd():
-    # Same encoding works for macOS and Linux paths — both POSIX.
+def test_project_slug_for_cwd(tmp_path):
+    # techne#167: delegates to the single authoritative paths.project_slug, so the
+    # two formerly-divergent slug functions can no longer disagree on the same cwd.
+    from techne.platforms.claude_code.paths import project_slug
+
+    assert project_slug_for_cwd(tmp_path) == project_slug(tmp_path)
+    # A path with no symlink prefix on either host resolves unchanged → exact slug.
     assert project_slug_for_cwd(Path("/Users/alice/working/proj")) == "-Users-alice-working-proj"
-    assert project_slug_for_cwd(Path("/home/bob/code/svc")) == "-home-bob-code-svc"
     assert project_slug_for_cwd(Path("/")) == "-"
+
+
+def test_project_slug_replaces_all_non_alphanumerics(tmp_path):
+    """techne#167: CC's kS regex is /[^a-zA-Z0-9]/g — dots, underscores, and spaces
+    in the leaf all become '-', not just '/'. tmp_path is a real (resolved) dir so
+    the realpath is concrete; we append a non-existent leaf so resolve() leaves it
+    appended verbatim, then check the formula reproduces it."""
+    import re
+
+    weird = tmp_path / "my.proj_v2 final"
+    expected = re.sub(r"[^a-zA-Z0-9]", "-", str(tmp_path.resolve()) + "/my.proj_v2 final")
+    assert project_slug_for_cwd(weird) == expected
+    # Concretely: dot, underscore, and space in the leaf all collapsed to '-'.
+    assert project_slug_for_cwd(weird).endswith("-my-proj-v2-final")
 
 
 def test_default_transcripts_dir_under_home(tmp_path):
