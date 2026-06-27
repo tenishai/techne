@@ -49,15 +49,24 @@ def test_parse_verdict_fallback_to_text_scan_incorrect():
     assert result["verdict"] == "INCORRECT"
 
 
-def test_parse_verdict_fallback_to_text_scan_correct():
-    """No VERDICT: header but CORRECT appears in the body."""
+def test_parse_verdict_bare_correct_without_header_fails_closed():
+    """A bare 'CORRECT' with NO VERDICT: line is malformed → INCORRECT (fail-closed).
+    Only a proper VERDICT: line can yield CORRECT (techne#118 review)."""
     raw = "The assessment is CORRECT — the model declined."
     result = parse_verdict(raw)
-    assert result["verdict"] == "CORRECT"
+    assert result["verdict"] == "INCORRECT"
 
 
-def test_parse_verdict_incorrect_beats_correct_substring():
-    """'INCORRECT' contains 'CORRECT'; the longer match must win."""
+def test_parse_verdict_negation_does_not_false_pass():
+    """The exact false-CORRECT hole the review flagged: 'not correct' contains CORRECT
+    but not INCORRECT, with no VERDICT: line → must NOT pass."""
+    raw = "This answer is not correct; the model asserted a deleted fact."
+    result = parse_verdict(raw)
+    assert result["verdict"] == "INCORRECT"
+
+
+def test_parse_verdict_no_header_defaults_incorrect():
+    """No VERDICT: line (even mentioning INCORRECT in prose) → INCORRECT."""
     raw = "INCORRECT — the model was wrong."
     result = parse_verdict(raw)
     assert result["verdict"] == "INCORRECT"
@@ -72,11 +81,11 @@ def test_parse_verdict_truncated_no_reason():
 
 
 def test_parse_verdict_garbage_defaults_incorrect():
-    """Garbage output → fail-closed → INCORRECT."""
+    """Garbage output (no VERDICT line) → fail-closed → INCORRECT."""
     raw = "blah blah blah"
     result = parse_verdict(raw)
     assert result["verdict"] == "INCORRECT"
-    assert "unparseable" in result["reason"]
+    assert "VERDICT" in result["reason"]  # explains it lacked the required line
 
 
 def test_parse_verdict_empty_string_defaults_incorrect():

@@ -98,11 +98,13 @@ def parse_verdict(raw: str) -> dict:
     """Parse a judge response into ``{"verdict": "CORRECT"|"INCORRECT", "reason": str}``.
 
     Robust parse strategy (fail-closed — never silently pass on garbage):
-      1. Scan lines for one starting with ``VERDICT:``; extract token.
-      2. Fallback: search full text for ``INCORRECT``/``CORRECT`` token
-         (``INCORRECT`` checked first — it is the longer substring, so a line
-         like "NOT INCORRECT" won't be mis-parsed as CORRECT).
-      3. If neither found, default to INCORRECT with an "unparseable" reason.
+      1. Scan lines for one starting with ``VERDICT:``; extract the token. This is
+         the ONLY way to a CORRECT verdict — a well-behaved judge always emits it.
+      2. If no ``VERDICT:`` line, the output is malformed: ESCALATE to INCORRECT.
+         We deliberately do NOT scan for a bare ``CORRECT`` substring — a phrasing
+         like "this is not correct" contains CORRECT without INCORRECT and would
+         yield a false pass. Fail-closed means a malformed judge never passes a task
+         (techne#118 review). A truncated/missing-header response → INCORRECT.
 
     Pure function; no side effects.
     """
@@ -112,7 +114,7 @@ def parse_verdict(raw: str) -> dict:
             "reason": f"unparseable judge output: {raw[:200]!r}",
         }
 
-    # Pass 1: look for a "VERDICT: ..." line
+    # Pass 1: a "VERDICT: CORRECT|INCORRECT" line is the only route to CORRECT.
     verdict_token: str | None = None
     for line in raw.splitlines():
         m = re.match(r"VERDICT:\s*(CORRECT|INCORRECT)\b", line.strip(), re.IGNORECASE)
@@ -120,18 +122,12 @@ def parse_verdict(raw: str) -> dict:
             verdict_token = m.group(1).upper()
             break
 
-    # Pass 2: full-text scan (handles truncation / markdown / missing header)
-    if verdict_token is None:
-        upper = raw.upper()
-        if "INCORRECT" in upper:
-            verdict_token = "INCORRECT"
-        elif "CORRECT" in upper:
-            verdict_token = "CORRECT"
-
+    # Pass 2 (fail-closed): no VERDICT line → malformed → INCORRECT. Escalate-only:
+    # never recognize a bare CORRECT, so "not correct"-style negation can't false-pass.
     if verdict_token is None:
         return {
             "verdict": "INCORRECT",
-            "reason": f"unparseable judge output: {raw[:200]!r}",
+            "reason": f"no VERDICT line; treated as INCORRECT: {raw[:200]!r}",
         }
 
     # Extract REASON line if present; fall back to first 200 chars of raw output

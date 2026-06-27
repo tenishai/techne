@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
-import urllib.error
 import urllib.request
 from typing import Callable
 
@@ -45,12 +43,17 @@ def _probe_ollama() -> tuple[bool, str]:
             if resp.status != 200:
                 return False, ""
             data = json.loads(resp.read())
-    except (urllib.error.URLError, OSError, socket.timeout):
+    except Exception:
+        # Fail closed on ANYTHING — a non-Ollama service on :11434 returning a 200
+        # with a non-JSON body (JSONDecodeError) or a JSON list (AttributeError below)
+        # must read as "not available", not escape the resolver (techne#118 review).
         return False, ""
 
     override = os.environ.get("TECHNE_EVAL_OLLAMA_MODEL")
     if override:
         return True, override
+    if not isinstance(data, dict):
+        return False, ""
     models = data.get("models") or []
     if not models:
         return False, ""
@@ -70,7 +73,7 @@ def _make_ollama_generate(model_name: str) -> Callable:
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens,
         )
-        return resp.choices[0].message.content.strip()
+        return (resp.choices[0].message.content or "").strip()
 
     return generate
 
