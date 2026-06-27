@@ -14,7 +14,18 @@ read its own state instead of the default agent's (techne#113).
 """
 
 import os
+import re
 from pathlib import Path
+
+
+def project_slug(cwd: Path | str) -> str:
+    """CC's per-project slug: the absolute cwd with '/' and '.' replaced by '-'.
+
+    OBSERVED, not documented (same caveat as the rest of this module). Shared by the
+    native-memory probe and the #107 memory-reconciliation discovery so the fragile
+    formula lives in exactly one place.
+    """
+    return re.sub(r"[/.]", "-", str(Path(cwd).resolve()))
 
 
 def claude_config_dir() -> Path:

@@ -1033,6 +1033,72 @@ def context(ctx, project_path, limit):
         click.echo(text)
 
 
+@main.group()
+@click.pass_context
+def memory(ctx):
+    """Reconcile the client's curated memory against techne's raw deed-log (techne#107)."""
+
+
+@memory.command("doctor")
+@click.option("--since", "since_days", type=int, default=None,
+              help="Only consider deeds from the last N days (default: all).")
+@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+@click.pass_context
+def memory_doctor_cmd(ctx, since_days, as_json):
+    """Diff the client's curated memory against techne's deed-log.
+
+    Read-only. Surfaces files you worked on but never noted (omissions) and files your
+    memory cites but no deed touched (unbacked). File-reference grain (techne#107 PR1).
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.core.memory_doctor import reconcile
+
+    report = reconcile(config.db_path, since_days=since_days)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    if not report["memory_present"]:
+        click.echo(
+            f"No curated memory found for this project (looked under the CC slug for "
+            f"{Path.cwd()}). Nothing to reconcile — is this a Claude Code project with "
+            "memory files?"
+        )
+        return
+    if report["deed_count"] == 0:
+        # Distinct from "your memory is all wrong": we found no deeds to compare against.
+        click.echo(
+            "Found curated memory but NO deeds for this project — the deed-log scoping "
+            "likely missed them (path mismatch / nothing captured yet). Not reconciling; "
+            "every reference would read as unbacked."
+        )
+        return
+    win = f"last {report['window_days']}d" if report["window_days"] else "all time"
+    click.echo(
+        f"memory doctor — {len(report['memory_files'])} memory file(s) vs "
+        f"{report['deed_count']} deeds ({win})"
+    )
+    click.echo(
+        f"  corroborated: {len(report['corroborated'])}  "
+        f"omissions: {len(report['omissions'])}  unbacked: {len(report['unbacked'])}"
+    )
+    if report.get("deed_log_capped"):
+        click.echo(
+            "  ⚠ deed-log hit the cap — oldest deeds dropped; results may be "
+            "incomplete. Narrow with --since."
+        )
+    if report["unbacked"]:
+        click.echo("\n⚠ unbacked — cited in memory, no deed touched them:")
+        for f in report["unbacked"]:
+            click.echo(f"  - {f}")
+    if report["omissions"]:
+        click.echo("\n• omissions — touched in deeds, not noted in memory:")
+        for f in report["omissions"]:
+            click.echo(f"  - {f}")
+
+
 @main.group(invoke_without_command=True)
 @click.pass_context
 def reflect(ctx):
