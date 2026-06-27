@@ -59,7 +59,7 @@ def seed(db_path: Path) -> dict[str, str]:
         "The end-of-session reflect pass writes proposals to the "
         "knowledge_candidates table for human review; it is off by default and "
         "never blocks session teardown.",
-        type="pattern",
+        type="decision",
         tags="reflect,candidates",
         source="eval",
     )
@@ -88,7 +88,7 @@ def seed(db_path: Path) -> dict[str, str]:
     store(db_path, "cabal#12 covers A2A streaming foundations: message/stream and "
           "tasks/resubscribe with cursor-based replay.", type="decision", tags="cabal", source="eval")
     store(db_path, "The MMR reranker adds diversity to search results via a greedy "
-          "second pass over BM25 candidates.", type="pattern", tags="search", source="eval")
+          "second pass over BM25 candidates.", type="fact", tags="search", source="eval")
     store(db_path, "Outbox routing should close the flush/flush_sinks race via "
           "enqueue-time target namespacing.", type="decision", tags="outbox", source="eval")
 

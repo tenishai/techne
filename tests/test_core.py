@@ -229,6 +229,17 @@ class TestKnowledge:
         with pytest.raises(ValueError):
             store(db_path, "test", type="invalid")
 
+    def test_store_rejects_team_domain_pattern_type(self, db_path):
+        """techne#137: `pattern` is a team-domain type (architect.db); writing it to
+        personal techne.db re-leaks team patterns into recall. store() must reject it
+        with a pointer to the right store — the boundary is a write-time invariant."""
+        with pytest.raises(ValueError, match="architect"):
+            store(db_path, "a lifted pattern", type="pattern")
+        # And it's no longer an accepted personal-memory type at all.
+        from techne.core.knowledge import VALID_TYPES
+
+        assert "pattern" not in VALID_TYPES
+
     def test_content_hash(self):
         h1 = content_hash("test content")
         h2 = content_hash("test content")

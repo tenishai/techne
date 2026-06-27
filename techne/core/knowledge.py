@@ -10,7 +10,6 @@ from techne.core.redaction import redact_credentials
 VALID_TYPES = (
     "fact",
     "decision",
-    "pattern",
     "evaluation",
     "procedure",
     # Documents — third-party authoritative content mirrored into techne
@@ -19,13 +18,24 @@ VALID_TYPES = (
     "document",
     # Document card (Librarian Option D, techne#91) — a compact GIST + pointer to
     # a row in the `documents` table; full content is fetched on demand, never
-    # injected. Pull-only like pattern. tags carry doc:/ver:/backing:/pending.
+    # injected. Pull-only (recall-able, never auto-injected). tags carry
+    # doc:/ver:/backing:/pending.
     "document_card",
 )
 VALID_CONFIDENCE = ("high", "medium", "low")
 
+# Team-domain types that must NOT be written to personal techne.db (techne#137).
+# `pattern` lives in the Architect store (architect.db); writing it here leaked team
+# patterns into personal recall (recall doesn't filter by type). store() rejects
+# these with a pointer to the right store, so the boundary is a write-time invariant,
+# not something a periodic cleanup has to mop up after.
+REDIRECTED_TYPES = {
+    "pattern": "the Architect pattern store (architect.db) — use `techne architect ingest`",
+}
+
 # Types that are reference material — recall-able (pull), but never auto-injected
-# into session-start context (push). egress filters these out.
+# into session-start context (push). egress filters these out. `pattern` stays
+# listed so any legacy rows on not-yet-cleaned installs are still pull-only.
 PULL_ONLY_TYPES = ("pattern", "document", "document_card")
 
 # Mapping the legacy text enum to canonical numeric values (0..1).
@@ -62,6 +72,11 @@ def store(
     leaves all anchor columns NULL and behaves exactly as before — non-anchored
     memory is never staleness-checked.
     """
+    if type in REDIRECTED_TYPES:
+        raise ValueError(
+            f"knowledge type '{type}' is not stored in personal memory (techne#137); "
+            f"it belongs in {REDIRECTED_TYPES[type]}"
+        )
     if type not in VALID_TYPES:
         raise ValueError(f"Invalid knowledge type '{type}'. Must be one of: {VALID_TYPES}")
     if confidence not in VALID_CONFIDENCE:

@@ -202,14 +202,18 @@ TOOLS = [
     },
     {
         "name": "techne_store",
-        "description": "Store a new observation, fact, decision, or pattern",
+        "description": (
+            "Store a durable personal-memory entry (fact, decision, evaluation, "
+            "procedure). Architectural patterns go to the Architect store via "
+            "`techne architect ingest`, not here (techne#137)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "The knowledge to store"},
                 "type": {
                     "type": "string",
-                    "enum": ["fact", "decision", "pattern", "evaluation", "procedure"],
+                    "enum": ["fact", "decision", "evaluation", "procedure"],
                     "default": "fact",
                 },
                 "tags": {"type": "string", "description": "Comma-separated tags"},

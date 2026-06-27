@@ -1,29 +1,25 @@
-"""Architectural-patterns markdown corpus importer.
+"""Architectural-patterns markdown corpus parser.
 
-Parses a markdown file (an `architectural-patterns.md`-style pattern corpus,
-wherever it lives) into knowledge entries for the techne knowledge store. The
-source path is supplied by the caller — this module makes no assumption about
-which client or directory it came from.
+`parse()` turns an `architectural-patterns.md`-style corpus into a `ParseResult`
+(patterns + no-lift entries). It is the shared front end for the Architect store:
+`patterns.ingest_patterns_md` seeds `architect.db` from a parsed corpus. This module
+is pure parsing — it does NOT write to any store. (The old `import_into` writer that
+dumped `type="pattern"` rows into personal techne.db was removed in techne#137; the
+pattern corpus lives only in architect.db now.)
 
 Two kinds of sections recognized:
 
   1. Pattern sections — `## <Pattern Name>` followed by lines
      `- **Source**: <text>` and `- **Surveyed**: YYYY-MM-DD`, then a
      body of paragraphs until the next `---` separator or `## ` heading.
-     Stored with type="pattern", source=<url>, tags include the date.
 
   2. No-lift list — bullets under `## Surveyed (no patterns worth saving)`
-     of the form `- <url> — surveyed YYYY-MM-DD — <reason>`. Stored with
-     type="pattern", source=<url>, tags include `surveyed-no-lift` and
-     the date. Preserves the "don't re-investigate" dedup signal.
+     of the form `- <url> — surveyed YYYY-MM-DD — <reason>`. Preserves the
+     "don't re-investigate" dedup signal.
 
 Skipped sections: `## Composite observations`, `## Template for new entries`,
 and any `## Surveyed` that isn't the no-lift list (defensive — we only
 match the exact heading we ship).
-
-Dedup is by source URL — if any existing knowledge entry has the same
-source, the importer skips the new entry with a log line. `--force`
-overrides.
 """
 
 from __future__ import annotations
@@ -31,7 +27,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -216,133 +211,3 @@ def _parse_no_lift_bullets(body: str) -> list[NoLiftEntry]:
             )
         )
     return out
-
-
-# ---- Importer (knowledge.store integration) -------------------------------
-
-
-@dataclass(slots=True)
-class ImportResult:
-    """Counts returned from import_into."""
-
-    patterns_added: int = 0
-    patterns_skipped_existing: int = 0
-    no_lifts_added: int = 0
-    no_lifts_skipped_existing: int = 0
-
-
-def import_into(
-    db_path: Path,
-    parsed: ParseResult,
-    *,
-    dry_run: bool = False,
-    force: bool = False,
-) -> ImportResult:
-    """Apply a ParseResult to a techne knowledge corpus.
-
-    Dedup by `source` URL — if any active knowledge entry has the same
-    source as a new pattern, the new entry is skipped with a log line.
-    `force=True` writes anyway (still creates a new row; supersession is
-    not used here because the corpus is append-only with re-runs).
-
-    `dry_run=True` parses + computes the would-add/would-skip counts
-    without writing.
-    """
-    from techne.core import knowledge
-
-    # Dedup is per (source_url, pattern-name) for patterns and
-    # (source_url, "<no-lift>") for no-lifts. Two patterns lifted from
-    # the same repo (e.g., OpenLtm has three) are kept separate.
-    existing_keys = _existing_keys(db_path)
-
-    result = ImportResult()
-
-    for pattern in parsed.patterns:
-        key = (pattern.source_url, pattern.name)
-        if not force and key in existing_keys:
-            result.patterns_skipped_existing += 1
-            logger.info(
-                "skip_existing_pattern",
-                extra={"source": pattern.source_url, "name": pattern.name},
-            )
-            continue
-        if not dry_run:
-            content = f"# {pattern.name}\n\n{pattern.body}".strip()
-            knowledge.store(
-                db_path,
-                content=content,
-                type="pattern",
-                tags=f"surveyed:{pattern.surveyed_date}",
-                confidence="medium",
-                source=pattern.source_url,
-            )
-            existing_keys.add(key)
-        result.patterns_added += 1
-
-    for no_lift in parsed.no_lifts:
-        key = (no_lift.source_url, "<no-lift>")
-        if not force and key in existing_keys:
-            result.no_lifts_skipped_existing += 1
-            logger.info(
-                "skip_existing_no_lift",
-                extra={"source": no_lift.source_url},
-            )
-            continue
-        if not dry_run:
-            knowledge.store(
-                db_path,
-                content=no_lift.reason,
-                type="pattern",
-                tags=f"surveyed-no-lift,surveyed:{no_lift.surveyed_date}",
-                confidence="low",
-                source=no_lift.source_url,
-            )
-            existing_keys.add(key)
-        result.no_lifts_added += 1
-
-    return result
-
-
-def _existing_keys(db_path: Path) -> set[tuple[str, str]]:
-    """Return every (source_url, identifier) tuple already in the corpus.
-
-    For patterns, the identifier is the pattern name extracted from the
-    first H1-style line in content. For no-lifts (tagged
-    `surveyed-no-lift`), the identifier is the literal "<no-lift>".
-    """
-    from techne.core.database import connect
-
-    if not db_path.exists():
-        return set()
-    conn = connect(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT source, content, tags FROM knowledge "
-            "WHERE source IS NOT NULL AND superseded_by IS NULL"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    out: set[tuple[str, str]] = set()
-    for row in rows:
-        source = row["source"]
-        tags = row["tags"] or ""
-        if "surveyed-no-lift" in tags:
-            out.add((source, "<no-lift>"))
-            continue
-        name = _extract_pattern_name(row["content"])
-        if name is not None:
-            out.add((source, name))
-    return out
-
-
-def _extract_pattern_name(content: str) -> str | None:
-    """Pull the `# <Name>` heading from the first non-blank line of content."""
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("# "):
-            return stripped[2:].strip()
-        return None
-    return None

@@ -40,6 +40,26 @@ def _seed(
     return store(db_path, content, type=type, tags=tags, confidence=confidence)
 
 
+def _insert_legacy_pattern(db_path: Path, content: str, *, tags: str = "") -> int:
+    """Insert a legacy `type='pattern'` row directly. store() rejects this type
+    post techne#137, but egress must still exclude rows that predate the cleanup
+    (PULL_ONLY_TYPES keeps 'pattern' for exactly this defense)."""
+    from techne.core.database import connect
+    from techne.core.knowledge import CONFIDENCE_NUMERIC
+
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO knowledge (type, content, tags, confidence, confidence_numeric) "
+            "VALUES ('pattern', ?, ?, 'high', ?)",
+            (content, tags, CONFIDENCE_NUMERIC["high"]),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Pattern exclusion
 # ---------------------------------------------------------------------------
@@ -48,13 +68,13 @@ def _seed(
 class TestPatternExclusion:
     def test_high_confidence_pattern_never_selected(self, db_path):
         """type='pattern' rows must never appear in Tier-0 output, even with confidence='high'."""
-        _seed(db_path, "should be excluded", type="pattern", tags="memory-type:feedback")
+        _insert_legacy_pattern(db_path, "should be excluded", tags="memory-type:feedback")
         rows = select_tier0_injection(db_path, char_budget=4000)
         assert not any(r["type"] == "pattern" for r in rows)
 
     def test_pattern_excluded_alongside_eligible_rows(self, db_path):
         """A mix of pattern (excluded) and fact (included) produces only the fact."""
-        _seed(db_path, "excluded pattern", type="pattern")
+        _insert_legacy_pattern(db_path, "excluded pattern")
         fact_id = _seed(db_path, "included fact", type="fact", tags="memory-type:user")
         rows = select_tier0_injection(db_path, char_budget=4000)
         ids = [r["id"] for r in rows]
