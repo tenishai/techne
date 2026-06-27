@@ -65,8 +65,12 @@ def librarian_store(config: Config) -> StoreAdapter:
 
     Resolved via the registry (`migrated_store` → `load_store`), so the path and
     adapter come from `config.stores['librarian']` — a `dsn:` override takes effect
-    (techne#102). Default is `<data_dir>/librarian.db`."""
-    return migrated_store(config, "librarian", LIBRARIAN_SCHEMA, _migrated)
+    (techne#102). Default is `<data_dir>/librarian.db`.
+
+    `reconcile=True` (techne#136): librarian's schema is purely additive, so an
+    upgraded librarian.db converges toward LIBRARIAN_SCHEMA on open — a new column/
+    index/trigger lands without a hand-written migration."""
+    return migrated_store(config, "librarian", LIBRARIAN_SCHEMA, _migrated, reconcile=True)
 
 
 def librarian_db(config: Config) -> Path:

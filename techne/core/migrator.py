@@ -389,3 +389,32 @@ def reconcile_indexes(conn: sqlite3.Connection, schema_sql: str) -> None:
         conn.execute(create_sql)  # one statement per entry; matches reconcile_columns
         conn.commit()
         print(f"[techne] reconcile: CREATE INDEX {name}", file=sys.stderr)
+
+
+def reconcile_schema(
+    conn: sqlite3.Connection,
+    schema_sql: str,
+    *,
+    triggers_sql: str = "",
+    fts_backfill: dict[str, tuple[str, list[str]]] | None = None,
+    fts_insert_cols: dict[str, list[str]] | None = None,
+) -> None:
+    """Converge a db toward *schema_sql* additively — the combined reconcile pass for
+    domains whose evolution is purely additive (new table/column/index/trigger; no
+    destructive change). Order is load-bearing (see module docstring):
+    tables → triggers → fts_backfill → columns → indexes.
+
+    A domain's triggers usually live in the same DDL string, so pass
+    ``triggers_sql=schema_sql``. ``fts_backfill`` is only needed by a db that gained
+    FTS *after* rows already existed (core techne.db) — omit it otherwise. NOT for a
+    db with destructive/numbered migrations (codex/architect): those run their
+    versioned step under ``guarded_migrate`` first, and a structure-diffing column
+    reconcile would mangle an old-shape table the numbered step means to rebuild.
+    """
+    reconcile_tables(conn, schema_sql)
+    if triggers_sql:
+        reconcile_triggers(conn, triggers_sql)
+    if fts_backfill:
+        reconcile_fts_backfill(conn, fts_backfill, fts_insert_cols or {})
+    reconcile_columns(conn, schema_sql)
+    reconcile_indexes(conn, schema_sql)
