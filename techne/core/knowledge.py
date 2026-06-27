@@ -1,6 +1,7 @@
 """Knowledge store — durable facts, decisions, patterns, evaluations, procedures."""
 
 import hashlib
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,6 +46,13 @@ CONFIDENCE_NUMERIC = {"high": 0.9, "medium": 0.6, "low": 0.3}
 # Default half-life for confidence decay (days). Operators can override per
 # call site; agents reading via recall use config.knowledge_confidence_half_life_days.
 DEFAULT_CONFIDENCE_HALF_LIFE_DAYS = 30.0
+
+# Down-rank multiplier applied to an `uncertain` entry's effective confidence
+# (techne#117 recall gate). An uncertain row is live and still surfaced, but a
+# dependency it rests on was superseded — so it must rank below an otherwise-
+# equal `current` row until reconfirmed. 0.5 halves its weight (one decay
+# half-life's worth), enough to sink it without erasing it.
+UNCERTAIN_CONFIDENCE_PENALTY = 0.5
 
 
 def store(
@@ -284,6 +292,74 @@ def reconfirm(db_path: Path, knowledge_id: int) -> bool:
         conn.close()
 
 
+def _uncertainty_payload() -> dict:
+    """Build the uncertainty marker attached to a recalled `uncertain` row.
+
+    Deliberately mirrors anchor.py's `_freshness_payload` shape (machine-readable
+    `state` + human `tag` + `note`) so a consumer renders staleness and
+    dependency-uncertainty through one code path rather than two vocabularies.
+    """
+    return {
+        "state": "uncertain",
+        "tag": "[uncertain — a fact this rests on changed; reconfirm before trusting]",
+        "note": (
+            "a dependency was superseded (techne#117); this entry is untrustworthy "
+            "until reconfirmed"
+        ),
+    }
+
+
+def annotate_uncertain(db_path, rows: Iterable[dict]) -> list[dict]:
+    """Attach an `uncertainty` payload to recalled knowledge rows whose status is
+    `uncertain` (techne#117 cascade-to-uncertain, Stage-2 recall gate).
+
+    The dependency cascade (Stage 1) flips a derived row to `uncertain` when its
+    basis is superseded; the row stays live (``superseded_by IS NULL``) so search
+    still returns it. This annotates that subset so the surface never presents an
+    uncertain row as confidently current — the recall-side mirror of #90's
+    `annotate_freshness`.
+
+    Scope guarantees (mirrors annotate_freshness):
+      - Only knowledge rows with status='uncertain' are touched; `current` rows
+        get no `uncertainty` field. No row is ever dropped — recall annotates.
+      - The `uncertainty` key is distinct from `freshness`, so a row that is both
+        anchor-stale and dependency-uncertain carries both, independently.
+      - Surfacing-path only; never fires on touch/relevance updates.
+
+    Mutates and returns *rows*.
+    """
+    from techne.core.database import connect
+
+    rows = list(rows)
+    knowledge_ids = [
+        r["id"] for r in rows if r.get("type") == "knowledge" and r.get("id") is not None
+    ]
+    if not knowledge_ids:
+        return rows
+
+    placeholders = ",".join("?" * len(knowledge_ids))
+    conn = connect(db_path)
+    try:
+        uncertain_ids = {
+            row["id"]
+            for row in conn.execute(
+                f"""SELECT id FROM knowledge
+                    WHERE id IN ({placeholders}) AND status = 'uncertain'""",
+                knowledge_ids,
+            )
+        }
+    finally:
+        conn.close()
+
+    if not uncertain_ids:
+        return rows
+
+    for r in rows:
+        if r.get("type") == "knowledge" and r.get("id") in uncertain_ids:
+            r["uncertainty"] = _uncertainty_payload()
+    return rows
+
+
 def list_entries(
     db_path: Path,
     type: str | None = None,
@@ -369,14 +445,15 @@ def effective_confidence(
 
     ``half_life_days=0`` disables decay entirely — useful for operators
     who want the raw stored value, or for entries (like architectural
-    patterns) where staleness isn't meaningful.
+    patterns) where staleness isn't meaningful. The `uncertain` down-rank
+    (techne#117) still applies in that mode: it is a trust penalty, not decay.
 
     Returns None if no such entry exists.
     """
     conn = connect(db_path)
     try:
         row = conn.execute(
-            """SELECT confidence_numeric, last_confirmed_at
+            """SELECT confidence_numeric, last_confirmed_at, status
                FROM knowledge WHERE id = ?""",
             (entry_id,),
         ).fetchone()
@@ -386,16 +463,22 @@ def effective_confidence(
         return None
     base = float(row["confidence_numeric"])
     if half_life_days <= 0:
-        return base
-    last = _parse_timestamp(row["last_confirmed_at"])
-    current = now or datetime.now(timezone.utc)
-    if last.tzinfo is None:
-        # SQLite returns naive timestamps; treat them as UTC.
-        last = last.replace(tzinfo=timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    days_since = max(0.0, (current - last).total_seconds() / 86400.0)
-    return base * (0.5 ** (days_since / half_life_days))
+        value = base
+    else:
+        last = _parse_timestamp(row["last_confirmed_at"])
+        current = now or datetime.now(timezone.utc)
+        if last.tzinfo is None:
+            # SQLite returns naive timestamps; treat them as UTC.
+            last = last.replace(tzinfo=timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        days_since = max(0.0, (current - last).total_seconds() / 86400.0)
+        value = base * (0.5 ** (days_since / half_life_days))
+    # techne#117 recall gate: an uncertain row (a dependency it rests on was
+    # superseded) ranks below an otherwise-equal current row until reconfirmed.
+    if row["status"] == "uncertain":
+        value *= UNCERTAIN_CONFIDENCE_PENALTY
+    return value
 
 
 def reaffirm(db_path: Path, entry_id: int) -> bool:

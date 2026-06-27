@@ -48,6 +48,7 @@ class EgressRow(TypedDict):
     type: str
     content: str
     tags: str
+    status: str
 
 
 def _tag_contains(tags: str | None, fragment: str) -> bool:
@@ -88,13 +89,17 @@ def select_tier0_injection(
         # Fetch all eligible candidates in one query, ordered by updated_at DESC
         # so within each priority tier we take the most recent entries.
         placeholders = ",".join("?" * len(PULL_ONLY_TYPES))
+        # status='uncertain' rows stay eligible but sort last within their band
+        # (techne#117): a high-confidence row whose basis was superseded must not
+        # be auto-asserted ahead of a trustworthy current row. Current-first is a
+        # global ORDER, so within each partitioned band the uncertain rows trail.
         rows = conn.execute(
-            f"""SELECT id, type, content, tags
+            f"""SELECT id, type, content, tags, status
                FROM knowledge
                WHERE superseded_by IS NULL
                  AND confidence = 'high'
                  AND type NOT IN ({placeholders})
-               ORDER BY updated_at DESC""",
+               ORDER BY (status = 'uncertain'), updated_at DESC""",
             PULL_ONLY_TYPES,
         ).fetchall()
     finally:
@@ -111,7 +116,8 @@ def select_tier0_injection(
 
     for row in rows:
         r = EgressRow(
-            id=row["id"], type=row["type"], content=row["content"], tags=row["tags"] or ""
+            id=row["id"], type=row["type"], content=row["content"],
+            tags=row["tags"] or "", status=row["status"],
         )
         tags = r["tags"]
 
@@ -126,7 +132,10 @@ def select_tier0_injection(
         else:
             remaining_rows.append(r)
 
-    most_recent_project_state = project_state_rows[:1]  # already ordered by updated_at DESC
+    # current-first then updated_at DESC (the SELECT's ORDER) — so if a current and
+    # an uncertain platform-state row are both live, this deliberately prefers the
+    # trustworthy one over a strictly-newer uncertain one (techne#117).
+    most_recent_project_state = project_state_rows[:1]
     recent_rows = remaining_rows  # decisions/evaluations/facts — the "what changed" band
 
     selected: list[EgressRow] = []
@@ -179,9 +188,14 @@ def _fill_band(
 
 
 def _render_line(row: EgressRow, max_content: int = 200) -> str:
-    """Render a single knowledge row as a bullet line with provenance prefix."""
+    """Render a single knowledge row as a bullet line with provenance prefix.
+
+    An `uncertain` row (techne#117) carries an inline marker so it is never
+    auto-injected as a confident fact — recall annotates, egress mirrors it.
+    """
     content = row["content"][:max_content]
-    return f"- ⟦techne#{row['id']}⟧ [{row['type']}] {content}\n"
+    marker = " [uncertain]" if row.get("status") == "uncertain" else ""
+    return f"- ⟦techne#{row['id']}⟧{marker} [{row['type']}] {content}\n"
 
 
 def render_tier0_block(rows: list[EgressRow], max_content: int = 200) -> str:
