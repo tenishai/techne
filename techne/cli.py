@@ -1099,6 +1099,42 @@ def memory_doctor_cmd(ctx, since_days, as_json):
             click.echo(f"  - {f}")
 
 
+@memory.command("sync")
+@click.pass_context
+def memory_sync_cmd(ctx):
+    """Drain the current project's curated memory files into techne.db.
+
+    Walks ~/.claude/projects/<slug>/memory/*.md and ingests each file via
+    content-hash dedup (new files stored, changed files supersede the prior row,
+    unchanged files are no-ops).  Reports how many files were drained (stored)
+    versus found (total discovered).
+
+    NOT read-only -- writes to the curated_memory table.  Safe to re-run:
+    unchanged files are always a no-op.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+        return
+
+    from techne.core.memory_doctor import find_curated_memory_files
+    from techne.sync.cc_memory import CCMemorySource
+
+    found = len(find_curated_memory_files())
+    if found == 0:
+        click.echo(
+            f"No curated memory files found for this project "
+            f"(looked under the CC slug for {Path.cwd()}). Nothing to drain."
+        )
+        return
+
+    stored = CCMemorySource(config).initial_walk()
+    click.echo(
+        f"memory sync — {stored} file(s) drained (stored/updated) of {found} found"
+    )
+
+
 @main.group(invoke_without_command=True)
 @click.pass_context
 def reflect(ctx):
