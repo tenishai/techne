@@ -2,7 +2,8 @@
 
 Per-task score in [0,1]:
     0.7 * evidence_recall@K  +  0.3 * phrase_coverage
-zeroed if a `must_exclude_phrases` entry appears in the top result (anti-relevance).
+zeroed if a `must_exclude_phrases` entry appears anywhere in the results
+(anti-relevance, whole-list since techne#118 — a stale leak at any rank fails).
 
 Honest because gold ids/phrases are authored against the committed synthetic
 corpus, where "correct" is knowable.

@@ -59,7 +59,13 @@ def _all_rows(db_path: Path, cap: int = 500) -> list[dict]:
         for r in conn.execute("SELECT id, label, summary FROM threads"):
             rows.append({"type": "thread", "id": r["id"], "label": r["label"],
                          "summary": r["summary"]})
-        return rows[:cap]
+        # No silent cap: if the corpus ever outgrows `cap`, raw-dump would drop rows
+        # (maybe gold), silently shifting the precision ratio + token_cost. Fail loud.
+        assert len(rows) <= cap, (
+            f"raw-source-dump corpus {len(rows)} exceeds cap {cap}; raise the cap so "
+            "the dump stays complete (techne#118)"
+        )
+        return rows
     finally:
         conn.close()
 

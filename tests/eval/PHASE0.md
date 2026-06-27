@@ -32,7 +32,10 @@ and excludes the stale ones (checked over the whole result list).
 
 Curated recall is **~7× more precise** and **~3× cheaper** than dumping the raw
 corpus — and on the `tracking` task the raw dump scores **0.0** (it leaks the stale
-revisions a curated, supersession-filtered search excludes). Gate: curated
+revisions a curated, supersession-filtered search excludes). Note the precision
+ratio **scales with corpus size** (raw-dump precision ≈ gold/total), so on this
+deliberately tiny ~21-row corpus the 7× is a *floor* — the gap only widens at real
+scale. Gate: curated
 precision ≥ `cost_precision_ratio` (3.0) × raw-dump precision, and curated
 token_cost < raw-dump. raw-source-dump is deliberately kept OUT of the recall gate
 (it recalls everything, so folding it in would mask regressions).
