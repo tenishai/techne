@@ -306,7 +306,11 @@ def link_threads(
 
     links = []
     for t in new_threads:
-        thread_id = f"{session_id}-{t.thread_num}"
+        # Key the link by the SAME id save_threads writes/looks up (thread_row_id):
+        # heuristic threads are stored as `t-<hash>`, so the legacy `{session}-{num}`
+        # key silently missed in save_threads' link_map → parent linkage was lost for
+        # every heuristic (default-detector) session (techne#165).
+        thread_id = thread_row_id(session_id, t)
         parent_id = None
 
         results = search_fts(
@@ -318,7 +322,12 @@ def link_threads(
 
         for r in results:
             candidate_id = r.get("id", "")
-            if candidate_id.startswith(session_id):
+            # Skip same-session candidates by session_id, NOT an id-prefix check: a
+            # heuristic id is `t-<hash>` and does NOT start with the session id, so the
+            # old prefix guard let a thread link to its OWN prior row (e.g. redetect_threads
+            # links before the DELETE) — a self-referential parent. Unmasked now that the
+            # link keys agree (techne#165). The exact session match covers both id forms.
+            if r.get("session_id") == session_id:
                 continue
             candidate_status = r.get("status", "")
             if candidate_status == "stale":

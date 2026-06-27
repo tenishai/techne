@@ -429,7 +429,9 @@ def ingest_reflection_response(
             )
             counts["candidates_written"] += 1
             if effective_write_to(config) == "live":
-                promoted_id = _write_live(config.db_path, c, source=f"reflect:{thread_id}")
+                promoted_id = _write_live(
+                    config.db_path, c, source=f"reflect:{thread_id or 'unknown'}"
+                )
                 _mark_promoted(config.db_path, cand_id, promoted_id)
                 counts["candidates_promoted"] += 1
         except Exception:
@@ -483,7 +485,7 @@ def reflect_on_session(
             result["errors"] += 1
             return result
 
-    from techne.core.thread_orchestrator import thread_row_id
+    from techne.core.thread_orchestrator import persisted_thread_id
 
     obs_by_thread = _bucket_observations(threads, observations)
 
@@ -502,10 +504,12 @@ def reflect_on_session(
             continue
         result["threads_reflected"] += 1
 
-        # Same insertion path as the agent-assisted ingest — one code path. Use
-        # the real threads.id (thread_row_id), or the candidates FK fails for
-        # heuristic-detected threads (the silent-error bug behind starved #92).
-        thread_id = thread_row_id(session_id, t)
+        # Same insertion path as the agent-assisted ingest — one code path. Resolve
+        # the ACTUAL persisted threads.id (the techne#106 drift-resistant lookup that
+        # emit_reflection_batch already uses), not a recomputed thread_row_id which
+        # drifts for re-detected heuristic threads → candidate FK silently NULLed
+        # (techne#165). None → ingest stores a NULL FK rather than losing the candidate.
+        thread_id = persisted_thread_id(config.db_path, session_id, t)
         counts = ingest_reflection_response(
             config, session_id, thread_id, prompt_hash, raw, model_used=reflect_config.model
         )
