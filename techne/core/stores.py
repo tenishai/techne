@@ -116,10 +116,13 @@ class SqliteStore:
                 # public StoreAdapter surface — mirrors documents/patterns search.
                 from techne.core.search import _sanitize_fts_query
 
+                match = _sanitize_fts_query(query)
+                if not match:  # all-punctuation/backslash input → no terms; MATCH '' errors (#103)
+                    return []
                 rows = conn.execute(
                     f"""SELECT t.* FROM {table}_fts f JOIN {table} t ON t.id = f.rowid
                         WHERE {table}_fts MATCH ? LIMIT ?""",
-                    (_sanitize_fts_query(query), limit),
+                    (match, limit),
                 ).fetchall()
             else:
                 from techne.core.database import like_escape

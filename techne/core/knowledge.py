@@ -146,14 +146,16 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
         numeric = CONFIDENCE_NUMERIC.get(old["confidence"], CONFIDENCE_NUMERIC["medium"])
 
         # Re-resolve the carried anchor (if any) against the current working tree.
-        content_hash: str | None = None
+        # Local named `anchor_content_hash` (not `content_hash`) to avoid shadowing
+        # the module-level content_hash() function, matching store().
+        anchor_content_hash: str | None = None
         anchor_git_sha: str | None = None
         if old["anchor_path"]:
             from techne.core.anchor import resolve_anchor
 
             resolved = resolve_anchor(old["anchor_path"])
             if resolved is not None:
-                content_hash = resolved["content_hash"]
+                anchor_content_hash = resolved["content_hash"]
                 anchor_git_sha = resolved["git_sha"]
 
         cur = conn.execute(
@@ -170,7 +172,7 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
                 numeric,
                 old["anchor_path"],
                 old["anchor_symbol"],
-                content_hash,
+                anchor_content_hash,
                 anchor_git_sha,
             ),
         )

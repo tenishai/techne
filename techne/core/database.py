@@ -480,6 +480,10 @@ def _strip_sql_comment(line: str) -> str:
     reconciler copies the column definition verbatim into an ``ALTER TABLE … ADD
     COLUMN``; leaving the comment (and the mid-line comma before it) in produces
     invalid DDL and crashes the universal ``connect()`` (techne#132).
+
+    Naive line-level strip: assumes no column's ``DEFAULT``/``CHECK`` carries a
+    literal ``--`` inside a string (e.g. ``CHECK (x <> 'a--b')``). Verified true of
+    the current SCHEMA_SQL; revisit if that ever changes.
     """
     return re.sub(r"\s*--.*$", "", line)
 
