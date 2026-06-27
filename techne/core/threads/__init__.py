@@ -22,7 +22,9 @@ from techne.core.thread_orchestrator import (
     detect_summarize_with_metadata as detect_summarize_with_metadata,
 )
 from techne.core.thread_orchestrator import link_threads as link_threads
+from techne.core.thread_orchestrator import persisted_thread_id as persisted_thread_id
 from techne.core.thread_orchestrator import save_threads as save_threads
+from techne.core.thread_orchestrator import thread_row_id as thread_row_id
 
 # --- features -----------------------------------------------------------------
 from techne.core.threads.features import DEFAULT_ENTITY_PATTERNS as DEFAULT_ENTITY_PATTERNS

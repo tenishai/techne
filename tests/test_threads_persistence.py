@@ -6,9 +6,57 @@ from pathlib import Path
 
 import pytest
 
+from techne.config import Config
 from techne.core.database import connect
-from techne.core.thread_orchestrator import Thread, save_threads
+from techne.core.thread_orchestrator import (
+    Thread,
+    link_threads,
+    save_threads,
+    thread_row_id,
+)
 from techne.core.threads.persistence import bucket_hash
+
+
+def test_heuristic_parent_link_persists_to_real_row(tmp_path):
+    """techne#165 regression: a heuristic (boundary_signal) thread's parent link must
+    resolve to the parent's real `t-<hash>` id. link_threads keyed the (thread_id,
+    parent) tuple by the legacy `{session}-{num}` form, so save_threads' link_map lookup
+    (which uses thread_row_id) silently missed → parent_thread_id was NULL for every
+    heuristic (default-detector) session."""
+    db = tmp_path / "t.db"
+    conn = connect(db)
+    conn.execute("INSERT INTO sessions (id, project_path) VALUES ('prior', '/p')")
+    conn.execute("INSERT INTO sessions (id, project_path) VALUES ('cur', '/p')")
+    conn.commit()
+    conn.close()
+
+    # Parent from a PRIOR session — persisted + FTS-indexed so link_threads can find it.
+    parent = Thread(thread_num=1, label="postgres migration planning",
+                    summary="planning the postgres migration", observation_indices=[0],
+                    boundary_signal="sig")
+    save_threads([parent], "prior", db)
+    parent_id = thread_row_id("prior", parent)
+
+    # A new heuristic thread in the current session with matching content.
+    child = Thread(thread_num=2, label="postgres migration planning",
+                   summary="continue the postgres migration", observation_indices=[5],
+                   boundary_signal="sig")
+    cfg = Config()
+    cfg.threads.link_threshold = 0.0  # any FTS match links — deterministic for the test
+
+    links = link_threads([child], "cur", db, cfg)
+    child_key, linked_parent = links[0]
+    # The fix: the link is keyed by the hash id, NOT the legacy "{session}-{num}".
+    assert child_key == thread_row_id("cur", child)
+    assert child_key != "cur-2"
+    assert linked_parent == parent_id
+
+    save_threads([child], "cur", db, parent_links=links)
+    row = connect(db).execute(
+        "SELECT parent_thread_id FROM threads WHERE id = ?",
+        (thread_row_id("cur", child),),
+    ).fetchone()
+    assert row[0] == parent_id  # persisted, not NULL
 
 # ---------------------------------------------------------------------------
 # bucket_hash unit tests

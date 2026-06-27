@@ -306,7 +306,11 @@ def link_threads(
 
     links = []
     for t in new_threads:
-        thread_id = f"{session_id}-{t.thread_num}"
+        # Key the link by the SAME id save_threads writes/looks up (thread_row_id):
+        # heuristic threads are stored as `t-<hash>`, so the legacy `{session}-{num}`
+        # key silently missed in save_threads' link_map → parent linkage was lost for
+        # every heuristic (default-detector) session (techne#165).
+        thread_id = thread_row_id(session_id, t)
         parent_id = None
 
         results = search_fts(

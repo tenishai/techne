@@ -118,6 +118,7 @@ def run_session_end(
         format_combined_summary,
         link_threads,
         save_threads,
+        thread_row_id,
     )
     from techne.sync.outbox import enqueue
 
@@ -162,7 +163,9 @@ def run_session_end(
                 THREAD_SUMMARY_TARGET,
                 {
                     "session_id": session_id,
-                    "thread_id": f"{session_id}-{t.thread_num}",
+                    # Real threads.id (heuristic threads are `t-<hash>`, not the legacy
+                    # `{session}-{num}`) so sync consumers reference a row that exists (#165).
+                    "thread_id": thread_row_id(session_id, t),
                     "thread_label": t.label,
                     "summary": t.summary,
                     "resume_points": t.resume_points,
@@ -248,6 +251,7 @@ def redetect_threads(
         format_combined_summary,
         link_threads,
         save_threads,
+        thread_row_id,
     )
     from techne.sync.outbox import enqueue
 
@@ -292,7 +296,9 @@ def redetect_threads(
                 THREAD_SUMMARY_TARGET,
                 {
                     "session_id": session_id,
-                    "thread_id": f"{session_id}-{t.thread_num}",
+                    # Real threads.id (heuristic threads are `t-<hash>`, not the legacy
+                    # `{session}-{num}`) so sync consumers reference a row that exists (#165).
+                    "thread_id": thread_row_id(session_id, t),
                     "thread_label": t.label,
                     "summary": t.summary,
                     "resume_points": t.resume_points,
