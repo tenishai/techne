@@ -108,7 +108,10 @@ def _architect_v0_to_v1(conn, current: int, target: int) -> None:
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(pattern_relations)")}
     if cols and "dst_name" not in cols:
+        # ATOMIC (one BEGIN/COMMIT, matching codex's edges rebuild) so a crash can
+        # never leave the table dropped-but-not-recreated.
         conn.executescript(
+            "BEGIN;\n"
             "DROP TABLE pattern_relations;\n"
             "CREATE TABLE pattern_relations (\n"
             "    src_pattern_id    TEXT NOT NULL REFERENCES patterns(id),\n"
@@ -119,7 +122,8 @@ def _architect_v0_to_v1(conn, current: int, target: int) -> None:
             "    PRIMARY KEY (src_pattern_id, dst_name, kind)\n"
             ");\n"
             "CREATE INDEX IF NOT EXISTS idx_pattern_relations_dst "
-            "ON pattern_relations(dst_pattern_id);"
+            "ON pattern_relations(dst_pattern_id);\n"
+            "COMMIT;"
         )
     migrator.user_version_io.write(conn, target)
     conn.commit()
