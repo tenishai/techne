@@ -46,7 +46,7 @@ A document's **gist card** is personal recall (it's *your* memory that this thin
 ```yaml
 stores:
   librarian: { adapter: sqlite, dsn: "sqlite:///~/.techne/librarian.db" }
-  architect: { adapter: sqlite, dsn: "sqlite:///~/.techne/architect.db" }   # → postgres later, by config
+  architect: { adapter: sqlite, dsn: "sqlite:///~/.techne/architect.db" }
   codex:     { adapter: sqlite, dsn: "sqlite:///~/.techne/codex.db" }
 ```
 
@@ -91,7 +91,7 @@ Sequenced; the Librarian goes first because it's already built and working — t
 - **`techne search --table documents`**: keep it (route to the librarian store) or move to a domain-scoped `techne library search`? (Leaning: domain-scoped; personal recall is the cards.)
 - **Vector search** across domains: each domain owns its own vec index in its store; personal recall vec-searches only `techne.db`. Confirm no cross-db vec need.
 - **Config defaults**: do domain dbs default to existing (`~/.techne/<domain>.db`) and auto-create on first use, or require explicit enable? (Leaning: explicit enable, so a memory-only install stays one file.)
-- **Backend portability proof**: validate the SQLite→Postgres `StoreAdapter` swap on `architect.db` (per #87) once a domain actually needs it — don't build Postgres day one.
+- ~~**Backend portability proof**: validate the SQLite→Postgres `StoreAdapter` swap~~ — **resolved (techne#135): retired.** techne is SQLite-only; the seam was unused and removed. Design a server backend against a real driver only if a concrete deploy/multi-writer need ever appears.
 
 ## How this reframes the issues
 
