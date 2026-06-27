@@ -1708,3 +1708,131 @@ class TestReconcileIndexes:
             assert expected <= live  # every SCHEMA_SQL index exists
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# techne#169: migration idempotency + step-12 trigger redeploy
+# ---------------------------------------------------------------------------
+
+
+def test_add_column_if_missing_is_idempotent():
+    """techne#169: the shared helper used by steps 2/4/5/7 must be a safe no-op on
+    replay — re-running after a crash-between-ALTER-and-version-bump must not raise
+    'duplicate column name'."""
+    from techne.core.database import _add_column_if_missing
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (id INTEGER)")
+    _add_column_if_missing(conn, "t", "x", "TEXT")
+    _add_column_if_missing(conn, "t", "x", "TEXT")  # replay — must not raise
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(t)")}
+    assert "x" in cols
+    conn.close()
+
+
+def test_step2_replay_after_partial_apply_does_not_crash(v1_conn):
+    """techne#169: simulate a crash that committed step-2's ALTERs but not the
+    version bump. Re-running _migrate must complete (guarded ALTER), not die with
+    'duplicate column name'. On the pre-fix bare-ALTER code this raised."""
+    v1_conn.execute("ALTER TABLE outbox ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+    v1_conn.execute("ALTER TABLE outbox ADD COLUMN error_message TEXT")
+    v1_conn.commit()
+
+    _migrate(v1_conn, 1, 2)  # must not raise
+
+    cols = {row[1] for row in v1_conn.execute("PRAGMA table_info(outbox)")}
+    assert "status" in cols and "error_message" in cols
+    assert v1_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 2
+
+
+_OLD_KNOWLEDGE_TRIGGERS = """
+DROP TRIGGER IF EXISTS knowledge_ai;
+DROP TRIGGER IF EXISTS knowledge_au;
+DROP TRIGGER IF EXISTS knowledge_ad;
+CREATE TRIGGER knowledge_ai AFTER INSERT ON knowledge BEGIN
+    INSERT INTO knowledge_fts(rowid, content, tags) VALUES (NEW.id, NEW.content, NEW.tags);
+END;
+CREATE TRIGGER knowledge_au AFTER UPDATE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, tags)
+    VALUES ('delete', OLD.id, OLD.content, OLD.tags);
+    INSERT INTO knowledge_fts(rowid, content, tags) VALUES (NEW.id, NEW.content, NEW.tags);
+END;
+CREATE TRIGGER knowledge_ad AFTER DELETE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, tags)
+    VALUES ('delete', OLD.id, OLD.content, OLD.tags);
+END;
+"""
+
+
+class TestStep12KnowledgeTriggerCoalesce:
+    """techne#169: knowledge_ai/ad/au must COALESCE(tags,'') to match the value the
+    backfill/rebuild paths index; step 12 redeploys the corrected bodies because the
+    name-only reconcile_triggers won't update an existing trigger."""
+
+    def test_fresh_db_triggers_have_coalesce(self, tmp_path):
+        conn = connect(tmp_path / "fresh.db")
+        try:
+            for name in ("knowledge_ai", "knowledge_au", "knowledge_ad"):
+                sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+                ).fetchone()[0]
+                assert "COALESCE" in sql, name
+        finally:
+            conn.close()
+
+    def test_step12_redeploys_coalesce_over_old_bodies(self, tmp_path):
+        conn = connect(tmp_path / "old.db")  # fresh = v12, correct triggers
+        try:
+            # Downgrade to the pre-fix (no-COALESCE) trigger bodies + drop the v12
+            # marker so _migrate(11, 12) re-runs step 12 as on a real pre-fix DB.
+            conn.executescript(_OLD_KNOWLEDGE_TRIGGERS)
+            conn.execute("DELETE FROM schema_version WHERE version = 12")
+            conn.commit()
+            assert "COALESCE" not in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='knowledge_au'"
+            ).fetchone()[0]
+
+            _migrate(conn, 11, 12)
+
+            for name in ("knowledge_ai", "knowledge_au", "knowledge_ad"):
+                sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+                ).fetchone()[0]
+                assert "COALESCE" in sql, f"{name} not redeployed with COALESCE"
+            assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 12
+        finally:
+            conn.close()
+
+    def test_null_tags_update_leaves_no_stale_fts_row(self, tmp_path):
+        """The concrete payoff: a NULL-tags row indexed via the backfill convention
+        ('') then mutated must not leave a stale FTS entry. The corrected trigger
+        deletes COALESCE('')='' (matching the index); the old trigger deleted NULL."""
+        db = tmp_path / "k.db"
+        conn = connect(db)  # v12, COALESCE triggers
+        try:
+            conn.execute(
+                "INSERT INTO knowledge (type, content, confidence, tags) "
+                "VALUES ('fact', 'alpha apple', 'high', NULL)"
+            )
+            kid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            # Re-index via the backfill convention so the indexed tags value is '' .
+            conn.execute("INSERT INTO knowledge_fts(knowledge_fts) VALUES('delete-all')")
+            conn.execute(
+                "INSERT INTO knowledge_fts(rowid, content, tags) "
+                "SELECT id, content, COALESCE(tags, '') FROM knowledge"
+            )
+            conn.commit()
+            # Mutate via the trigger; the corrected delete ('') matches the index.
+            conn.execute("UPDATE knowledge SET content = 'beta banana' WHERE id = ?", (kid,))
+            conn.commit()
+
+            apple = conn.execute(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'apple'"
+            ).fetchone()[0]
+            banana = conn.execute(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'banana'"
+            ).fetchone()[0]
+            assert apple == 0, "stale FTS row survived the update"
+            assert banana == 1
+        finally:
+            conn.close()

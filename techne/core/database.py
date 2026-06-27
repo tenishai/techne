@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -14,10 +14,14 @@ SCHEMA_VERSION = 11
 #   _migrate()        — data backfill, destructive change (DROP/rebuild), or a migration
 #                       step that must assume a prior structural precondition. Bump
 #                       SCHEMA_VERSION; update SCHEMA_SQL to match post-migration state.
-#   SCHEMA_SQL only   — purely additive: new nullable column, new table, new index, new
-#                       trigger. The reconciler (_reconcile_tables / _reconcile_columns /
-#                       _reconcile_triggers) diffs SCHEMA_SQL against the live DB on every
-#                       connect and applies the delta automatically.
+#   SCHEMA_SQL only   — purely additive: new nullable column, new table, new index, a
+#                       brand-NEW trigger. The reconciler (_reconcile_tables /
+#                       _reconcile_columns / _reconcile_triggers) diffs SCHEMA_SQL against
+#                       the live DB on every connect and applies the delta automatically.
+#   CHANGING a trigger BODY — NOT additive. _reconcile_triggers is name-only (so it can't
+#                       clobber a user-modified trigger), so an edited body never reaches
+#                       existing DBs. Edit FTS_TRIGGERS_SQL *and* ship a numbered _migrate
+#                       step that DROPs + re-CREATEs the trigger (see step 12, techne#169).
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -319,19 +323,26 @@ CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
     VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''), COALESCE(NEW.kind, ''));
 END;
 
+-- knowledge_* use COALESCE(tags,'') to match the value the backfill/rebuild paths
+-- index (COALESCE(tags,'') — see SCHEMA_FTS_BACKFILL / step 9). A NULL tags fed to
+-- the external-content 'delete' command would otherwise not match the indexed ''
+-- and corrupt/stale the FTS row (techne#169). NOTE: trigger-BODY changes here do NOT
+-- reach existing DBs — reconcile_triggers is name-only (intentional, so it can't
+-- clobber a user-modified trigger). A body change MUST also ship a numbered
+-- migration step that DROPs + re-CREATEs the trigger (see step 12).
 CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
     INSERT INTO knowledge_fts(rowid, content, tags)
-    VALUES (NEW.id, NEW.content, NEW.tags);
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''));
 END;
 CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
     INSERT INTO knowledge_fts(knowledge_fts, rowid, content, tags)
-    VALUES ('delete', OLD.id, OLD.content, OLD.tags);
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''));
 END;
 CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
     INSERT INTO knowledge_fts(knowledge_fts, rowid, content, tags)
-    VALUES ('delete', OLD.id, OLD.content, OLD.tags);
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''));
     INSERT INTO knowledge_fts(rowid, content, tags)
-    VALUES (NEW.id, NEW.content, NEW.tags);
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''));
 END;
 -- documents_* triggers moved to core/librarian.py (LIBRARIAN_SCHEMA) — the
 -- documents domain lives in librarian.db now (techne#99).
@@ -463,15 +474,32 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     return connect(db_path)
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    """Idempotent ``ALTER TABLE ADD COLUMN`` (techne#169).
+
+    ``executescript`` runs each DDL statement in autocommit, so the ALTER is
+    committed independently of the per-step ``INSERT INTO schema_version`` (which
+    only commits at the end of ``_migrate``). A crash in that window leaves the
+    column present but the version unrecorded → the next startup re-runs the step
+    and dies permanently with "duplicate column name". Guarding on
+    ``PRAGMA table_info`` makes the add a safe no-op on replay. (Matches the
+    guard step 11 already used.)
+    """
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
     """Run incremental migrations. Each branch is gated on both
     ``from_version`` (the migration applies) and ``to_version`` (the caller
     asked to reach at least this version)."""
     if from_version < 2 and to_version >= 2:
+        _add_column_if_missing(conn, "outbox", "status", "TEXT NOT NULL DEFAULT 'pending'")
+        _add_column_if_missing(conn, "outbox", "error_message", "TEXT")
         conn.executescript("""
-            ALTER TABLE outbox ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
-            ALTER TABLE outbox ADD COLUMN error_message TEXT;
-
             -- Backfill: synced_at NULL = pending (already default); 'DEAD:...' = dead; else synced
             UPDATE outbox SET status = 'synced'
                 WHERE synced_at IS NOT NULL AND synced_at NOT LIKE 'DEAD:%';
@@ -511,19 +539,18 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         # manual, LLM-derived, or heuristic — undifferentiable now), and the
         # effective_summary() read rule treats it as the highest-priority
         # "manual" slot. New writers route to the typed columns instead.
-        conn.executescript("""
-            ALTER TABLE sessions ADD COLUMN summary_llm TEXT;
-            ALTER TABLE sessions ADD COLUMN summary_heuristic TEXT;
-        """)
+        _add_column_if_missing(conn, "sessions", "summary_llm", "TEXT")
+        _add_column_if_missing(conn, "sessions", "summary_heuristic", "TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (4)")
     if from_version < 5 and to_version >= 5:
         # Add numeric confidence + last_confirmed_at so recall can decay
         # entries that haven't been re-confirmed. Legacy text `confidence`
         # stays for display + backward compat.
+        _add_column_if_missing(
+            conn, "knowledge", "confidence_numeric", "REAL NOT NULL DEFAULT 0.6"
+        )
+        _add_column_if_missing(conn, "knowledge", "last_confirmed_at", "TIMESTAMP")
         conn.executescript("""
-            ALTER TABLE knowledge ADD COLUMN confidence_numeric REAL NOT NULL DEFAULT 0.6;
-            ALTER TABLE knowledge ADD COLUMN last_confirmed_at TIMESTAMP;
-
             -- Backfill confidence_numeric from the legacy enum
             UPDATE knowledge SET confidence_numeric = 0.9 WHERE confidence = 'high';
             UPDATE knowledge SET confidence_numeric = 0.6 WHERE confidence = 'medium';
@@ -564,10 +591,8 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         # tags: whitespace-separated token list from embedding-based inference.
         # kind: highest-scoring kind label (decision-shaped / fact-shaped /
         #        question-shaped / observation-shaped).
-        conn.executescript("""
-            ALTER TABLE observations ADD COLUMN tags TEXT;
-            ALTER TABLE observations ADD COLUMN kind TEXT;
-        """)
+        _add_column_if_missing(conn, "observations", "tags", "TEXT")
+        _add_column_if_missing(conn, "observations", "kind", "TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (7)")
     if from_version < 8 and to_version >= 8:
         # Rebuild observations_fts to index tags + kind (Gap 1 fix: #50).
@@ -672,4 +697,54 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE knowledge ADD COLUMN {col} TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (11)")
+    if from_version < 12 and to_version >= 12:
+        # The knowledge_ai/ad/au FTS triggers shipped without COALESCE(tags, '') —
+        # a NULL tags value mismatches the COALESCE'd value the backfill/rebuild
+        # paths index, so the external-content 'delete' command (fired on UPDATE/
+        # DELETE) doesn't match the indexed row and corrupts/stales the FTS index
+        # (techne#169). reconcile_triggers is name-only, so editing FTS_TRIGGERS_SQL
+        # alone won't reach existing DBs — redeploy via DROP + CREATE here, then
+        # rebuild knowledge_fts to repair any drift the old triggers already caused.
+        knowledge_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge'"
+        ).fetchone()
+        if knowledge_exists:
+            conn.executescript("""
+                DROP TRIGGER IF EXISTS knowledge_ai;
+                DROP TRIGGER IF EXISTS knowledge_ad;
+                DROP TRIGGER IF EXISTS knowledge_au;
+                CREATE TRIGGER knowledge_ai AFTER INSERT ON knowledge BEGIN
+                    INSERT INTO knowledge_fts(rowid, content, tags)
+                    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''));
+                END;
+                CREATE TRIGGER knowledge_ad AFTER DELETE ON knowledge BEGIN
+                    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, tags)
+                    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''));
+                END;
+                CREATE TRIGGER knowledge_au AFTER UPDATE ON knowledge BEGIN
+                    INSERT INTO knowledge_fts(knowledge_fts, rowid, content, tags)
+                    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''));
+                    INSERT INTO knowledge_fts(rowid, content, tags)
+                    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''));
+                END;
+            """)
+            # Rebuild knowledge_fts so any stale/orphaned rows from the pre-fix
+            # triggers are cleared. Guarded on the FTS table existing; the INSERT
+            # mirrors the step-9 repopulate (COALESCE(tags, '')).
+            kfts_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
+            ).fetchone()
+            if kfts_exists:
+                conn.executescript("""
+                    DROP TABLE IF EXISTS knowledge_fts;
+                    CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+                        content, tags, content=knowledge, content_rowid=id,
+                        tokenize='porter unicode61'
+                    );
+                """)
+                conn.execute(
+                    "INSERT INTO knowledge_fts(rowid, content, tags) "
+                    "SELECT id, content, COALESCE(tags, '') FROM knowledge"
+                )
+        conn.execute("INSERT INTO schema_version (version) VALUES (12)")
     conn.commit()
