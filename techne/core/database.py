@@ -257,9 +257,33 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     tokenize='porter unicode61'
 );
 
+-- Curated memory drain (techne#107 PR2) — persisted mirror of CC's
+-- ~/.claude/projects/<slug>/memory/*.md files.  Content-hash deduped and
+-- superseding on change (the same 3-outcome dance as knowledge/documents).
+-- Queried by PR3 claim-gate via live_curated_memory().
+-- (No semicolons in this comment -- the SCHEMA_SQL parser stop heuristic, #56.)
+CREATE TABLE IF NOT EXISTS curated_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_path TEXT NOT NULL,
+    slug TEXT,
+    title TEXT,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    provenance TEXT NOT NULL DEFAULT 'disk_walk',
+    session_id TEXT,
+    meta TEXT,
+    superseded_by INTEGER REFERENCES curated_memory(id),
+    captured_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_curated_memory_path ON curated_memory(source_path);
+CREATE INDEX IF NOT EXISTS idx_curated_memory_slug ON curated_memory(slug);
+CREATE INDEX IF NOT EXISTS idx_curated_memory_superseded ON curated_memory(superseded_by);
+
 -- NOTE: the `documents` domain moved out of core to its own db (librarian.db)
 -- under db-per-domain (techne#99). Its schema now lives in core/librarian.py
--- (LIBRARIAN_SCHEMA), applied via the store registry — NOT here. techne.db is
+-- (LIBRARIAN_SCHEMA), applied via the store registry -- NOT here. techne.db is
 -- personal memory only.
 """
 
