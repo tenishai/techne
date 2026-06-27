@@ -202,7 +202,9 @@ def test_emit_ingest_promote_round_trip(config):
     assert get(db, b)["superseded_by"] == new_id
 
 
-def test_keep_verdict_writes_nothing(config):
+def test_keep_verdict_records_discarded_marker(config):
+    """A 'keep' writes no pending proposal, but DOES record a discarded marker so the
+    cluster isn't re-judged on every future run (the anti-re-proposal guard)."""
     db = config.db_path
     store(db, "dup", type="fact")
     store(db, "dup", type="fact")
@@ -214,11 +216,45 @@ def test_keep_verdict_writes_nothing(config):
     assert counts["written"] == 0 and counts["kept"] == 1
     conn = connect(db)
     try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM knowledge_candidates WHERE origin='consolidate'"
-        ).fetchone()[0] == 0
+        rows = conn.execute(
+            "SELECT status, decided_by FROM knowledge_candidates WHERE origin='consolidate'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "discarded" and rows[0]["decided_by"] == "agent-triage"
     finally:
         conn.close()
+
+
+def test_kept_cluster_not_re_proposed(config):
+    """After a 'keep', the cluster must not surface again — no re-nagging a rejected merge."""
+    db = config.db_path
+    a = store(db, "same thing", type="fact")
+    b = store(db, "same thing", type="fact")
+    batch1 = consolidate_emit(config)
+    item = next(c for c in batch1 if set(c["target_ids"]) == {a, b})
+    consolidate_ingest(config, item["target_ids"], item["cluster_hash"],
+                       json.dumps({"verdict": "keep"}))
+    batch2 = consolidate_emit(config)
+    assert not any(set(c["target_ids"]) == {a, b} for c in batch2)
+
+
+def test_ingest_recomputes_cluster_hash(config):
+    """ingest must store the hash derived from target_ids, not a caller-supplied one —
+    a mismatched hash can't silently defeat _already_proposed (techne#108 review)."""
+    from techne.core.sleepdream import _cluster_hash
+
+    db = config.db_path
+    a = store(db, "rc", type="fact")
+    b = store(db, "rc", type="fact")
+    consolidate_ingest(config, [a, b], "bogus-hash-from-caller", _MERGE_VERDICT)
+    conn = connect(db)
+    try:
+        ph = conn.execute(
+            "SELECT prompt_hash FROM knowledge_candidates WHERE origin='consolidate'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert ph == _cluster_hash([a, b])  # recomputed, not 'bogus-hash-from-caller'
 
 
 def test_anti_re_proposal_skips_already_proposed_cluster(config):

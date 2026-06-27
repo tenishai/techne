@@ -19,8 +19,11 @@ Selection is layered + degrade-safe:
 
 The load-bearing safety against an anti-bloat feature bloating its OWN review queue:
 every cluster has a stable `cluster_hash` (hash of its sorted target ids) stored in
-`prompt_hash`; a cluster that already has a pending/promoted consolidate candidate is
-skipped (`_already_proposed`).
+`prompt_hash`. A cluster already proposed — pending, promoted, OR discarded — is skipped
+(`_already_proposed`). A 'keep' verdict writes a *discarded* marker, so a cluster the
+agent judged distinct is remembered and never re-judged. (Tier-1 pairs without a BM25
+floor, so some weak pairs reach the agent once; the keep-memory bounds that to a single
+judgement per pair — a BM25 floor to cut it at the source is a follow-up.)
 """
 
 from __future__ import annotations
@@ -126,12 +129,16 @@ def consolidate_clusters(
 
 
 def _already_proposed(conn, cluster_hash: str) -> bool:
-    """A consolidate proposal for this exact cluster is already pending/promoted."""
+    """This exact cluster already has a consolidate proposal on record — pending,
+    promoted, OR discarded. Discarded counts: a human (or the agent via a 'keep'
+    verdict) already judged this cluster, so re-proposing it would re-nag a decision
+    that was already made. This is the load-bearing guard against the anti-bloat pass
+    bloating its own review queue (techne#108)."""
     return (
         conn.execute(
             """SELECT 1 FROM knowledge_candidates
                 WHERE prompt_hash = ? AND origin = 'consolidate'
-                  AND status IN ('pending', 'promoted') LIMIT 1""",
+                  AND status IN ('pending', 'promoted', 'discarded') LIMIT 1""",
             (cluster_hash,),
         ).fetchone()
         is not None
@@ -217,42 +224,74 @@ def parse_consolidation_response(raw: str) -> dict | None:
     return {"verdict": "merge", "content": content.strip(), "type": ktype, "confidence": conf}
 
 
+def _insert_consolidation_candidate(
+    conn, *, target_ids: list[int], cluster_hash: str, content: str, ktype: str,
+    confidence: str, status: str, decided_by: str | None, decision_reason: str | None,
+    raw: str | None,
+) -> None:
+    conn.execute(
+        """INSERT INTO knowledge_candidates
+             (scope, type, content, tags, confidence, source_session_id,
+              source_thread_id, model_used, prompt_hash, raw_response,
+              action, target_ids, origin, status, decided_by, decision_reason)
+           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
+                   'merge', ?, 'consolidate', ?, ?, ?)""",
+        (
+            ktype,
+            redact_credentials(content),
+            confidence,
+            SYSTEM_SLEEP_SESSION,
+            cluster_hash,
+            redact_credentials(raw) if raw else None,
+            json.dumps(sorted(target_ids)),
+            status,
+            decided_by,
+            decision_reason,
+        ),
+    )
+
+
 def consolidate_ingest(
     config: Config, target_ids: list[int], cluster_hash: str, response: str
 ) -> dict:
-    """Process one cluster's agent verdict into a candidate. A 'merge' verdict writes an
-    action='merge' candidate (origin='consolidate', target_ids set) for review; a 'keep'
-    (or unparseable) verdict writes nothing. Returns counts."""
+    """Process one cluster's agent verdict.
+
+    A 'merge' verdict writes a pending action='merge' candidate (origin='consolidate',
+    target_ids set) for review. A 'keep' (or unparseable) verdict writes a *discarded*
+    marker recording that the agent judged the cluster distinct — so the anti-re-proposal
+    guard won't re-judge the same cluster on every future sleep run (techne#108 review).
+
+    The cluster_hash is RECOMPUTED from target_ids — never trusted from the caller — so a
+    stored prompt_hash always corresponds to its real target ids and can't silently defeat
+    `_already_proposed`. Returns counts.
+    """
     counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0}
+    ch = _cluster_hash(target_ids)  # recompute; the passed cluster_hash is advisory only
     verdict = parse_consolidation_response(response)
-    if verdict is None:
-        counts["kept"] += 1
-        return counts
     _ensure_system_session(config.db_path)
     raw_for_store = response if config.reflect.log_raw_response else None
     conn = connect(config.db_path)
     try:
-        conn.execute(
-            """INSERT INTO knowledge_candidates
-                 (scope, type, content, tags, confidence, source_session_id,
-                  source_thread_id, model_used, prompt_hash, raw_response,
-                  action, target_ids, origin)
-               VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
-                       'merge', ?, 'consolidate')""",
-            (
-                verdict["type"],
-                redact_credentials(verdict["content"]),
-                verdict["confidence"],
-                SYSTEM_SLEEP_SESSION,
-                cluster_hash,
-                redact_credentials(raw_for_store) if raw_for_store else None,
-                json.dumps(sorted(target_ids)),
-            ),
-        )
+        if verdict is None:
+            _insert_consolidation_candidate(
+                conn, target_ids=target_ids, cluster_hash=ch,
+                content="(kept — agent judged these entries distinct)",
+                ktype="fact", confidence="low", status="discarded",
+                decided_by="agent-triage", decision_reason="keep", raw=raw_for_store,
+            )
+            counts["kept"] += 1
+        else:
+            _insert_consolidation_candidate(
+                conn, target_ids=target_ids, cluster_hash=ch,
+                content=verdict["content"], ktype=verdict["type"],
+                confidence=verdict["confidence"], status="pending",
+                decided_by=None, decision_reason=None, raw=raw_for_store,
+            )
+            counts["proposed"] += 1
+            counts["written"] += 1
         conn.commit()
-        counts["proposed"] += 1
-        counts["written"] += 1
     except Exception:
+        conn.rollback()
         counts["errors"] += 1
     finally:
         conn.close()
