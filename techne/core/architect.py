@@ -20,7 +20,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from techne.config import Config
+from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
+
+ARCHITECT_VERSION = 1  # PRAGMA user_version on architect.db
 
 ARCHITECT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS investigations (
@@ -92,40 +95,67 @@ _migrated: set[Path] = set()
 _reconciled: set[Path] = set()
 
 
+def _architect_v0_to_v1(conn, current: int, target: int) -> None:
+    """architect.db v0 → v1 run-step (techne#136; reshape introduced in #87 P2).
+
+    Reshape `pattern_relations` from the resolved-only `(src, dst_pattern_id, kind)`
+    to the unresolved-edge model (`dst_name` + nullable `dst_pattern_id` +
+    `resolution_status`, the shape codex#89 uses for call edges). Idempotency is
+    STRUCTURAL (the `dst_name`-presence guard), not version-based — a
+    retrofit-versioned db reads `user_version = 0` regardless of shape. The table
+    ships EMPTY in every existing db (no code path wrote a relation before #87 P2),
+    so the DROP+recreate is data-safe; the engine takes a backup first regardless.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pattern_relations)")}
+    if cols and "dst_name" not in cols:
+        # ATOMIC (one BEGIN/COMMIT, matching codex's edges rebuild) so a crash can
+        # never leave the table dropped-but-not-recreated.
+        conn.executescript(
+            "BEGIN;\n"
+            "DROP TABLE pattern_relations;\n"
+            "CREATE TABLE pattern_relations (\n"
+            "    src_pattern_id    TEXT NOT NULL REFERENCES patterns(id),\n"
+            "    dst_name          TEXT NOT NULL,\n"
+            "    dst_pattern_id    TEXT REFERENCES patterns(id),\n"
+            "    kind              TEXT NOT NULL DEFAULT 'related',\n"
+            "    resolution_status TEXT NOT NULL DEFAULT 'unresolved',\n"
+            "    PRIMARY KEY (src_pattern_id, dst_name, kind)\n"
+            ");\n"
+            "CREATE INDEX IF NOT EXISTS idx_pattern_relations_dst "
+            "ON pattern_relations(dst_pattern_id);\n"
+            "COMMIT;"
+        )
+    migrator.user_version_io.write(conn, target)
+    conn.commit()
+
+
 def _reconcile_relations(db_path: Path) -> None:
-    """One-shot shape migration for `pattern_relations` (techne#87 P2).
+    """Versioned `pattern_relations` shape migration (techne#136).
 
-    P1 created the table as `(src_pattern_id, dst_pattern_id, kind)` — a
-    resolved-only edge with no room for a dangling `[[wikilink]]`. P2 needs the
-    unresolved-edge model (`dst_name` + nullable `dst_pattern_id` +
-    `resolution_status`, the same shape codex#89 uses for call edges). The table
-    ships empty in every existing db (relations were never populated — no code
-    path wrote a row before this PR), so a DROP + recreate is data-safe. Guard on
-    the presence of the new `dst_name` column so this is idempotent and a no-op on
-    a fresh (already-new-shape) db.
+    Now routed through the shared engine, gaining the cross-process lock + online
+    backup it previously lacked (the old hand-rolled version had neither, justified
+    by the table being provably empty — true, but unnecessary now that the engine
+    makes locking + backup free). Kept as a named entrypoint (tests call it).
 
-    No cross-process lock (unlike core's `_guarded_migrate`): two racing processes
-    could both DROP+CREATE, but since the table is provably empty there is nothing
-    to lose, and the final state is identical either way.
+    A fresh or already-migrated db — `pattern_relations` already has `dst_name`, or
+    the table doesn't exist yet (schema-apply creates it new-shape) — just gets its
+    version stamped, quietly. An old-shape db takes the guarded, backed-up reshape.
     """
     conn = plain_connect(db_path)
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(pattern_relations)")}
-        if cols and "dst_name" not in cols:
-            conn.executescript(
-                "DROP TABLE pattern_relations;\n"
-                "CREATE TABLE pattern_relations (\n"
-                "    src_pattern_id    TEXT NOT NULL REFERENCES patterns(id),\n"
-                "    dst_name          TEXT NOT NULL,\n"
-                "    dst_pattern_id    TEXT REFERENCES patterns(id),\n"
-                "    kind              TEXT NOT NULL DEFAULT 'related',\n"
-                "    resolution_status TEXT NOT NULL DEFAULT 'unresolved',\n"
-                "    PRIMARY KEY (src_pattern_id, dst_name, kind)\n"
-                ");\n"
-                "CREATE INDEX IF NOT EXISTS idx_pattern_relations_dst "
-                "ON pattern_relations(dst_pattern_id);"
-            )
+        if not cols or "dst_name" in cols:
+            migrator.user_version_io.write(conn, ARCHITECT_VERSION)
             conn.commit()
+            return
+        migrator.guarded_migrate(
+            conn,
+            db_path,
+            target_version=ARCHITECT_VERSION,
+            read_version=migrator.user_version_io.read,
+            run_steps=_architect_v0_to_v1,
+            label="architect schema",
+        )
     finally:
         conn.close()
 
