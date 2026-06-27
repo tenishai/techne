@@ -465,6 +465,51 @@ TOOLS = [
             "required": ["session_id", "thread_id", "response"],
         },
     },
+    {
+        "name": "techne_consolidate_emit",
+        "description": (
+            "Find duplicate/overlapping knowledge entries and judge them with YOUR OWN "
+            "model (techne#108 'sleep' — fights memory bloat; no API key, no sampling). "
+            "Returns clusters; for each, answer the `prompt` with a JSON verdict "
+            "(merge into one, or keep separate), then call techne_consolidate_ingest with "
+            "the same cluster_hash + target_ids. Proposals land in the review queue — "
+            "never auto-applied. Run when wrapping up or when knowledge feels cluttered."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_clusters": {
+                    "type": "integer",
+                    "description": "Cap on clusters returned (default 20).",
+                },
+            },
+        },
+    },
+    {
+        "name": "techne_consolidate_ingest",
+        "description": (
+            "Feed back one cluster's consolidation verdict from techne_consolidate_emit. "
+            "`response` is your JSON verdict object; `target_ids` + `cluster_hash` come "
+            "from the emit batch item. A 'merge' verdict queues a proposal for review "
+            "(promoting it collapses the rows); a 'keep' verdict writes nothing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "The cluster's knowledge ids (from the emit batch item).",
+                },
+                "cluster_hash": {"type": "string", "description": "From the emit batch item."},
+                "response": {
+                    "type": "string",
+                    "description": "Your JSON verdict object answering the cluster prompt.",
+                },
+            },
+            "required": ["target_ids", "cluster_hash", "response"],
+        },
+    },
 ]
 
 def _codex_search(args: dict, config: Config) -> dict:
@@ -596,6 +641,34 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
     )
 
 
+def _techne_consolidate_emit(args: dict, config: Config) -> dict:
+    """Find duplicate/overlapping knowledge clusters for the agent to judge with its
+    own model (techne#108 sleep). Returns prompts; answer each and feed back via
+    techne_consolidate_ingest."""
+    from techne.core.sleepdream import consolidate_emit
+
+    batch = consolidate_emit(config, max_clusters=args.get("max_clusters", 20))
+    return {"count": len(batch), "batch": batch}
+
+
+def _techne_consolidate_ingest(args: dict, config: Config) -> dict:
+    """Persist one cluster's consolidation verdict (techne#108). `response` is the JSON
+    verdict object; `target_ids` + `cluster_hash` come from the emit batch item. A
+    'merge' verdict writes a proposal to knowledge_candidates for review."""
+    from techne.core.sleepdream import consolidate_ingest
+
+    response = args.get("response", "")
+    if not isinstance(response, str):
+        response = json.dumps(response) if response else ""
+
+    return consolidate_ingest(
+        config,
+        args.get("target_ids") or [],
+        args.get("cluster_hash", ""),
+        response,
+    )
+
+
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
@@ -610,6 +683,8 @@ TOOL_HANDLERS = {
     "pattern_related": _pattern_related,
     "techne_reflect_emit": _techne_reflect_emit,
     "techne_reflect_ingest": _techne_reflect_ingest,
+    "techne_consolidate_emit": _techne_consolidate_emit,
+    "techne_consolidate_ingest": _techne_consolidate_ingest,
 }
 
 

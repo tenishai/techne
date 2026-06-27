@@ -150,71 +150,156 @@ def supersede(db_path: Path, old_id: int, new_content: str, source: str = "sessi
     """
     conn = connect(db_path)
     try:
-        old = conn.execute(
-            "SELECT type, tags, confidence, anchor_path, anchor_symbol, superseded_by "
-            "FROM knowledge WHERE id = ?",
-            (old_id,),
-        ).fetchone()
-        if old is None:
-            raise ValueError(f"Knowledge entry {old_id} not found")
-        if old["superseded_by"] is not None:
-            raise ValueError(
-                f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
-                "supersede the latest revision instead"
-            )
-
-        # Re-derive numeric from the enum so the two can't drift (self-heals any
-        # row a pre-#131 supersede left inconsistent). Fall back to medium if the
-        # stored enum is somehow unknown.
-        numeric = CONFIDENCE_NUMERIC.get(old["confidence"], CONFIDENCE_NUMERIC["medium"])
-
-        # Re-resolve the carried anchor (if any) against the current working tree.
-        # Local named `anchor_content_hash` (not `content_hash`) to avoid shadowing
-        # the module-level content_hash() function, matching store().
-        anchor_content_hash: str | None = None
-        anchor_git_sha: str | None = None
-        if old["anchor_path"]:
-            from techne.core.anchor import resolve_anchor
-
-            resolved = resolve_anchor(old["anchor_path"])
-            if resolved is not None:
-                anchor_content_hash = resolved["content_hash"]
-                anchor_git_sha = resolved["git_sha"]
-
-        cur = conn.execute(
-            """INSERT INTO knowledge
-                 (type, content, source, tags, confidence, confidence_numeric,
-                  anchor_path, anchor_symbol, content_hash, anchor_git_sha)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                old["type"],
-                redact_credentials(new_content),
-                source,
-                old["tags"],
-                old["confidence"],
-                numeric,
-                old["anchor_path"],
-                old["anchor_symbol"],
-                anchor_content_hash,
-                anchor_git_sha,
-            ),
-        )
-        new_id = cur.lastrowid
-
-        conn.execute(
-            "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (new_id, old_id),
-        )
-        # Dependency cascade (techne#117): a fact that depended on the now-superseded
-        # entry can no longer be trusted at face value — flip live dependents to
-        # `uncertain`, atomically in this transaction. The replacement value is NOT
-        # auto-propagated; a dependent stays uncertain until reconfirm()ed. supersede
-        # is a deliberate update, so this is off the hot ingest path.
-        _cascade_uncertain(conn, old_id)
+        new_id = _supersede_in_conn(conn, old_id, new_content, source)
         conn.commit()
         return new_id
     finally:
         conn.close()
+
+
+def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
+    """Core of supersede() on a caller-owned connection — no commit/close — so it can
+    run inside another transaction (e.g. promote_candidate's action dispatch, #108).
+    Body is verbatim from the public supersede(); the caller owns the transaction."""
+    old = conn.execute(
+        "SELECT type, tags, confidence, anchor_path, anchor_symbol, superseded_by "
+        "FROM knowledge WHERE id = ?",
+        (old_id,),
+    ).fetchone()
+    if old is None:
+        raise ValueError(f"Knowledge entry {old_id} not found")
+    if old["superseded_by"] is not None:
+        raise ValueError(
+            f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
+            "supersede the latest revision instead"
+        )
+
+    # Re-derive numeric from the enum so the two can't drift (self-heals any
+    # row a pre-#131 supersede left inconsistent). Fall back to medium if the
+    # stored enum is somehow unknown.
+    numeric = CONFIDENCE_NUMERIC.get(old["confidence"], CONFIDENCE_NUMERIC["medium"])
+
+    # Re-resolve the carried anchor (if any) against the current working tree.
+    # Local named `anchor_content_hash` (not `content_hash`) to avoid shadowing
+    # the module-level content_hash() function, matching store().
+    anchor_content_hash: str | None = None
+    anchor_git_sha: str | None = None
+    if old["anchor_path"]:
+        from techne.core.anchor import resolve_anchor
+
+        resolved = resolve_anchor(old["anchor_path"])
+        if resolved is not None:
+            anchor_content_hash = resolved["content_hash"]
+            anchor_git_sha = resolved["git_sha"]
+
+    cur = conn.execute(
+        """INSERT INTO knowledge
+             (type, content, source, tags, confidence, confidence_numeric,
+              anchor_path, anchor_symbol, content_hash, anchor_git_sha)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            old["type"],
+            redact_credentials(new_content),
+            source,
+            old["tags"],
+            old["confidence"],
+            numeric,
+            old["anchor_path"],
+            old["anchor_symbol"],
+            anchor_content_hash,
+            anchor_git_sha,
+        ),
+    )
+    new_id = cur.lastrowid
+
+    conn.execute(
+        "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (new_id, old_id),
+    )
+    # Dependency cascade (techne#117): a fact that depended on the now-superseded
+    # entry can no longer be trusted at face value — flip live dependents to
+    # `uncertain`, atomically in this transaction. The replacement value is NOT
+    # auto-propagated; a dependent stays uncertain until reconfirm()ed. supersede
+    # is a deliberate update, so this is off the hot ingest path.
+    _cascade_uncertain(conn, old_id)
+    return new_id
+
+
+def merge_into(
+    db_path: Path,
+    old_ids: list[int],
+    merged_content: str,
+    *,
+    type: str,
+    confidence: str,
+    tags: str | None = None,
+    source: str = "consolidate",
+) -> int:
+    """Collapse N live knowledge rows into one merged row (techne#108 consolidate).
+
+    Mints ONE new row carrying the *explicitly chosen* type/confidence/tags (the olds
+    may differ — the proposal decides, we never silently pick), then points every old
+    at it via `superseded_by` (N→1 is a plain per-row FK; legal and indexed). Each old
+    runs the #117 cascade (its dependents go `uncertain`).
+
+    Reversible: `UPDATE knowledge SET superseded_by=NULL WHERE superseded_by=new_id`
+    then delete the merged row — the N back-pointers ARE the merge provenance, so no
+    extra table. Raises if any old is missing or already superseded (no merging a
+    chain). Does NOT add a knowledge_deps edge merged→olds: the olds are superseded,
+    so the cascade would immediately flip the merged row to uncertain.
+    """
+    if not old_ids:
+        raise ValueError("merge_into requires at least one old id")
+    if type not in VALID_TYPES:
+        raise ValueError(f"merge_into: invalid type {type!r}")
+    numeric = CONFIDENCE_NUMERIC.get(confidence, CONFIDENCE_NUMERIC["medium"])
+    conn = connect(db_path)
+    try:
+        new_id = _merge_in_conn(
+            conn, old_ids, merged_content,
+            ktype=type, confidence=confidence, numeric=numeric, tags=tags, source=source,
+        )
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def _merge_in_conn(
+    conn, old_ids: list[int], merged_content: str, *,
+    ktype: str, confidence: str, numeric: float, tags: str | None, source: str,
+) -> int:
+    """Core of merge_into() on a caller-owned connection (no commit/close), for the
+    promote dispatch (#108). Asserts every old is live, mints the merged row, repoints
+    the olds, cascades each. Caller owns the transaction."""
+    seen: set[int] = set()
+    for oid in old_ids:
+        if oid in seen:
+            raise ValueError(f"merge_into: duplicate old id {oid}")
+        seen.add(oid)
+        row = conn.execute(
+            "SELECT superseded_by FROM knowledge WHERE id = ?", (oid,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"merge_into: knowledge entry {oid} not found")
+        if row["superseded_by"] is not None:
+            raise ValueError(
+                f"merge_into: entry {oid} is already superseded — merge live rows only"
+            )
+
+    cur = conn.execute(
+        """INSERT INTO knowledge (type, content, source, tags, confidence, confidence_numeric)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (ktype, redact_credentials(merged_content), source, tags or "", confidence, numeric),
+    )
+    new_id = cur.lastrowid
+    for oid in old_ids:
+        conn.execute(
+            "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (new_id, oid),
+        )
+        _cascade_uncertain(conn, oid)
+    return new_id
 
 
 # --- dependency-driven staleness (techne#117) -------------------------------
