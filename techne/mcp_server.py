@@ -641,25 +641,40 @@ TOOLS = [
 
 def _codex_search(args: dict, config: Config) -> dict:
     """FTS over Codex symbols — search across all indexed repos."""
-    from techne.core.codegraph import search_symbols
+    from techne.core.codegraph import annotate_freshness, search_symbols
     from techne.core.codex import codex_db
 
     query = args.get("query", "")
     limit = args.get("limit", 20)
-    hits = search_symbols(codex_db(config), query, limit=limit)
-    return {"results": hits, "count": len(hits)}
+    db_path = codex_db(config)
+    hits = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
+    stale_count = sum(1 for h in hits if h.get("freshness") in ("stale", "missing"))
+    result: dict = {"results": hits, "count": len(hits)}
+    if stale_count:
+        result["notice"] = (
+            f"{stale_count} result(s) may be outdated — re-run `techne codex index` to refresh."
+        )
+    return result
 
 
 def _codex_blast_radius(args: dict, config: Config) -> dict:
     """Transitive reachability (blast-radius / dependency walk) for a symbol."""
-    from techne.core.codegraph import reachable
+    from techne.core.codegraph import annotate_freshness, reachable
     from techne.core.codex import codex_db
 
     symbol_id = args.get("symbol_id", "")
     depth = args.get("depth", 5)
     direction = args.get("direction", "out")
-    rows = reachable(codex_db(config), symbol_id, direction=direction, max_depth=depth)
-    return {"symbol_id": symbol_id, "direction": direction, "depth": depth, "nodes": rows}
+    db_path = codex_db(config)
+    raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
+    rows = annotate_freshness(db_path, raw)
+    stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
+    result: dict = {"symbol_id": symbol_id, "direction": direction, "depth": depth, "nodes": rows}
+    if stale_count:
+        result["notice"] = (
+            f"{stale_count} node(s) may be outdated — re-run `techne codex index` to refresh."
+        )
+    return result
 
 
 def _pattern_search(args: dict, config: Config) -> dict:

@@ -12,6 +12,7 @@ edges.to_name). plain_connect keeps codex.db code-only (no techne core tables).
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from techne.core.stores import plain_connect
@@ -93,7 +94,8 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
     conn = plain_connect(db_path)
     try:
         rows = conn.execute(
-            """SELECT s.id, s.file, s.name, s.kind, s.signature, bm25(symbols_fts) AS rank
+            """SELECT s.id, s.file, s.name, s.kind, s.signature, s.file_hash,
+                      bm25(symbols_fts) AS rank
                FROM symbols_fts f JOIN symbols s ON s.rowid = f.rowid
                WHERE symbols_fts MATCH ? ORDER BY rank LIMIT ?""",
             (fts, limit),
@@ -232,3 +234,107 @@ def stats(db_path: Path) -> dict:
         }
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Staleness annotation (techne#89 slice)
+# ---------------------------------------------------------------------------
+
+# Freshness states mirror anchor.py's spirit but scoped to codex symbols:
+#   fresh   — file on disk, bytes match the indexed file_hash
+#   stale   — file on disk, bytes differ (re-index this file)
+#   missing — file not found on disk (deleted or moved)
+#   unknown — can't determine: no repo_root for a relative path, or no file_hash
+
+
+def _sha256_bytes(path: Path) -> str:
+    """SHA-256 hex digest of *path*'s bytes. Caller must catch OSError."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def annotate_freshness(
+    db_path: Path,
+    symbols: list[dict],
+    *,
+    repo_root: Path | str | None = None,
+) -> list[dict]:
+    """Return a copy of *symbols* with a ``freshness`` key added to each dict.
+
+    Freshness states:
+      fresh   — file present, bytes match the indexed ``file_hash``
+      stale   — file present, bytes differ (re-index recommended)
+      missing — file not found on disk
+      unknown — cannot determine (relative path + no repo_root, or no file_hash)
+
+    ``repo_root`` can be passed explicitly or is read from ``codex_meta``
+    (written by ``RepoSource.initial_walk()``). Symbols that store an absolute
+    path in ``file`` are resolved without a root.
+
+    File hashing is deduplicated: multiple symbols in the same file share one
+    ``os.stat`` + one SHA-256 computation. This makes the call cheap (one stat +
+    hash per DISTINCT file) even on large result sets.
+
+    The function does not mutate the input dicts — it returns new dicts.
+    """
+    # Resolve repo_root from arg or codex_meta.
+    if repo_root is None:
+        if db_path is not None:
+            from techne.core.codex import get_meta
+
+            root_str = get_meta(db_path, "repo_root")
+            repo_root = Path(root_str) if root_str else None
+        # else: no db_path and no explicit repo_root — relative paths → unknown
+    elif not isinstance(repo_root, Path):
+        repo_root = Path(repo_root)
+
+    # Per-file cache: file_str → freshness state string.
+    # Deduplicates disk access for symbols sharing the same file.
+    _file_freshness: dict[str, str] = {}
+
+    def _classify_file(file_str: str, file_hash: str | None) -> str:
+        """Return the freshness state for one file (may be cached)."""
+        if file_str in _file_freshness:
+            return _file_freshness[file_str]
+
+        # Resolve to an absolute path.
+        candidate = Path(file_str)
+        if candidate.is_absolute():
+            abs_path: Path | None = candidate
+        elif repo_root is not None:
+            abs_path = repo_root / candidate
+        else:
+            # Relative path with no repo_root — unknown.
+            state = "unknown"
+            _file_freshness[file_str] = state
+            return state
+
+        if not abs_path.exists():
+            state = "missing"
+        elif file_hash is None:
+            # Can't compare — stored hash absent (older row).
+            state = "unknown"
+        else:
+            try:
+                current_hash = _sha256_bytes(abs_path)
+                state = "fresh" if current_hash == file_hash else "stale"
+            except OSError:
+                state = "unknown"
+
+        _file_freshness[file_str] = state
+        return state
+
+    result: list[dict] = []
+    for sym in symbols:
+        annotated = dict(sym)
+        file_str = sym.get("file")
+        if not file_str:
+            annotated["freshness"] = "unknown"
+        else:
+            annotated["freshness"] = _classify_file(file_str, sym.get("file_hash"))
+        result.append(annotated)
+
+    return result

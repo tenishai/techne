@@ -2110,11 +2110,15 @@ def codex_stats(ctx):
 def codex_search(ctx, query, limit):
     """FTS over symbol names + signatures."""
     config = ctx.obj["config"]
-    from techne.core.codegraph import search_symbols
+    from techne.core.codegraph import annotate_freshness, search_symbols
     from techne.core.codex import codex_db
 
-    for s in search_symbols(codex_db(config), query, limit=limit):
-        click.echo(f"  {s['id']}  [{s['kind']}] {s['name']}  {s.get('signature') or ''}")
+    db_path = codex_db(config)
+    results = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
+    for s in results:
+        freshness = s.get("freshness", "unknown")
+        marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
+        click.echo(f"  {s['id']}  [{s['kind']}] {s['name']}  {s.get('signature') or ''}{marker}")
         click.echo(f"    {s['file']}")
 
 
@@ -2124,11 +2128,14 @@ def codex_search(ctx, query, limit):
 def codex_callers(ctx, symbol_id):
     """Who calls this symbol (direct)."""
     config = ctx.obj["config"]
-    from techne.core.codegraph import callers
+    from techne.core.codegraph import annotate_freshness, callers
     from techne.core.codex import codex_db
 
-    for s in callers(codex_db(config), symbol_id):
-        click.echo(f"  {s['id']}  {s['name']}  ({s['file']})")
+    db_path = codex_db(config)
+    for s in annotate_freshness(db_path, callers(db_path, symbol_id)):
+        freshness = s.get("freshness", "unknown")
+        marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
+        click.echo(f"  {s['id']}  {s['name']}  ({s['file']}){marker}")
 
 
 @codex.command("blast-radius")
@@ -2139,15 +2146,78 @@ def codex_callers(ctx, symbol_id):
 def codex_blast(ctx, symbol_id, direction, depth):
     """Transitive reachability via recursive CTE — out=dependencies, in=dependents."""
     config = ctx.obj["config"]
-    from techne.core.codegraph import reachable
+    from techne.core.codegraph import annotate_freshness, reachable
     from techne.core.codex import codex_db
 
-    rows = reachable(codex_db(config), symbol_id, direction=direction, max_depth=depth)
+    db_path = codex_db(config)
+    raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
+    rows = annotate_freshness(db_path, raw)
     if not rows:
         click.echo("(nothing reachable)")
         return
     for s in rows:
-        click.echo(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']})")
+        freshness = s.get("freshness", "unknown")
+        marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
+        click.echo(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']}){marker}")
+
+
+@codex.command("watch")
+@click.argument("repo", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--language",
+    "languages",
+    default="python,typescript",
+    show_default=True,
+    help="Comma-separated list of languages to watch (python,typescript).",
+)
+@click.option(
+    "--debounce-ms",
+    default=300,
+    show_default=True,
+    help="Debounce interval in milliseconds for file-change events.",
+)
+@click.pass_context
+def codex_watch(ctx, repo, languages, debounce_ms):
+    """Watch REPO for file changes and re-index incrementally (Ctrl-C to stop).
+
+    Runs an initial index first (fresh baseline + persists repo_root), then
+    starts the watchdog observer. Requires `pip install techne[codex]` for
+    watchdog support.
+    """
+    import time
+
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        ctx.exit(1)
+    from techne.codex.source import RepoSource
+    from techne.core.codegraph import stats
+    from techne.core.codex import codex_db
+
+    lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
+    db_path = codex_db(config)
+    src = RepoSource(db_path, repo, languages=lang_list, debounce_ms=debounce_ms)
+
+    click.echo(f"indexing {repo} ...")
+    count = src.initial_walk()
+    s = stats(db_path)
+    click.echo(f"indexed: {count} new symbols  ({s['symbols']} total, {s['edges']} edges)")
+
+    try:
+        src.start_watch()
+    except RuntimeError as exc:
+        click.echo(f"error: {exc}", err=True)
+        ctx.exit(1)
+
+    click.echo(f"watching {repo} (Ctrl-C to stop)")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        src.stop_watch()
+    click.echo("watch stopped")
 
 
 # ---------------------------------------------------------------------------

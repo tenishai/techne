@@ -449,7 +449,7 @@ def test_codex_migration_idempotent(tmp_path):
     conn.commit()
     conn.close()
 
-    from techne.core.codex import _apply_codex_migration
+    from techne.core.codex import CODEX_VERSION, _apply_codex_migration
 
     _apply_codex_migration(db_path)
     # Second call must be a no-op (version check gates it).
@@ -460,6 +460,6 @@ def test_codex_migration_idempotent(tmp_path):
     conn2 = plain_connect(db_path)
     try:
         version = conn2.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 1
+        assert version == CODEX_VERSION
     finally:
         conn2.close()
