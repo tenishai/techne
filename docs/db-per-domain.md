@@ -1,7 +1,7 @@
 # db-per-domain: one store file per persona/domain
 
 **Status**: Draft for review (Raven + Richard, 2026-06-20). Pre-implementation.
-**Tracking**: reframes [#88](https://github.com/dimartin/techne/issues/88) (was: in-db domain registration), ties in [#87](https://github.com/dimartin/techne/issues/87) (StoreAdapter / patterns) and [#89](https://github.com/dimartin/techne/issues/89) (codex graph).
+**Tracking**: reframes [#88](https://github.com/tenishai/techne/issues/88) (was: in-db domain registration), ties in [#87](https://github.com/tenishai/techne/issues/87) (StoreAdapter / patterns) and [#89](https://github.com/tenishai/techne/issues/89) (codex graph).
 **Decision recorded**: techne knowledge#327.
 
 ---

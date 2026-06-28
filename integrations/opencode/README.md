@@ -2,7 +2,7 @@
 
 Run techne memory under [opencode](https://opencode.ai) — the same
 `~/.techne/techne.db` the Claude Code client reads. This is the opencode
-validation gate for [#57](https://github.com/dimartin/techne/issues/57)
+validation gate for [#57](https://github.com/tenishai/techne/issues/57)
 (memory portability across AI clients).
 
 There are two independent pieces. The MCP server gives the **model** access to

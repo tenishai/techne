@@ -9,7 +9,7 @@ Concretely: a SQLite-backed memory store whose core is a **single local file** (
 > **Tour the pieces:** [`docs/modules.md`](docs/modules.md) — a short sales-pitch for each module (what it does, why it's different, how to enable it).
 
 ```bash
-git clone https://github.com/dimartin/techne.git
+git clone https://github.com/tenishai/techne.git
 cd techne
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
@@ -44,7 +44,7 @@ techne is in early alpha — installed from source. Public PyPI distribution is 
 Use a virtual environment — required on Debian/Ubuntu (PEP 668), recommended everywhere else:
 
 ```bash
-git clone https://github.com/dimartin/techne.git
+git clone https://github.com/tenishai/techne.git
 cd techne
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .                  # core: capture, FTS recall, threads, knowledge, identity (lightweight)
@@ -168,12 +168,18 @@ print(techne.identity.list_entries(config.db_path, prefix="team."))
 ```
 techne init [--platform claude-code|codex|standalone] [--identity-dir DIR]
 techne status                              # session and storage stats
+techne serve                               # run as a stdio MCP server (non-Claude-Code clients)
 
 # Threads
 techne threads [--active] [--topic QUERY] [--limit N]
-techne threads show SESSION_ID [--no-color] [--detector heuristic|llm]
+techne threads show SESSION_ID [--no-color] [--detector auto|live|stored]
                                            # per-pair score breakdown for one session:
                                            # which boundaries the detector saw and why
+techne threads redetect SESSION_ID [--sync]
+                                           # re-run heuristic thread detection on a finished
+                                           # session. Refreshes summary_heuristic; leaves
+                                           # ended_at, summary, and summary_llm alone.
+                                           # --sync re-enqueues thread_summary outbox entries.
 techne history [--days N] [--limit N]
 
 # Knowledge
@@ -190,6 +196,13 @@ techne search QUERY [--table all|threads|observations|knowledge] [--limit N]
 techne outbox status                       # pending / synced / dead counts
 techne outbox flush                        # ship pending entries via configured adapter
 techne outbox dead                         # entries that failed permanently
+techne outbox flush-sinks                  # flush pending rows to registered sinks
+techne outbox prune-orphans                # mark pending rows for unregistered targets as dead
+techne outbox purge [--target T] [--yes]   # delete drainable-but-unconfigured pending rows
+
+# Sinks
+techne sinks list                          # all registered sinks: name, description, schema fields
+techne sinks describe NAME                 # full schema field list for a named sink
 
 # Backfill + re-analysis
 techne import [PATH] [--no-prompts] [--force]
@@ -198,11 +211,39 @@ techne import [PATH] [--no-prompts] [--force]
                                            # ~/.claude/projects/<slug>/ for the current cwd.
                                            # Idempotent — skips sessions that already have
                                            # observations unless --force.
-techne threads redetect SESSION_ID [--sync]
-                                           # re-run heuristic thread detection on a finished
-                                           # session. Refreshes summary_heuristic; leaves
-                                           # ended_at, summary, and summary_llm alone.
-                                           # --sync re-enqueues thread_summary outbox entries.
+
+# Capture + integration helpers (for non-Claude-Code runtimes)
+techne observe --session-id ID [--content TEXT] [--tool-name NAME] [--platform P]
+                                           # record an observation (platform-agnostic capture;
+                                           # CLI sibling of the techne_observe MCP tool)
+techne session-end SESSION_ID [--summary TEXT]
+                                           # run end-of-session processing: detect threads,
+                                           # summarize, age. Idempotent. Used by opencode plugin.
+techne context [--project-path PATH] [--limit N]
+                                           # emit a compact memory block for injecting into a
+                                           # client's system prompt (e.g. opencode transform)
+
+# Memory hygiene (reflect · evidence · claims — no API key; uses your own model)
+techne reflect                             # show pending / promoted / discarded candidate counts
+techne reflect review [--status pending|promoted|discarded|all] [--limit N]
+techne reflect emit [--session ID] [--limit N] [-o FILE]
+                                           # emit per-thread reflection prompts for agent to answer
+techne reflect ingest RESPONSES_FILE       # feed agent-answered prompts back; writes candidates
+techne reflect promote CANDIDATE_ID [--by WHO] [--reason TEXT]
+techne reflect discard CANDIDATE_ID [--by WHO] [--reason TEXT]
+techne reflect stats                       # candidate counts as JSON
+
+techne evidence SESSION_ID [--since ISO_TS]
+                                           # evidence gate (#105): show what an agent actually did
+                                           # (artifacts, commits, actions, test results) — verify
+                                           # claims against the observation ledger before asserting
+
+# CC memory reconciliation (techne#107)
+techne memory doctor [--since N] [--claims] [--json]
+                                           # diff CC's curated memory against the deed-log.
+                                           # --claims uses the resident model to judge each
+                                           # discrete fact (no API key required).
+techne memory sync                         # drain CC curated memory files into techne.db
 
 # Maintenance
 techne compact                             # age threads (active → completed → stale)
@@ -211,6 +252,25 @@ techne migrate-summaries [--dry-run]       # one-shot: reclassify pre-v4 session
                                            # summary_heuristic column (so the manual slot
                                            # stops winning the priority read against newer
                                            # LLM/heuristic signals). Safe to re-run.
+
+# Operations (cross-DB integrity)
+techne fsck                                # run every cross-DB consistency check in one pass;
+                                           # exits non-zero on any inconsistency (CI-friendly)
+techne reconcile                           # force the schema drift-reconcile passes on techne.db;
+                                           # use when you suspect schema drift or after an
+                                           # additive SCHEMA_SQL change at unchanged SCHEMA_VERSION
+techne backup [--out DIR]                  # snapshot ALL present domain DBs together into one
+                                           # timestamped set (cross-DB invariants require
+                                           # backup/restore of all DBs as a unit)
+techne restore BACKUP_DIR [--yes] [--no-pre-backup]
+                                           # restore all domain DBs from a backup set; validates
+                                           # the full set before touching any live file
+
+# Diagnostics
+techne probe [--runtime claude-code|opencode] [--mode off-test|pull|differential]
+                                           # differential-canary memory-attribution probe (#94):
+                                           # seeds a canary, spawns a fresh session, checks
+                                           # whether techne carried the codeword into context
 
 # Domain stores — db-per-domain (each in its own db file beside techne.db)
 # Librarian (librarian.db) — documents: transcripts + markdown; recall the gist, fetch full on demand
@@ -222,6 +282,7 @@ techne library show DOC_ID                 # full document (the fetch-on-demand 
 techne library card CARD_ID                # gist + resolve the document cross-db
 techne library cards emit|ingest|list|gist-transcripts
                                            # agent-assisted gist fill (no API key)
+techne library doctor                      # cross-db health check: dangling or stale cards
 techne library migrate-store               # one-time: move documents techne.db → librarian.db
 
 # Architect (architect.db) — the architectural-patterns corpus
@@ -229,6 +290,11 @@ techne architect                           # pattern / investigation counts
 techne architect ingest PATTERNS_MD        # seed from an architectural-patterns.md corpus
 techne architect search QUERY
 techne architect show PATTERN_ID
+techne architect export [-o FILE]          # regenerate shareable architectural-patterns.md
+techne architect related PATTERN_ID        # patterns linked via [[wikilink]] edges
+techne architect applies TARGET            # patterns tagged as applying to TARGET
+techne architect backfill                  # re-derive the relation/applies graph (idempotent)
+techne architect retire-legacy [--dry-run] # delete superseded type='pattern' rows from techne.db
 
 # Codex (codex.db) — code graph (symbols + call/import/def-use edges)
 techne codex index PATH                    # ingest a repo (Tree-sitter; pip install 'techne[codex]')
@@ -236,6 +302,9 @@ techne codex                               # symbol / edge counts
 techne codex search QUERY
 techne codex callers SYMBOL_ID
 techne codex blast-radius SYMBOL_ID [--direction out|in] [--depth N]
+techne codex watch REPO [--language LIST] [--debounce-ms N]
+                                           # watch a repo for file changes; re-indexes
+                                           # incrementally on each change (Ctrl-C to stop)
 ```
 
 ---

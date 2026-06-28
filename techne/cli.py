@@ -1291,10 +1291,10 @@ def memory_sync_cmd(ctx):
 def reflect(ctx):
     """Inspect and manage end-of-session reflection candidates.
 
-    Reflection is an opt-in 2-week-test feature: an LLM scans each detected
-    thread at session_end and proposes durable knowledge / identity entries.
-    While config.reflect.write_to='candidates' the proposals land here for
-    review and do NOT touch the live knowledge / identity tables.
+    Reflection is opt-in (off by default; enable via reflect.enabled): an LLM
+    scans each detected thread at session_end and proposes durable knowledge /
+    identity entries. While config.reflect.write_to='candidates' the proposals
+    land here for review and do NOT touch the live knowledge / identity tables.
     """
     if ctx.invoked_subcommand is not None:
         return

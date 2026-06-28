@@ -19,7 +19,7 @@
 
 [Unit]
 Description=techne filesystem watcher — continuous ingest daemon
-Documentation=https://github.com/dimartin/techne
+Documentation=https://github.com/tenishai/techne
 After=network.target
 
 [Service]

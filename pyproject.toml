@@ -72,7 +72,7 @@ noop = "techne.sync.noop:NoopAdapter"
 filesystem = "techne.sync.filesystem:FilesystemAdapter"
 
 [project.urls]
-Repository = "https://github.com/dimartin/techne"
+Repository = "https://github.com/tenishai/techne"
 
 [tool.ruff]
 target-version = "py311"
