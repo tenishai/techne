@@ -183,6 +183,14 @@ def claims_emit(
         for d in batch:
             deeds_by_id[d["id"]] = d
     deed_list = list(deeds_by_id.values())
+    # Two path candidates each pulled up to DEED_DIGEST_CAP, so their union can be up
+    # to 2× the cap when cwd != cwd.resolve() (macOS /tmp→/private/tmp) and deeds are
+    # stored under both forms — breaking the "pull == show" budget the digest assumes.
+    # Clamp to the cap, keeping the most recent (highest id) deeds. (techne#170)
+    if len(deed_list) > DEED_DIGEST_CAP:
+        capped = True
+        deed_list.sort(key=lambda d: d["id"], reverse=True)
+        deed_list = deed_list[:DEED_DIGEST_CAP]
 
     memory_content = _build_memory_block(memory_rows)
     # Show every pulled deed (pull is already bounded by DEED_DIGEST_CAP).

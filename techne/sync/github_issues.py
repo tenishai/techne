@@ -112,8 +112,15 @@ class GitHubIssuesSource:
     # Fetch
     # ------------------------------------------------------------------
 
-    def _fetch_issues(self) -> list[dict]:
+    def _fetch_issues(self, since: str | None = None) -> list[dict]:
         """Run `gh issue list` and return parsed JSON rows.
+
+        When *since* (an ISO updatedAt cursor) is given, restrict the fetch to
+        issues updated at/after it via `--search "updated:>=<since>"` — the
+        incremental path (techne#170: the cursor used to be saved but never read,
+        so every walk re-fetched the entire repo). `>=` (not `>`) re-fetches the
+        boundary issue, which dedups to a no-op, rather than risk missing another
+        issue updated in the same second.
 
         Uses subprocess so tests can mock it without touching the network.
         Raises RuntimeError on non-zero exit or JSON parse failure.
@@ -131,6 +138,8 @@ class GitHubIssuesSource:
             "--limit",
             str(self._limit),
         ]
+        if since:
+            cmd += ["--search", f"updated:>={since}"]
         log.debug("gh_issue_list_cmd", cmd=cmd)
         try:
             result = subprocess.run(
@@ -161,9 +170,14 @@ class GitHubIssuesSource:
         Returns the count of document rows stored (new inserts + supersessions).
         Re-running on an unchanged repo returns 0 (all dedup no-ops).
         """
-        issues = self._fetch_issues()
+        # Incremental: only fetch issues updated since the saved cursor (techne#170).
+        # First walk (no cursor) fetches everything; later walks fetch the delta.
+        since = self._load_cursor()
+        issues = self._fetch_issues(since=since)
         if not issues:
-            log.info("github_issues_walk_empty", repo=f"{self._owner}/{self._repo}")
+            log.info(
+                "github_issues_walk_empty", repo=f"{self._owner}/{self._repo}", since=since
+            )
             return 0
 
         # librarian.db is migrated on first access (no core schema applied) —

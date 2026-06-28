@@ -5,6 +5,7 @@ memory store contains the same shape of observations regardless of capture
 mechanism.
 """
 
+import logging
 from pathlib import Path
 
 from techne.core.database import connect
@@ -18,6 +19,8 @@ from techne.sync.jsonl_records import (
     should_import,
     tool_result_text,
 )
+
+log = logging.getLogger(__name__)
 
 # Import-time snapshot; honors CLAUDE_CONFIG_DIR set before launch (techne#113).
 PROJECTS_DIR = claude_projects_dir()
@@ -152,7 +155,15 @@ def import_transcript(
             if rtype == "assistant":
                 for b in blocks:
                     if isinstance(b, dict) and b.get("type") == "tool_use":
-                        pending[b.get("id", "")] = {
+                        tu_id = b.get("id")
+                        if not tu_id:
+                            # An id-less tool_use can't be matched to its tool_result.
+                            # The old `b.get("id", "")` fallback keyed every such block
+                            # on "" so they clobbered each other (and a stray id-less
+                            # tool_result would pop the wrong one). Skip it. (techne#170)
+                            log.debug("transcript_import: skipping id-less tool_use block")
+                            continue
+                        pending[tu_id] = {
                             "name": b.get("name", ""),
                             "input": b.get("input") or {},
                             "ts": ts,

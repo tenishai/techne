@@ -501,6 +501,25 @@ class TestGitHubIssuesSource:
         # Cursor should be the max updatedAt among the two mock issues.
         assert state["last_updated_at"] == "2024-01-16T12:00:00Z"
 
+    def test_second_walk_is_incremental_with_search_cursor(self, github_source, techne_db):
+        """techne#170: the saved cursor is now USED. The first walk fetches everything;
+        the second restricts the gh fetch to `--search updated:>=<cursor>` instead of
+        re-fetching the whole repo (the cursor used to be saved but never read)."""
+        with patch("techne.sync.github_issues.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = json.dumps(_MOCK_ISSUES)
+            mock_run.return_value.stderr = ""
+
+            github_source.initial_walk()
+            first_cmd = list(mock_run.call_args.args[0])
+            github_source.initial_walk()
+            second_cmd = list(mock_run.call_args.args[0])
+
+        assert "--search" not in first_cmd, "first walk should be a full fetch"
+        assert "--search" in second_cmd, "second walk should be incremental"
+        i = second_cmd.index("--search")
+        assert second_cmd[i + 1] == "updated:>=2024-01-16T12:00:00Z"
+
     def test_initial_walk_idempotent(self, github_source, db_path):
         """Re-walking with the same data stores nothing new (all dedup no-ops)."""
         with patch("techne.sync.github_issues.subprocess.run") as mock_run:

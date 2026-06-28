@@ -265,13 +265,20 @@ def consolidate_ingest(
     stored prompt_hash always corresponds to its real target ids and can't silently defeat
     `_already_proposed`. Returns counts.
     """
-    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0}
+    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0}
     ch = _cluster_hash(target_ids)  # recompute; the passed cluster_hash is advisory only
     verdict = parse_consolidation_response(response)
     _ensure_system_session(config.db_path)
     raw_for_store = response if config.reflect.log_raw_response else None
     conn = connect(config.db_path)
     try:
+        # Enforce the anti-re-proposal guard at INGEST too (techne#170). consolidate_emit
+        # skips already-proposed clusters, but a direct ingest — or a duplicate ingest of
+        # the same cluster — bypasses that and would re-add a candidate the agent/human
+        # already judged. Re-check on the recomputed hash; no-op if already on record.
+        if _already_proposed(conn, ch):
+            counts["skipped"] += 1
+            return counts
         if verdict is None:
             _insert_consolidation_candidate(
                 conn, target_ids=target_ids, cluster_hash=ch,
