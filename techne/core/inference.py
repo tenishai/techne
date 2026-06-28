@@ -37,6 +37,12 @@ _BUNDLED_PROTOTYPES = Path(__file__).parent.parent / "inference" / "prototypes.y
 _proto_cache: dict[bool, dict] = {}
 _embed_cache: dict[bool, dict] = {}  # override_active -> {label: np.ndarray mean}
 
+# Sentinel for the fastembed+numpy availability check in infer() (techne#56-14).
+# None = not yet attempted; True = deps present; False = ImportError on first attempt.
+# Short-circuits the failing import on every subsequent call when deps are absent,
+# instead of re-attempting a known-failing import each time.
+_INFER_DEPS: bool | None = None
+
 
 @dataclass
 class InferenceResult:
@@ -47,8 +53,10 @@ class InferenceResult:
 
 
 def _reset_cache():
+    global _INFER_DEPS
     _proto_cache.clear()
     _embed_cache.clear()
+    _INFER_DEPS = None
 
 
 def _override_active(config: "Config | None") -> bool:
@@ -109,7 +117,7 @@ def _get_prototype_embeddings(
 
     # Reuse the already-loaded singleton from search.py if available.
     # Import here to avoid circular imports.
-    from techne.core.search import _get_embedding_model
+    from techne.core.embeddings import _get_embedding_model
 
     model: TextEmbedding = _get_embedding_model()
 
@@ -149,13 +157,18 @@ def infer(
         tag_threshold: Minimum cosine similarity to attach a tag (default 0.6).
         top_k: Max number of tags to attach (by score).
     """
+    global _INFER_DEPS
+    if _INFER_DEPS is False:
+        return InferenceResult()
     try:
         import numpy as np
         from fastembed import TextEmbedding  # noqa: F401 — import guard
+        _INFER_DEPS = True
     except ImportError:
+        _INFER_DEPS = False
         return InferenceResult()
 
-    from techne.core.search import _get_embedding_model
+    from techne.core.embeddings import _get_embedding_model
 
     key = _override_active(config)
     prototypes = load_prototypes(config)
