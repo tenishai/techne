@@ -50,6 +50,18 @@ def test_recombine_groups_shared_tag_yields_group(config):
     assert any(g["via"] == "tag:lang:python" for g in groups)
 
 
+def test_recombine_groups_duplicate_tag_no_degenerate_group(config):
+    """A single row carrying a duplicated tag token (tags='foo,foo') must NOT form a
+    degenerate group of one distinct row repeated (Prudence nit — per-tag id dedup)."""
+    db = config.db_path
+    store(db, "lone fact with a doubled tag", type="fact", confidence="high", tags="dup,dup")
+    groups = recombine_groups(config)
+    # No group: the single row dedupes to one distinct id (< 2), so no recombination.
+    assert all("dup" not in g["via"] for g in groups)
+    for g in groups:
+        assert len(set(g["group_ids"])) == len(g["group_ids"]) >= 2  # no repeated ids, real groups
+
+
 def test_recombine_groups_no_shared_tag_yields_no_group(config):
     """Rows with entirely disjoint tags should not be grouped."""
     db = config.db_path

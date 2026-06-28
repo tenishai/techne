@@ -438,12 +438,17 @@ def recombine_groups(
     for tag, row_ids in by_tag.items():
         if len(groups) >= max_groups:
             break
-        if len(row_ids) < 2:
+        # Dedup ids preserving the most-recent-first order (a row may carry a
+        # duplicated tag token, e.g. tags="foo,foo", which would otherwise inflate
+        # the counts and yield a degenerate group with the same row twice).
+        seen_ids: set[int] = set()
+        uniq_ids = [i for i in row_ids if not (i in seen_ids or seen_ids.add(i))]
+        if len(uniq_ids) < 2:
             continue
-        # Giant-tag guard.
-        if len(row_ids) > giant_threshold:
+        # Giant-tag guard (on distinct rows).
+        if len(uniq_ids) > giant_threshold:
             continue
-        ids = sorted(row_ids[:group_size])
+        ids = sorted(uniq_ids[:group_size])
         id_set = frozenset(ids)
         key = _cluster_hash(ids)
         if key in seen_hashes:
