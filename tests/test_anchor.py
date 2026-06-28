@@ -91,6 +91,42 @@ def test_classify_deleted(git_repo):
     assert state == "deleted"
 
 
+def test_classify_too_large_repo_degrades_without_hashing(git_repo, monkeypatch):
+    """techne#141: a repo with >MAX_MOVED_SCAN_FILES tracked files must DEGRADE to
+    `deleted` on recall instead of hashing the whole tree — the moved-scan is skipped, so
+    NO candidate file is hashed. (Distinct from the ls-files-FAILED → `unknown` branch:
+    here the scan completed, it's just too big to walk on a recall.)"""
+    import techne.core.anchor as anchor
+
+    _repo, f = git_repo
+    r = resolve_anchor(str(f))
+    f.unlink()  # file gone → take the moved-scan branch
+
+    over = anchor.MAX_MOVED_SCAN_FILES + 1
+    big_listing = "\n".join(f"pkg/file_{i}.py" for i in range(over))
+    monkeypatch.setattr(anchor, "_git", lambda root, *a, **k: (True, big_listing))
+
+    hashed: list = []
+    real_sha = anchor._sha256_file
+    monkeypatch.setattr(anchor, "_sha256_file", lambda p: hashed.append(p) or real_sha(p))
+
+    state, _detail = anchor.classify(str(f), r["content_hash"], r["git_sha"])
+    assert state == "deleted"  # degrade — NOT `unknown` (the scan completed)
+    assert hashed == [], "too-large repo must not hash any candidate (whole-tree scan skipped)"
+
+
+def test_find_moved_too_large_returns_completed_degrade(git_repo, monkeypatch):
+    """Unit-level: _find_moved on an over-cap listing returns (None, scan_ok=True) — a
+    COMPLETED-but-degraded scan, so the caller emits `deleted`, not `unknown` (techne#141)."""
+    import techne.core.anchor as anchor
+
+    repo, _f = git_repo
+    big = "\n".join(f"f{i}.py" for i in range(anchor.MAX_MOVED_SCAN_FILES + 1))
+    monkeypatch.setattr(anchor, "_git", lambda root, *a, **k: (True, big))
+    new_path, scan_ok = anchor._find_moved(repo, "orig.py", "0" * 64)
+    assert new_path is None and scan_ok is True
+
+
 def test_classify_moved(git_repo):
     """File removed from its path but identical content lives elsewhere in the
     repo → moved, pointing at the new path."""

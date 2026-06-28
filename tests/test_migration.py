@@ -1832,3 +1832,70 @@ class TestStep12KnowledgeTriggerCoalesce:
             ).fetchone()[0] == 1
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# techne#141: migration concurrency — fork racing writers, prove the loser no-ops
+# ---------------------------------------------------------------------------
+
+import os  # noqa: E402
+import time  # noqa: E402
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork required for this race test")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # os.fork in a threaded interp (3.14)
+def test_concurrent_migration_serializes_no_duplicate_versions(tmp_path):
+    """techne#141: Claude Code fires session_start + post_tool_use near-simultaneously, so
+    on the first open after a code bump several processes can all see a stale version and
+    race into the migration body. guarded_migrate's fcntl lock + in-lock double-check must
+    serialize them — the loser re-reads the version under the lock and no-ops.
+
+    Fork N writers that all open connect() (which runs the full v1→current migration) at
+    once via a barrier. If the lock failed, two processes would re-run a step and the
+    second's `INSERT INTO schema_version (version) VALUES (N)` would hit the UNIQUE
+    constraint → IntegrityError → nonzero child exit. So 'all children exit 0' AND 'no
+    duplicate version rows' together prove the serialization holds."""
+    from techne.core.database import init_db
+
+    db_path = tmp_path / "race.db"
+    # Seed a FULL current-schema DB (all tables/triggers present), then roll the recorded
+    # version back one so the only pending migration is the latest step — a realistic
+    # "first open after a code bump" with the real tables present. (A minimal old schema
+    # would crash the migration on missing tables and mask the lock instead of testing it.)
+    init_db(db_path).close()
+    seed = sqlite3.connect(str(db_path))
+    seed.execute("DELETE FROM schema_version")
+    seed.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION - 1,))
+    seed.commit()
+    seed.close()
+
+    n = 16
+    go = tmp_path / "go"
+    pids: list[int] = []
+    for _ in range(n):
+        pid = os.fork()
+        if pid == 0:  # ---- child ----
+            code = 0
+            try:
+                while not go.exists():  # barrier: release all children together
+                    time.sleep(0.001)
+                conn = connect(db_path)  # triggers guarded_migrate to SCHEMA_VERSION
+                v = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+                conn.close()
+                code = 0 if v == SCHEMA_VERSION else 2
+            except BaseException:
+                code = 1
+            os._exit(code)
+        pids.append(pid)
+
+    go.write_text("go")  # fire the start gun
+    exits = [os.WEXITSTATUS(os.waitpid(pid, 0)[1]) for pid in pids]
+    assert all(e == 0 for e in exits), f"racing migrators failed (exit codes): {exits}"
+
+    conn = connect(db_path)
+    try:
+        versions = [r[0] for r in conn.execute("SELECT version FROM schema_version").fetchall()]
+    finally:
+        conn.close()
+    assert max(versions) == SCHEMA_VERSION
+    assert len(versions) == len(set(versions)), f"duplicate schema_version rows: {sorted(versions)}"
