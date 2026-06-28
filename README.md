@@ -1,8 +1,12 @@
 # techne
 
-**Agentic memory and knowledge system.**
+**Persistent memory for AI agents — local-first, one file, and it runs on the model already in the room.**
 
-A SQLite-backed memory store that gives AI agents persistent memory across sessions. Its core is a single file (`techne.db`), built around the idea that agents need three things to be useful over time: a structured record of *what they did* (sessions and threads), a curated record of *what they learned* (knowledge), and a stable record of *who they are and who they work with* (identity). Larger or team-scoped domains — documents, patterns, code — get their own SQLite file behind a `StoreAdapter` (db-per-domain), each carrying only its own schema.
+*Technē* (τέχνη) is the ancient Greek word for **craft**: practical, applied know-how — the knowledge you build by *doing*, as opposed to *epistēmē*, abstract theoretical knowledge. That's the idea here. techne is the craft knowledge an agent accumulates across sessions — what it did, what it learned, who it works with — so it gets better at the work over time instead of starting cold every session.
+
+Concretely: a SQLite-backed memory store whose core is a **single local file** (`techne.db`) — yours, offline, inspectable with `sqlite3`. It gives an agent three things to be useful over time: a structured record of *what it did* (sessions + auto-detected threads), a curated record of *what it learned* (knowledge), and a stable record of *who it is and who it works with* (identity). Its self-maintenance — distilling sessions into durable memory, deduping, evidence-checking claims — runs on **the agent's own model** (no API key, no extra inference bill). Larger or team-scoped domains — documents, patterns, code — each get their own SQLite file behind a `StoreAdapter` (db-per-domain).
+
+> **Tour the pieces:** [`docs/modules.md`](docs/modules.md) — a short sales-pitch for each module (what it does, why it's different, how to enable it).
 
 ```bash
 git clone https://github.com/dimartin/techne.git
@@ -25,7 +29,7 @@ techne init
 | **Identity** | Key-value store for who-the-agent-is and who-it-works-with. Ingests structured markdown (`contacts.md`, `invariants.md`) and YAML on init. |
 | **Outbox** | Pluggable sync for shipping curated knowledge to a team-memory backend. Default adapter is `noop`; ships with a `filesystem` adapter; the protocol is open for custom adapters via entry points. |
 | **Search** | FTS5 across all content layers. Optional vector search via `sqlite-vec` + `fastembed` for semantic similarity. |
-| **Domain stores** | `techne.db` is personal memory; larger/team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **Librarian** (`librarian.db`, documents), **Architect** (`architect.db`, patterns), **Codex** (`codex.db`, code graph). Each db carries only its own schema. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
+| **Domain stores** | `techne.db` is personal memory; larger/team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **Librarian** (`librarian.db`, documents), **Architect** (`architect.db`, patterns), **Codex** (`codex.db`, code graph — *experimental*). Each db carries only its own schema. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
 
 The schema and triggers all live in `techne/core/database.py`. Schema migrations are tracked in a `schema_version` table; `connect()` is lazy-init so library callers don't need to remember to call `init_db()` first.
 
@@ -43,9 +47,13 @@ Use a virtual environment — required on Debian/Ubuntu (PEP 668), recommended e
 git clone https://github.com/dimartin/techne.git
 cd techne
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .                  # core
-pip install -e ".[vectors]"       # adds sqlite-vec + fastembed for semantic recall
-pip install -e ".[llm]"           # OPTIONAL: operator-model path for autonomous/headless reflect/consolidate (the default uses the agent's own model — no extra)
+pip install -e .                  # core: capture, FTS recall, threads, knowledge, identity (lightweight)
+pip install -e ".[vectors]"       # semantic recall — sqlite-vec + fastembed (FTS works without it)
+pip install -e ".[codex]"         # code-graph (experimental) — tree-sitter symbol/call extraction
+pip install -e ".[llm]"           # OPTIONAL operator-model path for autonomous/headless runs;
+                                  #   the default memory-hygiene loop uses the agent's own model — no extra
+pip install -e ".[security]"      # CVE pre-install audit for the shell gate (fails open without it)
+pip install -e ".[watch]"         # continuous filesystem ingest (techne watch)
 ```
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `pip install -e ".[vectors]"` succeeds on 3.14 (installs `sqlite-vec` only); semantic search returns empty gracefully until the ecosystem catches up. FTS5 search works fully on every supported Python (3.11+).
@@ -238,7 +246,7 @@ techne codex blast-radius SYMBOL_ID [--direction out|in] [--depth N]
 
 - **Librarian** (`librarian.db`) — **documents**: your session *transcripts* (the conversation prose, not just tool calls) and *markdown directories*. Recall returns a compact **gist card** that rides normal knowledge recall; the full document is fetched on demand via the card's pointer (a cross-db lookup). Long multi-topic transcripts get a deterministic **thread-index** gist; single-topic docs get an agent-written prose gist (`cards emit/ingest`, no API key). **New here, or setting up a teammate's machine? → [Using the Librarian](docs/librarian-guide.md)** (the documents↔cards model, getting your transcripts in, and an agent-instructions block).
 - **Architect** (`architect.db`) — the **architectural-patterns** corpus: `investigations` (lens-aware dedup, keyed `url × surveyed_by × lens`, so two reviewer lenses on one URL is a join) + the `patterns` lifted from them. Team-scope — queried directly, not folded into personal recall. **Bootstrap your store from the shared corpus:** `techne architect ingest patterns/architectural-patterns.md` (the corpus is a generated export — `architect export` regenerates it; see [`patterns/README.md`](patterns/README.md) for the one-writer/many-readers workflow).
-- **Codex** (`codex.db`) — a **code graph**: `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest shipped — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, `pip install 'techne[codex]'`).
+- **Codex** (`codex.db`) — **a code graph (experimental):** `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest works — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, `pip install 'techne[codex]'`). **Experimental:** indexing is **manual** — the graph goes stale as code changes; re-run `codex index` to refresh (auto-refresh is the next cycle).
 
 Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **SQLite-only by decision** (techne#135): the domains are isolated db files behind a thin path/schema registry, not a backend-portability seam.
 
@@ -283,31 +291,25 @@ sync:
 
 ---
 
-## LLM routing
+## Model use — the agent's own model by default
 
-techne calls LLMs via [LiteLLM](https://github.com/BerriAI/litellm), which provides a unified interface to 140+ providers. The `model` field accepts any LiteLLM model identifier:
+techne's "thinking" features — reflecting a session into durable memory, deduping/merging knowledge ("sleep"), evidence-checking claims — **default to the model already running the agent.** techne renders a prompt, the agent answers it with its own model, and feeds the result back (the `*_emit` / `*_ingest` MCP tools). **No API key, no second model, no extra inference bill.** This is the recommended path and needs no extra dependency.
 
-| Provider | Example model ID | Env var needed |
-|---|---|---|
-| Anthropic | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
-| OpenAI | `openai/gpt-4o-mini` | `OPENAI_API_KEY` |
-| Ollama (local) | `ollama/llama3` | — (runs locally) |
-| Bedrock | `bedrock/anthropic.claude-3-haiku` | AWS creds |
-| Vertex | `vertex_ai/claude-haiku@20251001` | GCP creds |
+### Optional operator-model path (`[llm]`)
 
-Switch providers by changing one config line.
+For **autonomous or headless runs** — a scheduled consolidation, a batch backfill, a background service — there's no live agent to answer the prompt, so techne can drive a model *itself* via [LiteLLM](https://github.com/BerriAI/litellm). Install the extra and set `model`:
 
-### Routing through a LiteLLM proxy
-
-When you're running techne inside a larger system that hosts a [LiteLLM proxy server](https://docs.litellm.ai/docs/proxy/quick_start) for centralized budget enforcement, observability, or model routing, point techne at it:
-
-```yaml
-model: opus                           # whatever alias your proxy declares
-llm_api_base: http://litellm:4000
-llm_api_key: sk-your-virtual-key      # optional; omit to use env var
+```bash
+pip install -e ".[llm]"
 ```
 
-Unset → LiteLLM falls back to its standard env-var-based provider routing (e.g., calling Anthropic directly via `ANTHROPIC_API_KEY`).
+```yaml
+model: claude-haiku-4-5-20251001      # any LiteLLM model id (Anthropic / OpenAI / Ollama / Bedrock / Vertex …)
+llm_api_base: http://litellm:4000     # optional: route through a LiteLLM proxy for budget/observability
+llm_api_key: sk-your-virtual-key      # optional; omit to use the provider's env var (e.g. ANTHROPIC_API_KEY)
+```
+
+Without the `[llm]` extra, the operator path degrades gracefully — the resident (agent's-own-model) path covers everything an interactive session needs. Switch providers by changing the one `model` line.
 
 ---
 
