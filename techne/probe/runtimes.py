@@ -114,10 +114,9 @@ class ClaudeCodeAdapter:
 
     @staticmethod
     def _default_memory_path(cwd: Path) -> Path:
-        """CC stores per-project memory under ~/.claude/projects/<slug>/memory/.
-
-        The slug is the absolute cwd with '/' and '.' replaced by '-'.
-        """
+        """The project's CC auto-memory MEMORY.md, resolved by ``auto_memory_dir``: the
+        default ``~/.claude/projects/<git-root-slug>/memory/`` or a user-set
+        ``autoMemoryDirectory`` override (techne#175)."""
         # Resolve at call time (unlike the import-time snapshots in hooks.py /
         # transcript_import.py): the probe is a longer-lived differential-test
         # harness that may target different runtimes within one process, so it

@@ -22,7 +22,6 @@ from pathlib import Path
 
 from techne.core.state import deed_log
 from techne.core.threads.features import extract_file_paths
-from techne.platforms.claude_code.paths import project_slug  # noqa: F401 (re-exported)
 
 # Cap on deeds pulled per project-path candidate. Surfaced via report["deed_log_capped"]
 # rather than silently dropping the oldest deeds (which would read as false `unbacked`).

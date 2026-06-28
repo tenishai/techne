@@ -41,7 +41,7 @@ def project(tmp_path):
 
 def _write_memory(config_dir: Path, cwd: Path, text: str, filename: str = "MEMORY.md") -> Path:
     """Create a memory file under the redirected CC config dir."""
-    from techne.core.memory_doctor import project_slug
+    from techne.platforms.claude_code.paths import project_slug
 
     mem_dir = config_dir / "projects" / project_slug(cwd) / "memory"
     mem_dir.mkdir(parents=True, exist_ok=True)

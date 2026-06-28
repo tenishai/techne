@@ -110,11 +110,16 @@ def _auto_memory_directory_override(cwd: Path) -> Path | None:
     """The `autoMemoryDirectory` setting, if any, read across CC's settings scopes in
     precedence order (user → project → local; later wins). Returns the expanded Path or
     None. The value must be absolute or start with ``~/`` (per the docs); anything else is
-    ignored. Malformed/absent settings files are skipped. (techne#175)"""
+    ignored. Malformed/absent settings files are skipped. (techne#175)
+
+    PROJECT/LOCAL settings are read from the GIT REPO ROOT's ``.claude/`` — the same root
+    auto-memory is keyed on — so a session run from a subdirectory still finds a
+    repo-root-scoped override instead of falling through to the default dir."""
+    root = _git_project_root(cwd)
     candidates = [
-        claude_config_dir() / "settings.json",       # user scope
-        cwd / ".claude" / "settings.json",            # project scope
-        cwd / ".claude" / "settings.local.json",      # local scope
+        claude_config_dir() / "settings.json",        # user scope
+        root / ".claude" / "settings.json",           # project scope (repo root)
+        root / ".claude" / "settings.local.json",     # local scope (repo root)
     ]
     value: str | None = None
     for f in candidates:

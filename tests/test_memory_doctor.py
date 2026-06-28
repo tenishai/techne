@@ -15,10 +15,10 @@ from techne.core.database import connect, init_db
 from techne.core.memory_doctor import (
     _deed_touched_files,
     find_curated_memory_files,
-    project_slug,
     reconcile,
 )
 from techne.core.state import deed_log
+from techne.platforms.claude_code.paths import project_slug
 
 
 @pytest.fixture
@@ -254,6 +254,29 @@ def test_auto_memory_dir_honors_autoMemoryDirectory_override(project, monkeypatc
     assert auto_memory_dir(cwd) == custom
 
 
+def test_auto_memory_dir_reads_override_from_git_root_not_subdir(tmp_path, monkeypatch):
+    """techne#175 (Prudence): a PROJECT-scoped `autoMemoryDirectory` lives at the git
+    ROOT's .claude/, and CC keys memory on that root — so a session run from a subdir must
+    still pick it up, not fall through to the default dir."""
+    import json
+
+    from techne.platforms.claude_code.paths import auto_memory_dir
+
+    config_dir = tmp_path / "ccconfig"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+    custom = tmp_path / "elsewhere-mem"
+    (repo / ".claude" / "settings.json").write_text(
+        json.dumps({"autoMemoryDirectory": str(custom)})
+    )
+
+    subdir = repo / "pkg" / "deep"
+    subdir.mkdir(parents=True)
+    assert auto_memory_dir(subdir) == custom  # found via the repo-root .claude, not subdir
+
+
 def test_memory_project_slug_uses_git_repo_root(tmp_path):
     """techne#175: CC keys auto-memory on the GIT REPO ROOT (docs: '<project> is derived
     from the git repository … subdirectories within the same repo share one'). A session
@@ -267,3 +290,17 @@ def test_memory_project_slug_uses_git_repo_root(tmp_path):
 
     assert memory_project_slug(subdir) == project_slug(repo)
     assert memory_project_slug(subdir) != project_slug(subdir)  # NOT the raw cwd slug
+
+
+def test_memory_project_slug_handles_git_file_worktree(tmp_path):
+    """techne#175: in a git worktree/submodule `.git` is a `gitdir:` POINTER FILE, not a
+    directory. The root walk uses `.exists()`, which matches both — pin the file case."""
+    from techne.platforms.claude_code.paths import memory_project_slug
+
+    repo = tmp_path / "wt"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")  # .git as a FILE
+    subdir = repo / "src"
+    subdir.mkdir()
+
+    assert memory_project_slug(subdir) == project_slug(repo)
