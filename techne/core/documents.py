@@ -139,9 +139,10 @@ def search_documents(db_path: Path, query: str, *, limit: int = 20) -> list[dict
     """FTS over ACTIVE documents (superseded excluded) — the Librarian's domain
     search (db-per-domain #99). Personal recall is the gist cards in techne.db;
     this searches the full content in librarian.db."""
-    from techne.core.search import _sanitize_fts_query
+    from techne.core.search import prepare_fts_query
 
-    if not query.strip():  # FTS5 MATCH '' is a syntax error (#103)
+    fts = prepare_fts_query(query)  # None when empty/all-punctuation → MATCH '' crash (#143)
+    if fts is None:
         return []
     conn = connect(db_path)
     try:
@@ -151,7 +152,7 @@ def search_documents(db_path: Path, query: str, *, limit: int = 20) -> list[dict
                FROM documents_fts f JOIN documents d ON d.id = f.rowid
                WHERE documents_fts MATCH ? AND d.superseded_by IS NULL
                ORDER BY rank LIMIT ?""",
-            (_sanitize_fts_query(query), limit),
+            (fts, limit),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

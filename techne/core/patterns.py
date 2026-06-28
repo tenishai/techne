@@ -337,9 +337,10 @@ def investigations_for_url(db_path: Path, url: str) -> list[dict]:
 
 def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
     """FTS over active patterns (name + body)."""
-    from techne.core.search import _sanitize_fts_query
+    from techne.core.search import prepare_fts_query
 
-    if not query.strip():  # FTS5 MATCH '' is a syntax error (#103)
+    fts = prepare_fts_query(query)  # None when empty/all-punctuation → MATCH '' crash (#143)
+    if fts is None:
         return []
     conn = plain_connect(db_path)
     try:
@@ -348,7 +349,7 @@ def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]
                FROM patterns_fts f JOIN patterns p ON p.rowid = f.rowid
                WHERE patterns_fts MATCH ? AND p.status = 'active'
                ORDER BY rank LIMIT ?""",
-            (_sanitize_fts_query(query), limit),
+            (fts, limit),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
