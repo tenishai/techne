@@ -256,6 +256,36 @@ class TestClaimsEmit:
         assert result["deed_log_capped"] is True
         assert "CAPPED" in result["prompt"]
 
+    def test_deed_cap_not_doubled_across_path_forms(self, db, tmp_path, monkeypatch):
+        """techne#170: when cwd != cwd.resolve() (macOS /tmp→/private/tmp), the two path
+        candidates each pull DEED_DIGEST_CAP deeds; the union must be CLAMPED to the cap,
+        not 2× it — preserving the digest's "pull == show" budget."""
+        import techne.core.memory_claims as mc
+        from techne.config import Config
+
+        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "DEED_DIGEST_CAP", 2)
+
+        real = (tmp_path / "real").resolve()
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        assert str(link) != str(link.resolve())  # two distinct candidate path forms
+
+        _write_memory(db, real, "uses redis", slug="testslug")
+        # DEED_DIGEST_CAP deeds under EACH path form → union of 4 before the clamp.
+        _session(db, "s_link", str(link))
+        _session(db, "s_real", str(real))
+        for i in range(2):
+            _obs(db, "s_link", "Write", f"Wrote: /link/f{i}.py")
+            _obs(db, "s_real", "Write", f"Wrote: /real/f{i}.py")
+
+        cfg = Config()
+        cfg.db_path = db
+        result = claims_emit(cfg, cwd=link)
+        assert result["deed_count"] == 2  # clamped to the cap, not 4
+        assert result["deed_log_capped"] is True
+
     def test_prompt_contains_memory_content(self, db, project, monkeypatch):
         cwd, _ = project
         proj_path = str(cwd.resolve())

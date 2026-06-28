@@ -279,9 +279,15 @@ def run_differential(config, adapter, *, cleanup: bool = True) -> DifferentialVe
     native_cw, native_label = new_codeword()
     seed = seed_canary(config, techne_cw, techne_label)
 
-    has_control = adapter.supports_native_seed()
-    native_handle = adapter.seed_native_canary(native_cw, native_label) if has_control else None
+    # native_handle is pre-bound so the finally can reference it even if the native
+    # seed below raises. The native seed is INSIDE the try (techne#170): if it raised
+    # outside it, the finally never ran and the techne canary already seeded above
+    # leaked into production knowledge.
+    native_handle = None
     try:
+        has_control = adapter.supports_native_seed()
+        if has_control:
+            native_handle = adapter.seed_native_canary(native_cw, native_label)
         prompt = (
             "Two probe codewords were seeded before this session. "
             f"What is the techne probe codeword (label '{techne_label}') and the native "
