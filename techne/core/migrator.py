@@ -174,7 +174,6 @@ def _schema_table_statements(schema_sql: str) -> list[tuple[str, str]]:
     table_re = re.compile(
         r"CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.IGNORECASE
     )
-    index_re = re.compile(r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+", re.IGNORECASE)
 
     results: list[tuple[str, str]] = []
     current_name: str | None = None
@@ -184,21 +183,20 @@ def _schema_table_statements(schema_sql: str) -> list[tuple[str, str]]:
         if current_name and current_lines:
             results.append((current_name, "\n".join(current_lines).strip()))
 
+    # Statement boundaries are the CREATE TABLE lines themselves (and EOF): every
+    # line after a CREATE TABLE accumulates into that table's block — its body,
+    # its following CREATE INDEX lines, and any interleaved comments — until the
+    # next CREATE TABLE. A comment is never a boundary, so a `--` anywhere in the
+    # body cannot split a statement (techne#56 — the prior comment-based flush
+    # could prematurely close a block on a mid-body comment).
     for line in schema_sql.splitlines():
         m = table_re.match(line.strip())
         if m:
-            flush()
+            flush()  # close the previous table's block
             current_name = m.group(1)
             current_lines = [line]
         elif current_name is not None:
-            if index_re.match(line.strip()) or current_lines:
-                stmt_so_far = "\n".join(current_lines)
-                if line.strip().startswith("--") and ";" in stmt_so_far:
-                    flush()
-                    current_name = None
-                    current_lines = []
-                else:
-                    current_lines.append(line)
+            current_lines.append(line)
 
     flush()
     return results
