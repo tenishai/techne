@@ -95,6 +95,7 @@ class TestHandleRequest:
             "techne_consolidate_ingest",
             "techne_memory_claims_emit",
             "techne_memory_claims_ingest",
+            "techne_check_evidence",
         }
 
     def test_notifications_initialized_returns_none(self, config):
