@@ -82,6 +82,8 @@ CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
 END;
 """
 
+# Process-global memoization keyed on db_path: prevents re-running the migration
+# step on every codex_store() call within a process lifetime.
 _migrated: set[Path] = set()
 _migration_done: set[Path] = set()
 

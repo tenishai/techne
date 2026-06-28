@@ -282,6 +282,39 @@ class TestFlushSinks:
         assert summary["sink:raiser"] == (0, 1)
         assert stats(db_path)["pending"] == 1
 
+    def test_flush_mixed_batch_partial_success(self, db_path):
+        """Mixed batch: alternating ok/fail handler — succeeded rows are synced,
+        failed rows stay pending (techne#56-15)."""
+        from techne.sync.outbox import enqueue
+
+        call_count = [0]
+
+        def alternating_handler(data: dict) -> DeliveryResult:
+            """Succeeds on even calls (0, 2, …), fails on odd calls (1, 3, …)."""
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx % 2 == 0:
+                return DeliveryResult(ok=True)
+            return DeliveryResult(ok=False, error=f"deliberate failure on call {idx}")
+
+        mixed_sink = OutboxSink(
+            name="sink:mixed",
+            payload_schema=SimplePayload,
+            handler=alternating_handler,
+        )
+
+        with use_registry({}):
+            register_sink(mixed_sink)
+            # Enqueue four rows: calls 0 (ok), 1 (fail), 2 (ok), 3 (fail)
+            for i in range(4):
+                enqueue(db_path, "sink:mixed", {"content": f"row-{i}"}, deliver=False)
+            summary = flush_sinks(db_path)
+
+        assert summary["sink:mixed"] == (2, 2)
+        s = stats(db_path)
+        assert s["synced"] == 2
+        assert s["pending"] == 2  # failed rows remain pending for retry
+
 
 # ---------------------------------------------------------------------------
 # prune_orphans tests

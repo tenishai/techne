@@ -282,12 +282,35 @@ class TestOutbox:
     def test_purge_pending_leaves_synced_and_dead(self, db_path, registered_targets):
         # 'knowledge' sink delivers ok=True → synced; purge must not touch it
         enqueue(db_path, "sink:knowledge", {"content": "delivered"})
+        # pending row that purge_pending should delete
         enqueue(db_path, "sink:a", {"x": 1}, deliver=False)
+        # dead row: enqueue a sync: entry, then flush with a failing adapter
+        enqueue(db_path, "sync:doomed", {"x": 99}, deliver=False)
+
+        class _FailAdapter:
+            def health(self):
+                return True
+
+            def push(self, entries):
+                return PushResult(
+                    synced=0,
+                    failed=len(entries),
+                    errors=["forced dead for test"],
+                )
+
+            def pull(self, query):
+                return []
+
+        flush(db_path, _FailAdapter())
+
         assert stats(db_path)["synced"] == 1
+        assert stats(db_path)["dead"] == 1
+
         deleted = purge_pending(db_path)
-        assert deleted == 1
+        assert deleted == 1  # only the pending sink:a row
         s = stats(db_path)
         assert s["synced"] == 1
+        assert s["dead"] == 1  # dead row untouched
         assert s["pending"] == 0
 
     def test_enqueue_unnamespaced_target_raises(self, db_path):
