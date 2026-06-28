@@ -10,6 +10,36 @@ import sys
 from techne import __version__
 from techne.config import Config
 
+# Server-level guidance surfaced to the agent at MCP initialize (the protocol's
+# `instructions` field). This is techne's one chance to teach an agent the memory
+# *loop* — not just what each tool does, but when to reach for it. Keep it tight;
+# it ships in the agent's context on every session that connects this server.
+SERVER_INSTRUCTIONS = (
+    "techne is your persistent memory across sessions. Use it as a loop, not a filing cabinet.\n"
+    "\n"
+    "1. RECALL before you assume. Starting a task — or about to rely on a belief about this "
+    "project, person, or past decision — call techne_recall(topic) (techne_resume at session "
+    "start). Don't answer from assumption when memory may already hold it.\n"
+    "2. STORE when you learn something durable. Call techne_store the moment you learn a fact "
+    "that will matter later, make or are given a decision, receive user feedback or a "
+    "correction, or finish reasoning you'd hate to redo. Pick the type (fact/decision/"
+    "evaluation/procedure) and store the conclusion, not the transcript.\n"
+    "3. SEARCH for breadth. techne_search spans sessions/threads/knowledge; techne_recall is "
+    "focused, topic-scoped context including the identity layer.\n"
+    "4. At SESSION END, consolidate. Run techne_reflect_emit, answer each prompt with YOUR OWN "
+    "model, then techne_reflect_ingest — turning the session into durable candidates. Same "
+    "emit/ingest shape for techne_consolidate_* (dedup) and techne_memory_claims_* "
+    "(evidence-check). These use your model — no API key.\n"
+    "\n"
+    "Honesty: recall results tagged `freshness` (modified/moved/deleted) or marked `uncertain` "
+    "mean 'verify before relying', not fact. Stored knowledge is operator-owned — prefer "
+    "proposing candidates over overwriting.\n"
+    "Domains are opt-in and queried deliberately, not part of personal recall: pattern_search "
+    "(architectural patterns), codex_search/codex_blast_radius (code graph; needs "
+    "`techne codex index` first). Reach for them when the task is about that domain.\n"
+    "Capture is automatic where a host hook exists; otherwise call techne_observe each turn."
+)
+
 
 def handle_request(request: dict, config: Config) -> dict:
     """Route a JSON-RPC request to the appropriate handler."""
@@ -24,6 +54,7 @@ def handle_request(request: dict, config: Config) -> dict:
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "techne", "version": __version__},
+                "instructions": SERVER_INSTRUCTIONS,
             },
         )
 
@@ -191,7 +222,11 @@ def _techne_recall(args: dict, config: Config) -> dict:
 TOOLS = [
     {
         "name": "techne_search",
-        "description": "Search across sessions, threads, knowledge, and identity",
+        "description": (
+            "Call this when you need breadth across history — search across sessions, "
+            "threads, knowledge, and identity. (For focused topic context, prefer "
+            "techne_recall.)"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -209,9 +244,11 @@ TOOLS = [
     {
         "name": "techne_store",
         "description": (
-            "Store a durable personal-memory entry (fact, decision, evaluation, "
-            "procedure). Architectural patterns go to the Architect store via "
-            "`techne architect ingest`, not here (techne#137)."
+            "Call this when you learn a durable fact, make or are given a decision, get "
+            "user feedback or a correction, or finish reasoning you'd hate to redo — to "
+            "store a durable personal-memory entry (fact, decision, evaluation, procedure). "
+            "Store the conclusion, not the transcript. Architectural patterns go to the "
+            "Architect store via `techne architect ingest`, not here (techne#137)."
         ),
         "inputSchema": {
             "type": "object",
@@ -314,7 +351,8 @@ TOOLS = [
     {
         "name": "techne_recall",
         "description": (
-            "Retrieve context for a specific topic — searches all layers "
+            "Call this before relying on an assumption about this project, person, or past "
+            "decision — to retrieve context for a specific topic across all layers "
             "including identity. Git-anchored knowledge results that need "
             "attention carry an explicit `freshness` tag (modified/moved/"
             "deleted/unknown) — spend verification effort only on those rather "

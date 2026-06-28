@@ -46,6 +46,27 @@ class TestHandleRequest:
         assert "tools" in response["result"]["capabilities"]
         assert response["result"]["protocolVersion"] == "2024-11-05"
 
+    def test_initialize_includes_server_instructions(self, config):
+        """The MCP `instructions` field teaches the agent the memory loop (#109/#81 follow-up).
+        Without it an agent sees a pile of tools and no judgment about when to use them."""
+        response = handle_request({"id": 1, "method": "initialize"}, config)
+        instructions = response["result"].get("instructions", "")
+        assert isinstance(instructions, str) and len(instructions) > 200
+        low = instructions.lower()
+        # the four-step loop must be teachable from this text
+        assert "recall" in low and "store" in low
+        assert "techne_reflect_emit" in instructions  # session-end consolidation path
+        assert "verify" in low  # the freshness/uncertain honesty cue
+
+    def test_store_and_recall_descriptions_lead_with_trigger(self, config):
+        """store/recall/search descriptions must lead with WHEN to use them, not just WHAT."""
+        from techne.mcp_server import TOOLS
+
+        by_name = {t["name"]: t["description"] for t in TOOLS}
+        assert by_name["techne_store"].startswith("Call this when you learn")
+        assert by_name["techne_recall"].startswith("Call this before relying")
+        assert by_name["techne_search"].startswith("Call this when you need breadth")
+
     def test_ping_returns_empty_result(self, config):
         """MCP `ping` should return an empty object, not -32601. Without this,
         clients that probe the server with ping treat it as unreachable."""
