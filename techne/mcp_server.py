@@ -31,7 +31,7 @@ SERVER_INSTRUCTIONS = (
     "emit/ingest shape for techne_consolidate_* (dedup) and techne_memory_claims_* "
     "(evidence-check). These use your model — no API key.\n"
     "\n"
-    "Honesty: recall results tagged `freshness` (modified/moved/deleted) or marked `uncertain` "
+    "Honesty: recall results tagged `freshness` (modified/moved/deleted) or marked uncertain "
     "mean 'verify before relying', not fact. Stored knowledge is operator-owned — prefer "
     "proposing candidates over overwriting.\n"
     "Domains are opt-in and queried deliberately, not part of personal recall: pattern_search "
