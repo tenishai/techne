@@ -18,6 +18,10 @@ SCHEMA_VERSION = 12
 #                       brand-NEW trigger. The reconciler (_reconcile_tables /
 #                       _reconcile_columns / _reconcile_triggers) diffs SCHEMA_SQL against
 #                       the live DB on every connect and applies the delta automatically.
+#                       POST-#140 CAVEAT: connect()-time reconcile is sentinel-gated and
+#                       skips already-reconciled DBs. An additive SCHEMA_SQL change at an
+#                       UNCHANGED SCHEMA_VERSION will NOT reach already-reconciled databases.
+#                       Use `techne reconcile` to force re-run, or bump SCHEMA_VERSION.
 #   CHANGING a trigger BODY — NOT additive. _reconcile_triggers is name-only (so it can't
 #                       clobber a user-modified trigger), so an edited body never reaches
 #                       existing DBs. Edit FTS_TRIGGERS_SQL *and* ship a numbered _migrate

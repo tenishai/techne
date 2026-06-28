@@ -30,9 +30,12 @@ Real examples:
 
 The change is **purely additive**: new nullable column, new table, new index, new trigger. The reconciler (`_reconcile_tables` / `_reconcile_columns` / `_reconcile_triggers`) runs on every connect and diffs SCHEMA_SQL against the live DB, so the change lands automatically the next time any code opens a connection.
 
+**Post-#140 caveat:** connect()-time reconcile is sentinel-gated and skips databases that have already been reconciled at the current schema version. An additive SCHEMA_SQL change at an **unchanged SCHEMA_VERSION** will NOT automatically reach already-reconciled databases — they have passed the gate and won't re-run the diff. To force re-application on an existing DB, run `techne reconcile` (re-stamps the sentinel) or bump SCHEMA_VERSION (which always triggers a full reconcile pass).
+
 Steps:
 
 1. Add the column / table / index to `SCHEMA_SQL`. That's it.
+2. If deploying to existing DBs without a version bump, remind users to run `techne reconcile` once.
 
 Real examples:
 - `extension_state` table (issue #18) — new table, no migration needed.
