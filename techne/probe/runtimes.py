@@ -114,18 +114,17 @@ class ClaudeCodeAdapter:
 
     @staticmethod
     def _default_memory_path(cwd: Path) -> Path:
-        """CC stores per-project memory under ~/.claude/projects/<slug>/memory/.
-
-        The slug is the absolute cwd with '/' and '.' replaced by '-'.
-        """
+        """The project's CC auto-memory MEMORY.md, resolved by ``auto_memory_dir``: the
+        default ``~/.claude/projects/<git-root-slug>/memory/`` or a user-set
+        ``autoMemoryDirectory`` override (techne#175)."""
         # Resolve at call time (unlike the import-time snapshots in hooks.py /
         # transcript_import.py): the probe is a longer-lived differential-test
         # harness that may target different runtimes within one process, so it
         # re-reads CLAUDE_CONFIG_DIR per call. The deferred local import also
         # avoids a probe->platforms import cycle.
-        from techne.platforms.claude_code.paths import claude_projects_dir, project_slug
+        from techne.platforms.claude_code.paths import auto_memory_dir
 
-        return claude_projects_dir() / project_slug(cwd) / "memory" / "MEMORY.md"
+        return auto_memory_dir(cwd) / "MEMORY.md"
 
     def injected_context(self, config) -> str:
         """CC's push surface is the SessionStart hook's Tier-0 ## Key Knowledge

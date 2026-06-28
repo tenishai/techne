@@ -20,7 +20,8 @@ import structlog
 
 from techne.config import Config
 from techne.core.curated import ingest_memory_file
-from techne.core.memory_doctor import find_curated_memory_files, project_slug
+from techne.core.memory_doctor import find_curated_memory_files
+from techne.platforms.claude_code.paths import memory_project_slug
 
 log = structlog.get_logger(__name__)
 
@@ -61,7 +62,7 @@ class CCMemorySource:
         files returns 0 (all content-hash no-ops).
         """
         cwd = self._cwd or Path.cwd()
-        slug = project_slug(cwd)
+        slug = memory_project_slug(cwd)
         files = find_curated_memory_files(cwd)
 
         if not files:
