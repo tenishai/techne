@@ -84,6 +84,9 @@ def test_search_patterns_blank_query_returns_empty(db):
     add_pattern(db, investigation_id=inv, name="P", source_url="u", body="some body text")
     assert search_patterns(db, "") == []
     assert search_patterns(db, "   ") == []
+    # techne#143: a non-blank query that sanitizes to "" (lone backslash) reached
+    # MATCH '' on this path and crashed — now guarded via prepare_fts_query.
+    assert search_patterns(db, "\\") == []
 
 
 def test_ingest_patterns_md(db):

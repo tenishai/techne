@@ -56,6 +56,8 @@ def test_search_symbols_blank_query_returns_empty(db):
     _sym(db, "x", "authenticate", sig="def authenticate(user, token): ...")
     assert search_symbols(db, "") == []
     assert search_symbols(db, "   ") == []
+    # techne#143: a lone backslash sanitizes to "" and reached MATCH '' here — now guarded.
+    assert search_symbols(db, "\\") == []
 
 
 def test_callers_callees_direct(db):
