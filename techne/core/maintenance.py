@@ -305,6 +305,11 @@ def restore_all_dbs(
             + " or re-run."
         )
         raise RestoreError(msg) from e
+    finally:
+        # On success every temp was consumed by os.replace (these unlinks no-op); on a
+        # commit-pass failure this clears the orphan temps of the failing/unreached domains.
+        for *_, temp in plan:
+            temp.unlink(missing_ok=True)
 
     return RestoreResult(
         restored=restored, pre_restore_backup=pre, skipped_unknown=skipped_unknown
