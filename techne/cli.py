@@ -23,7 +23,7 @@ def main(ctx):
 def status(ctx):
     """Show current state: active threads, session info, database stats."""
     config = ctx.obj["config"]
-    from techne.core.state import db_stats, get_active_session
+    from techne.core.state import db_stats, get_active_session, platform_breakdown
 
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init")
@@ -31,6 +31,7 @@ def status(ctx):
 
     stats = db_stats(config.db_path)
     session = get_active_session(config.db_path)
+    breakdown = platform_breakdown(config.db_path)
 
     click.echo(f"Database: {config.db_path}")
     click.echo(f"Platform: {config.platform}")
@@ -48,6 +49,11 @@ def status(ctx):
         click.echo(f"Last session: {stats['last_session']}")
     if session:
         click.echo(f"Active session: {session['id'][:16]}... (project: {session['project_path']})")
+    if breakdown:
+        click.echo()
+        click.echo("Platforms:")
+        for plat, counts in breakdown.items():
+            click.echo(f"  {plat}: {counts['sessions']} sessions, {counts['observations']} obs")
 
 
 @main.group(invoke_without_command=True)

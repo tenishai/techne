@@ -241,6 +241,7 @@ def _run_phases_2_to_9(
     # ------------------------------------------------------------------
     try:
         from techne.core.state import get_resume_context
+        from techne.core.state import provenance_tag as _provenance_tag
 
         ctx = get_resume_context(config.db_path, project_path=project_path)
         inj = config.injection
@@ -259,7 +260,9 @@ def _run_phases_2_to_9(
                 label = (t.get("label") or "")[:per_item]
                 resume = (t.get("resume_points") or "")[:per_item]
                 updated = t.get("updated_at", "")
-                item = f"**{label}** (updated {updated})"
+                # Provenance tag (techne#81): which client/agent authored this thread,
+                # surfaced — not filtered — so cross-platform threads are visibly attributed.
+                item = f"**{label}** {_provenance_tag(t)} (updated {updated})"
                 if resume:
                     item += f"\nResume: {resume}"
                 item += "\n"
@@ -277,7 +280,7 @@ def _run_phases_2_to_9(
                 status = f"[{t['status']}]" if t.get("status") != "active" else ""
                 summary = (t.get("summary") or "")[:per_item]
                 label = (t.get("label") or "")[:per_item]
-                item = f"- **{label}** {status} — {summary}\n"
+                item = f"- **{label}** {_provenance_tag(t)} {status} — {summary}\n"
                 if chars_used + len(item) > budget:
                     break
                 recent_lines.append(item)

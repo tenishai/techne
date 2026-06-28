@@ -244,3 +244,27 @@ def test_serve_invokes_mcp_server_main(monkeypatch, isolated_config) -> None:
     result = runner.invoke(main, ["serve"])
     assert result.exit_code == 0, result.output
     assert called["yes"] is True
+
+
+class TestStatusPlatforms:
+    """`techne status` shows a Platforms section (#81)."""
+
+    def test_status_includes_platforms_section(self, cli_config) -> None:
+        """`techne status` renders a Platforms section when sessions exist."""
+        from techne.core.state import start_session
+
+        start_session(cli_config.db_path, platform="claude-code")
+        start_session(cli_config.db_path, platform="opencode")
+
+        result = CliRunner().invoke(main, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Platforms:" in result.output
+        assert "claude-code" in result.output
+        assert "opencode" in result.output
+        assert "sessions" in result.output
+
+    def test_status_no_platforms_section_when_empty(self, cli_config) -> None:
+        """`techne status` skips the Platforms section when the DB has no sessions."""
+        result = CliRunner().invoke(main, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Platforms:" not in result.output
