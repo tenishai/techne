@@ -8,7 +8,11 @@ Proposals land in `knowledge_candidates` (action='merge', origin='consolidate') 
 review; promoting one runs `merge_into` (#108 PR1 dispatch). Nothing auto-mutates live
 knowledge — reflect's safety contract.
 
-This module is the consolidate pass. dream/recombine is the deferred PR3.
+The **dream (recombine)** pass (techne#108 PR B) surfaces NON-OBVIOUS connections
+across already-promoted knowledge: given a group of related-but-distinct facts (shared
+tag), the agent proposes a NEW derived insight (action='add', origin='dream',
+confidence='low') if one genuinely emerges. Abstention-first: most groups yield nothing.
+Proposals land in `knowledge_candidates` for human review — never auto-applied.
 
 Selection is layered + degrade-safe:
   Tier 0 (always): exact `content_hash(content)` dup buckets — copy-paste dups, free.
@@ -283,6 +287,300 @@ def consolidate_ingest(
                 conn, target_ids=target_ids, cluster_hash=ch,
                 content=verdict["content"], ktype=verdict["type"],
                 confidence=verdict["confidence"], status="pending",
+                decided_by=None, decision_reason=None, raw=raw_for_store,
+            )
+            counts["proposed"] += 1
+            counts["written"] += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        counts["errors"] += 1
+    finally:
+        conn.close()
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Dream / recombine pass (techne#108 PR B)
+# ---------------------------------------------------------------------------
+# Surfaces NON-OBVIOUS connections across already-promoted knowledge.
+# Selector: shared tag (deterministic, no fastembed). Abstention-first: the
+# DREAM_PROMPT makes 'none' the easy default; noise control is paramount.
+#
+# Noise controls:
+#   - Only high-confidence live rows (confidence='high', superseded_by IS NULL).
+#   - Skip meta/identity rows (memory-type:user/feedback/project tags).
+#   - Skip generic/giant tags (> min(60% of eligible rows, 3*group_size) rows).
+#   - group_size cap (default 4) and max_groups cap (default 10).
+#   - Anti-churn: group_hash (same _cluster_hash mechanic) stored under
+#     origin='dream'; scoped separately from consolidate so the two passes
+#     never cross-block each other.
+#   - Forced LOW confidence on all dream candidates; never auto-promote.
+# ---------------------------------------------------------------------------
+
+_DREAM_SKIP_TAGS = frozenset({"memory-type:user", "memory-type:feedback", "memory-type:project"})
+
+
+def _tag_has_any(tags: str | None, skip: frozenset) -> bool:
+    """Return True if any comma-separated token in *tags* is in *skip*."""
+    if not tags:
+        return False
+    return any(t.strip() in skip for t in tags.split(","))
+
+
+def _already_proposed_dream(conn, group_hash: str) -> bool:
+    """Dream group already has a proposal — pending, promoted, OR discarded.
+
+    Sibling of _already_proposed scoped to origin='dream' so dream and consolidate
+    proposals never cross-block each other (a group proposed by dream is NOT skipped
+    by consolidate's check, and vice-versa — origin isolates the two passes).
+    """
+    return (
+        conn.execute(
+            """SELECT 1 FROM knowledge_candidates
+                WHERE prompt_hash = ? AND origin = 'dream'
+                  AND status IN ('pending', 'promoted', 'discarded') LIMIT 1""",
+            (group_hash,),
+        ).fetchone()
+        is not None
+    )
+
+
+DREAM_PROMPT = """Here are stored knowledge entries that share a common topic.
+ONLY propose a new insight if together they clearly imply something GENUINELY NEW,
+NON-OBVIOUS, and USEFUL — something that is NOT already stated by any single entry.
+
+MOST groups will NOT yield a real connection. When in doubt, abstain.
+
+# Entries
+{entries}
+
+# Your task
+Respond ONLY with a JSON object:
+  {{
+    "verdict": "connect" | "none",
+    "content": "<the new combined insight, one sentence>",  // required for connect
+    "type": "{types}",                                       // required for connect
+    "basis": "<one line: which facts combine and why>"      // required for connect
+  }}
+- "connect": only when the entries together — not any single one alone — imply a
+  genuinely new insight worth storing. Write the clearest statement as `content`.
+- "none": the entries are independently useful but do not imply anything new together.
+Use "none" (and nothing else) unless you are confident the connection is real and
+non-trivial. Output the JSON object and nothing else.
+"""
+
+
+def recombine_groups(
+    config: Config, *, max_groups: int = 10, group_size: int = 4
+) -> list[dict]:
+    """Select groups of related-but-distinct live knowledge for recombination.
+
+    Selector: shared tag (deterministic, no fastembed). Returns
+    ``[{"group_ids": sorted([...]), "rows": [row dicts], "via": "tag:<tag>"}]``.
+
+    Noise controls applied here:
+    - Only high-confidence live rows (superseded_by IS NULL, confidence='high').
+    - Skip meta/identity rows: tags containing memory-type:user, memory-type:feedback,
+      or memory-type:project are excluded — recombining identity/feedback/project-state
+      with factual knowledge produces noise, not insight.
+    - Giant-tag guard: any tag shared by too many rows is too generic to signal a
+      meaningful relationship. Threshold = max(group_size, min(60% of eligible rows,
+      3*group_size)). The OR of the two conditions fires at the lower (stricter)
+      threshold, but a floor of group_size prevents false positives on tiny corpora
+      where the 60% rule would otherwise filter every shared tag.
+    - group_size cap (up to 4 rows per group, most-recent first by updated_at DESC).
+    - max_groups cap (default 10).
+    - Dedup by sorted id-set; skip groups whose ids are a subset of a group already
+      added (a strict-subset group adds no new cross-fact signal).
+    """
+    conn = connect(config.db_path)
+    try:
+        raw = conn.execute(
+            "SELECT id, type, content, tags, confidence, updated_at FROM knowledge "
+            "WHERE superseded_by IS NULL AND confidence='high' "
+            "ORDER BY updated_at DESC"
+        ).fetchall()
+        rows_all = [dict(r) for r in raw]
+    finally:
+        conn.close()
+
+    # Meta-tag exclusion.
+    eligible = [r for r in rows_all if not _tag_has_any(r.get("tags"), _DREAM_SKIP_TAGS)]
+
+    if not eligible:
+        return []
+
+    n_eligible = len(eligible)
+    # Giant-tag guard: OR of two conditions (fire at the lower/stricter threshold),
+    # but floored at group_size so tiny corpora (where 60% is < group_size) don't
+    # have EVERY shared tag mislabeled as generic. Formula:
+    #   max(group_size, min(0.6 * n_eligible, 3 * group_size))
+    # On large corpora the 3*group_size absolute cap dominates; on medium corpora
+    # the 60% fractional cap dominates; the floor prevents false positives when
+    # n_eligible is very small.
+    giant_threshold = max(group_size, min(0.6 * n_eligible, 3 * group_size))
+
+    # Build per-tag row-id lists (rows already ordered most-recent first above).
+    by_tag: dict[str, list[int]] = {}
+    by_id: dict[int, dict] = {r["id"]: r for r in eligible}
+    for r in eligible:
+        for raw_tag in (r.get("tags") or "").split(","):
+            tag = raw_tag.strip()
+            if not tag:
+                continue
+            by_tag.setdefault(tag, []).append(r["id"])
+
+    groups: list[dict] = []
+    added_sets: list[frozenset] = []
+    seen_hashes: set[str] = set()
+
+    for tag, row_ids in by_tag.items():
+        if len(groups) >= max_groups:
+            break
+        # Dedup ids preserving the most-recent-first order (a row may carry a
+        # duplicated tag token, e.g. tags="foo,foo", which would otherwise inflate
+        # the counts and yield a degenerate group with the same row twice).
+        seen_ids: set[int] = set()
+        uniq_ids = [i for i in row_ids if not (i in seen_ids or seen_ids.add(i))]
+        if len(uniq_ids) < 2:
+            continue
+        # Giant-tag guard (on distinct rows).
+        if len(uniq_ids) > giant_threshold:
+            continue
+        ids = sorted(uniq_ids[:group_size])
+        id_set = frozenset(ids)
+        key = _cluster_hash(ids)
+        if key in seen_hashes:
+            continue
+        # Subset dedup: no new cross-fact signal if ids are a subset of something added.
+        if any(id_set.issubset(s) for s in added_sets):
+            continue
+        seen_hashes.add(key)
+        added_sets.append(id_set)
+        groups.append({
+            "group_ids": ids,
+            "rows": [by_id[i] for i in ids],
+            "via": f"tag:{tag}",
+        })
+
+    return groups
+
+
+def dream_emit(config: Config, *, max_groups: int = 10) -> list[dict]:
+    """Render one recombination prompt per fresh group for the agent to answer with its
+    own model. Skips groups already proposed (anti-re-proposal, origin='dream'). Returns
+    ``[{"group_hash", "group_ids", "prompt"}]``; the agent answers each `prompt` and
+    feeds it back via dream_ingest with the same group_hash + group_ids."""
+    _ensure_system_session(config.db_path)
+    groups = recombine_groups(config, max_groups=max_groups)
+    conn = connect(config.db_path)
+    try:
+        batch = []
+        for g in groups:
+            gh = _cluster_hash(g["group_ids"])
+            if _already_proposed_dream(conn, gh):
+                continue
+            prompt = DREAM_PROMPT.format(
+                entries=_render_cluster(g["rows"]), types=", ".join(VALID_TYPES)
+            )
+            batch.append({"group_hash": gh, "group_ids": g["group_ids"], "prompt": prompt})
+    finally:
+        conn.close()
+    return batch
+
+
+def parse_dream_response(raw: str) -> dict | None:
+    """Parse the agent's JSON dream verdict. Returns a normalized dict for a valid
+    'connect' with non-empty content and type in VALID_TYPES, or None for
+    'none'/unparseable/invalid (caller treats as abstain)."""
+    obj = extract_json_object(raw or "")
+    if not isinstance(obj, dict) or obj.get("verdict") != "connect":
+        return None
+    content = obj.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    ktype = obj.get("type") if obj.get("type") in VALID_TYPES else "fact"
+    return {"verdict": "connect", "content": content.strip(), "type": ktype}
+
+
+def _insert_dream_candidate(
+    conn, *, group_ids: list[int], group_hash: str, content: str, ktype: str,
+    confidence: str, status: str, decided_by: str | None, decision_reason: str | None,
+    raw: str | None,
+) -> None:
+    """Insert a dream candidate row.
+
+    Sibling of _insert_consolidation_candidate with origin='dream' and action='add'
+    (a new derived fact — NOT a merge; the basis facts stay live). Written as a
+    separate function rather than generalizing _insert_consolidation_candidate to avoid
+    any risk of altering consolidate's hardcoded origin/action values.
+    """
+    conn.execute(
+        """INSERT INTO knowledge_candidates
+             (scope, type, content, tags, confidence, source_session_id,
+              source_thread_id, model_used, prompt_hash, raw_response,
+              action, target_ids, origin, status, decided_by, decision_reason)
+           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
+                   'add', ?, 'dream', ?, ?, ?)""",
+        (
+            ktype,
+            redact_credentials(content),
+            confidence,
+            SYSTEM_SLEEP_SESSION,
+            group_hash,
+            redact_credentials(raw) if raw else None,
+            json.dumps(sorted(group_ids)),
+            status,
+            decided_by,
+            decision_reason,
+        ),
+    )
+
+
+def dream_ingest(
+    config: Config, group_ids: list[int], group_hash: str, response: str
+) -> dict:
+    """Process one group's agent dream verdict.
+
+    A 'connect' verdict writes a PENDING action='add' candidate (origin='dream',
+    confidence='low' forced — speculative by construction, never trust the model's
+    confidence, target_ids=group_ids for provenance/audit) for human review.
+
+    A 'none' (or unparseable) verdict writes a *discarded* keep-memory marker
+    (origin='dream') so the group is never re-judged on future dream runs — same
+    pattern as consolidate's 'keep' marker.
+
+    The group_hash is RECOMPUTED from group_ids — never trusted from the caller — so a
+    stored prompt_hash always corresponds to its real group ids and can't silently defeat
+    _already_proposed_dream. Returns counts.
+    """
+    counts = {"proposed": 0, "written": 0, "kept": 0, "errors": 0, "skipped": 0}
+    gh = _cluster_hash(group_ids)  # recompute; caller-supplied hash is advisory only
+    verdict = parse_dream_response(response)
+    _ensure_system_session(config.db_path)
+    raw_for_store = response if config.reflect.log_raw_response else None
+    conn = connect(config.db_path)
+    try:
+        # Anti-churn: enforce at ingest too (mirrors consolidate_ingest techne#170 fix).
+        if _already_proposed_dream(conn, gh):
+            counts["skipped"] += 1
+            return counts
+        if verdict is None:
+            _insert_dream_candidate(
+                conn, group_ids=group_ids, group_hash=gh,
+                content="(no connection — agent found no non-obvious link)",
+                ktype="fact", confidence="low", status="discarded",
+                decided_by="agent-triage", decision_reason="none", raw=raw_for_store,
+            )
+            counts["kept"] += 1
+        else:
+            # Confidence FORCED to 'low' — dream candidates are speculative by
+            # construction; the model's stated confidence is ignored.
+            _insert_dream_candidate(
+                conn, group_ids=group_ids, group_hash=gh,
+                content=verdict["content"], ktype=verdict["type"],
+                confidence="low", status="pending",
                 decided_by=None, decision_reason=None, raw=raw_for_store,
             )
             counts["proposed"] += 1

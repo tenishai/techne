@@ -553,6 +553,55 @@ TOOLS = [
         },
     },
     {
+        "name": "techne_dream_emit",
+        "description": (
+            "Recombine pass (techne#108 'dream'): find non-obvious connections across "
+            "stored knowledge using YOUR OWN model — speculative, low-confidence, "
+            "review-gated, abstention-first. No API key, no sampling. Returns groups; "
+            "for each, answer the `prompt` with a JSON verdict (connect or none), then "
+            "call techne_dream_ingest with the same group_hash + group_ids. 'none' is "
+            "the easy default — most groups will NOT yield a real connection. Proposals "
+            "land in the review queue as low-confidence candidates — never auto-applied."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_groups": {
+                    "type": "integer",
+                    "description": "Cap on groups returned (default 10).",
+                },
+            },
+        },
+    },
+    {
+        "name": "techne_dream_ingest",
+        "description": (
+            "Feed back one group's dream verdict from techne_dream_emit. "
+            "`response` is your JSON verdict object (verdict='connect'|'none'); "
+            "`group_ids` + `group_hash` come from the emit batch item. A 'connect' "
+            "verdict queues a low-confidence pending candidate for human review "
+            "(the basis facts stay live — this is a new derived insight, not a merge); "
+            "a 'none' verdict writes a keep-memory marker so the group is never "
+            "re-judged."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "group_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "The group's knowledge ids (from the emit batch item).",
+                },
+                "group_hash": {"type": "string", "description": "From the emit batch item."},
+                "response": {
+                    "type": "string",
+                    "description": "Your JSON verdict object answering the group prompt.",
+                },
+            },
+            "required": ["group_ids", "group_hash", "response"],
+        },
+    },
+    {
         "name": "techne_memory_claims_emit",
         "description": (
             "Extract claims from curated memory and judge each against the deed-log using "
@@ -811,6 +860,34 @@ def _techne_consolidate_ingest(args: dict, config: Config) -> dict:
     )
 
 
+def _techne_dream_emit(args: dict, config: Config) -> dict:
+    """Find related knowledge groups for the agent to judge with its own model
+    (techne#108 dream/recombine). Returns prompts; answer each and feed back via
+    techne_dream_ingest. Abstention-first — most groups yield nothing."""
+    from techne.core.sleepdream import dream_emit
+
+    batch = dream_emit(config, max_groups=args.get("max_groups", 10))
+    return {"count": len(batch), "batch": batch}
+
+
+def _techne_dream_ingest(args: dict, config: Config) -> dict:
+    """Persist one group's dream verdict (techne#108). `response` is the JSON verdict
+    object; `group_ids` + `group_hash` come from the emit batch item. A 'connect'
+    verdict writes a low-confidence pending candidate for review."""
+    from techne.core.sleepdream import dream_ingest
+
+    response = args.get("response", "")
+    if not isinstance(response, str):
+        response = json.dumps(response) if response else ""
+
+    return dream_ingest(
+        config,
+        args.get("group_ids") or [],
+        args.get("group_hash", ""),
+        response,
+    )
+
+
 def _techne_memory_claims_emit(args: dict, config: Config) -> dict:
     """Emit the claim-reconciliation prompt for the agent to answer with its own model
     (techne#107 PR3). Returns the prompt + metadata; feed the response back via
@@ -892,6 +969,8 @@ TOOL_HANDLERS = {
     "techne_reflect_ingest": _techne_reflect_ingest,
     "techne_consolidate_emit": _techne_consolidate_emit,
     "techne_consolidate_ingest": _techne_consolidate_ingest,
+    "techne_dream_emit": _techne_dream_emit,
+    "techne_dream_ingest": _techne_dream_ingest,
     "techne_memory_claims_emit": _techne_memory_claims_emit,
     "techne_memory_claims_ingest": _techne_memory_claims_ingest,
     "techne_check_evidence": _techne_check_evidence,
