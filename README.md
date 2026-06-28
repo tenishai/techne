@@ -375,7 +375,10 @@ sync:
 
 ## Versioning
 
-Semantic versioning. Tagged releases on the repo:
+Semantic versioning. **Full release history: [`CHANGELOG.md`](CHANGELOG.md).**
+
+<details>
+<summary>Pre-0.8.0 history (now canonical in CHANGELOG.md)</summary>
 
 - **v0.7.0** — db-per-domain + staff review:
   - **One db file per domain, behind a `StoreAdapter`.** `techne.db` stays personal memory; documents → `librarian.db` (#99), patterns → `architect.db` (#87 P1), code graph → `codex.db` (#89 P1). Domain tables left core's `SCHEMA_SQL` — a memory-only db no longer gets empty unused tables.
@@ -422,6 +425,8 @@ Semantic versioning. Tagged releases on the repo:
 - **v0.2.1** — polish: hook test coverage, contacts.md parser hardening, public API surface in `__init__.py`
 - **v0.2.0** — LiteLLM as default LLM router, lazy schema init, outbox status refactor, `techne.lifecycle` module for library use
 - **v0.1.0** — initial release
+
+</details>
 
 ---
 
