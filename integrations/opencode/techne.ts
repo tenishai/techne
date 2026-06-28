@@ -74,7 +74,10 @@ export const TechneCapture: Plugin = async ({ $, directory }) => {
     // Each user prompt → a UserPrompt observation (so memory records what was
     // asked, not just what tools ran). input: { sessionID, ... };
     // output: { message, parts }. We keep the text parts.
+    // Guard: only capture user-role messages — assistant turns must not be
+    // mislabeled as user prompts (#83-7).
     "chat.message": async (input, output) => {
+      if (output?.message?.role !== "user") return
       const text = (output.parts ?? [])
         .filter((p: any) => p?.type === "text" && p?.text)
         .map((p: any) => p.text as string)

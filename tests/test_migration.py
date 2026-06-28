@@ -1966,3 +1966,85 @@ def test_concurrent_migration_serializes_no_duplicate_versions(tmp_path):
         conn.close()
     # Exactly the seed version + the one applied migration — no step ran twice, none skipped.
     assert set(versions) == {SCHEMA_VERSION - 1, SCHEMA_VERSION}, f"unexpected versions: {versions}"
+
+
+# ---------------------------------------------------------------------------
+# #56-16: schema-parser robustness — mid-block comment must not prematurely
+# flush a CREATE TABLE statement
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaTableStatementsComments:
+    """_schema_table_statements must treat statement boundaries as the CREATE TABLE
+    lines themselves (not a comment-based heuristic), so a -- comment inside the
+    CREATE TABLE body does not prematurely end the statement (techne#56)."""
+
+    def test_mid_block_comment_parses_as_one_statement(self):
+        """A CREATE TABLE with a -- comment INSIDE the parens is ONE statement
+        under the paren-balance parser; the old comment heuristic would have
+        prematurely flushed the half-built statement."""
+        from techne.core.migrator import _schema_table_statements
+
+        schema = (
+            "CREATE TABLE IF NOT EXISTS my_table (\n"
+            "    id INTEGER PRIMARY KEY,\n"
+            "    -- this is a mid-block comment\n"
+            "    name TEXT NOT NULL,\n"
+            "    value TEXT\n"
+            ");\n"
+        )
+        results = _schema_table_statements(schema)
+        assert len(results) == 1, (
+            f"Expected 1 statement, got {len(results)}: {results}"
+        )
+        name, sql = results[0]
+        assert name == "my_table"
+        # The closing paren + semicolon and all columns must be in the statement.
+        assert "name TEXT NOT NULL" in sql
+        assert "value TEXT" in sql
+
+    def test_multi_table_with_mid_block_comments(self):
+        """Two CREATE TABLE blocks, each with an interior comment, parse as
+        two independent statements — not merged or split wrongly."""
+        from techne.core.migrator import _schema_table_statements
+
+        schema = (
+            "CREATE TABLE IF NOT EXISTS foo (\n"
+            "    id INTEGER PRIMARY KEY,\n"
+            "    -- comment inside foo\n"
+            "    x TEXT\n"
+            ");\n"
+            "\n"
+            "CREATE TABLE IF NOT EXISTS bar (\n"
+            "    id INTEGER PRIMARY KEY,\n"
+            "    -- comment inside bar\n"
+            "    y TEXT\n"
+            ");\n"
+        )
+        results = _schema_table_statements(schema)
+        assert len(results) == 2, (
+            f"Expected 2 statements, got {len(results)}: {[r[0] for r in results]}"
+        )
+        names = {name for name, _ in results}
+        assert names == {"foo", "bar"}
+
+    def test_comment_after_semicolon_does_not_merge(self):
+        """A -- comment line that appears AFTER the closing ';' must NOT cause
+        the next CREATE TABLE to be merged into the prior block."""
+        from techne.core.migrator import _schema_table_statements
+
+        schema = (
+            "CREATE TABLE IF NOT EXISTS t1 (\n"
+            "    id INTEGER PRIMARY KEY\n"
+            ");\n"
+            "-- separator comment between tables\n"
+            "CREATE TABLE IF NOT EXISTS t2 (\n"
+            "    id INTEGER PRIMARY KEY\n"
+            ");\n"
+        )
+        results = _schema_table_statements(schema)
+        assert len(results) == 2, (
+            f"Expected 2 statements, got {len(results)}: {[r[0] for r in results]}"
+        )
+        names = {name for name, _ in results}
+        assert names == {"t1", "t2"}
