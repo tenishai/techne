@@ -44,8 +44,8 @@ git clone https://github.com/dimartin/techne.git
 cd techne
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .                  # core
-pip install -e ".[vectors]"       # adds sqlite-vec + fastembed for semantic search
-pip install -e ".[anthropic]"     # if you want to pin Anthropic SDK directly (LiteLLM handles routing by default)
+pip install -e ".[vectors]"       # adds sqlite-vec + fastembed for semantic recall
+pip install -e ".[llm]"           # OPTIONAL: operator-model path for autonomous/headless reflect/consolidate (the default uses the agent's own model — no extra)
 ```
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `pip install -e ".[vectors]"` succeeds on 3.14 (installs `sqlite-vec` only); semantic search returns empty gracefully until the ecosystem catches up. FTS5 search works fully on every supported Python (3.11+).
