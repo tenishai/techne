@@ -93,6 +93,8 @@ class TestHandleRequest:
             "techne_reflect_ingest",
             "techne_consolidate_emit",
             "techne_consolidate_ingest",
+            "techne_dream_emit",
+            "techne_dream_ingest",
             "techne_memory_claims_emit",
             "techne_memory_claims_ingest",
             "techne_check_evidence",
