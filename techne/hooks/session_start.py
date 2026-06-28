@@ -7,7 +7,9 @@ Fail-safe design (techne#95, techne#119):
   3. Risky imports (egress, sync adapter) are lazy — an ImportError degrades
      to "no injection" instead of crashing the hook entirely.
   4. The hook NEVER exits non-zero. Worst case: minimal banner noting the failure.
-  5. All failures are persisted to extension_state so they survive stderr-swallowing.
+  5. Failures AFTER config load are persisted to extension_state so they survive
+     stderr-swallowing. A config-load failure itself cannot be persisted (no loaded
+     config means no db path) and is surfaced only via stderr + the degraded banner.
   6. A hard SIGALRM timeout (bounded_hook) ensures the hook cannot wedge the
      agent turn — phases 2-9 run inside the budget; any overrun exits 0.
 """
