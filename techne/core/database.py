@@ -444,8 +444,47 @@ def _guarded_migrate(conn: sqlite3.Connection, db_path: Path, existing_version: 
     )
 
 
+# Sentinel recording the SCHEMA_VERSION at which the reconcile passes last ran for
+# THIS db (techne#140). The reconcile passes are an idempotent drift safety-net, but
+# they run inside connect() — i.e. on the hot capture path — and include COUNT(*)
+# probes over the FTS shadow tables. Running them unconditionally on every connect is
+# wasteful once a db is already current+reconciled. We stamp this sentinel after a
+# reconcile and skip the passes while it matches SCHEMA_VERSION. Reconcile still runs
+# (a) after any migration and (b) once for any db that reaches the current version
+# without a matching stamp (e.g. a pre-sentinel db). `techne fsck` remains the
+# explicit-verification path for suspected drift on an already-stamped db.
+_RECONCILE_SENTINEL = "reconcile:schema_version"
+
+
+def _reconciled_version(conn: sqlite3.Connection) -> int:
+    from techne.core.extension_state import get_state
+
+    try:
+        st = get_state(conn, _RECONCILE_SENTINEL)
+    except sqlite3.OperationalError:
+        # extension_state not present yet (a db older than that table) → treat as
+        # un-reconciled so the passes run and create + stamp it.
+        return 0
+    return st.get("version", 0) if st else 0
+
+
+def _run_reconcile_passes(conn: sqlite3.Connection) -> None:
+    """Run every drift-reconcile pass, then stamp the sentinel at SCHEMA_VERSION."""
+    from techne.core.extension_state import set_state
+
+    _reconcile_tables(conn)
+    _reconcile_triggers(conn)
+    _reconcile_fts_backfill(conn)
+    _reconcile_columns(conn)
+    _reconcile_indexes(conn)  # last: an index may reference a just-added column (#138)
+    set_state(conn, _RECONCILE_SENTINEL, {"version": SCHEMA_VERSION})
+    conn.commit()
+
+
 def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
     """Initialize the schema if absent. Safe to call repeatedly."""
+    from techne.core.extension_state import set_state
+
     existing = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
     ).fetchone()
@@ -453,17 +492,22 @@ def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
         conn.executescript(SCHEMA_SQL)
         conn.executescript(FTS_TRIGGERS_SQL)
         conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        # A freshly-created schema is correct by construction — no reconcile needed;
+        # stamp the sentinel so the next connect skips the passes (techne#140).
+        set_state(conn, _RECONCILE_SENTINEL, {"version": SCHEMA_VERSION})
         conn.commit()
     else:
         row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
         existing_version = row[0] if row else 0
         if existing_version < SCHEMA_VERSION:
+            # Schema is changing — reconcile is mandatory afterwards.
             _guarded_migrate(conn, db_path, existing_version)
-        _reconcile_tables(conn)
-        _reconcile_triggers(conn)
-        _reconcile_fts_backfill(conn)
-        _reconcile_columns(conn)
-        _reconcile_indexes(conn)  # last: an index may reference a just-added column (#138)
+            _run_reconcile_passes(conn)
+        elif _reconciled_version(conn) != SCHEMA_VERSION:
+            # Already at the current version but not yet reconciled at it (a pre-sentinel
+            # db, or one that reached this version another way) — reconcile once, stamp.
+            _run_reconcile_passes(conn)
+        # else: current and already reconciled at SCHEMA_VERSION → skip the hot-path passes.
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:

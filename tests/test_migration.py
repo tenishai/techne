@@ -1689,23 +1689,62 @@ class TestReconcileIndexes:
         conn.close()
 
     def test_all_schema_indexes_present_after_connect(self, tmp_path):
-        """Convergence: drop a real SCHEMA_SQL index from a current-version DB,
-        reopen, and the reconciler restores it (#138)."""
+        """Convergence: drop a real SCHEMA_SQL index, then on an UNSTAMPED reopen the
+        reconciler restores it (#138). Reconcile is now gated on a sentinel (#140) — it
+        runs on a version change / unstamped db, not on every connect — so we clear the
+        stamp to simulate the trigger that invokes it."""
         from techne.core import migrator
-        from techne.core.database import SCHEMA_SQL
+        from techne.core.database import SCHEMA_SQL, _RECONCILE_SENTINEL
 
         db_path = tmp_path / "converge.db"
         conn = connect(db_path)  # fresh DB at current schema — all indexes present
         expected = {name for name, _ in migrator._index_statements(SCHEMA_SQL)}
         assert "idx_knowledge_type" in expected  # sanity: we parsed real indexes
         conn.execute("DROP INDEX idx_knowledge_type")
+        # Clear the reconcile stamp → next connect treats the db as un-reconciled.
+        conn.execute("DELETE FROM extension_state WHERE name = ?", (_RECONCILE_SENTINEL,))
         conn.commit()
         conn.close()
 
-        conn = connect(db_path)  # reopen → _reconcile_indexes restores it
+        conn = connect(db_path)  # reopen unstamped → _reconcile_indexes restores it
         try:
             live = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
             assert expected <= live  # every SCHEMA_SQL index exists
+        finally:
+            conn.close()
+
+    def test_reconcile_gated_on_sentinel(self, tmp_path):
+        """techne#140: an already-stamped current-version db SKIPS the reconcile passes
+        on connect (the hot-path win) — a dropped index is NOT auto-restored while the
+        sentinel matches; clearing the stamp re-arms reconcile, which restores it."""
+        from techne.core.database import SCHEMA_VERSION, _RECONCILE_SENTINEL
+        from techne.core.extension_state import get_state
+
+        db_path = tmp_path / "gated.db"
+        conn = connect(db_path)
+        # A fresh db is stamped at the current version (so the next connect skips).
+        assert get_state(conn, _RECONCILE_SENTINEL) == {"version": SCHEMA_VERSION}
+        conn.execute("DROP INDEX idx_knowledge_type")  # drop, but leave the stamp intact
+        conn.commit()
+        conn.close()
+
+        conn = connect(db_path)  # stamped → reconcile SKIPPED → index stays gone
+        try:
+            live = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+            assert "idx_knowledge_type" not in live, "reconcile should be skipped while stamped"
+        finally:
+            conn.close()
+
+        # Clearing the stamp re-arms reconcile, which restores the index and re-stamps.
+        conn = connect(db_path)
+        conn.execute("DELETE FROM extension_state WHERE name = ?", (_RECONCILE_SENTINEL,))
+        conn.commit()
+        conn.close()
+        conn = connect(db_path)
+        try:
+            live = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+            assert "idx_knowledge_type" in live
+            assert get_state(conn, _RECONCILE_SENTINEL) == {"version": SCHEMA_VERSION}
         finally:
             conn.close()
 
