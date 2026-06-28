@@ -238,8 +238,13 @@ def test_curated_memory_additive_reconcile(tmp_path):
         ).fetchone()
         assert table_exists is not None, "curated_memory table should exist after init_db"
 
-        # Drop it to simulate an old db.
+        # Drop it to simulate an old db. Reconcile is gated on a sentinel (techne#140),
+        # so also clear the stamp → the next connect treats the db as un-reconciled and
+        # runs the reconcile passes (rather than skipping them on the hot path).
+        from techne.core.database import _RECONCILE_SENTINEL
+
         conn.execute("DROP TABLE curated_memory")
+        conn.execute("DELETE FROM extension_state WHERE name = ?", (_RECONCILE_SENTINEL,))
         conn.commit()
 
         gone = conn.execute(
@@ -249,7 +254,7 @@ def test_curated_memory_additive_reconcile(tmp_path):
     finally:
         conn.close()
 
-    # Re-open (triggers reconciliation via _ensure_initialized -> _reconcile_tables).
+    # Re-open unstamped (triggers reconciliation via _ensure_initialized -> _reconcile_tables).
     conn2 = connect(db_path)
     try:
         restored = conn2.execute(

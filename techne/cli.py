@@ -2178,6 +2178,26 @@ def fsck_cmd(ctx):
         raise SystemExit(1)
 
 
+@main.command("reconcile")
+@click.pass_context
+def reconcile_cmd(ctx):
+    """Force the schema drift-reconcile passes on techne.db (re-add a dropped
+    index/trigger/column, fix FTS desync).
+
+    connect()-time reconcile is gated to skip an already-current, already-reconciled
+    db (techne#140 — the hot-path optimisation); this re-runs the passes
+    unconditionally and re-stamps the sentinel. Use it if you suspect schema drift.
+    """
+    from techne.core.database import force_reconcile
+
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        raise SystemExit(1)
+    force_reconcile(config.db_path)
+    click.echo(f"reconcile: drift-reconcile passes re-run on {config.db_path}")
+
+
 @main.command("backup")
 @click.option("--out", default=None, help="Destination dir (default: <data_dir>/backups/)")
 @click.pass_context
