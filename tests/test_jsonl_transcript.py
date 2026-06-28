@@ -160,6 +160,28 @@ def test_second_walk_emits_zero_when_no_new_lines(db_path, tmp_path):
     assert _obs_count(db_path) == 2  # unchanged
 
 
+def test_cursor_committed_with_observations(db_path, tmp_path):
+    """techne#170: the per-file cursor is now persisted in the SAME transaction as its
+    observations (inside _ingest_records_from_offset), not in a separate post-walk write.
+    After a walk the cursor must be committed and advanced to the file's end — so a
+    crash before a (now-removed) deferred save can't re-ingest. Behaviour lock for the
+    persist location."""
+    p = tmp_path / "sess-1.jsonl"
+    _write_jsonl(p, [_rec_user("a"), _rec_user("b")])
+
+    cfg = JsonlTranscriptConfig(paths=[tmp_path])
+    JsonlTranscriptSource(db_path=db_path, config=cfg).initial_walk()
+
+    conn = connect(db_path)
+    try:
+        state = get_state(conn, cfg.adapter_name)
+    finally:
+        conn.close()
+    assert state is not None and "cursors" in state
+    cursor = state["cursors"][str(p)]
+    assert cursor["offset"] == p.stat().st_size  # advanced to EOF, committed
+
+
 # ---------------------------------------------------------------------------
 # Append M lines → emit exactly M
 # ---------------------------------------------------------------------------

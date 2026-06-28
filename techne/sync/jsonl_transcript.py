@@ -109,11 +109,18 @@ def _ingest_records_from_offset(
     jsonl_path: Path,
     start_byte: int,
     adapter_name: str,
+    *,
+    cursor_key: str,
+    inode: int,
+    head: str,
 ) -> tuple[int, int]:
     """Read new records from *jsonl_path* starting at *start_byte*.
 
-    Emits observations into the DB. Returns (new_byte_offset, obs_count).
-    Session and project are derived from path when not in the record.
+    Emits observations into the DB AND persists this file's cursor
+    ({offset, inode, head} under *cursor_key*) in the SAME transaction, so a crash
+    between the two can't leave observations committed with a stale cursor →
+    re-ingest → duplicate observations (techne#170). Returns (new_byte_offset,
+    obs_count). Session and project are derived from path when not in the record.
     """
     session_id = _session_from_path(jsonl_path)
     project = _project_from_path(jsonl_path)
@@ -132,13 +139,13 @@ def _ingest_records_from_offset(
 
     conn = connect(db_path)
     try:
-        # Ensure session row exists so observations can reference it.
+        # Ensure session row exists so observations can reference it. No commit here:
+        # the whole file (session row + observations + cursor) is ONE transaction.
         conn.execute(
             """INSERT OR IGNORE INTO sessions (id, project_path, platform)
                VALUES (?, ?, 'claude-code')""",
             (session_id, str(jsonl_path.parent)),
         )
-        conn.commit()
 
         with jsonl_path.open("rb") as fh:
             fh.seek(start_byte)
@@ -172,7 +179,14 @@ def _ingest_records_from_offset(
                 if rtype == "assistant":
                     for b in blocks:
                         if isinstance(b, dict) and b.get("type") == "tool_use":
-                            pending_tool_uses[b.get("id", "")] = {
+                            tu_id = b.get("id")
+                            if not tu_id:
+                                # id-less tool_use can't be matched to its result; the
+                                # old `b.get("id","")` fallback clobbered all such blocks
+                                # under "". Skip it. (techne#170)
+                                log.debug("jsonl_ingest: skipping id-less tool_use block")
+                                continue
+                            pending_tool_uses[tu_id] = {
                                 "name": b.get("name", ""),
                                 "input": b.get("input") or {},
                                 "ts": ts,
@@ -232,6 +246,16 @@ def _ingest_records_from_offset(
                         )
                         obs_count += 1
 
+        # Persist THIS file's cursor in the SAME transaction as its observations.
+        # (techne#170 — the old code committed observations here, then saved cursors
+        # in a separate transaction after the whole walk; a crash between re-ingested
+        # the same records.)
+        state = get_state(conn, adapter_name) or {}
+        cursors = state.get("cursors", {})
+        cursors[cursor_key] = {"offset": new_offset, "inode": inode, "head": head}
+        state["cursors"] = cursors
+        set_state(conn, adapter_name, state)
+
         conn.commit()
         return new_offset, obs_count
 
@@ -285,14 +309,9 @@ class JsonlTranscriptSource:
         finally:
             conn.close()
 
-    def _save_cursors(self, cursors: dict[str, dict]) -> None:
-        conn = connect(self._db_path)
-        try:
-            state = get_state(conn, self._cfg.adapter_name) or {}
-            state["cursors"] = cursors
-            set_state(conn, self._cfg.adapter_name, state)
-        finally:
-            conn.close()
+    # Cursors are PERSISTED (write side) atomically with their observations inside
+    # _ingest_records_from_offset (techne#170), so there is no _save_cursors here —
+    # _load_cursors above is read-only, for per-file rotation detection.
 
     # ------------------------------------------------------------------
     # Core ingest
@@ -333,8 +352,17 @@ class JsonlTranscriptSource:
             saved_offset = 0
 
         new_offset, count = _ingest_records_from_offset(
-            self._db_path, path, saved_offset, self._cfg.adapter_name
+            self._db_path,
+            path,
+            saved_offset,
+            self._cfg.adapter_name,
+            cursor_key=key,
+            inode=st.st_ino,
+            head=head,
         )
+        # The cursor is now persisted atomically inside _ingest_records_from_offset
+        # (same transaction as the observations). Keep the in-memory snapshot in sync
+        # for any same-walk rotation reads; callers no longer need _save_cursors.
         cursors[key] = {"offset": new_offset, "inode": st.st_ino, "head": head}
         return cursors, count
 
@@ -354,7 +382,8 @@ class JsonlTranscriptSource:
                 total += count
                 if count:
                     log.debug("jsonl_ingest path=%s obs=%d", p, count)
-        self._save_cursors(cursors)
+        # No _save_cursors here: each file's cursor is persisted atomically with its
+        # observations inside _ingest_file → _ingest_records_from_offset (techne#170).
         return total
 
     # ------------------------------------------------------------------
@@ -380,8 +409,9 @@ class JsonlTranscriptSource:
         def _on_change(path: Path) -> None:
             with self._lock:
                 cursors = self._load_cursors()
-                cursors, count = self._ingest_file(path, cursors)
-                self._save_cursors(cursors)
+                # _ingest_file persists the cursor atomically with its observations
+                # (techne#170); no separate _save_cursors needed.
+                _, count = self._ingest_file(path, cursors)
                 if count:
                     log.info("jsonl_watch_ingest path=%s obs=%d", path, count)
 

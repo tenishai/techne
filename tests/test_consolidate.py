@@ -270,6 +270,32 @@ def test_anti_re_proposal_skips_already_proposed_cluster(config):
     assert not any(set(c["target_ids"]) == {a, b} for c in batch2)
 
 
+def test_ingest_guards_against_duplicate_proposal(config):
+    """techne#170: the anti-re-proposal guard is enforced at INGEST too — a direct or
+    duplicate ingest of an already-proposed cluster is skipped, not re-added."""
+    db = config.db_path
+    a = store(db, "dup ingest", type="fact")
+    b = store(db, "dup ingest", type="fact")
+    item = next(c for c in consolidate_emit(config) if set(c["target_ids"]) == {a, b})
+
+    first = consolidate_ingest(config, item["target_ids"], item["cluster_hash"], _MERGE_VERDICT)
+    assert first["written"] == 1 and first["skipped"] == 0
+
+    # Re-ingest the SAME cluster (e.g. a retry) — must be a no-op, not a 2nd candidate.
+    second = consolidate_ingest(config, item["target_ids"], item["cluster_hash"], _MERGE_VERDICT)
+    assert second["skipped"] == 1
+    assert second["written"] == 0 and second["proposed"] == 0
+
+    conn = connect(db)
+    try:
+        n = conn.execute(
+            "SELECT count(*) FROM knowledge_candidates WHERE origin='consolidate'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1, "duplicate ingest must not create a second candidate"
+
+
 # ---- parser ---------------------------------------------------------------
 
 

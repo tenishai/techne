@@ -83,6 +83,56 @@ def transcript(tmp_path):
     return p
 
 
+def _bash_use_no_id(cmd: str, ts: str) -> dict:
+    """An assistant tool_use block WITHOUT an id (the techne#170 edge)."""
+    return {
+        "type": "assistant",
+        "sessionId": "sess-fixture",
+        "timestamp": ts,
+        "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": cmd}}]},
+    }
+
+
+def _tool_result_no_id(output: str, ts: str) -> dict:
+    return {
+        "type": "user",
+        "sessionId": "sess-fixture",
+        "timestamp": ts,
+        "message": {"content": [{"type": "tool_result", "content": output}]},
+    }
+
+
+def test_idless_tool_use_skipped_no_clobber(db_path, tmp_path):
+    """techne#170: tool_use blocks without an id can't be matched to a result. The old
+    `b.get("id", "")` fallback keyed every id-less block on "" so they clobbered each
+    other, and a stray id-less tool_result would pop the wrong one — importing a tool
+    call under the wrong command. They must be skipped instead."""
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _bash_use_no_id("rm -rf /a", "2026-06-01T10:00:00.000Z"),
+            _bash_use_no_id("rm -rf /b", "2026-06-01T10:00:01.000Z"),  # clobbered "" on old code
+            _tool_result_no_id("done", "2026-06-01T10:00:02.000Z"),    # popped "" on old code
+            _bash_use("tu_real", "ls /tmp", "2026-06-01T10:00:03.000Z"),
+            _tool_result("tu_real", "file1", "2026-06-01T10:00:04.000Z"),
+        ],
+    )
+    import_transcript(db_path, p)
+
+    conn = connect(db_path)
+    try:
+        contents = "\n".join(
+            r[0] for r in conn.execute(
+                "SELECT content FROM observations WHERE content LIKE '%Ran:%'"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+    assert "ls /tmp" in contents              # the real, id-bearing tool call imported
+    assert "rm -rf" not in contents           # the id-less ones did NOT (no phantom)
+
+
 def test_imports_tool_calls_and_prompts(db_path, transcript):
     result = import_transcript(db_path, transcript)
 

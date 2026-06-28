@@ -279,6 +279,26 @@ def test_differential_cleans_up_techne_canary(config):
     assert not any("PROBE CANARY" in r["content"] for r in rows)
 
 
+def test_differential_cleans_techne_canary_when_native_seed_raises(config):
+    """techne#170: the techne canary is seeded BEFORE the native one. If seed_native_canary
+    raises, the cleanup finally must still run — else the techne canary leaks into
+    production knowledge. (The native seed was moved inside the try.)"""
+    from techne.core.knowledge import list_entries
+
+    class _RaisingFake(DifferentialFake):
+        def seed_native_canary(self, codeword, label):
+            raise RuntimeError("native seed boom")
+
+    fake = _RaisingFake(config, inject_techne=True, inject_native=True)
+    with pytest.raises(RuntimeError, match="native seed boom"):
+        run_differential(config, fake)
+
+    rows = list_entries(config.db_path, limit=100)
+    assert not any("PROBE CANARY" in r["content"] for r in rows), (
+        "techne canary leaked into knowledge after native seed failure"
+    )
+
+
 # ---------------------------------------------------------------------------
 # ClaudeCodeAdapter native-seed file mechanics (no session spawned)
 # ---------------------------------------------------------------------------
