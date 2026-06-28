@@ -1974,10 +1974,10 @@ def test_concurrent_migration_serializes_no_duplicate_versions(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-class TestSchemaTableStatementsParenBalance:
-    """_schema_table_statements must use paren-balance + semicolon detection
-    (not a comment-based heuristic) so a -- comment inside the CREATE TABLE
-    body does not prematurely end the statement."""
+class TestSchemaTableStatementsComments:
+    """_schema_table_statements must treat statement boundaries as the CREATE TABLE
+    lines themselves (not a comment-based heuristic), so a -- comment inside the
+    CREATE TABLE body does not prematurely end the statement (techne#56)."""
 
     def test_mid_block_comment_parses_as_one_statement(self):
         """A CREATE TABLE with a -- comment INSIDE the parens is ONE statement
