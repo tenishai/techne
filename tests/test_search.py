@@ -7,6 +7,7 @@ from techne.core.search import (
     search_fts,
     search_vec,
     search,
+    _rerank,
     _sanitize_fts_query,
     _build_or_fts_query,
 )
@@ -154,6 +155,40 @@ class TestSearchFtsKnowledge:
         results = search_fts(db_path, "experimental", table="knowledge")
         ids = [r["id"] for r in results]
         assert old_id not in ids
+
+
+class TestRerankCrossTableNormalization:
+    """_rerank normalises BM25 PER source table, not across the pooled multi-table
+    set: bm25() magnitudes differ per fts table, so a single global spread buries a
+    small-magnitude table's best match under another table's mid-pack rows (techne#56)."""
+
+    def test_per_table_normalization_is_fair(self):
+        # type A (observation): large-magnitude BM25 (-10..-1);
+        # type B (knowledge): small-magnitude BM25 (-0.5..-0.1).
+        candidates = [
+            {"type": "observation", "id": "A_best", "rank": -10.0},
+            {"type": "observation", "id": "A_worst", "rank": -1.0},
+            {"type": "knowledge", "id": "B_best", "rank": -0.5},
+            {"type": "knowledge", "id": "B_worst", "rank": -0.1},
+        ]
+        # recency_weight=0 isolates the BM25 component; bm25_weight=1.
+        out = _rerank(candidates, limit=4, recency_weight=0.0, bm25_weight=1.0, mmr_lambda=0.0)
+        order = [r["id"] for r in out]
+        # Per-table: each table's best (A_best, B_best) normalises to 1.0 → both top.
+        # The OLD global-spread normalisation buried B_best (norm≈0.04) below A_worst;
+        # this assertion fails on that behaviour and passes on the per-table fix.
+        assert set(order[:2]) == {"A_best", "B_best"}, order
+        assert order.index("B_best") < order.index("A_worst"), order
+
+    def test_single_table_unchanged(self):
+        # One source table → one group → global == per-table normalisation.
+        candidates = [
+            {"type": "knowledge", "id": "k1", "rank": -8.0},
+            {"type": "knowledge", "id": "k2", "rank": -4.0},
+            {"type": "knowledge", "id": "k3", "rank": -1.0},
+        ]
+        out = _rerank(candidates, limit=3, recency_weight=0.0, bm25_weight=1.0, mmr_lambda=0.0)
+        assert [r["id"] for r in out] == ["k1", "k2", "k3"]
 
 
 class TestSearchFtsAll:

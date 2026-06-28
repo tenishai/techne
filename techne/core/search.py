@@ -152,13 +152,25 @@ def _rerank(
     if not candidates:
         return candidates
 
-    # BM25 is negative; most-negative = best match.
-    raw_ranks = [r["rank"] for r in candidates]
-    min_r, max_r = min(raw_ranks), max(raw_ranks)
-    spread = max_r - min_r  # >= 0
+    # BM25 is negative; most-negative = best match. Normalise PER SOURCE TABLE:
+    # bm25() scores are NOT comparable across fts tables — threads/observations/
+    # knowledge differ in doc count, average length, and term stats, so their BM25
+    # magnitudes differ. Normalising a pooled multi-table set over one global spread
+    # distorts cross-table ranking: the best match in a small-magnitude table gets
+    # buried under another table's mid-pack rows (techne#56). Group by `type` and
+    # normalise within each table's own [min, max]. A single-table search has one
+    # group, so its behaviour is unchanged.
+    spread_by_type: dict[str, tuple[float, float]] = {}
+    ranks_by_type: dict[str, list[float]] = {}
+    for r in candidates:
+        ranks_by_type.setdefault(r["type"], []).append(r["rank"])
+    for t, ranks in ranks_by_type.items():
+        mn, mx = min(ranks), max(ranks)
+        spread_by_type[t] = (mx, mx - mn)  # (max_r, spread); spread >= 0
 
     for r in candidates:
-        # norm_bm25=1 for best BM25 match (most negative rank = min_r), 0 for worst.
+        max_r, spread = spread_by_type[r["type"]]
+        # norm_bm25=1 for this table's best match (most-negative rank), 0 for worst.
         r["_norm_bm25"] = (max_r - r["rank"]) / spread if spread else 1.0
 
     for r in candidates:
@@ -329,8 +341,9 @@ def search_fts(
             if or_query:
                 results = _fts_match_rows(conn, or_query, table, candidate_limit)
 
-        # For multi-table ("all"), sort combined pool first so BM25 ordering
-        # is consistent before the reranker normalises across the whole set.
+        # For multi-table ("all"), pre-sort by raw rank for a deterministic input
+        # order; the reranker normalises BM25 PER TABLE (techne#56) and then
+        # re-sorts by the combined recency×BM25 score.
         if table == "all":
             results.sort(key=lambda x: x.get("rank", 0))
 
