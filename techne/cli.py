@@ -2039,7 +2039,11 @@ def architect_retire_legacy(ctx, dry_run):
 @main.group(invoke_without_command=True)
 @click.pass_context
 def codex(ctx):
-    """Code-graph store (codex.db) — symbols + edges, graph queries (techne#89)."""
+    """Code-graph store (codex.db) — symbols + edges, graph queries (techne#89).
+
+    EXPERIMENTAL (techne#89): indexing is manual — the graph can go stale as code
+    changes; re-run `codex index` to refresh.
+    """
     if ctx.invoked_subcommand is not None:
         return
     config = ctx.obj["config"]
