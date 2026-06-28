@@ -62,6 +62,12 @@ class VulnerableInstallError(ShellGuardError):
     the configured severity threshold."""
 
 
+class MalformedCommandError(ShellGuardError):
+    """The command could not be parsed into argv — empty, or malformed quoting
+    (unbalanced quote). Raised by run_guarded so a caller catching ShellGuardError handles
+    it alongside the gate rejections, rather than a bare shlex ``ValueError``."""
+
+
 def check_command(command: str) -> None:
     """Raise :class:`CommandChainingError` if *command* contains a shell control operator.
 
@@ -69,6 +75,12 @@ def check_command(command: str) -> None:
     whole point: an allow-list that matches a prefix (``git diff*``) is bypassed by
     ``git diff; rm -rf ~``. Does no I/O; safe to call anywhere. Returns ``None`` (the
     command is a single, un-chained command) on success.
+
+    SCOPE: this prevents *chaining* (running a second program), not single-command shell
+    *expansion*. Globs (``* ? [``), ``~``, ``$VAR``, ``(`` subshells, ``!`` history, ``#``
+    are intentionally NOT rejected — under ``run_guarded`` they reach ``execve`` literally
+    (``shell=False``) and are harmless. A caller that wires this in front of a ``shell=True``
+    path still needs its own allow-list: this gate stops ``rm a; rm b`` but not ``rm *``.
     """
     found = [op for op in SHELL_OPERATORS if op in command]
     if found:
@@ -131,6 +143,14 @@ def _detect_install(command: str) -> tuple[str | None, list[str]]:
     Best-effort token scan (the command is already known single + un-chained when called
     from run_guarded). ``packages`` are the non-flag tokens after the install subcommand;
     they may include version specifiers (``requests==2.20`` ) — passed through verbatim.
+
+    DELIBERATELY shallow — this audit is defense-in-depth, not a sandbox, and is fail-open
+    by design, so detection misses degrade to "allowed unaudited", never a false block.
+    Known, accepted gaps: non-standard exe names (``pip3.11``, a venv's absolute path to a
+    differently-named shim); ``-r requirements.txt`` / ``-e .`` / VCS specs (no concrete
+    named package → not audited); a space-separated flag VALUE (``--index-url URL``) is read
+    as a package and handed to pip-audit (which then resolves or errors → fail open). Never
+    rely on this as the sole control.
     """
     try:
         tokens = shlex.split(command)
@@ -149,8 +169,11 @@ def _detect_install(command: str) -> tuple[str | None, list[str]]:
     for ecosystem, exes, subcommands in _INSTALL_ECOSYSTEMS:
         if exe not in exes:
             continue
-        if rest and rest[0] in subcommands:
-            packages = [t for t in rest[1:] if not t.startswith("-")]
+        # Locate the subcommand, skipping leading global flags so `pip --quiet install evil`
+        # can't evade the audit by putting a flag before `install`.
+        sub_idx = next((i for i, t in enumerate(rest) if not t.startswith("-")), None)
+        if sub_idx is not None and rest[sub_idx] in subcommands:
+            packages = [t for t in rest[sub_idx + 1:] if not t.startswith("-")]
             return ecosystem, packages
     return None, []
 
@@ -183,6 +206,12 @@ def _pip_audit_findings(packages: list[str], threshold: str, timeout: float) -> 
     if not proc.stdout.strip():
         raise RuntimeError(f"pip-audit produced no output (stderr: {proc.stderr.strip()[:200]})")
     data = json.loads(proc.stdout)
+    # Pin the schema contract: pip-audit ≥ 2.x always emits a top-level "dependencies" list
+    # (even with zero vulns). If a future version changes shape, `data.get("dependencies",
+    # [])` would silently yield no findings → fail OPEN unnoticed. Raise instead, so the
+    # caller fails open WITH a logged reason (and a test trips on the contract change).
+    if not isinstance(data, dict) or "dependencies" not in data:
+        raise RuntimeError("pip-audit JSON missing 'dependencies' — unexpected schema")
     findings: list[dict] = []
     for dep in data.get("dependencies", []):
         name = dep.get("name", "")
@@ -314,7 +343,9 @@ def run_guarded(
        execution, never a shell, so the (now operator-free) command can't expand or chain.
 
     Extra ``subprocess_kwargs`` (cwd, env, timeout, capture_output, text, check, …) pass
-    through. Raises ``ValueError`` if *command* is empty after splitting.
+    through. Raises :class:`MalformedCommandError` (a ShellGuardError) if *command* is empty
+    or has malformed quoting. Passing ``shell=True`` is a ``TypeError`` (it's hard-pinned
+    False) — by design, this wrapper never invokes a shell.
     """
     check_command(command)
     if audit:
@@ -322,7 +353,10 @@ def run_guarded(
         if not result.ok:
             raise VulnerableInstallError(result.reason)
 
-    argv = shlex.split(command)
+    try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        raise MalformedCommandError(f"could not parse command (malformed quoting?): {e}") from e
     if not argv:
-        raise ValueError("empty command")
+        raise MalformedCommandError("empty command")
     return subprocess.run(argv, shell=False, **subprocess_kwargs)

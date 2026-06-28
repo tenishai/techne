@@ -16,6 +16,7 @@ import pytest
 from techne.security.shell_guard import (
     AuditResult,
     CommandChainingError,
+    MalformedCommandError,
     VulnerableInstallError,
     _detect_install,
     audit_install,
@@ -90,6 +91,8 @@ class TestDetectInstall:
         [
             ("pip install requests", "pip", ["requests"]),
             ("pip3 install foo==1.2.0", "pip", ["foo==1.2.0"]),
+            ("pip --quiet install evil", "pip", ["evil"]),  # flag before subcommand (Prudence #4)
+            ("pip -q install evil --upgrade", "pip", ["evil"]),
             ("python -m pip install bar baz", "pip", ["bar", "baz"]),
             ("python3 -m pip install -U requests", "pip", ["requests"]),  # flag stripped
             ("/usr/local/bin/pip3 install x", "pip", ["x"]),              # path stripped
@@ -219,6 +222,17 @@ class TestAuditInstall:
             r = audit_install("pip install requests")
         assert r.ok and not r.audited and "fail open" in r.reason
 
+    def test_unexpected_schema_fails_open(self):
+        """Prudence #2: a valid-JSON-but-wrong-shape pip-audit output (a format change)
+        must fail OPEN with a reason — not silently yield zero findings and allow. The
+        contract (top-level 'dependencies') is pinned so a future change trips here."""
+        with patch(_WHICH, return_value="/usr/bin/pip-audit"), patch(_RUN) as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps({"results": []}), stderr=""
+            )
+            r = audit_install("pip install requests")
+        assert r.ok and not r.audited and "fail open" in r.reason
+
     def test_garbage_output_fails_open(self):
         with patch(_WHICH, return_value="/usr/bin/pip-audit"), \
              patch(_RUN) as run:
@@ -263,9 +277,17 @@ class TestRunGuarded:
         proc = run_guarded("echo literal*star", audit=False, capture_output=True, text=True)
         assert proc.stdout.strip() == "literal*star"
 
-    def test_empty_command_raises_value_error(self):
-        with pytest.raises(ValueError):
+    def test_empty_command_raises_malformed(self):
+        with pytest.raises(MalformedCommandError):
             run_guarded("   ", audit=False)
+
+    def test_malformed_quoting_raises_shellguard_not_bare_valueerror(self):
+        # An unbalanced quote has no operator (clears check_command) but breaks shlex.split.
+        # It must surface as a ShellGuardError, not a bare ValueError. (Prudence #5)
+        from techne.security.shell_guard import ShellGuardError
+
+        with pytest.raises(ShellGuardError):
+            run_guarded('echo "oops', audit=False)
 
     def test_audit_skipped_when_disabled(self):
         with patch(_AUDIT) as audit:
