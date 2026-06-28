@@ -295,6 +295,8 @@ class TestDocumentsFtsSearch:
         )
         assert search_documents(db_path, "") == []
         assert search_documents(db_path, "   ") == []
+        # techne#143: a lone backslash sanitizes to "" and reached MATCH '' here — now guarded.
+        assert search_documents(db_path, "\\") == []
 
     def test_fts_superseded_docs_excluded(self, db_path):
         url = "https://github.com/acme/repo/issues/13"

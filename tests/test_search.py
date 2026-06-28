@@ -345,6 +345,29 @@ class TestSanitizeFtsQuery:
         assert _sanitize_fts_query('foo"bar') == '"foo""bar"'
 
 
+class TestPrepareFtsQuery:
+    """techne#143: the single shared guard. Returns None for any query with no searchable
+    terms (so callers skip the MATCH that would crash on ''), else the sanitized string."""
+
+    def test_none_for_empty_and_whitespace(self):
+        from techne.core.search import prepare_fts_query
+
+        assert prepare_fts_query("") is None
+        assert prepare_fts_query("   ") is None
+
+    def test_none_for_all_punctuation_and_backslash(self):
+        from techne.core.search import prepare_fts_query
+
+        assert prepare_fts_query("\\") is None        # lone backslash → sanitizes to ""
+        assert prepare_fts_query("\\\\  \\") is None   # only backslashes/space → no terms
+
+    def test_real_query_sanitized(self):
+        from techne.core.search import prepare_fts_query
+
+        assert prepare_fts_query("database") == '"database"'
+        assert prepare_fts_query("foo\\bar") == '"foo" "bar"'  # backslash-as-separator survives
+
+
 # ---------------------------------------------------------------------------
 # _build_or_fts_query tests (#70)
 # ---------------------------------------------------------------------------

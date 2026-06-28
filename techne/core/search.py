@@ -307,15 +307,10 @@ def search_fts(
                          fastembed; degrades silently to relevance order if
                          the dep is not installed.
     """
-    if not query.strip():
-        return []
-
-    fts_query = _sanitize_fts_query(query)
-    if not fts_query:
-        # A query made only of escape/operator chars (e.g. "\" — backslashes are
-        # stripped by _fts_terms) survives the query.strip() guard above but
-        # sanitizes to an empty MATCH string, which raises sqlite3.OperationalError
-        # and crashes recall/search. Treat it as "no terms". (techne#168)
+    fts_query = prepare_fts_query(query)
+    if fts_query is None:
+        # Empty or all-punctuation query (e.g. "\") → no searchable terms; MATCH '' would
+        # crash. Single guard shared with documents/patterns/codegraph (techne#143/#168).
         return []
     conn = connect(db_path)
     candidate_limit = limit * expansion_ratio
@@ -743,6 +738,24 @@ def _sanitize_fts_query(query: str) -> str:
     between terms is still FTS5 implicit-AND.
     """
     return " ".join(f'"{t}"' for t in _fts_terms(query))
+
+
+def prepare_fts_query(query: str) -> str | None:
+    """The single entry point for turning a raw user query into an FTS5 MATCH string.
+
+    Returns the sanitized query, or ``None`` when it has NO searchable terms — either
+    empty/whitespace, OR all-punctuation/escape input (e.g. a lone ``\\``) that
+    ``_sanitize_fts_query`` strips to ``""``. ``MATCH ''`` raises ``fts5: syntax error``
+    (#103), so EVERY FTS MATCH caller must funnel through this and treat ``None`` as
+    "no results, skip the query". Centralizing both guards here is the #143 fix: the
+    bare-``query.strip()``-then-sanitize shape had drifted across search/documents/
+    patterns/codegraph, each missing the empty-AFTER-sanitize case (#168 fixed only the
+    main recall path). One chokepoint, no drift.
+    """
+    if not query.strip():
+        return None
+    fts = _sanitize_fts_query(query)
+    return fts or None
 
 
 def _build_or_fts_query(query: str) -> str:

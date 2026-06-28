@@ -85,9 +85,10 @@ def get_symbol(db_path: Path, symbol_id: str) -> dict | None:
 
 def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
     """FTS over symbol name + signature."""
-    from techne.core.search import _sanitize_fts_query
+    from techne.core.search import prepare_fts_query
 
-    if not query.strip():  # FTS5 MATCH '' is a syntax error (#103)
+    fts = prepare_fts_query(query)  # None when empty/all-punctuation → MATCH '' crash (#143)
+    if fts is None:
         return []
     conn = plain_connect(db_path)
     try:
@@ -95,7 +96,7 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
             """SELECT s.id, s.file, s.name, s.kind, s.signature, bm25(symbols_fts) AS rank
                FROM symbols_fts f JOIN symbols s ON s.rowid = f.rowid
                WHERE symbols_fts MATCH ? ORDER BY rank LIMIT ?""",
-            (_sanitize_fts_query(query), limit),
+            (fts, limit),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
