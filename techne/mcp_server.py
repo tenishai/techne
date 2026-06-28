@@ -334,7 +334,9 @@ TOOLS = [
         "name": "codex_search",
         "description": (
             "Search Codex symbols (functions, classes, methods) by name or signature. "
-            "Requires `techne codex index <repo>` to have been run first."
+            "Requires `techne codex index <repo>` to have been run first. "
+            "Experimental: the index is built manually and may be stale — re-run "
+            "`techne codex index` after code changes."
         ),
         "inputSchema": {
             "type": "object",
@@ -353,7 +355,9 @@ TOOLS = [
         "description": (
             "Compute the transitive reachability (blast radius) of a Codex symbol — "
             "out=what this symbol reaches (dependencies), in=what reaches this symbol "
-            "(dependents). Uses recursive CTE BFS over the call/import graph."
+            "(dependents). Uses recursive CTE BFS over the call/import graph. "
+            "Experimental: the index is built manually and may be stale — re-run "
+            "`techne codex index` after code changes."
         ),
         "inputSchema": {
             "type": "object",
