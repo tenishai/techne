@@ -312,6 +312,20 @@ class TestCheckClaims:
         verdicts = check_claims([{"type": "wrote_file", "path": "y.py"}], ev)
         assert verdicts[0]["status"] == "backed"
 
+    def test_completion_unverifiable_when_empty_and_bash_off(self):
+        """A pure-Bash turn under capture_bash=off leaves NO trace (count 0) — completion
+        is unverifiable (absent), not unbacked (disproven). techne#105 no-false-flag."""
+        ev = self._ev(any_tool_call=False, artifacts=[], observation_count=0, bash_captured=False)
+        verdicts = check_claims([{"type": "completion"}], ev)
+        assert verdicts[0]["status"] == "unverifiable"
+
+    def test_completion_unbacked_when_recorded_but_no_deed(self):
+        """The carve-out is narrow: observations exist (e.g. a UserPrompt) but no deed →
+        genuinely unbacked, even with bash off (something WAS recorded, just no work)."""
+        ev = self._ev(any_tool_call=False, artifacts=[], observation_count=3, bash_captured=False)
+        verdicts = check_claims([{"type": "completion"}], ev)
+        assert verdicts[0]["status"] == "unbacked"
+
     def test_completion_backed_when_tool_called(self):
         ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[])
         verdicts = check_claims([{"type": "completion"}], ev)
@@ -474,9 +488,12 @@ class TestMcpCheckEvidence:
 
     def test_unbacked_count_correct(self, config, db_path):
         _insert_session(db_path, "sess-ub")
-        # No observations, and capture_bash is off by default → completion is
-        # unbacked, but commit is UNVERIFIABLE (absent + Bash not recorded), not
-        # unbacked — so unbacked_count is 1, not 2 (techne#105 no-false-flag).
+        # A recorded-but-no-deed turn (a UserPrompt, no Write/Edit/Bash) with
+        # capture_bash off: completion is genuinely UNBACKED (something WAS recorded,
+        # just no work — the bash-off carve-out only fires at zero observations),
+        # while commit is UNVERIFIABLE (absent + Bash not recorded). So unbacked_count
+        # is 1, not 2 — techne#105 no-false-flag, and the count distinguishes the two.
+        _insert_obs(db_path, "sess-ub", "UserPrompt", "fix the bug")
 
         response = handle_request(
             {

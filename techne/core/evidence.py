@@ -40,8 +40,11 @@ NON_DEED: frozenset[str] = frozenset({"UserPrompt", "AskUserQuestion"})
 
 # Regex: extract 7-40 hex chars from git's commit summary line:
 #   [branch-name abc1234] commit message
-# The branch name may itself contain slashes; we anchor to a word boundary
-# before the SHA so we don't accidentally grab non-SHA hex runs.
+# The word-boundary anchors the SHA's LEFT edge inside the brackets. This is
+# heuristic, not exact: any bracketed token ending in a 7-40 hex run (some log
+# formats) can match. That errs toward false-BACKING a `commit` claim, never
+# false-flagging — the safe direction for an advisory tool; dedup only collapses
+# repeats. Tightening (e.g. requiring a `git commit` action) is a follow-up.
 _GIT_SHA_RE = re.compile(r"\[[^\]]*\b([0-9a-f]{7,40})\]")
 
 # Test-runner result line patterns — cover pytest ("N passed"), jest/vitest
@@ -334,6 +337,15 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
                 detail = (
                     f"Agent made {evidence.observation_count} observations; "
                     "tool calls and/or artifacts found in the ledger."
+                )
+            elif evidence.observation_count == 0 and not evidence.bash_captured:
+                # Nothing recorded AND Bash is off: the turn could have been all-Bash
+                # (uncaptured). Absent, not disproven — don't falsely flag (techne#105).
+                status = "unverifiable"
+                detail = (
+                    "No observations recorded and Bash capture is off — a Bash-only "
+                    "turn would leave no trace, so completion can't be confirmed or "
+                    "denied. " + _BASH_OFF_DETAIL
                 )
             else:
                 status = "unbacked"
