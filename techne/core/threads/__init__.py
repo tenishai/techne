@@ -8,7 +8,71 @@ Public API re-exported here so that:
     shim that replaces that file.
 
 Heuristic detection API (from heuristic_threads.py, now split into submodules):
+
+``__all__`` defines the public surface of this package.  Private symbols
+(``_xxx``) are still re-exported for backwards compatibility with existing
+importers (reflect.py, heuristic_threads.py shim, tests) but are not part of
+the public API and will not appear in ``from techne.core.threads import *``.
 """
+
+__all__ = [
+    # Core public types
+    "Thread",
+    "BoundaryScore",
+    "ObsFeatures",
+    # Top-level detection entry-point (defined in this module)
+    "detect_threads",
+    # Orchestrator public functions
+    "age_threads",
+    "detect_and_summarize",
+    "detect_summarize_with_metadata",
+    "link_threads",
+    "persisted_thread_id",
+    "save_threads",
+    "thread_row_id",
+    # Features
+    "DEFAULT_ENTITY_PATTERNS",
+    "DEFAULT_FAMILIES",
+    "FILE_PATH_RE",
+    "META_FAMILY",
+    "REPO_MARKERS",
+    "extract_entities",
+    "extract_features",
+    "extract_file_paths",
+    "find_repo",
+    "resolve_tool_family",
+    # Labels
+    "GENERIC_FAMILIES",
+    "generate_label",
+    # Persistence
+    "boundary_indices_from_segments",
+    "bucket_hash",
+    "load_boundaries",
+    "save_boundaries",
+    # Scoring constants + function
+    "BOUNDARY_THRESHOLD",
+    "CONTINUING_INVESTIGATION_GAP",
+    "FAMILY_CHANGE_SCORE",
+    "GAP_HARD",
+    "GAP_MEDIUM",
+    "GAP_SOFT",
+    "MIN_SEGMENT_SIZE",
+    "REPO_CHANGE_SCORE",
+    "USER_PROMPT_FAMILY",
+    "USER_PROMPT_SCORE",
+    "ZERO_ENTITY_OVERLAP_SCORE",
+    "ZERO_FILE_OVERLAP_SCORE",
+    "score_boundaries",
+    # Segmentation
+    "merge_pass",
+    "split_at_boundaries",
+    # Summary
+    "ERROR_LINE_RE",
+    "FILE_OP_TOOLS",
+    "build_resume_point",
+    "fallback_summary",
+    "format_combined_summary",
+]
 
 # --- orchestrator (formerly threads.py) ---------------------------------------
 # Public names callers imported from techne.core.threads before this refactor.

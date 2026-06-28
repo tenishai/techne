@@ -179,6 +179,8 @@ def _schema_table_statements(schema_sql: str) -> list[tuple[str, str]]:
     results: list[tuple[str, str]] = []
     current_name: str | None = None
     current_lines: list[str] = []
+    paren_depth: int = 0
+    stmt_complete: bool = False  # True once parens balanced AND ';' seen
 
     def flush() -> None:
         if current_name and current_lines:
@@ -187,18 +189,40 @@ def _schema_table_statements(schema_sql: str) -> list[tuple[str, str]]:
     for line in schema_sql.splitlines():
         m = table_re.match(line.strip())
         if m:
+            # Start of a new CREATE TABLE — flush any prior statement first.
             flush()
             current_name = m.group(1)
             current_lines = [line]
+            paren_depth = line.count("(") - line.count(")")
+            stmt_complete = paren_depth == 0 and ";" in line
         elif current_name is not None:
-            if index_re.match(line.strip()) or current_lines:
-                stmt_so_far = "\n".join(current_lines)
-                if line.strip().startswith("--") and ";" in stmt_so_far:
-                    flush()
-                    current_name = None
-                    current_lines = []
-                else:
+            if index_re.match(line.strip()):
+                # A CREATE INDEX after a completed table statement — belongs to
+                # this table's block only when the table statement is already
+                # closed (parens balanced + semicolon seen).
+                if stmt_complete:
                     current_lines.append(line)
+                else:
+                    # Shouldn't happen in well-formed DDL, but handle gracefully.
+                    current_lines.append(line)
+            elif current_lines:
+                # Continuation of the current statement.  Track paren depth
+                # on the non-comment content so an inline/mid-block comment
+                # line is accumulated without prematurely closing the block.
+                current_lines.append(line)
+                # Count parens only on the code portion (strip inline comments).
+                code_part = re.sub(r"--.*$", "", line)
+                paren_depth += code_part.count("(") - code_part.count(")")
+                if paren_depth <= 0 and ";" in line:
+                    # Parens balanced and statement terminated: the CREATE TABLE
+                    # body is complete. Mark so subsequent INDEX lines attach.
+                    stmt_complete = True
+                    paren_depth = 0
+
+        # Detect a new non-TABLE/INDEX keyword while in a completed stmt block
+        # (e.g. a standalone comment line after the closing ';').  The next
+        # CREATE TABLE match above will flush automatically, so nothing extra is
+        # needed here.
 
     flush()
     return results

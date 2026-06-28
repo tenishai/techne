@@ -170,3 +170,60 @@ def test_import_yaml_malformed_logs_error(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "broken.yaml" in captured.err or "failed to parse" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# #140-2: bulk import uses a single connection / transaction
+# ---------------------------------------------------------------------------
+
+
+def test_import_contacts_all_keys_written_single_connection(tmp_path, monkeypatch):
+    """_import_contacts writes all keys and uses ONE connection, not one per key.
+
+    Patches techne.core.identity.connect to count calls so we can verify that
+    a contacts.md with multiple contacts produces a single open-connection,
+    not N connections (one per set_value call).
+    """
+    db_path = _setup_db(tmp_path)
+    identity_dir = tmp_path / "identity"
+    identity_dir.mkdir()
+
+    contacts = textwrap.dedent("""\
+        ## Alice Smith
+
+        - **email**: alice@example.com
+        - **role**: SRE
+
+        ## Bob Jones
+
+        - **email**: bob@example.com
+        - **role**: DevOps
+        - **slack**: @bob
+    """)
+    (identity_dir / "contacts.md").write_text(contacts)
+
+    connect_calls: list[str] = []
+    real_connect = connect
+
+    def counting_connect(path):
+        connect_calls.append(str(path))
+        return real_connect(path)
+
+    monkeypatch.setattr(identity, "connect", counting_connect)
+
+    identity.sync_from_markdown(db_path, identity_dir)
+
+    # All field-level keys must be written
+    keys = _all_keys(db_path)
+    assert keys.get("identity.contacts.alice_smith.email") == "alice@example.com"
+    assert keys.get("identity.contacts.alice_smith.role") == "SRE"
+    assert keys.get("identity.contacts.bob_jones.email") == "bob@example.com"
+    assert keys.get("identity.contacts.bob_jones.role") == "DevOps"
+    assert keys.get("identity.contacts.bob_jones.slack") == "@bob"
+    assert "identity.contacts" in keys
+
+    # _import_contacts should open exactly ONE connection for all set_value calls
+    # (the blob write + all field writes share the same conn).
+    assert len(connect_calls) == 1, (
+        f"Expected 1 connect() call from _import_contacts, got {len(connect_calls)}"
+    )

@@ -103,34 +103,49 @@ _CONTACT_FIELD_RE = re.compile(
 
 
 def _import_contacts(db_path: Path, contacts_file: Path):
-    """Parse contacts.md and create structured identity entries."""
-    content = contacts_file.read_text()
-    set_value(db_path, "identity.contacts", content, source="file")
+    """Parse contacts.md and create structured identity entries.
 
-    current_entity = None
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("## "):
-            current_entity = stripped[3:].strip().lower().replace(" ", "_")
-            continue
-        if not current_entity:
-            continue
-        m = _CONTACT_FIELD_RE.match(line)
-        if not m:
-            continue
-        key = m.group("key").strip().lower().replace(" ", "_")
-        val = m.group("val").strip().strip("`")
-        if key and val:
-            set_value(
-                db_path,
-                f"identity.contacts.{current_entity}.{key}",
-                val,
-                source="file",
-            )
+    Opens a single connection for all writes in this import so a large
+    contacts.md produces one transaction rather than one per key.
+    """
+    content = contacts_file.read_text()
+
+    conn = connect(db_path)
+    try:
+        set_value(db_path, "identity.contacts", content, source="file", conn=conn)
+
+        current_entity = None
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                current_entity = stripped[3:].strip().lower().replace(" ", "_")
+                continue
+            if not current_entity:
+                continue
+            m = _CONTACT_FIELD_RE.match(line)
+            if not m:
+                continue
+            key = m.group("key").strip().lower().replace(" ", "_")
+            val = m.group("val").strip().strip("`")
+            if key and val:
+                set_value(
+                    db_path,
+                    f"identity.contacts.{current_entity}.{key}",
+                    val,
+                    source="file",
+                    conn=conn,
+                )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _import_yaml(db_path: Path, yaml_file: Path):
-    """Import a YAML file as structured identity entries."""
+    """Import a YAML file as structured identity entries.
+
+    Opens a single connection for all writes so a large YAML produces one
+    transaction rather than one connection/transaction per key.
+    """
     try:
         data = yaml.safe_load(yaml_file.read_text())
     except yaml.YAMLError as e:
@@ -144,15 +159,20 @@ def _import_yaml(db_path: Path, yaml_file: Path):
         return
 
     key_base = yaml_file.stem.replace("-", "_")
-    _flatten_dict(db_path, data, prefix=f"identity.{key_base}")
+    conn = connect(db_path)
+    try:
+        _flatten_dict(db_path, data, prefix=f"identity.{key_base}", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
 
 
-def _flatten_dict(db_path: Path, data: dict, prefix: str):
+def _flatten_dict(db_path: Path, data: dict, prefix: str, conn=None):
     for k, v in data.items():
         key = f"{prefix}.{k}"
         if isinstance(v, dict):
-            _flatten_dict(db_path, v, key)
+            _flatten_dict(db_path, v, key, conn=conn)
         elif isinstance(v, list):
-            set_value(db_path, key, ",".join(str(x) for x in v), source="file")
+            set_value(db_path, key, ",".join(str(x) for x in v), source="file", conn=conn)
         else:
-            set_value(db_path, key, str(v), source="file")
+            set_value(db_path, key, str(v), source="file", conn=conn)
