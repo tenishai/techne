@@ -91,6 +91,57 @@ def test_classify_deleted(git_repo):
     assert state == "deleted"
 
 
+def test_classify_too_large_repo_degrades_without_hashing(git_repo, monkeypatch):
+    """techne#141: a repo with >MAX_MOVED_SCAN_FILES tracked files must DEGRADE to
+    `deleted` on recall instead of hashing the whole tree — the moved-scan is skipped.
+
+    The test BITES: a REAL twin with identical content sits in the (over-cap) listing, so a
+    non-degraded scan WOULD find it and report `moved` (+ hash it). Only the degrade makes
+    this `deleted` with zero candidate hashes — delete the cap guard and both asserts flip.
+    """
+    import techne.core.anchor as anchor
+
+    repo, f = git_repo
+    r = resolve_anchor(str(f))
+    twin = repo / "elsewhere" / "twin.py"
+    twin.parent.mkdir()
+    twin.write_text(f.read_text())  # identical content → sha256 == stored hash
+    f.unlink()  # original gone → moved-scan branch
+
+    monkeypatch.setattr(anchor, "MAX_MOVED_SCAN_FILES", 2)
+    listing = "\n".join(["elsewhere/twin.py", "a.py", "b.py", "c.py"])  # 4 > cap(2)
+    monkeypatch.setattr(anchor, "_git", lambda root, *a, **k: (True, listing))
+
+    hashed: list = []
+    real_sha = anchor._sha256_file
+    monkeypatch.setattr(anchor, "_sha256_file", lambda p: hashed.append(p) or real_sha(p))
+
+    state, _detail = anchor.classify(str(f), r["content_hash"], r["git_sha"])
+    assert state == "deleted"  # degraded — the real twin was NOT scanned/found
+    assert hashed == [], "too-large repo must not hash any candidate (whole-tree scan skipped)"
+
+
+def test_find_moved_too_large_returns_completed_degrade(git_repo, monkeypatch):
+    """Unit-level, also BITES: an over-cap listing containing a REAL matching twin must
+    still return (None, scan_ok=True) — the cap skips the scan before the twin is found, so
+    the caller emits `deleted`, not `moved`. Without the cap, _find_moved would return the
+    twin's path. (scan_ok=True, not False, keeps it `deleted` vs the ls-files-failed
+    `unknown` branch.) (techne#141)"""
+    import techne.core.anchor as anchor
+
+    repo, f = git_repo
+    stored = anchor._sha256_file(f)
+    twin = repo / "twin.py"
+    twin.write_text(f.read_text())  # real file, content matches `stored`
+
+    monkeypatch.setattr(anchor, "MAX_MOVED_SCAN_FILES", 2)
+    listing = "\n".join(["twin.py", "a.py", "b.py"])  # 3 > cap(2), twin is real + matching
+    monkeypatch.setattr(anchor, "_git", lambda root, *a, **k: (True, listing))
+
+    new_path, scan_ok = anchor._find_moved(repo, "orig.py", stored)
+    assert new_path is None and scan_ok is True  # degraded, did NOT return the twin
+
+
 def test_classify_moved(git_repo):
     """File removed from its path but identical content lives elsewhere in the
     repo → moved, pointing at the new path."""
