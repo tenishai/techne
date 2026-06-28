@@ -49,9 +49,7 @@ def _persist_hook_state(db_path, *, last_run: str, error: dict | None) -> None:
 
 def main() -> None:
     run_ts = _now_iso()
-    hook_error: dict | None = None
     db_path = None
-    session_id: str | None = None
     output_parts: list[str] = []
     _failures: list[str] = []  # accumulate non-fatal degradation notes
 
@@ -74,7 +72,6 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         msg = f"Config load failed: {exc}"
         print(f"techne: {msg}", file=sys.stderr)
-        hook_error = {"ts": run_ts, "stage": "config", "msg": str(exc)[:200]}
         # Emit a minimal degraded banner and exit cleanly.
         print(
             json.dumps(

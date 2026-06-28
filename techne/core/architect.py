@@ -91,6 +91,8 @@ CREATE TRIGGER IF NOT EXISTS patterns_au AFTER UPDATE ON patterns BEGIN
 END;
 """
 
+# Process-global memoization keyed on db_path: prevents re-running the migration
+# step on every architect_store() call within a process lifetime.
 _migrated: set[Path] = set()
 _reconciled: set[Path] = set()
 

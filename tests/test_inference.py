@@ -127,7 +127,7 @@ class TestLoadPrototypes:
         _reset_cache()
         with (
             patch.dict(sys.modules, {"numpy": fake_np, "fastembed": fake_fastembed}),
-            patch("techne.core.search._get_embedding_model", return_value=_FakeModel()),
+            patch("techne.core.embeddings._get_embedding_model", return_value=_FakeModel()),
         ):
             protos = {"decision": ["a sentence"], "fact": ["b"], "empty": []}
             out_false = inference._get_prototype_embeddings(protos, key=False)
@@ -150,6 +150,32 @@ class TestInferNoFastembed:
         assert isinstance(result, InferenceResult)
         assert result.tags == []
         assert result.kind == "observation-shaped"
+
+    def test_import_failure_cached_no_retry(self):
+        """_INFER_DEPS sentinel short-circuits subsequent calls after first ImportError.
+
+        The import is attempted ONCE; on later calls with deps absent the sentinel
+        short-circuits without re-attempting the known-failing import (techne#56-14).
+        """
+        from techne.core import inference as _inf_mod
+
+        with patch.dict(sys.modules, {"fastembed": None, "numpy": None}):
+            _reset_cache()
+            assert _inf_mod._INFER_DEPS is None  # not yet probed
+            infer("first call — triggers the ImportError path")
+            assert _inf_mod._INFER_DEPS is False  # cached failure
+
+        # With deps "restored" (context manager exited), but sentinel still False,
+        # a second call should short-circuit and return the default InferenceResult
+        # WITHOUT attempting the import (so no success even though deps are back).
+        result = infer("second call — should hit the sentinel fast-path")
+        assert _inf_mod._INFER_DEPS is False  # sentinel unchanged
+        assert result.tags == []
+        assert result.kind == "observation-shaped"
+
+        # After _reset_cache() the sentinel is cleared so imports are retried.
+        _reset_cache()
+        assert _inf_mod._INFER_DEPS is None
 
 
 def _scores_from_map(label_scores: dict):
@@ -207,7 +233,7 @@ class TestInferTagAndKindSelection:
         with (
             patch.dict(sys.modules, {"fastembed": dummy_fe, "numpy": mock_np}),
             patch("techne.core.inference._get_prototype_embeddings", return_value=proto_embs),
-            patch("techne.core.search._get_embedding_model", return_value=mock_model),
+            patch("techne.core.embeddings._get_embedding_model", return_value=mock_model),
             patch("techne.core.inference._cosine", side_effect=fake_cosine),
         ):
             _reset_cache()
@@ -256,7 +282,7 @@ class TestInferTagAndKindSelection:
         with (
             patch.dict(sys.modules, {"fastembed": dummy_fe, "numpy": mock_np}),
             patch("techne.core.inference._get_prototype_embeddings", return_value={}),
-            patch("techne.core.search._get_embedding_model"),
+            patch("techne.core.embeddings._get_embedding_model"),
         ):
             _reset_cache()
             result = infer("anything")

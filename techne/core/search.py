@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from techne.core.database import connect
+from techne.core.embeddings import _get_embedding_model
 
 
 def _cosine_similarity(a, b) -> float:
@@ -655,23 +656,6 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
         conn.close()
 
     return counts
-
-
-_embedding_model = None
-
-
-def _get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        from fastembed import TextEmbedding
-
-        cache_dir = Path.home() / ".cache" / "fastembed"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        _embedding_model = TextEmbedding(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            cache_dir=str(cache_dir),
-        )
-    return _embedding_model
 
 
 def _purge_superseded_knowledge_vec(conn: sqlite3.Connection) -> int:

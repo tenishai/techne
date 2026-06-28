@@ -625,6 +625,13 @@ def format_resume_context(ctx: dict, project_path: str = "", max_chars: int = 18
     experimental.chat.system.transform) to prepend "here's what you were working
     on + durable facts" to the model's system prompt. Returns "" when there is
     nothing worth injecting, so callers can skip cleanly. Capped at *max_chars*.
+
+    Trust boundary (techne#83-8): stored content (labels, summaries, knowledge)
+    is operator-trusted but concatenated verbatim into the model context. A
+    literal ``</techne-memory>`` in that content would prematurely close the
+    wrapper tag, so it is neutralised before wrapping (zero-width space inserted
+    after ``</``). The tag boundary is structural, not a security boundary, but
+    keeping the block well-formed avoids confusing the model.
     """
     active = ctx.get("active_threads") or []
     knowledge = ctx.get("knowledge") or []
@@ -652,6 +659,9 @@ def format_resume_context(ctx: dict, project_path: str = "", max_chars: int = 18
     inner = "\n".join(body)
     if len(inner) > max_chars:
         inner = inner[:max_chars].rstrip() + " …"
+    # Neutralise any literal closing tag so injected content cannot prematurely
+    # end the <techne-memory> block (zero-width space after "</").
+    inner = inner.replace("</techne-memory>", "<​/techne-memory>")
     return f"<techne-memory>\n{inner}\n</techne-memory>"
 
 
