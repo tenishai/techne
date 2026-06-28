@@ -167,8 +167,14 @@ replaceability/dream/compression sit on top.
   pursue Model B (per-client transcript adapters feeding the durable store).
 - **#108 / #105** — consolidation/evidence-gate; sit *above* the durable-store floor.
 - Unaffected & independently completable now: **#164** (dedup resident-model util — ripe after
-  #107 added a 4th emit/ingest copy), **#81** (sessions.platform read path), **#140/#83/#56**
-  (staff-review backlog cleanups), **#75/#118** (eval), **#89** (Codex).
+  #107 added a 4th emit/ingest copy), ~~**#81** (sessions.platform read path)~~ **done**,
+  **#140/#83/#56** (staff-review backlog cleanups), **#75/#118** (eval), **#89** (Codex).
+
+**#81 platform-provenance decision (implemented):** resume-context injection is intentionally
+cross-platform — projects span agents/clients and shared memory is the point. Each thread dict
+now carries `platform` + `agent_identity` (FK-derived via the session JOIN, no denorm) and the
+rendered context block annotates every thread with a `[platform]` tag. This surfaces provenance
+without filtering it, so a future per-platform scoping decision is data-supported from day one.
 
 ---
 
