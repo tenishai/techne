@@ -2140,5 +2140,98 @@ def codex_blast(ctx, symbol_id, direction, depth):
         click.echo(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']})")
 
 
+# ---------------------------------------------------------------------------
+# Cross-DB maintenance: fsck + all-DBs-together backup/restore (techne#139)
+# ---------------------------------------------------------------------------
+
+
+@main.command("fsck")
+@click.pass_context
+def fsck_cmd(ctx):
+    """Run every cross-DB consistency check (dangling cards, …) as one pass.
+
+    Exits non-zero if any inconsistency is found, so it's usable in scripts/CI.
+    """
+    from techne.core.maintenance import run_fsck
+
+    config = ctx.obj["config"]
+    report = run_fsck(config)
+
+    present = ", ".join(d for d, p in report.db_present.items() if p) or "(none)"
+    click.echo(f"databases present: {present}")
+    for c in report.checks:
+        click.echo(f"  [{'OK  ' if c.ok else 'FAIL'}] {c.name}: {c.summary}")
+    if report.ok:
+        click.echo("fsck: all cross-DB checks passed.")
+    else:
+        click.echo("fsck: inconsistencies found.", err=True)
+        raise SystemExit(1)
+
+
+@main.command("backup")
+@click.option("--out", default=None, help="Destination dir (default: <data_dir>/backups/)")
+@click.pass_context
+def backup_cmd(ctx, out):
+    """Snapshot ALL present domain DBs together into one timestamped set.
+
+    Cross-DB invariants span files, so a single-DB backup desyncs pointers — always back up
+    (and restore) the whole set. Each DB is copied via the online backup API (consistent
+    even under concurrent writes); absent domains are skipped.
+    """
+    from pathlib import Path as _Path
+
+    from techne.core.maintenance import backup_all_dbs
+
+    config = ctx.obj["config"]
+    res = backup_all_dbs(config, _Path(out) if out else None)
+    click.echo(f"backed up [{', '.join(res.backed_up) or '(none)'}] → {res.dest}")
+    if res.skipped_absent:
+        click.echo(f"skipped (absent): {', '.join(res.skipped_absent)}")
+
+
+@main.command("restore")
+@click.argument("backup_dir")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt")
+@click.option("--no-pre-backup", is_flag=True, help="Don't snapshot the current DBs first")
+@click.pass_context
+def restore_cmd(ctx, backup_dir, yes, no_pre_backup):
+    """Restore ALL domain DBs from a backup set, overwriting the live DBs as a unit.
+
+    The set is validated before any live file is touched, and the CURRENT state is
+    snapshotted first (unless --no-pre-backup) so the restore is itself reversible. Ensure no
+    other techne process is running against these DBs.
+    """
+    from pathlib import Path as _Path
+
+    from techne.core.maintenance import RestoreError, read_manifest, restore_all_dbs
+
+    config = ctx.obj["config"]
+    src = _Path(backup_dir)
+    try:
+        manifest = read_manifest(src)  # validate the whole set BEFORE prompting/touching
+    except RestoreError as e:
+        click.echo(f"restore aborted: {e}", err=True)
+        raise SystemExit(1) from e
+
+    dbs = ", ".join(manifest["databases"].keys())
+    click.echo(
+        f"This OVERWRITES the live DBs [{dbs}] from {src} "
+        f"(set created {manifest.get('created_at', '?')})."
+    )
+    if not yes and not click.confirm("Proceed?"):
+        click.echo("restore cancelled.")
+        return
+    try:
+        res = restore_all_dbs(config, src, pre_restore_backup=not no_pre_backup)
+    except RestoreError as e:
+        click.echo(f"restore aborted: {e}", err=True)
+        raise SystemExit(1) from e
+    click.echo(f"restored: [{', '.join(res.restored)}]")
+    if res.skipped_unknown:
+        click.echo(f"skipped (domains not in this techne): {', '.join(res.skipped_unknown)}")
+    if res.pre_restore_backup:
+        click.echo(f"prior state snapshotted at: {res.pre_restore_backup}")
+
+
 if __name__ == "__main__":
     main()

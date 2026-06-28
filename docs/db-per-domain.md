@@ -86,6 +86,31 @@ Sequenced; the Librarian goes first because it's already built and working — t
 3. **Patterns → `architect.db`** (#87): build on the proven registry/adapter; collapse `architectural-patterns.md` into the store.
 4. **Codex → `codex.db`** (#89): graph domain on the same pattern.
 
+## Operational contract: backup/restore + fsck (techne#139)
+
+db-per-domain has one unavoidable consequence: **two SQLite files cannot share a
+transaction.** Cross-db invariants — a `document_card`'s `doc:<id>` resolving in
+`librarian.db`, a future codex edge resolving — are therefore maintained by
+*after-the-fact reconciliation*, never guaranteed atomically. Two rules follow, and
+`techne/core/maintenance.py` makes them first-class:
+
+- **Backup and restore are all-or-nothing.** Because the invariants span files, backing up
+  or restoring **one** domain db alone silently desyncs the pointers (cards point at
+  documents that the restored `librarian.db` no longer has, etc.). Always operate on the
+  whole set:
+  - `techne backup [--out DIR]` snapshots **every present** domain db together (consistent
+    online copy per file) into one timestamped directory with a `manifest.json`. Absent
+    domains are skipped, not created.
+  - `techne restore <dir>` writes a set back over the live dbs **as a unit** — the set is
+    validated before any live file is touched, the current state is snapshotted first
+    (reversible restore), and stale `-wal`/`-shm` sidecars are cleared. Never hand-restore a
+    single `.db`; that is the exact failure this command exists to prevent.
+- **`techne fsck` is the consistency check.** It runs every cross-db check in one pass
+  (today: dangling/stale `document_card`s vs `librarian.db`) and exits non-zero on any
+  inconsistency, so a human or CI can verify the whole constellation after a restore,
+  rebuild, or suspected drift. New cross-db invariants register as additional checks in
+  `maintenance._CHECKS`.
+
 ## Open questions
 
 - **`techne search --table documents`**: keep it (route to the librarian store) or move to a domain-scoped `techne library search`? (Leaning: domain-scoped; personal recall is the cards.)
