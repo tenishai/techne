@@ -71,24 +71,24 @@ def init_session_for_external_id(
     Caller is responsible for namespacing the external_id to avoid collisions
     across runtimes sharing one techne DB.
     """
-    from techne.core.database import connect, init_db
+    from techne.core.database import init_db
+    from techne.core.state import ensure_session
 
     init_db(config.db_path)
 
-    conn = connect(config.db_path)
-    try:
-        row = conn.execute("SELECT id FROM sessions WHERE id = ?", (external_id,)).fetchone()
-        if row is not None:
-            return external_id
-    finally:
-        conn.close()
-
-    return run_session_start(
-        config,
-        project_path=project_path,
-        agent_identity=agent_identity,
-        session_id=external_id,
+    # Atomic + idempotent: ensure_session is INSERT OR IGNORE, so it can't race the
+    # way the old SELECT-then-(maybe)-INSERT did — two concurrent callers both seeing
+    # "no row" and both inserting would make the second raise IntegrityError on the
+    # sessions PK. INSERT OR IGNORE no-ops on an existing row, preserving the
+    # "return the id without modifying it" contract. (techne#170)
+    ensure_session(
+        config.db_path,
+        external_id,
+        project_path=project_path or "",
+        agent_identity=agent_identity or "",
+        platform=config.platform,
     )
+    return external_id
 
 
 def run_session_end(
