@@ -39,6 +39,10 @@ vectors = [
     "fastembed>=0.4.0; python_version < '3.14'",
 ]
 anthropic = ["anthropic>=0.40.0"]
+# `security` wires the pre-install CVE auditor for techne.security.shell_guard
+# (techne#120). Optional: the gate FAILS OPEN when pip-audit is absent, so this
+# only sharpens the audit — it is never required for the anti-chaining gate.
+security = ["pip-audit>=2.7"]
 # `watch` enables `techne watch <dir>` — continuous-ingest mode that
 # observes filesystem changes and adds them as observations. Useful for
 # code agents (the Codex persona) and for keeping a docs corpus current.
