@@ -291,8 +291,10 @@ def annotate_freshness(
     elif not isinstance(repo_root, Path):
         repo_root = Path(repo_root)
 
-    # Per-file cache: file_str → freshness state string.
-    # Deduplicates disk access for symbols sharing the same file.
+    # Per-file cache: file_str → freshness state string. Deduplicates disk access
+    # for symbols sharing the same file. Keyed on file_str ALONE (not file_hash):
+    # every symbol of a given file carries that file's one file_hash, so file_str
+    # uniquely determines freshness — the hash is not part of the cache key.
     _file_freshness: dict[str, str] = {}
 
     def _classify_file(file_str: str, file_hash: str | None) -> str:
