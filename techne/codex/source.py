@@ -555,13 +555,26 @@ class RepoSource:
     # ------------------------------------------------------------------
 
     def initial_walk(self) -> int:
-        """Walk the repo, index all source files. Returns total symbol count."""
+        """Walk the repo, index all source files. Returns total symbol count.
+
+        Also persists the repo_root absolute path in codex_meta so query-time
+        staleness checks can resolve relative file paths without caller input.
+        """
         total = 0
         files = 0
         for path in _walk_repo(self._root, self._languages):
             files += 1
             total += _index_file(self._db_path, path, self._root)
         log.info("codex_initial_walk root=%s files=%d symbols=%d", self._root, files, total)
+
+        # Persist repo_root so annotate_freshness can resolve relative paths.
+        try:
+            from techne.core.codex import set_meta
+
+            set_meta(self._db_path, "repo_root", str(self._root.resolve()))
+        except Exception:  # noqa: BLE001
+            log.warning("codex: failed to persist repo_root in codex_meta", exc_info=True)
+
         # No-silent-failures guard: a non-empty repo that produces an empty graph
         # means grammars are missing or the layout is unsupported. total==0 alone
         # is normal on a fully-unchanged re-index, so check the store itself.

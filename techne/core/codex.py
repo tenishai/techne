@@ -14,6 +14,7 @@ Graph-boosted ranking, graphqlite, and code vectors are deferred.
 Schema versions (PRAGMA user_version on codex.db):
   0 — original: edges(from_symbol, to_symbol NOT NULL, kind); no file_hash on symbols
   1 — v1 extraction: edges name-based (to_name, to_symbol nullable); symbols.file_hash
+  2 — codex_meta KV table: persists repo_root (and future per-db metadata)
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, load_store, plain_connect
 
-CODEX_VERSION = 1
+CODEX_VERSION = 2
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -80,6 +81,11 @@ CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
     INSERT INTO symbols_fts(rowid, name, signature)
     VALUES (NEW.rowid, NEW.name, COALESCE(NEW.signature, ''));
 END;
+
+CREATE TABLE IF NOT EXISTS codex_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # Process-global memoization keyed on db_path: prevents re-running the migration
@@ -88,8 +94,8 @@ _migrated: set[Path] = set()
 _migration_done: set[Path] = set()
 
 
-def _codex_v0_to_v1(conn, current: int, target: int) -> None:
-    """codex.db v0 → v1 run-step (techne#136): symbols.file_hash + name-based edges.
+def _codex_v0_to_v1(conn) -> None:
+    """codex.db v0 → v1 structural changes: symbols.file_hash + name-based edges.
 
     Idempotency is STRUCTURAL (column-presence), not version-based — a
     retrofit-versioned db reads ``user_version = 0`` regardless of its actual
@@ -143,6 +149,32 @@ def _codex_v0_to_v1(conn, current: int, target: int) -> None:
             CREATE INDEX IF NOT EXISTS idx_edges_src_hash  ON edges(src_file_hash);
         """)
 
+
+def _codex_v1_to_v2(conn) -> None:
+    """codex.db v1 → v2: codex_meta KV table (repo_root + future db-level metadata).
+
+    The table is also created via ``CREATE TABLE IF NOT EXISTS codex_meta`` in
+    CODEX_SCHEMA (applied by ``store.migrate(CODEX_SCHEMA)`` after the migration
+    step), so this step is intentionally a no-op structurally — its sole job is to
+    bump user_version so the migration engine does not re-enter on subsequent opens.
+    The ``IF NOT EXISTS`` guard makes it safe on both fresh and migrated DBs.
+    """
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT);"
+    )
+
+
+def _run_codex_steps(conn, current: int, target: int) -> None:
+    """Chain all codex migration steps from *current* to *target*.
+
+    Each step guards itself structurally so it's safe to re-enter (idempotent).
+    Version is written once at the end so a mid-chain crash re-runs all pending
+    steps on the next open (they're all no-ops on already-applied changes).
+    """
+    if current < 1:
+        _codex_v0_to_v1(conn)
+    if current < 2:
+        _codex_v1_to_v2(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
@@ -171,7 +203,7 @@ def _apply_codex_migration(db_path: Path) -> None:
             db_path,
             target_version=CODEX_VERSION,
             read_version=migrator.user_version_io.read,
-            run_steps=_codex_v0_to_v1,
+            run_steps=_run_codex_steps,
             label="codex schema",
         )
     finally:
@@ -217,3 +249,45 @@ def codex_store(config: Config) -> StoreAdapter:
 
 def codex_db(config: Config) -> Path:
     return codex_store(config).db_path
+
+
+# ---------------------------------------------------------------------------
+# codex_meta helpers — repo-level KV store
+# ---------------------------------------------------------------------------
+
+
+def get_meta(db_path: Path, key: str) -> str | None:
+    """Return the value for *key* from codex_meta, or None if absent.
+
+    Gracefully returns None when the codex_meta table doesn't exist yet (e.g.
+    on a pre-v2 DB that hasn't been migrated), so callers don't need to guard.
+    """
+    conn = plain_connect(db_path)
+    try:
+        # Guard: table may be absent on a very old DB accessed without codex_store().
+        has_meta = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='codex_meta'"
+        ).fetchone()
+        if not has_meta:
+            return None
+        row = conn.execute(
+            "SELECT value FROM codex_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def set_meta(db_path: Path, key: str, value: str) -> None:
+    """Upsert *key* → *value* in codex_meta. Creates the table if absent (graceful)."""
+    conn = plain_connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO codex_meta (key, value) VALUES (?, ?)", (key, value)
+        )
+        conn.commit()
+    finally:
+        conn.close()
