@@ -15,13 +15,13 @@ Output is EPHEMERAL — no new table, no persistence.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 
 import structlog
 
 from techne.config import Config
+from techne.core._resident import extract_json_array
+from techne.core._resident import prompt_hash as _prompt_hash
 from techne.core.curated import live_curated_memory
 from techne.core.state import deed_log
 from techne.platforms.claude_code.paths import memory_project_slug
@@ -205,7 +205,7 @@ def claims_emit(
         deed_digest=digest if digest else "(no deeds found for this project)",
     )
 
-    prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:16]
+    prompt_hash = _prompt_hash(prompt)
 
     log.debug(
         "claims_emit",
@@ -235,22 +235,7 @@ def parse_claims_response(raw: str) -> list[dict]:
     """
     VALID_STATUSES = {"corroborated", "uncorroborated", "contradicted"}
 
-    text = (raw or "").strip()
-    # Strip markdown code fences if present (mirrors reflect.parse_response)
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(ln for ln in lines[1:] if not ln.startswith("```")).strip()
-
-    start = text.find("[")
-    end = text.rfind("]")
-    if start < 0 or end < 0 or end < start:
-        return []
-    try:
-        items = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(items, list):
-        return []
+    items = extract_json_array(raw)
 
     out: list[dict] = []
     for item in items:

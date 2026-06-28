@@ -11,12 +11,13 @@ contract still applies: any failure here exits 0 with stderr noise; thread
 detection and session teardown must complete regardless.
 """
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from techne.config import Config
+from techne.core._resident import extract_json_array
+from techne.core._resident import prompt_hash as _prompt_hash
 from techne.core.database import connect
 from techne.core.knowledge import VALID_TYPES as KNOWLEDGE_TYPES
 from techne.core.redaction import redact_credentials
@@ -123,23 +124,7 @@ def parse_response(raw: str, max_items: int) -> list[Candidate]:
     Tolerant of common LLM noise: leading/trailing prose, fenced code blocks.
     Returns [] on any parse failure (caller decides whether to surface that).
     """
-    text = raw.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.splitlines()
-        # drop the first fence line and any trailing fence
-        text = "\n".join(line for line in lines[1:] if not line.startswith("```")).strip()
-    # Find the first '[' and matching ']' — handles trailing prose
-    start = text.find("[")
-    end = text.rfind("]")
-    if start < 0 or end < 0 or end < start:
-        return []
-    try:
-        items = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(items, list):
-        return []
+    items = extract_json_array(raw)
 
     out: list[Candidate] = []
     for item in items[:max_items]:
@@ -358,7 +343,7 @@ def emit_reflection_batch(
         if len(t_obs) < config.reflect.min_observations_per_thread:
             continue
         prompt = _build_prompt(t, t_obs, config.db_path, config)
-        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        prompt_hash = _prompt_hash(prompt)
         batch.append(
             {
                 # The real persisted FK id — resolved against the threads table, not
@@ -495,7 +480,7 @@ def reflect_on_session(
             continue
 
         prompt = _build_prompt(t, t_obs, config.db_path, config)
-        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        prompt_hash = _prompt_hash(prompt)
 
         try:
             raw = generate_fn(prompt)

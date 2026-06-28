@@ -32,6 +32,7 @@ import hashlib
 import json
 
 from techne.config import Config
+from techne.core._resident import extract_json_object
 from techne.core.database import connect
 from techne.core.knowledge import VALID_CONFIDENCE, VALID_TYPES, content_hash
 from techne.core.redaction import redact_credentials
@@ -203,17 +204,7 @@ def consolidate_emit(config: Config, *, max_clusters: int = 20) -> list[dict]:
 def parse_consolidation_response(raw: str) -> dict | None:
     """Parse the agent's JSON verdict object. Returns a normalized dict for a valid
     'merge', or None for 'keep'/unparseable/invalid (caller counts it as kept)."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(ln for ln in lines[1:] if not ln.startswith("```")).strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end < 0 or end < start:
-        return None
-    try:
-        obj = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
+    obj = extract_json_object(raw or "")
     if not isinstance(obj, dict) or obj.get("verdict") != "merge":
         return None
     content = obj.get("content")
