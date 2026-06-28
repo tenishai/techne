@@ -2227,6 +2227,8 @@ def restore_cmd(ctx, backup_dir, yes, no_pre_backup):
         click.echo(f"restore aborted: {e}", err=True)
         raise SystemExit(1) from e
     click.echo(f"restored: [{', '.join(res.restored)}]")
+    if res.skipped_unknown:
+        click.echo(f"skipped (domains not in this techne): {', '.join(res.skipped_unknown)}")
     if res.pre_restore_backup:
         click.echo(f"prior state snapshotted at: {res.pre_restore_backup}")
 

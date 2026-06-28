@@ -265,3 +265,82 @@ def test_cli_restore_bad_dir_aborts(config, monkeypatch, tmp_path):
     res = _run_cli(config, monkeypatch, ["restore", str(tmp_path / "nope")])
     assert res.exit_code == 1
     assert "aborted" in res.output
+
+
+# ---------------------------------------------------------------------------
+# Prudence follow-up: stale-advisory, multi-domain round-trip, mid-copy safety
+# ---------------------------------------------------------------------------
+
+
+def test_fsck_stale_card_is_advisory_not_fail(config):
+    """A card that RESOLVES but whose ver: drifted from the doc is `stale` — advisory, so
+    fsck stays ok (a routine doc edit must not flip fsck red). Only dangling fails."""
+    from techne.core.cards import upsert_document_card
+    from techne.core.documents import store_document
+    from techne.core.librarian import librarian_db
+
+    doc_id, _ = store_document(
+        librarian_db(config), source_type="x", source_url="u", content="real body", title="T"
+    )
+    # ver: deliberately doesn't match the doc's content hash → stale (but resolves).
+    upsert_document_card(
+        config.db_path, source_url="u", doc_id=doc_id, source_version="WRONG-HASH", title="T"
+    )
+    report = run_fsck(config)
+    assert report.ok  # stale does NOT fail
+    card = next(c for c in report.checks if c.name == "dangling_cards")
+    assert card.ok and len(card.details["stale"]) == 1 and "advisory" in card.summary
+
+
+def test_backup_restore_multi_domain_round_trip(config):
+    """The loop that matters: back up techne + librarian, mutate BOTH, restore, both recover."""
+    from techne.core.documents import get_document, store_document
+    from techne.core.librarian import librarian_db
+
+    lib = librarian_db(config)
+    _add_knowledge(config.db_path, "T-MARK")
+    doc_id, _ = store_document(lib, source_type="x", source_url="u", content="L-MARK", title="T")
+
+    res = backup_all_dbs(config)
+    assert set(res.backed_up) == {"techne", "librarian"}
+
+    # Mutate both live DBs.
+    conn = connect(config.db_path)
+    conn.execute("DELETE FROM knowledge")
+    conn.commit()
+    conn.close()
+    lconn = connect(lib)
+    lconn.execute("DELETE FROM documents")
+    lconn.commit()
+    lconn.close()
+
+    rr = restore_all_dbs(config, res.dest)
+    assert set(rr.restored) == {"techne", "librarian"}
+    assert "T-MARK" in _knowledge_contents(config.db_path)
+    assert get_document(lib, doc_id)["content"] == "L-MARK"
+
+
+def test_restore_staging_failure_leaves_live_untouched(config, monkeypatch):
+    """Prudence #2: a copy failure mid-restore must abort with the live DBs UNTOUCHED (the
+    stage-then-commit design) and surface the pre-restore snapshot location."""
+    import techne.core.maintenance as maint
+
+    _add_knowledge(config.db_path, "LIVE-OK")
+    res = backup_all_dbs(config)
+
+    calls = {"n": 0}
+    real_copy = maint.shutil.copy2
+
+    def _flaky_copy(src, dst, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1 and str(dst).endswith(".restore-tmp"):
+            raise OSError("disk full (simulated)")
+        return real_copy(src, dst, *a, **k)
+
+    monkeypatch.setattr(maint.shutil, "copy2", _flaky_copy)
+    with pytest.raises(RestoreError, match="staging failed"):
+        restore_all_dbs(config, res.dest)
+
+    # Live DB never overwritten; no orphan temp left behind.
+    assert "LIVE-OK" in _knowledge_contents(config.db_path)
+    assert not config.db_path.with_name(config.db_path.name + ".restore-tmp").exists()

@@ -21,6 +21,7 @@ operational consequences this module makes first-class:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 from dataclasses import dataclass, field
@@ -59,6 +60,18 @@ def _now_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
+def _unique_dir(path: Path) -> Path:
+    """``path`` if free, else ``path-2``/``path-3``/… — so two auto-named backups (or
+    pre-restore snapshots) in the same wall-clock second can't silently overwrite each
+    other (the prior set is exactly what a restore-gone-wrong needs)."""
+    if not path.exists():
+        return path
+    i = 2
+    while (cand := path.with_name(f"{path.name}-{i}")).exists():
+        i += 1
+    return cand
+
+
 # ---------------------------------------------------------------------------
 # fsck — cross-DB consistency
 # ---------------------------------------------------------------------------
@@ -83,19 +96,27 @@ def _check_dangling_cards(config: Config, present: dict[str, bool]) -> CheckResu
     """The one true cross-DB invariant today: each active document_card in techne.db points
     (``doc:<id>``) at a row that resolves in librarian.db, and the doc still hashes to the
     card's ``ver:``. ``find_dangling_cards`` reports both dangling (unresolvable) and stale.
-    Skipped (ok) when librarian.db doesn't exist — no documents domain, nothing to dangle."""
+    Skipped (ok) when librarian.db doesn't exist — no documents domain, nothing to dangle.
+
+    A DANGLING card (pointer doesn't resolve) is a structural fault → fail. A STALE card
+    (resolves, but the doc drifted from the card's ``ver:``) still works — it's advisory, so
+    it does NOT fail fsck (else a routine doc edit flips CI red); refresh it via the card
+    summary pass."""
     if not present.get("librarian"):
         return CheckResult("dangling_cards", True, "skipped — no librarian.db")
+    # The present-check above is LOAD-BEARING: find_dangling_cards opens librarian_store,
+    # which would CREATE+migrate an absent librarian.db. Never call it when absent.
     from techne.core.cards import find_dangling_cards
 
     rep = find_dangling_cards(config)
     n_dangling, n_stale = len(rep["dangling"]), len(rep["stale"])
-    ok = n_dangling == 0 and n_stale == 0
-    summary = (
-        f"{rep['total']} cards: {n_dangling} dangling, {n_stale} stale"
-        if not ok
-        else f"{rep['total']} cards: all resolve"
-    )
+    ok = n_dangling == 0  # stale is advisory, not a hard fail
+    parts = []
+    if n_dangling:
+        parts.append(f"{n_dangling} DANGLING")
+    if n_stale:
+        parts.append(f"{n_stale} stale (advisory)")
+    summary = f"{rep['total']} cards: " + (", ".join(parts) if parts else "all resolve")
     return CheckResult("dangling_cards", ok, summary, details=rep)
 
 
@@ -146,7 +167,7 @@ def backup_all_dbs(config: Config, dest_dir: Path | None = None) -> BackupResult
     (recorded in the manifest), not created. Returns the destination + which domains landed.
     """
     if dest_dir is None:
-        dest_dir = Path(config.data_dir) / "backups" / f"backup-{_now_stamp()}"
+        dest_dir = _unique_dir(Path(config.data_dir) / "backups" / f"backup-{_now_stamp()}")
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,6 +209,7 @@ class RestoreError(Exception):
 class RestoreResult:
     restored: list[str]
     pre_restore_backup: Path | None
+    skipped_unknown: list[str] = field(default_factory=list)
 
 
 def read_manifest(src_dir: Path) -> dict:
@@ -214,15 +236,25 @@ def read_manifest(src_dir: Path) -> dict:
 def restore_all_dbs(
     config: Config, src_dir: Path, *, pre_restore_backup: bool = True
 ) -> RestoreResult:
-    """Write a backup set back over the live domain DBs, as a unit.
+    """Write a backup set back over the live domain DBs, as close to a unit as a filesystem
+    allows.
 
-    ALL-OR-NOTHING: the set is validated up front (``read_manifest``) before any live file is
-    touched, so a bad set aborts with the live DBs untouched. A pre-restore snapshot of the
-    CURRENT live state is taken first (unless disabled) so a restore is itself reversible.
-    For each db: copy the backup file over the live path, then delete the live ``-wal``/
-    ``-shm`` sidecars so SQLite can't replay a stale WAL over the restored file.
+    Fail-safe ordering, to keep a restore from leaving a half-applied cross-DB desync:
+      1. ``read_manifest`` validates the WHOLE set before any live file is touched — a bad
+         set aborts with live untouched.
+      2. A pre-restore snapshot of the CURRENT live state is taken (unless disabled), so the
+         restore is itself reversible.
+      3. STAGE: copy every source db to a ``<target>.restore-tmp`` sibling. Copying is the
+         failure-prone step (disk full, EIO); doing it ALL before touching any live file
+         means such a failure aborts with live untouched (temps cleaned up).
+      4. COMMIT: per db, delete the live ``-wal``/``-shm`` FIRST (so SQLite can't replay a
+         stale WAL over the new file — the corruption window if done after), then
+         ``os.replace`` the staged temp into place (atomic, near-instant — a failure here is
+         very unlikely and is reported with the pre-restore location to recover from).
 
-    Caller MUST ensure no other techne process holds the DBs open during a restore.
+    Caller MUST ensure no other techne process holds the DBs open during a restore —
+    overwriting a db under a live WAL-mode connection is undefined and that process may later
+    checkpoint its WAL back over the restored file. (v1 stance: documented, not enforced.)
     """
     src_dir = Path(src_dir)
     manifest = read_manifest(src_dir)  # validates the whole set first
@@ -230,21 +262,50 @@ def restore_all_dbs(
     pre: Path | None = None
     if pre_restore_backup:
         pre = backup_all_dbs(
-            config, Path(config.data_dir) / "backups" / f"pre-restore-{_now_stamp()}"
+            config, _unique_dir(Path(config.data_dir) / "backups" / f"pre-restore-{_now_stamp()}")
         ).dest
 
     live = domain_db_paths(config)
-    restored: list[str] = []
+    plan: list[tuple[str, Path, Path, Path]] = []  # (domain, src_file, target, temp)
+    skipped_unknown: list[str] = []
     for domain, meta in manifest["databases"].items():
-        if domain not in live:
-            # A backup from a future techne with a new domain — skip rather than guess a path.
+        if domain not in live:  # a backup from a future techne with a new domain
+            skipped_unknown.append(domain)
             continue
         target = live[domain]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_dir / meta.get("file", f"{domain}.db"), target)
-        for sidecar in _WAL_SIDECARS:
-            wal = target.with_name(target.name + sidecar)
-            if wal.exists():
-                wal.unlink()
-        restored.append(domain)
-    return RestoreResult(restored=restored, pre_restore_backup=pre)
+        src_file = src_dir / meta.get("file", f"{domain}.db")
+        plan.append((domain, src_file, target, target.with_name(target.name + ".restore-tmp")))
+
+    # STAGE — copy all sources to temps beside their targets. Live is UNTOUCHED until commit.
+    try:
+        for _domain, src_file, target, temp in plan:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, temp)
+    except OSError as e:
+        for *_, temp in plan:
+            temp.unlink(missing_ok=True)
+        msg = f"restore staging failed ({e}); live DBs untouched."
+        if pre:
+            msg += f" Prior state: {pre}"
+        raise RestoreError(msg) from e
+
+    # COMMIT — corruption-safe order: drop stale WAL sidecars, then atomic rename into place.
+    restored: list[str] = []
+    try:
+        for domain, _src_file, target, temp in plan:
+            for sidecar in _WAL_SIDECARS:
+                target.with_name(target.name + sidecar).unlink(missing_ok=True)
+            os.replace(temp, target)
+            restored.append(domain)
+    except OSError as e:
+        msg = (
+            f"restore PARTIALLY applied (committed {restored}, failed on the next db: {e}). "
+            f"Cross-DB state may be inconsistent — restore from the pre-restore snapshot"
+            + (f" at {pre}" if pre else " (none taken)")
+            + " or re-run."
+        )
+        raise RestoreError(msg) from e
+
+    return RestoreResult(
+        restored=restored, pre_restore_backup=pre, skipped_unknown=skipped_unknown
+    )
