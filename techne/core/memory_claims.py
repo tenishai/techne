@@ -24,7 +24,7 @@ import structlog
 from techne.config import Config
 from techne.core.curated import live_curated_memory
 from techne.core.state import deed_log
-from techne.platforms.claude_code.paths import project_slug
+from techne.platforms.claude_code.paths import memory_project_slug
 
 log = structlog.get_logger(__name__)
 
@@ -139,7 +139,7 @@ def claims_emit(
       memory_files    — list of source_path strings ([] when memory_present=False)
     """
     cwd = Path(cwd) if cwd else Path.cwd()
-    slug = project_slug(cwd)
+    slug = memory_project_slug(cwd)
 
     # Auto-drain CC's memory files into curated_memory FIRST, so the claim-gate reads a
     # fresh drain. Without this the drain only fills on a manual `techne memory sync`, and

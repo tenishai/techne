@@ -219,3 +219,51 @@ def test_reconcile_scopes_to_project(project, db, monkeypatch):
     report = reconcile(db, cwd=cwd)
     assert "foreign.py" not in report["omissions"]
     assert report["deed_count"] == 0  # only this project's deeds count
+
+
+# ---- techne#175: auto-memory dir resolution -------------------------------
+
+
+def test_auto_memory_dir_default_is_projects_slug_memory(project, monkeypatch):
+    """Lock the base dir: default = <config>/projects/<git-root-slug>/memory. This is the
+    regression guard — if a future CC version moves curated memory elsewhere, this fails
+    loudly instead of techne silently reconciling an empty/absent dir (techne#175)."""
+    from techne.platforms.claude_code.paths import auto_memory_dir, memory_project_slug
+
+    cwd, config_dir = project
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    expected = config_dir / "projects" / memory_project_slug(cwd) / "memory"
+    assert auto_memory_dir(cwd) == expected
+    # The tmp cwd is not inside a git repo, so the memory slug == the cwd (kS) slug.
+    assert memory_project_slug(cwd) == project_slug(cwd)
+
+
+def test_auto_memory_dir_honors_autoMemoryDirectory_override(project, monkeypatch):
+    """techne#175: a user-set `autoMemoryDirectory` in settings.json relocates the dir;
+    techne must read from there, not the default projects/<slug>/memory."""
+    import json
+
+    from techne.platforms.claude_code.paths import auto_memory_dir
+
+    cwd, config_dir = project
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    custom = cwd / "custom-mem"
+    (config_dir / "settings.json").write_text(json.dumps({"autoMemoryDirectory": str(custom)}))
+
+    assert auto_memory_dir(cwd) == custom
+
+
+def test_memory_project_slug_uses_git_repo_root(tmp_path):
+    """techne#175: CC keys auto-memory on the GIT REPO ROOT (docs: '<project> is derived
+    from the git repository … subdirectories within the same repo share one'). A session
+    run from a subdir must resolve the repo-root slug, not the subdir's."""
+    from techne.platforms.claude_code.paths import memory_project_slug
+
+    repo = tmp_path / "myrepo"
+    (repo / ".git").mkdir(parents=True)  # marks the repo root
+    subdir = repo / "pkg" / "sub"
+    subdir.mkdir(parents=True)
+
+    assert memory_project_slug(subdir) == project_slug(repo)
+    assert memory_project_slug(subdir) != project_slug(subdir)  # NOT the raw cwd slug

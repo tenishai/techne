@@ -123,9 +123,9 @@ class ClaudeCodeAdapter:
         # harness that may target different runtimes within one process, so it
         # re-reads CLAUDE_CONFIG_DIR per call. The deferred local import also
         # avoids a probe->platforms import cycle.
-        from techne.platforms.claude_code.paths import claude_projects_dir, project_slug
+        from techne.platforms.claude_code.paths import auto_memory_dir
 
-        return claude_projects_dir() / project_slug(cwd) / "memory" / "MEMORY.md"
+        return auto_memory_dir(cwd) / "MEMORY.md"
 
     def injected_context(self, config) -> str:
         """CC's push surface is the SessionStart hook's Tier-0 ## Key Knowledge
