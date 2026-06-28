@@ -1850,11 +1850,13 @@ def test_concurrent_migration_serializes_no_duplicate_versions(tmp_path):
     race into the migration body. guarded_migrate's fcntl lock + in-lock double-check must
     serialize them — the loser re-reads the version under the lock and no-ops.
 
-    Fork N writers that all open connect() (which runs the full v1→current migration) at
-    once via a barrier. If the lock failed, two processes would re-run a step and the
-    second's `INSERT INTO schema_version (version) VALUES (N)` would hit the UNIQUE
-    constraint → IntegrityError → nonzero child exit. So 'all children exit 0' AND 'no
-    duplicate version rows' together prove the serialization holds."""
+    Fork N writers that all open connect() (which runs the one pending migration step) at
+    once via a barrier. THE serialization probe is the child EXIT CODE: if the fcntl lock
+    failed, ≥2 processes read the stale version in their double-check, both run the step,
+    and the loser's `INSERT INTO schema_version (version) VALUES (N)` hits the UNIQUE
+    constraint → IntegrityError → nonzero exit → the `all(e == 0)` assert fails. (The
+    final `set(versions)` check is a state sanity-check, not the proof — the UNIQUE column
+    means a doubled insert RAISES rather than leaving a duplicate row.)"""
     from techne.core.database import init_db
 
     db_path = tmp_path / "race.db"
@@ -1869,7 +1871,7 @@ def test_concurrent_migration_serializes_no_duplicate_versions(tmp_path):
     seed.commit()
     seed.close()
 
-    n = 16
+    n = 8  # enough to force contention; more only adds reconciler churn, not lock coverage
     go = tmp_path / "go"
     pids: list[int] = []
     for _ in range(n):
@@ -1877,7 +1879,12 @@ def test_concurrent_migration_serializes_no_duplicate_versions(tmp_path):
         if pid == 0:  # ---- child ----
             code = 0
             try:
-                while not go.exists():  # barrier: release all children together
+                # Barrier: release all children together. Bounded so a child can never spin
+                # forever as an orphan if the parent dies before writing `go`.
+                deadline = time.monotonic() + 30.0
+                while not go.exists():
+                    if time.monotonic() > deadline:
+                        os._exit(4)
                     time.sleep(0.001)
                 conn = connect(db_path)  # triggers guarded_migrate to SCHEMA_VERSION
                 v = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
@@ -1897,5 +1904,5 @@ def test_concurrent_migration_serializes_no_duplicate_versions(tmp_path):
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_version").fetchall()]
     finally:
         conn.close()
-    assert max(versions) == SCHEMA_VERSION
-    assert len(versions) == len(set(versions)), f"duplicate schema_version rows: {sorted(versions)}"
+    # Exactly the seed version + the one applied migration — no step ran twice, none skipped.
+    assert set(versions) == {SCHEMA_VERSION - 1, SCHEMA_VERSION}, f"unexpected versions: {versions}"
