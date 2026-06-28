@@ -6,9 +6,9 @@ durable identity claims about the operator). Proposals are written to
 `knowledge_candidates` for human review; while config.reflect.write_to is
 'candidates' the live knowledge / identity tables are never touched.
 
-Designed as a 2-week opt-in experiment — see config.ReflectConfig. The hook
-contract still applies: any failure here exits 0 with stderr noise; thread
-detection and session teardown must complete regardless.
+Opt-in (off by default; enable via reflect.enabled) — see config.ReflectConfig.
+The hook contract still applies: any failure here exits 0 with stderr noise;
+thread detection and session teardown must complete regardless.
 """
 
 import json

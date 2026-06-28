@@ -45,13 +45,15 @@ Within a session, techne detects distinct topics with a **structural heuristic**
 
 ---
 
-## Memory hygiene — reflect · consolidate · claims  ·  *uses the agent's own model*
+## Memory hygiene — reflect · consolidate · dream · evidence · claims  ·  *uses the agent's own model*
 
-The part most memory systems skip. techne keeps memory *honest and lean* through three passes, each driven by **the live agent's own model** (the `emit` / `ingest` pattern — techne renders a prompt, the agent answers, techne stores the result). **No API key. No extra inference cost.**
+The part most memory systems skip. techne keeps memory *honest and lean* through **five distinct passes**, each driven by **the live agent's own model** (the `emit` / `ingest` pattern — techne renders a prompt, the agent answers, techne stores the result). **No API key. No extra inference cost.**
 
-- **Reflect** — at session end, distill a thread of work into durable knowledge *candidates* (proposed, not auto-asserted).
-- **Consolidate** ("sleep") — find duplicate/overlapping knowledge and merge it, fighting memory bloat over time.
-- **Claims** (evidence gate) — judge curated claims against the actual deed-log: "is there evidence for this, or did the agent editorialize?"
+- **Reflect** — at session end, distill a finished session's observations into durable knowledge *candidates* (add-only; opt-in, off by default; enable via `reflect.enabled`).
+- **Consolidate** ("sleep") — dedup and merge near-duplicate live knowledge, fighting memory bloat over time.
+- **Dream** (recombine) — surface *non-obvious* connections across knowledge entries (A + B ⇒ C) as LOW-confidence, review-gated candidates. *Speculative* — for discovery, not assertion.
+- **Evidence gate** (#105) — verify an agent's *structured* claims (committed / tested / wrote-file) against the observation ledger *deterministically* (`backed` / `unbacked` / `unverifiable`). **Caveat:** commit/test/action claims come from Bash output, which is off by default (`capture_bash`), so those return `unverifiable` — not `unbacked` — until enabled.
+- **Claims reconciliation** (#107) — use the agent's own model to judge free-text claims in CC's curated memory against the deed-log digest. *Distinct from the evidence gate:* #105 is deterministic + structured; #107 is model-driven + free-text.
 
 **Why it's different:** memory that *curates itself using the model already running*, and proposes rather than overwrites. For headless/background runs with no agent in the loop, an optional **operator-model** path (`techne[llm]`) can drive the same passes autonomously — but it's strictly opt-in; the default is the agent's own model.
 
@@ -143,4 +145,4 @@ techne is delivered as an **MCP server**, so its tools (`store`, `recall`, `sear
 | CVE pre-install audit | `techne[security]` | `pip-audit` |
 | Continuous filesystem ingest | `techne[watch]` | `watchdog` |
 
-*The memory-hygiene passes (reflect/consolidate/claims) need **no** extra — they run on the agent's own model.*
+*The memory-hygiene passes (reflect/consolidate/dream/evidence/claims) need **no** extra — they run on the agent's own model.*

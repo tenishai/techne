@@ -65,7 +65,7 @@ def seed(db_path: Path) -> dict[str, str]:
     )
     gold["canonical_remote"] = "knowledge:%d" % store(
         db_path,
-        "techne's canonical git origin is github.com/dimartin/techne. The gitea "
+        "techne's canonical git origin is github.com/tenishai/techne. The gitea "
         "remote was dropped on 2026-06-17 — github is canonical, gitea is a dead "
         "archive on a divergent v0.5.0 line.",
         type="decision",
