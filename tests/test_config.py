@@ -197,6 +197,7 @@ def test_make_generate_fn_passes_proxy_fields(tmp_path, monkeypatch):
     """_make_generate_fn forwards api_base + api_key to litellm.completion()
     when configured. Without those, it omits them (relying on litellm's
     env-var routing)."""
+    pytest.importorskip("litellm")
     from techne.config import Config
     from techne.core.threads import _make_generate_fn
 

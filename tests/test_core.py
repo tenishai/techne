@@ -492,6 +492,7 @@ class TestLinkThreshold:
 
 
 def test_make_generate_fn_uses_litellm(monkeypatch):
+    pytest.importorskip("litellm")
     from techne.config import Config
     from techne.core.threads import _make_generate_fn
 
