@@ -503,6 +503,38 @@ def get_latest_checkpoint(db_path: Path, session_id: str) -> dict | None:
         conn.close()
 
 
+def platform_breakdown(db_path: Path) -> dict[str, dict]:
+    """Platform breakdown for status display.
+
+    Returns ``{platform: {"sessions": int, "observations": int}}``.
+    Sessions and observations grouped by ``sessions.platform``; NULL/''
+    coalesced to 'unknown'. Sorted by session count descending.
+    """
+    conn = connect(db_path)
+    try:
+        sess_rows = conn.execute(
+            """SELECT COALESCE(NULLIF(platform, ''), 'unknown') AS plat, COUNT(*) AS cnt
+               FROM sessions
+               GROUP BY plat
+               ORDER BY cnt DESC"""
+        ).fetchall()
+        obs_rows = conn.execute(
+            """SELECT COALESCE(NULLIF(s.platform, ''), 'unknown') AS plat, COUNT(*) AS cnt
+               FROM observations o
+               JOIN sessions s ON o.session_id = s.id
+               GROUP BY plat
+               ORDER BY cnt DESC"""
+        ).fetchall()
+        obs_map = {r["plat"]: r["cnt"] for r in obs_rows}
+        result: dict[str, dict] = {}
+        for r in sess_rows:
+            plat = r["plat"]
+            result[plat] = {"sessions": r["cnt"], "observations": obs_map.get(plat, 0)}
+        return result
+    finally:
+        conn.close()
+
+
 def get_resume_context(db_path: Path, project_path: str = "", limit: int = 5) -> dict:
     """Build resume context for session start injection.
 
@@ -511,10 +543,16 @@ def get_resume_context(db_path: Path, project_path: str = "", limit: int = 5) ->
     """
     conn = connect(db_path)
     try:
-        # Active threads with resume points
+        # Active threads with resume points.
+        #
+        # Cross-platform by deliberate design (techne#81): projects span agents/clients;
+        # shared memory is the point. Provenance (platform + agent_identity) is selected
+        # and surfaced so a future per-platform scoping decision is data-supported without
+        # a migration. We deliberately do NOT filter by platform.
         if project_path:
             threads = conn.execute(
-                """SELECT t.id, t.label, t.summary, t.resume_points, t.updated_at
+                """SELECT t.id, t.label, t.summary, t.resume_points, t.updated_at,
+                          s.platform AS platform, s.agent_identity AS agent_identity
                    FROM threads t
                    JOIN sessions s ON t.session_id = s.id
                    WHERE t.status = 'active'
@@ -526,21 +564,26 @@ def get_resume_context(db_path: Path, project_path: str = "", limit: int = 5) ->
             ).fetchall()
         else:
             threads = conn.execute(
-                """SELECT id, label, summary, resume_points, updated_at
-                   FROM threads
-                   WHERE status = 'active'
-                     AND resume_points IS NOT NULL
-                     AND resume_points != ''
-                   ORDER BY updated_at DESC LIMIT ?""",
+                """SELECT t.id, t.label, t.summary, t.resume_points, t.updated_at,
+                          s.platform AS platform, s.agent_identity AS agent_identity
+                   FROM threads t
+                   JOIN sessions s ON t.session_id = s.id
+                   WHERE t.status = 'active'
+                     AND t.resume_points IS NOT NULL
+                     AND t.resume_points != ''
+                   ORDER BY t.updated_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
 
-        # Recent threads (last 48h, whether or not they have resume points)
+        # Recent threads (last 48h, whether or not they have resume points).
+        # Joined to sessions so platform + agent_identity provenance is available.
         recent = conn.execute(
-            """SELECT id, label, summary, resume_points, status, updated_at
-               FROM threads
-               WHERE updated_at > datetime('now', '-48 hours')
-               ORDER BY updated_at DESC LIMIT ?""",
+            """SELECT t.id, t.label, t.summary, t.resume_points, t.status, t.updated_at,
+                      s.platform AS platform, s.agent_identity AS agent_identity
+               FROM threads t
+               JOIN sessions s ON t.session_id = s.id
+               WHERE t.updated_at > datetime('now', '-48 hours')
+               ORDER BY t.updated_at DESC LIMIT ?""",
             (limit * 2,),
         ).fetchall()
 
@@ -559,6 +602,19 @@ def get_resume_context(db_path: Path, project_path: str = "", limit: int = 5) ->
         }
     finally:
         conn.close()
+
+
+def provenance_tag(row: dict) -> str:
+    """Terse provenance tag for a thread/session row (techne#81).
+
+    ``[platform]`` (e.g. ``[opencode]``), or ``[platform:agent_identity]`` when an
+    agent identity is present. Empty/None platform coalesces to ``unknown``. This is
+    surfaced at injection so cross-platform threads are visibly attributed — it never
+    filters which threads are shown (projects span agents by design).
+    """
+    plat = (row.get("platform") or "").strip() or "unknown"
+    agent = (row.get("agent_identity") or "").strip()
+    return f"[{plat}:{agent}]" if agent else f"[{plat}]"
 
 
 def format_resume_context(ctx: dict, project_path: str = "", max_chars: int = 1800) -> str:
@@ -583,7 +639,8 @@ def format_resume_context(ctx: dict, project_path: str = "", max_chars: int = 18
         for t in active:
             label = (t.get("label") or "thread").strip()
             detail = (t.get("resume_points") or t.get("summary") or "").strip().replace("\n", " ")
-            body.append(f"- {label}: {detail[:200]}".rstrip(": ").rstrip())
+            tag = " " + provenance_tag(t)
+            body.append((f"- {label}: {detail[:200]}".rstrip(": ").rstrip()) + tag)
 
     if knowledge:
         body.append("\nDurable facts:")

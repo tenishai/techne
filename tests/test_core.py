@@ -1,26 +1,28 @@
 """Tests for techne core modules."""
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from techne.config import Config
 from techne.core.database import connect, init_db
-from techne.core.knowledge import store, list_entries, supersede, get, content_hash
-from techne.core.identity import set_value, get as identity_get, list_entries as identity_list
+from techne.core.identity import get as identity_get
+from techne.core.identity import list_entries as identity_list
+from techne.core.identity import set_value
+from techne.core.knowledge import content_hash, get, list_entries, store, supersede
 from techne.core.state import (
-    start_session,
-    end_session,
-    get_session,
-    get_active_session,
     add_observation,
-    get_observations,
-    observation_count,
-    save_checkpoint,
-    get_latest_checkpoint,
-    get_resume_context,
     db_stats,
+    end_session,
+    format_resume_context,
+    get_active_session,
+    get_latest_checkpoint,
+    get_observations,
+    get_resume_context,
+    get_session,
+    observation_count,
+    platform_breakdown,
+    provenance_tag,
+    save_checkpoint,
+    start_session,
 )
 from techne.core.threads import (
     Thread,
@@ -51,7 +53,8 @@ def config(db_path):
 class TestDatabase:
     def test_connect_initializes_lazily(self, tmp_path):
         """connect() (via a core function) initializes schema without explicit init_db."""
-        from techne.core.knowledge import store, get
+        from techne.core.knowledge import get, store
+
         fresh_db = tmp_path / "fresh.db"
         # No init_db call — lazy init must handle this
         entry_id = store(fresh_db, "test fact", type="fact")
@@ -87,7 +90,8 @@ class TestDatabase:
         assert "schema_version" in tables
 
     def test_schema_version(self, db_path):
-        from techne.core.database import connect, SCHEMA_VERSION
+        from techne.core.database import SCHEMA_VERSION, connect
+
         conn = connect(db_path)
         row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
         conn.close()
@@ -290,7 +294,9 @@ class TestIdentity:
 class TestCheckpoints:
     def test_save_and_get(self, db_path):
         sid = start_session(db_path)
-        save_checkpoint(db_path, sid, "auto", {"files_modified": ["foo.py"], "last_task": "Fix bug"})
+        save_checkpoint(
+            db_path, sid, "auto", {"files_modified": ["foo.py"], "last_task": "Fix bug"}
+        )
 
         cp = get_latest_checkpoint(db_path, sid)
         assert cp is not None
@@ -332,8 +338,14 @@ class TestResumeContext:
         # Create a session and threads with resume points
         sid = start_session(db_path, project_path="/proj/test")
         threads = [
-            Thread(thread_num=1, label="Database migration", summary="Ran Alembic migrations", resume_points="- Verify prod deployment"),
-            Thread(thread_num=2, label="API refactor", summary="Refactored user endpoints", resume_points="- Add integration tests"),
+            Thread(
+                thread_num=1, label="Database migration",
+                summary="Ran Alembic migrations", resume_points="- Verify prod deployment",
+            ),
+            Thread(
+                thread_num=2, label="API refactor",
+                summary="Refactored user endpoints", resume_points="- Add integration tests",
+            ),
         ]
         save_threads(threads, sid, db_path)
 
@@ -729,3 +741,192 @@ class TestSupersedeGuard:
         assert "C" in contents
         assert "B" not in contents
         assert "A" not in contents
+
+
+# ---------------------------------------------------------------------------
+# techne#81 — sessions.platform read path
+# ---------------------------------------------------------------------------
+
+
+class TestPlatformBreakdown:
+    """platform_breakdown() returns per-platform session + observation counts."""
+
+    def test_empty_db(self, db_path):
+        result = platform_breakdown(db_path)
+        assert result == {}
+
+    def test_counts_sessions_by_platform(self, db_path):
+        start_session(db_path, platform="claude-code")
+        start_session(db_path, platform="claude-code")
+        start_session(db_path, platform="opencode")
+        result = platform_breakdown(db_path)
+        assert result["claude-code"]["sessions"] == 2
+        assert result["opencode"]["sessions"] == 1
+
+    def test_counts_observations_by_platform(self, db_path):
+        sid_cc = start_session(db_path, platform="claude-code")
+        sid_oc = start_session(db_path, platform="opencode")
+        add_observation(db_path, sid_cc, "Edit", "cc edit 1")
+        add_observation(db_path, sid_cc, "Bash", "cc bash")
+        add_observation(db_path, sid_oc, "Edit", "oc edit 1")
+        result = platform_breakdown(db_path)
+        assert result["claude-code"]["observations"] == 2
+        assert result["opencode"]["observations"] == 1
+
+    def test_null_platform_coalesced_to_unknown(self, db_path):
+        from techne.core.database import connect as db_connect
+
+        # Insert a session with NULL platform directly (bypassing start_session default).
+        conn = db_connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO sessions (id, platform) VALUES ('null-plat', NULL)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        result = platform_breakdown(db_path)
+        assert "unknown" in result
+        assert result["unknown"]["sessions"] >= 1
+
+    def test_empty_string_platform_coalesced_to_unknown(self, db_path):
+        from techne.core.database import connect as db_connect
+
+        conn = db_connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO sessions (id, platform) VALUES ('empty-plat', '')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        result = platform_breakdown(db_path)
+        assert "unknown" in result
+
+    def test_sorted_by_sessions_desc(self, db_path):
+        # 3 claude-code, 1 opencode → claude-code first
+        for _ in range(3):
+            start_session(db_path, platform="claude-code")
+        start_session(db_path, platform="opencode")
+        result = platform_breakdown(db_path)
+        platforms = list(result.keys())
+        assert platforms[0] == "claude-code"
+
+
+class TestResumeContextProvenance:
+    """get_resume_context returns platform + agent_identity on thread dicts (#81)."""
+
+    def test_active_threads_include_platform(self, db_path):
+        sid = start_session(db_path, project_path="/proj", platform="claude-code")
+        threads = [
+            Thread(thread_num=1, label="work", summary="did stuff", resume_points="- next step")
+        ]
+        save_threads(threads, sid, db_path)
+        ctx = get_resume_context(db_path, project_path="/proj")
+        assert len(ctx["active_threads"]) == 1
+        t = ctx["active_threads"][0]
+        assert t["platform"] == "claude-code"
+        assert "agent_identity" in t
+
+    def test_active_threads_no_project_include_platform(self, db_path):
+        sid = start_session(db_path, platform="opencode")
+        threads = [
+            Thread(thread_num=1, label="oc work", summary="oc stuff", resume_points="- oc next")
+        ]
+        save_threads(threads, sid, db_path)
+        ctx = get_resume_context(db_path)
+        assert len(ctx["active_threads"]) == 1
+        assert ctx["active_threads"][0]["platform"] == "opencode"
+
+    def test_recent_threads_include_platform(self, db_path):
+        sid = start_session(db_path, platform="opencode")
+        threads = [Thread(thread_num=1, label="recent", summary="recent work")]
+        save_threads(threads, sid, db_path)
+        ctx = get_resume_context(db_path)
+        assert len(ctx["recent_threads"]) >= 1
+        assert ctx["recent_threads"][0]["platform"] == "opencode"
+
+    def test_cross_platform_both_returned(self, db_path):
+        """Cross-platform fixture: one cc thread + one opencode thread in the same
+        project → both returned (proving no platform filter)."""
+        sid_cc = start_session(db_path, project_path="/myproj", platform="claude-code")
+        sid_oc = start_session(db_path, project_path="/myproj", platform="opencode")
+        save_threads(
+            [Thread(thread_num=1, label="cc task", summary="cc", resume_points="- cc resume")],
+            sid_cc, db_path,
+        )
+        save_threads(
+            [Thread(thread_num=1, label="oc task", summary="oc", resume_points="- oc resume")],
+            sid_oc, db_path,
+        )
+        ctx = get_resume_context(db_path, project_path="/myproj")
+        platforms = {t["platform"] for t in ctx["active_threads"]}
+        assert "claude-code" in platforms
+        assert "opencode" in platforms
+
+
+class TestFormatResumeContextProvenance:
+    """format_resume_context annotates thread lines with [platform] tags (#81)."""
+
+    def _make_thread(self, label, resume, platform, agent_identity=""):
+        return {
+            "label": label,
+            "resume_points": resume,
+            "summary": "",
+            "platform": platform,
+            "agent_identity": agent_identity,
+        }
+
+    def test_platform_tag_appended(self):
+        t = self._make_thread("my task", "- do the thing", "claude-code")
+        out = format_resume_context({"active_threads": [t], "knowledge": []})
+        assert "[claude-code]" in out
+
+    def test_agent_identity_included_when_present(self):
+        t = self._make_thread("my task", "- do the thing", "claude-code", agent_identity="rook-v2")
+        out = format_resume_context({"active_threads": [t], "knowledge": []})
+        assert "[claude-code:rook-v2]" in out
+
+    def test_agent_identity_absent_when_empty(self):
+        t = self._make_thread("my task", "- do the thing", "opencode", agent_identity="")
+        out = format_resume_context({"active_threads": [t], "knowledge": []})
+        assert "[opencode]" in out
+        assert "opencode:" not in out
+
+    def test_both_cc_and_opencode_rendered(self):
+        """Both a claude-code and an opencode thread are rendered (no platform filtering)."""
+        cc = self._make_thread("cc task", "- cc resume", "claude-code")
+        oc = self._make_thread("oc task", "- oc resume", "opencode")
+        out = format_resume_context({"active_threads": [cc, oc], "knowledge": []})
+        assert "[claude-code]" in out
+        assert "[opencode]" in out
+        assert "cc task" in out
+        assert "oc task" in out
+
+    def test_unknown_platform_coalesced(self):
+        t = self._make_thread("task", "- step", platform=None)
+        out = format_resume_context({"active_threads": [t], "knowledge": []})
+        assert "[unknown]" in out
+
+
+class TestProvenanceTag:
+    """provenance_tag() — the shared [platform(:agent)] formatter (#81)."""
+
+    def test_platform_only(self):
+        assert provenance_tag({"platform": "opencode"}) == "[opencode]"
+
+    def test_platform_and_agent(self):
+        tag = provenance_tag({"platform": "claude-code", "agent_identity": "rook"})
+        assert tag == "[claude-code:rook]"
+
+    def test_empty_agent_omitted(self):
+        assert provenance_tag({"platform": "opencode", "agent_identity": ""}) == "[opencode]"
+
+    def test_none_platform_unknown(self):
+        assert provenance_tag({"platform": None}) == "[unknown]"
+
+    def test_empty_platform_unknown(self):
+        assert provenance_tag({"platform": "", "agent_identity": ""}) == "[unknown]"
+
+    def test_missing_keys_unknown(self):
+        assert provenance_tag({}) == "[unknown]"
