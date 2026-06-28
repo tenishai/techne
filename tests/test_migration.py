@@ -1748,6 +1748,27 @@ class TestReconcileIndexes:
         finally:
             conn.close()
 
+    def test_force_reconcile_repairs_stamped_db(self, tmp_path):
+        """techne#140: force_reconcile (the `techne reconcile` escape hatch) re-runs the
+        passes on an already-stamped db WITHOUT a manual sentinel clear, restoring drift."""
+        from techne.core.database import force_reconcile
+
+        db_path = tmp_path / "force.db"
+        conn = connect(db_path)  # fresh → stamped
+        conn.execute("DROP INDEX idx_knowledge_type")
+        conn.commit()
+        conn.close()
+
+        # A plain reconnect would skip (stamped); force_reconcile must restore it.
+        force_reconcile(db_path)
+
+        conn = connect(db_path)
+        try:
+            live = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+            assert "idx_knowledge_type" in live, "force_reconcile should restore drift"
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # techne#169: migration idempotency + step-12 trigger redeploy

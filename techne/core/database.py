@@ -451,8 +451,10 @@ def _guarded_migrate(conn: sqlite3.Connection, db_path: Path, existing_version: 
 # wasteful once a db is already current+reconciled. We stamp this sentinel after a
 # reconcile and skip the passes while it matches SCHEMA_VERSION. Reconcile still runs
 # (a) after any migration and (b) once for any db that reaches the current version
-# without a matching stamp (e.g. a pre-sentinel db). `techne fsck` remains the
-# explicit-verification path for suspected drift on an already-stamped db.
+# without a matching stamp (e.g. a pre-sentinel db). For suspected drift on an
+# already-stamped db, `techne reconcile` (force_reconcile) re-runs the passes
+# unconditionally — the operator escape hatch now that the every-connect self-heal
+# is gated.
 _RECONCILE_SENTINEL = "reconcile:schema_version"
 
 
@@ -479,6 +481,21 @@ def _run_reconcile_passes(conn: sqlite3.Connection) -> None:
     _reconcile_indexes(conn)  # last: an index may reference a just-added column (#138)
     set_state(conn, _RECONCILE_SENTINEL, {"version": SCHEMA_VERSION})
     conn.commit()
+
+
+def force_reconcile(db_path: Path) -> None:
+    """Force the drift-reconcile passes on *db_path*, bypassing the sentinel (techne#140).
+
+    The connect()-time passes are gated to skip an already-stamped, current-version db
+    (the hot-path optimisation). This is the operator escape hatch: re-run all passes
+    unconditionally to repair suspected schema drift (a dropped index/trigger/column,
+    FTS desync) on a db that would otherwise be skipped. Re-stamps the sentinel.
+    """
+    conn = connect(db_path)
+    try:
+        _run_reconcile_passes(conn)
+    finally:
+        conn.close()
 
 
 def _ensure_initialized(conn: sqlite3.Connection, db_path: Path) -> None:
