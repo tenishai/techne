@@ -597,6 +597,46 @@ TOOLS = [
             "required": ["response"],
         },
     },
+    {
+        "name": "techne_check_evidence",
+        "description": (
+            "Call this before asserting you did something (committed, ran tests, wrote a "
+            "file) to verify the claim against the observation ledger — enforces 'no "
+            "unbacked word'. Returns per-claim backed/unbacked/unverifiable verdicts by "
+            "parsing what the agent actually DID (Write/Edit/Bash tool records) in the "
+            "given session window. Advisory — does not block; use unbacked_count > 0 as "
+            "the flag. Structured claims only; free-text extraction is out of scope. NOTE: "
+            "commit/tests_green/ran_action come from Bash, which is off by default — those "
+            "return 'unverifiable' (not 'unbacked') unless capture_bash is enabled."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session to query observations for.",
+                },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "Optional ISO-8601 timestamp. When given, only observations with "
+                        "timestamp > since are checked (turn-boundary approximation)."
+                    ),
+                },
+                "claims": {
+                    "type": "array",
+                    "description": (
+                        "Structured claims to check. Each object must have a 'type' field. "
+                        "Supported types: 'completion'/'did_work', 'commit' (optional 'sha'), "
+                        "'tests_green', 'ran_action' (required 'match'), "
+                        "'wrote_file' (required 'path')."
+                    ),
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["session_id", "claims"],
+        },
+    },
 ]
 
 def _codex_search(args: dict, config: Config) -> dict:
@@ -777,6 +817,50 @@ def _techne_memory_claims_ingest(args: dict, config: Config) -> dict:
     return claims_ingest(config, args.get("prompt_hash", ""), response)
 
 
+def _techne_check_evidence(args: dict, config: Config) -> dict:
+    """Verify structured claims against the observation ledger (techne#105).
+
+    Calls query_turn_evidence to build the evidence window, then check_claims
+    to produce per-claim verdicts.  Returns a summary dict with the evidence
+    view, the verdict list, and an unbacked_count for the caller to flag.
+    """
+    from techne.core.evidence import check_claims, query_turn_evidence
+
+    session_id = args.get("session_id", "")
+    if not session_id:
+        raise ValueError("techne_check_evidence requires 'session_id'")
+
+    since = args.get("since")
+    claims = args.get("claims") or []
+    if not isinstance(claims, list):
+        raise ValueError("'claims' must be an array of objects")
+
+    ev = query_turn_evidence(
+        config.db_path, session_id, since_iso=since,
+        bash_captured=config.hooks.capture_bash,
+    )
+    verdicts = check_claims(claims, ev)
+    unbacked_count = sum(1 for v in verdicts if v["status"] == "unbacked")
+
+    return {
+        "evidence": {
+            "any_tool_call": ev.any_tool_call,
+            "observation_count": ev.observation_count,
+            "artifacts": ev.artifacts,
+            "commits": ev.commits,
+            "actions": ev.actions,
+            "tests": {
+                "passed": ev.tests.passed,
+                "failed": ev.tests.failed,
+                "errors": ev.tests.errors,
+                "suite_green": ev.tests.suite_green,
+            },
+        },
+        "verdicts": verdicts,
+        "unbacked_count": unbacked_count,
+    }
+
+
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
@@ -795,6 +879,7 @@ TOOL_HANDLERS = {
     "techne_consolidate_ingest": _techne_consolidate_ingest,
     "techne_memory_claims_emit": _techne_memory_claims_emit,
     "techne_memory_claims_ingest": _techne_memory_claims_ingest,
+    "techne_check_evidence": _techne_check_evidence,
 }
 
 

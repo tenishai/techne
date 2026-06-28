@@ -2151,6 +2151,89 @@ def codex_blast(ctx, symbol_id, direction, depth):
 
 
 # ---------------------------------------------------------------------------
+# Evidence gate (techne#105) — read-only view over the observation ledger
+# ---------------------------------------------------------------------------
+
+
+@main.command("evidence")
+@click.argument("session_id")
+@click.option(
+    "--since",
+    default=None,
+    help="ISO-8601 timestamp; only observations after this time are included.",
+)
+@click.pass_context
+def evidence_cmd(ctx, session_id, since):
+    """Show what an agent actually did in a session window.
+
+    Queries the observation ledger and prints the evidence view: any tool
+    calls made, files written/edited, git commits found, bash actions run,
+    and test results parsed from output.  Useful for humans and CI to eyeball
+    what an agent did before trusting its claims.
+
+    SESSION_ID is the techne session identifier to inspect.
+    """
+    from techne.core.evidence import query_turn_evidence
+
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init", err=True)
+        raise SystemExit(1)
+
+    ev = query_turn_evidence(
+        config.db_path, session_id, since_iso=since,
+        bash_captured=config.hooks.capture_bash,
+    )
+
+    click.echo(f"Session: {session_id}")
+    if since:
+        click.echo(f"Since:   {since}")
+    click.echo(f"Observations: {ev.observation_count}")
+    click.echo(f"Any tool call: {ev.any_tool_call}")
+    if not config.hooks.capture_bash:
+        click.echo(
+            "NOTE: Bash capture is OFF (config.hooks.capture_bash=False) — commits, "
+            "actions, and test results are not recorded and will show empty; enable "
+            "capture_bash to verify those.",
+        )
+    click.echo()
+
+    if ev.artifacts:
+        click.echo(f"Artifacts ({len(ev.artifacts)}):")
+        for a in ev.artifacts:
+            click.echo(f"  {a}")
+    else:
+        click.echo("Artifacts: (none)")
+
+    if ev.commits:
+        click.echo(f"Commits ({len(ev.commits)}):")
+        for c in ev.commits:
+            click.echo(f"  {c}")
+    else:
+        click.echo("Commits: (none)")
+
+    click.echo(f"Actions: {len(ev.actions)}")
+    for a in ev.actions[:3]:
+        click.echo(f"  $ {a}")
+    if len(ev.actions) > 3:
+        click.echo(f"  ... ({len(ev.actions) - 3} more)")
+
+    t = ev.tests
+    if t.suite_green is None:
+        tests_str = "unparsed (no test output found)"
+    else:
+        parts = []
+        if t.passed is not None:
+            parts.append(f"passed={t.passed}")
+        if t.failed is not None:
+            parts.append(f"failed={t.failed}")
+        if t.errors is not None:
+            parts.append(f"errors={t.errors}")
+        tests_str = f"{'GREEN' if t.suite_green else 'RED'} ({', '.join(parts)})"
+    click.echo(f"Tests: {tests_str}")
+
+
+# ---------------------------------------------------------------------------
 # Cross-DB maintenance: fsck + all-DBs-together backup/restore (techne#139)
 # ---------------------------------------------------------------------------
 
