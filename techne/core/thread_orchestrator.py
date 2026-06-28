@@ -532,7 +532,13 @@ def _make_generate_fn(config: Config):
     """
 
     def generate(prompt: str) -> str:
-        import litellm
+        try:
+            import litellm
+        except ImportError as exc:
+            raise RuntimeError(
+                "techne's operator-model path requires litellm. Install it with: "
+                "pip install 'techne[llm]'  (the default resident emit/ingest path needs no extra)."
+            ) from exc
 
         kwargs: dict = {
             "model": config.model,
