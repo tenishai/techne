@@ -203,9 +203,13 @@ def _pip_audit_findings(packages: list[str], threshold: str, timeout: float) -> 
 
 
 def _extract_severity(vuln: dict) -> str | None:
-    """pip-audit/OSV severity is irregular (sometimes absent, sometimes a CVSS vector,
-    sometimes a label). Pull a coarse label when present; None otherwise (which our
-    threshold treats as 'unknown' → blocks at any threshold)."""
+    """Best-effort coarse severity label, or None.
+
+    NB (verified vs pip-audit 2.10.1): pip-audit's vuln objects are
+    ``{id, fix_versions, aliases, description}`` with NO ``severity`` — and the aliases are
+    CVE/GHSA/SNYK IDs, not severity labels. So this returns None for every real pip-audit
+    finding today, which the threshold treats as 'unknown' → blocks at any threshold. The
+    ``severity``/alias probing is forward-compat for an auditor that DOES emit a label."""
     sev = vuln.get("severity")
     if isinstance(sev, str) and sev.strip():
         return sev.strip()
@@ -235,6 +239,13 @@ def audit_install(
     no auditor wired; the auditor is not installed; or the auditor errors. Only a clean run
     that REPORTS a vulnerability at/above *threshold* blocks (``ok=False``). *threshold* is
     one of low/moderate(medium)/high/critical.
+
+    HONEST CAVEAT (verified against pip-audit 2.10.1): pip-audit's JSON carries NO severity
+    field — only id/aliases/fix_versions. So every vuln it reports has 'unknown' severity,
+    which by design ranks above any threshold → for pip, *threshold* is effectively inert
+    and EVERY known vuln blocks (fail-closed — the safe direction). The threshold mechanism
+    is kept for auditors that DO emit severity (and so callers can opt into a softer gate if
+    one is wired later); it just doesn't loosen the pip gate today.
     """
     ecosystem, packages = _detect_install(command)
     if ecosystem is None:

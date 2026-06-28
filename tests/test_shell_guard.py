@@ -194,6 +194,25 @@ class TestAuditInstall:
             r = audit_install("pip install p", threshold="critical")
         assert not r.ok and r.findings[0]["id"] == "UNSCORED"
 
+    def test_real_pip_audit_shape_no_severity_blocks(self):
+        """Faithful to pip-audit 2.10.1 output: vulns are {id, fix_versions, aliases,
+        description} with NO severity field, aliases are CVE/GHSA IDs. Such a finding has
+        unknown severity → must BLOCK even at threshold='critical' (fail-closed)."""
+        real = {
+            "id": "PYSEC-2021-66",
+            "fix_versions": ["2.11.3"],
+            "aliases": ["CVE-2020-28493", "GHSA-g3rq-g295-4j3m"],
+            "description": "ReDoS in jinja2 < 2.11.3",
+        }
+        with patch(_WHICH, return_value="/usr/bin/pip-audit"), patch(_RUN) as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=1, stdout=_pip_audit_json(("jinja2", "2.10", [real])), stderr=""
+            )
+            r = audit_install("pip install jinja2==2.10", threshold="critical")
+        assert not r.ok and r.audited
+        assert r.findings[0]["id"] == "PYSEC-2021-66"
+        assert r.findings[0]["severity"] is None  # no severity in real pip-audit output
+
     def test_auditor_error_fails_open(self):
         with patch(_WHICH, return_value="/usr/bin/pip-audit"), \
              patch(_RUN, side_effect=subprocess.TimeoutExpired("pip-audit", 60)):
