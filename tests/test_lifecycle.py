@@ -598,6 +598,34 @@ def test_init_session_for_external_id_respects_config_platform(tmp_path):
     assert row["platform"] == "cabal"
 
 
+def test_init_session_for_external_id_carries_fields_single_row(tmp_path):
+    """techne#170: the switch to ensure_session (atomic INSERT OR IGNORE, closing the
+    SELECT→INSERT TOCTOU) must still persist project_path/agent_identity and leave
+    exactly one row even when re-called."""
+    from techne.config import Config
+    from techne.core.database import connect
+    from techne.lifecycle import init_session_for_external_id
+
+    config = Config()
+    config.db_path = tmp_path / "fields.db"
+
+    init_session_for_external_id(config, "task-9", project_path="/repo", agent_identity="raven")
+    # Re-bind (agent restart): must not duplicate or overwrite.
+    init_session_for_external_id(config, "task-9", project_path="/other", agent_identity="rook")
+
+    conn = connect(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT project_path, agent_identity FROM sessions WHERE id = ?", ("task-9",)
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1, "exactly one session row per external id"
+    # INSERT OR IGNORE keeps the first write — the row is not modified on re-bind.
+    assert rows[0]["project_path"] == "/repo"
+    assert rows[0]["agent_identity"] == "raven"
+
+
 def test_run_session_start_passes_session_id_through(tmp_path):
     """The lifecycle wrapper threads session_id down to start_session unchanged."""
     from techne.config import Config

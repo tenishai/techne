@@ -283,6 +283,49 @@ def test_incrementality_on_file_change(tmp_path):
         conn_tmp2.close()
 
 
+def _edges_for_file(db_path: Path, file: str) -> int:
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT count(*) FROM edges WHERE from_symbol IN "
+            "(SELECT id FROM symbols WHERE file = ?)",
+            (file,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
+def test_reindex_does_not_delete_twin_file_edges(tmp_path):
+    """techne#170: two files with identical bytes share a SHA. Re-indexing one must
+    NOT delete the OTHER's edges — the old `DELETE FROM edges WHERE src_file_hash=?`
+    keyed on the shared content hash and wiped the twin's edges."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    twin = "def a():\n    return b()\n\n\ndef b():\n    return 1\n"
+    (repo / "one.py").write_text(twin)
+    (repo / "two.py").write_text(twin)  # identical content → identical file_hash
+
+    db = _make_db(tmp_path)
+    src = _make_source(db, repo, languages=["python"])
+    src.initial_walk()
+
+    two_before = _edges_for_file(db, "two.py")
+    assert two_before > 0, "expected the twin file to contribute edges (a→b)"
+
+    # Re-index ONLY one.py by changing its content (new hash → triggers the
+    # stale-delete path). two.py is unchanged, so the fast-path skips it.
+    (repo / "one.py").write_text("def a():\n    return c()\n\n\ndef c():\n    return 2\n")
+    src.initial_walk()
+
+    two_after = _edges_for_file(db, "two.py")
+    assert two_after == two_before, (
+        f"twin file two.py lost edges on one.py re-index: {two_before} → {two_after}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Unresolved edges (v1 contract)
 # ---------------------------------------------------------------------------

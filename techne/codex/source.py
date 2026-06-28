@@ -7,9 +7,12 @@ SourceAdapter Protocol from techne.sync.adapter.
 Key design decisions
 --------------------
 * File-hash-scoped incremental:  sha256(bytes) is stored on every symbol row.
-  On re-index, any file whose hash hasn't changed is skipped.  On change:
-  DELETE edges WHERE src_file_hash = <old_hash>; DELETE symbols WHERE file = ?;
-  re-parse and INSERT fresh rows.
+  On re-index, any file whose hash hasn't changed is skipped.  On change, stale
+  rows are deleted scoped by FILE (not by content hash — two files with identical
+  bytes share a SHA, so a hash-keyed edge delete wipes the other file's edges,
+  techne#170):
+  DELETE edges WHERE from_symbol IN (SELECT id FROM symbols WHERE file = ?);
+  DELETE symbols WHERE file = ?;  re-parse and INSERT fresh rows.
 
 * Unresolved edges:  v1 writes to_name (the callee name string, always known)
   and leaves to_symbol NULL + resolution_status = 'unresolved'.  A future
@@ -447,12 +450,17 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
         if existing and existing[0] == file_hash:
             return 0
 
-        # Get old hash for edge cleanup.
-        old_hash = existing[0] if existing else None
-
-        # Delete stale data.
-        if old_hash:
-            conn.execute("DELETE FROM edges WHERE src_file_hash = ?", (old_hash,))
+        # Delete stale data for THIS file. Scope edge deletion by the file's symbols,
+        # NOT by content hash: two files with identical bytes share a SHA, so a
+        # hash-keyed delete would wipe the OTHER file's edges (techne#170). An edge's
+        # owning file is its from_symbol's file, so delete edges whose from_symbol is
+        # one of this file's (about-to-be-replaced) symbols — before the symbols go.
+        if existing:
+            conn.execute(
+                "DELETE FROM edges WHERE from_symbol IN "
+                "(SELECT id FROM symbols WHERE file = ?)",
+                (file_str,),
+            )
         conn.execute("DELETE FROM symbols WHERE file = ?", (file_str,))
         # NB: deliberately no commit here — delete + re-insert share one
         # transaction. A parse that yields nothing (or raises) rolls back the
