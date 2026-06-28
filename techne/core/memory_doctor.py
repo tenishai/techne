@@ -22,7 +22,6 @@ from pathlib import Path
 
 from techne.core.state import deed_log
 from techne.core.threads.features import extract_file_paths
-from techne.platforms.claude_code.paths import project_slug  # noqa: F401 (re-exported)
 
 # Cap on deeds pulled per project-path candidate. Surfaced via report["deed_log_capped"]
 # rather than silently dropping the oldest deeds (which would read as false `unbacked`).
@@ -46,12 +45,13 @@ _FILE_PATH_JSON_RE = re.compile(r'"file_path"\s*:\s*"([^"]+)"')
 
 
 def find_curated_memory_files(cwd: Path | None = None) -> list[Path]:
-    """Resolve CC's curated memory files for a project:
-    ``~/.claude/projects/<slug>/memory/*.md``. Empty list when the dir is absent."""
-    from techne.platforms.claude_code.paths import claude_projects_dir
+    """Resolve CC's curated memory files for a project. The directory is resolved by
+    ``auto_memory_dir`` — the default ``~/.claude/projects/<git-root-slug>/memory/`` or a
+    user-set ``autoMemoryDirectory`` override (techne#175). Empty list when absent."""
+    from techne.platforms.claude_code.paths import auto_memory_dir
 
     cwd = Path(cwd) if cwd else Path.cwd()
-    mem_dir = claude_projects_dir() / project_slug(cwd) / "memory"
+    mem_dir = auto_memory_dir(cwd)
     if not mem_dir.is_dir():
         return []
     return sorted(mem_dir.glob("*.md"))

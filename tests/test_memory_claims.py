@@ -187,7 +187,7 @@ class TestClaimsEmit:
         # Patch project_slug so it doesn't depend on fs discovery
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         from techne.config import Config
 
@@ -211,7 +211,7 @@ class TestClaimsEmit:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "The project uses Python. We store data in redis.")
         _session(db, "s1", proj_path)
@@ -240,7 +240,7 @@ class TestClaimsEmit:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
         monkeypatch.setattr(mc, "DEED_DIGEST_CAP", 2)
 
         _write_memory(db, cwd, "uses redis")
@@ -263,7 +263,7 @@ class TestClaimsEmit:
         import techne.core.memory_claims as mc
         from techne.config import Config
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
         monkeypatch.setattr(mc, "DEED_DIGEST_CAP", 2)
 
         real = (tmp_path / "real").resolve()
@@ -292,7 +292,7 @@ class TestClaimsEmit:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "We use PostgreSQL for persistence.")
         _session(db, "s1", proj_path)
@@ -312,7 +312,7 @@ class TestClaimsEmit:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "We edit files with the Edit tool.")
         _session(db, "s1", proj_path)
@@ -332,7 +332,7 @@ class TestClaimsEmit:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "Stable memory content.")
         _session(db, "s1", proj_path)
@@ -353,7 +353,7 @@ class TestClaimsEmit:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "Content about old file and recent file.")
         _session(db, "s1", proj_path)
@@ -544,7 +544,7 @@ class TestMcpHandlers:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "The agent uses Python 3.11.")
         _session(db, "s1", proj_path)
@@ -573,7 +573,7 @@ class TestMcpHandlers:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "Uses FastAPI. Data in Postgres.")
         _session(db, "s1", proj_path)
@@ -660,7 +660,7 @@ class TestCliMemoryDoctorClaims:
         cwd, _ = project
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
         self._make_config(db, monkeypatch)
         monkeypatch.chdir(cwd)
 
@@ -681,7 +681,7 @@ class TestCliMemoryDoctorClaims:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "The project stores sessions in Redis.")
         _session(db, "s1", proj_path)
@@ -725,7 +725,7 @@ class TestCliMemoryDoctorClaims:
         import techne.core.memory_claims as mc
         import techne.core.thread_orchestrator as orch
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "The project uses FastAPI and SQLAlchemy.")
         _session(db, "s1", proj_path)
@@ -758,7 +758,7 @@ class TestCliMemoryDoctorClaims:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "The system uses RabbitMQ for messaging.")
         _session(db, "s1", proj_path)
@@ -810,7 +810,7 @@ class TestCliMemoryDoctorClaims:
 
         import techne.core.memory_claims as mc
 
-        monkeypatch.setattr(mc, "project_slug", lambda p: "testslug")
+        monkeypatch.setattr(mc, "memory_project_slug", lambda p: "testslug")
 
         _write_memory(db, cwd, "Project uses Django.")
         _session(db, "s1", proj_path)
