@@ -66,7 +66,7 @@ def test_fsck_passes_when_card_resolves(config):
     """A card whose doc:<id> resolves in librarian.db at the recorded version → fsck ok."""
     from techne.core.cards import upsert_document_card
     from techne.core.documents import store_document
-    from techne.core.knowledge import content_hash
+    from techne.core.knowledge import content_fingerprint
     from techne.core.librarian import librarian_db
 
     content = "a real document body"
@@ -75,7 +75,7 @@ def test_fsck_passes_when_card_resolves(config):
     )
     upsert_document_card(
         config.db_path, source_url="u", doc_id=doc_id,
-        source_version=content_hash(content), title="T",
+        source_version=content_fingerprint(content), title="T",
     )
     report = run_fsck(config)
     assert report.ok

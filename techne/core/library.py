@@ -19,7 +19,7 @@ from pathlib import Path
 from techne.config import Config
 from techne.core.cards import upsert_document_card
 from techne.core.documents import store_document
-from techne.core.knowledge import content_hash
+from techne.core.knowledge import content_fingerprint
 from techne.core.librarian import librarian_db
 from techne.core.redaction import redact_credentials
 
@@ -62,7 +62,7 @@ def index_document(
             config.db_path,
             source_url=source_url,
             doc_id=doc_id,
-            source_version=content_hash(content),
+            source_version=content_fingerprint(content),
             title=title or source_url,
             backing_mode=backing_mode,
             summary=redact_credentials(summary) if summary else None,

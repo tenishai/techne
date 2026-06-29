@@ -17,7 +17,7 @@ from techne.core.cards import (
 from techne.core.database import init_db
 from techne.core.documents import store_document
 from techne.core.egress import select_tier0_injection
-from techne.core.knowledge import content_hash, store
+from techne.core.knowledge import content_fingerprint, store
 
 
 @pytest.fixture()
@@ -167,7 +167,7 @@ def test_find_dangling_cards_clean(db, config):
     content = "the full body to fetch on demand"
     doc_id = _doc(config, content=content)
     upsert_document_card(
-        db, source_url="u", doc_id=doc_id, source_version=content_hash(content), title="x"
+        db, source_url="u", doc_id=doc_id, source_version=content_fingerprint(content), title="x"
     )
     report = find_dangling_cards(config)
     assert report == {"total": 1, "dangling": [], "stale": []}

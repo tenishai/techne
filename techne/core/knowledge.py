@@ -188,8 +188,8 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
     numeric = CONFIDENCE_NUMERIC.get(old["confidence"], CONFIDENCE_NUMERIC["medium"])
 
     # Re-resolve the carried anchor (if any) against the current working tree.
-    # Local named `anchor_content_hash` (not `content_hash`) to avoid shadowing
-    # the module-level content_hash() function, matching store().
+    # `anchor_content_hash` is the anchored FILE's hash (→ the content_hash column),
+    # distinct from the content_fingerprint() of the knowledge text.
     anchor_content_hash: str | None = None
     anchor_git_sha: str | None = None
     if old["anchor_path"]:
@@ -517,8 +517,13 @@ def delete(db_path: Path, entry_id: int) -> bool:
         conn.close()
 
 
-def content_hash(content: str) -> str:
-    """Generate a dedup hash for knowledge content."""
+def content_fingerprint(content: str) -> str:
+    """Stable hash of knowledge CONTENT — used for dedup + version compare.
+
+    Renamed from ``content_hash`` (techne#self-review): that collided with the
+    ``content_hash`` *column*, which stores the anchored FILE's hash (a different
+    thing) — see anchor.py. The two are now lexically distinct.
+    """
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
