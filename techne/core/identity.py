@@ -150,7 +150,12 @@ def _import_yaml(db_path: Path, yaml_file: Path):
     try:
         data = yaml.safe_load(yaml_file.read_text())
     except yaml.YAMLError as e:
-        log.warning("identity_yaml_parse_failed", path=str(yaml_file), error=str(e))
+        log.warning(
+            "identity_yaml_parse_failed",
+            path=str(yaml_file),
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         return
 
     if not isinstance(data, dict):

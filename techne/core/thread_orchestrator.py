@@ -133,7 +133,12 @@ def _detect_summarize_heuristic(
         try:
             extra_patterns.append(re.compile(pattern))
         except re.error as e:
-            log.warning("entity_pattern_invalid", pattern=pattern, error=str(e))
+            log.warning(
+                "entity_pattern_invalid",
+                pattern=pattern,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
 
     user_families = config.threads.tool_families or None
     extras = extra_patterns or None
@@ -173,7 +178,7 @@ def _detect_summarize_heuristic(
             try:
                 summary = _summarize_thread_llm(seg_observations, label, generate_fn)
             except Exception as e:
-                log.warning("thread_summary_llm_failed", error=str(e))
+                log.warning("thread_summary_llm_failed", error=str(e), error_type=type(e).__name__)
 
         threads.append(
             Thread(
@@ -278,7 +283,7 @@ Session observations ({len(observations)} total, {len(sampled)} shown):
         if response:
             return _parse_threads(response)
     except Exception as e:
-        log.warning("thread_inference_llm_failed", error=str(e))
+        log.warning("thread_inference_llm_failed", error=str(e), error_type=type(e).__name__)
 
     summary = _summarize_single(observations, generate_fn)
     return [Thread(thread_num=1, label="session", summary=summary)]
@@ -627,7 +632,7 @@ Summary:"""
         if response:
             return response
     except Exception as e:
-        log.warning("thread_single_summary_llm_failed", error=str(e))
+        log.warning("thread_single_summary_llm_failed", error=str(e), error_type=type(e).__name__)
 
     tools: dict[str, int] = {}
     for obs in observations:

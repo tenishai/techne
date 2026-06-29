@@ -715,6 +715,7 @@ class TestDetectorRouting:
             assert t.summary
         # Error should have been logged via structlog
         assert any(e["event"] == "thread_summary_llm_failed" for e in cap_logs)
+        assert any("simulated LLM failure" in e.get("error", "") for e in cap_logs)
 
 
 # ---------------------------------------------------------------------------

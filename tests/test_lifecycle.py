@@ -520,8 +520,9 @@ def test_session_end_with_failing_llm(tmp_path):
     # Either single-thread fallback or thread parsing fallback
     assert threads[0].summary  # non-empty summary
 
-    # Error should have been logged via structlog
-    assert any("failed" in e["event"] for e in cap_logs)
+    # Error should have been logged via structlog (detector LLM path fails first)
+    assert any(e["event"] == "thread_inference_llm_failed" for e in cap_logs)
+    assert any("simulated LLM failure" in e.get("error", "") for e in cap_logs)
 
 
 # ---------------------------------------------------------------------------
