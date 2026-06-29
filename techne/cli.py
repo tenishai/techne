@@ -841,7 +841,8 @@ def init(ctx, platform, identity_dir, posture):
         # Be honest about why we landed on observe (detected-none vs forced-despite-CC).
         cc_note = (
             "CC curated memory WAS detected, but observe was requested"
-            if cc else "no CC curated memory detected"
+            if cc
+            else "no CC curated memory detected"
         )
         click.echo(
             "Posture: observe — techne captures + (if you enable reflect) may author its own"
@@ -1128,9 +1129,7 @@ def _memory_doctor_claims(ctx, config, *, since_days, as_json):
             click.echo(json.dumps(result, indent=2))
             return
         counts = result["counts"]
-        click.echo(
-            f"memory doctor --claims — {report['deed_count']} deed(s) considered"
-        )
+        click.echo(f"memory doctor --claims — {report['deed_count']} deed(s) considered")
         click.echo(
             f"  {counts['corroborated']} corroborated  "
             f"{counts['uncorroborated']} uncorroborated  "
@@ -1171,18 +1170,34 @@ def _memory_doctor_claims(ctx, config, *, since_days, as_json):
         "  3. Feed the response to: techne_memory_claims_ingest\n"
     )
     if as_json:
-        click.echo(json.dumps({"memory_present": True,
-                               "deed_count": report["deed_count"],
-                               "memory_files": report.get("memory_files", []),
-                               "note": "no-model path; use MCP tools to complete"}, indent=2))
+        click.echo(
+            json.dumps(
+                {
+                    "memory_present": True,
+                    "deed_count": report["deed_count"],
+                    "memory_files": report.get("memory_files", []),
+                    "note": "no-model path; use MCP tools to complete",
+                },
+                indent=2,
+            )
+        )
 
 
 @memory.command("doctor")
-@click.option("--since", "since_days", type=int, default=None,
-              help="Only consider deeds from the last N days (default: all).")
+@click.option(
+    "--since",
+    "since_days",
+    type=int,
+    default=None,
+    help="Only consider deeds from the last N days (default: all).",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
-@click.option("--claims", "do_claims", is_flag=True,
-              help="Claim-level reconciliation via the resident model (techne#107 PR3).")
+@click.option(
+    "--claims",
+    "do_claims",
+    is_flag=True,
+    help="Claim-level reconciliation via the resident model (techne#107 PR3).",
+)
 @click.pass_context
 def memory_doctor_cmd(ctx, since_days, as_json, do_claims):
     """Diff the client's curated memory against techne's deed-log.
@@ -1281,9 +1296,7 @@ def memory_sync_cmd(ctx):
         return
 
     stored = CCMemorySource(config).initial_walk()
-    click.echo(
-        f"memory sync — {stored} file(s) drained (stored/updated) of {found} found"
-    )
+    click.echo(f"memory sync — {stored} file(s) drained (stored/updated) of {found} found")
 
 
 @main.group(invoke_without_command=True)
@@ -1421,9 +1434,7 @@ def reflect_emit(ctx, session_id, limit, output):
 
 
 @reflect.command("ingest")
-@click.argument(
-    "responses_file", type=click.Path(exists=True, dir_okay=False, path_type=Path)
-)
+@click.argument("responses_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.pass_context
 def reflect_ingest(ctx, responses_file):
     """Ingest agent-produced reflection responses into knowledge_candidates.
@@ -1487,8 +1498,10 @@ def reflect_promote(ctx, candidate_id, decided_by, decision_reason):
 
     try:
         new_id = promote_candidate(
-            config.db_path, candidate_id,
-            decided_by=decided_by, decision_reason=decision_reason,
+            config.db_path,
+            candidate_id,
+            decided_by=decided_by,
+            decision_reason=decision_reason,
         )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
@@ -1511,8 +1524,10 @@ def reflect_discard(ctx, candidate_id, decided_by, decision_reason):
 
     try:
         discard_candidate(
-            config.db_path, candidate_id,
-            decided_by=decided_by, decision_reason=decision_reason,
+            config.db_path,
+            candidate_id,
+            decided_by=decided_by,
+            decision_reason=decision_reason,
         )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
@@ -1899,9 +1914,7 @@ def architect_ingest(ctx, markdown_file):
     from techne.core.architect import architect_db
     from techne.core.patterns import ingest_patterns_md
 
-    counts = ingest_patterns_md(
-        architect_db(config), markdown_file.read_text(encoding="utf-8")
-    )
+    counts = ingest_patterns_md(architect_db(config), markdown_file.read_text(encoding="utf-8"))
     click.echo(json.dumps(counts, indent=2))
 
 
@@ -2251,7 +2264,9 @@ def evidence_cmd(ctx, session_id, since):
         raise SystemExit(1)
 
     ev = query_turn_evidence(
-        config.db_path, session_id, since_iso=since,
+        config.db_path,
+        session_id,
+        since_iso=since,
         bash_captured=config.hooks.capture_bash,
     )
 

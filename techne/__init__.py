@@ -49,18 +49,27 @@ if not _structlog.is_configured():
 __all__ = [
     "__version__",
     # config
-    "Config", "Platform", "ThreadConfig", "HookConfig", "SyncConfig",
+    "Config",
+    "Platform",
+    "ThreadConfig",
+    "HookConfig",
+    "SyncConfig",
     # lifecycle
-    "run_session_start", "run_session_end", "capture_tool_use",
+    "run_session_start",
+    "run_session_end",
+    "capture_tool_use",
     "init_session_for_external_id",
     # core types
     "Thread",
     # db
-    "init_db", "connect",
+    "init_db",
+    "connect",
     # knowledge type vocabulary
     "VALID_TYPES",
     # subpackages exposed as namespaces
-    "knowledge", "identity", "search",
+    "knowledge",
+    "identity",
+    "search",
     # lifecycle module (consumers may import techne.lifecycle directly)
     "lifecycle",
 ]

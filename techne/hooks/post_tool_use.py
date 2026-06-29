@@ -86,6 +86,7 @@ def main():
     try:
         with bounded_hook(config.hooks.timeout_s):
             from techne.lifecycle import capture_tool_use
+
             capture_tool_use(config, session_id, tool_name, tool_input, tool_output)
     except Exception as e:
         print(f"techne: capture failed: {e}", file=sys.stderr)

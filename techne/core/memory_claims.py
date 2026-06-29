@@ -28,7 +28,7 @@ from techne.platforms.claude_code.paths import memory_project_slug
 
 log = structlog.get_logger(__name__)
 
-MEMORY_BUDGET = 8000   # max chars of curated-memory content fed to the prompt
+MEMORY_BUDGET = 8000  # max chars of curated-memory content fed to the prompt
 DEED_DIGEST_CAP = 200  # deeds pulled AND shown per project-path candidate (newest-first)
 # Pull == show: capping the pull at the digest size means every deed the model receives is
 # accounted for, and hitting the cap is surfaced as report["deed_log_capped"] rather than

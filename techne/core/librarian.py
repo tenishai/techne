@@ -122,9 +122,7 @@ def migrate_documents_to_librarian(config: Config) -> dict:
         # AND the SAME content (an id collision would land a *different* doc at that id).
         unfaithful = []
         for d in rows:
-            got = dest.execute(
-                "SELECT content FROM documents WHERE id = ?", (d["id"],)
-            ).fetchone()
+            got = dest.execute("SELECT content FROM documents WHERE id = ?", (d["id"],)).fetchone()
             if got is None or got["content"] != d["content"]:
                 unfaithful.append(d["id"])
     finally:

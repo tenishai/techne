@@ -20,6 +20,9 @@ from techne.platforms.claude_code.transcript_import import (
 )
 
 __all__ = [
+    "MCP_CONFIG_PATH",
+    "SETTINGS_PATH",
+    "_group_contains_techne",
     "register_hooks",
     "register_mcp",
     "unregister",

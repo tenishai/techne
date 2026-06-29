@@ -203,9 +203,10 @@ def _insert_candidate(
     try:
         # FK safety net (techne#106): never let a stale/missing thread id drop a
         # candidate — fall back to a NULL FK (loses provenance) rather than raising.
-        if thread_id is not None and not conn.execute(
-            "SELECT 1 FROM threads WHERE id = ?", (thread_id,)
-        ).fetchone():
+        if (
+            thread_id is not None
+            and not conn.execute("SELECT 1 FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        ):
             thread_id = None
         cur = conn.execute(
             """INSERT INTO knowledge_candidates
@@ -623,9 +624,14 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
     conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
     ktype = row["type"] if row["type"] in VALID_TYPES else "fact"
     return _merge_in_conn(
-        conn, targets, redact_credentials(row["content"]),
-        ktype=ktype, confidence=conf, numeric=CONFIDENCE_NUMERIC[conf],
-        tags=row["tags"] or "", source=f"consolidate-merge:{row['id']}",
+        conn,
+        targets,
+        redact_credentials(row["content"]),
+        ktype=ktype,
+        confidence=conf,
+        numeric=CONFIDENCE_NUMERIC[conf],
+        tags=row["tags"] or "",
+        source=f"consolidate-merge:{row['id']}",
     )
 
 

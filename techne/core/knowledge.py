@@ -266,8 +266,14 @@ def merge_into(
         # Write lock before the liveness reads (TOCTOU guard, matches supersede above).
         conn.execute("BEGIN IMMEDIATE")
         new_id = _merge_in_conn(
-            conn, old_ids, merged_content,
-            ktype=type, confidence=confidence, numeric=numeric, tags=tags, source=source,
+            conn,
+            old_ids,
+            merged_content,
+            ktype=type,
+            confidence=confidence,
+            numeric=numeric,
+            tags=tags,
+            source=source,
         )
         conn.commit()
         return new_id
@@ -279,8 +285,15 @@ def merge_into(
 
 
 def _merge_in_conn(
-    conn, old_ids: list[int], merged_content: str, *,
-    ktype: str, confidence: str, numeric: float, tags: str | None, source: str,
+    conn,
+    old_ids: list[int],
+    merged_content: str,
+    *,
+    ktype: str,
+    confidence: str,
+    numeric: float,
+    tags: str | None,
+    source: str,
 ) -> int:
     """Core of merge_into() on a caller-owned connection (no commit/close), for the
     promote dispatch (#108). Asserts every old is live, mints the merged row, repoints
@@ -290,9 +303,7 @@ def _merge_in_conn(
         if oid in seen:
             raise ValueError(f"merge_into: duplicate old id {oid}")
         seen.add(oid)
-        row = conn.execute(
-            "SELECT superseded_by FROM knowledge WHERE id = ?", (oid,)
-        ).fetchone()
+        row = conn.execute("SELECT superseded_by FROM knowledge WHERE id = ?", (oid,)).fetchone()
         if row is None:
             raise ValueError(f"merge_into: knowledge entry {oid} not found")
         if row["superseded_by"] is not None:

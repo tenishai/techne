@@ -150,9 +150,7 @@ def _name_index(conn) -> dict[str, str]:
     """Map normalized pattern name → id for resolution. On a name collision the
     first (lowest rowid) wins — deterministic, and name dupes are rare."""
     index: dict[str, str] = {}
-    for row in conn.execute(
-        "SELECT id, name FROM patterns WHERE status = 'active' ORDER BY rowid"
-    ):
+    for row in conn.execute("SELECT id, name FROM patterns WHERE status = 'active' ORDER BY rowid"):
         key = _norm(row["name"])
         index.setdefault(key, row["id"])
     return index
@@ -491,7 +489,7 @@ def export_patterns_md(db_path: Path) -> str:
         "",
         "    ---",
         "",
-        'For a URL you investigated but found nothing to lift, add a bullet under '
+        "For a URL you investigated but found nothing to lift, add a bullet under "
         '"## Surveyed (no patterns worth saving)": `- <url> — surveyed <date> — <reason>`.',
         "",
     ]

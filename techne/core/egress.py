@@ -123,8 +123,11 @@ def select_tier0_injection(
 
     for row in rows:
         r = EgressRow(
-            id=row["id"], type=row["type"], content=row["content"],
-            tags=row["tags"] or "", status=row["status"],
+            id=row["id"],
+            type=row["type"],
+            content=row["content"],
+            tags=row["tags"] or "",
+            status=row["status"],
         )
         tags = r["tags"]
 

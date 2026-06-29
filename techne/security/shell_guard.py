@@ -173,7 +173,7 @@ def _detect_install(command: str) -> tuple[str | None, list[str]]:
         # can't evade the audit by putting a flag before `install`.
         sub_idx = next((i for i, t in enumerate(rest) if not t.startswith("-")), None)
         if sub_idx is not None and rest[sub_idx] in subcommands:
-            packages = [t for t in rest[sub_idx + 1:] if not t.startswith("-")]
+            packages = [t for t in rest[sub_idx + 1 :] if not t.startswith("-")]
             return ecosystem, packages
     return None, []
 
@@ -194,8 +194,15 @@ def _pip_audit_findings(packages: list[str], threshold: str, timeout: float) -> 
         req = Path(td) / "requirements.txt"
         req.write_text("\n".join(packages) + "\n")
         proc = subprocess.run(
-            ["pip-audit", "--requirement", str(req), "--format", "json",
-             "--progress-spinner", "off"],
+            [
+                "pip-audit",
+                "--requirement",
+                str(req),
+                "--format",
+                "json",
+                "--progress-spinner",
+                "off",
+            ],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -283,45 +290,61 @@ def audit_install(
         # e.g. `pip install -r requirements.txt` (the spec is a flag) or `npm install` (no
         # args) — nothing concrete to audit pre-install. Fail open.
         return AuditResult(
-            ok=True, audited=False, ecosystem=ecosystem,
+            ok=True,
+            audited=False,
+            ecosystem=ecosystem,
             reason=f"{ecosystem}: no concrete package to audit — allowed (fail open)",
         )
 
     auditor = _AUDITORS.get(ecosystem)
     if auditor is None:
         return AuditResult(
-            ok=True, audited=False, ecosystem=ecosystem,
+            ok=True,
+            audited=False,
+            ecosystem=ecosystem,
             reason=f"{ecosystem}: no pre-install auditor wired — allowed (fail open)",
         )
     if shutil.which(auditor) is None:
         log.warning("shell_guard: %s not on PATH — allowing install unaudited (fail open)", auditor)
         return AuditResult(
-            ok=True, audited=False, ecosystem=ecosystem,
+            ok=True,
+            audited=False,
+            ecosystem=ecosystem,
             reason=f"{auditor} not installed — allowed (fail open)",
         )
 
     try:
         findings = _pip_audit_findings(packages, threshold, timeout)
     except (
-        FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, RuntimeError, OSError
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+        RuntimeError,
+        OSError,
     ) as e:
         log.warning(
             "shell_guard: %s failed (%s) — allowing install unaudited (fail open)", auditor, e
         )
         return AuditResult(
-            ok=True, audited=False, ecosystem=ecosystem,
+            ok=True,
+            audited=False,
+            ecosystem=ecosystem,
             reason=f"{auditor} failed ({type(e).__name__}) — allowed (fail open)",
         )
 
     if findings:
         ids = ", ".join(f"{f['package']} {f['id']}" for f in findings)
         return AuditResult(
-            ok=False, audited=True, ecosystem=ecosystem,
+            ok=False,
+            audited=True,
+            ecosystem=ecosystem,
             reason=f"{ecosystem}: {len(findings)} vulnerability(ies) at/above '{threshold}': {ids}",
             findings=findings,
         )
     return AuditResult(
-        ok=True, audited=True, ecosystem=ecosystem,
+        ok=True,
+        audited=True,
+        ecosystem=ecosystem,
         reason=f"{ecosystem}: audited, no vulnerability at/above '{threshold}'",
     )
 

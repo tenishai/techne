@@ -491,8 +491,10 @@ def test_redetect_drops_orphan_threads_when_fewer_detected(tmp_path):
     assert [r["thread_num"] for r in after] == [1]
 
 
-def test_session_end_with_failing_llm(tmp_path, capsys):
-    """LLM failure: detect_and_summarize falls back gracefully, logs to stderr."""
+def test_session_end_with_failing_llm(tmp_path):
+    """LLM failure: detect_and_summarize falls back gracefully, logs a warning."""
+    from structlog.testing import capture_logs
+
     from techne.config import Config
     from techne.core.threads import detect_and_summarize
 
@@ -510,16 +512,17 @@ def test_session_end_with_failing_llm(tmp_path, capsys):
     def failing_generate(prompt):
         raise RuntimeError("simulated LLM failure")
 
-    threads = detect_and_summarize(observations, config, generate_fn=failing_generate)
+    with capture_logs() as cap_logs:
+        threads = detect_and_summarize(observations, config, generate_fn=failing_generate)
 
     # Fallback should produce at least one thread
     assert len(threads) >= 1
     # Either single-thread fallback or thread parsing fallback
     assert threads[0].summary  # non-empty summary
 
-    # Stderr should mention the failure
-    captured = capsys.readouterr()
-    assert "failed" in captured.err.lower() or "RuntimeError" in captured.err
+    # Error should have been logged via structlog (detector LLM path fails first)
+    assert any(e["event"] == "thread_inference_llm_failed" for e in cap_logs)
+    assert any("simulated LLM failure" in e.get("error", "") for e in cap_logs)
 
 
 # ---------------------------------------------------------------------------

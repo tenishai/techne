@@ -40,7 +40,10 @@ _PATTERNS: list[tuple[str, str]] = [
     # "secret[ access][ key]: <value>" label immediately preceding it. The
     # optional quote before the separator covers the JSON/SDK form
     # `"SecretAccessKey": "wJalr…"` (boto3/STS dumps), not just `key: value`.
-    (r"(?i)secret(?:[ _-]?access)?(?:[ _-]?key)?['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9/+]{40}", "aws-secret"),
+    (
+        r"(?i)secret(?:[ _-]?access)?(?:[ _-]?key)?['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9/+]{40}",
+        "aws-secret",
+    ),
     # JWT shape: three base64url segments
     (r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", "jwt"),
     # Env-style: SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value
