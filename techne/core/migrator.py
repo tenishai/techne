@@ -378,9 +378,7 @@ def reconcile_indexes(conn: sqlite3.Connection, schema_sql: str) -> None:
     name it is NOT reconciled (the name is already present) — that's a redefinition
     and, per the SCHEMA_SQL-only-is-additive convention, requires a numbered
     migration + version bump, not the reconciler."""
-    existing = {
-        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
-    }
+    existing = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
     for name, create_sql in _index_statements(schema_sql):
         if name in existing:
             continue

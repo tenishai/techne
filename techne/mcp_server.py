@@ -336,8 +336,7 @@ TOOLS = [
     {
         "name": "techne_resume",
         "description": (
-            "Get the current resume state — active threads and hot facts "
-            "for session start"
+            "Get the current resume state — active threads and hot facts for session start"
         ),
         "inputSchema": {
             "type": "object",
@@ -413,8 +412,7 @@ TOOLS = [
                     "enum": ["out", "in"],
                     "default": "out",
                     "description": (
-                        "out=dependencies (what this reaches), "
-                        "in=dependents (what reaches this)"
+                        "out=dependencies (what this reaches), in=dependents (what reaches this)"
                     ),
                 },
             },
@@ -691,6 +689,7 @@ TOOLS = [
     },
 ]
 
+
 def _codex_search(args: dict, config: Config) -> dict:
     """FTS over Codex symbols — search across all indexed repos."""
     from techne.core.codegraph import annotate_freshness, search_symbols
@@ -822,8 +821,12 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
     if not isinstance(response, str):
         response = json.dumps(response) if response else ""
     if not response.strip():
-        return {"candidates_proposed": 0, "candidates_written": 0,
-                "candidates_promoted": 0, "note": "empty response — nothing to ingest"}
+        return {
+            "candidates_proposed": 0,
+            "candidates_written": 0,
+            "candidates_promoted": 0,
+            "note": "empty response — nothing to ingest",
+        }
 
     return ingest_reflection_response(
         config,
@@ -931,7 +934,9 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
         raise ValueError("'claims' must be an array of objects")
 
     ev = query_turn_evidence(
-        config.db_path, session_id, since_iso=since,
+        config.db_path,
+        session_id,
+        since_iso=since,
         bash_captured=config.hooks.capture_bash,
     )
     verdicts = check_claims(claims, ev)

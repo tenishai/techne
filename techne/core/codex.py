@@ -159,9 +159,7 @@ def _codex_v1_to_v2(conn) -> None:
     bump user_version so the migration engine does not re-enter on subsequent opens.
     The ``IF NOT EXISTS`` guard makes it safe on both fresh and migrated DBs.
     """
-    conn.executescript(
-        "CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT);"
-    )
+    conn.executescript("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT);")
 
 
 def _run_codex_steps(conn, current: int, target: int) -> None:
@@ -270,9 +268,7 @@ def get_meta(db_path: Path, key: str) -> str | None:
         ).fetchone()
         if not has_meta:
             return None
-        row = conn.execute(
-            "SELECT value FROM codex_meta WHERE key = ?", (key,)
-        ).fetchone()
+        row = conn.execute("SELECT value FROM codex_meta WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
     finally:
         conn.close()
@@ -282,12 +278,8 @@ def set_meta(db_path: Path, key: str, value: str) -> None:
     """Upsert *key* → *value* in codex_meta. Creates the table if absent (graceful)."""
     conn = plain_connect(db_path)
     try:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT)"
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO codex_meta (key, value) VALUES (?, ?)", (key, value)
-        )
+        conn.execute("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT OR REPLACE INTO codex_meta (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
     finally:
         conn.close()

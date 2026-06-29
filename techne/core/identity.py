@@ -1,12 +1,14 @@
 """Identity registry — structured key-value store for agent identity."""
 
 import re
-import sys
 from pathlib import Path
 
+import structlog
 import yaml
 
 from techne.core.database import connect, like_escape
+
+log = structlog.get_logger(__name__)
 
 
 def get(db_path: Path, key: str) -> str | None:
@@ -47,7 +49,8 @@ def list_entries(db_path: Path, prefix: str = "") -> list[dict]:
     try:
         if prefix:
             rows = conn.execute(
-                "SELECT key, value, source, updated_at FROM identity WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
+                "SELECT key, value, source, updated_at FROM identity"
+                " WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
                 (f"{like_escape(prefix)}%",),
             ).fetchall()
         else:
@@ -97,9 +100,7 @@ def sync_from_markdown(db_path: Path, identity_dir: Path):
 
 # Match: optional leading "- ", then "**key**:" then value
 # Tolerates extra whitespace around components.
-_CONTACT_FIELD_RE = re.compile(
-    r"^\s*(?:-\s+)?\*\*\s*(?P<key>[^*]+?)\s*\*\*\s*:\s*(?P<val>.+?)\s*$"
-)
+_CONTACT_FIELD_RE = re.compile(r"^\s*(?:-\s+)?\*\*\s*(?P<key>[^*]+?)\s*\*\*\s*:\s*(?P<val>.+?)\s*$")
 
 
 def _import_contacts(db_path: Path, contacts_file: Path):
@@ -149,10 +150,7 @@ def _import_yaml(db_path: Path, yaml_file: Path):
     try:
         data = yaml.safe_load(yaml_file.read_text())
     except yaml.YAMLError as e:
-        print(
-            f"techne: failed to parse {yaml_file} ({type(e).__name__}: {e}); skipping",
-            file=sys.stderr,
-        )
+        log.warning("identity_yaml_parse_failed", path=str(yaml_file), error=str(e))
         return
 
     if not isinstance(data, dict):

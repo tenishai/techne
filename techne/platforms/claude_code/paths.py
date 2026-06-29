@@ -117,9 +117,9 @@ def _auto_memory_directory_override(cwd: Path) -> Path | None:
     repo-root-scoped override instead of falling through to the default dir."""
     root = _git_project_root(cwd)
     candidates = [
-        claude_config_dir() / "settings.json",        # user scope
-        root / ".claude" / "settings.json",           # project scope (repo root)
-        root / ".claude" / "settings.local.json",     # local scope (repo root)
+        claude_config_dir() / "settings.json",  # user scope
+        root / ".claude" / "settings.json",  # project scope (repo root)
+        root / ".claude" / "settings.local.json",  # local scope (repo root)
     ]
     value: str | None = None
     for f in candidates:

@@ -546,9 +546,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     return connect(db_path)
 
 
-def _add_column_if_missing(
-    conn: sqlite3.Connection, table: str, column: str, decl: str
-) -> None:
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
     """Idempotent ``ALTER TABLE ADD COLUMN`` (techne#169).
 
     ``executescript`` runs each DDL statement in autocommit, so the ALTER is
@@ -618,9 +616,7 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         # Add numeric confidence + last_confirmed_at so recall can decay
         # entries that haven't been re-confirmed. Legacy text `confidence`
         # stays for display + backward compat.
-        _add_column_if_missing(
-            conn, "knowledge", "confidence_numeric", "REAL NOT NULL DEFAULT 0.6"
-        )
+        _add_column_if_missing(conn, "knowledge", "confidence_numeric", "REAL NOT NULL DEFAULT 0.6")
         _add_column_if_missing(conn, "knowledge", "last_confirmed_at", "TIMESTAMP")
         conn.executescript("""
             -- Backfill confidence_numeric from the legacy enum

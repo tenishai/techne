@@ -163,6 +163,7 @@ def infer(
     try:
         import numpy as np
         from fastembed import TextEmbedding  # noqa: F401 — import guard
+
         _INFER_DEPS = True
     except ImportError:
         _INFER_DEPS = False

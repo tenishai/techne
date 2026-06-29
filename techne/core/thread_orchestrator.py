@@ -6,12 +6,15 @@ unit of continuity — they link across sessions to form a chain of work.
 """
 
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
+
 from techne.config import Config
 from techne.core.redaction import redact_credentials
+
+log = structlog.get_logger(__name__)
 
 MAX_SAMPLED_OBSERVATIONS = 60
 
@@ -130,10 +133,7 @@ def _detect_summarize_heuristic(
         try:
             extra_patterns.append(re.compile(pattern))
         except re.error as e:
-            print(
-                f"techne: skipping bad entity pattern {pattern!r}: {e}",
-                file=sys.stderr,
-            )
+            log.warning("entity_pattern_invalid", pattern=pattern, error=str(e))
 
     user_families = config.threads.tool_families or None
     extras = extra_patterns or None
@@ -166,20 +166,14 @@ def _detect_summarize_heuristic(
         label = ht.generate_label(segment, features)
         resume = ht.build_resume_point(seg_observations)
 
-        boundary_signal = _boundary_signal_from_scores(
-            segment[0], scores_by_a, thread_num
-        )
+        boundary_signal = _boundary_signal_from_scores(segment[0], scores_by_a, thread_num)
 
         summary = ht.fallback_summary(seg_observations, seg_features)
         if use_llm_summary:
             try:
                 summary = _summarize_thread_llm(seg_observations, label, generate_fn)
             except Exception as e:
-                print(
-                    f"techne: per-thread LLM summary failed "
-                    f"({type(e).__name__}: {e}); using heuristic fallback",
-                    file=sys.stderr,
-                )
+                log.warning("thread_summary_llm_failed", error=str(e))
 
         threads.append(
             Thread(
@@ -244,9 +238,11 @@ def _detect_summarize_llm(
     context = "\n\n".join(context_lines)
 
     prompt = f"""Analyze these session observations and identify distinct HIGH-LEVEL topic threads.
-A "thread" is a major investigation, project, or piece of work — NOT individual tool calls or sub-tasks.
+A "thread" is a major investigation, project, or piece of work — NOT individual \
+tool calls or sub-tasks.
 Group related refactors, edits, and fixes into the SAME thread if they serve the same goal.
-Most sessions have 1-4 threads. If you find more than 5, you are over-segmenting — merge related threads.
+Most sessions have 1-4 threads. If you find more than 5, you are over-segmenting — \
+merge related threads.
 
 For each thread, provide:
 1. A short label (3-8 words)
@@ -282,11 +278,7 @@ Session observations ({len(observations)} total, {len(sampled)} shown):
         if response:
             return _parse_threads(response)
     except Exception as e:
-        print(
-            f"techne: thread detection failed ({type(e).__name__}: {e}); "
-            f"falling back to single summary",
-            file=sys.stderr,
-        )
+        log.warning("thread_inference_llm_failed", error=str(e))
 
     summary = _summarize_single(observations, generate_fn)
     return [Thread(thread_num=1, label="session", summary=summary)]
@@ -635,11 +627,7 @@ Summary:"""
         if response:
             return response
     except Exception as e:
-        print(
-            f"techne: single summary failed ({type(e).__name__}: {e}); "
-            f"falling back to bare summary",
-            file=sys.stderr,
-        )
+        log.warning("thread_single_summary_llm_failed", error=str(e))
 
     tools: dict[str, int] = {}
     for obs in observations:

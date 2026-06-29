@@ -217,7 +217,7 @@ def query_turn_evidence(
             # "Wrote: <file_path>\nContent: ..."
             first_line = content.split("\n", 1)[0]
             if first_line.startswith("Wrote: "):
-                path = first_line[len("Wrote: "):].strip()
+                path = first_line[len("Wrote: ") :].strip()
                 if path and path not in artifacts_seen:
                     artifacts.append(path)
                     artifacts_seen.add(path)
@@ -226,7 +226,7 @@ def query_turn_evidence(
             # "Edited: <file_path>\nChange: ..."
             first_line = content.split("\n", 1)[0]
             if first_line.startswith("Edited: "):
-                path = first_line[len("Edited: "):].strip()
+                path = first_line[len("Edited: ") :].strip()
                 if path and path not in artifacts_seen:
                     artifacts.append(path)
                     artifacts_seen.add(path)
@@ -238,11 +238,11 @@ def query_turn_evidence(
             rest = parts[1] if len(parts) > 1 else ""
 
             if first_line.startswith("Ran: "):
-                cmd = first_line[len("Ran: "):].strip()
+                cmd = first_line[len("Ran: ") :].strip()
                 actions.append(cmd)
 
             # Strip the "Output: " prefix to get the raw bash output.
-            output_text = rest[len("Output: "):] if rest.startswith("Output: ") else rest
+            output_text = rest[len("Output: ") :] if rest.startswith("Output: ") else rest
 
             # Extract git commit SHAs.
             for m in _GIT_SHA_RE.finditer(output_text):
@@ -382,9 +382,7 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             t = evidence.tests
             if t.suite_green is True:
                 status = "backed"
-                detail = (
-                    f"Tests green: passed={t.passed}, failed={t.failed}, errors={t.errors}."
-                )
+                detail = f"Tests green: passed={t.passed}, failed={t.failed}, errors={t.errors}."
             elif t.suite_green is False:
                 status = "unbacked"
                 detail = (

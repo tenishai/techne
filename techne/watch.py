@@ -68,9 +68,7 @@ class WatchConfig:
 # ---- glob matcher ---------------------------------------------------------
 
 
-def matches(
-    path: Path, includes: list[str], excludes: list[str]
-) -> bool:
+def matches(path: Path, includes: list[str], excludes: list[str]) -> bool:
     """Return True iff path passes the include + exclude glob filters.
 
     Includes: at least one pattern must match either the basename or the
@@ -81,13 +79,9 @@ def matches(
     """
     name = path.name
     posix = path.as_posix()
-    if not any(
-        fnmatch.fnmatch(name, g) or fnmatch.fnmatch(posix, g) for g in includes
-    ):
+    if not any(fnmatch.fnmatch(name, g) or fnmatch.fnmatch(posix, g) for g in includes):
         return False
-    if any(
-        fnmatch.fnmatch(name, g) or fnmatch.fnmatch(posix, g) for g in excludes
-    ):
+    if any(fnmatch.fnmatch(name, g) or fnmatch.fnmatch(posix, g) for g in excludes):
         return False
     return True
 
@@ -149,15 +143,9 @@ def ingest_file(db_path: Path, session_id: str, path: Path) -> bool:
         stat = path.stat()
     except OSError:
         return False
-    content = (
-        f"path={path}\n"
-        f"size={stat.st_size}\n"
-        f"mtime={stat.st_mtime:.0f}"
-    )
+    content = f"path={path}\nsize={stat.st_size}\nmtime={stat.st_mtime:.0f}"
     try:
-        add_observation(
-            db_path, session_id, tool_name="FileSync", content=content
-        )
+        add_observation(db_path, session_id, tool_name="FileSync", content=content)
     except Exception:  # noqa: BLE001
         log.exception("ingest_file_failed path=%s", path)
         return False
@@ -206,9 +194,7 @@ def watch(
         from watchdog.events import FileSystemEventHandler
         from watchdog.observers import Observer
     except ImportError as exc:
-        raise RuntimeError(
-            "watchdog is not installed; run `pip install techne[watch]`"
-        ) from exc
+        raise RuntimeError("watchdog is not installed; run `pip install techne[watch]`") from exc
 
     def ingest(path: Path) -> None:
         if matches(path, config.include_globs, config.exclude_globs):

@@ -80,7 +80,7 @@ def _deed_touched_files(deeds: list[dict]) -> set[str]:
         first = content.splitlines()[0] if content else ""
         for pre in _TOUCH_PREFIXES:
             if first.startswith(pre):
-                path = first[len(pre):].strip()
+                path = first[len(pre) :].strip()
                 break
         if path is None:  # MultiEdit/NotebookEdit render "Tool: …\nInput: {json}"
             m = _FILE_PATH_JSON_RE.search(content)

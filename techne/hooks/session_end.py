@@ -32,6 +32,7 @@ def main():
 
     try:
         from techne.config import Config
+
         config = Config.load()
         timeout_s = config.hooks.timeout_s
     except Exception as e:
