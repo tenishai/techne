@@ -87,6 +87,8 @@ Point it at a repo (`techne codex index`) and it extracts a **symbol + call/impo
 
 > **Status: experimental (opt-in).** Indexing is **manual today** — the graph goes stale as code changes; re-run `index` to refresh. Auto-refresh and deeper integration are the next cycle. Ships behind the `codex` extra; nothing else depends on it.
 
+> **When to reach for it (and when not):** see [`codex-usage.md`](./codex-usage.md) — Codex is a *relationship-mapping engine* (code is adapter #1), best for graphs too big to eyeball or needing transitive queries; for ad-hoc "where is X" and small graphs, grep/memory win. What decides whether such a graph lives or rots isn't persistence — it's having an automatic, high-value consumer.
+
 ```bash
 pip install "techne[codex]"
 techne codex index .
