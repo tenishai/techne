@@ -36,6 +36,9 @@ vectors = [
     # vector search degrades to empty via the import guard in core/search.py).
     # Drop the marker when onnxruntime ships 3.14 wheels.
     "fastembed>=0.4.0; python_version < '3.14'",
+    # Direct import in core/search.py and core/inference.py; currently satisfied
+    # transitively via fastembed but declared here to make the dependency explicit.
+    "numpy",
 ]
 # `llm` enables the optional operator-model path for autonomous/headless
 # reflect/consolidate/claims. The default resident emit/ingest path needs no

@@ -122,7 +122,8 @@ def consolidate_clusters(
             continue
         hits = search_fts(config.db_path, r["content"], table="knowledge", limit=fts_neighbors + 1)
         neighbors = [
-            h["id"] for h in hits
+            h["id"]
+            for h in hits
             if h.get("id") != r["id"] and h.get("id") in by_id and h["id"] not in clustered_ids
         ]
         if neighbors:
@@ -220,8 +221,16 @@ def parse_consolidation_response(raw: str) -> dict | None:
 
 
 def _insert_consolidation_candidate(
-    conn, *, target_ids: list[int], cluster_hash: str, content: str, ktype: str,
-    confidence: str, status: str, decided_by: str | None, decision_reason: str | None,
+    conn,
+    *,
+    target_ids: list[int],
+    cluster_hash: str,
+    content: str,
+    ktype: str,
+    confidence: str,
+    status: str,
+    decided_by: str | None,
+    decision_reason: str | None,
     raw: str | None,
 ) -> None:
     conn.execute(
@@ -276,18 +285,30 @@ def consolidate_ingest(
             return counts
         if verdict is None:
             _insert_consolidation_candidate(
-                conn, target_ids=target_ids, cluster_hash=ch,
+                conn,
+                target_ids=target_ids,
+                cluster_hash=ch,
                 content="(kept — agent judged these entries distinct)",
-                ktype="fact", confidence="low", status="discarded",
-                decided_by="agent-triage", decision_reason="keep", raw=raw_for_store,
+                ktype="fact",
+                confidence="low",
+                status="discarded",
+                decided_by="agent-triage",
+                decision_reason="keep",
+                raw=raw_for_store,
             )
             counts["kept"] += 1
         else:
             _insert_consolidation_candidate(
-                conn, target_ids=target_ids, cluster_hash=ch,
-                content=verdict["content"], ktype=verdict["type"],
-                confidence=verdict["confidence"], status="pending",
-                decided_by=None, decision_reason=None, raw=raw_for_store,
+                conn,
+                target_ids=target_ids,
+                cluster_hash=ch,
+                content=verdict["content"],
+                ktype=verdict["type"],
+                confidence=verdict["confidence"],
+                status="pending",
+                decided_by=None,
+                decision_reason=None,
+                raw=raw_for_store,
             )
             counts["proposed"] += 1
             counts["written"] += 1
@@ -371,9 +392,7 @@ non-trivial. Output the JSON object and nothing else.
 """
 
 
-def recombine_groups(
-    config: Config, *, max_groups: int = 10, group_size: int = 4
-) -> list[dict]:
+def recombine_groups(config: Config, *, max_groups: int = 10, group_size: int = 4) -> list[dict]:
     """Select groups of related-but-distinct live knowledge for recombination.
 
     Selector: shared tag (deterministic, no fastembed). Returns
@@ -458,11 +477,13 @@ def recombine_groups(
             continue
         seen_hashes.add(key)
         added_sets.append(id_set)
-        groups.append({
-            "group_ids": ids,
-            "rows": [by_id[i] for i in ids],
-            "via": f"tag:{tag}",
-        })
+        groups.append(
+            {
+                "group_ids": ids,
+                "rows": [by_id[i] for i in ids],
+                "via": f"tag:{tag}",
+            }
+        )
 
     return groups
 
@@ -505,8 +526,16 @@ def parse_dream_response(raw: str) -> dict | None:
 
 
 def _insert_dream_candidate(
-    conn, *, group_ids: list[int], group_hash: str, content: str, ktype: str,
-    confidence: str, status: str, decided_by: str | None, decision_reason: str | None,
+    conn,
+    *,
+    group_ids: list[int],
+    group_hash: str,
+    content: str,
+    ktype: str,
+    confidence: str,
+    status: str,
+    decided_by: str | None,
+    decision_reason: str | None,
     raw: str | None,
 ) -> None:
     """Insert a dream candidate row.
@@ -538,9 +567,7 @@ def _insert_dream_candidate(
     )
 
 
-def dream_ingest(
-    config: Config, group_ids: list[int], group_hash: str, response: str
-) -> dict:
+def dream_ingest(config: Config, group_ids: list[int], group_hash: str, response: str) -> dict:
     """Process one group's agent dream verdict.
 
     A 'connect' verdict writes a PENDING action='add' candidate (origin='dream',
@@ -568,20 +595,32 @@ def dream_ingest(
             return counts
         if verdict is None:
             _insert_dream_candidate(
-                conn, group_ids=group_ids, group_hash=gh,
+                conn,
+                group_ids=group_ids,
+                group_hash=gh,
                 content="(no connection — agent found no non-obvious link)",
-                ktype="fact", confidence="low", status="discarded",
-                decided_by="agent-triage", decision_reason="none", raw=raw_for_store,
+                ktype="fact",
+                confidence="low",
+                status="discarded",
+                decided_by="agent-triage",
+                decision_reason="none",
+                raw=raw_for_store,
             )
             counts["kept"] += 1
         else:
             # Confidence FORCED to 'low' — dream candidates are speculative by
             # construction; the model's stated confidence is ignored.
             _insert_dream_candidate(
-                conn, group_ids=group_ids, group_hash=gh,
-                content=verdict["content"], ktype=verdict["type"],
-                confidence="low", status="pending",
-                decided_by=None, decision_reason=None, raw=raw_for_store,
+                conn,
+                group_ids=group_ids,
+                group_hash=gh,
+                content=verdict["content"],
+                ktype=verdict["type"],
+                confidence="low",
+                status="pending",
+                decided_by=None,
+                decision_reason=None,
+                raw=raw_for_store,
             )
             counts["proposed"] += 1
             counts["written"] += 1

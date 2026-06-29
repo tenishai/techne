@@ -175,9 +175,7 @@ class GitHubIssuesSource:
         since = self._load_cursor()
         issues = self._fetch_issues(since=since)
         if not issues:
-            log.info(
-                "github_issues_walk_empty", repo=f"{self._owner}/{self._repo}", since=since
-            )
+            log.info("github_issues_walk_empty", repo=f"{self._owner}/{self._repo}", since=since)
             return 0
 
         # librarian.db is migrated on first access (no core schema applied) —

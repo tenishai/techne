@@ -72,7 +72,8 @@ def migrate_legacy_summaries(db_path: Path, *, dry_run: bool = False) -> dict:
                     conn.execute("UPDATE sessions SET summary = NULL WHERE id = ?", (r["id"],))
                 else:
                     conn.execute(
-                        "UPDATE sessions SET summary_heuristic = summary, summary = NULL WHERE id = ?",
+                        "UPDATE sessions SET summary_heuristic = summary,"
+                        " summary = NULL WHERE id = ?",
                         (r["id"],),
                     )
             if already_has_heuristic:
@@ -416,8 +417,10 @@ def deed_log(
     """
     conn = connect(db_path)
     try:
-        parts = ["SELECT o.id, o.session_id, o.timestamp, o.tool_name, o.content",
-                 "FROM observations o"]
+        parts = [
+            "SELECT o.id, o.session_id, o.timestamp, o.tool_name, o.content",
+            "FROM observations o",
+        ]
         wheres: list[str] = []
         params: list = []
         if project_path is not None:

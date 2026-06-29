@@ -169,9 +169,7 @@ def _is_method_python(fn_node) -> bool:
     )
 
 
-def _find_enclosing_symbol(
-    byte_pos: int, spans: list[tuple[int, int, str]]
-) -> str | None:
+def _find_enclosing_symbol(byte_pos: int, spans: list[tuple[int, int, str]]) -> str | None:
     """Return the id of the innermost symbol span that contains *byte_pos*."""
     best: str | None = None
     best_size = float("inf")
@@ -244,13 +242,9 @@ def _extract_import_names(node, language: str) -> list[str]:
                                 nm = spec.child_by_field_name("name")
                                 target = alias or nm
                                 if target:
-                                    names.append(
-                                        target.text.decode("utf-8", errors="replace")
-                                    )
+                                    names.append(target.text.decode("utf-8", errors="replace"))
                     elif sub.type == "namespace_import":
-                        ident = next(
-                            (c for c in sub.children if c.type == "identifier"), None
-                        )
+                        ident = next((c for c in sub.children if c.type == "identifier"), None)
                         if ident:
                             names.append(ident.text.decode("utf-8", errors="replace"))
     return names
@@ -310,19 +304,25 @@ def _parse_file(
 
     # Collect symbol definitions: build spans for enclosing-symbol lookup.
     # spans: list of (start_byte, end_byte, symbol_id)
-    spans: list[tuple[int, int, str]] = [
-        (root.start_byte, root.end_byte, module_sym_id)
-    ]
+    spans: list[tuple[int, int, str]] = [(root.start_byte, root.end_byte, module_sym_id)]
 
-    call_matches: list[tuple] = []   # deferred for after symbols are collected
-    import_matches: list[tuple] = [] # deferred for after symbols are collected
+    call_matches: list[tuple] = []  # deferred for after symbols are collected
+    import_matches: list[tuple] = []  # deferred for after symbols are collected
 
     for _pattern_idx, caps in matches:
         # Symbol definition
         if "symbol.function" in caps or "symbol.class" in caps or "symbol.method" in caps:
             kind_key = next(
-                (k for k in ("symbol.function", "symbol.class", "symbol.method", "symbol.interface")
-                 if k in caps),
+                (
+                    k
+                    for k in (
+                        "symbol.function",
+                        "symbol.class",
+                        "symbol.method",
+                        "symbol.interface",
+                    )
+                    if k in caps
+                ),
                 None,
             )
             if kind_key is None:
@@ -457,8 +457,7 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
         # one of this file's (about-to-be-replaced) symbols — before the symbols go.
         if existing:
             conn.execute(
-                "DELETE FROM edges WHERE from_symbol IN "
-                "(SELECT id FROM symbols WHERE file = ?)",
+                "DELETE FROM edges WHERE from_symbol IN (SELECT id FROM symbols WHERE file = ?)",
                 (file_str,),
             )
         conn.execute("DELETE FROM symbols WHERE file = ?", (file_str,))

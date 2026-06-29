@@ -157,8 +157,10 @@ def test_import_contacts_value_with_colon(tmp_path):
     assert keys.get("identity.contacts.eve_easton.slack_dm") == "https://example.com:8080/path"
 
 
-def test_import_yaml_malformed_logs_error(tmp_path, capsys):
-    """A malformed YAML file logs a parse error to stderr and does not raise."""
+def test_import_yaml_malformed_logs_error(tmp_path):
+    """A malformed YAML file logs a parse error via structlog and does not raise."""
+    from structlog.testing import capture_logs
+
     db_path = _setup_db(tmp_path)
     identity_dir = tmp_path / "identity"
     identity_dir.mkdir()
@@ -166,10 +168,11 @@ def test_import_yaml_malformed_logs_error(tmp_path, capsys):
     # Write a malformed YAML file
     (identity_dir / "broken.yaml").write_text("key: [unclosed")
 
-    identity.sync_from_markdown(db_path, identity_dir)
+    with capture_logs() as cap_logs:
+        identity.sync_from_markdown(db_path, identity_dir)
 
-    captured = capsys.readouterr()
-    assert "broken.yaml" in captured.err or "failed to parse" in captured.err
+    assert any(e["event"] == "identity_yaml_parse_failed" for e in cap_logs)
+    assert any("broken.yaml" in e.get("path", "") for e in cap_logs)
 
 
 # ---------------------------------------------------------------------------

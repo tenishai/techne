@@ -532,8 +532,10 @@ def test_make_generate_fn_uses_litellm(monkeypatch):
 
 
 class TestErrorVisibility:
-    def test_thread_detection_logs_errors(self, capsys):
-        """detect_and_summarize logs to stderr on LLM failure and still returns threads."""
+    def test_thread_detection_logs_errors(self):
+        """detect_and_summarize logs a warning on LLM failure and still returns threads."""
+        from structlog.testing import capture_logs
+
         config = Config()
         config.threads.min_observations = 5
         # This test asserts LLM-path-specific error logging.
@@ -548,19 +550,21 @@ class TestErrorVisibility:
             for i in range(20)
         ]
 
-        threads = detect_and_summarize(observations, config, generate_fn=failing_generate)
+        with capture_logs() as cap_logs:
+            threads = detect_and_summarize(observations, config, generate_fn=failing_generate)
 
         # Fallback should still produce at least one Thread
         assert len(threads) >= 1
         assert isinstance(threads[0], Thread)
 
-        # Error should have been logged to stderr
-        captured = capsys.readouterr()
-        assert "thread detection failed" in captured.err
-        assert "RuntimeError" in captured.err
+        # Error should have been logged via structlog
+        assert any(e["event"] == "thread_inference_llm_failed" for e in cap_logs)
+        assert any("simulated LLM failure" in e.get("error", "") for e in cap_logs)
 
-    def test_summarize_single_logs_errors(self, capsys):
-        """_summarize_single logs to stderr on LLM failure and returns a bare summary."""
+    def test_summarize_single_logs_errors(self):
+        """_summarize_single logs a warning on LLM failure and returns a bare summary."""
+        from structlog.testing import capture_logs
+
         def failing_generate(prompt: str) -> str:
             raise RuntimeError("simulated LLM failure")
 
@@ -569,16 +573,16 @@ class TestErrorVisibility:
             for i in range(3)
         ]
 
-        result = _summarize_single(observations, failing_generate)
+        with capture_logs() as cap_logs:
+            result = _summarize_single(observations, failing_generate)
 
         # Fallback bare summary should be a non-empty string
         assert isinstance(result, str)
         assert len(result) > 0
 
-        # Error should have been logged to stderr
-        captured = capsys.readouterr()
-        assert "single summary failed" in captured.err
-        assert "RuntimeError" in captured.err
+        # Error should have been logged via structlog
+        assert any(e["event"] == "thread_single_summary_llm_failed" for e in cap_logs)
+        assert any("simulated LLM failure" in e.get("error", "") for e in cap_logs)
 
 
 class TestDetectorRouting:
@@ -692,7 +696,8 @@ class TestDetectorRouting:
         for t in threads:
             assert t.summary == "LLM summary for this thread."
 
-    def test_heuristic_llm_summarizer_falls_back_when_failing(self, capsys):
+    def test_heuristic_llm_summarizer_falls_back_when_failing(self):
+        from structlog.testing import capture_logs
         from techne.core.threads import detect_and_summarize
 
         config = Config()
@@ -701,14 +706,16 @@ class TestDetectorRouting:
         def failing_generate(_prompt):
             raise RuntimeError("simulated LLM failure")
 
-        threads = detect_and_summarize(
-            self._observations(), config, generate_fn=failing_generate
-        )
+        with capture_logs() as cap_logs:
+            threads = detect_and_summarize(
+                self._observations(), config, generate_fn=failing_generate
+            )
         # Threads still produced via heuristic fallback summary
         for t in threads:
             assert t.summary
-        err = capsys.readouterr().err
-        assert "per-thread LLM summary failed" in err
+        # Error should have been logged via structlog
+        assert any(e["event"] == "thread_summary_llm_failed" for e in cap_logs)
+        assert any("simulated LLM failure" in e.get("error", "") for e in cap_logs)
 
 
 # ---------------------------------------------------------------------------

@@ -64,10 +64,12 @@ def register_hooks(config: Config):
         groups = hooks.setdefault(event, [])
         # Strip any prior techne entry, in either the wrapped or legacy shape.
         groups[:] = [g for g in groups if not _group_contains_techne(g)]
-        groups.append({
-            "matcher": "",
-            "hooks": [{"type": "command", "command": command}],
-        })
+        groups.append(
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": command}],
+            }
+        )
 
     _save_json(SETTINGS_PATH, settings)
 

@@ -311,6 +311,4 @@ def restore_all_dbs(
         for *_, temp in plan:
             temp.unlink(missing_ok=True)
 
-    return RestoreResult(
-        restored=restored, pre_restore_backup=pre, skipped_unknown=skipped_unknown
-    )
+    return RestoreResult(restored=restored, pre_restore_backup=pre, skipped_unknown=skipped_unknown)

@@ -376,7 +376,7 @@ def search_vec(
     """
     try:
         import sqlite_vec
-        from fastembed import TextEmbedding
+        from fastembed import TextEmbedding as TextEmbedding  # availability probe
     except ImportError:
         return []
 
@@ -439,7 +439,8 @@ def search_vec(
                 ).fetchall()
                 for row in rows:
                     obs = conn.execute(
-                        "SELECT id, content, tool_name, session_id, timestamp FROM observations WHERE id = ?",
+                        "SELECT id, content, tool_name, session_id, timestamp"
+                        " FROM observations WHERE id = ?",
                         (row[0],),
                     ).fetchone()
                     if obs:
