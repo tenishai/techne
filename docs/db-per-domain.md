@@ -1,6 +1,6 @@
 # db-per-domain: one store file per persona/domain
 
-**Status**: Draft for review (Raven + Richard, 2026-06-20). Pre-implementation.
+**Status**: Decision record — **IMPLEMENTED** across v0.7.0–v0.8.0 (originally drafted 2026-06-20, pre-implementation). Librarian/Architect/Codex all ship behind `StoreAdapter`; the once-open questions below are resolved as built.
 **Tracking**: reframes [#88](https://github.com/tenishai/techne/issues/88) (was: in-db domain registration), ties in [#87](https://github.com/tenishai/techne/issues/87) (StoreAdapter / patterns) and [#89](https://github.com/tenishai/techne/issues/89) (codex graph).
 **Decision recorded**: techne knowledge#327.
 
@@ -111,12 +111,12 @@ transaction.** Cross-db invariants — a `document_card`'s `doc:<id>` resolving 
   rebuild, or suspected drift. New cross-db invariants register as additional checks in
   `maintenance._CHECKS`.
 
-## Open questions
+## Resolved (as implemented)
 
-- **`techne search --table documents`**: keep it (route to the librarian store) or move to a domain-scoped `techne library search`? (Leaning: domain-scoped; personal recall is the cards.)
-- **Vector search** across domains: each domain owns its own vec index in its store; personal recall vec-searches only `techne.db`. Confirm no cross-db vec need.
-- **Config defaults**: do domain dbs default to existing (`~/.techne/<domain>.db`) and auto-create on first use, or require explicit enable? (Leaning: explicit enable, so a memory-only install stays one file.)
-- ~~**Backend portability proof**: validate the SQLite→Postgres `StoreAdapter` swap~~ — **resolved (techne#135): retired.** techne is SQLite-only; the seam was unused and removed. Design a server backend against a real driver only if a concrete deploy/multi-writer need ever appears.
+- **`techne search --table documents`** → **domain-scoped.** Documents moved out of `techne.db` to `librarian.db`; full-content search is `techne library search` against the Librarian store, while personal recall ranks the gist cards in `techne.db`.
+- **Vector search across domains** → **per-domain, no cross-db vec.** Each domain owns its own vec index in its store; personal recall vec-searches only `techne.db`. No cross-db vector ranking is performed — the card model removes the need.
+- **Config defaults** → **lazy auto-create.** Domain dbs default to `<data_dir>/<domain>.db` and are created+migrated on first *use* (`librarian_store`/`architect_store`/`codex_store`), not at init — a memory-only install never materialises them and stays effectively one file.
+- ~~**Backend portability proof**: validate the SQLite→Postgres `StoreAdapter` swap~~ — **retired (techne#135).** techne is SQLite-only; the seam was unused and removed. Design a server backend against a real driver only if a concrete deploy/multi-writer need ever appears.
 
 ## How this reframes the issues
 

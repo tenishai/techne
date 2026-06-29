@@ -233,9 +233,14 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
     reviewed_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     -- Sleep/dream consolidation (techne#108). Additive (reconciled, no migration).
-    -- action: what promote does with this proposal. target_ids: JSON array of the
-    -- knowledge.id rows it acts on (NULL for plain adds). origin: which pass made it.
-    action TEXT NOT NULL DEFAULT 'add',         -- add | supersede | merge | connect
+    -- action: what promote does with this proposal — one of the reflect._APPLIERS
+    -- dispatch keys (add | supersede | merge), which is the single source of truth.
+    -- An unknown action raises at promote-time in promote_candidate(). Deliberately
+    -- NOT a SQL CHECK: that would duplicate the _APPLIERS key list in the schema (a
+    -- second source of truth to drift) and shift enforcement off the dispatch.
+    -- target_ids: JSON array of the knowledge.id rows it acts on (NULL for plain
+    -- adds). origin: which pass made it.
+    action TEXT NOT NULL DEFAULT 'add',
     target_ids TEXT,
     origin TEXT NOT NULL DEFAULT 'reflect',     -- reflect | consolidate | dream
     -- Decision-provenance: who/what reviewed and why (free-text, not a DB enum).
