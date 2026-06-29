@@ -15,7 +15,7 @@ confidence='low') if one genuinely emerges. Abstention-first: most groups yield 
 Proposals land in `knowledge_candidates` for human review — never auto-applied.
 
 Selection is layered + degrade-safe:
-  Tier 0 (always): exact `content_hash(content)` dup buckets — copy-paste dups, free.
+  Tier 0 (always): exact `content_fingerprint(content)` dup buckets — copy-paste dups, free.
   Tier 1 (no fastembed needed): FTS self-similarity — each row's top neighbor.
   (Tier 2, vec dup-band over stored knowledge_vec embeddings, and an updated_at
    watermark to bound the scan on a large table, are scaling follow-ups — the table is
@@ -38,7 +38,7 @@ import json
 from techne.config import Config
 from techne.core._resident import extract_json_object
 from techne.core.database import connect
-from techne.core.knowledge import VALID_CONFIDENCE, VALID_TYPES, content_hash
+from techne.core.knowledge import VALID_CONFIDENCE, VALID_TYPES, content_fingerprint
 from techne.core.redaction import redact_credentials
 from techne.core.search import search_fts
 
@@ -103,10 +103,10 @@ def consolidate_clusters(
         seen_keys.add(key)
         clusters.append({"target_ids": ids, "rows": [by_id[i] for i in ids], "via": via})
 
-    # Tier 0 — exact content_hash dup buckets (copy-paste dups; free, deterministic).
+    # Tier 0 — exact content_fingerprint dup buckets (copy-paste dups; free, deterministic).
     buckets: dict[str, list[int]] = {}
     for r in live:
-        buckets.setdefault(content_hash(r["content"]), []).append(r["id"])
+        buckets.setdefault(content_fingerprint(r["content"]), []).append(r["id"])
     for ids in buckets.values():
         if len(ids) >= 2:
             _add(ids, "hash")

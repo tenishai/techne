@@ -7,7 +7,7 @@ from techne.core.database import connect, init_db
 from techne.core.identity import get as identity_get
 from techne.core.identity import list_entries as identity_list
 from techne.core.identity import set_value
-from techne.core.knowledge import content_hash, get, list_entries, store, supersede
+from techne.core.knowledge import content_fingerprint, get, list_entries, store, supersede
 from techne.core.state import (
     add_observation,
     db_stats,
@@ -244,10 +244,10 @@ class TestKnowledge:
 
         assert "pattern" not in VALID_TYPES
 
-    def test_content_hash(self):
-        h1 = content_hash("test content")
-        h2 = content_hash("test content")
-        h3 = content_hash("different content")
+    def test_content_fingerprint(self):
+        h1 = content_fingerprint("test content")
+        h2 = content_fingerprint("test content")
+        h3 = content_fingerprint("different content")
         assert h1 == h2
         assert h1 != h3
 

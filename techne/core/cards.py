@@ -191,7 +191,7 @@ def find_dangling_cards(config: Config) -> dict:
     Reports active document_cards that are `dangling` (pointer doesn't resolve in
     librarian.db) or `stale` (the live document's content no longer hashes to the
     card's `ver:`). Returns {total, dangling: [...], stale: [...]}."""
-    from techne.core.knowledge import content_hash
+    from techne.core.knowledge import content_fingerprint
     from techne.core.librarian import librarian_store
 
     store = librarian_store(config)
@@ -218,7 +218,7 @@ def find_dangling_cards(config: Config) -> dict:
             )
             continue
         ver = _tag_value(c["tags"], "ver:")
-        if ver and ver != content_hash(doc.get("content") or ""):
+        if ver and ver != content_fingerprint(doc.get("content") or ""):
             stale.append({"card_id": c["id"], "source": c["source"], "doc_id": doc_id})
     return {"total": len(cards), "dangling": dangling, "stale": stale}
 
