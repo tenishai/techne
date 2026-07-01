@@ -247,6 +247,25 @@ def register_hooks(config: Config):
             }
         )
 
+    # PreToolUse grep-assist (techne#206) — OPT-IN, experimental. Only registered
+    # when hooks.codex_grep_assist is ON. Unlike the always-on hooks above it uses
+    # a "Grep|Glob" matcher so it fires only on the agent's own search calls, and
+    # it's the sole techne PreToolUse entry — so a flipped-off flag on re-init
+    # cleanly removes it (the strip below drops any prior techne PreToolUse group).
+    pre_groups = hooks.setdefault("PreToolUse", [])
+    pre_groups[:] = [g for g in pre_groups if not _group_contains_techne(g)]
+    if config.hooks.codex_grep_assist:
+        pre_groups.append(
+            {
+                "matcher": "Grep|Glob",
+                "hooks": [
+                    {"type": "command", "command": _hook_command("techne.hooks.pre_tool_use")}
+                ],
+            }
+        )
+    if not pre_groups:
+        del hooks["PreToolUse"]
+
     _save_json(SETTINGS_PATH, settings)
 
 
