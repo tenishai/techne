@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""PreToolUse hook — graph-augment the agent's own Grep/Glob with Codex (techne#206).
+"""PreToolUse hook — graph-augment the agent's own Grep with Codex (techne#206).
 
-When the agent issues a Grep/Glob tool call AND the opt-in flag
+When the agent issues a Grep tool call AND the opt-in flag
 ``hooks.codex_grep_assist`` is ON, this hook runs a Codex symbol search for the
 search pattern and injects the matching symbols into the model's context via
 ``hookSpecificOutput.additionalContext``.
@@ -24,7 +24,9 @@ import json
 import sys
 
 # Tools whose pattern is a symbol-ish search worth augmenting with the code graph.
-ASSIST_TOOLS = {"Grep", "Glob"}
+# Grep only: Glob's "pattern" is a file glob (e.g. **/*.py), not a symbol name, so
+# feeding it to the symbol FTS yields noise/nothing — excluded (techne#206 dogfood).
+ASSIST_TOOLS = {"Grep"}
 
 
 def _build_context(pattern: str, results: list[dict]) -> str:

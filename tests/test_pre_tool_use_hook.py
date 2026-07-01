@@ -1,6 +1,6 @@
 """Tests for the PreToolUse grep-assist hook (techne#206).
 
-The hook augments the agent's own Grep/Glob calls with Codex symbol matches,
+The hook augments the agent's own Grep calls with Codex symbol matches,
 injected via hookSpecificOutput.additionalContext. It is strictly best-effort:
 it must NEVER block the tool, ALWAYS exit 0, and emit NOTHING on any error or
 empty path. These tests drive main() directly with a monkeypatched stdin and
@@ -71,7 +71,7 @@ def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
 
 
 def test_non_grep_glob_tool_emits_nothing(home, monkeypatch, capsys):
-    """A tool that isn't Grep/Glob → no stdout (short-circuits before config load)."""
+    """A tool that isn't Grep → no stdout (short-circuits before config load)."""
     _write_config(home, codex_grep_assist=True)
     db = _make_codex_db(home)
     add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
@@ -136,16 +136,15 @@ def test_matching_symbol_injects_context(home, monkeypatch, capsys):
     assert "auth.py" in ctx
 
 
-def test_glob_tool_also_augmented(home, monkeypatch, capsys):
-    """Glob calls are augmented too (both are in ASSIST_TOOLS)."""
+def test_glob_tool_not_augmented(home, monkeypatch, capsys):
+    """Glob is NOT augmented — its pattern is a file glob, not a symbol name (techne#206)."""
     _write_config(home, codex_grep_assist=True)
     db = _make_codex_db(home)
     add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
     out = _run(
         monkeypatch, capsys, {"tool_name": "Glob", "tool_input": {"pattern": "authenticate"}}
     )
-    payload = json.loads(out)
-    assert "authenticate" in payload["hookSpecificOutput"]["additionalContext"]
+    assert out == ""
 
 
 def test_stale_symbol_shows_freshness_marker(home, monkeypatch, capsys):
