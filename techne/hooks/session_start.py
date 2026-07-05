@@ -301,6 +301,7 @@ def _run_phases_2_to_9(
                 config.db_path,
                 char_budget=config.injection.char_budget,
                 recent_reserve_frac=config.injection.recent_reserve_frac,
+                correction_reserve_frac=config.injection.correction_reserve_frac,
                 half_life_days=config.knowledge_confidence_half_life_days,
             )
             knowledge_block = render_tier0_block(tier0_rows)
