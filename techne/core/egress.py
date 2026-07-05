@@ -135,6 +135,8 @@ def select_tier0_injection(
         # status='uncertain' rows stay eligible but sort last within their band
         # (techne#117): a high-confidence row whose basis was superseded must not
         # be auto-asserted ahead of a trustworthy current row.
+        # status='archived' rows are excluded entirely (techne#216 soft-archive):
+        # they remain searchable but are NOT auto-injected into session context.
         # We keep ORDER BY (status = 'uncertain') here for the primary uncertain/
         # current split; within each group the Python-side _eff_conf sort below
         # applies the decay ordering.
@@ -145,6 +147,7 @@ def select_tier0_injection(
                WHERE superseded_by IS NULL
                  AND confidence = 'high'
                  AND type NOT IN ({placeholders})
+                 AND status != 'archived'
                ORDER BY (status = 'uncertain'), updated_at DESC""",
             PULL_ONLY_TYPES,
         ).fetchall()
