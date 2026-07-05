@@ -1417,6 +1417,20 @@ def reflect_review(ctx, status, limit, show_raw):
         click.echo(f"  created: {r['created_at']}")
         if r["status"] == "promoted" and r.get("promoted_to_id"):
             click.echo(f"  promoted_to: knowledge.id={r['promoted_to_id']}")
+        # Faithfulness gate (techne#217): flag merge/supersede candidates where
+        # the replacement was found to drop a load-bearing source claim.
+        # faithfulness_ok: NULL=unchecked, 1=faithful, 0=unfaithful.
+        faith_ok = r.get("faithfulness_ok")
+        if faith_ok == 0:
+            warning = r.get("faithfulness_warning") or "a source claim may have been dropped"
+            click.echo(f"  ⚠ FAITHFULNESS WARNING: {warning}")
+            click.echo(
+                "    This candidate may drop a load-bearing claim from its source entries."
+            )
+            click.echo("    Review carefully before promoting. (Run: techne reflect promote --help)")
+        elif faith_ok == 1:
+            click.echo("  ✓ faithfulness: ok")
+        # faith_ok IS NULL: unchecked — silently omit so the noise level stays low.
         if show_raw and r.get("raw_response"):
             click.echo("  --- raw LLM response ---")
             click.echo("  " + (r["raw_response"][:1000].replace("\n", "\n  ")))

@@ -766,6 +766,51 @@ TOOLS = [
             "required": ["session_id", "claims"],
         },
     },
+    {
+        "name": "techne_faithfulness_emit",
+        "description": (
+            "Faithfulness gate (techne#217 / coherence-layer D4): find pending merge/"
+            "supersede candidates whose replacement content has NOT yet been checked for "
+            "faithfulness to their source entries, and emit a prompt for each so you can "
+            "judge it with YOUR OWN model (no API key, no sampling). "
+            "Returns prompts; for each, answer the `prompt` and call "
+            "techne_faithfulness_ingest with the same `candidate_id`. "
+            "A 'faithful' verdict leaves the candidate unchanged. An 'unfaithful' verdict "
+            "annotates the candidate with a warning visible at `reflect review` so the "
+            "operator can decide before promotion. The gate is ADVISORY — a flagged "
+            "candidate is never blocked or auto-discarded."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "techne_faithfulness_ingest",
+        "description": (
+            "Feed back one candidate's faithfulness verdict from techne_faithfulness_emit. "
+            "`response` is your JSON verdict object (verdict='faithful'|'unfaithful', "
+            "dropped_claims, reason). `candidate_id` comes from the emit batch item. "
+            "An 'unfaithful' verdict annotates the candidate row with a warning visible "
+            "at `techne reflect review` — it does NOT change the candidate status. "
+            "Sovereignty invariant: the operator still decides whether to promote or "
+            "discard; the gate only adds the annotation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "candidate_id": {
+                    "type": "integer",
+                    "description": "The candidate to annotate (from the emit batch item).",
+                },
+                "response": {
+                    "type": "string",
+                    "description": "Your JSON verdict object answering the faithfulness prompt.",
+                },
+            },
+            "required": ["candidate_id", "response"],
+        },
+    },
 ]
 
 
@@ -973,6 +1018,30 @@ def _techne_dream_ingest(args: dict, config: Config) -> dict:
     )
 
 
+def _techne_faithfulness_emit(args: dict, config: Config) -> dict:
+    """Find pending merge/supersede candidates without a faithfulness check and emit
+    prompts for the agent to answer with its own model (techne#217 / D4)."""
+    from techne.core.faithfulness import faithfulness_emit
+
+    batch = faithfulness_emit(config)
+    return {"count": len(batch), "batch": batch}
+
+
+def _techne_faithfulness_ingest(args: dict, config: Config) -> dict:
+    """Annotate one merge/supersede candidate with a faithfulness verdict
+    (techne#217 / D4). Sovereignty invariant: never changes candidate status."""
+    from techne.core.faithfulness import faithfulness_ingest
+
+    candidate_id = args.get("candidate_id")
+    if not isinstance(candidate_id, int):
+        return {"error": "candidate_id must be an integer"}
+    response = args.get("response", "")
+    if not isinstance(response, str):
+        response = json.dumps(response) if response else ""
+
+    return faithfulness_ingest(config, candidate_id, response)
+
+
 def _techne_memory_claims_emit(args: dict, config: Config) -> dict:
     """Emit the claim-reconciliation prompt for the agent to answer with its own model
     (techne#107 PR3). Returns the prompt + metadata; feed the response back via
@@ -1093,6 +1162,8 @@ TOOL_HANDLERS = {
     "techne_consolidate_ingest": _techne_consolidate_ingest,
     "techne_dream_emit": _techne_dream_emit,
     "techne_dream_ingest": _techne_dream_ingest,
+    "techne_faithfulness_emit": _techne_faithfulness_emit,
+    "techne_faithfulness_ingest": _techne_faithfulness_ingest,
     "techne_memory_claims_emit": _techne_memory_claims_emit,
     "techne_memory_claims_ingest": _techne_memory_claims_ingest,
     "techne_check_evidence": _techne_check_evidence,
