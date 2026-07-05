@@ -145,6 +145,10 @@ class InjectionConfig:
         decisions/evaluations/facts ("what changed since last session"), filled
         before the static feedback band so it can never be starved (techne#93
         egress-starvation fix). 0.0 disables the reservation (legacy ordering).
+    correction_reserve_frac: fraction of char_budget reserved for belief-
+        overturning facts (tagged memory-type:correction), filled right after
+        identity so a correction is never evicted by merely-newer routine facts
+        (the confident-wrong fix). 0.0 disables the reservation.
     """
 
     enabled: bool = True
@@ -154,6 +158,7 @@ class InjectionConfig:
     thread_char_budget: int = 1500
     thread_per_item_chars: int = 200
     recent_reserve_frac: float = 0.4
+    correction_reserve_frac: float = 0.3
 
 
 @dataclass
@@ -439,6 +444,7 @@ class Config:
                 thread_char_budget=int(i.get("thread_char_budget", 1500)),
                 thread_per_item_chars=int(i.get("thread_per_item_chars", 200)),
                 recent_reserve_frac=float(i.get("recent_reserve_frac", 0.4)),
+                correction_reserve_frac=float(i.get("correction_reserve_frac", 0.3)),
             )
 
         if "staleness_hours" in raw:
@@ -550,6 +556,7 @@ class Config:
                 "thread_char_budget": self.injection.thread_char_budget,
                 "thread_per_item_chars": self.injection.thread_per_item_chars,
                 "recent_reserve_frac": self.injection.recent_reserve_frac,
+                "correction_reserve_frac": self.injection.correction_reserve_frac,
             },
             "staleness_hours": self.staleness_hours,
             "knowledge_confidence_half_life_days": self.knowledge_confidence_half_life_days,
