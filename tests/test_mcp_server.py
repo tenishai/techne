@@ -97,6 +97,8 @@ class TestHandleRequest:
             "techne_dream_ingest",
             "techne_memory_claims_emit",
             "techne_memory_claims_ingest",
+            "techne_conflict_emit",
+            "techne_conflict_ingest",
             "techne_check_evidence",
         }
 

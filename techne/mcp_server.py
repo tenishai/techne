@@ -648,6 +648,63 @@ TOOLS = [
         },
     },
     {
+        "name": "techne_conflict_emit",
+        "description": (
+            "Contradiction detection pass (techne#213 D1 — coherence layer): find live "
+            "knowledge pairs that share entities/tags + same type and may contradict each "
+            "other. Structural selection — NOT similarity (cosine AUROC ~0.59 for "
+            "contradictions). Returns prompts for YOUR OWN model to judge; answer each with "
+            "a JSON verdict array (SUPERSEDE/UPDATE/NOOP/DISTINCT) and call "
+            "techne_conflict_ingest. SUPERSEDE routes to a pending supersession candidate "
+            "(older event_at loses); UPDATE to a pending update candidate. Proposals land "
+            "in the review queue — never auto-applied."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_items": {
+                    "type": "integer",
+                    "description": "Cap on conflict groups returned (default from config, typically 20).",
+                },
+            },
+        },
+    },
+    {
+        "name": "techne_conflict_ingest",
+        "description": (
+            "Feed back one conflict verdict from techne_conflict_emit (techne#213). "
+            "`response` is your JSON verdict array; `focus_id`, `comparison_ids`, and "
+            "`check_hash` come from the emit batch item. SUPERSEDE → pending supersession "
+            "candidate (older event_at is retired; operator reviews before promote). "
+            "UPDATE → pending supersede candidate with merged content. "
+            "NOOP/DISTINCT → discarded markers (pair not re-nagged). "
+            "Nothing auto-applies — sovereignty preserved."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "focus_id": {
+                    "type": "integer",
+                    "description": "The focus entry id (from the emit batch item).",
+                },
+                "comparison_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "The comparison entry ids (from the emit batch item).",
+                },
+                "check_hash": {
+                    "type": "string",
+                    "description": "Stable group identifier (from the emit batch item).",
+                },
+                "response": {
+                    "type": "string",
+                    "description": "Your JSON verdict array answering the conflict prompt.",
+                },
+            },
+            "required": ["focus_id", "comparison_ids", "check_hash", "response"],
+        },
+    },
+    {
         "name": "techne_check_evidence",
         "description": (
             "Call this before asserting you did something (committed, ran tests, wrote a "
@@ -915,6 +972,41 @@ def _techne_memory_claims_ingest(args: dict, config: Config) -> dict:
     return claims_ingest(config, args.get("prompt_hash", ""), response)
 
 
+def _techne_conflict_emit(args: dict, config: Config) -> dict:
+    """Find live knowledge pairs that may conflict and emit prompts for the agent
+    (techne#213 D1 — contradiction detection). Selection uses shared tags + same type,
+    NOT similarity (AUROC ~0.59 for contradictions). Returns prompts; answer each
+    and feed back via techne_conflict_ingest. Proposals land in review — never
+    auto-applied. Run this pass alongside consolidate to catch contradictions that
+    FTS clustering misses."""
+    from techne.core.conflict import conflict_check_emit
+
+    max_items = args.get("max_items", None)
+    batch = conflict_check_emit(config, max_items=max_items)
+    return {"count": len(batch), "batch": batch}
+
+
+def _techne_conflict_ingest(args: dict, config: Config) -> dict:
+    """Feed back one conflict-check verdict from techne_conflict_emit (techne#213).
+    `response` is the agent's JSON verdict array; `focus_id`, `comparison_ids`, and
+    `check_hash` come from the emit batch item. SUPERSEDE routes to a pending
+    supersession candidate (the older event_at loses); UPDATE to a pending update
+    candidate; NOOP/DISTINCT to discarded markers. Nothing auto-applies."""
+    from techne.core.conflict import conflict_check_ingest
+
+    response = args.get("response", "")
+    if not isinstance(response, str):
+        response = json.dumps(response) if response else ""
+
+    return conflict_check_ingest(
+        config,
+        int(args.get("focus_id", 0)),
+        [int(i) for i in (args.get("comparison_ids") or [])],
+        args.get("check_hash", ""),
+        response,
+    )
+
+
 def _techne_check_evidence(args: dict, config: Config) -> dict:
     """Verify structured claims against the observation ledger (techne#105).
 
@@ -982,6 +1074,8 @@ TOOL_HANDLERS = {
     "techne_memory_claims_emit": _techne_memory_claims_emit,
     "techne_memory_claims_ingest": _techne_memory_claims_ingest,
     "techne_check_evidence": _techne_check_evidence,
+    "techne_conflict_emit": _techne_conflict_emit,
+    "techne_conflict_ingest": _techne_conflict_ingest,
 }
 
 

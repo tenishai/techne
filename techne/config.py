@@ -175,6 +175,22 @@ class ReflectConfig:
 
 
 @dataclass
+class ConflictConfig:
+    """Configuration for contradiction detection → supersession (techne#213, D1).
+
+    model: LLM model for the conflict prompt. Falls back to Config.model when empty.
+    max_comparison_candidates: how many entity-overlapping rows to compare per entry.
+    max_items_per_emit: cap on groups returned by conflict_check_emit per run.
+    log_raw_response: whether to persist the agent's raw response in the candidate row.
+    """
+
+    model: str = ""  # falls back to Config.model
+    max_comparison_candidates: int = 20
+    max_items_per_emit: int = 20
+    log_raw_response: bool = True
+
+
+@dataclass
 class PostureConfig:
     """Coexistence posture with Claude Code's curated memory (techne#107 PR4).
 
@@ -217,6 +233,7 @@ class Config:
     search: SearchConfig = field(default_factory=SearchConfig)
     injection: InjectionConfig = field(default_factory=InjectionConfig)
     posture: PostureConfig = field(default_factory=PostureConfig)
+    conflict: ConflictConfig = field(default_factory=ConflictConfig)
     platform: Platform = "claude-code"
     # Staleness alarm: if the prior last_session is older than this many hours,
     # the banner and collect_health emit a visible warning. Default 12h.
@@ -416,6 +433,18 @@ class Config:
             cfg.posture = PostureConfig(
                 mode=mode,
                 cc_memory_detected=bool(p.get("cc_memory_detected", False)),
+            )
+
+        if "conflict" in raw and isinstance(raw["conflict"], dict):
+            c = raw["conflict"]
+            _cd = ConflictConfig()
+            cfg.conflict = ConflictConfig(
+                model=str(c.get("model", _cd.model)),
+                max_comparison_candidates=int(
+                    c.get("max_comparison_candidates", _cd.max_comparison_candidates)
+                ),
+                max_items_per_emit=int(c.get("max_items_per_emit", _cd.max_items_per_emit)),
+                log_raw_response=bool(c.get("log_raw_response", _cd.log_raw_response)),
             )
 
         return cfg
