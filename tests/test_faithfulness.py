@@ -11,6 +11,9 @@ Covers:
 - Sovereignty: faithfulness_ingest never changes candidate status.
 - CLI reflect review surfaces the warning for an unfaithful candidate.
 - annotate_faithfulness direct write utility.
+- Anti-re-dormancy: the pass is wired into the session-end MCP instructions.
+- Redaction: a credential-shaped warning is redacted at rest.
+- Batch cap: emit respects max_candidates.
 """
 
 from __future__ import annotations
@@ -467,3 +470,118 @@ def test_cli_review_silent_for_unchecked_candidate(config, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "FAITHFULNESS WARNING" not in result.output
     assert "faithfulness:" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Anti-re-dormancy: the gate MUST be invoked by the automated session-end loop.
+#
+# The faithfulness pass is agent-instruction-driven (no programmatic runner
+# chains consolidate → faithfulness; consolidate itself is only run via the MCP
+# emit/ingest loop). So the wiring that makes the pass actually RUN is its
+# presence in the MCP SERVER_INSTRUCTIONS session-end block. These tests fail if
+# that wiring is removed — guarding against the pass silently going dormant.
+# ---------------------------------------------------------------------------
+
+
+def test_faithfulness_tools_are_registered_mcp_handlers():
+    """The emit/ingest handlers must be dispatchable (registered in TOOL_HANDLERS)."""
+    from techne.mcp_server import TOOL_HANDLERS
+
+    assert "techne_faithfulness_emit" in TOOL_HANDLERS
+    assert "techne_faithfulness_ingest" in TOOL_HANDLERS
+
+
+def test_faithfulness_wired_into_session_end_instructions():
+    """The session-end loop text must name the faithfulness pass, or the resident
+    agent never runs it and every merge/supersede candidate reaches review with
+    faithfulness_ok=NULL (no warning ever surfaces). This is the anti-re-dormancy
+    guard — it fails if the wiring is dropped from SERVER_INSTRUCTIONS."""
+    from techne.mcp_server import SERVER_INSTRUCTIONS
+
+    assert "techne_faithfulness_emit" in SERVER_INSTRUCTIONS or (
+        "techne_faithfulness_emit/ingest" in SERVER_INSTRUCTIONS
+    )
+    # It must be positioned as part of the SESSION END consolidation loop, after
+    # consolidate (whose candidates it checks).
+    idx_consolidate = SERVER_INSTRUCTIONS.find("techne_consolidate")
+    idx_faith = SERVER_INSTRUCTIONS.find("techne_faithfulness")
+    assert idx_consolidate != -1, "consolidate wiring missing from instructions"
+    assert idx_faith != -1, "faithfulness wiring missing from instructions"
+    assert idx_faith > idx_consolidate, (
+        "faithfulness must be described AFTER consolidate — it checks consolidate's output"
+    )
+
+
+def test_faithfulness_exposed_as_mcp_tool_schemas():
+    """Both tools must appear in the advertised TOOLS list (tools/list), so a client
+    that reads the schema can call them."""
+    from techne.mcp_server import TOOLS
+
+    names = {t["name"] for t in TOOLS}
+    assert "techne_faithfulness_emit" in names
+    assert "techne_faithfulness_ingest" in names
+
+
+# ---------------------------------------------------------------------------
+# Redaction — the new stored free-text column must be redacted at rest.
+# ---------------------------------------------------------------------------
+
+
+def test_faithfulness_warning_is_redacted_at_rest(config):
+    """A credential-shaped string in a warning must be redacted before storage
+    (redaction.py invariant for new free-text columns)."""
+    db = config.db_path
+    a = store(db, "source A", type="fact")
+    b = store(db, "source B", type="fact")
+    cid = _insert_candidate(db, target_ids=[a, b], content="replacement")
+
+    secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890"
+    annotate_faithfulness(db, cid, ok=False, warning=f"dropped the key {secret}")
+
+    row = _get_candidate(db, cid)
+    assert secret not in row["faithfulness_warning"]
+    assert "<redacted:sk-ant>" in row["faithfulness_warning"]
+
+
+def test_faithfulness_ingest_redacts_warning_at_rest(config):
+    """The full ingest path (not just the direct utility) must redact the warning."""
+    db = config.db_path
+    a = store(db, "source A", type="fact")
+    b = store(db, "source B", type="fact")
+    cid = _insert_candidate(db, target_ids=[a, b], content="replacement drops something")
+
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    response = json.dumps({
+        "verdict": "unfaithful",
+        "reason": f"dropped the credential {secret}",
+        "dropped_claims": "",
+    })
+    faithfulness_ingest(config, cid, response)
+
+    row = _get_candidate(db, cid)
+    assert secret not in (row["faithfulness_warning"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Batch cap — emit respects max_candidates (bounded like the sibling passes).
+# ---------------------------------------------------------------------------
+
+
+def test_faithfulness_emit_respects_max_candidates(config):
+    """A large backlog must not produce an unbounded emit batch."""
+    db = config.db_path
+    for i in range(5):
+        a = store(db, f"source A{i}", type="fact")
+        b = store(db, f"source B{i}", type="fact")
+        _insert_candidate(db, target_ids=[a, b], content=f"merged {i}")
+
+    batch = faithfulness_emit(config, max_candidates=2)
+    assert len(batch) <= 2
+
+
+def test_faithfulness_emit_default_cap_is_bounded(config):
+    """The default cap is a finite bound (not None/unbounded)."""
+    from techne.core.faithfulness import DEFAULT_MAX_CANDIDATES
+
+    assert isinstance(DEFAULT_MAX_CANDIDATES, int)
+    assert DEFAULT_MAX_CANDIDATES > 0

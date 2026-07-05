@@ -34,12 +34,18 @@ from pathlib import Path
 from techne.config import Config
 from techne.core._resident import extract_json_object
 from techne.core.database import connect
+from techne.core.redaction import redact_credentials
 
 # Actions that have source rows whose claims must be preserved.
 CHECKED_ACTIONS = frozenset({"merge", "supersede"})
 
 MAX_SOURCE_CHARS = 300
 MAX_REPLACEMENT_CHARS = 500
+
+# Default cap on the emit batch, mirroring the sibling passes' bounded batches
+# (consolidate_emit's max_clusters=20). Prevents an unbounded prompt batch on a
+# large candidate backlog. Overridable per-call (and via the MCP tool arg).
+DEFAULT_MAX_CANDIDATES = 50
 
 FAITHFULNESS_PROMPT = """You are checking whether a proposed replacement knowledge entry
 preserves all load-bearing claims from the original source entries it replaces.
@@ -132,7 +138,9 @@ def parse_faithfulness_response(raw: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def faithfulness_emit(config: Config) -> list[dict]:
+def faithfulness_emit(
+    config: Config, *, max_candidates: int = DEFAULT_MAX_CANDIDATES
+) -> list[dict]:
     """Find pending merge/supersede candidates without a faithfulness check and
     return a prompt batch for the agent to answer with its own model.
 
@@ -141,16 +149,31 @@ def faithfulness_emit(config: Config) -> list[dict]:
     ``candidate_id``. Only candidates with ``action IN ('merge', 'supersede')``
     and ``faithfulness_ok IS NULL`` are included (already-checked candidates are
     skipped — the check is idempotent, not repeated).
+
+    ``max_candidates`` caps the batch (default DEFAULT_MAX_CANDIDATES), mirroring
+    the sibling passes' bounded emits — an unbounded batch on a large backlog would
+    blow the agent's context. The SQL LIMIT is applied BEFORE the source-existence
+    filter, so a batch may return fewer than ``max_candidates`` items; the newest
+    candidates are prioritised (ORDER BY created_at DESC) and the rest resurface on
+    the next emit once these are checked.
     """
     conn = connect(config.db_path)
     try:
+        # Filter is `action IN ('merge','supersede')` — deliberately NOT 'retire'.
+        # A 'retire' candidate only LINKS an older row to an existing survivor
+        # (superseded_by) and writes NO synthesized content into the live store on
+        # promote — there is nothing lossy to check for claim preservation. If a
+        # future change ever wires a retire candidate's display `content` into a
+        # live write, this filter MUST be revisited to include it (techne#217).
         rows = conn.execute(
             """SELECT id, action, content, target_ids
                  FROM knowledge_candidates
                 WHERE status = 'pending'
                   AND action IN ('merge', 'supersede')
                   AND faithfulness_ok IS NULL
-                ORDER BY created_at DESC""",
+                ORDER BY created_at DESC
+                LIMIT ?""",
+            (max_candidates,),
         ).fetchall()
         batch = []
         for row in rows:
@@ -223,15 +246,20 @@ def annotate_faithfulness(
 
     This is the ONLY function that writes faithfulness_ok / faithfulness_warning.
     It never changes candidate status — sovereignty invariant (flag, not block).
+
+    The warning is a new stored free-text column, so it is run through
+    ``redact_credentials`` before being written (the redaction.py invariant: every
+    new free-text column that reaches disk must be redacted at rest).
     """
     ok_int: int | None = None if ok is None else (1 if ok else 0)
+    safe_warning = redact_credentials(warning) if warning else warning
     conn = connect(db_path)
     try:
         conn.execute(
             """UPDATE knowledge_candidates
                   SET faithfulness_ok = ?, faithfulness_warning = ?
                 WHERE id = ?""",
-            (ok_int, warning, candidate_id),
+            (ok_int, safe_warning, candidate_id),
         )
         conn.commit()
     finally:

@@ -28,7 +28,10 @@ SERVER_INSTRUCTIONS = (
     "focused, topic-scoped context including the identity layer.\n"
     "4. At SESSION END, consolidate. Run techne_reflect_emit, answer each prompt with YOUR OWN "
     "model, then techne_reflect_ingest — turning the session into durable candidates. Same "
-    "emit/ingest shape for techne_consolidate_* (dedup), techne_dream_emit/ingest (recombine — "
+    "emit/ingest shape for techne_consolidate_* (dedup) — then techne_faithfulness_emit/ingest to "
+    "check the merge/supersede candidates consolidate just staged: does the replacement preserve "
+    "each source's load-bearing claims before the operator reviews (flags a warning, never blocks). "
+    "Also techne_dream_emit/ingest (recombine — "
     "speculative; surfaces non-obvious A+B→C connections as low-confidence candidates), and "
     "techne_memory_claims_* (evidence-check). Before asserting completed work (committed, tested, "
     "wrote-file), call techne_check_evidence — it verifies your claims against the observation "
@@ -782,7 +785,12 @@ TOOLS = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "max_candidates": {
+                    "type": "integer",
+                    "description": "Cap on candidates returned (default 50).",
+                },
+            },
         },
     },
     {
@@ -1021,9 +1029,11 @@ def _techne_dream_ingest(args: dict, config: Config) -> dict:
 def _techne_faithfulness_emit(args: dict, config: Config) -> dict:
     """Find pending merge/supersede candidates without a faithfulness check and emit
     prompts for the agent to answer with its own model (techne#217 / D4)."""
-    from techne.core.faithfulness import faithfulness_emit
+    from techne.core.faithfulness import DEFAULT_MAX_CANDIDATES, faithfulness_emit
 
-    batch = faithfulness_emit(config)
+    batch = faithfulness_emit(
+        config, max_candidates=args.get("max_candidates", DEFAULT_MAX_CANDIDATES)
+    )
     return {"count": len(batch), "batch": batch}
 
 
