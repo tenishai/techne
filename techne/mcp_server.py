@@ -653,18 +653,26 @@ TOOLS = [
             "Contradiction detection pass (techne#213 D1 — coherence layer): find live "
             "knowledge pairs that share entities/tags + same type and may contradict each "
             "other. Structural selection — NOT similarity (cosine AUROC ~0.59 for "
-            "contradictions). Returns prompts for YOUR OWN model to judge; answer each with "
-            "a JSON verdict array (SUPERSEDE/UPDATE/NOOP/DISTINCT) and call "
-            "techne_conflict_ingest. SUPERSEDE routes to a pending supersession candidate "
-            "(older event_at loses); UPDATE to a pending update candidate. Proposals land "
-            "in the review queue — never auto-applied."
+            "contradictions). PREREQUISITE: detection requires a SHARED TAG token between "
+            "two entries (or an overlapping content word when an entry is untagged) — "
+            "consistent tagging is a prerequisite for contradiction recall, and untagged "
+            "antonyms in different vocabulary (e.g. 'use postgres' vs 'we switched to "
+            "sqlite' with no shared tag) will NOT be compared. Returns prompts for YOUR "
+            "OWN model to judge; answer each with a JSON verdict array "
+            "(SUPERSEDE/UPDATE/NOOP/DISTINCT) and call techne_conflict_ingest. SUPERSEDE "
+            "retires the older entry (by event_at) into the newer one; UPDATE retires the "
+            "new refinement into the canonical existing entry. Both LINK existing rows via "
+            "superseded_by — no duplicate row minted. Proposals land in the review queue — "
+            "never auto-applied."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "max_items": {
                     "type": "integer",
-                    "description": "Cap on conflict groups returned (default from config, typically 20).",
+                    "description": (
+                        "Cap on conflict groups returned (default from config, typically 20)."
+                    ),
                 },
             },
         },
@@ -674,11 +682,13 @@ TOOLS = [
         "description": (
             "Feed back one conflict verdict from techne_conflict_emit (techne#213). "
             "`response` is your JSON verdict array; `focus_id`, `comparison_ids`, and "
-            "`check_hash` come from the emit batch item. SUPERSEDE → pending supersession "
-            "candidate (older event_at is retired; operator reviews before promote). "
-            "UPDATE → pending supersede candidate with merged content. "
-            "NOOP/DISTINCT → discarded markers (pair not re-nagged). "
-            "Nothing auto-applies — sovereignty preserved."
+            "`check_hash` come from the emit batch item. SUPERSEDE → pending 'retire' "
+            "candidate linking the older entry (by event_at) into the newer survivor "
+            "(no row minted; operator reviews before promote). UPDATE → pending 'retire' "
+            "candidate folding the new refinement into the canonical existing entry, with "
+            "the merged wording kept for optional edit. NOOP/DISTINCT → discarded markers "
+            "(group not re-judged unless its membership changes). Nothing auto-applies — "
+            "sovereignty preserved."
         ),
         "inputSchema": {
             "type": "object",

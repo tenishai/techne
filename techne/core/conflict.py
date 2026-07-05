@@ -21,6 +21,7 @@ consolidate emit path. Only the emit/ingest wrappers touch the DB.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -267,9 +268,13 @@ def parse_conflict_response(raw: str) -> list[dict]:
 
 
 def _already_proposed_conflict(conn, check_hash: str) -> bool:
-    """This exact conflict pair/group already has a record — pending, promoted, OR
-    discarded. Discarded counts: the pair was already judged (NOOP/DISTINCT/etc.) and
-    should not be re-nagged until the underlying entries change."""
+    """This exact conflict group already has a record — pending, promoted, OR discarded.
+
+    check_hash is _cluster_hash(sorted ids), so the guard keys on group MEMBERSHIP only.
+    A discarded group is not re-judged until its membership CHANGES — e.g. a member is
+    superseded/retired (so it drops out of the live set) or a new entity-overlapping entry
+    joins. An in-place content EDIT that keeps the same ids does NOT reopen a discarded
+    group; re-check it explicitly if a wording change alters the judgement."""
     return (
         conn.execute(
             """SELECT 1 FROM knowledge_candidates
@@ -301,9 +306,6 @@ def _is_newer(a: dict, b: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-import json as _json
-
-
 def _insert_conflict_candidate(
     conn,
     *,
@@ -318,7 +320,12 @@ def _insert_conflict_candidate(
     decision_reason: str | None,
     raw: str | None,
 ) -> None:
-    """Insert one conflict-check result into knowledge_candidates."""
+    """Insert one conflict-check result into knowledge_candidates.
+
+    target_ids is stored in the ORDER GIVEN — not sorted. For a 'retire' candidate the
+    order is load-bearing: [old_id, survivor_id] (old retired into survivor). The
+    anti-re-proposal dedup key (check_hash) is computed separately from sorted ids, so
+    preserving order here does not affect dedup."""
     conn.execute(
         """INSERT INTO knowledge_candidates
              (scope, type, content, tags, confidence, source_session_id,
@@ -334,7 +341,7 @@ def _insert_conflict_candidate(
             check_hash,
             redact_credentials(raw) if raw else None,
             action,
-            _json.dumps(sorted(target_ids)),
+            json.dumps(list(target_ids)),
             status,
             decided_by,
             decision_reason,
@@ -352,6 +359,15 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
 
     Selection: pairs of live knowledge rows that share at least one tag token AND
     have the same ``type`` — no FTS/embedding similarity (AUROC ~0.59 for contradictions).
+
+    PREREQUISITE — CONSISTENT TAGGING. Detection is structural: two entries are only ever
+    compared if they share a tag token (or, when an entry is untagged, a significant
+    content word). This is a hard recall limit — contradictory ANTONYMS in different
+    vocabulary with no shared tag are NEVER compared. "use postgres" tagged `datastore`
+    and "we switched to sqlite" tagged `datastore` WILL be compared; the same two facts
+    with no shared tag and no shared content word will NOT. Consistent tagging (a shared
+    subject/entity tag on related facts) is therefore a prerequisite for contradiction
+    recall — untagged antonyms slip through.
 
     Returns a list of emit items:
       {
@@ -388,6 +404,12 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
         batch: list[dict] = []
         seen_pairs: set[frozenset] = set()
 
+        # TODO(perf): this calls select_conflict_candidates per focus, each opening a
+        # fresh connection and re-scanning the same-type set (1+N connections, O(N²) over
+        # the live table). Fine while knowledge is small (see sleepdream's note). A future
+        # optimisation could group `live` by tag once in-memory here — but must NOT change
+        # select_conflict_candidates' pure (db_path, dict) signature, which the federation
+        # read-merge call site depends on. Left as a TODO to protect that decoupling.
         for focus in live:
             if len(batch) >= max_items:
                 break
@@ -625,15 +647,21 @@ def _handle_supersede(
     reason: str | None,
     raw: str | None,
 ) -> None:
-    """Stage a supersession candidate, retiring the older entry.
+    """Stage a RETIRE-LINK candidate: the older entry is retired into the newer one.
 
-    Temporal tiebreak: the entry with the later event_at is the current fact;
-    the earlier one is retired (superseded). Do NOT use created_at alone — the
-    spec mandates event_at as the authoritative real-world time.
+    Both entries are already live knowledge rows, so we do NOT mint a new revision —
+    that would duplicate the survivor's fact into a second live row with a divergent
+    decay clock (the integrity bug). Instead we stage an action='retire' candidate whose
+    applier points older.superseded_by at the EXISTING survivor id (_apply_retire →
+    _retire_in_conn), keeping the survivor's row/id/clock intact.
 
-    target_ids=[older_id] → _apply_supersede in promote_candidate will call
-    _supersede_in_conn(older_id, surviving_content), creating a new row and
-    marking older_id.superseded_by = new_id.
+    Temporal tiebreak (event_at, then created_at fallback): the entry with the later
+    event_at is the survivor (current fact); the earlier one is retired. This is decided
+    in code, not by the LLM — the model only says "these contradict".
+
+    target_ids = [older_id, survivor_id] (ORDER-SIGNIFICANT). The candidate's `content`
+    carries the survivor's (optionally LLM-refined) text for operator display only — the
+    applier links, it does not write content.
     """
     if focus_row is None:
         log.debug("conflict: SUPERSEDE skipped — focus row not found")
@@ -641,35 +669,37 @@ def _handle_supersede(
 
     focus_newer = _is_newer(focus_row, comp_row)
     if focus_newer:
-        # Focus is the current fact; comp should be retired.
+        # Focus is the current fact (survivor); comp is retired.
         older_id = comp_row["id"]
-        surviving_content = suggested_content or focus_row.get("content", "")
-        surviving_type = focus_row.get("type", "fact")
-        surviving_confidence = focus_row.get("confidence", "medium")
+        survivor_id = focus_row["id"]
+        survivor_row = focus_row
     else:
-        # Comparison is the current fact; focus should be retired.
+        # Comparison is the current fact (survivor); focus is retired.
         older_id = focus_row["id"]
-        surviving_content = suggested_content or comp_row.get("content", "")
-        surviving_type = comp_row.get("type", "fact")
-        surviving_confidence = comp_row.get("confidence", "medium")
+        survivor_id = comp_row["id"]
+        survivor_row = comp_row
 
-    surviving_content = surviving_content.strip() or (
-        focus_row.get("content") if focus_newer else comp_row.get("content")
-    ) or ""
+    surviving_content = (
+        (suggested_content or "").strip() or (survivor_row.get("content") or "")
+    )
+    surviving_type = survivor_row.get("type", "fact")
+    surviving_confidence = survivor_row.get("confidence", "medium")
 
     log.debug(
-        "conflict: staging SUPERSEDE candidate — retire id=%s surviving='%.60s…'",
+        "conflict: staging RETIRE candidate (contradiction) — retire id=%s into survivor id=%s"
+        " surviving='%.60s…'",
         older_id,
+        survivor_id,
         surviving_content,
     )
 
     _insert_conflict_candidate(
         conn,
-        action="supersede",
+        action="retire",
         content=surviving_content,
         ktype=surviving_type,
         confidence=surviving_confidence,
-        target_ids=[older_id],
+        target_ids=[older_id, survivor_id],
         check_hash=check_hash,
         status="pending",
         decided_by=None,
@@ -688,36 +718,47 @@ def _handle_update(
     reason: str | None,
     raw: str | None,
 ) -> None:
-    """Stage an update (supersede-with-improved-content) candidate.
+    """Stage a RETIRE-LINK candidate for an UPDATE verdict: the focus (the augmenting
+    NEW entry) is retired into the comparison (the canonical EXISTING entry it refines).
 
-    UPDATE means the new entry augments the existing without contradiction. We
-    stage a supersede candidate so the operator can review the merged wording
-    before applying. If the LLM provided no merged content, we fall back to the
-    focus entry's content.
+    UPDATE means the new entry augments the existing WITHOUT contradiction. Like
+    SUPERSEDE, both rows are already live, so we link rather than mint — retiring the
+    focus into comp collapses the redundant pair to the single canonical row.
+
+    Direction is deliberately NOT event_at-ordered (unlike SUPERSEDE): a refinement folds
+    the new entry into the established canonical one regardless of which is newer, so the
+    canonical entry keeps its id and history. The LLM's suggested merged wording is kept
+    in the candidate's `content` + `decision_reason` so the operator can optionally apply
+    it as an edit on review — the applier itself only links (no mint, no content write).
+
+    target_ids = [focus_id, comp_id] (ORDER-SIGNIFICANT: focus retired into comp).
     """
     if focus_row is None:
         log.debug("conflict: UPDATE skipped — focus row not found")
         return
 
-    update_content = (suggested_content or "").strip() or focus_row.get("content", "")
+    update_content = (suggested_content or "").strip() or (comp_row.get("content") or "")
 
     log.debug(
-        "conflict: staging UPDATE candidate — target id=%s content='%.60s…'",
+        "conflict: staging RETIRE candidate (update/refinement) — retire focus id=%s into"
+        " canonical id=%s content='%.60s…'",
+        focus_row["id"],
         comp_row["id"],
         update_content,
     )
 
     _insert_conflict_candidate(
         conn,
-        action="supersede",
+        action="retire",
         content=update_content,
         ktype=comp_row.get("type", "fact"),
         confidence=comp_row.get("confidence", "medium"),
-        target_ids=[comp_row["id"]],
+        target_ids=[focus_row["id"], comp_row["id"]],
         check_hash=check_hash,
         status="pending",
         decided_by=None,
-        decision_reason=f"update: {reason or ''}",
+        decision_reason=f"update (refinement — apply merged wording as an edit if desired): "
+        f"{reason or ''}",
         raw=raw,
     )
 

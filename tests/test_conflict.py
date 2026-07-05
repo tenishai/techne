@@ -27,7 +27,6 @@ from techne.core.database import connect, init_db
 from techne.core.knowledge import get, store, supersede
 from techne.core.reflect import promote_candidate
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -56,6 +55,20 @@ def _status(db, kid):
         conn.close()
 
 
+def _live_count(db):
+    """Count live (non-superseded) knowledge rows. Retire-link must reduce this by
+    exactly the number of entries retired (no duplicate minted). The OLD mint behavior
+    kept it constant on promote (retired one row, minted one) — so the
+    live_after == live_before - 1 assertions below would FAIL against the old code."""
+    conn = connect(db)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM knowledge WHERE superseded_by IS NULL"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
 def _pending_conflict_candidates(db):
     conn = connect(db)
     try:
@@ -70,9 +83,7 @@ def _pending_conflict_candidates(db):
 def _all_conflict_candidates(db):
     conn = connect(db)
     try:
-        rows = conn.execute(
-            "SELECT * FROM knowledge_candidates WHERE origin='conflict'"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM knowledge_candidates WHERE origin='conflict'").fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -87,7 +98,7 @@ def test_select_candidates_by_shared_tags(config):
     """select_conflict_candidates returns live rows with ≥1 shared tag, same type."""
     db = config.db_path
     focus = dict(id=store(db, "use postgres", type="fact", tags="datastore,infra"))
-    store(db, "we use redis too", type="fact", tags="datastore,cache")   # shares 'datastore'
+    store(db, "we use redis too", type="fact", tags="datastore,cache")  # shares 'datastore'
     unrelated = store(db, "prefer dark mode", type="fact", tags="ui,editor")
     wrong_type = store(db, "we use postgres", type="decision", tags="datastore,infra")
 
@@ -99,7 +110,7 @@ def test_select_candidates_by_shared_tags(config):
     try:
         row = conn.execute(
             "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
-            (focus["id"],)
+            (focus["id"],),
         ).fetchone()
     finally:
         conn.close()
@@ -108,8 +119,9 @@ def test_select_candidates_by_shared_tags(config):
     cand_ids = {c["id"] for c in candidates}
 
     # Should include the redis row (shared 'datastore' tag, same 'fact' type)
-    assert any("redis" in c.get("content", "") for c in candidates), \
+    assert any("redis" in c.get("content", "") for c in candidates), (
         "Expected redis row (shares 'datastore' tag) in candidates"
+    )
     # Should NOT include unrelated (no shared tag) or wrong_type (different type)
     assert unrelated not in cand_ids
     assert wrong_type not in cand_ids
@@ -123,10 +135,12 @@ def test_select_candidates_same_type_only(config):
 
     conn = connect(db)
     try:
-        focus_row = dict(conn.execute(
-            "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
-            (fact_id,)
-        ).fetchone())
+        focus_row = dict(
+            conn.execute(
+                "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
+                (fact_id,),
+            ).fetchone()
+        )
     finally:
         conn.close()
 
@@ -144,10 +158,12 @@ def test_select_candidates_excludes_superseded(config):
     focus_id = store(db, "we switched to sqlite", type="fact", tags="datastore")
     conn = connect(db)
     try:
-        focus_row = dict(conn.execute(
-            "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
-            (focus_id,)
-        ).fetchone())
+        focus_row = dict(
+            conn.execute(
+                "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
+                (focus_id,),
+            ).fetchone()
+        )
     finally:
         conn.close()
 
@@ -162,10 +178,12 @@ def test_select_candidates_excludes_self(config):
     rid = store(db, "use postgres", type="fact", tags="datastore")
     conn = connect(db)
     try:
-        row = dict(conn.execute(
-            "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
-            (rid,)
-        ).fetchone())
+        row = dict(
+            conn.execute(
+                "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
+                (rid,),
+            ).fetchone()
+        )
     finally:
         conn.close()
 
@@ -181,10 +199,12 @@ def test_select_candidates_keyword_fallback_no_tags(config):
 
     conn = connect(db)
     try:
-        focus_row = dict(conn.execute(
-            "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
-            (focus_id,)
-        ).fetchone())
+        focus_row = dict(
+            conn.execute(
+                "SELECT id, type, content, tags, event_at, created_at FROM knowledge WHERE id=?",
+                (focus_id,),
+            ).fetchone()
+        )
     finally:
         conn.close()
 
@@ -223,9 +243,16 @@ def test_run_conflict_check_raises_on_empty_comparison():
 
 
 def test_parse_conflict_response_supersede():
-    raw = json.dumps([
-        {"id": 5, "verdict": "SUPERSEDE", "content": "we switched to sqlite", "reason": "contradiction"}
-    ])
+    raw = json.dumps(
+        [
+            {
+                "id": 5,
+                "verdict": "SUPERSEDE",
+                "content": "we switched to sqlite",
+                "reason": "contradiction",
+            }
+        ]
+    )
     decisions = parse_conflict_response(raw)
     assert len(decisions) == 1
     assert decisions[0]["verdict"] == "SUPERSEDE"
@@ -246,10 +273,12 @@ def test_parse_conflict_response_distinct():
 
 
 def test_parse_conflict_response_unknown_verdict_ignored():
-    raw = json.dumps([
-        {"id": 1, "verdict": "DELETE", "reason": "bad"},  # unknown — should be ignored
-        {"id": 2, "verdict": "NOOP", "reason": "fine"},
-    ])
+    raw = json.dumps(
+        [
+            {"id": 1, "verdict": "DELETE", "reason": "bad"},  # unknown — should be ignored
+            {"id": 2, "verdict": "NOOP", "reason": "fine"},
+        ]
+    )
     decisions = parse_conflict_response(raw)
     assert len(decisions) == 1
     assert decisions[0]["id"] == 2
@@ -300,9 +329,7 @@ def test_sqlite_supersedes_postgres(config):
     sqlite_id = store(db, "we switched to sqlite", type="fact", tags="datastore,database")
     conn = connect(db)
     try:
-        conn.execute(
-            "UPDATE knowledge SET event_at='2025-06-01 00:00:00' WHERE id=?", (sqlite_id,)
-        )
+        conn.execute("UPDATE knowledge SET event_at='2025-06-01 00:00:00' WHERE id=?", (sqlite_id,))
         conn.commit()
     finally:
         conn.close()
@@ -329,17 +356,17 @@ def test_sqlite_supersedes_postgres(config):
     comp_ids_set = set(target_group["comparison_ids"])
     # At least one of the two entries must be in the comparison set
     # (the other is the focus). Target whichever comparison entry is present.
-    verdict_target = next(
-        cid for cid in [postgres_id, sqlite_id] if cid in comp_ids_set
+    verdict_target = next(cid for cid in [postgres_id, sqlite_id] if cid in comp_ids_set)
+    verdict_response = json.dumps(
+        [
+            {
+                "id": verdict_target,
+                "verdict": "SUPERSEDE",
+                "content": "we switched to sqlite",
+                "reason": "new fact directly contradicts the old one",
+            }
+        ]
     )
-    verdict_response = json.dumps([
-        {
-            "id": verdict_target,
-            "verdict": "SUPERSEDE",
-            "content": "we switched to sqlite",
-            "reason": "new fact directly contradicts the old one",
-        }
-    ])
     counts = conflict_check_ingest(
         config,
         target_group["focus_id"],
@@ -350,26 +377,38 @@ def test_sqlite_supersedes_postgres(config):
     assert counts["supersede"] == 1, f"Expected 1 supersede; got {counts}"
     assert counts["errors"] == 0
 
-    # ---- Verify: a pending 'supersede' candidate was staged ----
+    # ---- Verify: a pending 'retire' candidate was staged (link, not mint) ----
     candidates = _pending_conflict_candidates(db)
-    assert len(candidates) >= 1, "Expected at least one pending supersede candidate"
+    assert len(candidates) >= 1, "Expected at least one pending retire candidate"
     cand = candidates[0]
-    assert cand["action"] == "supersede"
+    assert cand["action"] == "retire"
     assert cand["origin"] == "conflict"
 
-    # The TARGET should be the OLDER entry (postgres, earlier event_at)
+    # target_ids = [older_id, survivor_id] — ORDER-SIGNIFICANT. postgres (earlier
+    # event_at) is retired INTO sqlite (the existing survivor row).
     target_ids = json.loads(cand["target_ids"])
-    assert postgres_id in target_ids, (
-        f"Expected postgres entry ({postgres_id}) to be the supersede target (older event_at); "
-        f"got {target_ids}"
+    assert target_ids == [postgres_id, sqlite_id], (
+        f"Expected [postgres={postgres_id}, sqlite={sqlite_id}] (older retired into "
+        f"existing survivor); got {target_ids}"
     )
 
-    # ---- Promote the candidate — verify postgres is now retired ----
+    # ---- Promote the candidate — postgres links to the EXISTING sqlite row ----
+    live_before = _live_count(db)  # postgres + sqlite = 2 live
     new_id = promote_candidate(db, cand["id"])
-    assert new_id is not None
+    # Retire returns the EXISTING survivor id — NOT a freshly minted row id.
+    assert new_id == sqlite_id, (
+        f"retire must link to the existing survivor ({sqlite_id}), not mint a new row; got {new_id}"
+    )
     postgres_row = get(db, postgres_id)
-    assert postgres_row["superseded_by"] is not None, (
-        "postgres entry should be superseded after promoting the conflict candidate"
+    assert postgres_row["superseded_by"] == sqlite_id, (
+        "postgres must point at the EXISTING sqlite row, not a fresh revision"
+    )
+    # No duplicate minted: exactly one fewer live row (postgres retired), sqlite untouched.
+    live_after = _live_count(db)
+    assert live_after == live_before - 1, (
+        f"retire must not mint a duplicate live row: live went {live_before} → {live_after} "
+        f"(expected {live_before - 1}). The old mint behavior would have kept it at "
+        f"{live_before}."
     )
 
 
@@ -387,20 +426,23 @@ def test_event_at_tiebreak_older_loses(config):
 
     conn = connect(db)
     try:
-        conn.execute(
-            "UPDATE knowledge SET event_at='2024-01-01' WHERE id=?", (older_id,)
-        )
-        conn.execute(
-            "UPDATE knowledge SET event_at='2025-01-01' WHERE id=?", (newer_id,)
-        )
+        conn.execute("UPDATE knowledge SET event_at='2024-01-01' WHERE id=?", (older_id,))
+        conn.execute("UPDATE knowledge SET event_at='2025-01-01' WHERE id=?", (newer_id,))
         conn.commit()
     finally:
         conn.close()
 
     # Simulate ingest where focus=newer, comparison=[older], verdict=SUPERSEDE
-    verdict_response = json.dumps([
-        {"id": older_id, "verdict": "SUPERSEDE", "content": "new fact about db", "reason": "newer wins"}
-    ])
+    verdict_response = json.dumps(
+        [
+            {
+                "id": older_id,
+                "verdict": "SUPERSEDE",
+                "content": "new fact about db",
+                "reason": "newer wins",
+            }
+        ]
+    )
     counts = conflict_check_ingest(
         config, newer_id, [older_id], "test-hash-tiebreak", verdict_response
     )
@@ -409,7 +451,10 @@ def test_event_at_tiebreak_older_loses(config):
     candidates = _pending_conflict_candidates(db)
     assert len(candidates) == 1
     target_ids = json.loads(candidates[0]["target_ids"])
-    assert older_id in target_ids, "Older entry must be the supersede target"
+    # target_ids = [older, survivor]; the OLDER entry is retired (position 0).
+    assert target_ids == [older_id, newer_id], (
+        f"older retired into newer survivor: expected [{older_id}, {newer_id}]; got {target_ids}"
+    )
 
 
 def test_event_at_tiebreak_when_focus_is_older(config):
@@ -430,17 +475,22 @@ def test_event_at_tiebreak_when_focus_is_older(config):
 
     # Verdict says focus SUPERSEDES comp — but focus is actually older.
     # The tiebreak in code should override and retire the focus (older event_at).
-    verdict_response = json.dumps([
-        {"id": comp_id, "verdict": "SUPERSEDE", "content": "new db fact", "reason": "test"}
-    ])
-    counts = conflict_check_ingest(config, focus_id, [comp_id], "test-hash-older-focus", verdict_response)
+    verdict_response = json.dumps(
+        [{"id": comp_id, "verdict": "SUPERSEDE", "content": "new db fact", "reason": "test"}]
+    )
+    counts = conflict_check_ingest(
+        config, focus_id, [comp_id], "test-hash-older-focus", verdict_response
+    )
     assert counts["supersede"] == 1
 
     candidates = _pending_conflict_candidates(db)
     assert len(candidates) == 1
     target_ids = json.loads(candidates[0]["target_ids"])
-    # focus_id is older → should be the supersede target
-    assert focus_id in target_ids, f"focus (older event_at) should be the target; got {target_ids}"
+    # focus_id is older → retired (position 0) into comp_id (survivor).
+    assert target_ids == [focus_id, comp_id], (
+        f"focus (older event_at) retired into comp survivor: expected [{focus_id}, {comp_id}]; "
+        f"got {target_ids}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -458,14 +508,19 @@ def test_conflict_emit_skips_already_proposed(config):
     assert len(batch1) > 0
 
     # Ingest a DISTINCT verdict → discarded marker
-    group = next(
-        i for i in batch1
-        if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id}
+    group = next(i for i in batch1 if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
+    verdict = json.dumps(
+        [
+            {
+                "id": (a_id if group["focus_id"] == b_id else b_id),
+                "verdict": "DISTINCT",
+                "reason": "test",
+            }
+        ]
     )
-    verdict = json.dumps([{"id": (a_id if group["focus_id"] == b_id else b_id),
-                            "verdict": "DISTINCT", "reason": "test"}])
-    conflict_check_ingest(config, group["focus_id"], group["comparison_ids"],
-                          group["check_hash"], verdict)
+    conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
 
     # Second emit: the pair must NOT reappear
     batch2 = conflict_check_emit(config)
@@ -481,20 +536,19 @@ def test_conflict_ingest_deduplicates_on_reingest(config):
     b_id = store(db, "sqlite fact", type="fact", tags="db")
 
     batch = conflict_check_emit(config)
-    group = next(
-        i for i in batch
-        if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id}
+    group = next(i for i in batch if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
+    verdict = json.dumps(
+        [{"id": b_id if group["focus_id"] == a_id else a_id, "verdict": "NOOP", "reason": "test"}]
     )
-    verdict = json.dumps([
-        {"id": b_id if group["focus_id"] == a_id else a_id, "verdict": "NOOP", "reason": "test"}
-    ])
 
-    first = conflict_check_ingest(config, group["focus_id"], group["comparison_ids"],
-                                   group["check_hash"], verdict)
+    first = conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
     assert first["skipped"] == 0
 
-    second = conflict_check_ingest(config, group["focus_id"], group["comparison_ids"],
-                                    group["check_hash"], verdict)
+    second = conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
     assert second["skipped"] == 1
 
 
@@ -510,14 +564,12 @@ def test_noop_verdict_writes_discarded_marker(config):
     b_id = store(db, "use postgres", type="fact", tags="db")
 
     batch = conflict_check_emit(config)
-    group = next(
-        i for i in batch
-        if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id}
-    )
+    group = next(i for i in batch if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
     comp_id = group["comparison_ids"][0] if group["focus_id"] in {a_id, b_id} else a_id
     verdict = json.dumps([{"id": comp_id, "verdict": "NOOP", "reason": "same fact"}])
-    counts = conflict_check_ingest(config, group["focus_id"], group["comparison_ids"],
-                                   group["check_hash"], verdict)
+    counts = conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
     assert counts["noop"] == 1
 
     # No pending candidates — only a discarded marker
@@ -535,14 +587,12 @@ def test_distinct_verdict_writes_discarded_marker(config):
     b_id = store(db, "prefer sqlite", type="fact", tags="db")
 
     batch = conflict_check_emit(config)
-    group = next(
-        i for i in batch
-        if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id}
-    )
+    group = next(i for i in batch if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
     comp_id = group["comparison_ids"][0] if group["focus_id"] in {a_id, b_id} else a_id
     verdict = json.dumps([{"id": comp_id, "verdict": "DISTINCT", "reason": "different scope"}])
-    counts = conflict_check_ingest(config, group["focus_id"], group["comparison_ids"],
-                                   group["check_hash"], verdict)
+    counts = conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
     assert counts["distinct"] == 1
 
     pending = _pending_conflict_candidates(db)
@@ -554,34 +604,79 @@ def test_distinct_verdict_writes_discarded_marker(config):
 # ---------------------------------------------------------------------------
 
 
-def test_update_verdict_stages_supersede_candidate(config):
-    """UPDATE stages a pending supersede candidate with the merged content."""
+def test_update_verdict_stages_retire_candidate(config):
+    """UPDATE stages a pending 'retire' candidate: the focus (augmenting new entry) is
+    retired into the comparison (canonical existing entry). The merged content is kept in
+    the candidate for optional operator edit; the applier links, not mints."""
     db = config.db_path
     a_id = store(db, "postgres version 13", type="fact", tags="db")
     b_id = store(db, "postgres v13 with extensions", type="fact", tags="db")
 
     batch = conflict_check_emit(config)
-    group = next(
-        i for i in batch
-        if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id}
-    )
+    group = next(i for i in batch if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
     comp_id = group["comparison_ids"][0]
-    verdict = json.dumps([{
-        "id": comp_id,
-        "verdict": "UPDATE",
-        "content": "we use postgres v13 with pgvector and hstore extensions",
-        "reason": "augments without contradiction"
-    }])
-    counts = conflict_check_ingest(config, group["focus_id"], group["comparison_ids"],
-                                   group["check_hash"], verdict)
+    verdict = json.dumps(
+        [
+            {
+                "id": comp_id,
+                "verdict": "UPDATE",
+                "content": "we use postgres v13 with pgvector and hstore extensions",
+                "reason": "augments without contradiction",
+            }
+        ]
+    )
+    counts = conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
     assert counts["update"] == 1
     assert counts["errors"] == 0
 
     pending = _pending_conflict_candidates(db)
     assert len(pending) >= 1
     cand = pending[0]
-    assert cand["action"] == "supersede"
+    assert cand["action"] == "retire"
+    # merged wording preserved for operator display / optional edit
     assert "pgvector" in cand["content"]
+    # target_ids = [focus, comp] — focus retired into the canonical comp
+    tids = json.loads(cand["target_ids"])
+    assert tids == [group["focus_id"], comp_id], (
+        f"UPDATE retires focus into comp: expected [{group['focus_id']}, {comp_id}]; got {tids}"
+    )
+
+
+def test_update_promote_retires_focus_into_comp_no_mint(config):
+    """Promoting an UPDATE retire candidate links focus→comp and mints NO new row."""
+    db = config.db_path
+    a_id = store(db, "postgres version 13", type="fact", tags="db")
+    b_id = store(db, "postgres v13 with extensions", type="fact", tags="db")
+
+    batch = conflict_check_emit(config)
+    group = next(i for i in batch if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
+    comp_id = group["comparison_ids"][0]
+    verdict = json.dumps(
+        [
+            {
+                "id": comp_id,
+                "verdict": "UPDATE",
+                "content": "postgres v13 with pgvector extension",
+                "reason": "augments",
+            }
+        ]
+    )
+    conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
+    cand = _pending_conflict_candidates(db)[0]
+    old_id, survivor_id = json.loads(cand["target_ids"])
+    assert old_id == group["focus_id"]  # focus retired
+    assert survivor_id == comp_id  # into the canonical comp
+
+    live_before = _live_count(db)  # both live = 2
+    new_id = promote_candidate(db, cand["id"])
+    assert new_id == survivor_id, "retire returns the existing survivor id, not a mint"
+    assert get(db, old_id)["superseded_by"] == survivor_id
+    # comp (survivor) stays live; focus retired; nothing minted → exactly one fewer live.
+    assert _live_count(db) == live_before - 1
 
 
 # ---------------------------------------------------------------------------
@@ -589,8 +684,9 @@ def test_update_verdict_stages_supersede_candidate(config):
 # ---------------------------------------------------------------------------
 
 
-def test_promote_conflict_candidate_applies_supersession(config):
-    """Promoting a conflict supersede candidate calls supersede() on the older entry."""
+def test_promote_conflict_candidate_links_to_existing_survivor(config):
+    """Promoting a conflict retire candidate links the older entry to the EXISTING
+    survivor row (no new row minted) — the retire-not-mint integrity fix."""
     db = config.db_path
     postgres_id = store(db, "use postgres", type="fact", tags="datastore")
     sqlite_id = store(db, "we switched to sqlite", type="fact", tags="datastore")
@@ -603,25 +699,36 @@ def test_promote_conflict_candidate_applies_supersession(config):
     finally:
         conn.close()
 
-    verdict = json.dumps([
-        {"id": postgres_id, "verdict": "SUPERSEDE",
-         "content": "we switched to sqlite", "reason": "newer fact wins"}
-    ])
+    verdict = json.dumps(
+        [
+            {
+                "id": postgres_id,
+                "verdict": "SUPERSEDE",
+                "content": "we switched to sqlite",
+                "reason": "newer fact wins",
+            }
+        ]
+    )
     conflict_check_ingest(config, sqlite_id, [postgres_id], "test-promote", verdict)
 
     candidates = _pending_conflict_candidates(db)
     assert len(candidates) == 1
+    assert candidates[0]["action"] == "retire"
 
+    live_before = _live_count(db)  # 2
     new_id = promote_candidate(db, candidates[0]["id"])
-    assert new_id is not None
+    # Retire returns the EXISTING sqlite survivor id — not a fresh mint.
+    assert new_id == sqlite_id
 
-    # postgres entry should now be retired
+    # postgres entry now points at the existing sqlite row
     postgres_row = get(db, postgres_id)
-    assert postgres_row["superseded_by"] == new_id
+    assert postgres_row["superseded_by"] == sqlite_id
 
-    # new entry should carry the surviving content
-    new_row = get(db, new_id)
-    assert "sqlite" in new_row["content"]
+    # The survivor is the pre-existing sqlite row, still carrying its content — and NO
+    # duplicate live row was minted.
+    survivor = get(db, new_id)
+    assert "sqlite" in survivor["content"]
+    assert _live_count(db) == live_before - 1
 
 
 # ---------------------------------------------------------------------------
