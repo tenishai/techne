@@ -116,10 +116,19 @@ Behaviour:
   Default `local` (techne). `team` hands off to the Archivist (who owns the git push —
   techne never touches git). Nothing leaks local→team unless the agent says so.
 
-**The load-bearing open decision:** is `team` memory the *same techne schema*, shared
-and git-backed (federation is **techne↔techne**, one schema everywhere), or a foreign
-store reached via an adapter? The techne↔techne answer is the elegant one: the
-Archivist is "just techne with git-backing on." **Decide this before building.**
+**Resolved (2026-07-05, [#220](https://github.com/tenishai/techne/issues/220)): techne↔techne — one schema everywhere, git-backed.**
+`team` memory is the *same techne schema*, shared and git-backed; the Archivist is
+"just techne with git-backing on." Rationale: the read-merge reuses the coherence
+layer's pure conflict functions directly on team rows (same shape — one implementation,
+two call sites); far less code (no per-store translation adapter); and it fits the
+target scale — for solo/small-team at agent cadence the **git-sync model, not SQLite
+size, is the ceiling**, and it's far off (a single techne instance is comfortable to
+~hundreds-of-thousands of embedded rows; the shared-write concurrency wall is where a
+Postgres archivist would be needed, which git handles fine for a handful of writers).
+This does **not** burn the adapter bridge: a future foreign store (e.g. a Postgres
+archivist rebuilt from the precursor) is normalized to techne schema at the connection
+edge, keeping the core one-schema. The proven two-engine precursor (local SQLite +
+foreign ClickHouse/AlloyDB team store) is deliberately simplified here for independent scale.
 
 ---
 
@@ -271,8 +280,10 @@ topology A.**
 
 ## 11. Open decisions (in priority order)
 
-1. **`team` = same techne schema (techne↔techne) or a foreign store via adapter?**
-   Load-bearing; cascades through §4, §5, §9. Lean: techne↔techne.
+1. **✅ RESOLVED (2026-07-05, #220): `team` = same techne schema (techne↔techne).**
+   One schema everywhere, git-backed; Archivist = "just techne with git-backing on."
+   Adapter deferred — a future foreign store normalizes to techne schema at the edge.
+   Unblocks #222 (read-merge) and #227 (cabal Archivist relocation). See §4.
 2. **Consolidate all shared domains under the Archivist role, or split by pillar?**
    Lean: consolidate; personas (Architect/Codex) become consumers, not stores.
 3. **Read-merge ranking + dedup rule** (local vs team vs static; content-hash dedup;
