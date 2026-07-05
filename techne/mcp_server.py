@@ -198,45 +198,112 @@ def _techne_status(args: dict, config: Config) -> dict:
 
 
 def _techne_recall(args: dict, config: Config) -> dict:
-    """Retrieve context for a specific topic — searches all layers."""
+    """Retrieve context for a specific topic — searches all layers.
+
+    When config.connections is non-empty (techne#222 federation), fans out to
+    team/static stores, deduplicates, detects cross-store contradictions, and
+    returns a merged ranked set. When empty (the common case), returns local-only
+    with an identical shape — no behaviour change for unconfigured instances.
+    """
     from techne.core.anchor import annotate_freshness
     from techne.core.identity import list_entries as list_identity
     from techne.core.knowledge import annotate_uncertain
     from techne.core.search import search
 
     topic = args.get("topic", "")
-    # techne#216: techne_recall is DEFAULT recall — the topic-scoped pull agents hit
-    # every task — so soft-archived knowledge is excluded here. Explicit techne_search
-    # (via _techne_search) keeps the inclusive default and still returns archived.
-    results = search(
+
+    # Helper: shared identity search (same in both paths)
+    def _identity_matches() -> list[dict]:
+        results_i = []
+        for entry in list_identity(config.db_path):
+            if topic.lower() in entry["key"].lower() or topic.lower() in entry["value"].lower():
+                results_i.append(entry)
+        return results_i[:5]
+
+    # ---- Noop gate (techne#222 §2): no connections → local-only, unchanged shape ----
+    if not config.connections:
+        # techne#216: DEFAULT recall excludes soft-archived knowledge.
+        results = search(
+            config.db_path,
+            topic,
+            table="all",
+            limit=10,
+            half_life_days=config.knowledge_confidence_half_life_days,
+            include_archived=False,
+        )
+        # Graded staleness (techne#90): grade anchored knowledge results against the
+        # current working tree and attach a freshness tag. Non-anchored results are
+        # untouched; this fires only here, on the surfacing path — never on
+        # touch/relevance updates.
+        annotate_freshness(config.db_path, results)
+        # Dependency uncertainty (techne#117): a row whose basis was superseded is
+        # still returned (it's live) but must not read as confidently current —
+        # attach an `uncertainty` marker. Distinct key from `freshness`; a row can
+        # carry both.
+        annotate_uncertain(config.db_path, results)
+        return {
+            "search_results": results,
+            "identity_matches": _identity_matches(),
+        }
+
+    # ---- Federation path (techne#222) ----
+    from techne.core.federation import (
+        _cross_store_dedup,
+        detect_cross_store_contradictions,
+        fan_out_search,
+        merge_and_rank,
+    )
+
+    local_results, remote_results = fan_out_search(
         config.db_path,
+        config.connections,
         topic,
-        table="all",
         limit=10,
         half_life_days=config.knowledge_confidence_half_life_days,
-        include_archived=False,
+        recency_weight=config.search.recency_weight,
+        bm25_weight=config.search.bm25_weight,
     )
-    # Graded staleness (techne#90): grade anchored knowledge results against the
-    # current working tree and attach a freshness tag. Non-anchored results are
-    # untouched; this fires only here, on the surfacing path — never on
-    # touch/relevance updates.
-    annotate_freshness(config.db_path, results)
-    # Dependency uncertainty (techne#117): a row whose basis was superseded is
-    # still returned (it's live) but must not read as confidently current —
-    # attach an `uncertainty` marker. Distinct key from `freshness`; a row can
-    # carry both.
-    annotate_uncertain(config.db_path, results)
 
-    # Also search identity
-    identity_results = []
-    for entry in list_identity(config.db_path):
-        if topic.lower() in entry["key"].lower() or topic.lower() in entry["value"].lower():
-            identity_results.append(entry)
+    # Step B — content-hash dedup before the contradiction check
+    remote_deduped = _cross_store_dedup(local_results, remote_results)
 
-    return {
-        "search_results": results,
-        "identity_matches": identity_results[:5],
+    # Step C — cross-store contradiction detection (read-only; returns prompts)
+    conflicts = detect_cross_store_contradictions(
+        config.db_path,
+        local_results,
+        remote_deduped,
+        max_candidates=config.conflict.max_comparison_candidates,
+    )
+
+    # Step D — merge + rank (per-type BM25 normalisation handles cross-store, #56)
+    merged = merge_and_rank(
+        local_results,
+        remote_deduped,
+        limit=10,
+        recency_weight=config.search.recency_weight,
+        bm25_weight=config.search.bm25_weight,
+        half_life_days=config.knowledge_confidence_half_life_days,
+    )
+
+    # Freshness + uncertainty annotations on the merged set (local rows only have paths)
+    annotate_freshness(config.db_path, merged)
+    annotate_uncertain(config.db_path, merged)
+
+    out: dict = {
+        "search_results": merged,
+        "identity_matches": _identity_matches(),
     }
+
+    # Step E — surface conflict prompts; recall itself does NOT write
+    if conflicts:
+        out["federation_conflicts"] = conflicts
+        out["_federation_note"] = (
+            "Cross-store contradictions detected. For each item in federation_conflicts: "
+            "answer the prompt field using your own model (JSON verdict array), then call "
+            "techne_federation_conflict_ingest with the result to stage a reviewable candidate."
+        )
+
+    return out
 
 
 # --- Tool definitions ---
@@ -734,6 +801,52 @@ TOOLS = [
         },
     },
     {
+        "name": "techne_federation_conflict_ingest",
+        "description": (
+            "Feed back your verdict on a cross-store contradiction surfaced by techne_recall "
+            "(techne#222). Use the fields from a federation_conflicts item returned by "
+            "techne_recall: focus_content, focus_store, focus_event_at, comparison_ids, "
+            "check_hash. Answer the prompt with a JSON verdict array (same format as "
+            "techne_conflict_ingest) and pass it as response. "
+            "SUPERSEDE + team newer → pending 'retire' candidate targeting the LOCAL row "
+            "(operator reviews before promote). "
+            "SUPERSEDE + local newer → discarded informational marker (team is stale; "
+            "no push to the foreign store — sovereignty preserved). "
+            "NOOP/DISTINCT → discarded markers. Nothing auto-applies."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "focus_content": {
+                    "type": "string",
+                    "description": "The remote row's content (from federation_conflicts.focus_content).",
+                },
+                "focus_store": {
+                    "type": "string",
+                    "description": "The remote connection name (from federation_conflicts.focus_store).",
+                },
+                "focus_event_at": {
+                    "type": "string",
+                    "description": "The remote row's event_at for temporal tiebreak (from federation_conflicts.focus_event_at).",
+                },
+                "comparison_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "LOCAL knowledge row ids to compare against (from federation_conflicts.comparison_ids).",
+                },
+                "check_hash": {
+                    "type": "string",
+                    "description": "Anti-re-proposal hash (from federation_conflicts.check_hash).",
+                },
+                "response": {
+                    "type": "string",
+                    "description": "Your JSON verdict array answering the conflict prompt.",
+                },
+            },
+            "required": ["focus_content", "focus_store", "comparison_ids", "check_hash", "response"],
+        },
+    },
+    {
         "name": "techne_check_evidence",
         "description": (
             "Call this before asserting you did something (committed, ran tests, wrote a "
@@ -1112,6 +1225,31 @@ def _techne_conflict_ingest(args: dict, config: Config) -> dict:
     )
 
 
+def _techne_federation_conflict_ingest(args: dict, config: Config) -> dict:
+    """Feed back the agent's verdict on a cross-store contradiction surfaced by
+    techne_recall (techne#222 step E). focus_content, focus_store, focus_event_at,
+    comparison_ids, check_hash, and response come from the federation_conflicts item
+    returned by techne_recall. SUPERSEDE + team newer → pending 'retire' candidate
+    targeting the LOCAL row. SUPERSEDE + local newer → discarded marker (team is stale;
+    no push to foreign store). NOOP/DISTINCT → discarded markers. Nothing auto-applies.
+    Writes the LOCAL db only — the foreign team store is never modified."""
+    from techne.core.federation import federation_conflict_ingest
+
+    response = args.get("response", "")
+    if not isinstance(response, str):
+        response = json.dumps(response) if response else ""
+
+    return federation_conflict_ingest(
+        config,
+        focus_content=str(args.get("focus_content", "")),
+        focus_store=str(args.get("focus_store", "")),
+        focus_event_at=args.get("focus_event_at") or None,
+        comparison_ids=[int(i) for i in (args.get("comparison_ids") or [])],
+        check_hash=str(args.get("check_hash", "")),
+        response=response,
+    )
+
+
 def _techne_check_evidence(args: dict, config: Config) -> dict:
     """Verify structured claims against the observation ledger (techne#105).
 
@@ -1183,6 +1321,7 @@ TOOL_HANDLERS = {
     "techne_check_evidence": _techne_check_evidence,
     "techne_conflict_emit": _techne_conflict_emit,
     "techne_conflict_ingest": _techne_conflict_ingest,
+    "techne_federation_conflict_ingest": _techne_federation_conflict_ingest,
 }
 
 

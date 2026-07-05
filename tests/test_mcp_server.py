@@ -102,6 +102,7 @@ class TestHandleRequest:
             "techne_check_evidence",
             "techne_faithfulness_emit",
             "techne_faithfulness_ingest",
+            "techne_federation_conflict_ingest",
         }
 
     def test_notifications_initialized_returns_none(self, config):
