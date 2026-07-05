@@ -112,6 +112,9 @@ Behaviour:
   rule is specified by the coherence layer — see
   [`proposals/coherence-layer.md`](proposals/coherence-layer.md) §4b; the fan-out
   merge calls the same contradiction-detection + decayed-ranking functions.
+  **Concrete design:** [`proposals/federation-read-merge.md`](proposals/federation-read-merge.md)
+  (#222) — connections config, the fan-out algorithm, and the read-only/candidate-staging
+  sovereignty boundary.
 - **Writes route by scope, explicitly.** `store(..., scope=local|team|static)`.
   Default `local` (techne). `team` hands off to the Archivist (who owns the git push —
   techne never touches git). Nothing leaks local→team unless the agent says so.
@@ -293,6 +296,7 @@ topology A.**
    which can't tell contradiction from duplicate), later `event_at` wins a supersession,
    `effective_confidence()` breaks non-conflicting ties. The coherence primitives are a
    **prerequisite** for this fan-out merge — one implementation, two call sites.
+   → **Concrete build design:** [`proposals/federation-read-merge.md`](proposals/federation-read-merge.md) (#222).
 4. **Distiller cadence/trigger for Archivist intake** (on-deposit nudge vs scheduled
    sweep vs the same fire-up/close cadence as the drain).
 
