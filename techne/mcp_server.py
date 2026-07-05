@@ -205,12 +205,16 @@ def _techne_recall(args: dict, config: Config) -> dict:
     from techne.core.search import search
 
     topic = args.get("topic", "")
+    # techne#216: techne_recall is DEFAULT recall — the topic-scoped pull agents hit
+    # every task — so soft-archived knowledge is excluded here. Explicit techne_search
+    # (via _techne_search) keeps the inclusive default and still returns archived.
     results = search(
         config.db_path,
         topic,
         table="all",
         limit=10,
         half_life_days=config.knowledge_confidence_half_life_days,
+        include_archived=False,
     )
     # Graded staleness (techne#90): grade anchored knowledge results against the
     # current working tree and attach a freshness tag. Non-anchored results are

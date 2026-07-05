@@ -2,7 +2,7 @@
 
 import hashlib
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from techne.core.database import connect, like_escape
@@ -684,6 +684,147 @@ def reaffirm(db_path: Path, entry_id: int) -> bool:
                SET last_confirmed_at = CURRENT_TIMESTAMP,
                    updated_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
+            (entry_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ---- Soft-archive lifecycle (techne#216 / coherence D2) --------------------
+
+# Conservative defaults — archiving should be hard to trigger accidentally.
+# Evidence: aggressive lifecycle costs precision; bias the floor low and the
+# reaffirmation window long so only genuinely stale, uncertain entries qualify.
+DEFAULT_ARCHIVE_CONFIDENCE_FLOOR = 0.1
+DEFAULT_ARCHIVE_REAFFIRMATION_WINDOW_DAYS = 180
+
+
+def archive_scan(
+    db_path: Path,
+    *,
+    confidence_floor: float = DEFAULT_ARCHIVE_CONFIDENCE_FLOOR,
+    reaffirmation_window_days: int = DEFAULT_ARCHIVE_REAFFIRMATION_WINDOW_DAYS,
+    half_life_days: float = DEFAULT_CONFIDENCE_HALF_LIFE_DAYS,
+    now: datetime | None = None,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Soft-archive scan — move stale, uncertain, unreaffirmed entries out of default recall.
+
+    An entry qualifies for archiving when ALL THREE of these hold:
+      1. status = 'uncertain'         (a dependency it rests on was superseded)
+      2. effective_confidence() < confidence_floor  (decayed below the floor)
+      3. last_confirmed_at older than reaffirmation_window_days (not recently reaffirmed)
+
+    Action: sets status = 'archived'. This is a RECALL VISIBILITY change, not a
+    content edit — the row is NEVER hard-deleted. Archived entries are:
+      - Excluded from Tier-0 egress (select_tier0_injection — the default session-start
+        injection). Bounds growth of the default working set.
+      - Excluded from techne_recall (operator-topic-scoped pull).
+      - Still returned by explicit knowledge search (techne_search / search_fts).
+      - Fully reversible via unarchive().
+
+    This is an EXPLICIT operator-invoked action (not a silent background sweep) because:
+      - It changes recall visibility, which affects every future session.
+      - It's reversible but the change has immediate operational effect.
+      - The codebase precedent for reversible status changes (reconfirm, reaffirm)
+        is explicit — mirrored here.
+
+    Returns a list of archived-entry dicts: {id, content, status, effective_confidence}.
+    When dry_run=True, returns the same list without writing to the DB (no-op).
+
+    Config levers (conservative defaults):
+      - confidence_floor: 0.1  (only archive deeply decayed entries)
+      - reaffirmation_window_days: 180  (6 months without reaffirmation)
+    """
+    _now = now or datetime.now(timezone.utc)
+    cutoff_dt = _now - timedelta(days=reaffirmation_window_days)
+    # SQLite stores timestamps as "YYYY-MM-DD HH:MM:SS"; format the cutoff to match.
+    cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = connect(db_path)
+    try:
+        # Fetch all uncertain, live (non-superseded) entries whose last_confirmed_at
+        # predates the reaffirmation window. We pull their decay columns so we can
+        # compute effective_confidence() in Python (same formula as the public API)
+        # without an extra per-row DB round-trip.
+        candidates = conn.execute(
+            """SELECT id, content, confidence_numeric, last_confirmed_at, status
+               FROM knowledge
+               WHERE superseded_by IS NULL
+                 AND status = 'uncertain'
+                 AND last_confirmed_at < ?""",
+            (cutoff_str,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Filter by effective_confidence floor.
+    to_archive: list[dict] = []
+    for row in candidates:
+        base = float(row["confidence_numeric"])
+        if half_life_days <= 0:
+            eff = base
+        else:
+            last = _parse_timestamp(row["last_confirmed_at"])
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            days_since = max(0.0, (_now - last).total_seconds() / 86400.0)
+            eff = base * (0.5 ** (days_since / half_life_days))
+        # Apply the uncertain penalty (mirrors effective_confidence()).
+        eff *= UNCERTAIN_CONFIDENCE_PENALTY
+        if eff < confidence_floor:
+            to_archive.append({
+                "id": row["id"],
+                "content": row["content"],
+                "status": row["status"],
+                "effective_confidence": eff,
+            })
+
+    if not to_archive or dry_run:
+        return to_archive
+
+    # TOCTOU note: candidates are read on one connection above and UPDATEd on a
+    # fresh connection below. A concurrent reaffirm() landing between the two could
+    # archive a just-reaffirmed row. Negligible for a single-operator CLI (the only
+    # caller); the miss self-heals on the next scan or via unarchive(). Documented
+    # rather than defended (a held write-lock across the whole scan isn't worth it).
+    # Write: flip status to 'archived' for each qualifying row.
+    ids = [r["id"] for r in to_archive]
+    placeholders = ",".join("?" * len(ids))
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            f"""UPDATE knowledge
+                SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})""",
+            ids,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return to_archive
+
+
+def unarchive(db_path: Path, entry_id: int) -> bool:
+    """Reverse a soft-archive: restore an archived entry to 'uncertain' status.
+
+    Archived entries were moved out of default recall by archive_scan(). This is
+    the EXPLICIT reversal — it does not reconfirm the entry (the dependency that
+    caused it to become uncertain is still unresolved). Use reconfirm() separately
+    if the dependency has been resolved and the entry should return to 'current'.
+
+    Returns True if the entry was archived and has now been restored, False if it
+    was not found or was not in 'archived' status.
+    """
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            """UPDATE knowledge
+               SET status = 'uncertain', updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status = 'archived'""",
             (entry_id,),
         )
         conn.commit()
