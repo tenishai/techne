@@ -1843,10 +1843,13 @@ class TestStep12KnowledgeTriggerCoalesce:
     def test_step12_redeploys_coalesce_over_old_bodies(self, tmp_path):
         conn = connect(tmp_path / "old.db")  # fresh = v12, correct triggers
         try:
-            # Downgrade to the pre-fix (no-COALESCE) trigger bodies + drop the v12
-            # marker so _migrate(11, 12) re-runs step 12 as on a real pre-fix DB.
+            # Downgrade to the pre-fix (no-COALESCE) trigger bodies + drop all
+            # markers >= 12 so _migrate(11, 12) re-runs step 12 as on a real pre-fix
+            # DB. Deleting '>= 12' rather than '= 12' is necessary because the fresh
+            # DB now starts at SCHEMA_VERSION (>12), and leaving a higher-version row
+            # would make MAX(version) > 12 after the migration call.
             conn.executescript(_OLD_KNOWLEDGE_TRIGGERS)
-            conn.execute("DELETE FROM schema_version WHERE version = 12")
+            conn.execute("DELETE FROM schema_version WHERE version >= 12")
             conn.commit()
             assert "COALESCE" not in conn.execute(
                 "SELECT sql FROM sqlite_master WHERE name='knowledge_au'"

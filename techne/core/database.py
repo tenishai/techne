@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -245,7 +245,16 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
     origin TEXT NOT NULL DEFAULT 'reflect',     -- reflect | consolidate | dream
     -- Decision-provenance: who/what reviewed and why (free-text, not a DB enum).
     decided_by TEXT,
-    decision_reason TEXT
+    decision_reason TEXT,
+    -- Faithfulness gate (techne#217 / coherence-layer D4). Populated by the
+    -- faithfulness emit/ingest pass on merge/supersede candidates. NULL means
+    -- unchecked (candidate was not yet run through the pass, or action='add'
+    -- which has no source rows to preserve). 1=faithful, 0=unfaithful (a
+    -- load-bearing claim was dropped). faithfulness_warning carries the
+    -- human-readable reason when unfaithful. The gate is ADVISORY — a flagged
+    -- candidate still goes to the operator for decision; it is never auto-blocked.
+    faithfulness_ok INTEGER,          -- NULL|1|0
+    faithfulness_warning TEXT         -- NULL when ok or unchecked
 );
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
@@ -804,4 +813,20 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 END;
             """)
         conn.execute("INSERT INTO schema_version (version) VALUES (12)")
+    if from_version < 13 and to_version >= 13:
+        # Faithfulness gate (techne#217 / coherence-layer D4). Add two nullable
+        # columns to knowledge_candidates to carry the pre-promotion faithfulness
+        # annotation for merge/supersede candidates: faithfulness_ok (1/0/NULL) and
+        # faithfulness_warning (human-readable reason when unfaithful). NULL means
+        # the candidate was not yet checked (or is an action='add' with no sources).
+        # The gate is ADVISORY — the operator still decides; no candidate is blocked.
+        kc_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_candidates'"
+        ).fetchone()
+        if kc_exists:
+            _add_column_if_missing(conn, "knowledge_candidates", "faithfulness_ok", "INTEGER")
+            _add_column_if_missing(
+                conn, "knowledge_candidates", "faithfulness_warning", "TEXT"
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (13)")
     conn.commit()
