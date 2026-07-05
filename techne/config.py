@@ -246,6 +246,12 @@ class Config:
     # want techne's summarization calls to go through it.
     llm_api_base: str = ""
     llm_api_key: str = ""
+    # Decay half-life for effective_confidence() (techne#214).  Entries
+    # confirmed this many days ago are at half their stored confidence_numeric.
+    # Generous default (≥30d per proposal D2) because decay is operational-only
+    # — ZenBrain NoDecay ΔP@5=0.002; aggressive decay costs 4.4pp precision.
+    # Set to 0 to disable decay entirely (returns raw confidence_numeric).
+    knowledge_confidence_half_life_days: float = 30.0
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -419,6 +425,11 @@ class Config:
         if "staleness_hours" in raw:
             cfg.staleness_hours = int(raw["staleness_hours"])
 
+        if "knowledge_confidence_half_life_days" in raw:
+            cfg.knowledge_confidence_half_life_days = float(
+                raw["knowledge_confidence_half_life_days"]
+            )
+
         if "posture" in raw and isinstance(raw["posture"], dict):
             p = raw["posture"]
             mode = p.get("mode", "observe")
@@ -512,6 +523,7 @@ class Config:
                 "recent_reserve_frac": self.injection.recent_reserve_frac,
             },
             "staleness_hours": self.staleness_hours,
+            "knowledge_confidence_half_life_days": self.knowledge_confidence_half_life_days,
         }
         # sources: only emit the sub-keys that are configured to avoid
         # polluting a minimal config with empty stubs.
