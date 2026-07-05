@@ -269,10 +269,17 @@ def _fts_match_rows(
     fts_query: str,
     table: SearchTable,
     candidate_limit: int,
+    include_archived: bool = True,
 ) -> list[dict]:
     """Run the per-table FTS5 MATCH queries for ``fts_query`` and return raw
     candidate rows (pre-rerank). Shared by the implicit-AND pass and the #70
     OR fallback so both issue identical SQL.
+
+    ``include_archived`` (techne#216): when False, soft-archived knowledge rows
+    (``status = 'archived'``) are filtered out of the knowledge FTS query.
+    Default True — explicit search (techne_search) returns archived entries;
+    only DEFAULT recall (techne_recall) passes False. Affects the knowledge
+    table only; threads/observations have no archive lifecycle.
     """
     results: list[dict] = []
 
@@ -331,15 +338,20 @@ def _fts_match_rows(
             )
 
     if table in ("knowledge", "all"):
+        # techne#216: DEFAULT recall (include_archived=False) drops soft-archived
+        # rows; explicit search (default True) keeps them. Interpolating a fixed
+        # clause here — not a bound param — because it's a boolean-selected literal
+        # SQL fragment, never user input.
+        archived_clause = "" if include_archived else " AND k.status != 'archived'"
         rows = conn.execute(
-            """SELECT k.id, k.type, k.content, k.tags, k.confidence,
+            f"""SELECT k.id, k.type, k.content, k.tags, k.confidence,
                       k.confidence_numeric, k.last_confirmed_at, k.status,
                       k.source, k.updated_at,
                       bm25(knowledge_fts) AS rank
                FROM knowledge_fts f
                JOIN knowledge k ON k.id = f.rowid
                WHERE knowledge_fts MATCH ?
-                 AND k.superseded_by IS NULL
+                 AND k.superseded_by IS NULL{archived_clause}
                ORDER BY rank
                LIMIT ?""",
             (fts_query, candidate_limit),
@@ -381,6 +393,7 @@ def search_fts(
     mmr_lambda: float = 0.0,
     confidence_decay_weight: float = 0.1,
     half_life_days: float = 30.0,
+    include_archived: bool = True,
 ) -> list[dict]:
     """Full-text search across techne tables.
 
@@ -404,6 +417,9 @@ def search_fts(
         half_life_days:          Half-life for confidence decay, passed from
                                  config.knowledge_confidence_half_life_days.
                                  Default 30.0; 0.0 disables time decay.
+        include_archived:        When False, soft-archived knowledge rows (techne#216)
+                                 are excluded. Default True — explicit search keeps
+                                 archived entries; only DEFAULT recall passes False.
     """
     fts_query = prepare_fts_query(query)
     if fts_query is None:
@@ -414,7 +430,9 @@ def search_fts(
     candidate_limit = limit * expansion_ratio
 
     try:
-        results = _fts_match_rows(conn, fts_query, table, candidate_limit)
+        results = _fts_match_rows(
+            conn, fts_query, table, candidate_limit, include_archived=include_archived
+        )
 
         # #70: bare space-separated terms are FTS5 implicit-AND, so a multi-word
         # or natural-language query (recall topics especially) returns nothing
@@ -424,7 +442,9 @@ def search_fts(
         if not results:
             or_query = _build_or_fts_query(query)
             if or_query:
-                results = _fts_match_rows(conn, or_query, table, candidate_limit)
+                results = _fts_match_rows(
+                    conn, or_query, table, candidate_limit, include_archived=include_archived
+                )
 
         # For multi-table ("all"), pre-sort by raw rank for a deterministic input
         # order; the reranker normalises BM25 PER TABLE (techne#56) and then
@@ -462,10 +482,15 @@ def search_vec(
     query: str,
     table: SearchTable = "all",
     limit: int = 10,
+    include_archived: bool = True,
 ) -> list[dict]:
     """Semantic vector search. Requires sqlite-vec and fastembed extras.
 
     Falls back gracefully if vector dependencies aren't installed.
+
+    ``include_archived`` (techne#216): when False, soft-archived knowledge rows
+    are excluded from the vector channel too, so search()'s DEFAULT-recall
+    exclusion holds regardless of which channel surfaced the row.
     """
     try:
         import sqlite_vec
@@ -563,11 +588,14 @@ def search_vec(
                        WHERE v.embedding MATCH ? AND k = ?""",
                     (q_bytes, limit * _VEC_SUPERSEDE_OVERFETCH),
                 ).fetchall()
+                # techne#216: DEFAULT recall drops soft-archived rows on the vec
+                # channel too. Fixed literal clause (boolean-selected), never user input.
+                archived_clause = "" if include_archived else " AND status != 'archived'"
                 live = 0
                 for row in rows:
                     k = conn.execute(
-                        """SELECT id, type, content, tags, confidence
-                           FROM knowledge WHERE id = ? AND superseded_by IS NULL""",
+                        f"""SELECT id, type, content, tags, confidence
+                           FROM knowledge WHERE id = ? AND superseded_by IS NULL{archived_clause}""",
                         (row[0],),
                     ).fetchone()
                     if k:
@@ -636,6 +664,7 @@ def search(
     limit: int = 20,
     use_vectors: bool = True,
     half_life_days: float = 30.0,
+    include_archived: bool = True,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) fused via Reciprocal
     Rank Fusion.
@@ -654,13 +683,26 @@ def search(
     When vec is requested but no vec results came back (extras not
     installed, vec tables empty, etc.), falls through to FTS-only —
     same as the legacy behavior.
+
+    ``include_archived`` (techne#216): when False, soft-archived knowledge rows
+    are excluded from BOTH channels — this is the DEFAULT-recall path (techne_recall).
+    Default True: EXPLICIT search (techne_search) still returns archived entries.
     """
-    fts_results = search_fts(db_path, query, table=table, limit=limit, half_life_days=half_life_days)
+    fts_results = search_fts(
+        db_path,
+        query,
+        table=table,
+        limit=limit,
+        half_life_days=half_life_days,
+        include_archived=include_archived,
+    )
 
     if not use_vectors:
         return fts_results
 
-    vec_results = search_vec(db_path, query, table=table, limit=limit)
+    vec_results = search_vec(
+        db_path, query, table=table, limit=limit, include_archived=include_archived
+    )
     if not vec_results:
         return fts_results
 

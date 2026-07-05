@@ -191,6 +191,24 @@ class ConflictConfig:
 
 
 @dataclass
+class ArchiveConfig:
+    """Configuration for the soft-archive scan lifecycle (techne#216, D2).
+
+    confidence_floor: entries whose effective_confidence() drops below this threshold
+        qualify for archiving (along with status='uncertain' AND no recent reaffirmation).
+        Default 0.1 is deliberately conservative — only deeply-decayed entries are
+        archived, avoiding false positives. Bias conservative: aggressive archiving
+        costs recall precision.
+    reaffirmation_window_days: if last_confirmed_at is OLDER than this many days,
+        the entry counts as "not recently reaffirmed" and qualifies (all other criteria
+        also met). Default 180 days (6 months) is conservative.
+    """
+
+    confidence_floor: float = 0.1
+    reaffirmation_window_days: int = 180
+
+
+@dataclass
 class PostureConfig:
     """Coexistence posture with Claude Code's curated memory (techne#107 PR4).
 
@@ -234,6 +252,7 @@ class Config:
     injection: InjectionConfig = field(default_factory=InjectionConfig)
     posture: PostureConfig = field(default_factory=PostureConfig)
     conflict: ConflictConfig = field(default_factory=ConflictConfig)
+    archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     platform: Platform = "claude-code"
     # Staleness alarm: if the prior last_session is older than this many hours,
     # the banner and collect_health emit a visible warning. Default 12h.
@@ -458,6 +477,16 @@ class Config:
                 log_raw_response=bool(c.get("log_raw_response", _cd.log_raw_response)),
             )
 
+        if "archive" in raw and isinstance(raw["archive"], dict):
+            a = raw["archive"]
+            _ad = ArchiveConfig()
+            cfg.archive = ArchiveConfig(
+                confidence_floor=float(a.get("confidence_floor", _ad.confidence_floor)),
+                reaffirmation_window_days=int(
+                    a.get("reaffirmation_window_days", _ad.reaffirmation_window_days)
+                ),
+            )
+
         return cfg
 
     def save(self, path: Path | None = None):
@@ -524,6 +553,10 @@ class Config:
             },
             "staleness_hours": self.staleness_hours,
             "knowledge_confidence_half_life_days": self.knowledge_confidence_half_life_days,
+            "archive": {
+                "confidence_floor": self.archive.confidence_floor,
+                "reaffirmation_window_days": self.archive.reaffirmation_window_days,
+            },
         }
         # sources: only emit the sub-keys that are configured to avoid
         # polluting a minimal config with empty stubs.

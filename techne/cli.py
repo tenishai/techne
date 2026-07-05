@@ -508,6 +508,116 @@ def knowledge_export(ctx, output, include_superseded):
     click.echo(f"  {output}/index.md")
 
 
+@knowledge.command("archive-scan")
+@click.option(
+    "--floor",
+    "confidence_floor",
+    type=float,
+    default=None,
+    help=(
+        "Effective-confidence floor (0..1). Entries below this are candidates. "
+        "Defaults to config.archive.confidence_floor (0.1)."
+    ),
+)
+@click.option(
+    "--window",
+    "reaffirmation_window_days",
+    type=int,
+    default=None,
+    help=(
+        "Reaffirmation window in days. Entries not reaffirmed within this period qualify. "
+        "Defaults to config.archive.reaffirmation_window_days (180)."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show which entries would be archived without writing to the DB.",
+)
+@click.pass_context
+def knowledge_archive_scan(ctx, confidence_floor, reaffirmation_window_days, dry_run):
+    """Soft-archive stale, uncertain, unreaffirmed knowledge entries (techne#216).
+
+    Entries meeting ALL of these criteria are archived (excluded from default
+    session-start injection, still returned by explicit search, NEVER deleted):
+
+    \b
+      - status = 'uncertain'  (a dependency it rests on was superseded)
+      - effective_confidence() < floor  (decayed below the confidence floor)
+      - not reaffirmed within the window  (last_confirmed_at is old)
+
+    Archived entries can be restored with:  techne knowledge unarchive ID
+
+    Defaults are conservative (floor=0.1, window=180d) to avoid false positives.
+    """
+    config = ctx.obj["config"]
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core.knowledge import archive_scan
+
+    floor = confidence_floor if confidence_floor is not None else config.archive.confidence_floor
+    window = (
+        reaffirmation_window_days
+        if reaffirmation_window_days is not None
+        else config.archive.reaffirmation_window_days
+    )
+
+    archived = archive_scan(
+        config.db_path,
+        confidence_floor=floor,
+        reaffirmation_window_days=window,
+        half_life_days=config.knowledge_confidence_half_life_days,
+        dry_run=dry_run,
+    )
+
+    if not archived:
+        click.echo("No entries qualify for archiving.")
+        return
+
+    tag = " (dry run — not written)" if dry_run else ""
+    click.echo(f"{'Would archive' if dry_run else 'Archived'} {len(archived)} {'entry' if len(archived) == 1 else 'entries'}{tag}:")
+    for entry in archived:
+        snippet = entry["content"][:80].replace("\n", " ")
+        click.echo(
+            f"  #{entry['id']}  eff_conf={entry['effective_confidence']:.4f}  {snippet!r}"
+        )
+
+
+@knowledge.command("unarchive")
+@click.argument("entry_id", type=int)
+@click.pass_context
+def knowledge_unarchive(ctx, entry_id):
+    """Restore an archived knowledge entry to 'uncertain' status (techne#216).
+
+    Reverses a soft-archive — the entry returns to default recall visibility.
+    Does NOT reconfirm the entry (the dependency that caused it to become
+    uncertain is still unresolved). Use 'techne knowledge reconfirm' separately
+    if the dependency has been resolved.
+    """
+    config = ctx.obj["config"]
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core.knowledge import unarchive
+
+    restored = unarchive(config.db_path, entry_id)
+    if restored:
+        click.echo(f"Restored knowledge entry #{entry_id} → status='uncertain'.")
+    else:
+        click.echo(
+            f"Entry #{entry_id} was not found or is not in 'archived' status.",
+            err=True,
+        )
+        # Exit non-zero on a no-op so scripts can distinguish success from miss.
+        ctx.exit(1)
+
+
 @main.group()
 @click.pass_context
 def identity(ctx):
