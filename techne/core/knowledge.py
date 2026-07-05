@@ -785,6 +785,11 @@ def archive_scan(
     if not to_archive or dry_run:
         return to_archive
 
+    # TOCTOU note: candidates are read on one connection above and UPDATEd on a
+    # fresh connection below. A concurrent reaffirm() landing between the two could
+    # archive a just-reaffirmed row. Negligible for a single-operator CLI (the only
+    # caller); the miss self-heals on the next scan or via unarchive(). Documented
+    # rather than defended (a held write-lock across the whole scan isn't worth it).
     # Write: flip status to 'archived' for each qualifying row.
     ids = [r["id"] for r in to_archive]
     placeholders = ",".join("?" * len(ids))

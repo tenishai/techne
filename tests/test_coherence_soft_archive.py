@@ -3,10 +3,12 @@
 Design invariants validated here:
   - A below-floor, uncertain, un-reaffirmed entry IS archived by archive_scan().
   - An archived entry is EXCLUDED from Tier-0 egress (default recall).
-  - An archived entry IS returned by explicit search (search_fts).
+  - An archived entry is EXCLUDED from default recall via search(include_archived=False)
+    but PRESENT via explicit search (search / search_fts, default include_archived=True).
   - A fresh / confirmed / high-confidence entry is NOT archived.
   - Archiving is REVERSIBLE via unarchive().
   - dry_run=True reports candidates without writing.
+  - archive_scan's inline decay scoring agrees with effective_confidence() (drift guard).
   - Config fields (confidence_floor, reaffirmation_window_days) are parsed and wired.
 """
 
@@ -22,7 +24,7 @@ from techne.core.knowledge import (
     DEFAULT_ARCHIVE_CONFIDENCE_FLOOR,
     DEFAULT_ARCHIVE_REAFFIRMATION_WINDOW_DAYS,
     archive_scan,
-    reconfirm,
+    effective_confidence,
     store,
     unarchive,
 )
@@ -147,41 +149,30 @@ class TestArchiveScanNegatives:
         assert not any(r["id"] == entry_id for r in archived)
 
     def test_high_confidence_not_archived(self, tmp_path):
-        """A high-confidence uncertain entry stays above the default floor."""
+        """A high-confidence uncertain entry stays above the floor even past the window.
+
+        Isolates the FLOOR criterion: with decay disabled (half_life_days=0), the
+        entry's effective_confidence is confidence_numeric × uncertain_penalty =
+        0.9 × 0.5 = 0.45, which is well above the 0.1 floor — so despite being
+        uncertain AND past the reaffirmation window, it is NOT archived.
+        """
         db = _make_db(tmp_path)
         entry_id = _insert(
             db,
             "uncertain but high-confidence entry gamma3delta4",
-            confidence="high",       # confidence_numeric=0.9; even with decay × 0.5 >> 0.1
+            confidence="high",       # confidence_numeric=0.9 → eff_conf 0.45 with penalty
             status="uncertain",
-            confirmed_days_ago=400,
+            confirmed_days_ago=400,  # past the window, but decay is off below
         )
         archived = archive_scan(
             db,
             confidence_floor=DEFAULT_ARCHIVE_CONFIDENCE_FLOOR,  # 0.1
             reaffirmation_window_days=DEFAULT_ARCHIVE_REAFFIRMATION_WINDOW_DAYS,
-            half_life_days=30.0,
+            half_life_days=0.0,      # decay disabled → floor is the only gate that matters
         )
-        # 0.9 × 0.5^(400/30) × 0.5 (uncertain) is vanishingly small, so this
-        # WILL be archived on such an extreme time scale. Use a very recent
-        # confirmed_at instead to keep it above the floor.
-        # Re-run the check with a short confirmed_days_ago.
-        db2 = _make_db(tmp_path.parent / "db2")
-        entry2_id = _insert(
-            db2,
-            "uncertain but high-confidence fresh entry epsilon5",
-            confidence="high",
-            status="uncertain",
-            confirmed_days_ago=5,    # recently confirmed → above floor
+        assert not any(r["id"] == entry_id for r in archived), (
+            "A high-confidence entry (eff_conf 0.45) must stay above the 0.1 floor"
         )
-        archived2 = archive_scan(
-            db2,
-            confidence_floor=DEFAULT_ARCHIVE_CONFIDENCE_FLOOR,
-            reaffirmation_window_days=180,
-            half_life_days=30.0,
-        )
-        # Not archived because confirmed only 5 days ago (< 180d window).
-        assert not any(r["id"] == entry2_id for r in archived2)
 
     def test_recently_reaffirmed_not_archived(self, tmp_path):
         """An uncertain entry reaffirmed recently (within the window) is not archived."""
@@ -364,6 +355,144 @@ class TestArchivedInExplicitSearch:
         )
         assert entry_id in [r["id"] for r in search_results], (
             "Archived entry must be present in explicit search"
+        )
+
+
+# ---------------------------------------------------------------------------
+# DoD core split: default recall EXCLUDES, explicit search INCLUDES
+# ---------------------------------------------------------------------------
+
+
+class TestRecallExclusionVsSearchInclusion:
+    """The issue's done-when split, at the search() layer (techne#216).
+
+    search(include_archived=False) is DEFAULT recall (techne_recall) — must EXCLUDE
+    archived. search(include_archived=True), the default, is EXPLICIT search
+    (techne_search) — must INCLUDE archived. This test BITES against the pre-fix
+    code where _fts_match_rows had no status filter (archived leaked into recall).
+    """
+
+    def test_archived_excluded_from_default_recall_present_in_explicit_search(self, tmp_path):
+        from techne.core.search import search
+
+        db = _make_db(tmp_path)
+        entry_id = _insert(
+            db,
+            "unique_recall_split_term_nu18 an archived uncertain fact",
+            confidence="high",
+            status="uncertain",
+            confirmed_days_ago=400,
+        )
+        # Archive it directly (status flip is what archive_scan writes).
+        conn = connect(db)
+        conn.execute("UPDATE knowledge SET status = 'archived' WHERE id = ?", (entry_id,))
+        conn.commit()
+        conn.close()
+
+        # DEFAULT recall (include_archived=False) — MUST EXCLUDE. use_vectors=False so
+        # the assertion is deterministic regardless of whether fastembed is installed.
+        recall_results = search(
+            db,
+            "unique_recall_split_term_nu18",
+            table="all",
+            limit=20,
+            use_vectors=False,
+            include_archived=False,
+        )
+        assert entry_id not in [r["id"] for r in recall_results], (
+            "Archived entry must be EXCLUDED from default recall "
+            "(search(include_archived=False))"
+        )
+
+        # EXPLICIT search (default include_archived=True) — MUST INCLUDE.
+        search_results = search(
+            db,
+            "unique_recall_split_term_nu18",
+            table="all",
+            limit=20,
+            use_vectors=False,
+        )
+        assert entry_id in [r["id"] for r in search_results], (
+            "Archived entry must be PRESENT in explicit search "
+            "(search(), default include_archived=True)"
+        )
+
+    def test_techne_recall_excludes_archived(self, tmp_path):
+        """End-to-end through the MCP _techne_recall handler: archived is excluded."""
+        from techne.config import Config
+        from techne.mcp_server import _techne_recall, _techne_search
+
+        db = _make_db(tmp_path)
+        cfg = Config()
+        cfg.db_path = db
+
+        entry_id = _insert(
+            db,
+            "unique_mcp_recall_term_xi19 archived uncertain knowledge",
+            confidence="high",
+            status="uncertain",
+            confirmed_days_ago=400,
+        )
+        conn = connect(db)
+        conn.execute("UPDATE knowledge SET status = 'archived' WHERE id = ?", (entry_id,))
+        conn.commit()
+        conn.close()
+
+        # _techne_recall — DEFAULT recall — must NOT surface the archived entry.
+        recall = _techne_recall({"topic": "unique_mcp_recall_term_xi19"}, cfg)
+        recall_ids = [r["id"] for r in recall["search_results"]]
+        assert entry_id not in recall_ids, (
+            "techne_recall (default recall) must exclude archived entries"
+        )
+
+        # _techne_search — EXPLICIT search — must still return it.
+        found = _techne_search(
+            {"query": "unique_mcp_recall_term_xi19", "table": "knowledge"}, cfg
+        )
+        found_ids = [r["id"] for r in found["results"]]
+        assert entry_id in found_ids, (
+            "techne_search (explicit search) must still return archived entries"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Drift guard: archive_scan's inline scoring == effective_confidence()
+# ---------------------------------------------------------------------------
+
+
+class TestDecayFormulaDriftGuard:
+    """archive_scan inlines the effective_confidence() formula (to avoid an N-row
+    DB round-trip). This guards against the two drifting apart (techne#216 review)."""
+
+    def test_archive_scoring_agrees_with_effective_confidence(self, tmp_path):
+        """The eff_conf reported by archive_scan matches effective_confidence() on
+        the same uncertain row, for a sampled age/half-life."""
+        db = _make_db(tmp_path)
+        entry_id = _insert(
+            db,
+            "drift guard sampled uncertain row omicron20",
+            confidence="low",         # 0.3 base
+            status="uncertain",
+            confirmed_days_ago=250,   # past window, decayed but computable
+        )
+
+        # dry_run so the row's status stays 'uncertain' — effective_confidence()
+        # applies the uncertain penalty, which archive_scan must also apply.
+        candidates = archive_scan(
+            db,
+            confidence_floor=1.0,     # floor=1.0 → every uncertain past-window row qualifies
+            reaffirmation_window_days=180,
+            half_life_days=30.0,
+            dry_run=True,
+        )
+        scored = {c["id"]: c["effective_confidence"] for c in candidates}
+        assert entry_id in scored, "sampled row should be a candidate under floor=1.0"
+
+        # Reference value from the public API (same half_life, same 'now' semantics).
+        reference = effective_confidence(db, entry_id, half_life_days=30.0)
+        assert reference is not None
+        assert scored[entry_id] == pytest.approx(reference, rel=1e-6, abs=1e-9), (
+            "archive_scan's inline decay score must agree with effective_confidence()"
         )
 
 

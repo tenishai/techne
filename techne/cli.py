@@ -614,6 +614,8 @@ def knowledge_unarchive(ctx, entry_id):
             f"Entry #{entry_id} was not found or is not in 'archived' status.",
             err=True,
         )
+        # Exit non-zero on a no-op so scripts can distinguish success from miss.
+        ctx.exit(1)
 
 
 @main.group()
