@@ -50,6 +50,25 @@ def query_live_knowledge(db_path: Path, *, include_superseded: bool = False) -> 
 # ---------------------------------------------------------------------------
 
 
+def _date_only(raw) -> str:
+    """Normalize a timestamp value to a YYYY-MM-DD date string.
+
+    Reuses knowledge._parse_timestamp (handles both SQLite ISO text and
+    datetime objects) so a non-string type never silently yields a garbage
+    prefix. Unparseable/None → "" (field is then omitted from the metadata line).
+    """
+    if raw is None:
+        return ""
+    from techne.core.knowledge import _parse_timestamp
+
+    try:
+        return _parse_timestamp(raw).date().isoformat()
+    except (ValueError, TypeError):
+        # Last-resort: assume ISO text; a bad value drops the field rather than crash.
+        text = str(raw)[:10]
+        return text if len(text) == 10 else ""
+
+
 def _render_entry(entry: dict) -> str:
     """Render one knowledge entry as a markdown section.
 
@@ -61,11 +80,9 @@ def _render_entry(entry: dict) -> str:
     confidence = entry.get("confidence") or "medium"
     status = entry.get("status") or "current"
     tags = (entry.get("tags") or "").strip()
-    # Slice timestamps to date-only (YYYY-MM-DD) — avoids sub-second churn.
-    raw_confirmed = entry.get("last_confirmed_at")
-    raw_event = entry.get("event_at")
-    last_confirmed = str(raw_confirmed)[:10] if raw_confirmed is not None else ""
-    event_at = str(raw_event)[:10] if raw_event is not None else ""
+    # Date-only (YYYY-MM-DD) — avoids sub-second churn on re-export.
+    last_confirmed = _date_only(entry.get("last_confirmed_at"))
+    event_at = _date_only(entry.get("event_at"))
 
     # Heading: id + first line of content (truncated for readability).
     # Status badge only when non-current — avoids churn on `current` entries.
@@ -74,7 +91,14 @@ def _render_entry(entry: dict) -> str:
     status_badge = f" `⚠ {status}`" if status != "current" else ""
     heading = f"## [{eid}]{status_badge} {heading_title}"
 
-    parts = [heading, "", content, ""]
+    # Explicit anchor GitHub honors. GitHub auto-slugifies the `##` heading to
+    # something like `#1-use-sqlite-…`, NOT `#1`, so an index link keyed on the id
+    # alone would load the file but never scroll to the entry. Emit a stable,
+    # id-prefixed anchor (`e{id}`) that the index links to — it never collides with
+    # the auto-slug and never changes when content changes (deterministic per id).
+    anchor = f'<a id="e{eid}"></a>'
+
+    parts = [anchor, "", heading, "", content, ""]
 
     # Metadata line — only include fields that carry a non-empty value.
     meta: list[str] = [f"**Confidence:** {confidence}"]
@@ -167,10 +191,13 @@ def _render_index(
             first_line = content.split("\n")[0]
             stub = first_line[:100] + ("…" if len(first_line) > 100 else "")
             conf = e.get("confidence") or "medium"
-            # Anchor href uses the numeric id (matches the heading in the type file).
+            # Anchor href targets the explicit `e{id}` anchor emitted by
+            # _render_entry — GitHub honors it and scrolls to the entry (the
+            # auto-slug of the heading would not match a plain `#{id}`).
+            eid = e["id"]
             lines.append(
-                f"- **[{e['id']}]** ({conf}) {stub}"
-                f" → [{ktype}.md#{e['id']}]({ktype}.md#{e['id']})"
+                f"- **[{eid}]** ({conf}) {stub}"
+                f" → [{ktype}.md#e{eid}]({ktype}.md#e{eid})"
             )
         lines.append("")
 

@@ -179,6 +179,41 @@ class TestIndexContent:
         assert "[fact.md](fact.md)" in index
         assert "[decision.md](decision.md)" in index
 
+    def test_index_stub_links_use_explicit_anchor(
+        self, populated_db: Path, tmp_path: Path
+    ) -> None:
+        """Index stubs must link to `#e{id}` (the explicit anchor), not `#{id}`
+        (which GitHub's heading auto-slug would never match)."""
+        out = tmp_path / "out"
+        export_knowledge(populated_db, out)
+        index = (out / "index.md").read_text()
+        # fact id 1 exists in the populated fixture
+        assert "(fact.md#e1)" in index
+        # A bare `#1` fragment must NOT appear as a link target.
+        assert "(fact.md#1)" not in index
+
+    def test_index_anchors_and_type_file_anchors_are_in_lockstep(
+        self, populated_db: Path, tmp_path: Path
+    ) -> None:
+        """Every `#e{id}` the index links to must have a matching `id="e{id}"`
+        anchor in the corresponding type file — guards against drift where a
+        link points at an anchor that no longer exists (or vice versa)."""
+        import re
+
+        out = tmp_path / "out"
+        export_knowledge(populated_db, out)
+        index = (out / "index.md").read_text()
+
+        # Collect (ktype, id) pairs the index links to via #e{id}.
+        link_pairs = set(re.findall(r"\(([a-z_]+)\.md#e(\d+)\)", index))
+        assert link_pairs, "expected at least one #e{id} link in the index"
+
+        for ktype, eid in link_pairs:
+            type_text = (out / f"{ktype}.md").read_text()
+            assert f'id="e{eid}"' in type_text, (
+                f'index links {ktype}.md#e{eid} but {ktype}.md has no id="e{eid}" anchor'
+            )
+
     def test_index_contains_entry_stubs(self, populated_db: Path, tmp_path: Path) -> None:
         out = tmp_path / "out"
         export_knowledge(populated_db, out)
