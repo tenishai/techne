@@ -10,3 +10,6 @@ build/
 *.db
 .coverage
 htmlcov/
+
+# Agent worktrees created by Claude Code (isolation: worktree) — transient
+.claude/worktrees/
