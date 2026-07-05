@@ -605,6 +605,28 @@ def _apply_supersede(conn, row, db_path: Path) -> int | None:
     return _supersede_in_conn(conn, targets[0], redact_credentials(row["content"]), source)
 
 
+def _apply_retire(conn, row, db_path: Path) -> int | None:
+    """Apply a 'retire' proposal (techne#213 contradiction detection): link an EXISTING
+    live row to an EXISTING live survivor via `superseded_by` — no new row minted.
+
+    target_ids = [old_id, survivor_id] (ORDER-SIGNIFICANT — old is retired into survivor).
+    Both are already live knowledge rows (the two entries the conflict check compared),
+    so retirement points old_id.superseded_by at survivor_id rather than minting a
+    duplicate of the survivor's fact. The candidate's `content` holds the survivor's
+    (optionally LLM-refined) text for operator DISPLAY only; the applier links, it does
+    not write content — apply a wording edit separately if desired. Returns survivor_id."""
+    from techne.core.knowledge import _retire_in_conn
+
+    targets = json.loads(row["target_ids"] or "[]")
+    if len(targets) != 2:
+        raise ValueError(
+            f"retire candidate {row['id']} needs exactly two target_ids "
+            f"[old, survivor], got {targets}"
+        )
+    old_id, survivor_id = targets[0], targets[1]
+    return _retire_in_conn(conn, old_id, survivor_id)
+
+
 def _apply_merge(conn, row, db_path: Path) -> int | None:
     """Apply a 'merge' proposal (techne#108 consolidate): collapse N existing rows
     (target_ids) into one merged row carrying the proposal's explicitly chosen
@@ -638,11 +660,13 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
 # Per-action appliers (techne#108). promote_candidate owns the transaction + status
 # guard; each applier takes the open conn + the candidate row and returns the new
 # knowledge.id (or None). 'add' is reflect's original path; 'supersede'/'merge' are
-# the consolidate pass. ('connect' / dream is the deferred PR3.)
+# the consolidate pass; 'retire' is the contradiction-detection pass (techne#213 —
+# links two EXISTING live rows without minting). ('connect' / dream is the deferred PR3.)
 _APPLIERS = {
     "add": _apply_add,
     "supersede": _apply_supersede,
     "merge": _apply_merge,
+    "retire": _apply_retire,
 }
 
 

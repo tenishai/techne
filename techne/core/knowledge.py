@@ -233,6 +233,60 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
     return new_id
 
 
+def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
+    """Retire *old_id* by pointing its `superseded_by` at an EXISTING live *survivor_id*
+    row — without minting a new revision (techne#213 contradiction detection).
+
+    Unlike `_supersede_in_conn`, which mints a fresh row from *new_content*, retire is
+    used when BOTH the loser and the survivor already exist as live `knowledge` rows
+    (the two entries a contradiction check compared). Minting here would duplicate the
+    survivor's fact into a second live row with an independent confidence/decay clock
+    that can drift — the integrity bug this helper avoids. The survivor keeps its own
+    row, id, and clock untouched; we only repoint the loser at it.
+
+    Bookkeeping parity with `_supersede_in_conn` MINUS the mint: sets
+    `superseded_by` + `updated_at` on *old_id* and runs the #117 dependency cascade
+    (live dependents of *old_id* → `uncertain`). It does NOT repoint knowledge_deps
+    edges — neither does `_supersede_in_conn`: per `cascade_uncertain`, an edge
+    references a specific revision and is re-pointed by re-extraction, not auto-migrated.
+    It does NOT touch the survivor's `last_confirmed_at` (retire is not a reaffirmation
+    of the survivor; that would be a separate deliberate act).
+
+    Preserve-not-delete: *old_id* is retained (retrievable with include_superseded),
+    never hard-deleted. Returns *survivor_id* (the id that stays live).
+    """
+    if old_id == survivor_id:
+        raise ValueError("cannot retire a knowledge entry into itself")
+    old = conn.execute(
+        "SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)
+    ).fetchone()
+    if old is None:
+        raise ValueError(f"Knowledge entry {old_id} not found")
+    if old["superseded_by"] is not None:
+        raise ValueError(
+            f"Knowledge entry {old_id} is already superseded by {old['superseded_by']}; "
+            "retire the latest revision instead"
+        )
+    survivor = conn.execute(
+        "SELECT superseded_by FROM knowledge WHERE id = ?", (survivor_id,)
+    ).fetchone()
+    if survivor is None:
+        raise ValueError(f"Survivor knowledge entry {survivor_id} not found")
+    if survivor["superseded_by"] is not None:
+        raise ValueError(
+            f"Survivor {survivor_id} is itself superseded by {survivor['superseded_by']}; "
+            "retire into a live entry"
+        )
+    conn.execute(
+        "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (survivor_id, old_id),
+    )
+    # #117 cascade — identical to _supersede_in_conn: live dependents of the retired
+    # entry go `uncertain` until reconfirmed. The survivor is NOT auto-propagated.
+    _cascade_uncertain(conn, old_id)
+    return survivor_id
+
+
 def merge_into(
     db_path: Path,
     old_ids: list[int],
