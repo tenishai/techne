@@ -3,6 +3,43 @@
 All notable changes to techne are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); the project uses semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- **Federation brick #1: deposit-and-drain (#221)** — the first step toward
+  one-distiller-many-sources memory federation.
+
+  **Pattern:** an ephemeral producer (a short-lived agent, a CI job, a sidecar)
+  deposits raw observations into a techne store it doesn't own by calling
+  `record_observation(config, ...)` with a `Config` whose `db_path` points at
+  the foreign store.  A single distiller (`drain.py`) then drains that store
+  asynchronously — no LLM call, no blocking on the deposit path (accept-fast /
+  distill-async).
+
+  **Primitives:** the deposit and drain primitives pre-existed; this brick
+  proves the round-trip with an acceptance test suite and adds a discoverability
+  CLI surface.
+
+  **Idempotency (two signals):**
+  - *Signal A* — `knowledge_candidates.source_session_id`: once a session has
+    been distilled (candidates written), drain.py's `NOT IN` worklist query
+    excludes it on subsequent fire-ups.  Tested end-to-end.
+  - *Signal B* — `.drained.json` fingerprint: drain.py filesystem state for
+    empty-yield sessions (no candidates written).  Handled by drain.py; noted
+    in the test comments.
+
+  **Sovereignty:** deposit writes raw observations only; distillation stays
+  the distiller's async job.  The local caller's store is never touched.
+
+  **New CLI command:** `techne deposit --target <foreign techne home>
+  --session-id <sid> --content "..."` — the explicit "deposit into a store you
+  don't own" surface.  Mirrors `techne observe` in option shape; targets an
+  independent foreign store.
+
+  **Follow-up:** candidates land in the foreign store; Archivist-promotion
+  (surfacing them to the owning agent's curated memory) is tracked in #222.
+
 ## [0.8.0] — 2026-06-28
 
 The "memory that maintains itself, honestly" release: a self-curating memory loop
