@@ -562,8 +562,21 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
     Runs inside promote_candidate's open transaction (techne#108 dispatch); a
     failure here rolls back the status flip too. Returns the new knowledge.id, or
     None for an identity entry.
+
+    Dependency edges (techne#215): a dream-origin candidate is a new insight
+    explicitly synthesized from its source entries (recorded in `target_ids`). The
+    derivation relationship is genuinely known at promotion time — NOT inferred from
+    similarity. Writing dep edges here, inside the same transaction as the knowledge
+    insert, makes the relationship atomic and ensures the cascade can fire the moment
+    any source is superseded. No edges are written for reflect/consolidate add
+    candidates: those have no structural source relationship.
     """
-    from techne.core.knowledge import CONFIDENCE_NUMERIC, VALID_CONFIDENCE, VALID_TYPES
+    from techne.core.knowledge import (
+        CONFIDENCE_NUMERIC,
+        VALID_CONFIDENCE,
+        VALID_TYPES,
+        _add_dep_in_conn,
+    )
 
     scope = row["scope"]
     source = f"reflect-promote:{row['source_session_id']}:{row['id']}"
@@ -579,7 +592,19 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
                VALUES (?, ?, ?, ?, ?, ?)""",
             (ktype, content, source, tags, conf, numeric),
         )
-        return cur2.lastrowid
+        new_id = cur2.lastrowid
+
+        # Populate dependency edges for dream candidates (techne#215).
+        # Only dream candidates carry a meaningful derived-from relationship: the
+        # new insight was synthesized from the explicit source entries in target_ids.
+        # Superseding any source later will cascade the insight to `uncertain` via
+        # the existing _cascade_uncertain machinery — no new cascade logic needed.
+        if row["origin"] == "dream":
+            source_ids = json.loads(row["target_ids"] or "[]")
+            for src_id in source_ids:
+                _add_dep_in_conn(conn, new_id, src_id)
+
+        return new_id
     if scope == "identity":
         from techne.core.identity import set_value
 
