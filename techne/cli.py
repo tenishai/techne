@@ -457,6 +457,57 @@ def knowledge_add(ctx, content, ktype, tags, confidence):
     click.echo(f"Stored knowledge entry #{entry_id}")
 
 
+@knowledge.command("export")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default="techne-knowledge",
+    show_default=True,
+    help="Output directory for the markdown tree.",
+)
+@click.option(
+    "--include-superseded",
+    is_flag=True,
+    default=False,
+    help="Include superseded (archived) entries in addition to live knowledge.",
+)
+@click.pass_context
+def knowledge_export(ctx, output, include_superseded):
+    """Export live knowledge as a browseable, git-diffable markdown tree (techne#218).
+
+    Writes an index file plus one file per knowledge type to OUTPUT. Only live
+    entries (superseded_by IS NULL) are exported by default. Output is
+    deterministic — stable ordering by type then id — so re-exports on an
+    unchanged DB produce byte-identical files and meaningful git diffs.
+
+    Example layout:
+
+    \b
+        OUTPUT/index.md        — summary table + entry stubs by type
+        OUTPUT/fact.md         — all facts
+        OUTPUT/decision.md     — all decisions
+        OUTPUT/procedure.md    — all procedures
+        OUTPUT/evaluation.md   — all evaluations
+    """
+    config = ctx.obj["config"]
+    from techne.core.knowledge_export import export_knowledge
+
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    result = export_knowledge(
+        config.db_path, output, include_superseded=include_superseded
+    )
+    total = result["total"]
+    scope = "(including superseded)" if include_superseded else "(live only)"
+    click.echo(f"Exported {total} {'entry' if total == 1 else 'entries'} {scope} → {output}/")
+    for ktype, count in sorted(result["by_type"].items()):
+        click.echo(f"  {output}/{ktype}.md  ({count} {'entry' if count == 1 else 'entries'})")
+    click.echo(f"  {output}/index.md")
+
+
 @main.group()
 @click.pass_context
 def identity(ctx):
