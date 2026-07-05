@@ -11,14 +11,21 @@ Selection rules:
      reference material — recall-able but never auto-injected)
   2. Bands fill in order; each appends to the render list until the budget runs out:
      a. Identity      — tagged memory-type:user (the anchor; always first)
-     b. Recent results — the freshest decisions/evaluations/facts NOT in another
+     b. Corrections   — tagged memory-type:correction: facts that OVERTURN a prior
+                        belief. Reserved a slice (`correction_reserve_frac`) right
+                        after identity so a belief-correcting fact is never evicted
+                        by merely-newer routine facts. This is the fix for the
+                        confident-wrong blind spot: the wrong belief lives in the
+                        model's weights (no row to supersede), so the correction
+                        must ride the resident screen by priority, not recency.
+     c. Recent results — the freshest decisions/evaluations/facts NOT in another
                         band, capped at `recent_reserve_frac` of the budget so the
                         large, static feedback band can never starve "what changed
                         since last session" (techne#93 egress-starvation fix).
-     c. Feedback      — tagged memory-type:feedback (stable behavioral anchors)
-     d. Project state — single most-recent entry tagged memory-type:project
+     d. Feedback      — tagged memory-type:feedback (stable behavioral anchors)
+     e. Project state — single most-recent entry tagged memory-type:project
                         whose name: tag contains 'platform-state'
-     e. Leftover recent — any recent rows the reservation in (b) couldn't fit
+     f. Leftover      — any correction/recent rows the reservations couldn't fit
   3. Each rendered line is prefixed with ⟦techne#<id>⟧ for attribution/traceability.
   4. Budget is config-driven (injection.char_budget, default 2000 chars).
 
@@ -106,6 +113,7 @@ def select_tier0_injection(
     *,
     char_budget: int = 2000,
     recent_reserve_frac: float = 0.4,
+    correction_reserve_frac: float = 0.3,
     half_life_days: float = 30.0,
 ) -> list[EgressRow]:
     """Select knowledge rows for Tier-0 session-start injection.
@@ -119,11 +127,18 @@ def select_tier0_injection(
     the freshest decisions/evaluations/facts before the feedback band fills; set
     to 0.0 for the legacy identity→feedback→project→recent ordering.
 
+    `correction_reserve_frac` (0.0-1.0) is the share reserved for correction rows
+    (tagged memory-type:correction) right after identity, so a belief-overturning
+    fact is never evicted by merely-newer routine facts; set to 0.0 to disable the
+    reservation (corrections then fall back to the leftover pass).
+
     `half_life_days` (techne#214): within each priority band, rows are ordered
     by effective_confidence (= confidence_numeric × 0.5^(age/half_life)) so a
     recently-confirmed entry surfaces before a long-unconfirmed one at the same
     stored tier. Pass ``config.knowledge_confidence_half_life_days``; default
     30.0. Set to 0.0 to disable decay (order by raw confidence_numeric only).
+    Applies to the corrections band too — a decayed correction does not outrank
+    a fresh one within the same band.
 
     The returned list is already deduplicated by id.
     """
@@ -160,6 +175,7 @@ def select_tier0_injection(
     # Partition into priority buckets — O(n) single pass.
     # Each bucket holds raw row dicts so _eff_conf can access decay columns.
     identity_raw: list[dict] = []
+    correction_raw: list[dict] = []
     feedback_raw: list[dict] = []
     project_state_raw: list[dict] = []  # all platform-state rows; take 1 below
     remaining_raw: list[dict] = []
@@ -170,6 +186,8 @@ def select_tier0_injection(
 
         if _tag_contains(tags, "memory-type:user"):
             identity_raw.append(d)
+        elif _tag_contains(tags, "memory-type:correction"):
+            correction_raw.append(d)
         elif _tag_contains(tags, "memory-type:feedback"):
             feedback_raw.append(d)
         elif _tag_contains(tags, "memory-type:project") and _tag_has_prefix(
@@ -184,10 +202,12 @@ def select_tier0_injection(
     # is stable, so the uncertain/current split from the DB is preserved within
     # each decay-ordered tier (uncertain rows have already been placed at the end
     # by the ORDER BY clause, so the secondary key just refines within each group).
+    # Corrections are sorted by _eff_conf too — a decayed correction does not
+    # outrank a fresher one within the same band.
     def _decay_key(d: dict) -> float:
         return -_eff_conf(d, half_life_days)
 
-    for bucket in (identity_raw, feedback_raw, project_state_raw, remaining_raw):
+    for bucket in (identity_raw, correction_raw, feedback_raw, project_state_raw, remaining_raw):
         bucket.sort(key=_decay_key)
 
     # Convert raw row dicts to typed EgressRow dicts.
@@ -201,6 +221,7 @@ def select_tier0_injection(
         )
 
     identity_rows = [_to_erow(d) for d in identity_raw]
+    correction_rows = [_to_erow(d) for d in correction_raw]
     feedback_rows = [_to_erow(d) for d in feedback_raw]
     project_state_rows = [_to_erow(d) for d in project_state_raw]
     remaining_rows = [_to_erow(d) for d in remaining_raw]
@@ -218,23 +239,34 @@ def select_tier0_injection(
     chars_used = 0
 
     # Phase 1 — reserved bands that must not be starved by feedback volume:
-    #   identity (the anchor, always) then the freshest results, capped at a
-    #   reserved fraction of the budget. This is the egress-starvation fix.
+    #   identity (the anchor, always) → corrections (belief-overturning facts) →
+    #   the freshest results, each capped at a reserved fraction of the budget.
+    #   Corrections rank ahead of generic recency: a fact that overturns a prior
+    #   belief must survive even a busy day of newer routine facts (the
+    #   confident-wrong fix — see module docstring band b).
     chars_used = _fill_band(identity_rows, char_budget, selected, seen_ids, chars_used)
+    correction_cap = min(
+        char_budget, chars_used + int(char_budget * correction_reserve_frac)
+    )
+    chars_used = _fill_band(correction_rows, correction_cap, selected, seen_ids, chars_used)
     recent_cap = min(char_budget, chars_used + int(char_budget * recent_reserve_frac))
     chars_used = _fill_band(recent_rows, recent_cap, selected, seen_ids, chars_used)
 
     # Phase 2 — fill the remaining budget with stable anchors, then any leftover
-    #   recent rows the reservation couldn't fit: feedback → platform-state → recent.
-    for band in (feedback_rows, most_recent_project_state, recent_rows):
+    #   correction/recent rows the reservations couldn't fit:
+    #   feedback → platform-state → corrections → recent.
+    for band in (feedback_rows, most_recent_project_state, correction_rows, recent_rows):
         chars_used = _fill_band(band, char_budget, selected, seen_ids, chars_used)
 
     logger.debug(
-        "egress.tier0: selected %d rows, %d chars (budget %d, recent_reserve_frac %.2f)",
+        "egress.tier0: selected %d rows, %d chars "
+        "(budget %d, recent_reserve_frac %.2f, correction_reserve_frac %.2f, half_life_days %.1f)",
         len(selected),
         chars_used,
         char_budget,
         recent_reserve_frac,
+        correction_reserve_frac,
+        half_life_days,
     )
     return selected
 

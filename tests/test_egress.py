@@ -411,3 +411,70 @@ class TestEdgeCases:
         ids = [r["id"] for r in rows]
         assert id2 in ids
         assert id1 not in ids, "Only the most-recent platform-state row should be included"
+
+
+# ---------------------------------------------------------------------------
+# Correction priority (belief-overturning facts)
+# ---------------------------------------------------------------------------
+
+
+class TestCorrectionPriority:
+    """memory-type:correction rows are belief-overturning facts. A wrong belief
+    lives in the model's weights (there is no stored row to supersede), so the
+    correction must ride the resident screen by PRIORITY, not recency — otherwise
+    a busy day of newer routine facts evicts it (the 'no Sonnet 5' failure)."""
+
+    def test_correction_included(self, db_path):
+        cid = _seed(
+            db_path,
+            "Claude Sonnet 5 exists (corrects the prior 'there is no Sonnet 5')",
+            type="fact",
+            tags="memory-type:correction",
+        )
+        rows = select_tier0_injection(db_path, char_budget=4000)
+        assert any(r["id"] == cid for r in rows)
+
+    def test_correction_before_feedback_and_recent(self, db_path):
+        """A correction renders ahead of both the feedback band and generic recent rows."""
+        recent_id = _seed(db_path, "a routine new fact", type="fact")
+        feedback_id = _seed(
+            db_path, "a behavioral rule", type="fact", tags="memory-type:feedback"
+        )
+        correction_id = _seed(
+            db_path, "a belief correction", type="fact", tags="memory-type:correction"
+        )
+        rows = select_tier0_injection(db_path, char_budget=4000)
+        ids = [r["id"] for r in rows]
+        assert correction_id in ids
+        assert ids.index(correction_id) < ids.index(feedback_id)
+        assert ids.index(correction_id) < ids.index(recent_id)
+
+    def test_correction_survives_flood_that_starves_untagged_peer(self, db_path):
+        """The Sonnet-5 case, held rigorous: two equally-OLD facts, then a flood of
+        NEWER routine facts under a tight budget. The one tagged memory-type:correction
+        survives (reserved band); its untagged twin, competing on pure recency, is
+        evicted. Recency is pinned so the ordering is deterministic."""
+        from techne.core.database import connect
+
+        corr_id = _seed(
+            db_path,
+            "SONNET 5 EXISTS " + "c" * 120,
+            type="fact",
+            tags="memory-type:correction",
+        )
+        untagged_id = _seed(db_path, "untagged early fact " + "u" * 120, type="fact")
+        for n in range(12):
+            _seed(db_path, f"newer routine fact {n} " + "z" * 120, type="fact")
+        # Pin the untagged peer old so it is unambiguously the last recent row.
+        conn = connect(db_path)
+        conn.execute(
+            "UPDATE knowledge SET updated_at = '2026-01-01 00:00:00' WHERE id = ?",
+            (untagged_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        tight = 900
+        ids = [r["id"] for r in select_tier0_injection(db_path, char_budget=tight)]
+        assert corr_id in ids, "the correction must be protected by its reserved band"
+        assert untagged_id not in ids, "the untagged early peer should be starved by newer facts"
