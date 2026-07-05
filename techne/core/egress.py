@@ -18,6 +18,12 @@ Selection rules:
                         confident-wrong blind spot: the wrong belief lives in the
                         model's weights (no row to supersede), so the correction
                         must ride the resident screen by priority, not recency.
+                        OPERATOR NOTE: a correction is only injected if it's stored
+                        confidence='high' — the Tier-0 eligibility gate below is
+                        `confidence = 'high'`, so a correction written at medium/low
+                        confidence is silently invisible to the resident screen and
+                        the confident-wrong fix fails. Store corrections with
+                        `techne_store(..., confidence='high', tags='memory-type:correction')`.
      c. Recent results — the freshest decisions/evaluations/facts NOT in another
                         band, capped at `recent_reserve_frac` of the budget so the
                         large, static feedback band can never starve "what changed
@@ -34,6 +40,12 @@ recent, so on a store with many high-confidence feedback facts the budget was
 exhausted before the recency band was ever reached — the single most
 decision-relevant memory (e.g. "the acceptance test just passed") was the most
 likely to be dropped. Reserving a slice for fresh results fixes that inversion.
+
+Reservation math: in Phase 1, corrections + recent can together reserve up to
+`correction_reserve_frac + recent_reserve_frac` of `char_budget` (0.3 + 0.4 = 0.7
+by default); feedback and project-state then fill from whatever remains in Phase 2.
+This is intended — a belief-overturning correction is meant to outrank the stable
+anchors, so it claims budget ahead of them.
 
 Deferred (Tier-1, techne#92): relevance ranking against the current query.
 """

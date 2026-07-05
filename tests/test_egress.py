@@ -466,6 +466,13 @@ class TestCorrectionPriority:
         for n in range(12):
             _seed(db_path, f"newer routine fact {n} " + "z" * 120, type="fact")
         # Pin the untagged peer old so it is unambiguously the last recent row.
+        # Determinism note: the recent band now sorts by _eff_conf (techne#214),
+        # which reads last_confirmed_at, NOT updated_at. This pin only bites because
+        # store() stamps every seeded row's last_confirmed_at with the same
+        # CURRENT_TIMESTAMP, so _eff_conf ties across the recent band and the stable
+        # sort falls through to the SQL `updated_at DESC` order — where this pin lives.
+        # If _seed ever sets a per-row last_confirmed_at, the tie breaks and this pin
+        # stops determining order; re-pin on last_confirmed_at instead.
         conn = connect(db_path)
         conn.execute(
             "UPDATE knowledge SET updated_at = '2026-01-01 00:00:00' WHERE id = ?",
