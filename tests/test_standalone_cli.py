@@ -168,6 +168,79 @@ class TestSessionEndCommand:
         assert b3 == b1, "thread_boundaries must not accumulate on replay (unbounded-growth guard)"
 
 
+class TestDepositCommand:
+    """`techne deposit` — federation brick: ephemeral producer writes to a foreign store (#221)."""
+
+    def test_writes_to_target_and_not_local(self, cli_config, tmp_path) -> None:
+        """deposit writes to --target/techne.db, not to the local (cli_config) db."""
+        from techne.core.database import connect
+
+        foreign_dir = tmp_path / "foreign-agent"
+        foreign_dir.mkdir()
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "deposit",
+                "--target",
+                str(foreign_dir),
+                "--session-id",
+                "dep-1",
+                "--content",
+                "the federation is operational",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "deposited session=dep-1" in result.output
+        assert str(foreign_dir / "techne.db") in result.output
+
+        # Foreign store has the observation.
+        foreign_db = foreign_dir / "techne.db"
+        assert foreign_db.exists(), "techne.db must be auto-created under --target"
+        conn = connect(foreign_db)
+        try:
+            n_foreign = conn.execute(
+                "SELECT COUNT(*) FROM observations WHERE session_id = ?", ("dep-1",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n_foreign == 1
+
+        # The local (default) store must NOT be touched.
+        conn = connect(cli_config.db_path)
+        try:
+            n_local = conn.execute(
+                "SELECT COUNT(*) FROM observations WHERE session_id = ?", ("dep-1",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n_local == 0, "deposit must not write to the local store"
+
+    def test_reads_content_from_stdin(self, cli_config, tmp_path) -> None:
+        foreign_dir = tmp_path / "foreign-stdin"
+        foreign_dir.mkdir()
+
+        result = CliRunner().invoke(
+            main,
+            ["deposit", "--target", str(foreign_dir), "--session-id", "dep-stdin"],
+            input="piped content goes here\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "deposited session=dep-stdin" in result.output
+
+    def test_empty_content_errors(self, cli_config, tmp_path) -> None:
+        foreign_dir = tmp_path / "foreign-empty"
+        foreign_dir.mkdir()
+
+        result = CliRunner().invoke(
+            main,
+            ["deposit", "--target", str(foreign_dir), "--session-id", "dep-err"],
+            input="   \n",
+        )
+        assert result.exit_code != 0
+        assert "content" in result.output.lower()
+
+
 class TestContextCommand:
     """`techne context` — memory block for prompt injection (#57 read-side)."""
 

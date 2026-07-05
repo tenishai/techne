@@ -1194,6 +1194,69 @@ def observe(
     click.echo(f"observed session={result['session_id']} tool={tool_name} ({len(content)} chars)")
 
 
+@main.command("deposit")
+@click.option(
+    "--target",
+    required=True,
+    help="Foreign techne home directory to deposit into (e.g. /home/agent/.techne)",
+)
+@click.option(
+    "--session-id", required=True, help="Session identifier for the deposited observation"
+)
+@click.option("--content", default=None, help="Observation text; if omitted, read from stdin")
+@click.option(
+    "--tool-name", default="Observation", help="Tool or event name (e.g. Edit, turn_complete)"
+)
+@click.option("--agent-identity", default="", help="Agent identity for the session row")
+@click.option("--tier", default="hot", type=click.Choice(["hot", "warm", "cold"]))
+@click.pass_context
+def deposit(ctx, target, session_id, content, tool_name, agent_identity, tier):
+    """Deposit a raw observation into a foreign techne store (federation brick #221).
+
+    The explicit 'ephemeral producer deposits raw into a store it doesn't own'
+    surface — the techne side of the accept-fast / distill-async pattern.  The
+    caller's own techne store is NOT touched.
+
+    The foreign store's distiller (drain.py, pointed at --target) picks up the
+    deposited observations asynchronously and distills them into knowledge
+    candidates.  No LLM call happens here; deposit is a fast, durable write.
+
+    --target is the foreign techne home directory (the directory that contains
+    techne.db, i.e. the value drain.py's TECHNE_HOME points at).  The db is
+    auto-created if the directory exists but the db does not.
+    """
+    import sys
+
+    from techne.config import Config
+    from techne.core.state import record_observation
+
+    if content is None:
+        content = sys.stdin.read()
+    content = content.strip()
+    if not content:
+        raise click.ClickException("deposit requires content (via --content or stdin)")
+
+    # Build a config targeting the foreign store.  Only db_path matters for deposit —
+    # distillation config lives in the distiller's own environment, not here.
+    # The caller's ctx.obj["config"] (local store) is deliberately NOT used as the
+    # base, keeping local and foreign configs fully independent.
+    foreign_config = Config()
+    foreign_config.db_path = Path(target) / "techne.db"
+
+    result = record_observation(
+        foreign_config,
+        session_id,
+        content,
+        tool_name=tool_name,
+        agent_identity=agent_identity,
+        tier=tier,
+    )
+    click.echo(
+        f"deposited session={result['session_id']} store={foreign_config.db_path} "
+        f"tool={tool_name} ({len(content)} chars)"
+    )
+
+
 @main.command("session-end")
 @click.argument("session_id")
 @click.option("--summary", default=None, help="Optional manual session summary")
