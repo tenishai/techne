@@ -403,6 +403,27 @@ def add_dependency(
         conn.close()
 
 
+def _add_dep_in_conn(
+    conn, dependent_id: int, trigger_id: int, kind: str = "derived_from"
+) -> None:
+    """Write one dependency edge inside a caller-owned transaction (no commit/close).
+
+    Idempotent (INSERT OR IGNORE). Sibling of add_dependency() for callers already
+    holding an open connection (e.g. promote_candidate's action dispatch in reflect.py)
+    so the edge write stays in the same atomic transaction as the knowledge row insert.
+    Self-edges are silently skipped rather than raising — the caller is iterating a list
+    and cannot raise per-item; the add_dependency() public API still raises for callers
+    that control individual ids. (techne#215)
+    """
+    if dependent_id == trigger_id:
+        return  # no self-edges; silent skip mirrors INSERT OR IGNORE spirit
+    conn.execute(
+        "INSERT OR IGNORE INTO knowledge_deps (dependent_id, trigger_id, kind) "
+        "VALUES (?, ?, ?)",
+        (dependent_id, trigger_id, kind),
+    )
+
+
 def _cascade_uncertain(conn, trigger_id: int) -> int:
     """Flip live (non-superseded, currently-current) dependents of *trigger_id* to
     `uncertain`. Operates on a caller-owned connection so supersede() can run it in
