@@ -387,3 +387,20 @@ def test_posture_absent_block_gives_defaults(tmp_path):
     cfg = Config.load(f)
     assert cfg.posture.mode == "observe"
     assert cfg.posture.cc_memory_detected is False
+
+
+def test_correction_reserve_frac_round_trip(tmp_path):
+    """correction_reserve_frac must survive save() → load() (mirrors the
+    recent_reserve_frac check in test_injection_and_staleness_round_trip)."""
+    cfg = Config()
+    cfg.injection.correction_reserve_frac = 0.15
+    out = tmp_path / "config.yaml"
+    cfg.save(out)
+    reloaded = Config.load(out)
+    assert reloaded.injection.correction_reserve_frac == 0.15
+
+
+def test_correction_reserve_frac_default():
+    """Default correction_reserve_frac is 0.3 (matches select_tier0_injection default)."""
+    cfg = Config()
+    assert cfg.injection.correction_reserve_frac == 0.3

@@ -478,3 +478,52 @@ class TestCorrectionPriority:
         ids = [r["id"] for r in select_tier0_injection(db_path, char_budget=tight)]
         assert corr_id in ids, "the correction must be protected by its reserved band"
         assert untagged_id not in ids, "the untagged early peer should be starved by newer facts"
+
+
+    def test_correction_band_ordered_by_eff_conf_fresh_before_decayed(self, db_path):
+        """Within the corrections band, rows are sorted by effective_confidence DESC
+        (techne#214 decay ordering). A freshly-confirmed correction surfaces before
+        a long-unconfirmed one at the same stored tier.
+
+        This verifies that _eff_conf is applied to correction_raw, not just the
+        other buckets. Both rows fit the budget; we assert ordering, not exclusion.
+        """
+        from techne.core.database import connect
+
+        # Insert decayed correction first so insertion order would pick it first
+        # if there were no eff_conf sort.
+        decayed_id = _seed(
+            db_path,
+            "DECAYED correction — inserted first",
+            type="fact",
+            tags="memory-type:correction",
+        )
+        fresh_id = _seed(
+            db_path,
+            "FRESH correction — inserted second",
+            type="fact",
+            tags="memory-type:correction",
+        )
+
+        conn = connect(db_path)
+        # Decayed: last confirmed 400 days ago (≫ 30-day half-life → eff_conf ≈ 0).
+        conn.execute(
+            "UPDATE knowledge SET last_confirmed_at = '2025-04-01 00:00:00' WHERE id = ?",
+            (decayed_id,),
+        )
+        # Fresh: last confirmed today.
+        conn.execute(
+            "UPDATE knowledge SET last_confirmed_at = '2026-07-05 00:00:00' WHERE id = ?",
+            (fresh_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        # Generous budget so both rows are selected; we only care about order.
+        rows = select_tier0_injection(db_path, char_budget=4000, half_life_days=30.0)
+        ids = [r["id"] for r in rows]
+        assert fresh_id in ids, "fresh correction must be selected"
+        assert decayed_id in ids, "decayed correction must also be selected (budget is generous)"
+        assert ids.index(fresh_id) < ids.index(decayed_id), (
+            "fresh correction (higher eff_conf) must render before decayed one"
+        )
