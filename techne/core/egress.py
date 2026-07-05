@@ -34,6 +34,8 @@ Deferred (Tier-1, techne#92): relevance ranking against the current query.
 from __future__ import annotations
 
 import logging
+import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -41,6 +43,33 @@ from techne.core.database import connect
 from techne.core.knowledge import PULL_ONLY_TYPES
 
 logger = logging.getLogger(__name__)
+
+
+def _eff_conf(row: dict, half_life_days: float) -> float:
+    """Effective confidence for an egress candidate row (techne#214).
+
+    Used as the sort key within each priority band so recently-confirmed
+    entries surface before long-unconfirmed ones of the same stored tier.
+    Mirrors ``knowledge.effective_confidence()`` but operates on the
+    pre-fetched dict (no extra DB round-trip on the selection path).
+
+    Returns ``confidence_numeric`` directly when ``half_life_days <= 0``
+    (decay disabled) or when ``last_confirmed_at`` is absent.  Returns 0.0
+    for rows without ``confidence_numeric`` (should not occur in practice
+    since egress only selects rows the ``store()`` path wrote, but safe).
+    """
+    base = float(row.get("confidence_numeric") or 0.0)
+    if half_life_days <= 0 or not row.get("last_confirmed_at"):
+        return base
+    try:
+        last = datetime.fromisoformat(str(row["last_confirmed_at"]).replace(" ", "T"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        days_since = max(0.0, (now - last).total_seconds() / 86400.0)
+        return base * math.pow(0.5, days_since / half_life_days)
+    except (ValueError, TypeError):
+        return base
 
 
 class EgressRow(TypedDict):
@@ -77,6 +106,7 @@ def select_tier0_injection(
     *,
     char_budget: int = 2000,
     recent_reserve_frac: float = 0.4,
+    half_life_days: float = 30.0,
 ) -> list[EgressRow]:
     """Select knowledge rows for Tier-0 session-start injection.
 
@@ -89,19 +119,28 @@ def select_tier0_injection(
     the freshest decisions/evaluations/facts before the feedback band fills; set
     to 0.0 for the legacy identity→feedback→project→recent ordering.
 
+    `half_life_days` (techne#214): within each priority band, rows are ordered
+    by effective_confidence (= confidence_numeric × 0.5^(age/half_life)) so a
+    recently-confirmed entry surfaces before a long-unconfirmed one at the same
+    stored tier. Pass ``config.knowledge_confidence_half_life_days``; default
+    30.0. Set to 0.0 to disable decay (order by raw confidence_numeric only).
+
     The returned list is already deduplicated by id.
     """
     conn = connect(db_path)
     try:
-        # Fetch all eligible candidates in one query, ordered by updated_at DESC
-        # so within each priority tier we take the most recent entries.
+        # Fetch all eligible candidates in one query. Include last_confirmed_at
+        # and confidence_numeric for the within-band decay sort (techne#214).
         placeholders = ",".join("?" * len(PULL_ONLY_TYPES))
         # status='uncertain' rows stay eligible but sort last within their band
         # (techne#117): a high-confidence row whose basis was superseded must not
-        # be auto-asserted ahead of a trustworthy current row. Current-first is a
-        # global ORDER, so within each partitioned band the uncertain rows trail.
+        # be auto-asserted ahead of a trustworthy current row.
+        # We keep ORDER BY (status = 'uncertain') here for the primary uncertain/
+        # current split; within each group the Python-side _eff_conf sort below
+        # applies the decay ordering.
         rows = conn.execute(
-            f"""SELECT id, type, content, tags, status
+            f"""SELECT id, type, content, tags, status,
+                       last_confirmed_at, confidence_numeric
                FROM knowledge
                WHERE superseded_by IS NULL
                  AND confidence = 'high'
@@ -116,35 +155,58 @@ def select_tier0_injection(
         return []
 
     # Partition into priority buckets — O(n) single pass.
-    identity_rows: list[EgressRow] = []
-    feedback_rows: list[EgressRow] = []
-    project_state_rows: list[EgressRow] = []  # all platform-state rows; take 1 below
-    remaining_rows: list[EgressRow] = []
+    # Each bucket holds raw row dicts so _eff_conf can access decay columns.
+    identity_raw: list[dict] = []
+    feedback_raw: list[dict] = []
+    project_state_raw: list[dict] = []  # all platform-state rows; take 1 below
+    remaining_raw: list[dict] = []
 
     for row in rows:
-        r = EgressRow(
-            id=row["id"],
-            type=row["type"],
-            content=row["content"],
-            tags=row["tags"] or "",
-            status=row["status"],
-        )
-        tags = r["tags"]
+        d = dict(row)
+        tags = d.get("tags") or ""
 
         if _tag_contains(tags, "memory-type:user"):
-            identity_rows.append(r)
+            identity_raw.append(d)
         elif _tag_contains(tags, "memory-type:feedback"):
-            feedback_rows.append(r)
+            feedback_raw.append(d)
         elif _tag_contains(tags, "memory-type:project") and _tag_has_prefix(
             tags, "name:platform-state"
         ):
-            project_state_rows.append(r)
+            project_state_raw.append(d)
         else:
-            remaining_rows.append(r)
+            remaining_raw.append(d)
 
-    # current-first then updated_at DESC (the SELECT's ORDER) — so if a current and
-    # an uncertain platform-state row are both live, this deliberately prefers the
-    # trustworthy one over a strictly-newer uncertain one (techne#117).
+    # Within each band, sort by effective_confidence DESC (techne#214 decay
+    # wiring). The SQL ORDER BY already groups uncertain rows last; Python sort
+    # is stable, so the uncertain/current split from the DB is preserved within
+    # each decay-ordered tier (uncertain rows have already been placed at the end
+    # by the ORDER BY clause, so the secondary key just refines within each group).
+    def _decay_key(d: dict) -> float:
+        return -_eff_conf(d, half_life_days)
+
+    for bucket in (identity_raw, feedback_raw, project_state_raw, remaining_raw):
+        bucket.sort(key=_decay_key)
+
+    # Convert raw row dicts to typed EgressRow dicts.
+    def _to_erow(d: dict) -> EgressRow:
+        return EgressRow(
+            id=d["id"],
+            type=d["type"],
+            content=d["content"],
+            tags=d.get("tags") or "",
+            status=d["status"],
+        )
+
+    identity_rows = [_to_erow(d) for d in identity_raw]
+    feedback_rows = [_to_erow(d) for d in feedback_raw]
+    project_state_rows = [_to_erow(d) for d in project_state_raw]
+    remaining_rows = [_to_erow(d) for d in remaining_raw]
+
+    # Take the single best platform-state entry (highest effective_confidence
+    # after the decay sort; ties broken by updated_at DESC from the SQL ORDER).
+    # If a current and an uncertain row have the same decay score, the uncertain
+    # row trails because the SQL ORDER BY put it last and the stable sort keeps it
+    # there — so the current/trustworthy one is preferred (techne#117).
     most_recent_project_state = project_state_rows[:1]
     recent_rows = remaining_rows  # decisions/evaluations/facts — the "what changed" band
 

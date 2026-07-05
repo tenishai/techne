@@ -105,7 +105,13 @@ def _techne_search(args: dict, config: Config) -> dict:
     query = args.get("query", "")
     table = args.get("table", "all")
     limit = args.get("limit", 20)
-    results = search(config.db_path, query, table=table, limit=limit)
+    results = search(
+        config.db_path,
+        query,
+        table=table,
+        limit=limit,
+        half_life_days=config.knowledge_confidence_half_life_days,
+    )
     return {"results": results, "count": len(results)}
 
 
@@ -196,7 +202,13 @@ def _techne_recall(args: dict, config: Config) -> dict:
     from techne.core.search import search
 
     topic = args.get("topic", "")
-    results = search(config.db_path, topic, table="all", limit=10)
+    results = search(
+        config.db_path,
+        topic,
+        table="all",
+        limit=10,
+        half_life_days=config.knowledge_confidence_half_life_days,
+    )
     # Graded staleness (techne#90): grade anchored knowledge results against the
     # current working tree and attach a freshness tag. Non-anchored results are
     # untouched; this fires only here, on the surfacing path — never on

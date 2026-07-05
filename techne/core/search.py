@@ -112,6 +112,54 @@ def _mmr_reorder(
 SearchTable = Literal["threads", "observations", "knowledge", "all"]
 
 
+def _knowledge_decay_score(
+    row: dict,
+    half_life_days: float,
+    now: datetime | None = None,
+) -> float:
+    """Decay-adjusted confidence score (0..1) for a knowledge row dict.
+
+    Used as a small additive tiebreak weight in ``_rerank`` (techne#214).
+    Implements the same formula as ``knowledge.effective_confidence()`` but
+    operates on a pre-fetched dict (no extra DB round-trip in the ranking hot
+    path).  Only knowledge rows carry ``confidence_numeric`` — for threads and
+    observations the function returns 1.0 so the decay weight has no effect.
+
+    ``half_life_days=0`` disables time decay and returns ``confidence_numeric``
+    directly (the uncertain penalty still applies).
+
+    Returns 1.0 when ``confidence_numeric`` is absent from the row dict so
+    that manually-constructed test candidates (and non-knowledge rows) are not
+    penalised.
+    """
+    if "confidence_numeric" not in row:
+        return 1.0  # No metadata → neutral; no effect on threads/observations.
+    base = float(row["confidence_numeric"])
+    if half_life_days <= 0:
+        value = base
+    else:
+        last_str = row.get("last_confirmed_at")
+        if not last_str:
+            value = base  # No confirmation timestamp → treat as fresh.
+        else:
+            try:
+                last = datetime.fromisoformat(str(last_str).replace(" ", "T"))
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                current = now or datetime.now(timezone.utc)
+                if current.tzinfo is None:
+                    current = current.replace(tzinfo=timezone.utc)
+                days_since = max(0.0, (current - last).total_seconds() / 86400.0)
+                value = base * (0.5 ** (days_since / half_life_days))
+            except (ValueError, TypeError):
+                value = base
+    # Mirror knowledge.py's UNCERTAIN_CONFIDENCE_PENALTY: an uncertain row's
+    # dependency was superseded, so it ranks below an otherwise-equal current row.
+    if row.get("status") == "uncertain":
+        value *= 0.5
+    return value
+
+
 def _recency_score(ts_str: str | None, half_life_days: float = 30.0) -> float:
     """Exponential decay from [0..1] where 1 = now, 0 = very old.
 
@@ -138,12 +186,25 @@ def _rerank(
     recency_weight: float,
     bm25_weight: float,
     mmr_lambda: float = 0.0,
+    confidence_decay_weight: float = 0.1,
+    half_life_days: float = 30.0,
 ) -> list[dict]:
-    """Two-stage reranker: (1) recency × BM25 combined score, then (2) optional MMR.
+    """Two-stage reranker: (1) recency × BM25 + decay combined score, then (2) optional MMR.
 
     Stage 1 — BM25 from FTS5 is negative (more negative = better match).
     Normalise to [0..1] across the candidate set so it can be linearly combined
-    with recency_score.  score = recency_weight * recency + bm25_weight * norm_bm25.
+    with recency_score.  score = recency_weight * recency + bm25_weight * norm_bm25
+    + confidence_decay_weight * effective_confidence.
+
+    The ``confidence_decay_weight`` term (techne#214) is deliberately modest
+    (default 0.1) — a tiebreak/penalty, not a primary signal. A deeply-decayed
+    'high' entry (e.g. unconfirmed for 2+ years) will score near zero on this
+    term while a fresh 'medium' scores ~0.06, allowing the fresh entry to
+    outrank the stale one when BM25/recency are otherwise equal.  Entries are
+    NEVER excluded by decay — this is purely an additive weight.  Rows without
+    ``confidence_numeric`` (threads, observations, manually-constructed test
+    dicts) receive a neutral 1.0, so the weight adds uniformly and does not
+    change relative ordering among non-knowledge rows.
 
     Stage 2 — Greedy MMR selection from the stage-1 ordered pool.  When
     mmr_lambda=0 (default) MMR is skipped and pure relevance ordering is kept.
@@ -179,6 +240,15 @@ def _rerank(
         ts = r.get("event_at") or r.get("updated_at") or r.get("timestamp")
         r["_recency"] = _recency_score(ts)
         r["_combined"] = recency_weight * r["_recency"] + bm25_weight * r["_norm_bm25"]
+        # Confidence decay tiebreak (techne#214): add a small additive bonus for
+        # freshly-confirmed knowledge entries. Deliberately modest so decay never
+        # dominates — see _knowledge_decay_score() docstring. Non-knowledge rows
+        # (no confidence_numeric) receive a neutral 1.0, adding uniformly so
+        # ordering among non-knowledge rows is unchanged.
+        if confidence_decay_weight > 0:
+            r["_combined"] += confidence_decay_weight * _knowledge_decay_score(
+                r, half_life_days
+            )
 
     candidates.sort(key=lambda x: -x["_combined"])
 
@@ -263,6 +333,7 @@ def _fts_match_rows(
     if table in ("knowledge", "all"):
         rows = conn.execute(
             """SELECT k.id, k.type, k.content, k.tags, k.confidence,
+                      k.confidence_numeric, k.last_confirmed_at, k.status,
                       k.source, k.updated_at,
                       bm25(knowledge_fts) AS rank
                FROM knowledge_fts f
@@ -282,6 +353,11 @@ def _fts_match_rows(
                     "content": r["content"][:500],
                     "tags": r["tags"],
                     "confidence": r["confidence"],
+                    # Decay metadata (techne#214): used by _rerank to compute
+                    # effective_confidence as a tiebreak signal.
+                    "confidence_numeric": r["confidence_numeric"],
+                    "last_confirmed_at": r["last_confirmed_at"],
+                    "status": r["status"],
                     "source": r["source"],
                     "updated_at": r["updated_at"],
                     "rank": r["rank"],
@@ -303,22 +379,31 @@ def search_fts(
     bm25_weight: float = 0.7,
     expansion_ratio: int = 2,
     mmr_lambda: float = 0.0,
+    confidence_decay_weight: float = 0.1,
+    half_life_days: float = 30.0,
 ) -> list[dict]:
     """Full-text search across techne tables.
 
     Fetches ``expansion_ratio * limit`` BM25 candidates per table, then
     applies a two-stage reranker:
-      Stage 1 — recency × BM25 combined score.
+      Stage 1 — recency × BM25 + decay-confidence combined score.
       Stage 2 — optional MMR diversity pass (skipped when mmr_lambda=0).
 
     Args:
-        recency_weight: Weight for exponential-decay recency score (0..1).
-        bm25_weight:    Weight for normalised BM25 score (0..1).
-        expansion_ratio: Candidate pool = expansion_ratio * limit per table.
-        mmr_lambda:      MMR diversity weight λ ∈ [0, 1].  0 = pure relevance
-                         (default, matches legacy behaviour).  Requires
-                         fastembed; degrades silently to relevance order if
-                         the dep is not installed.
+        recency_weight:          Weight for exponential-decay recency score (0..1).
+        bm25_weight:             Weight for normalised BM25 score (0..1).
+        expansion_ratio:         Candidate pool = expansion_ratio * limit per table.
+        mmr_lambda:              MMR diversity weight λ ∈ [0, 1].  0 = pure relevance
+                                 (default, matches legacy behaviour).  Requires
+                                 fastembed; degrades silently to relevance order if
+                                 the dep is not installed.
+        confidence_decay_weight: Small additive weight for effective_confidence()
+                                 tiebreak (techne#214).  Default 0.1 — deliberately
+                                 modest, decay is operational not accuracy-driving.
+                                 Set to 0.0 to disable decay entirely.
+        half_life_days:          Half-life for confidence decay, passed from
+                                 config.knowledge_confidence_half_life_days.
+                                 Default 30.0; 0.0 disables time decay.
     """
     fts_query = prepare_fts_query(query)
     if fts_query is None:
@@ -347,7 +432,15 @@ def search_fts(
         if table == "all":
             results.sort(key=lambda x: x.get("rank", 0))
 
-        results = _rerank(results, limit, recency_weight, bm25_weight, mmr_lambda=mmr_lambda)
+        results = _rerank(
+            results,
+            limit,
+            recency_weight,
+            bm25_weight,
+            mmr_lambda=mmr_lambda,
+            confidence_decay_weight=confidence_decay_weight,
+            half_life_days=half_life_days,
+        )
 
     finally:
         conn.close()
@@ -542,6 +635,7 @@ def search(
     table: SearchTable = "all",
     limit: int = 20,
     use_vectors: bool = True,
+    half_life_days: float = 30.0,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) fused via Reciprocal
     Rank Fusion.
@@ -561,7 +655,7 @@ def search(
     installed, vec tables empty, etc.), falls through to FTS-only —
     same as the legacy behavior.
     """
-    fts_results = search_fts(db_path, query, table=table, limit=limit)
+    fts_results = search_fts(db_path, query, table=table, limit=limit, half_life_days=half_life_days)
 
     if not use_vectors:
         return fts_results
