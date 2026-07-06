@@ -5,10 +5,13 @@ via `techne init`.
 """
 
 import json
+import logging
 import sys
 
 from techne import __version__
 from techne.config import Config
+
+log = logging.getLogger(__name__)
 
 # Server-level guidance surfaced to the agent at MCP initialize (the protocol's
 # `instructions` field). This is techne's one chance to teach an agent the memory
@@ -254,40 +257,74 @@ def _techne_recall(args: dict, config: Config) -> dict:
         merge_and_rank,
     )
 
-    local_results, remote_results = fan_out_search(
+    # Local recall MUST always succeed. Compute it first, standalone, so that a
+    # failure anywhere in the remote fan-out / dedup / detect / merge path degrades
+    # to local-only rather than losing the local results entirely. fan_out_search
+    # already guards each remote's open+query internally (one bad remote → skipped),
+    # but the pooling/detection steps below are wrapped too as defence in depth.
+    local_results = search(
         config.db_path,
-        config.connections,
         topic,
+        table="all",
         limit=10,
         half_life_days=config.knowledge_confidence_half_life_days,
-        recency_weight=config.search.recency_weight,
-        bm25_weight=config.search.bm25_weight,
+        include_archived=False,
     )
+    for r in local_results:
+        r["_store"] = "local"
+        r["_role"] = "local"
 
-    # Step B — content-hash dedup before the contradiction check
-    remote_deduped = _cross_store_dedup(local_results, remote_results)
+    merged = local_results
+    conflicts: list = []
+    try:
+        # Fan out to remotes only (local already computed above). fan_out_search
+        # recomputes local too, but we discard its copy and keep our own so a raise
+        # inside fan_out can never strand the already-good local set.
+        _, remote_results = fan_out_search(
+            config.db_path,
+            config.connections,
+            topic,
+            limit=10,
+            half_life_days=config.knowledge_confidence_half_life_days,
+            recency_weight=config.search.recency_weight,
+            bm25_weight=config.search.bm25_weight,
+        )
 
-    # Step C — cross-store contradiction detection (read-only; returns prompts)
-    conflicts = detect_cross_store_contradictions(
-        config.db_path,
-        local_results,
-        remote_deduped,
-        max_candidates=config.conflict.max_comparison_candidates,
-    )
+        # Step B — content-hash dedup before the contradiction check
+        remote_deduped = _cross_store_dedup(local_results, remote_results)
 
-    # Step D — merge + rank (per-type BM25 normalisation handles cross-store, #56)
-    merged = merge_and_rank(
-        local_results,
-        remote_deduped,
-        limit=10,
-        recency_weight=config.search.recency_weight,
-        bm25_weight=config.search.bm25_weight,
-        half_life_days=config.knowledge_confidence_half_life_days,
-    )
+        # Step C — cross-store contradiction detection (read-only; returns prompts)
+        conflicts = detect_cross_store_contradictions(
+            config.db_path,
+            local_results,
+            remote_deduped,
+            max_candidates=config.conflict.max_comparison_candidates,
+        )
 
-    # Freshness + uncertainty annotations on the merged set (local rows only have paths)
-    annotate_freshness(config.db_path, merged)
-    annotate_uncertain(config.db_path, merged)
+        # Step D — merge + rank (per-type BM25 normalisation handles cross-store, #56)
+        merged = merge_and_rank(
+            local_results,
+            remote_deduped,
+            limit=10,
+            recency_weight=config.search.recency_weight,
+            bm25_weight=config.search.bm25_weight,
+            half_life_days=config.knowledge_confidence_half_life_days,
+        )
+    except Exception:
+        log.warning(
+            "federation: fan-out/merge failed — degrading to local-only recall", exc_info=True
+        )
+        merged = local_results
+        conflicts = []
+
+    # Freshness + uncertainty annotations: LOCAL rows ONLY. Remote and local knowledge
+    # ids are both small sequential ints and collide as the common case — annotating a
+    # remote row against the local db by its (colliding) id would stamp a team fact with
+    # YOUR file provenance (anchor_path/freshness) and a spurious `uncertain` tag. The
+    # `_store == "local"` discriminator keeps annotation on rows the local db actually owns.
+    local_only = [r for r in merged if r.get("_store") == "local"]
+    annotate_freshness(config.db_path, local_only)
+    annotate_uncertain(config.db_path, local_only)
 
     out: dict = {
         "search_results": merged,
@@ -819,31 +856,43 @@ TOOLS = [
             "properties": {
                 "focus_content": {
                     "type": "string",
-                    "description": "The remote row's content (from federation_conflicts.focus_content).",
+                    "description": "The remote row's content (federation_conflicts.focus_content).",
                 },
                 "focus_store": {
                     "type": "string",
-                    "description": "The remote connection name (from federation_conflicts.focus_store).",
+                    "description": "The remote connection name (federation_conflicts.focus_store).",
                 },
                 "focus_event_at": {
                     "type": "string",
-                    "description": "The remote row's event_at for temporal tiebreak (from federation_conflicts.focus_event_at).",
+                    "description": (
+                        "The remote row's event_at for the temporal tiebreak "
+                        "(federation_conflicts.focus_event_at)."
+                    ),
                 },
                 "comparison_ids": {
                     "type": "array",
                     "items": {"type": "integer"},
-                    "description": "LOCAL knowledge row ids to compare against (from federation_conflicts.comparison_ids).",
+                    "description": (
+                        "LOCAL knowledge row ids to compare against "
+                        "(federation_conflicts.comparison_ids)."
+                    ),
                 },
                 "check_hash": {
                     "type": "string",
-                    "description": "Anti-re-proposal hash (from federation_conflicts.check_hash).",
+                    "description": "Anti-re-proposal hash (federation_conflicts.check_hash).",
                 },
                 "response": {
                     "type": "string",
                     "description": "Your JSON verdict array answering the conflict prompt.",
                 },
             },
-            "required": ["focus_content", "focus_store", "comparison_ids", "check_hash", "response"],
+            "required": [
+                "focus_content",
+                "focus_store",
+                "comparison_ids",
+                "check_hash",
+                "response",
+            ],
         },
     },
     {

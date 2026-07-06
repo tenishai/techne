@@ -24,7 +24,6 @@ from techne.config import Config, FederationConnectionSpec
 from techne.core.database import connect, init_db
 from techne.core.knowledge import store
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -331,7 +330,9 @@ class TestDetectsCrossStoreContradiction:
         finally:
             local_conn.close()
 
-        connections = {"team-archivist": FederationConnectionSpec(role="team", db_path=str(team_db))}
+        connections = {
+            "team-archivist": FederationConnectionSpec(role="team", db_path=str(team_db))
+        }
         local_results, remote_results = fan_out_search(
             local_db, connections, "database postgres sqlite", limit=10, half_life_days=30.0
         )
@@ -520,6 +521,51 @@ class TestIngestStagesPendingCandidate:
             "superseded_by must not be set — the candidate is pending, not promoted"
         )
 
+    def test_foreign_credential_redacted_in_decision_reason(self, tmp_path):
+        """A credential in the FOREIGN fact must be redacted in the stored decision_reason.
+
+        The team-newer branch interpolates focus_content into decision_reason for operator
+        display. _insert_federation_candidate redacts content/raw AND decision_reason, so a
+        credential-shaped token in the foreign fact is scrubbed everywhere it lands.
+        """
+        from techne.core.federation import federation_conflict_ingest
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        local_id = store(local_db, "use the old deploy key", type="fact", tags="deploy")
+
+        cfg = Config()
+        cfg.db_path = local_db
+
+        secret = "AKIAIOSFODNN7EXAMPLE"  # AWS access key id shape → redacted
+        counts = federation_conflict_ingest(
+            cfg,
+            focus_content=f"new deploy uses credential {secret} for the pipeline",
+            focus_store="team",
+            focus_event_at="2030-01-01T00:00:00",  # team newer → team-newer branch
+            comparison_ids=[local_id],
+            check_hash="",
+            response=json.dumps([{
+                "id": local_id,
+                "verdict": "SUPERSEDE",
+                "content": f"new deploy uses credential {secret}",
+                "reason": "rotated key",
+            }]),
+        )
+        assert counts["errors"] == 0
+
+        pending = _pending_federation_candidates(local_db)
+        assert len(pending) == 1
+        cand = pending[0]
+        # The raw secret must NOT appear in ANY persisted text column
+        assert secret not in (cand["decision_reason"] or ""), (
+            "Credential must be redacted in decision_reason (foreign content leak)"
+        )
+        assert secret not in (cand["content"] or "")
+        assert "<redacted:" in (cand["decision_reason"] or ""), (
+            "decision_reason should carry the redaction marker where the secret was"
+        )
+
     def test_local_newer_supersede_stages_discarded_marker(self, tmp_path):
         """SUPERSEDE verdict + local newer → discarded informational marker; no team write."""
         from techne.core.federation import federation_conflict_ingest
@@ -696,12 +742,22 @@ class TestReadOnlyRemoteUnderWAL:
             ro_conn.close()
 
     def test_no_schema_write_in_team_dir(self, tmp_path):
-        """Opening a WAL-mode db read-only must NOT create a new .db file in the team dir.
+        """Read-only open of a WAL-mode store: the team's MEMORY (db content + schema)
+        is never modified, and no new .db file is created.
 
         database.connect() calls _ensure_initialized() which would write schema into the
-        foreign dir. _open_remote_readonly() must not do this. We verify by recording the
-        set of .db files before the open and asserting none are added.
+        foreign dir. _open_remote_readonly() must not do this.
+
+        SIDECAR FINDING (documented in _open_remote_readonly): reading a WAL-mode store
+        under ?mode=ro DOES materialize transient `<db>-wal` / `<db>-shm` coordination
+        files (SQLite's required read mechanism for WAL), and they persist after close
+        because a read-only connection cannot checkpoint. This is NOT a memory write — the
+        main techne.db is byte-identical before/after. This test asserts exactly that
+        boundary: main db unchanged + no new .db file; sidecars, if any, are ONLY the
+        transient -wal/-shm (never a -journal, never a second .db).
         """
+        import hashlib
+
         from techne.core.federation import _open_remote_readonly
 
         team_dir = tmp_path / "team"
@@ -714,24 +770,48 @@ class TestReadOnlyRemoteUnderWAL:
         init_conn.execute("PRAGMA journal_mode=WAL")
         init_conn.commit()
         init_conn.close()
+        store(team_db, "a fact to read back", type="fact", tags="probe")
 
-        # Snapshot .db files before
+        def _hash(p):
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+
+        # Snapshot .db files + the main db content hash before
         db_files_before = {p.name for p in team_dir.iterdir() if p.suffix == ".db"}
         assert "techne.db" in db_files_before
+        main_hash_before = _hash(team_db)
 
         ro_conn = _open_remote_readonly(team_db)
         try:
-            # Run a simple read to exercise the connection
+            # Exercise the connection with a real content read (touches the WAL)
             ro_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            ro_conn.execute("SELECT count(*) FROM knowledge").fetchall()
         finally:
             ro_conn.close()
 
-        # No new .db files should have appeared
+        # 1. The team's MEMORY is untouched — main db byte-identical.
+        assert _hash(team_db) == main_hash_before, (
+            "read-only open must NOT modify the team's db content/schema"
+        )
+
+        # 2. No NEW .db file appeared (no schema write into a second store).
         db_files_after = {p.name for p in team_dir.iterdir() if p.suffix == ".db"}
-        new_db_files = db_files_after - db_files_before
-        assert not new_db_files, (
-            f"_open_remote_readonly must not create new .db files in the team dir. "
-            f"New files: {new_db_files}"
+        assert not (db_files_after - db_files_before), (
+            f"read-only open must not create new .db files. "
+            f"New: {db_files_after - db_files_before}"
+        )
+
+        # 3. Any sidecars that DID appear are ONLY the transient WAL coordination files
+        #    — never a rollback -journal (which would signal a non-WAL write attempt) and
+        #    never anything outside the -wal/-shm set.
+        all_after = {p.name for p in team_dir.iterdir()}
+        new_files = all_after - {p.name for p in team_dir.iterdir() if p.suffix == ".db"}
+        allowed_sidecars = {"techne.db-wal", "techne.db-shm"}
+        assert new_files <= allowed_sidecars, (
+            f"Only transient -wal/-shm sidecars are acceptable; got unexpected: "
+            f"{new_files - allowed_sidecars}"
+        )
+        assert "techne.db-journal" not in all_after, (
+            "a rollback -journal would indicate a non-WAL write attempt on the foreign store"
         )
 
     def test_team_fts_search_works_over_wal_db(self, tmp_path):
@@ -851,6 +931,191 @@ class TestForeignIdNeverFetchedLocally:
 
 
 # ---------------------------------------------------------------------------
+# 7. Broken remote degrades to local-only (availability — Prudence Important 1)
+# ---------------------------------------------------------------------------
+
+
+def _recall(cfg, topic):
+    """Call techne_recall via the MCP handler and return the parsed result dict."""
+    from techne.mcp_server import handle_request
+
+    resp = handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "techne_recall", "arguments": {"topic": topic}}},
+        cfg,
+    )
+    # tools/call wraps the handler result in content[0].text as JSON
+    assert "error" not in resp, f"recall must not error: {resp.get('error')}"
+    return json.loads(resp["result"]["content"][0]["text"])
+
+
+class TestBrokenRemoteDegradesToLocal:
+    """One bad remote must NOT break the operator's entire recall (Important 1).
+
+    ?mode=ro opens LAZILY — it succeeds on any existing file and only fails at first
+    execute(). So a wrong-schema / corrupt / unreachable remote raises inside the QUERY
+    block, which must be caught and degraded to local-only. These tests bite against the
+    pre-fix code (which had try/finally with no except on the query block).
+    """
+
+    def test_wrong_schema_remote_degrades_to_local(self, tmp_path):
+        """A team db that is a valid sqlite file but has no knowledge_fts (older techne)
+        raises 'no such table' at query time — recall must still return local results."""
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        store(local_db, "local fact: use postgres", type="fact", tags="datastore")
+
+        # A plain sqlite file with NO knowledge_fts table — ?mode=ro opens fine, the
+        # FTS query raises 'no such table: knowledge_fts'.
+        bad_db = tmp_path / "wrong_schema.db"
+        c = sqlite3.connect(str(bad_db))
+        c.execute("CREATE TABLE unrelated (x TEXT)")
+        c.commit()
+        c.close()
+
+        connections = {"bad-team": FederationConnectionSpec(role="team", db_path=str(bad_db))}
+
+        # Must NOT raise — degrades to local-only
+        local_results, remote_results = fan_out_search(
+            local_db, connections, "postgres datastore", limit=10, half_life_days=30.0
+        )
+        assert any("postgres" in (r.get("content") or "") for r in local_results), (
+            "Local results must survive a broken remote"
+        )
+        assert remote_results == [], "Broken remote must contribute no rows"
+
+    def test_nonexistent_remote_degrades_to_local(self, tmp_path):
+        """A nonexistent remote path (open fails) must degrade to local-only, not raise."""
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        store(local_db, "local fact: use redis", type="fact", tags="cache")
+
+        connections = {
+            "ghost": FederationConnectionSpec(
+                role="team", db_path=str(tmp_path / "does_not_exist.db")
+            )
+        }
+        local_results, remote_results = fan_out_search(
+            local_db, connections, "redis cache", limit=10, half_life_days=30.0
+        )
+        assert any("redis" in (r.get("content") or "") for r in local_results)
+        assert remote_results == []
+
+    def test_corrupt_remote_degrades_to_local(self, tmp_path):
+        """A corrupt db file (garbage bytes) raises at query time — degrade to local-only."""
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        store(local_db, "local fact: use kafka", type="fact", tags="queue")
+
+        corrupt = tmp_path / "corrupt.db"
+        corrupt.write_bytes(b"this is not a sqlite database at all \x00\x01\x02" * 20)
+
+        connections = {"corrupt": FederationConnectionSpec(role="team", db_path=str(corrupt))}
+        local_results, remote_results = fan_out_search(
+            local_db, connections, "kafka queue", limit=10, half_life_days=30.0
+        )
+        assert any("kafka" in (r.get("content") or "") for r in local_results)
+        assert remote_results == []
+
+    def test_recall_full_path_degrades_on_broken_remote(self, tmp_path):
+        """The full techne_recall MCP path returns local results even when a remote is
+        broken — local recall must never be lost to a federation failure."""
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        store(local_db, "local decision: adopt FastAPI", type="decision", tags="framework")
+
+        bad_db = tmp_path / "wrong.db"
+        c = sqlite3.connect(str(bad_db))
+        c.execute("CREATE TABLE nope (x TEXT)")
+        c.commit()
+        c.close()
+
+        cfg = Config()
+        cfg.db_path = local_db
+        cfg.connections = {
+            "bad": FederationConnectionSpec(role="team", db_path=str(bad_db)),
+        }
+
+        data = _recall(cfg, "FastAPI framework decision")
+        # Local results must be present despite the broken remote
+        assert any(
+            "FastAPI" in (r.get("content") or "") for r in data["search_results"]
+        ), "Local results must survive a broken remote in the full recall path"
+
+
+# ---------------------------------------------------------------------------
+# 8. Annotation must not cross the store boundary (Prudence Important 2)
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotationStoreBoundary:
+    """Remote and local knowledge ids collide (both small sequential ints). Annotating a
+    remote row against the LOCAL db by its (colliding) id would stamp a team fact with
+    YOUR file provenance. annotate_freshness/uncertain must run on LOCAL rows only.
+    """
+
+    def test_colliding_remote_id_not_annotated_with_local_provenance(self, tmp_path):
+        """Local row id=1 is anchored; team row id=1 is not. After recall, the team row
+        must NOT carry the local row's anchor_path/freshness/uncertain (id-collision)."""
+        local_db = tmp_path / "local.db"
+        team_db = tmp_path / "team.db"
+        _init_team_db(local_db)
+        _init_team_db(team_db)
+
+        # Local id=1, ANCHORED (so annotate_freshness would stamp anchor_path)
+        local_id = store(
+            local_db,
+            "local anchored fact about the database layer",
+            type="fact",
+            tags="datastore",
+            anchor="techne/core/database.py",
+        )
+        # Team id=1 (same int), NOT anchored, different content + tags (no contradiction)
+        team_id = store(
+            team_db,
+            "team fact about the caching layer using redis",
+            type="fact",
+            tags="cache",
+        )
+        assert local_id == team_id == 1, "Test needs the id collision to exist"
+
+        cfg = Config()
+        cfg.db_path = local_db
+        cfg.connections = {"team": FederationConnectionSpec(role="team", db_path=str(team_db))}
+
+        data = _recall(cfg, "database caching layer fact")
+
+        results = data["search_results"]
+        team_rows = [r for r in results if r.get("_store") == "team"]
+        assert team_rows, "Team row must be present in merged results"
+
+        for tr in team_rows:
+            assert "anchor_path" not in tr, (
+                "Team row must NOT inherit the local row's anchor_path (id-collision bug)"
+            )
+            assert "freshness" not in tr, (
+                "Team row must NOT inherit the local row's freshness annotation"
+            )
+            assert "uncertain" not in tr, (
+                "Team row must NOT inherit a local uncertain marker"
+            )
+
+        # And the LOCAL anchored row SHOULD still be annotated — proves annotation runs,
+        # just scoped to local rows.
+        local_rows = [r for r in results if r.get("_store") == "local"]
+        anchored_local = [r for r in local_rows if r.get("anchor_path")]
+        assert anchored_local, (
+            "The local anchored row must still receive its anchor_path annotation"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Config round-trip test
 # ---------------------------------------------------------------------------
 
@@ -897,6 +1162,7 @@ class TestConfigRoundTrip:
     def test_invalid_role_raises(self, tmp_path):
         """An invalid federation role raises ValueError on parse."""
         import yaml
+
         from techne.config import Config
 
         bad_config = {
@@ -915,6 +1181,7 @@ class TestConfigRoundTrip:
     def test_connections_empty_dict_not_serialized(self, tmp_path):
         """When connections is empty, the key is not written to config.yaml."""
         import yaml
+
         from techne.config import Config
 
         cfg = Config()

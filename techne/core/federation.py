@@ -43,14 +43,29 @@ log = logging.getLogger(__name__)
 def _open_remote_readonly(db_path: Path) -> sqlite3.Connection:
     """Open a remote techne.db read-only (sovereignty guard, techne#222 §3-A).
 
-    Uses the SQLite URI ?mode=ro flag so writes are physically impossible —
-    any INSERT/UPDATE/DELETE raises OperationalError: attempt to write a
-    readonly database. PRAGMA busy_timeout=3000 so a writer on the team store
-    doesn't immediately SQLITE_BUSY-fail a recall.
+    Uses the SQLite URI ?mode=ro flag so writes to the database CONTENT are
+    physically impossible — any INSERT/UPDATE/DELETE raises OperationalError:
+    attempt to write a readonly database. PRAGMA busy_timeout=3000 so a writer on
+    the team store doesn't immediately SQLITE_BUSY-fail a recall.
 
     **Do NOT** use techne.core.database.connect() for remote opens:
     connect() calls _ensure_initialized() which creates WAL + runs schema
-    migrations, writing into the foreign directory. ?mode=ro is the guard.
+    migrations, writing schema into the foreign directory. ?mode=ro is the guard.
+
+    SIDECAR CAVEAT (empirically verified — the proposal's "?mode=ro prevents WAL-file
+    creation" is imprecise): reading a WAL-mode store under ?mode=ro DOES materialize
+    transient `<db>-wal` and `<db>-shm` coordination files in the foreign directory,
+    and (because a read-only connection cannot checkpoint) they persist after close.
+    What ?mode=ro guarantees is that the team's MEMORY — the db content + schema — is
+    never modified (verified byte-identical before/after in tests). The -wal/-shm are
+    SQLite's required read-coordination mechanism for a WAL database; they carry no
+    memory content. Eliminating them entirely needs immutable=1, but immutable asserts
+    the file will not change while open — UNSAFE for a live team store being written
+    concurrently (the reader could see a torn/stale snapshot), which defeats the whole
+    reason the proposal chose WAL (concurrent readers + writer). So we accept the
+    transient sidecars as the price of consistent live reads. If the foreign dir is a
+    truly read-only mount, the open/read raises SQLITE_READONLY_CANTINIT — handled by
+    the caller's degrade-to-local-only guard in fan_out_search.
     """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.execute("PRAGMA busy_timeout=3000")
@@ -98,6 +113,25 @@ def _search_remote_knowledge(
             results = _fts_match_rows(
                 remote_conn, or_query, "knowledge", candidate_limit, include_archived=False
             )
+
+    # Enrich with the real event_at. The shared _fts_match_rows knowledge SELECT omits
+    # event_at (adding it there would change recency ranking for the LOCAL path too —
+    # out of scope), so knowledge rows would otherwise fall back to updated_at for the
+    # temporal tiebreak. The proposal's "later event_at wins" is load-bearing for the
+    # cross-store contradiction verdict, so we backfill event_at scoped to the remote
+    # (foreign) path only via one extra read-only query. IDs are trusted (from our own
+    # FTS result, never user input) so the interpolated IN-list is safe.
+    if results:
+        ids = [r["id"] for r in results]
+        placeholders = ",".join("?" for _ in ids)
+        event_by_id = {
+            row["id"]: row["event_at"]
+            for row in remote_conn.execute(
+                f"SELECT id, event_at FROM knowledge WHERE id IN ({placeholders})", ids
+            ).fetchall()
+        }
+        for r in results:
+            r["event_at"] = event_by_id.get(r["id"])
 
     return _rerank(results, limit, recency_weight, bm25_weight, half_life_days=half_life_days)
 
@@ -150,6 +184,15 @@ def fan_out_search(
         except Exception:
             log.warning("federation: failed to open remote %r at %s", conn_name, db_path)
             continue
+        # The QUERY block is guarded independently of the OPEN: ?mode=ro opens
+        # LAZILY — it succeeds on any existing file and only fails at first
+        # execute(). A wrong-schema remote (older techne with no knowledge_fts →
+        # "no such table"), a corrupt db, a store locked beyond busy_timeout, or a
+        # live-WAL store the RO reader can't init shared memory for
+        # (SQLITE_READONLY_CANTINIT) all raise HERE, not at open. Without this
+        # except, one bad remote would propagate out of the whole recall and
+        # discard the already-computed local results. Degraded local-only beats a
+        # hard failure — so we log + skip the bad remote and keep going.
         try:
             rows = _search_remote_knowledge(
                 remote_conn,
@@ -164,6 +207,13 @@ def fan_out_search(
                 r["_role"] = spec.role
             remote_results.extend(rows)
             log.debug("federation: %s returned %d knowledge row(s)", conn_name, len(rows))
+        except Exception:
+            log.warning(
+                "federation: query failed on remote %r at %s — skipping (local-only degrade)",
+                conn_name,
+                db_path,
+            )
+            continue
         finally:
             remote_conn.close()
 
@@ -302,6 +352,11 @@ def detect_cross_store_contradictions(
             store_name = r.get("_store", "remote")
             foreign_id = r.get("id")
             namespaced_id = f"{store_name}:{foreign_id}"
+            # NOTE (MVP, LOW): local_ids come from select_conflict_candidates(...)[:max],
+            # a truncated list. At scale the truncation set can vary between recalls (a
+            # different overlapping row falls inside the cap), so the same foreign-vs-local
+            # PAIR could hash differently and re-surface once. Acceptable at MVP scale;
+            # a stabler key (e.g. per-pair rather than per-group) is a fast-follow.
             local_ids = sorted(m["id"] for m in local_matches)
 
             remote_fp = content_fingerprint(r_proxy["content"])
@@ -353,12 +408,19 @@ def merge_and_rank(
 ) -> list[dict]:
     """Pool local + deduped remote results and re-rank.
 
-    _rerank's per-type BM25 normalisation (#56) handles cross-store
-    comparability — a team 'knowledge' row and a local 'knowledge' row are
-    normalised together within their type bucket. Different corpus sizes →
-    different BM25 magnitudes → normalisation makes them comparable within a
-    query. Same fix that handled cross-table (#56); cross-store is the same
-    shape. Do NOT invent additional normalisation here.
+    _rerank's per-type BM25 normalisation (#56) puts local and remote knowledge
+    rows into ONE min-max bucket so their (negative) BM25 magnitudes become
+    linearly combinable with recency/decay — without it the raw cross-store BM25
+    spread would swamp the other signals.
+
+    CAVEAT (LOW, ranking-quality only — NOT the same as #56): #56 normalised
+    cross-*table* rows drawn from ONE corpus. Here the two sets come from TWO
+    INDEPENDENT corpora (local + remote) with independent IDF / doc-length stats.
+    Min-maxing them into a single bucket means a systematically-weaker remote
+    corpus gets compressed toward the low end of the combined range — remote rows
+    can be under-ranked relative to a from-scratch cross-corpus normalisation.
+    This affects ordering only (never inclusion/exclusion), and true cross-corpus
+    BM25 calibration is out of MVP scope. Do NOT invent ad-hoc normalisation here.
     """
     from techne.core.search import _rerank
 
@@ -393,6 +455,12 @@ def _insert_federation_candidate(
 
     target_ids = LOCAL ids only (no foreign namespaced ids — promote_candidate
     must never try to look up a foreign id in the local db).
+
+    decision_reason is ALSO run through redact_credentials: the team-newer and
+    local-newer branches interpolate the FOREIGN fact's content into it for the
+    operator's display, so a credential in the foreign fact would otherwise be
+    scrubbed from `content` but persisted verbatim in `decision_reason`. Redact
+    at this one chokepoint so every branch is covered.
     """
     from techne.core.redaction import redact_credentials
     from techne.core.sleepdream import SYSTEM_SLEEP_SESSION
@@ -415,7 +483,7 @@ def _insert_federation_candidate(
             json.dumps(list(target_ids)),
             status,
             decided_by,
-            decision_reason,
+            redact_credentials(decision_reason) if decision_reason else decision_reason,
         ),
     )
 
@@ -477,18 +545,10 @@ def federation_conflict_ingest(
 
         decisions = parse_conflict_response(response)
 
-        # Build focus row as a dict from passed content (never _fetch_row by namespaced id).
-        # This is the id-namespace gotcha guard: we never call _fetch_row(conn, focus_id)
-        # because focus_id is a namespaced string like "team-archivist:42" with no local row.
-        focus_row = {
-            "id": f"{focus_store}:foreign",
-            "content": focus_content,
-            "event_at": focus_event_at,
-            "created_at": focus_event_at,
-            "type": "fact",
-            "confidence": "medium",
-        }
-
+        # The id-namespace gotcha guard: the focus (foreign) row is used ONLY via the
+        # passed focus_content / focus_event_at args — we NEVER _fetch_row the namespaced
+        # id ("team-archivist:42") from the local db, because it has no local row. Only
+        # the LOCAL comparison rows are fetched here.
         comp_by_id = {cid: _fetch_row(conn, cid) for cid in local_ids}
 
         if not decisions:
@@ -606,7 +666,7 @@ def federation_conflict_ingest(
                 _insert_federation_candidate(
                     conn,
                     action="add",
-                    content=f"(distinct — {focus_store} and local id={comp_id} are different topics)",
+                    content=f"(distinct — {focus_store} and local id={comp_id} differ in topic)",
                     ktype=comp_row.get("type", "fact"),
                     confidence="low",
                     target_ids=[comp_id],
