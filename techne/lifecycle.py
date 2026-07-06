@@ -125,32 +125,45 @@ def run_session_end(
     observations = get_observations(config.db_path, session_id)
     threads, scores = detect_summarize_with_metadata(observations, config)
 
+    # Compute parent links before opening the write connection — link_threads
+    # does read-only FTS queries on its own connection so there's no conflict.
+    parent_links = link_threads(threads, session_id, config.db_path, config)
+
     if scores:
         # Heuristic detector ran — persist the per-pair score breakdown so
         # `techne threads show` can read it back without re-running detection.
         boundary_a_indices = boundary_indices_from_segments(
             [t.observation_indices for t in threads]
         )
+        # Write thread_boundaries AND threads in ONE transaction so a crash
+        # between the two writes never leaves committed boundaries with no
+        # threads (#248). This mirrors redetect_threads exactly: one
+        # connection, commit=False on the intermediate writes, single commit
+        # at the end, rollback on any exception.
+        #
+        # Replace, don't accumulate. run_session_end fires once per turn
+        # (Claude Code's Stop hook, opencode's session.idle), so re-inserting
+        # the boundary set without clearing the prior one grows
+        # thread_boundaries unboundedly — the #79 backlog pathology on a
+        # different table (seen live: one session at 37k rows). DELETE+insert
+        # keeps it idempotent, mirroring redetect_threads.
         conn = connect(config.db_path)
         try:
-            # Replace, don't accumulate. run_session_end fires once per turn
-            # (Claude Code's Stop hook, opencode's session.idle), so re-inserting
-            # the boundary set without clearing the prior one grows
-            # thread_boundaries unboundedly — the #79 backlog pathology on a
-            # different table (seen live: one session at 37k rows). DELETE+insert
-            # keeps it idempotent, mirroring redetect_threads. Same transaction
-            # as save_boundaries (which commits) so there's no empty window.
             conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
-            save_boundaries(conn, session_id, scores, boundary_a_indices)
+            save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
             # Persist the observation count processed so external tooling (and
             # future incremental passes) can tell how far the detector has run.
             ext_key = f"heuristic_threads.{session_id}"
-            set_state(conn, ext_key, {"last_obs_count": len(observations)})
+            set_state(conn, ext_key, {"last_obs_count": len(observations)}, commit=False)
+            save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
-
-    parent_links = link_threads(threads, session_id, config.db_path, config)
-    save_threads(threads, session_id, config.db_path, parent_links=parent_links)
+    else:
+        save_threads(threads, session_id, config.db_path, parent_links=parent_links)
 
     aged = age_threads(config.db_path, config)
 
