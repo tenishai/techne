@@ -61,7 +61,8 @@ def summarize(tool_name: str, tool_input: dict, tool_output) -> str:
 def main():
     try:
         data = json.load(sys.stdin)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        print(f"techne: post_tool_use received invalid JSON on stdin — capture skipped: {exc}", file=sys.stderr)
         sys.exit(0)
 
     session_id = data.get("session_id", "")

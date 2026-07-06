@@ -14,7 +14,8 @@ from techne.core.state import save_checkpoint
 def main():
     try:
         data = json.load(sys.stdin)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        print(f"techne: pre_compact received invalid JSON on stdin — checkpoint skipped: {exc}", file=sys.stderr)
         data = {}
 
     session_id = data.get("session_id", "")

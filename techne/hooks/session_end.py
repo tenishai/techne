@@ -19,7 +19,8 @@ MIN_NEW_OBSERVATIONS = 10
 def main():
     try:
         data = json.load(sys.stdin)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        print(f"techne: session_end received invalid JSON on stdin — teardown skipped: {exc}", file=sys.stderr)
         data = {}
 
     session_id = data.get("session_id", "")
