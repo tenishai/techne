@@ -24,8 +24,13 @@ def get_state(conn: sqlite3.Connection, name: str) -> dict | None:
     return json.loads(row[0])
 
 
-def set_state(conn: sqlite3.Connection, name: str, payload: dict) -> None:
-    """Upsert *payload* for *name*. Commits immediately."""
+def set_state(conn: sqlite3.Connection, name: str, payload: dict, *, commit: bool = True) -> None:
+    """Upsert *payload* for *name*.
+
+    Commits immediately when *commit* is True (default).  Pass ``commit=False``
+    to keep the write in the caller's open transaction — the caller is then
+    responsible for commit/rollback.
+    """
     conn.execute(
         """INSERT INTO extension_state (name, payload_json, updated_at)
            VALUES (?, ?, ?)
@@ -34,4 +39,5 @@ def set_state(conn: sqlite3.Connection, name: str, payload: dict) -> None:
                updated_at   = excluded.updated_at""",
         (name, json.dumps(payload, separators=(",", ":")), int(time.time())),
     )
-    conn.commit()
+    if commit:
+        conn.commit()

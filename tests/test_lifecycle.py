@@ -682,3 +682,98 @@ def test_redetect_threads_never_stamps_ended_at_on_open_session(tmp_path):
     ).fetchone()
     conn.close()
     assert row["ended_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# Atomicity: thread_boundaries + threads must be written in one transaction
+# (techne#248).  This test bites against the pre-fix two-connection code
+# because save_boundaries committed on its own connection before save_threads
+# ran — a crash or raise between them left orphaned boundary rows.
+# ---------------------------------------------------------------------------
+
+
+def test_session_end_atomicity_boundaries_rolled_back_on_save_threads_failure(
+    tmp_path, monkeypatch
+):
+    """If save_threads raises, thread_boundaries must NOT be left committed.
+
+    Under the old two-connection code this test fails: save_boundaries
+    committed before save_threads was called, so a failure in save_threads
+    left orphaned boundary rows in the DB.
+
+    Under the fixed single-transaction code both writes roll back together,
+    so thread_boundaries is empty after the exception.
+    """
+    from datetime import datetime, timedelta
+
+    import pytest
+
+    from techne.config import Config
+    from techne.core.database import connect, init_db
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+
+    db_path = tmp_path / "atomicity.db"
+    init_db(db_path)
+    config = Config()
+    config.db_path = db_path
+    config.threads.detector = "heuristic"
+    config.threads.summarizer = "heuristic"
+
+    session_id = start_session(db_path, project_path="/proj", agent_identity="t")
+
+    # Two clusters separated by a 2-hour gap → heuristic produces boundary
+    # scores (scores is non-empty), so the if-scores branch executes.
+    base = datetime(2026, 1, 1, 12, 0)
+    for i in range(6):
+        ts = (base + timedelta(minutes=i)).isoformat()
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+            "VALUES (?, ?, ?, ?)",
+            (session_id, ts, "Edit", f"/proj/a.py line {i}"),
+        )
+        conn.commit()
+        conn.close()
+    for i in range(6):
+        ts = (base + timedelta(minutes=120 + i)).isoformat()
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+            "VALUES (?, ?, ?, ?)",
+            (session_id, ts, "Bash", f"echo step {i}"),
+        )
+        conn.commit()
+        conn.close()
+
+    # Patch save_threads to raise AFTER the boundary rows would have been
+    # written in the old two-connection code.  The import inside run_session_end
+    # resolves at call time from techne.core.threads, so patching that module
+    # attribute replaces the binding the function picks up.
+    import techne.core.threads as _threads_mod
+
+    original_save_threads = _threads_mod.save_threads
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated save_threads failure")
+
+    monkeypatch.setattr(_threads_mod, "save_threads", _boom)
+
+    with pytest.raises(RuntimeError, match="simulated save_threads failure"):
+        run_session_end(config, session_id, summary="done")
+
+    # The whole transaction must have rolled back — no orphaned boundary rows.
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM thread_boundaries WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert rows["c"] == 0, (
+        f"Expected 0 thread_boundary rows after rolled-back save_threads, "
+        f"got {rows['c']} — boundaries were committed before the rollback "
+        f"(non-atomic two-connection bug, techne#248)"
+    )
