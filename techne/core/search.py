@@ -452,6 +452,73 @@ def search_fts(
     return results
 
 
+def search_knowledge_conn(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int,
+    *,
+    half_life_days: float = 30.0,
+    recency_weight: float = 0.3,
+    bm25_weight: float = 0.7,
+    include_event_at: bool = True,
+) -> list[dict]:
+    """Public read-only knowledge-layer search over a caller-supplied connection.
+
+    Stable public entrypoint for the knowledge FTS + rerank path (techne#253).
+    Encapsulates the AND/OR-fallback search, optional ``event_at`` enrichment, and
+    ``_rerank`` so that callers (esp. federation's remote path) never reach into
+    search.py private helpers.  Returning rows with ``event_at`` populated means
+    the federation path no longer hand-backfills it — the temporal tiebreak for
+    cross-store contradiction verdicts is now owned here.
+
+    The caller owns the connection lifecycle (open/close).  This function never
+    calls ``database.connect()`` so it is safe to use with read-only remote
+    connections (?mode=ro) — calling ``connect()`` would write WAL + schema into
+    the foreign directory.
+
+    ``include_event_at`` (default True): when True, fetches ``event_at`` from the
+    ``knowledge`` table for every result row.  Set to False only in unit tests that
+    construct mock rows without a real SQLite connection.
+
+    table='knowledge' only — this function is intentionally knowledge-scoped.
+    For multi-table hybrid search use ``search()`` or ``search_fts()``.
+    """
+    fts_query = prepare_fts_query(query)
+    if fts_query is None:
+        return []
+
+    candidate_limit = limit * 2  # expansion_ratio=2 (matches search_fts default)
+    results = _fts_match_rows(conn, fts_query, "knowledge", candidate_limit, include_archived=False)
+
+    # #70: OR fallback when AND-pass returns nothing (same logic as search_fts)
+    if not results:
+        or_query = _build_or_fts_query(query)
+        if or_query:
+            results = _fts_match_rows(
+                conn, or_query, "knowledge", candidate_limit, include_archived=False
+            )
+
+    # Enrich with event_at from the base knowledge table. _fts_match_rows omits
+    # event_at from its knowledge SELECT (adding it there would change recency
+    # ranking on the local path too — out of scope). Federation needs event_at for
+    # the cross-store "later event_at wins" tiebreak, so we fetch it here, scoped
+    # to the connection (never touching the local db). IDs come from our own FTS
+    # result, never user input — the interpolated IN-list is safe.
+    if include_event_at and results:
+        ids = [r["id"] for r in results]
+        placeholders = ",".join("?" for _ in ids)
+        event_by_id = {
+            row["id"]: row["event_at"]
+            for row in conn.execute(
+                f"SELECT id, event_at FROM knowledge WHERE id IN ({placeholders})", ids
+            ).fetchall()
+        }
+        for r in results:
+            r["event_at"] = event_by_id.get(r["id"])
+
+    return _rerank(results, limit, recency_weight, bm25_weight, half_life_days=half_life_days)
+
+
 # Knowledge is the only vec table whose rows can be superseded after embedding,
 # and search_vec drops superseded rows AFTER the ANN k-nearest cut — so a stale
 # embedding eats a top-k slot and starves a live result. backfill_vectors purges

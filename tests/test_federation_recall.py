@@ -1348,3 +1348,463 @@ class TestConfigRoundTrip:
         assert "connections" not in raw, (
             "Empty connections must not be serialized (mirrors stores block behavior)"
         )
+
+
+# ---------------------------------------------------------------------------
+# 9. #254 — fan_out_search does NOT double-compute local when caller passes
+#           precomputed local_results
+# ---------------------------------------------------------------------------
+
+
+class TestNoDoubleLocalSearch:
+    """techne#254: fan_out_search must NOT re-run the local search when
+    local_results is provided by the caller."""
+
+    def test_fan_out_skips_local_search_when_precomputed(self, tmp_path, monkeypatch):
+        """When local_results is supplied, the local search() call inside
+        fan_out_search must NOT fire.
+
+        This bites against the pre-fix code where fan_out_search always ran
+        search() internally regardless of what the caller passed, causing the
+        local db to be searched twice per federated recall.
+
+        Spy approach: patch search in the search module itself (where federation.py
+        imports it lazily via ``from techne.core.search import search``).
+        """
+        from techne.core import search as search_mod
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        store(local_db, "redis is our caching layer", type="fact", tags="cache")
+
+        # Precompute local results as _techne_recall would — before patching
+        precomputed = search_mod.search(
+            local_db, "redis cache", table="all", limit=10,
+            half_life_days=30.0, include_archived=False,
+        )
+        for r in precomputed:
+            r["_store"] = "local"
+            r["_role"] = "local"
+
+        # Now patch search in the search module with a sentinel that raises if called.
+        # fan_out_search uses lazy ``from techne.core.search import search`` inside
+        # the ``if local_results is None`` branch — patching the module attribute
+        # intercepts it because Python resolves the name at call time within
+        # that branch.
+        def _must_not_be_called(*args, **kwargs):
+            raise AssertionError(
+                "fan_out_search called search() internally despite local_results being provided — "
+                "this is the techne#254 double-compute bug."
+            )
+
+        monkeypatch.setattr(search_mod, "search", _must_not_be_called)
+
+        # fan_out_search with precomputed local_results — must NOT enter the
+        # ``if local_results is None`` branch and therefore must never call search()
+        returned_local, _ = fan_out_search(
+            local_db,
+            connections={},
+            query="redis cache",
+            limit=10,
+            half_life_days=30.0,
+            local_results=precomputed,
+        )
+
+        # The returned local results must be our precomputed set (by identity)
+        assert returned_local is precomputed, (
+            "fan_out_search must return the passed-in local_results unchanged"
+        )
+
+    def test_fan_out_without_precomputed_still_runs_local_search(self, tmp_path, monkeypatch):
+        """Backward-compat: when local_results is NOT supplied (None),
+        fan_out_search still computes local results internally."""
+        from techne.core import search as search_mod
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        store(local_db, "kafka is our message queue", type="fact", tags="queue")
+
+        call_count = []
+        original = search_mod.search
+
+        def counting(db_path, query, **kwargs):
+            call_count.append(1)
+            return original(db_path, query, **kwargs)
+
+        monkeypatch.setattr(search_mod, "search", counting)
+
+        local_results, _ = fan_out_search(
+            local_db, connections={}, query="kafka queue", limit=10, half_life_days=30.0
+        )
+
+        assert len(call_count) >= 1, (
+            "Without precomputed local_results, fan_out_search must call search() internally"
+        )
+        assert any("kafka" in (r.get("content") or "") for r in local_results)
+
+    def test_merged_results_identical_with_precomputed_vs_without(self, tmp_path):
+        """End-to-end: the merged result set must be the same whether fan_out_search
+        computes local internally or uses a precomputed set from the caller.
+
+        This is the invariant that ensures the #254 fix doesn't change query output.
+        """
+        from techne.core.federation import (
+            _cross_store_dedup,
+            fan_out_search,
+            merge_and_rank,
+        )
+        from techne.core.search import search
+
+        local_db = tmp_path / "local.db"
+        team_db = tmp_path / "team.db"
+        _init_team_db(local_db)
+        _init_team_db(team_db)
+
+        store(local_db, "local: we use postgres for persistence", type="fact", tags="db")
+        store(team_db, "team: we switched to sqlite for simplicity", type="fact", tags="db")
+
+        connections = {"team": FederationConnectionSpec(role="team", db_path=str(team_db))}
+
+        # Path A: fan_out_search computes local internally (old behaviour)
+        local_a, remote_a = fan_out_search(
+            local_db, connections, "database postgres sqlite", limit=10, half_life_days=30.0
+        )
+        deduped_a = _cross_store_dedup(local_a, remote_a)
+        merged_a = merge_and_rank(
+            local_a, deduped_a, limit=10, recency_weight=0.3, bm25_weight=0.7, half_life_days=30.0
+        )
+
+        # Path B: caller precomputes local and passes it in (#254 fix path)
+        precomputed = search(
+            local_db, "database postgres sqlite", table="all", limit=10,
+            half_life_days=30.0, include_archived=False,
+        )
+        for r in precomputed:
+            r["_store"] = "local"
+            r["_role"] = "local"
+        local_b, remote_b = fan_out_search(
+            local_db, connections, "database postgres sqlite", limit=10, half_life_days=30.0,
+            local_results=precomputed,
+        )
+        deduped_b = _cross_store_dedup(local_b, remote_b)
+        merged_b = merge_and_rank(
+            local_b, deduped_b, limit=10, recency_weight=0.3, bm25_weight=0.7, half_life_days=30.0
+        )
+
+        # The content sets must be identical (order may differ due to independent sorts)
+        contents_a = sorted(r.get("content", "") for r in merged_a)
+        contents_b = sorted(r.get("content", "") for r in merged_b)
+        assert contents_a == contents_b, (
+            "Merged results must be identical whether local search is internal or precomputed. "
+            f"Path A: {contents_a}  Path B: {contents_b}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. #253 — schema-compat check and stable public entrypoint
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaCompatCheck:
+    """techne#253: remotes with drifted/incompatible knowledge schemas must be
+    skipped with a warning; local recall must still return."""
+
+    def test_drifted_remote_missing_column_is_skipped(self, tmp_path, caplog):
+        """A remote whose knowledge table is missing a required column (e.g.
+        event_at or confidence_numeric) must be skipped with a log.warning —
+        NOT raise, NOT silently mis-rank.
+
+        This bites against the pre-253 code which only caught missing TABLES
+        (no knowledge_fts) but let drifted-column remotes through to the query
+        where they might fail silently or raise cryptically.
+        """
+        import logging
+
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+        store(local_db, "local recall survives drifted remote", type="fact", tags="test")
+
+        # Build a remote db that has knowledge_fts but whose knowledge table
+        # is MISSING the event_at column — this is the "drifted schema" case.
+        drifted_db = tmp_path / "drifted.db"
+        conn = sqlite3.connect(str(drifted_db))
+        conn.execute("""
+            CREATE TABLE knowledge (
+                id INTEGER PRIMARY KEY,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tags TEXT,
+                confidence TEXT DEFAULT 'medium',
+                confidence_numeric REAL DEFAULT 0.6,
+                last_confirmed_at TIMESTAMP,
+                status TEXT DEFAULT 'current',
+                source TEXT,
+                updated_at TIMESTAMP,
+                superseded_by INTEGER
+                -- NOTE: event_at column is intentionally ABSENT (drifted schema)
+            )
+        """)
+        conn.execute("""
+            CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+                content, tags,
+                content=knowledge, content_rowid=id,
+                tokenize='porter unicode61'
+            )
+        """)
+        conn.execute(
+            "INSERT INTO knowledge (type, content, tags) VALUES ('fact', 'drifted remote fact', 'test')"
+        )
+        conn.execute(
+            "INSERT INTO knowledge_fts(rowid, content, tags) SELECT id, content, COALESCE(tags,'') FROM knowledge"
+        )
+        conn.commit()
+        conn.close()
+
+        connections = {
+            "drifted": FederationConnectionSpec(role="team", db_path=str(drifted_db))
+        }
+
+        with caplog.at_level(logging.WARNING, logger="techne.core.federation"):
+            local_results, remote_results = fan_out_search(
+                local_db, connections, "drifted remote recall", limit=10, half_life_days=30.0
+            )
+
+        # Local recall must survive
+        assert any("local" in (r.get("content") or "").lower() for r in local_results), (
+            "Local results must survive when a drifted-schema remote is skipped"
+        )
+        # Drifted remote must contribute NO rows
+        assert remote_results == [], (
+            "Drifted-schema remote must contribute no rows (skipped at schema-compat check)"
+        )
+        # A warning must have been emitted naming the remote
+        assert any(
+            "drifted" in rec.message and "incompatible" in rec.message.lower()
+            for rec in caplog.records
+            if rec.levelno >= logging.WARNING
+        ), (
+            "A warning naming 'drifted' and 'incompatible' must be logged when the remote is skipped. "
+            f"Logged warnings: {[r.message for r in caplog.records if r.levelno >= logging.WARNING]}"
+        )
+
+    def test_schema_compat_check_passes_for_full_schema(self, tmp_path):
+        """A fully-initialised techne db passes the schema-compat check."""
+        from techne.core.federation import _check_remote_schema_compat, _open_remote_readonly
+
+        db = tmp_path / "full.db"
+        _init_team_db(db)
+        store(db, "full schema fact", type="fact", tags="test")
+
+        conn = _open_remote_readonly(db)
+        try:
+            compat, reason = _check_remote_schema_compat(conn)
+        finally:
+            conn.close()
+
+        assert compat is True, f"Full techne db must pass compat check. reason={reason!r}"
+        assert reason == ""
+
+    def test_schema_compat_check_fails_for_missing_fts(self, tmp_path):
+        """A db without knowledge_fts fails the compat check with an informative reason."""
+        from techne.core.federation import _check_remote_schema_compat, _open_remote_readonly
+
+        no_fts = tmp_path / "no_fts.db"
+        c = sqlite3.connect(str(no_fts))
+        c.execute("CREATE TABLE knowledge (id INTEGER PRIMARY KEY, content TEXT)")
+        c.commit()
+        c.close()
+
+        conn = _open_remote_readonly(no_fts)
+        try:
+            compat, reason = _check_remote_schema_compat(conn)
+        finally:
+            conn.close()
+
+        assert compat is False
+        assert "knowledge_fts" in reason
+
+    def test_schema_compat_check_fails_for_missing_columns(self, tmp_path):
+        """A db with knowledge_fts but missing required columns fails the check."""
+        from techne.core.federation import _check_remote_schema_compat, _open_remote_readonly
+
+        partial = tmp_path / "partial.db"
+        c = sqlite3.connect(str(partial))
+        # knowledge_fts exists but knowledge table is missing event_at and confidence_numeric
+        c.execute("CREATE TABLE knowledge (id INTEGER PRIMARY KEY, content TEXT, type TEXT)")
+        c.execute(
+            "CREATE VIRTUAL TABLE knowledge_fts USING fts5(content, content=knowledge, content_rowid=id)"
+        )
+        c.commit()
+        c.close()
+
+        conn = _open_remote_readonly(partial)
+        try:
+            compat, reason = _check_remote_schema_compat(conn)
+        finally:
+            conn.close()
+
+        assert compat is False
+        assert "missing" in reason.lower()
+        # The reason must name at least one of the missing columns
+        assert any(col in reason for col in ("event_at", "confidence_numeric", "status")), (
+            f"Reason must name missing columns; got: {reason!r}"
+        )
+
+    def test_drifted_schema_degrade_preserves_good_remotes(self, tmp_path):
+        """When one remote has a drifted schema and another is good, only the
+        good remote contributes rows — local + good remote are unchanged."""
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        good_db = tmp_path / "good.db"
+        drifted_db = tmp_path / "drifted.db"
+        _init_team_db(local_db)
+        _init_team_db(good_db)
+
+        store(local_db, "local postgres fact", type="fact", tags="db")
+        store(good_db, "good remote sqlite fact", type="fact", tags="db")
+
+        # Drifted remote: has knowledge_fts but missing event_at
+        c = sqlite3.connect(str(drifted_db))
+        c.execute("""CREATE TABLE knowledge (
+            id INTEGER PRIMARY KEY, type TEXT, content TEXT, tags TEXT,
+            confidence TEXT, confidence_numeric REAL, last_confirmed_at TIMESTAMP,
+            status TEXT, source TEXT, updated_at TIMESTAMP, superseded_by INTEGER
+        )""")
+        c.execute("CREATE VIRTUAL TABLE knowledge_fts USING fts5(content, tags, content=knowledge, content_rowid=id)")
+        c.execute("INSERT INTO knowledge(type,content,tags) VALUES('fact','drifted content','db')")
+        c.execute("INSERT INTO knowledge_fts(rowid,content,tags) SELECT id,content,COALESCE(tags,'') FROM knowledge")
+        c.commit()
+        c.close()
+
+        connections = {
+            "good": FederationConnectionSpec(role="team", db_path=str(good_db)),
+            "drifted": FederationConnectionSpec(role="team", db_path=str(drifted_db)),
+        }
+
+        local_results, remote_results = fan_out_search(
+            local_db, connections, "postgres sqlite fact", limit=10, half_life_days=30.0
+        )
+
+        # Good remote must contribute
+        assert any("good remote" in (r.get("content") or "") for r in remote_results), (
+            "Good remote must still contribute rows when another remote has a drifted schema"
+        )
+        # Drifted remote must NOT contribute
+        assert not any("drifted content" in (r.get("content") or "") for r in remote_results), (
+            "Drifted-schema remote must not contribute any rows"
+        )
+        # Local must survive
+        assert any("postgres" in (r.get("content") or "") for r in local_results)
+
+
+class TestPublicKnowledgeConnEntrypoint:
+    """techne#253: search_knowledge_conn is a stable public entrypoint that
+    returns event_at so federation no longer hand-backfills it."""
+
+    def test_search_knowledge_conn_returns_event_at(self, tmp_path):
+        """search_knowledge_conn must return rows WITH event_at populated
+        (not None/absent) when the knowledge table has event_at set."""
+        import sqlite3 as _sqlite3
+
+        from techne.core.search import search_knowledge_conn
+
+        db = tmp_path / "test.db"
+        _init_team_db(db)
+
+        kid = store(db, "event_at test: production switched to postgres", type="fact", tags="db")
+
+        # Set a known event_at on the row
+        from techne.core.database import connect as _connect
+        c = _connect(db)
+        try:
+            c.execute("UPDATE knowledge SET event_at='2026-06-01 12:00:00' WHERE id=?", (kid,))
+            c.commit()
+        finally:
+            c.close()
+
+        conn = _sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = _sqlite3.Row
+        try:
+            results = search_knowledge_conn(
+                conn, "postgres production", limit=10, half_life_days=30.0
+            )
+        finally:
+            conn.close()
+
+        assert results, "search_knowledge_conn must return at least one result"
+        row = results[0]
+        assert "event_at" in row, (
+            "search_knowledge_conn must include event_at in returned rows "
+            "(this is the stable-seam guarantee from techne#253)"
+        )
+        assert row["event_at"] == "2026-06-01 12:00:00", (
+            f"event_at must match what was stored; got {row['event_at']!r}"
+        )
+
+    def test_search_knowledge_conn_returns_empty_on_no_match(self, tmp_path):
+        """search_knowledge_conn returns [] when nothing matches the query."""
+        import sqlite3 as _sqlite3
+
+        from techne.core.search import search_knowledge_conn
+
+        db = tmp_path / "empty.db"
+        _init_team_db(db)
+        store(db, "something completely different about bananas", type="fact", tags="food")
+
+        conn = _sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = _sqlite3.Row
+        try:
+            results = search_knowledge_conn(conn, "quantum entanglement physics", limit=5,
+                                            half_life_days=30.0)
+        finally:
+            conn.close()
+
+        assert results == []
+
+    def test_federation_remote_search_uses_event_at_from_entrypoint(self, tmp_path):
+        """End-to-end: remote results returned by fan_out_search carry event_at
+        (no longer hand-backfilled in _search_remote_knowledge — owned by the
+        public entrypoint search_knowledge_conn instead).
+
+        This verifies the stable-seam guarantee: if someone refactors
+        _fts_match_rows to remove event_at, the public entrypoint test above
+        catches it; this test verifies the federation path sees the same field.
+        """
+        from techne.core.federation import fan_out_search
+
+        local_db = tmp_path / "local.db"
+        team_db = tmp_path / "team.db"
+        _init_team_db(local_db)
+        _init_team_db(team_db)
+
+        kid = store(team_db, "team fact about deployments", type="fact", tags="deploy")
+        from techne.core.database import connect as _connect
+        c = _connect(team_db)
+        try:
+            c.execute(
+                "UPDATE knowledge SET event_at='2026-05-15 09:00:00' WHERE id=?", (kid,)
+            )
+            c.commit()
+        finally:
+            c.close()
+
+        connections = {"team": FederationConnectionSpec(role="team", db_path=str(team_db))}
+        _, remote_results = fan_out_search(
+            local_db, connections, "team deployments", limit=10, half_life_days=30.0
+        )
+
+        assert remote_results, "Remote must return at least one result"
+        team_row = next(
+            (r for r in remote_results if "deployments" in (r.get("content") or "")), None
+        )
+        assert team_row is not None
+        assert "event_at" in team_row, (
+            "Remote rows must carry event_at (populated by search_knowledge_conn, "
+            "not hand-backfilled in _search_remote_knowledge)"
+        )
+        assert team_row["event_at"] == "2026-05-15 09:00:00"
