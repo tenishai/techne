@@ -265,28 +265,6 @@ def _cluster_hash_cross(remote_fp: str, local_ids: list[int]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Anti-re-proposal guard (federation-conflict origin)
-# ---------------------------------------------------------------------------
-
-
-def _already_proposed_federation_conflict(conn, check_hash: str) -> bool:
-    """True if this cross-store conflict group already has a record in the local db.
-
-    Mirrors _already_proposed_conflict from conflict.py but uses
-    origin='federation-conflict' so regular conflict proposals don't interfere.
-    """
-    return (
-        conn.execute(
-            """SELECT 1 FROM knowledge_candidates
-               WHERE prompt_hash = ? AND origin = 'federation-conflict'
-                 AND status IN ('pending', 'promoted', 'discarded') LIMIT 1""",
-            (check_hash,),
-        ).fetchone()
-        is not None
-    )
-
-
-# ---------------------------------------------------------------------------
 # Cross-store contradiction detection (step C)
 # ---------------------------------------------------------------------------
 
@@ -319,7 +297,7 @@ def detect_cross_store_contradictions(
         "prompt":         str,        # conflict prompt for agent to answer
       }
     """
-    from techne.core.conflict import run_conflict_check, select_conflict_candidates
+    from techne.core.conflict import _already_proposed, run_conflict_check, select_conflict_candidates
     from techne.core.database import connect as _connect
     from techne.core.knowledge import content_fingerprint
 
@@ -362,7 +340,7 @@ def detect_cross_store_contradictions(
             remote_fp = content_fingerprint(r_proxy["content"])
             check_hash = _cluster_hash_cross(remote_fp, local_ids)
 
-            if _already_proposed_federation_conflict(conn, check_hash):
+            if _already_proposed(conn, check_hash, 'federation-conflict'):
                 log.debug(
                     "federation: skipping already-proposed conflict hash=%s", check_hash
                 )
@@ -429,66 +407,6 @@ def merge_and_rank(
 
 
 # ---------------------------------------------------------------------------
-# Candidate insertion helper (federation-conflict origin)
-# ---------------------------------------------------------------------------
-
-
-def _insert_federation_candidate(
-    conn,
-    *,
-    action: str,
-    content: str,
-    ktype: str,
-    confidence: str,
-    target_ids: list[int],
-    check_hash: str,
-    status: str,
-    decided_by: str | None,
-    decision_reason: str | None,
-    raw: str | None,
-) -> None:
-    """Insert a federation-conflict candidate into the LOCAL knowledge_candidates.
-
-    Mirrors _insert_conflict_candidate from conflict.py but uses
-    origin='federation-conflict' so the two candidate types are distinguishable
-    and their anti-re-proposal guards don't interfere.
-
-    target_ids = LOCAL ids only (no foreign namespaced ids — promote_candidate
-    must never try to look up a foreign id in the local db).
-
-    decision_reason is ALSO run through redact_credentials: the team-newer and
-    local-newer branches interpolate the FOREIGN fact's content into it for the
-    operator's display, so a credential in the foreign fact would otherwise be
-    scrubbed from `content` but persisted verbatim in `decision_reason`. Redact
-    at this one chokepoint so every branch is covered.
-    """
-    from techne.core.redaction import redact_credentials
-    from techne.core.sleepdream import SYSTEM_SLEEP_SESSION
-
-    conn.execute(
-        """INSERT INTO knowledge_candidates
-             (scope, type, content, tags, confidence, source_session_id,
-              source_thread_id, model_used, prompt_hash, raw_response,
-              action, target_ids, origin, status, decided_by, decision_reason)
-           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
-                   ?, ?, 'federation-conflict', ?, ?, ?)""",
-        (
-            ktype,
-            redact_credentials(content),
-            confidence,
-            SYSTEM_SLEEP_SESSION,
-            check_hash,
-            redact_credentials(raw) if raw else None,
-            action,
-            json.dumps(list(target_ids)),
-            status,
-            decided_by,
-            redact_credentials(decision_reason) if decision_reason else decision_reason,
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Federation conflict ingest (step E — the only writer, LOCAL db only)
 # ---------------------------------------------------------------------------
 
@@ -516,7 +434,13 @@ def federation_conflict_ingest(
 
     Writes the LOCAL db only. The team store is never touched.
     """
-    from techne.core.conflict import _effective_event_at, _fetch_row, parse_conflict_response
+    from techne.core.conflict import (
+        _already_proposed,
+        _effective_event_at,
+        _fetch_row,
+        _insert_candidate,
+        parse_conflict_response,
+    )
     from techne.core.database import connect
     from techne.core.knowledge import content_fingerprint
     from techne.core.sleepdream import _ensure_system_session
@@ -539,7 +463,7 @@ def federation_conflict_ingest(
 
     conn = connect(config.db_path)
     try:
-        if _already_proposed_federation_conflict(conn, ch):
+        if _already_proposed(conn, ch, 'federation-conflict'):
             counts["skipped"] += 1
             return counts
 
@@ -553,7 +477,7 @@ def federation_conflict_ingest(
 
         if not decisions:
             # No parseable verdicts — record discarded marker so we don't re-nag.
-            _insert_federation_candidate(
+            _insert_candidate(
                 conn,
                 action="add",
                 content="(no conflict — agent found no actionable verdict)",
@@ -565,6 +489,7 @@ def federation_conflict_ingest(
                 decided_by="agent-triage",
                 decision_reason="no-verdicts",
                 raw=None,
+                origin='federation-conflict',
             )
             conn.commit()
             return counts
@@ -609,7 +534,7 @@ def federation_conflict_ingest(
                         f"federation-conflict: team store ({focus_store}) has newer fact. "
                         f"Foreign content: {focus_content[:200]}. Reason: {reason or ''}"
                     )
-                    _insert_federation_candidate(
+                    _insert_candidate(
                         conn,
                         # supersede — not retire — because the foreign survivor has no
                         # local id. _apply_supersede mints a new local row from
@@ -627,6 +552,7 @@ def federation_conflict_ingest(
                         decided_by=None,
                         decision_reason=decision_reason,
                         raw=response,
+                        origin='federation-conflict',
                     )
                     log.debug(
                         "federation_ingest: staged pending SUPERSEDE for local id=%s"
@@ -640,7 +566,7 @@ def federation_conflict_ingest(
                         f"federation-conflict: local store is newer than team ({focus_store}). "
                         f"Team fact discarded (no push to foreign store). Reason: {reason or ''}"
                     )
-                    _insert_federation_candidate(
+                    _insert_candidate(
                         conn,
                         action="add",
                         content=f"(local newer than team {focus_store} — team is stale, no action)",
@@ -652,6 +578,7 @@ def federation_conflict_ingest(
                         decided_by="agent-triage",
                         decision_reason=decision_reason,
                         raw=response,
+                        origin='federation-conflict',
                     )
                     log.debug(
                         "federation_ingest: discarded (local newer, team=%s stale)", focus_store
@@ -659,7 +586,7 @@ def federation_conflict_ingest(
                 counts["supersede"] += 1
 
             elif verdict == "NOOP":
-                _insert_federation_candidate(
+                _insert_candidate(
                     conn,
                     action="add",
                     content=f"(noop — cross-store check: {focus_store} already known locally)",
@@ -671,11 +598,12 @@ def federation_conflict_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"noop: {reason or ''}",
                     raw=response,
+                    origin='federation-conflict',
                 )
                 counts["noop"] += 1
 
             elif verdict == "DISTINCT":
-                _insert_federation_candidate(
+                _insert_candidate(
                     conn,
                     action="add",
                     content=f"(distinct — {focus_store} and local id={comp_id} differ in topic)",
@@ -687,13 +615,14 @@ def federation_conflict_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"distinct: {reason or ''}",
                     raw=response,
+                    origin='federation-conflict',
                 )
                 counts["distinct"] += 1
 
             # UPDATE verdict: not routed for federation — we don't push merged content
             # to the team store. Log it as a discarded informational marker.
             elif verdict == "UPDATE":
-                _insert_federation_candidate(
+                _insert_candidate(
                     conn,
                     action="add",
                     content=f"(update — federation defers cross-store writes; "
@@ -706,6 +635,7 @@ def federation_conflict_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"update deferred (federation read-only path): {reason or ''}",
                     raw=response,
+                    origin='federation-conflict',
                 )
                 counts["update"] += 1
 
