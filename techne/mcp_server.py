@@ -277,9 +277,11 @@ def _techne_recall(args: dict, config: Config) -> dict:
     merged = local_results
     conflicts: list = []
     try:
-        # Fan out to remotes only (local already computed above). fan_out_search
-        # recomputes local too, but we discard its copy and keep our own so a raise
-        # inside fan_out can never strand the already-good local set.
+        # Pass the precomputed local_results so fan_out_search skips the local
+        # search entirely (techne#254 — avoids the 2× local search cost).  The
+        # rows are already tagged _store/role above; fan_out_search will NOT
+        # re-tag them.  fan_out_search returns our own list as its first element,
+        # but we already hold it — we only need remote_results here.
         _, remote_results = fan_out_search(
             config.db_path,
             config.connections,
@@ -288,6 +290,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
             half_life_days=config.knowledge_confidence_half_life_days,
             recency_weight=config.search.recency_weight,
             bm25_weight=config.search.bm25_weight,
+            local_results=local_results,
         )
 
         # Step B — content-hash dedup before the contradiction check

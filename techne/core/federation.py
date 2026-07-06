@@ -74,6 +74,63 @@ def _open_remote_readonly(db_path: Path) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
+# Schema-compat check (techne#253)
+# ---------------------------------------------------------------------------
+
+# Minimum columns required in the remote's ``knowledge`` table for the FTS + rerank
+# path to produce correct results.  _fts_match_rows SELECTs all of these; the
+# event_at enrichment in search_knowledge_conn also needs it.  A missing column
+# would raise OperationalError at query time (caught by the existing degrade guard),
+# but checking BEFORE the query makes the degrade reason explicit and prevents the
+# "silently wrong ranking" case where a drifted schema causes a partially-populated
+# row to be returned without error — e.g. a renamed column that SQLite silently
+# returns as NULL instead of raising.
+_REQUIRED_KNOWLEDGE_COLUMNS: frozenset[str] = frozenset({
+    "id", "type", "content", "tags", "confidence",
+    "confidence_numeric", "last_confirmed_at", "status",
+    "source", "updated_at", "superseded_by", "event_at",
+})
+
+
+def _check_remote_schema_compat(conn: sqlite3.Connection) -> tuple[bool, str]:
+    """Check whether a remote db has a compatible knowledge schema (techne#253).
+
+    Compat rule (two gates, both must pass):
+      1. ``knowledge_fts`` virtual table exists — without it no FTS search is
+         possible and the remote is useless to the recall path.
+      2. ``knowledge`` table contains every column in _REQUIRED_KNOWLEDGE_COLUMNS —
+         a missing/renamed column means the FTS JOIN SELECT would either fail or
+         silently return NULL for that field, causing mis-ranking with no error.
+
+    Returns ``(True, "")`` when compat, or ``(False, reason_str)`` on failure.
+    The caller should log a warning using ``reason_str`` and skip the remote.
+
+    Never raises — any unexpected exception is caught and returned as a failure
+    reason so the caller's degrade path is always taken on error.
+    """
+    try:
+        fts_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
+        ).fetchone()
+        if not fts_exists:
+            return False, "missing knowledge_fts table (remote schema too old or not a techne db)"
+
+        col_rows = conn.execute("PRAGMA table_info(knowledge)").fetchall()
+        if not col_rows:
+            return False, "knowledge table absent or PRAGMA returned no rows"
+
+        # PRAGMA table_info row shape: (cid, name, type, notnull, dflt_value, pk)
+        present_cols = {row[1] for row in col_rows}
+        missing = _REQUIRED_KNOWLEDGE_COLUMNS - present_cols
+        if missing:
+            return False, f"knowledge table missing required columns: {sorted(missing)}"
+
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, f"schema-compat check failed with unexpected error: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Remote FTS search (knowledge layer only)
 # ---------------------------------------------------------------------------
 
@@ -88,52 +145,28 @@ def _search_remote_knowledge(
 ) -> list[dict]:
     """FTS over a remote's knowledge layer using a pre-opened read-only connection.
 
-    Uses _fts_match_rows + _rerank directly (without calling search_fts) so we
-    never call database.connect() on the remote — that would write WAL + schema
-    into the foreign dir (see _open_remote_readonly docstring).
+    Delegates to ``search.search_knowledge_conn`` — the stable public entrypoint
+    (techne#253) — so federation never reaches into search.py private helpers.
+    ``search_knowledge_conn`` handles AND/OR-fallback FTS, event_at enrichment
+    (so we no longer hand-backfill it here), and rerank.
 
     table='knowledge' only — threads/observations are private raw capture and
     never federate (arch §2).
+
+    The caller must have already passed _check_remote_schema_compat; this function
+    does not re-check.
     """
-    from techne.core.search import _build_or_fts_query, _fts_match_rows, _rerank, prepare_fts_query
+    from techne.core.search import search_knowledge_conn
 
-    fts_query = prepare_fts_query(query)
-    if fts_query is None:
-        return []
-
-    candidate_limit = limit * 2  # expansion_ratio=2
-    results = _fts_match_rows(
-        remote_conn, fts_query, "knowledge", candidate_limit, include_archived=False
+    return search_knowledge_conn(
+        remote_conn,
+        query,
+        limit,
+        half_life_days=half_life_days,
+        recency_weight=recency_weight,
+        bm25_weight=bm25_weight,
+        include_event_at=True,
     )
-
-    # #70: OR fallback when AND-pass returns nothing
-    if not results:
-        or_query = _build_or_fts_query(query)
-        if or_query:
-            results = _fts_match_rows(
-                remote_conn, or_query, "knowledge", candidate_limit, include_archived=False
-            )
-
-    # Enrich with the real event_at. The shared _fts_match_rows knowledge SELECT omits
-    # event_at (adding it there would change recency ranking for the LOCAL path too —
-    # out of scope), so knowledge rows would otherwise fall back to updated_at for the
-    # temporal tiebreak. The proposal's "later event_at wins" is load-bearing for the
-    # cross-store contradiction verdict, so we backfill event_at scoped to the remote
-    # (foreign) path only via one extra read-only query. IDs are trusted (from our own
-    # FTS result, never user input) so the interpolated IN-list is safe.
-    if results:
-        ids = [r["id"] for r in results]
-        placeholders = ",".join("?" for _ in ids)
-        event_by_id = {
-            row["id"]: row["event_at"]
-            for row in remote_conn.execute(
-                f"SELECT id, event_at FROM knowledge WHERE id IN ({placeholders})", ids
-            ).fetchall()
-        }
-        for r in results:
-            r["event_at"] = event_by_id.get(r["id"])
-
-    return _rerank(results, limit, recency_weight, bm25_weight, half_life_days=half_life_days)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +182,8 @@ def fan_out_search(
     half_life_days: float,
     recency_weight: float = 0.3,
     bm25_weight: float = 0.7,
+    *,
+    local_results: list[dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Fan out recall to local + team/static stores.
 
@@ -158,23 +193,35 @@ def fan_out_search(
 
     Local uses the full hybrid search (all tables). Remotes use knowledge FTS only.
     Each remote connection is opened read-only and closed after the query.
-    Failed remote opens are logged and skipped (a degraded local-only result is
-    better than a hard failure).
-    """
-    from techne.core.search import search
+    Failed remote opens and schema-incompatible remotes are logged and skipped
+    (a degraded local-only result is better than a hard failure).
 
-    # Local — all tables, include_archived=False (same as existing recall)
-    local_results = search(
-        local_db,
-        query,
-        table="all",
-        limit=limit,
-        half_life_days=half_life_days,
-        include_archived=False,
-    )
-    for r in local_results:
-        r["_store"] = "local"
-        r["_role"] = "local"
+    ``local_results`` (techne#254): when the caller has already computed the local
+    search (e.g. mcp_server._techne_recall which runs it standalone first so it
+    survives any remote failure), pass it here to avoid the 2× local search cost.
+    When ``None`` (the default), local search is computed internally — unchanged
+    behaviour for any caller that doesn't hold a precomputed set.
+
+    Rows in the provided ``local_results`` must already be tagged with
+    ``_store="local"`` and ``_role="local"`` — _techne_recall does this before
+    passing them in.
+    """
+    # Local — all tables, include_archived=False (same as existing recall).
+    # When the caller passes a precomputed set we skip the search entirely.
+    if local_results is None:
+        from techne.core.search import search
+
+        local_results = search(
+            local_db,
+            query,
+            table="all",
+            limit=limit,
+            half_life_days=half_life_days,
+            include_archived=False,
+        )
+        for r in local_results:
+            r["_store"] = "local"
+            r["_role"] = "local"
 
     remote_results: list[dict] = []
     for conn_name, spec in connections.items():
@@ -184,15 +231,33 @@ def fan_out_search(
         except Exception:
             log.warning("federation: failed to open remote %r at %s", conn_name, db_path)
             continue
+
+        # Schema-compat check (techne#253): verify the remote has the knowledge
+        # columns we need BEFORE running the query.  The existing query-block
+        # except already catches "no such table: knowledge_fts" (lazy ?mode=ro
+        # open), but doesn't catch drifted columns — a renamed or missing column
+        # in an older remote would either raise OperationalError or, worse, return
+        # NULL values that silently mis-rank results.  By checking explicitly we
+        # emit a descriptive warning early and always degrade gracefully.
+        compat, reason = _check_remote_schema_compat(remote_conn)
+        if not compat:
+            log.warning(
+                "federation: skipping remote %r at %s — incompatible schema: %s",
+                conn_name,
+                db_path,
+                reason,
+            )
+            remote_conn.close()
+            continue
+
         # The QUERY block is guarded independently of the OPEN: ?mode=ro opens
         # LAZILY — it succeeds on any existing file and only fails at first
-        # execute(). A wrong-schema remote (older techne with no knowledge_fts →
-        # "no such table"), a corrupt db, a store locked beyond busy_timeout, or a
+        # execute().  A corrupt db, a store locked beyond busy_timeout, or a
         # live-WAL store the RO reader can't init shared memory for
-        # (SQLITE_READONLY_CANTINIT) all raise HERE, not at open. Without this
+        # (SQLITE_READONLY_CANTINIT) all raise HERE, not at open.  Without this
         # except, one bad remote would propagate out of the whole recall and
-        # discard the already-computed local results. Degraded local-only beats a
-        # hard failure — so we log + skip the bad remote and keep going.
+        # discard the already-computed local results.  Degraded local-only beats
+        # a hard failure — so we log + skip the bad remote and keep going.
         try:
             rows = _search_remote_knowledge(
                 remote_conn,
