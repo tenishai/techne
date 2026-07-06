@@ -41,6 +41,7 @@ from techne.core.database import connect
 from techne.core.documents import store_document
 from techne.core.extension_state import get_state, set_state
 from techne.core.librarian import librarian_db
+from techne.core.redaction import redact_credentials
 
 log = structlog.get_logger(__name__)
 
@@ -209,7 +210,7 @@ class GitHubIssuesSource:
                 library_db,
                 source_type="github_issue",
                 source_url=url,
-                content=body,
+                content=redact_credentials(body),
                 title=title,
                 meta=meta,
             )

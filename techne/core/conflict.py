@@ -344,7 +344,7 @@ def _insert_conflict_candidate(
             json.dumps(list(target_ids)),
             status,
             decided_by,
-            decision_reason,
+            redact_credentials(decision_reason) if decision_reason else decision_reason,
         ),
     )
 
