@@ -383,37 +383,21 @@ def _merge_in_conn(
 # --- dependency-driven staleness (techne#117) -------------------------------
 
 
-def add_dependency(
-    db_path: Path, dependent_id: int, trigger_id: int, kind: str = "derived_from"
-) -> None:
-    """Record that *dependent_id* depends on *trigger_id*. When the trigger is later
-    superseded, the cascade marks the dependent `uncertain`. Explicit edge written
-    at extraction/reconcile time (never inferred on the hot path); idempotent."""
-    if dependent_id == trigger_id:
-        raise ValueError("a knowledge entry cannot depend on itself")
-    conn = connect(db_path)
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO knowledge_deps (dependent_id, trigger_id, kind) "
-            "VALUES (?, ?, ?)",
-            (dependent_id, trigger_id, kind),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def _add_dep_in_conn(
     conn, dependent_id: int, trigger_id: int, kind: str = "derived_from"
 ) -> None:
     """Write one dependency edge inside a caller-owned transaction (no commit/close).
 
-    Idempotent (INSERT OR IGNORE). Sibling of add_dependency() for callers already
-    holding an open connection (e.g. promote_candidate's action dispatch in reflect.py)
-    so the edge write stays in the same atomic transaction as the knowledge row insert.
-    Self-edges are silently skipped rather than raising — the caller is iterating a list
-    and cannot raise per-item; the add_dependency() public API still raises for callers
-    that control individual ids. (techne#215)
+    Idempotent (INSERT OR IGNORE). The sole mechanism for writing dep edges — called
+    only from promote_candidate's dream-promote dispatch (_apply_add in reflect.py)
+    so the edge write stays in the same atomic transaction as the knowledge row insert
+    (techne#215). Self-edges are silently skipped (dependent_id == trigger_id).
+
+    Design decision (techne#251, 2026-07-06): dependency edges are created only on the
+    dream-promote path. Supersession is replacement, not derivation, so no dep-edge is
+    written on the conflict/supersede path. The former public add_dependency() API was
+    removed as dead code (zero non-test callers); revisit if agent-declared dependencies
+    become a concrete need.
     """
     if dependent_id == trigger_id:
         return  # no self-edges; silent skip mirrors INSERT OR IGNORE spirit

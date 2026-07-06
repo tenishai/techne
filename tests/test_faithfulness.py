@@ -585,3 +585,155 @@ def test_faithfulness_emit_default_cap_is_bounded(config):
 
     assert isinstance(DEFAULT_MAX_CANDIDATES, int)
     assert DEFAULT_MAX_CANDIDATES > 0
+
+
+# ---------------------------------------------------------------------------
+# Promote soft gate (techne#252) — faithfulness gate enforced-by-default
+# ---------------------------------------------------------------------------
+
+
+def _insert_unfaithful_candidate(
+    db, *, target_ids: list[int], content: str, action: str = "merge"
+) -> int:
+    """Insert a pending candidate and immediately annotate it as explicitly unfaithful."""
+    cid = _insert_candidate(db, target_ids=target_ids, content=content, action=action)
+    annotate_faithfulness(db, cid, ok=False, warning="dropped the Python-only constraint")
+    return cid
+
+
+def test_promote_refuses_unfaithful_merge(config):
+    """An unfaithful merge candidate is REFUSED at promote (gate fires, candidate stays pending).
+
+    This test MUST FAIL against origin/main (which promotes without checking faithfulness).
+    """
+    from techne.core.reflect import FaithfulnessGateError, promote_candidate
+
+    db = config.db_path
+    a = store(db, "Richard exclusively uses Python for scripting", type="fact")
+    b = store(db, "All automation scripts are Python", type="fact")
+    cid = _insert_unfaithful_candidate(db, target_ids=[a, b], content="Richard writes automation scripts")
+
+    with pytest.raises(FaithfulnessGateError, match="flagged unfaithful"):
+        promote_candidate(db, cid)
+
+    # Candidate must remain pending — nothing was applied.
+    row = _get_candidate(db, cid)
+    assert row["status"] == "pending", "gate must not change candidate status"
+
+
+def test_promote_refuses_unfaithful_supersede(config):
+    """Same gate fires for supersede action, not just merge."""
+    from techne.core.reflect import FaithfulnessGateError, promote_candidate
+
+    db = config.db_path
+    a = store(db, "project uses Postgres", type="fact")
+    cid = _insert_unfaithful_candidate(
+        db, target_ids=[a], content="project uses SQLite", action="supersede"
+    )
+
+    with pytest.raises(FaithfulnessGateError):
+        promote_candidate(db, cid)
+
+    row = _get_candidate(db, cid)
+    assert row["status"] == "pending"
+
+
+def test_promote_force_overrides_faithfulness_gate(config):
+    """force=True bypasses the gate — the same unfaithful merge candidate promotes."""
+    from techne.core.reflect import promote_candidate
+
+    db = config.db_path
+    a = store(db, "Richard exclusively uses Python for scripting", type="fact")
+    b = store(db, "All automation scripts are Python", type="fact")
+    cid = _insert_unfaithful_candidate(db, target_ids=[a, b], content="Richard writes scripts")
+
+    new_id = promote_candidate(db, cid, force=True)
+    assert new_id is not None, "force=True must promote successfully"
+
+    row = _get_candidate(db, cid)
+    assert row["status"] == "promoted"
+
+
+def test_promote_faithful_candidate_passes_gate(config):
+    """A faithful candidate (faithfulness_ok=1) promotes normally — gate does not fire."""
+    from techne.core.reflect import promote_candidate
+
+    db = config.db_path
+    a = store(db, "Richard uses Python", type="fact")
+    b = store(db, "Python is the default language", type="fact")
+    cid = _insert_candidate(db, target_ids=[a, b], content="Richard uses Python (the default)")
+    annotate_faithfulness(db, cid, ok=True, warning=None)
+
+    new_id = promote_candidate(db, cid)
+    assert new_id is not None
+    row = _get_candidate(db, cid)
+    assert row["status"] == "promoted"
+
+
+def test_promote_unchecked_candidate_passes_gate(config):
+    """An unchecked candidate (faithfulness_ok IS NULL) promotes normally — gate does not fire."""
+    from techne.core.reflect import promote_candidate
+
+    db = config.db_path
+    a = store(db, "Richard prefers concise responses", type="fact")
+    b = store(db, "terse replies are preferred", type="fact")
+    cid = _insert_candidate(db, target_ids=[a, b], content="Richard prefers concise/terse responses")
+    # No annotation — faithfulness_ok stays NULL
+
+    new_id = promote_candidate(db, cid)
+    assert new_id is not None
+    row = _get_candidate(db, cid)
+    assert row["status"] == "promoted"
+
+
+def test_promote_gate_does_not_fire_for_add_action_unfaithful(config):
+    """action='add' is NOT gated even if faithfulness_ok=0 (gate only covers merge/supersede)."""
+    from techne.core.reflect import promote_candidate
+
+    db = config.db_path
+    # Insert an add candidate (no target_ids — add has no source rows)
+    conn = connect(db)
+    try:
+        conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES ('system:reflect')")
+        cur = conn.execute(
+            """INSERT INTO knowledge_candidates
+                 (scope, type, content, confidence, source_session_id, model_used,
+                  prompt_hash, action, origin)
+               VALUES ('knowledge', 'fact', 'a new add fact', 'medium', 'system:reflect',
+                       'agent', 'ph-add', 'add', 'reflect')"""
+        )
+        cid = cur.lastrowid
+        conn.execute(
+            "UPDATE knowledge_candidates SET faithfulness_ok = 0 WHERE id = ?", (cid,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Must not raise — the gate is restricted to merge/supersede
+    new_id = promote_candidate(db, cid)
+    assert new_id is not None
+
+
+def test_cli_promote_force_flag_threads_through(config, monkeypatch):
+    """CLI --force flag reaches promote_candidate(force=True) and overcomes the gate."""
+    from click.testing import CliRunner
+    from techne.cli import main as cli
+    from techne.config import Config as TechneConfig
+
+    monkeypatch.setattr(TechneConfig, "load", classmethod(lambda cls: config))
+    db = config.db_path
+    a = store(db, "source fact A", type="fact")
+    b = store(db, "source fact B", type="fact")
+    cid = _insert_unfaithful_candidate(db, target_ids=[a, b], content="dropped A claim")
+
+    runner = CliRunner()
+    # Without --force: gate fires, exit code != 0
+    result_no_force = runner.invoke(cli, ["reflect", "promote", str(cid)])
+    assert result_no_force.exit_code != 0
+    assert "flagged unfaithful" in result_no_force.output
+
+    # With --force: gate bypassed, promote succeeds
+    result_force = runner.invoke(cli, ["reflect", "promote", str(cid), "--force"])
+    assert result_force.exit_code == 0
+    assert "Promoted" in result_force.output

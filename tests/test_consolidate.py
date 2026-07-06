@@ -17,7 +17,7 @@ import pytest
 from techne.config import Config
 from techne.core.database import connect, init_db
 from techne.core.knowledge import (
-    add_dependency,
+    _add_dep_in_conn,
     get,
     merge_into,
     store,
@@ -93,7 +93,14 @@ def test_merge_into_cascades_dependents_to_uncertain(config):
     a = store(db, "trigger fact", type="fact")
     b = store(db, "trigger fact dup", type="fact")
     derived = store(db, "depends on the trigger", type="fact")
-    add_dependency(db, dependent_id=derived, trigger_id=a)
+    # Write dep edge directly — add_dependency() was removed as dead code in #251;
+    # use _add_dep_in_conn inside a short-lived connection for test setup.
+    conn = connect(db)
+    try:
+        _add_dep_in_conn(conn, dependent_id=derived, trigger_id=a)
+        conn.commit()
+    finally:
+        conn.close()
     merge_into(db, [a, b], "the trigger fact", type="fact", confidence="high")
     assert _status(db, derived) == "uncertain"
 

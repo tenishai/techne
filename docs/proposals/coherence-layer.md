@@ -94,9 +94,19 @@ From a source read of the current code (`techne/core/{knowledge,database,search,
 
 `knowledge_deps` + `_cascade_uncertain` are built and dormant. Populate edges from the D1 path: when a supersession or update references a prior entry, write a `(dependent, trigger, kind)` edge. Then superseding a trigger correctly flips its live dependents to `uncertain` in production. **This is techne's differentiator** — dependency-aware supersession, which mem0/Graphiti/mem0 do not do.
 
-### D4 — Consolidation faithfulness gate
+### D4 — Consolidation faithfulness gate *(resolved: soft gate, #252)*
 
-TRUSTMEM (arxiv:2606.25161) shows naive LLM writes to memory produce **40%+ omission, 79% corruption, 50% hallucination**. techne's candidate-staging (review before promote) is already the right instinct. Add a light **faithfulness check** on `merge`/`supersede` candidates before promotion: does the replacement content preserve the load-bearing claims of its sources (coverage/preservation)? Cheap — a verification prompt, or a source-vs-result diff surfaced at `techne reflect review`.
+TRUSTMEM (arxiv:2606.25161) shows naive LLM writes to memory produce **40%+ omission, 79% corruption, 50% hallucination**. techne's candidate-staging (review before promote) is already the right instinct. A **faithfulness check** runs on `merge`/`supersede` candidates before promotion — the agent answers a prompt asking whether the replacement content preserves all load-bearing claims of its sources (coverage/preservation), and the verdict (`faithfulness_ok` 1/0/NULL, `faithfulness_warning`) is stored on the candidate row.
+
+**Resolved behavior (techne#252, 2026-07-06) — SOFT GATE, enforced by default, operator-overridable:**
+
+- `promote_candidate` checks `faithfulness_ok` for `merge`/`supersede` candidates *before* touching the candidate's status.
+- If `faithfulness_ok == 0` (explicitly checked and flagged unfaithful) and `force=False` (the default): promotion is **refused** — a `FaithfulnessGateError` is raised and the candidate stays `pending`. The error message cites the stored `faithfulness_warning` so the operator can see exactly what was flagged.
+- The operator can override with `--force` (CLI: `techne reflect promote <id> --force`) after reviewing the warning. The same `force=True` keyword is available on the Python API.
+- Unchecked candidates (`faithfulness_ok IS NULL`) and faithful candidates (`== 1`) always promote normally — the gate only blocks explicitly-flagged-unfaithful `merge`/`supersede`.
+- Non-gated actions (`add`, `retire`) are never blocked regardless of `faithfulness_ok`.
+
+This closes the doc-vs-code gap: the check was previously computed and stored but never enforced at promote time.
 
 ### D5 — Readability + schema-as-living-document *(Karpathy lifts)*
 
