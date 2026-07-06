@@ -12,10 +12,13 @@ thread detection and session teardown must complete regardless.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from techne.config import Config
+
+log = logging.getLogger(__name__)
 from techne.core._resident import extract_json_array
 from techne.core._resident import prompt_hash as _prompt_hash
 from techne.core.database import connect
@@ -421,6 +424,12 @@ def ingest_reflection_response(
                 _mark_promoted(config.db_path, cand_id, promoted_id)
                 counts["candidates_promoted"] += 1
         except Exception:
+            log.exception(
+                "ingest_reflection_response: failed to insert/promote candidate"
+                " (session=%s thread=%s)",
+                session_id,
+                thread_id,
+            )
             counts["errors"] += 1
     return counts
 
@@ -468,6 +477,9 @@ def reflect_on_session(
         try:
             generate_fn = _make_generate_fn(reflect_config)
         except Exception:
+            log.exception(
+                "reflect_on_session: could not build generate_fn (session=%s)", session_id
+            )
             result["errors"] += 1
             return result
 
@@ -486,6 +498,11 @@ def reflect_on_session(
         try:
             raw = generate_fn(prompt)
         except Exception:
+            log.exception(
+                "reflect_on_session: LLM call failed (session=%s thread_num=%s)",
+                session_id,
+                t.thread_num,
+            )
             result["errors"] += 1
             continue
         result["threads_reflected"] += 1
