@@ -177,7 +177,7 @@ def end_session(
             f"""UPDATE sessions SET ended_at = CURRENT_TIMESTAMP, {column} = ?,
                     summary_llm_source = COALESCE(?, summary_llm_source)
                 WHERE id = ?""",
-            (summary or None, llm_src, session_id),
+            (redact_credentials(summary) if summary else None, llm_src, session_id),
         )
         conn.commit()
     finally:
@@ -207,7 +207,7 @@ def set_session_summary(
             f"""UPDATE sessions SET {column} = ?,
                     summary_llm_source = COALESCE(?, summary_llm_source)
                 WHERE id = ?""",
-            (summary or None, llm_src, session_id),
+            (redact_credentials(summary) if summary else None, llm_src, session_id),
         )
         conn.commit()
     finally:
@@ -468,6 +468,19 @@ def save_checkpoint(
     (or when session_start is not configured).
     """
     import json
+
+    # Redact each bash command string in recent_commands before persisting.
+    # These are raw shell commands extracted from the transcript and may
+    # contain credentials passed as CLI arguments or env-style assignments.
+    # A shallow copy avoids mutating the caller's dict.
+    if "recent_commands" in data:
+        cmds = data["recent_commands"]
+        if isinstance(cmds, list):
+            data = dict(data)
+            data["recent_commands"] = [
+                redact_credentials(cmd) if isinstance(cmd, str) else cmd
+                for cmd in cmds
+            ]
 
     conn = connect(db_path)
     try:

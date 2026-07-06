@@ -22,6 +22,7 @@ from techne.core.state import (
     platform_breakdown,
     provenance_tag,
     save_checkpoint,
+    set_session_summary,
     start_session,
 )
 from techne.core.threads import (
@@ -119,6 +120,35 @@ class TestSessions:
         session = get_session(db_path, sid)
         assert session["ended_at"] is not None
         assert session["summary"] == "Test complete"
+
+    def test_end_session_summary_redacted(self, db_path):
+        """#244: end_session must redact credentials in the summary column (techne#244)."""
+        sid = start_session(db_path)
+        # HuggingFace token in the LLM-generated session summary — uses the hf_
+        # pattern added in #243.
+        end_session(
+            db_path,
+            sid,
+            summary="Uploaded model; token hf_abcdefghijklmnopqrstuvwx was used",
+        )
+        session = get_session(db_path, sid)
+        assert "hf_abcdefghijklmnopqrstuvwx" not in session["summary"]
+        assert "<redacted:hf-token>" in session["summary"]
+
+    def test_set_session_summary_redacted(self, db_path):
+        """#244: set_session_summary must redact credentials in the summary column."""
+        sid = start_session(db_path)
+        # Google API key in the compaction summary — uses the AIzaSy pattern added in #243.
+        set_session_summary(
+            db_path,
+            sid,
+            "Compaction: called Maps API with AIzaSyAbcdefghijklmnopqrstuvwxyz1234567",
+            source="llm",
+            summary_llm_source="compaction",
+        )
+        session = get_session(db_path, sid)
+        assert "AIzaSyAbcdefghijklmnopqrstuvwxyz1234567" not in session["summary_llm"]
+        assert "<redacted:google-api-key>" in session["summary_llm"]
 
     def test_active_session(self, db_path):
         sid = start_session(db_path)
@@ -324,6 +354,40 @@ class TestCheckpoints:
         save_checkpoint(db_path, sid, "compact", {"n": 2})
         cp = get_latest_checkpoint(db_path, sid)
         assert cp["data"]["n"] == 2
+
+    def test_save_checkpoint_recent_commands_redacted(self, db_path):
+        """#244: recent_commands in checkpoint data must be redacted at write time (techne#244).
+
+        Bearer token in a curl command is the highest-value sink — uses the bearer
+        pattern added in #243.
+        """
+        sid = start_session(db_path)
+        cmd_with_secret = "curl -H 'Authorization: Bearer ya29.longOpaqueBearerToken1234567890x' https://api.example.com"
+        save_checkpoint(
+            db_path,
+            sid,
+            "compact",
+            {
+                "recent_commands": [cmd_with_secret, "ls -la"],
+                "last_task": "fetch data from API",
+            },
+        )
+        cp = get_latest_checkpoint(db_path, sid)
+        assert cp is not None
+        commands = cp["data"]["recent_commands"]
+        # The token must not appear in persisted data
+        assert "ya29.longOpaqueBearerToken1234567890x" not in commands[0]
+        assert "<redacted:bearer>" in commands[0]
+        # Non-sensitive command and other keys must be unchanged
+        assert commands[1] == "ls -la"
+        assert cp["data"]["last_task"] == "fetch data from API"
+
+    def test_save_checkpoint_no_recent_commands_key(self, db_path):
+        """save_checkpoint with no recent_commands key works without error (no mutation)."""
+        sid = start_session(db_path)
+        save_checkpoint(db_path, sid, "auto", {"last_task": "just work", "files_modified": []})
+        cp = get_latest_checkpoint(db_path, sid)
+        assert cp["data"]["last_task"] == "just work"
 
 
 class TestResumeContext:

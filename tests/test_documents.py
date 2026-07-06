@@ -639,6 +639,40 @@ class TestGitHubIssuesSource:
         assert "all" in called_cmd
         assert "--json" in called_cmd
 
+    def test_issue_body_redacted_at_store(self, github_source, lib_db):
+        """#244: issue body must be redacted before landing in documents.content
+        (techne#244). GitHub calls store_document directly, bypassing library.index_document's
+        redaction wrapper — redact_credentials(body) was added to close that gap.
+
+        Uses the Google API key pattern from #243 to provide a high-confidence
+        signal that goes through the new code path.
+        """
+        issue_with_secret = [
+            {
+                "number": 99,
+                "title": "Update Maps integration",
+                "body": (
+                    "The Maps widget broke after rotating the key. "
+                    "New key: AIzaSyAbcdefghijklmnopqrstuvwxyz1234567"
+                ),
+                "url": "https://github.com/acme/testrepo/issues/99",
+                "state": "OPEN",
+                "labels": [],
+                "updatedAt": "2024-03-01T00:00:00Z",
+            }
+        ]
+        with patch("techne.sync.github_issues.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = json.dumps(issue_with_secret)
+            mock_run.return_value.stderr = ""
+            github_source.initial_walk()
+
+        docs = list_documents(lib_db, source_type="github_issue")
+        assert len(docs) == 1
+        stored_content = get_document(lib_db, docs[0]["id"])["content"]
+        assert "AIzaSyAbcdefghijklmnopqrstuvwxyz1234567" not in stored_content
+        assert "<redacted:google-api-key>" in stored_content
+
 
 def test_search_documents_sanitizes_fts_query(db_path):
     # hyphenated/operator-ish terms must not crash FTS5 (regression).

@@ -25,6 +25,7 @@ from pathlib import Path
 from techne.config import Config
 from techne.core.database import connect
 from techne.core.knowledge import CONFIDENCE_NUMERIC
+from techne.core.redaction import redact_credentials
 
 CARD_TYPE = "document_card"
 
@@ -134,7 +135,7 @@ def fill_card_summary(db_path: Path, card_id: int, summary: str) -> bool:
                SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP,
                    last_confirmed_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
-            (summary, tags, card_id),
+            (redact_credentials(summary), tags, card_id),
         )
         conn.commit()
         return True
