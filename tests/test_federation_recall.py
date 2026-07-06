@@ -4,7 +4,7 @@ Mirrors test_conflict.py patterns. Six test groups:
   1. local_only_unchanged        — no connections → recall returns local-only, identical shape
   2. merges_team_results         — team connection → merged results include rows from both stores
   3. detects_cross_store_contradiction — sqlite-vs-postgres scenario surfaces correctly
-  4. ingest_stages_pending_candidate  — SUPERSEDE → pending retire; local-newer → discarded
+  4. ingest_stages_pending_candidate  — SUPERSEDE → pending supersede; local-newer → discarded
   5. read_only_remote_under_WAL  — WAL-mode team db opens read-only; no schema write
   6. foreign_id_never_fetched_locally — namespaced focus id never _fetch_row'd from local db
 
@@ -463,13 +463,13 @@ class TestDetectsCrossStoreContradiction:
 
 
 class TestIngestStagesPendingCandidate:
-    """Ingest paths: SUPERSEDE + team-newer → pending retire; local-newer → discarded.
+    """Ingest paths: SUPERSEDE + team-newer → pending supersede; local-newer → discarded.
 
     The local knowledge row must NOT be auto-applied in any case.
     """
 
-    def test_team_newer_supersede_stages_pending_retire(self, tmp_path):
-        """SUPERSEDE verdict + team newer → pending 'retire' candidate in LOCAL db.
+    def test_team_newer_supersede_stages_pending_supersede(self, tmp_path):
+        """SUPERSEDE verdict + team newer → pending 'supersede' candidate in LOCAL db.
 
         The local knowledge row is still live (not auto-applied).
         """
@@ -502,16 +502,20 @@ class TestIngestStagesPendingCandidate:
         assert counts["errors"] == 0
         assert counts["supersede"] == 1
 
-        # A pending 'retire' candidate must exist in the LOCAL db
+        # A pending 'supersede' candidate must exist in the LOCAL db.
+        # The action must be 'supersede' (not 'retire') because the foreign survivor
+        # has no local id — _apply_retire requires two LOCAL ids [old, survivor] and
+        # would ValueError with only one. _apply_supersede mints a new local row from
+        # the content and points the stale local row's superseded_by at it. (techne#245)
         pending = _pending_federation_candidates(local_db)
         assert len(pending) == 1, f"Expected 1 pending candidate, got {pending}"
         cand = pending[0]
-        assert cand["action"] == "retire"
+        assert cand["action"] == "supersede"
         assert cand["status"] == "pending"
         assert cand["origin"] == "federation-conflict"
 
         target_ids = json.loads(cand["target_ids"])
-        assert local_id in target_ids, "Pending retire must target the LOCAL row id"
+        assert local_id in target_ids, "Pending supersede must target the LOCAL row id"
 
         # CRITICAL: the local knowledge row must NOT be auto-applied (still live)
         assert _knowledge_status(local_db, local_id) != "superseded", (
@@ -519,6 +523,155 @@ class TestIngestStagesPendingCandidate:
         )
         assert _knowledge_superseded_by(local_db, local_id) is None, (
             "superseded_by must not be set — the candidate is pending, not promoted"
+        )
+
+    def test_team_newer_supersede_promote_succeeds(self, tmp_path):
+        """Promoting the federation SUPERSEDE candidate succeeds end-to-end (techne#245).
+
+        This is the bug-bite test: before the fix, action='retire' with one target_id
+        raised ValueError('retire candidate needs exactly two target_ids'). After the
+        fix, action='supersede' mints a new local row from the team content and sets
+        superseded_by on the stale local row.
+
+        Assertions:
+          - promote_candidate does NOT raise
+          - the stale local row's superseded_by is now non-NULL
+          - a new live knowledge row exists carrying the team's content
+        """
+        from techne.core.knowledge import get
+        from techne.core.reflect import promote_candidate
+
+        from techne.core.federation import federation_conflict_ingest
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+
+        team_content = "we switched to sqlite — much simpler for this workload"
+        local_id = store(local_db, "use postgres for all services", type="fact", tags="datastore")
+
+        cfg = Config()
+        cfg.db_path = local_db
+
+        counts = federation_conflict_ingest(
+            cfg,
+            focus_content=team_content,
+            focus_store="team-archivist",
+            focus_event_at="2030-01-01T00:00:00",  # unambiguously newer
+            comparison_ids=[local_id],
+            check_hash="",
+            response=json.dumps([{
+                "id": local_id,
+                "verdict": "SUPERSEDE",
+                "content": team_content,
+                "reason": "team adopted sqlite in 2026",
+            }]),
+        )
+        assert counts["errors"] == 0
+        assert counts["supersede"] == 1
+
+        # Exactly one pending supersede candidate
+        pending = _pending_federation_candidates(local_db)
+        assert len(pending) == 1
+        assert pending[0]["action"] == "supersede", (
+            "Staged action must be 'supersede', not 'retire' — before fix this was 'retire' "
+            "which would raise ValueError on promote (two target_ids required but only one "
+            "provided). (techne#245)"
+        )
+
+        # --- Promote: must NOT raise ---
+        cand_id = pending[0]["id"]
+        new_id = promote_candidate(local_db, cand_id, decided_by="test", decision_reason="fix#245")
+
+        # --- Post-promote assertions ---
+        assert new_id is not None, "promote_candidate must return a new knowledge.id"
+
+        # The stale local row must now be retired (superseded_by set)
+        stale_row = get(local_db, local_id)
+        assert stale_row is not None
+        assert stale_row.get("superseded_by") is not None, (
+            "The stale local row must have superseded_by set after promote (was None = bug)"
+        )
+        assert stale_row["superseded_by"] == new_id, (
+            f"superseded_by must point at the newly minted row ({new_id})"
+        )
+
+        # A new live row must exist carrying the team's content
+        new_row = get(local_db, new_id)
+        assert new_row is not None, f"New knowledge row id={new_id} must exist after promote"
+        assert new_row.get("superseded_by") is None, "New row must be live (not superseded)"
+        assert team_content in (new_row.get("content") or ""), (
+            f"New row must carry the team's content. Got: {new_row.get('content')!r}"
+        )
+
+    def test_temporal_tiebreak_iso_t_separator_normalized(self, tmp_path):
+        """ISO 'T' separator in focus_event_at must compare correctly vs SQLite space separator.
+
+        Bug (techne#245): 'T' (0x54) > ' ' (0x20) in ASCII, so without normalization an ISO
+        timestamp '2026-01-01T00:00:00' compares as GREATER than '2026-01-01 01:00:00'
+        (space-sep, one hour later) because the comparison short-circuits at position 10.
+        This flips the tiebreak: the EARLIER team fact would be deemed 'newer', causing
+        an incorrect pending supersede instead of a discarded marker.
+
+        After the fix: both sides are normalized (T→space) so '2026-01-01 00:00:00' <
+        '2026-01-01 01:00:00' → local is newer → discarded marker, no pending candidate.
+        """
+        from techne.core.federation import federation_conflict_ingest
+        from techne.core.database import connect
+
+        local_db = tmp_path / "local.db"
+        _init_team_db(local_db)
+
+        local_id = store(local_db, "use postgres now", type="fact", tags="datastore")
+
+        # Set local event_at to 2026-01-01 01:00:00 (space-separated, SQLite format)
+        # so it is 1 hour NEWER than the team's 2026-01-01T00:00:00 (ISO format).
+        local_conn = connect(local_db)
+        try:
+            local_conn.execute(
+                "UPDATE knowledge SET event_at='2026-01-01 01:00:00' WHERE id=?", (local_id,)
+            )
+            local_conn.commit()
+        finally:
+            local_conn.close()
+
+        cfg = Config()
+        cfg.db_path = local_db
+
+        # Team event_at is ISO "T" format, and is 1 hour EARLIER than local.
+        # Without the fix: '2026-01-01T00:00:00' >= '2026-01-01 01:00:00' is True
+        # (because T > space at char 10) → incorrectly stages a pending supersede.
+        # With the fix: '2026-01-01 00:00:00' >= '2026-01-01 01:00:00' is False
+        # (correct, team is earlier) → discarded marker, zero pending candidates.
+        counts = federation_conflict_ingest(
+            cfg,
+            focus_content="use sqlite instead",
+            focus_store="team-archivist",
+            focus_event_at="2026-01-01T00:00:00",  # ISO format, 1 hour BEFORE local
+            comparison_ids=[local_id],
+            check_hash="",
+            response=json.dumps([{
+                "id": local_id,
+                "verdict": "SUPERSEDE",
+                "content": "use sqlite instead",
+                "reason": "team prefers sqlite",
+            }]),
+        )
+
+        assert counts["errors"] == 0
+        assert counts["supersede"] == 1
+
+        # Local is newer → must produce a DISCARDED marker, not a pending supersede
+        pending = _pending_federation_candidates(local_db)
+        assert len(pending) == 0, (
+            f"Local is newer (2026-01-01 01:00:00 > 2026-01-01T00:00:00 after normalization) "
+            f"so no pending candidate should be staged. Got {pending}. "
+            "Without the T→space normalization fix this would be 1 (incorrect team-newer path)."
+        )
+
+        all_cands = _all_federation_candidates(local_db)
+        assert len(all_cands) == 1
+        assert all_cands[0]["status"] == "discarded", (
+            "The candidate must be a discarded informational marker (local is newer)"
         )
 
     def test_foreign_credential_redacted_in_decision_reason(self, tmp_path):
