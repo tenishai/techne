@@ -267,20 +267,29 @@ def parse_conflict_response(raw: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _already_proposed_conflict(conn, check_hash: str) -> bool:
-    """This exact conflict group already has a record — pending, promoted, OR discarded.
+def _already_proposed(conn, check_hash: str, origin: str) -> bool:
+    """True if this conflict group already has a record keyed by (check_hash, origin).
 
-    check_hash is _cluster_hash(sorted ids), so the guard keys on group MEMBERSHIP only.
-    A discarded group is not re-judged until its membership CHANGES — e.g. a member is
-    superseded/retired (so it drops out of the live set) or a new entity-overlapping entry
-    joins. An in-place content EDIT that keeps the same ids does NOT reopen a discarded
-    group; re-check it explicitly if a wording change alters the judgement."""
+    Guards against re-proposing the same pair regardless of prior verdict status
+    (pending / promoted / discarded).  The ``origin`` parameter isolates the local
+    conflict path (origin='conflict') from the federation cross-store path
+    (origin='federation-conflict') so the two anti-re-proposal guards never suppress
+    each other.
+
+    For origin='conflict': check_hash is _cluster_hash(sorted local ids), so the guard
+    keys on group MEMBERSHIP only.  An in-place content EDIT that keeps the same ids does
+    NOT reopen a discarded group; re-check it explicitly if the wording change matters.
+
+    For origin='federation-conflict': check_hash is
+    _cluster_hash_cross(content_fingerprint(remote), sorted local ids), so a changed
+    remote fact reopens the check even when the local candidate set is unchanged.
+    """
     return (
         conn.execute(
             """SELECT 1 FROM knowledge_candidates
-                WHERE prompt_hash = ? AND origin = 'conflict'
+                WHERE prompt_hash = ? AND origin = ?
                   AND status IN ('pending', 'promoted', 'discarded') LIMIT 1""",
-            (check_hash,),
+            (check_hash, origin),
         ).fetchone()
         is not None
     )
@@ -306,7 +315,7 @@ def _is_newer(a: dict, b: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _insert_conflict_candidate(
+def _insert_candidate(
     conn,
     *,
     action: str,
@@ -319,20 +328,31 @@ def _insert_conflict_candidate(
     decided_by: str | None,
     decision_reason: str | None,
     raw: str | None,
+    origin: str,
 ) -> None:
-    """Insert one conflict-check result into knowledge_candidates.
+    """Insert one ingest result into knowledge_candidates for operator review.
 
-    target_ids is stored in the ORDER GIVEN — not sorted. For a 'retire' candidate the
-    order is load-bearing: [old_id, survivor_id] (old retired into survivor). The
+    Shared by the local conflict path (origin='conflict') and the federation cross-store
+    path (origin='federation-conflict').  The ``origin`` parameter isolates the two
+    anti-re-proposal guards so they never suppress each other.
+
+    target_ids is stored in the ORDER GIVEN — not sorted.  For a 'retire' candidate the
+    order is load-bearing: [old_id, survivor_id] (old retired into survivor).  The
     anti-re-proposal dedup key (check_hash) is computed separately from sorted ids, so
-    preserving order here does not affect dedup."""
+    preserving order here does not affect dedup.
+
+    Both ``content`` and ``decision_reason`` are run through redact_credentials: the LLM
+    and federation paths can interpolate foreign or model-generated text into these fields,
+    so credentials must be scrubbed at this one chokepoint regardless of which branch
+    produced them (#244).
+    """
     conn.execute(
         """INSERT INTO knowledge_candidates
              (scope, type, content, tags, confidence, source_session_id,
               source_thread_id, model_used, prompt_hash, raw_response,
               action, target_ids, origin, status, decided_by, decision_reason)
            VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
-                   ?, ?, 'conflict', ?, ?, ?)""",
+                   ?, ?, ?, ?, ?, ?)""",
         (
             ktype,
             redact_credentials(content),
@@ -342,6 +362,7 @@ def _insert_conflict_candidate(
             redact_credentials(raw) if raw else None,
             action,
             json.dumps(list(target_ids)),
+            origin,
             status,
             decided_by,
             redact_credentials(decision_reason) if decision_reason else decision_reason,
@@ -433,7 +454,7 @@ def conflict_check_emit(config: Config, *, max_items: int | None = None) -> list
             all_ids = sorted([focus["id"]] + [c["id"] for c in fresh])
             check_hash = _cluster_hash(all_ids)
 
-            if _already_proposed_conflict(conn, check_hash):
+            if _already_proposed(conn, check_hash, 'conflict'):
                 log.debug(
                     "conflict: skipping already-proposed group hash=%s", check_hash
                 )
@@ -509,7 +530,7 @@ def conflict_check_ingest(
 
     conn = connect(config.db_path)
     try:
-        if _already_proposed_conflict(conn, ch):
+        if _already_proposed(conn, ch, 'conflict'):
             counts["skipped"] += 1
             return counts
 
@@ -520,7 +541,7 @@ def conflict_check_ingest(
         if not decisions:
             # No parseable verdicts — record a discarded marker so this group isn't
             # re-proposed on every emit run.
-            _insert_conflict_candidate(
+            _insert_candidate(
                 conn,
                 action="add",
                 content="(no conflict — agent found no actionable verdict)",
@@ -532,6 +553,7 @@ def conflict_check_ingest(
                 decided_by="agent-triage",
                 decision_reason="no-verdicts",
                 raw=raw_for_store,
+                origin='conflict',
             )
             conn.commit()
             return counts
@@ -580,7 +602,7 @@ def conflict_check_ingest(
                 counts["update"] += 1
 
             elif verdict == "NOOP":
-                _insert_conflict_candidate(
+                _insert_candidate(
                     conn,
                     action="add",
                     content=f"(noop — focus #{focus_id} already known in #{comp_id})",
@@ -592,11 +614,12 @@ def conflict_check_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"noop: {reason or ''}",
                     raw=raw_for_store,
+                    origin='conflict',
                 )
                 counts["noop"] += 1
 
             elif verdict == "DISTINCT":
-                _insert_conflict_candidate(
+                _insert_candidate(
                     conn,
                     action="add",
                     content=f"(distinct — #{focus_id} and #{comp_id} are different topics)",
@@ -608,6 +631,7 @@ def conflict_check_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"distinct: {reason or ''}",
                     raw=raw_for_store,
+                    origin='conflict',
                 )
                 counts["distinct"] += 1
 
@@ -693,7 +717,7 @@ def _handle_supersede(
         surviving_content,
     )
 
-    _insert_conflict_candidate(
+    _insert_candidate(
         conn,
         action="retire",
         content=surviving_content,
@@ -705,6 +729,7 @@ def _handle_supersede(
         decided_by=None,
         decision_reason=reason,
         raw=raw,
+        origin='conflict',
     )
 
 
@@ -747,7 +772,7 @@ def _handle_update(
         update_content,
     )
 
-    _insert_conflict_candidate(
+    _insert_candidate(
         conn,
         action="retire",
         content=update_content,
@@ -760,6 +785,7 @@ def _handle_update(
         decision_reason=f"update (refinement — apply merged wording as an edit if desired): "
         f"{reason or ''}",
         raw=raw,
+        origin='conflict',
     )
 
 
