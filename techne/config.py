@@ -53,6 +53,23 @@ class StoreSpec:
     dsn: str = ""
 
 
+_FEDERATION_ROLES = frozenset({"team", "static"})
+
+
+@dataclass
+class FederationConnectionSpec:
+    """One remote techne store to federate recall over (techne#222).
+
+    role: 'team' — shared team store; 'static' — read-only reference store.
+    db_path: absolute path to the remote techne.db (opened read-only, never written).
+    label: human-readable label shown in surfaced federation conflicts.
+    """
+
+    role: str  # "team" | "static"
+    db_path: str  # path to remote techne.db, opened read-only
+    label: str = ""
+
+
 Detector = Literal["heuristic", "llm"]
 Summarizer = Literal["heuristic", "llm"]
 
@@ -248,6 +265,9 @@ class Config:
     # techne.db (db_path) is the implicit personal-memory store; these are the
     # separate domain dbs (librarian, architect, codex). Empty = no domains.
     stores: dict[str, StoreSpec] = field(default_factory=dict)
+    # Federation connections (techne#222): connection name → FederationConnectionSpec.
+    # Empty dict = local-only (unchanged behavior). opt-in: no migration needed.
+    connections: dict[str, FederationConnectionSpec] = field(default_factory=dict)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     threads: ThreadConfig = field(default_factory=ThreadConfig)
     hooks: HookConfig = field(default_factory=HookConfig)
@@ -319,6 +339,21 @@ class Config:
                     cfg.stores[str(domain)] = StoreSpec(
                         adapter=str(spec.get("adapter", "sqlite")),
                         dsn=str(spec.get("dsn", "")),
+                    )
+
+        if "connections" in raw and isinstance(raw["connections"], dict):
+            for conn_name, spec in raw["connections"].items():
+                if isinstance(spec, dict):
+                    role = str(spec.get("role", "team"))
+                    if role not in _FEDERATION_ROLES:
+                        raise ValueError(
+                            f"Invalid connections['{conn_name}'].role '{role}'. "
+                            f"Must be one of: {', '.join(sorted(_FEDERATION_ROLES))}"
+                        )
+                    cfg.connections[str(conn_name)] = FederationConnectionSpec(
+                        role=role,
+                        db_path=str(spec.get("db_path", "")),
+                        label=str(spec.get("label", "")),
                     )
 
         if "sources" in raw and isinstance(raw["sources"], dict):
@@ -593,6 +628,16 @@ class Config:
             data["stores"] = {
                 domain: {"adapter": spec.adapter, "dsn": spec.dsn}
                 for domain, spec in self.stores.items()
+            }
+        # connections: only emit when non-empty, mirrors the stores block (techne#222).
+        if self.connections:
+            data["connections"] = {
+                conn_name: {
+                    "role": spec.role,
+                    "db_path": spec.db_path,
+                    **({"label": spec.label} if spec.label else {}),
+                }
+                for conn_name, spec in self.connections.items()
             }
         if self.sync.url:
             data["sync"]["url"] = self.sync.url
