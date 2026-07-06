@@ -616,6 +616,63 @@ def content_fingerprint(content: str) -> str:
 # ---- Decay-aware confidence ----------------------------------------------
 
 
+def decay_score(
+    confidence_numeric: float,
+    last_confirmed_at: "str | datetime | None",
+    half_life_days: float,
+    status: "str | None" = None,
+    *,
+    now: "datetime | None" = None,
+) -> float:
+    """Pure decay formula — no DB access.
+
+    Formula: ``confidence_numeric * 0.5 ** (days_since_confirmed / half_life_days)``
+
+    When ``half_life_days <= 0`` or ``last_confirmed_at`` is absent/unparseable,
+    returns ``confidence_numeric`` directly (decay disabled; no timestamp → treat
+    as fresh). The ``UNCERTAIN_CONFIDENCE_PENALTY`` (×0.5) is applied afterwards
+    when ``status == 'uncertain'``, regardless of whether time decay was computed
+    — it is a trust penalty, not a decay penalty (techne#117).
+
+    Args:
+        confidence_numeric: The base stored confidence (0..1).
+        last_confirmed_at:  ISO/space-separated timestamp of last confirmation,
+                            or a ``datetime`` object, or None.
+        half_life_days:     Half-life for exponential decay.  0 or negative
+                            disables time decay.
+        status:             Row status string; ``'uncertain'`` triggers the
+                            ``UNCERTAIN_CONFIDENCE_PENALTY`` multiplier.
+        now:                Reference instant for age calculation.  Defaults to
+                            ``datetime.now(timezone.utc)``; pass an explicit
+                            value in tests to pin time.
+    """
+    base = float(confidence_numeric)
+    if half_life_days <= 0 or not last_confirmed_at:
+        value = base
+    else:
+        try:
+            if isinstance(last_confirmed_at, datetime):
+                last = last_confirmed_at
+            else:
+                last = _parse_timestamp(last_confirmed_at)
+            if last.tzinfo is None:
+                # SQLite returns naive timestamps; treat them as UTC.
+                last = last.replace(tzinfo=timezone.utc)
+            _now = now or datetime.now(timezone.utc)
+            if _now.tzinfo is None:
+                _now = _now.replace(tzinfo=timezone.utc)
+            days_since = max(0.0, (_now - last).total_seconds() / 86400.0)
+            value = base * (0.5 ** (days_since / half_life_days))
+        except (ValueError, TypeError):
+            value = base
+    # techne#117 recall gate: an uncertain row (a dependency it rests on was
+    # superseded) ranks below an otherwise-equal current row until reconfirmed.
+    # Applied regardless of whether time decay ran — this is a trust penalty.
+    if status == "uncertain":
+        value *= UNCERTAIN_CONFIDENCE_PENALTY
+    return value
+
+
 def effective_confidence(
     db_path: Path,
     entry_id: int,
@@ -650,24 +707,13 @@ def effective_confidence(
         conn.close()
     if row is None:
         return None
-    base = float(row["confidence_numeric"])
-    if half_life_days <= 0:
-        value = base
-    else:
-        last = _parse_timestamp(row["last_confirmed_at"])
-        current = now or datetime.now(timezone.utc)
-        if last.tzinfo is None:
-            # SQLite returns naive timestamps; treat them as UTC.
-            last = last.replace(tzinfo=timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        days_since = max(0.0, (current - last).total_seconds() / 86400.0)
-        value = base * (0.5 ** (days_since / half_life_days))
-    # techne#117 recall gate: an uncertain row (a dependency it rests on was
-    # superseded) ranks below an otherwise-equal current row until reconfirmed.
-    if row["status"] == "uncertain":
-        value *= UNCERTAIN_CONFIDENCE_PENALTY
-    return value
+    return decay_score(
+        row["confidence_numeric"],
+        row["last_confirmed_at"],
+        half_life_days,
+        row["status"],
+        now=now,
+    )
 
 
 def reaffirm(db_path: Path, entry_id: int) -> bool:
@@ -763,17 +809,13 @@ def archive_scan(
     # Filter by effective_confidence floor.
     to_archive: list[dict] = []
     for row in candidates:
-        base = float(row["confidence_numeric"])
-        if half_life_days <= 0:
-            eff = base
-        else:
-            last = _parse_timestamp(row["last_confirmed_at"])
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
-            days_since = max(0.0, (_now - last).total_seconds() / 86400.0)
-            eff = base * (0.5 ** (days_since / half_life_days))
-        # Apply the uncertain penalty (mirrors effective_confidence()).
-        eff *= UNCERTAIN_CONFIDENCE_PENALTY
+        eff = decay_score(
+            row["confidence_numeric"],
+            row["last_confirmed_at"],
+            half_life_days,
+            row["status"],
+            now=_now,
+        )
         if eff < confidence_floor:
             to_archive.append({
                 "id": row["id"],
@@ -836,14 +878,27 @@ def unarchive(db_path: Path, entry_id: int) -> bool:
 def _parse_timestamp(value) -> datetime:
     """Parse a SQLite timestamp value into a datetime. Accepts both string
     and datetime forms because connect() has detect_types enabled in some
-    paths but not others."""
+    paths but not others.
+
+    Handles all timestamp formats seen in practice:
+    - Timezone-aware ISO 8601:  ``"2024-07-06T21:09:39.617094+00:00"``
+    - SQLite space-separated:   ``"2024-07-06 21:09:39"`` / ``"2024-07-06 21:09:39.123456"``
+    - UTC sentinel "Z" suffix:  ``"2024-07-06T21:09:39Z"`` (stripped before strptime)
+    """
     if isinstance(value, datetime):
         return value
-    # SQLite ISO format: "YYYY-MM-DD HH:MM:SS" (optionally with fractional secs)
-    s = str(value).replace("T", " ").rstrip("Z")
+    s = str(value)
+    # fromisoformat handles timezone-aware strings (e.g. "+00:00") and the
+    # standard space separator; try it first before the strptime fallback.
+    try:
+        return datetime.fromisoformat(s.replace(" ", "T"))
+    except ValueError:
+        pass
+    # Fallback: strip "Z" suffix and parse with explicit strptime formats.
+    s_stripped = s.replace("T", " ").rstrip("Z")
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
         try:
-            return datetime.strptime(s, fmt)
+            return datetime.strptime(s_stripped, fmt)
         except ValueError:
             continue
     raise ValueError(f"could not parse timestamp {value!r}")

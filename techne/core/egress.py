@@ -53,13 +53,11 @@ Deferred (Tier-1, techne#92): relevance ranking against the current query.
 from __future__ import annotations
 
 import logging
-import math
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
 from techne.core.database import connect
-from techne.core.knowledge import PULL_ONLY_TYPES
+from techne.core.knowledge import PULL_ONLY_TYPES, decay_score
 
 logger = logging.getLogger(__name__)
 
@@ -69,26 +67,20 @@ def _eff_conf(row: dict, half_life_days: float) -> float:
 
     Used as the sort key within each priority band so recently-confirmed
     entries surface before long-unconfirmed ones of the same stored tier.
-    Mirrors ``knowledge.effective_confidence()`` but operates on the
-    pre-fetched dict (no extra DB round-trip on the selection path).
+    Delegates to ``knowledge.decay_score()`` — the single canonical formula
+    (techne#249).
 
-    Returns ``confidence_numeric`` directly when ``half_life_days <= 0``
-    (decay disabled) or when ``last_confirmed_at`` is absent.  Returns 0.0
-    for rows without ``confidence_numeric`` (should not occur in practice
-    since egress only selects rows the ``store()`` path wrote, but safe).
+    Returns 0.0 for rows without ``confidence_numeric`` (should not occur in
+    practice since egress only selects rows the ``store()`` path wrote, but safe).
+    The ``UNCERTAIN_CONFIDENCE_PENALTY`` is applied when ``status='uncertain'``
+    so uncertain rows rank lower within each band, consistent with search/recall.
     """
-    base = float(row.get("confidence_numeric") or 0.0)
-    if half_life_days <= 0 or not row.get("last_confirmed_at"):
-        return base
-    try:
-        last = datetime.fromisoformat(str(row["last_confirmed_at"]).replace(" ", "T"))
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        days_since = max(0.0, (now - last).total_seconds() / 86400.0)
-        return base * math.pow(0.5, days_since / half_life_days)
-    except (ValueError, TypeError):
-        return base
+    return decay_score(
+        float(row.get("confidence_numeric") or 0.0),
+        row.get("last_confirmed_at"),
+        half_life_days,
+        row.get("status"),
+    )
 
 
 class EgressRow(TypedDict):
