@@ -591,10 +591,16 @@ def federation_conflict_ingest(
 
             if verdict == "SUPERSEDE":
                 # Temporal tiebreak: compare team's event_at with local row's event_at.
-                # team newer → stage pending 'retire' targeting the LOCAL row.
+                # team newer → stage pending 'supersede' targeting the LOCAL row.
                 # local newer → stage discarded informational marker; no push to team.
-                team_effective = focus_event_at or ""
-                local_effective = _effective_event_at(comp_row)
+                #
+                # Normalize the 'T' ISO separator to a space before comparing: agent-
+                # supplied event_at may be ISO-8601 ("…T…") while SQLite stores dates
+                # with a space separator ("… …").  'T' (0x54) > ' ' (0x20), so without
+                # normalization a same-date ISO timestamp compares as GREATER than its
+                # space-separated equivalent, flipping the tiebreak. (techne#245)
+                team_effective = (focus_event_at or "").replace("T", " ")
+                local_effective = _effective_event_at(comp_row).replace("T", " ")
                 team_newer = team_effective >= local_effective
 
                 if team_newer:
@@ -605,7 +611,13 @@ def federation_conflict_ingest(
                     )
                     _insert_federation_candidate(
                         conn,
-                        action="retire",
+                        # supersede — not retire — because the foreign survivor has no
+                        # local id. _apply_supersede mints a new local row from
+                        # surviving_content (the team's newer fact) and sets
+                        # superseded_by on comp_id. _apply_retire requires two LOCAL
+                        # ids [old, survivor] and would ValueError with only one.
+                        # (techne#245)
+                        action="supersede",
                         content=surviving_content,
                         ktype=comp_row.get("type", "fact"),
                         confidence=comp_row.get("confidence", "medium"),
@@ -617,7 +629,7 @@ def federation_conflict_ingest(
                         raw=response,
                     )
                     log.debug(
-                        "federation_ingest: staged pending RETIRE for local id=%s"
+                        "federation_ingest: staged pending SUPERSEDE for local id=%s"
                         " (team newer, store=%s)",
                         comp_id,
                         focus_store,
