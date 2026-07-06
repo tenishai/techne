@@ -34,8 +34,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 
 from techne.config import Config
+
+log = logging.getLogger(__name__)
 from techne.core._resident import extract_json_object
 from techne.core.database import connect
 from techne.core.knowledge import VALID_CONFIDENCE, VALID_TYPES, content_fingerprint
@@ -315,6 +318,11 @@ def consolidate_ingest(
         conn.commit()
     except Exception:
         conn.rollback()
+        log.exception(
+            "consolidate_ingest: unexpected error (cluster_hash=%s target_ids=%s)",
+            cluster_hash,
+            target_ids,
+        )
         counts["errors"] += 1
     finally:
         conn.close()
@@ -627,6 +635,11 @@ def dream_ingest(config: Config, group_ids: list[int], group_hash: str, response
         conn.commit()
     except Exception:
         conn.rollback()
+        log.exception(
+            "dream_ingest: unexpected error (group_hash=%s group_ids=%s)",
+            group_hash,
+            group_ids,
+        )
         counts["errors"] += 1
     finally:
         conn.close()

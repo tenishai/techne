@@ -8,6 +8,8 @@ The agent's role (answering a prompt) is faked by canned JSON — no real LLM.
 from __future__ import annotations
 
 import json
+import logging
+from unittest.mock import patch
 
 import pytest
 
@@ -504,3 +506,30 @@ class TestDreamMcpRoundTrip:
         )
         batch2 = json.loads(emit_resp2["result"]["content"][0]["text"])["batch"]
         assert not any(set(i["group_ids"]) == {a, b} for i in batch2)
+
+
+# ---------------------------------------------------------------------------
+# #246 — silent-failure logging: dream_ingest swallow must now log
+# ---------------------------------------------------------------------------
+
+
+def test_dream_ingest_logs_on_insert_failure(config, caplog):
+    """#246: when _insert_dream_candidate raises inside the try block,
+    log.exception fires with context AND the errors counter still increments."""
+    db = config.db_path
+    a = store(db, "insight A about neural nets", type="fact", confidence="high",
+              tags="topic:ml")
+    b = store(db, "insight B about backprop", type="fact", confidence="high",
+              tags="topic:ml")
+
+    with patch(
+        "techne.core.sleepdream._insert_dream_candidate",
+        side_effect=RuntimeError("disk full"),
+    ):
+        with caplog.at_level(logging.ERROR, logger="techne.core.sleepdream"):
+            counts = dream_ingest(config, [a, b], "ignored-hash", _CONNECT_VERDICT)
+
+    assert counts["errors"] == 1, "error counter must still increment (behavior preserved)"
+    assert any(
+        "dream_ingest" in r.message for r in caplog.records
+    ), "log.exception must emit a record naming the function"

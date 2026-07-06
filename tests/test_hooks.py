@@ -582,3 +582,67 @@ class TestSessionEndFlushSinks:
         assert s["pending"] == 1, "flush_sinks must leave sync: rows pending, not touch them"
         assert s["dead"] == 0
         assert "sync:thread_summary" not in summary, "flush_sinks must ignore sync: rows entirely"
+
+
+# ---------------------------------------------------------------------------
+# #247 — hook stdin parse failures must emit a stderr diagnostic
+#
+# All hooks must: (a) exit 0 (never wedge the session), and (b) emit a clear
+# message on stderr so the failure is visible rather than silently swallowed.
+# ---------------------------------------------------------------------------
+
+
+class TestHookStdinDiagnostics:
+    """#247: each hook must write a diagnostic to stderr on bad-stdin parse failure
+    while still exiting 0 (hooks must never wedge the host session)."""
+
+    def test_session_end_bad_stdin_stderr_diagnostic(self):
+        result = _run_hook_subprocess("techne.hooks.session_end", "not json {{{")
+        assert result.returncode == 0, (
+            f"session_end must exit 0 on bad stdin (got {result.returncode})"
+        )
+        assert "invalid JSON" in result.stderr, (
+            f"session_end must emit a stderr diagnostic on bad stdin; got: {result.stderr!r}"
+        )
+
+    def test_post_tool_use_bad_stdin_stderr_diagnostic(self):
+        result = _run_hook_subprocess("techne.hooks.post_tool_use", "not json {{{")
+        assert result.returncode == 0, (
+            f"post_tool_use must exit 0 on bad stdin (got {result.returncode})"
+        )
+        assert "invalid JSON" in result.stderr, (
+            f"post_tool_use must emit a stderr diagnostic on bad stdin; got: {result.stderr!r}"
+        )
+
+    def test_session_start_bad_stdin_stderr_diagnostic(self):
+        result = _run_hook_subprocess("techne.hooks.session_start", "not json {{{")
+        assert result.returncode == 0, (
+            f"session_start must exit 0 on bad stdin (got {result.returncode})"
+        )
+        assert "invalid JSON" in result.stderr, (
+            f"session_start must emit a stderr diagnostic on bad stdin; got: {result.stderr!r}"
+        )
+
+    def test_pre_compact_bad_stdin_stderr_diagnostic(self):
+        result = _run_hook_subprocess("techne.hooks.pre_compact", "not json {{{")
+        assert result.returncode == 0, (
+            f"pre_compact must exit 0 on bad stdin (got {result.returncode})"
+        )
+        assert "invalid JSON" in result.stderr, (
+            f"pre_compact must emit a stderr diagnostic on bad stdin; got: {result.stderr!r}"
+        )
+
+    def test_post_compact_bad_stdin_stderr_diagnostic(self):
+        result = _run_hook_subprocess("techne.hooks.post_compact", "not json {{{")
+        assert result.returncode == 0, (
+            f"post_compact must exit 0 on bad stdin (got {result.returncode})"
+        )
+        assert "invalid JSON" in result.stderr, (
+            f"post_compact must emit a stderr diagnostic on bad stdin; got: {result.stderr!r}"
+        )
+
+    def test_session_end_empty_stdin_no_spurious_diagnostic(self):
+        """Empty stdin is not a parse error — session_end reads it as decode error,
+        so we DO expect the diagnostic here. This test asserts exit 0 regardless."""
+        result = _run_hook_subprocess("techne.hooks.session_end", "")
+        assert result.returncode == 0

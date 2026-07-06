@@ -9,6 +9,8 @@ reflect/consolidate emit-ingest contract.
 from __future__ import annotations
 
 import json
+import logging
+from unittest.mock import patch
 
 import pytest
 
@@ -315,3 +317,28 @@ def test_parse_keep_and_garbage_return_none():
 def test_parse_tolerates_code_fence():
     fenced = "```json\n" + _MERGE_VERDICT + "\n```"
     assert parse_consolidation_response(fenced)["verdict"] == "merge"
+
+
+# ---------------------------------------------------------------------------
+# #246 — silent-failure logging: consolidate_ingest swallow must now log
+# ---------------------------------------------------------------------------
+
+
+def test_consolidate_ingest_logs_on_insert_failure(config, caplog):
+    """#246: when _insert_consolidation_candidate raises inside the try block,
+    log.exception fires with context AND the errors counter still increments."""
+    db = config.db_path
+    a = store(db, "fact alpha", type="fact")
+    b = store(db, "fact alpha dup", type="fact")
+
+    with patch(
+        "techne.core.sleepdream._insert_consolidation_candidate",
+        side_effect=RuntimeError("sqlite gone"),
+    ):
+        with caplog.at_level(logging.ERROR, logger="techne.core.sleepdream"):
+            counts = consolidate_ingest(config, [a, b], "ignored-hash", _MERGE_VERDICT)
+
+    assert counts["errors"] == 1, "error counter must still increment (behavior preserved)"
+    assert any(
+        "consolidate_ingest" in r.message for r in caplog.records
+    ), "log.exception must emit a record naming the function"

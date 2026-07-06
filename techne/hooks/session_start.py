@@ -60,7 +60,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     try:
         data = json.load(sys.stdin)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        print(f"techne: session_start received invalid JSON on stdin — context limited: {exc}", file=sys.stderr)
         data = {}
 
     # ------------------------------------------------------------------

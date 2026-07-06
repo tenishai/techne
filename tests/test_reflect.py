@@ -1,6 +1,8 @@
 """Tests for the end-of-session reflection pass."""
 
 import json
+import logging
+from unittest.mock import patch
 
 import pytest
 
@@ -781,3 +783,73 @@ def test_spool_primary_blocks_live_write_via_ingest(tmp_path):
         assert rows[0]["content"] == "spool-primary live-gate test"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# #246 — silent-failure logging: swallowed exceptions must now log
+# ---------------------------------------------------------------------------
+
+
+def _candidate_json(content: str = "a durable fact") -> str:
+    return json.dumps(
+        [{"scope": "knowledge", "type": "fact", "content": content,
+          "tags": "test", "confidence": "high"}]
+    )
+
+
+def test_ingest_reflection_response_logs_on_insert_failure(tmp_path, caplog):
+    """#246: when _insert_candidate raises, log.exception fires (not silent swallow)
+    AND errors counter still increments (behavior preserved)."""
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 3)
+
+    with patch("techne.core.reflect._insert_candidate", side_effect=RuntimeError("db gone")):
+        with caplog.at_level(logging.ERROR, logger="techne.core.reflect"):
+            counts = ingest_reflection_response(
+                config, session_id, "t-test", "deadbeef", _candidate_json()
+            )
+
+    assert counts["errors"] == 1, "error counter must still increment (behavior preserved)"
+    assert any(
+        "ingest_reflection_response" in r.message for r in caplog.records
+    ), "log.exception must emit a record naming the function"
+
+
+def test_reflect_on_session_logs_on_generate_fn_failure(tmp_path, caplog):
+    """#246: when the per-thread LLM call raises, log.exception fires AND errors
+    counter increments.  Uses an injectable generate_fn that raises."""
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 5)
+    thread = Thread(thread_num=1, label="crash thread", summary="s", observation_indices=list(range(5)))
+    _save_thread_row(config, session_id, thread)
+
+    def exploding_generate_fn(_prompt):
+        raise RuntimeError("LLM unavailable")
+
+    with caplog.at_level(logging.ERROR, logger="techne.core.reflect"):
+        result = reflect_on_session(
+            config, session_id, [thread], obs, generate_fn=exploding_generate_fn
+        )
+
+    assert result["errors"] == 1, "error counter must still increment (behavior preserved)"
+    assert any(
+        "reflect_on_session" in r.message for r in caplog.records
+    ), "log.exception must emit a record naming the function"
+
+
+def test_reflect_on_session_logs_on_make_generate_fn_failure(tmp_path, caplog):
+    """#246: when _make_generate_fn raises, log.exception fires AND errors counter
+    increments (generate_fn=None path so the real _make_generate_fn is called)."""
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 5)
+    thread = Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))
+    _save_thread_row(config, session_id, thread)
+
+    with patch("techne.core.reflect._make_generate_fn", side_effect=RuntimeError("no model")):
+        with caplog.at_level(logging.ERROR, logger="techne.core.reflect"):
+            result = reflect_on_session(config, session_id, [thread], obs)
+
+    assert result["errors"] == 1, "error counter must still increment (behavior preserved)"
+    assert any(
+        "reflect_on_session" in r.message for r in caplog.records
+    ), "log.exception must emit a record naming the function"
