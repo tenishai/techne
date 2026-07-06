@@ -177,7 +177,7 @@ def end_session(
             f"""UPDATE sessions SET ended_at = CURRENT_TIMESTAMP, {column} = ?,
                     summary_llm_source = COALESCE(?, summary_llm_source)
                 WHERE id = ?""",
-            (summary or None, llm_src, session_id),
+            (redact_credentials(summary) if summary else None, llm_src, session_id),
         )
         conn.commit()
     finally:
@@ -207,7 +207,7 @@ def set_session_summary(
             f"""UPDATE sessions SET {column} = ?,
                     summary_llm_source = COALESCE(?, summary_llm_source)
                 WHERE id = ?""",
-            (summary or None, llm_src, session_id),
+            (redact_credentials(summary) if summary else None, llm_src, session_id),
         )
         conn.commit()
     finally:
@@ -468,6 +468,25 @@ def save_checkpoint(
     (or when session_start is not configured).
     """
     import json
+
+    # Redact every free-text value in the checkpoint blob before it is
+    # serialized into data_json. The pre_compact hook packs several raw
+    # transcript-derived fields here — recent_commands (raw bash argv) AND
+    # last_task (the last substantive user message, verbatim). Users paste
+    # secrets into chat as readily as into argv, so we redact at the
+    # serialization boundary rather than field-by-field: any string value
+    # (or string item in a list) is filtered, so a future field can't reopen
+    # the hole. Non-string / structured values (files_modified paths,
+    # tools_used counts, git_branch) are left as-is — they don't match the
+    # anchored patterns anyway. A shallow copy avoids mutating the caller's dict.
+    def _redact_value(v):
+        if isinstance(v, str):
+            return redact_credentials(v)
+        if isinstance(v, list):
+            return [redact_credentials(x) if isinstance(x, str) else x for x in v]
+        return v
+
+    data = {k: _redact_value(v) for k, v in data.items()}
 
     conn = connect(db_path)
     try:

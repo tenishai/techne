@@ -1,4 +1,4 @@
-"""Tests for sink-boundary credential redaction (issue #17)."""
+"""Tests for sink-boundary credential redaction (issue #17, #243, #244)."""
 
 import pytest
 
@@ -267,3 +267,205 @@ def test_env_var_redacted_in_observation(tmp_db):
     obs = get_observations(tmp_db, "sess-002")
     assert "sk_live_supersecret123" not in obs[0]["content"]
     assert "<redacted:env>" in obs[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# #243 — new pattern unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_redact_none_returns_none():
+    """None guard: redact_credentials(None) must return None, not raise."""
+    assert redact_credentials(None) is None
+
+
+def test_redact_hf_token():
+    text = "login with hf_abcdefghijklmnopqrstuvwx to access the model hub"
+    result = redact_credentials(text)
+    assert "hf_abcdefghijklmnopqrstuvwx" not in result
+    assert "<redacted:hf-token>" in result
+
+
+def test_redact_hf_token_short_no_match():
+    # Under 20 alphanumeric chars after hf_ — should NOT be redacted
+    text = "hf_tooshort"
+    assert redact_credentials(text) == text
+
+
+def test_hf_token_benign_prose_untouched():
+    # A plain word that starts with "hf" but is not a real token
+    text = "The heuristic framework (hf) paper was interesting."
+    assert redact_credentials(text) == text
+
+
+def test_redact_google_api_key():
+    # 39 chars total: AIzaSy (6) + 33 alphanumeric chars
+    # AIzaSy(6) + Abcdefghijklmnopqrstuvwxyz1234567(33) = 39
+    key = "AIzaSyAbcdefghijklmnopqrstuvwxyz1234567"
+    text = f"Calling Maps API with key {key}"
+    result = redact_credentials(text)
+    assert key not in result
+    assert "<redacted:google-api-key>" in result
+
+
+def test_google_api_key_short_no_match():
+    # Fewer than 33 chars after AIzaSy — not a complete key
+    text = "AIzaSyShortNotAKey"
+    assert redact_credentials(text) == text
+
+
+def test_google_api_key_benign_prefix_untouched():
+    # "AIzaSy" without trailing chars — should not match
+    text = "The prefix AIzaSy is interesting but this is not a key."
+    assert redact_credentials(text) == text
+
+
+def test_redact_pem_private_key():
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEowIBAAKCAQEA2a2rwplBQLzHPZe5TnjKEtMH\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    result = redact_credentials(pem)
+    assert "MIIEowIBAAKCAQEA2a2rwplBQLzHPZe5TnjKEtMH" not in result
+    assert "<redacted:pem-private-key>" in result
+
+
+def test_redact_pem_ec_private_key():
+    pem = (
+        "-----BEGIN EC PRIVATE KEY-----\n"
+        "MHQCAQEEIONzuFbdhmEJCzMvDO5RzxwT2hJhNkAO\n"
+        "-----END EC PRIVATE KEY-----"
+    )
+    result = redact_credentials(pem)
+    assert "MHQCAQEEIONzuFbdhmEJCzMvDO5RzxwT2hJhNkAO" not in result
+    assert "<redacted:pem-private-key>" in result
+
+
+def test_redact_pem_plain_private_key():
+    # PKCS8 / plain "PRIVATE KEY" (no algorithm prefix)
+    pem = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj\n"
+        "-----END PRIVATE KEY-----"
+    )
+    result = redact_credentials(pem)
+    assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj" not in result
+    assert "<redacted:pem-private-key>" in result
+
+
+def test_pem_public_key_untouched():
+    # PUBLIC KEY blocks should NOT be redacted — no credential value
+    pem = (
+        "-----BEGIN PUBLIC KEY-----\n"
+        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC\n"
+        "-----END PUBLIC KEY-----"
+    )
+    assert redact_credentials(pem) == pem
+
+
+def test_redact_bearer_token():
+    # Bearer token that is NOT a JWT (opaque OAuth2 token)
+    text = "Authorization: Bearer ya29.a0AfH6SMCexampleLongOpaqueToken1234567890"
+    result = redact_credentials(text)
+    assert "ya29.a0AfH6SMCexampleLongOpaqueToken1234567890" not in result
+    assert "<redacted:bearer>" in result
+
+
+def test_bearer_token_short_no_match():
+    # Token under 20 chars — should NOT be redacted (placeholder / synthetic value)
+    text = "Authorization: Bearer shorttoken"
+    assert redact_credentials(text) == text
+
+
+def test_bearer_benign_prose_untouched():
+    # "Bearer" in ordinary prose, not an Authorization header
+    text = "The bearer of this document is authorized."
+    assert redact_credentials(text) == text
+
+
+def test_redact_lowered_api_key_bare():
+    text = "curl -H 'api_key=supersecretapikey1234'"
+    result = redact_credentials(text)
+    assert "supersecretapikey1234" not in result
+    assert "<redacted:lowered-credential>" in result
+
+
+def test_redact_lowered_password_bare():
+    text = "connect --password=Hunter2!!x --host=db.example.com"
+    result = redact_credentials(text)
+    assert "Hunter2!!x" not in result
+    assert "<redacted:lowered-credential>" in result
+
+
+def test_redact_lowered_secret_bare():
+    text = "export secret=my_super_long_secret_value_xyz"
+    result = redact_credentials(text)
+    assert "my_super_long_secret_value_xyz" not in result
+    assert "<redacted:lowered-credential>" in result
+
+
+def test_redact_lowered_api_key_json():
+    text = '{"api_key": "supersecretapikey1234", "model": "gpt-4"}'
+    result = redact_credentials(text)
+    assert "supersecretapikey1234" not in result
+    assert "<redacted:lowered-credential>" in result
+    # Non-credential JSON field untouched
+    assert "gpt-4" in result
+
+
+def test_redact_lowered_password_json():
+    text = '{"password": "Hunter2!!xYZ", "username": "alice"}'
+    result = redact_credentials(text)
+    assert "Hunter2!!xYZ" not in result
+    assert "<redacted:lowered-credential>" in result
+    assert "alice" in result
+
+
+def test_lowered_credential_short_value_no_match():
+    # Value under 8 chars — should NOT be redacted to avoid false positives
+    text = "api_key=short"
+    assert redact_credentials(text) == text
+
+
+def test_lowered_credential_benign_json_field_untouched():
+    # JSON fields with common names but short/non-secret values
+    text = '{"secret": "no"}'
+    assert redact_credentials(text) == text
+
+
+def test_lowered_credential_spaced_long_value_untouched():
+    """#244 (review): the bare pattern requires `=` with NO surrounding whitespace.
+    A spaced `key = value` with a LONG (8+ char) value is prose/code, not a leaked
+    secret — it must survive. This pins the space boundary the short-value negative
+    tests can't (they only lock the length floor).
+    """
+    # Code snippet: the RHS is a call, not a credential.
+    code = "password = get_password()"
+    assert redact_credentials(code) == code
+    # Prose: a spaced assignment describing behavior, long value.
+    prose = "the api_key = whatever the user typed into the form"
+    assert redact_credentials(prose) == prose
+    secret_prose = "the secret = something the operator configures elsewhere"
+    assert redact_credentials(secret_prose) == secret_prose
+
+
+def test_pem_bounded_span_no_redos_on_unterminated_opener():
+    """#243 (review): the PEM span is bounded to 8KB so an unterminated BEGIN
+    opener (semi-external GitHub issue bodies) can't force an O(n²) rescan.
+    A BEGIN with no matching END and a large body must NOT match, and must
+    complete quickly (bounded work).
+    """
+    import time
+
+    # 50 openers, each with no closer, followed by a large tail. Unbounded lazy
+    # matching would rescan to EOF per opener; the {0,8192} bound caps it.
+    junk = "-----BEGIN RSA PRIVATE KEY-----\n" + ("A" * 200 + "\n") * 50
+    payload = junk * 50  # ~0.5 MB of opener-heavy, closer-free text
+    start = time.perf_counter()
+    result = redact_credentials(payload)
+    elapsed = time.perf_counter() - start
+    # No END marker anywhere → nothing to redact for this pattern.
+    assert "<redacted:pem-private-key>" not in result
+    # Bounded work: comfortably under a second even on slow CI.
+    assert elapsed < 2.0, f"PEM matching took {elapsed:.3f}s — bound may be ineffective"

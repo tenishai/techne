@@ -784,3 +784,52 @@ def test_run_conflict_check_is_pure():
     # Both entries' content should appear in the prompt
     assert "clickhouse" in prompt.lower()
     assert "bigquery" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# #244 — write-site redaction: decision_reason
+# ---------------------------------------------------------------------------
+
+
+def test_conflict_ingest_decision_reason_redacted(config):
+    """#244: decision_reason must be redacted before landing in knowledge_candidates
+    (parity with federation.py:486 which already redacts the same field — techne#244).
+
+    Uses a DISTINCT verdict (discarded marker) so _insert_conflict_candidate is
+    exercised without the test needing to stage or promote a supersession.  The
+    reason text carries a Slack bot token (xoxb-…) — a pre-existing pattern that
+    fires regardless of the #243 additions.
+    """
+    db = config.db_path
+    a_id = store(db, "we use redis for caching", type="fact", tags="cache,infra")
+    b_id = store(db, "we use memcached for caching", type="fact", tags="cache,infra")
+
+    batch = conflict_check_emit(config)
+    group = next(i for i in batch if {i["focus_id"]} | set(i["comparison_ids"]) == {a_id, b_id})
+    comp_id = group["comparison_ids"][0]
+
+    # The LLM embeds a Slack token in its reasoning (realistic: model echoes back
+    # a logged header from tool output).
+    reason_with_secret = (
+        "Different caching backends; no conflict. "
+        "Verified using token xoxb-123456789012-abcdefghijklmnop."
+    )
+    verdict = json.dumps(
+        [{"id": comp_id, "verdict": "DISTINCT", "reason": reason_with_secret}]
+    )
+    counts = conflict_check_ingest(
+        config, group["focus_id"], group["comparison_ids"], group["check_hash"], verdict
+    )
+    assert counts["distinct"] == 1
+
+    # Read the stored candidate back; decision_reason must not contain the raw token.
+    conn = connect(db)
+    rows = conn.execute(
+        "SELECT decision_reason FROM knowledge_candidates WHERE origin='conflict'"
+    ).fetchall()
+    conn.close()
+
+    assert rows, "Expected at least one conflict candidate row"
+    decision_reason_stored = rows[-1]["decision_reason"]
+    assert "xoxb-123456789012-abcdefghijklmnop" not in decision_reason_stored
+    assert "<redacted:slack>" in decision_reason_stored
