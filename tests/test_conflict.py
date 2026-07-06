@@ -833,3 +833,65 @@ def test_conflict_ingest_decision_reason_redacted(config):
     decision_reason_stored = rows[-1]["decision_reason"]
     assert "xoxb-123456789012-abcdefghijklmnop" not in decision_reason_stored
     assert "<redacted:slack>" in decision_reason_stored
+
+
+# ---------------------------------------------------------------------------
+# #250 — shared seam: _insert_candidate redacts content+decision_reason for
+# both 'conflict' and 'federation-conflict' origins via one chokepoint
+# ---------------------------------------------------------------------------
+
+
+def test_insert_candidate_redacts_both_fields_for_both_origins(config):
+    """_insert_candidate (the shared insert helper extracted in #250) must redact
+    ``content`` AND ``decision_reason`` regardless of which origin is passed.
+
+    Without the de-fork both call sites had independent helpers that could drift
+    (federation already redacted decision_reason; conflict got that fix at #244).
+    Now one function covers both — this test pins that invariant for the shared seam.
+    """
+    from techne.core.conflict import _insert_candidate
+    from techne.core.sleepdream import _ensure_system_session
+
+    db = config.db_path
+    _ensure_system_session(db)
+
+    secret = "AKIAIOSFODNN7EXAMPLE"  # AWS access key id shape
+    conn = connect(db)
+
+    for origin in ("conflict", "federation-conflict"):
+        _insert_candidate(
+            conn,
+            action="add",
+            content=f"raw credential {secret} in content",
+            ktype="fact",
+            confidence="low",
+            target_ids=[1],
+            check_hash=f"test-hash-{origin}",
+            status="discarded",
+            decided_by="test",
+            decision_reason=f"reason with credential {secret} here",
+            raw=None,
+            origin=origin,
+        )
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT origin, content, decision_reason FROM knowledge_candidates"
+        " WHERE prompt_hash LIKE 'test-hash-%'"
+    ).fetchall()
+    conn.close()
+
+    assert len(rows) == 2, "Expected one row per origin"
+    for row in rows:
+        assert secret not in (row["content"] or ""), (
+            f"[{row['origin']}] credential must be redacted from content"
+        )
+        assert secret not in (row["decision_reason"] or ""), (
+            f"[{row['origin']}] credential must be redacted from decision_reason"
+        )
+        assert "<redacted:" in (row["content"] or ""), (
+            f"[{row['origin']}] content should carry the redaction marker"
+        )
+        assert "<redacted:" in (row["decision_reason"] or ""), (
+            f"[{row['origin']}] decision_reason should carry the redaction marker"
+        )
