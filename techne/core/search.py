@@ -8,6 +8,7 @@ from typing import Literal
 
 from techne.core.database import connect
 from techne.core.embeddings import _get_embedding_model
+from techne.core.knowledge import decay_score
 
 
 def _cosine_similarity(a, b) -> float:
@@ -120,10 +121,10 @@ def _knowledge_decay_score(
     """Decay-adjusted confidence score (0..1) for a knowledge row dict.
 
     Used as a small additive tiebreak weight in ``_rerank`` (techne#214).
-    Implements the same formula as ``knowledge.effective_confidence()`` but
-    operates on a pre-fetched dict (no extra DB round-trip in the ranking hot
-    path).  Only knowledge rows carry ``confidence_numeric`` — for threads and
-    observations the function returns 1.0 so the decay weight has no effect.
+    Delegates to ``knowledge.decay_score()`` — the single canonical formula
+    (techne#249).  Only knowledge rows carry ``confidence_numeric`` — for
+    threads and observations the function returns 1.0 so the decay weight has
+    no effect.
 
     ``half_life_days=0`` disables time decay and returns ``confidence_numeric``
     directly (the uncertain penalty still applies).
@@ -134,30 +135,13 @@ def _knowledge_decay_score(
     """
     if "confidence_numeric" not in row:
         return 1.0  # No metadata → neutral; no effect on threads/observations.
-    base = float(row["confidence_numeric"])
-    if half_life_days <= 0:
-        value = base
-    else:
-        last_str = row.get("last_confirmed_at")
-        if not last_str:
-            value = base  # No confirmation timestamp → treat as fresh.
-        else:
-            try:
-                last = datetime.fromisoformat(str(last_str).replace(" ", "T"))
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=timezone.utc)
-                current = now or datetime.now(timezone.utc)
-                if current.tzinfo is None:
-                    current = current.replace(tzinfo=timezone.utc)
-                days_since = max(0.0, (current - last).total_seconds() / 86400.0)
-                value = base * (0.5 ** (days_since / half_life_days))
-            except (ValueError, TypeError):
-                value = base
-    # Mirror knowledge.py's UNCERTAIN_CONFIDENCE_PENALTY: an uncertain row's
-    # dependency was superseded, so it ranks below an otherwise-equal current row.
-    if row.get("status") == "uncertain":
-        value *= 0.5
-    return value
+    return decay_score(
+        row["confidence_numeric"],
+        row.get("last_confirmed_at"),
+        half_life_days,
+        row.get("status"),
+        now=now,
+    )
 
 
 def _recency_score(ts_str: str | None, half_life_days: float = 30.0) -> float:
