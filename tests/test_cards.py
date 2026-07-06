@@ -225,3 +225,29 @@ def test_fill_card_summary_redacts_credential(db, config):
     stored_content = row["content"]
     assert "ghp_abcdefghijklmnopqrstuvwxyz1234" not in stored_content
     assert "<redacted:github>" in stored_content
+
+
+def test_insert_card_redacts_content_defense_in_depth(db, config):
+    """#244 (review): _insert_card redacts at the INSERT boundary itself, so a
+    credential reaching the card content by any path (here a doc title used as the
+    stand-in gist) is redacted at rest — not only when the upstream caller remembers.
+    """
+    doc_id = _doc(config)
+    # No summary → the title becomes the card's content (the placeholder gist),
+    # exercising _insert_card's own redaction rather than an upstream wrapper.
+    card_id, changed = upsert_document_card(
+        db,
+        source_url="u-secret",
+        doc_id=doc_id,
+        source_version="v1",
+        title="issue mentions ghp_abcdefghijklmnopqrstuvwxyz1234 in the body",
+    )
+    assert changed
+
+    from techne.core.database import connect
+
+    conn = connect(db)
+    row = conn.execute("SELECT content FROM knowledge WHERE id = ?", (card_id,)).fetchone()
+    conn.close()
+    assert "ghp_abcdefghijklmnopqrstuvwxyz1234" not in row["content"]
+    assert "<redacted:github>" in row["content"]

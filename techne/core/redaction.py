@@ -7,6 +7,14 @@ caller-supplied and low-risk by convention. This is NOT a confidentiality
 guarantee; new free-text columns MUST call redact_credentials before
 INSERT/UPDATE. Pattern ordering matters: more-specific prefixes first so
 substrings don't capture broader matches.
+
+Intentionally NOT redacted (by design, not oversight):
+  - the architect `patterns` store — operator-curated architectural notes, not
+    a credential sink; redaction there would corrupt deliberately-authored text.
+  - the codex code-graph store — repo symbols/spans extracted from source the
+    operator already controls, not captured tool/LLM output.
+Both are opt-in domain stores queried deliberately, never fed verbatim tool
+output the way observations / summaries / cards / documents are.
 """
 
 import re
@@ -51,11 +59,14 @@ _PATTERNS: list[tuple[str, str]] = [
     # Google API keys (AIzaSy… prefix, 39 chars total: 6-char prefix + 33 chars)
     # — techne#243
     (r"AIzaSy[A-Za-z0-9_-]{33}", "google-api-key"),
-    # PEM private key blocks (techne#243). [\s\S]*? matches the base64 body
-    # across newlines without requiring re.DOTALL. Covers RSA, EC, ENCRYPTED,
-    # and plain PRIVATE KEY headers.
+    # PEM private key blocks (techne#243). [\s\S]{0,8192}? matches the base64
+    # body across newlines without requiring re.DOTALL. Covers RSA, EC,
+    # ENCRYPTED, and plain PRIVATE KEY headers. The span is BOUNDED to 8KB
+    # (a real PEM key body is well under that) so a BEGIN opener with no END
+    # closer can't force an O(n²) rescan-to-EOF per opener — redaction now runs
+    # on semi-external, unbounded GitHub issue bodies (github_issues.py).
     (
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,8192}?-----END [A-Z ]*PRIVATE KEY-----",
         "pem-private-key",
     ),
     # HTTP Authorization header: Bearer token (techne#243). Requires ≥20 non-
@@ -68,8 +79,12 @@ _PATTERNS: list[tuple[str, str]] = [
     # assignments. Require ≥8 non-whitespace chars for the value to stay above
     # the false-positive threshold for short placeholder/test strings.
     #   bare form:  api_key=longvalue123  or  password=Hunter2!x
-    (r"(?i)\b(?:api_key|password|secret)\s*=\s*\S{8,}", "lowered-credential"),
-    #   JSON form:  "api_key": "longvalue123"
+    # The `=` must have NO surrounding whitespace — that's the real shell/env/CLI
+    # shape (`export secret=…`, `--password=…`). Allowing spaces (`key = value`)
+    # over-redacts prose and code (`password = get_password()`), which now flows
+    # through the LLM-prose sinks this pass wired up (decision_reason, summaries).
+    (r"(?i)\b(?:api_key|password|secret)=\S{8,}", "lowered-credential"),
+    #   JSON form:  "api_key": "longvalue123"  (spaces around ':' are normal JSON)
     (r'(?i)"(?:api_key|password|secret)"\s*:\s*"[^"]{8,}"', "lowered-credential"),
     # Env-style: SOME_KEY=value, SOME_TOKEN=value, SOME_SECRET=value
     (r"[A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET)=\S+", "env"),

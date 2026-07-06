@@ -469,18 +469,24 @@ def save_checkpoint(
     """
     import json
 
-    # Redact each bash command string in recent_commands before persisting.
-    # These are raw shell commands extracted from the transcript and may
-    # contain credentials passed as CLI arguments or env-style assignments.
-    # A shallow copy avoids mutating the caller's dict.
-    if "recent_commands" in data:
-        cmds = data["recent_commands"]
-        if isinstance(cmds, list):
-            data = dict(data)
-            data["recent_commands"] = [
-                redact_credentials(cmd) if isinstance(cmd, str) else cmd
-                for cmd in cmds
-            ]
+    # Redact every free-text value in the checkpoint blob before it is
+    # serialized into data_json. The pre_compact hook packs several raw
+    # transcript-derived fields here — recent_commands (raw bash argv) AND
+    # last_task (the last substantive user message, verbatim). Users paste
+    # secrets into chat as readily as into argv, so we redact at the
+    # serialization boundary rather than field-by-field: any string value
+    # (or string item in a list) is filtered, so a future field can't reopen
+    # the hole. Non-string / structured values (files_modified paths,
+    # tools_used counts, git_branch) are left as-is — they don't match the
+    # anchored patterns anyway. A shallow copy avoids mutating the caller's dict.
+    def _redact_value(v):
+        if isinstance(v, str):
+            return redact_credentials(v)
+        if isinstance(v, list):
+            return [redact_credentials(x) if isinstance(x, str) else x for x in v]
+        return v
+
+    data = {k: _redact_value(v) for k, v in data.items()}
 
     conn = connect(db_path)
     try:

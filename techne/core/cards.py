@@ -55,10 +55,21 @@ def _card_tags(doc_id: int, source_version: str, backing_mode: str, pending: boo
 
 
 def _insert_card(conn, content: str, source_url: str, tags: str, confidence: str) -> int:
+    # Defense in depth: redact at the INSERT boundary too. Today's callers
+    # (upsert_document_card via a document title/summary, fill_card_summary via
+    # an agent gist) already redact upstream, but redacting here means a future
+    # second caller can't reopen the sink by forgetting to.
     cur = conn.execute(
         """INSERT INTO knowledge (type, content, source, tags, confidence, confidence_numeric)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (CARD_TYPE, content, source_url, tags, confidence, CONFIDENCE_NUMERIC[confidence]),
+        (
+            CARD_TYPE,
+            redact_credentials(content),
+            source_url,
+            tags,
+            confidence,
+            CONFIDENCE_NUMERIC[confidence],
+        ),
     )
     return cur.lastrowid
 

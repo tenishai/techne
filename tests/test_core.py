@@ -389,6 +389,30 @@ class TestCheckpoints:
         cp = get_latest_checkpoint(db_path, sid)
         assert cp["data"]["last_task"] == "just work"
 
+    def test_save_checkpoint_last_task_redacted(self, db_path):
+        """#244 (review): last_task is the last raw USER MESSAGE verbatim — users
+        paste secrets into chat. The serialization-boundary walk must redact it
+        (and any future string field), not just recent_commands.
+        """
+        sid = start_session(db_path)
+        # A user message pasting an Anthropic key into chat, verbatim.
+        save_checkpoint(
+            db_path,
+            sid,
+            "compact",
+            {
+                "last_task": "here's my key sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890 configure it",
+                "git_branch": "main",
+                "files_modified": ["/repo/foo.py"],
+            },
+        )
+        cp = get_latest_checkpoint(db_path, sid)
+        assert "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890" not in cp["data"]["last_task"]
+        assert "<redacted:sk-ant>" in cp["data"]["last_task"]
+        # Structured / non-credential fields survive untouched.
+        assert cp["data"]["git_branch"] == "main"
+        assert cp["data"]["files_modified"] == ["/repo/foo.py"]
+
 
 class TestResumeContext:
     def test_empty_db(self, db_path):

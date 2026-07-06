@@ -432,3 +432,40 @@ def test_lowered_credential_benign_json_field_untouched():
     # JSON fields with common names but short/non-secret values
     text = '{"secret": "no"}'
     assert redact_credentials(text) == text
+
+
+def test_lowered_credential_spaced_long_value_untouched():
+    """#244 (review): the bare pattern requires `=` with NO surrounding whitespace.
+    A spaced `key = value` with a LONG (8+ char) value is prose/code, not a leaked
+    secret — it must survive. This pins the space boundary the short-value negative
+    tests can't (they only lock the length floor).
+    """
+    # Code snippet: the RHS is a call, not a credential.
+    code = "password = get_password()"
+    assert redact_credentials(code) == code
+    # Prose: a spaced assignment describing behavior, long value.
+    prose = "the api_key = whatever the user typed into the form"
+    assert redact_credentials(prose) == prose
+    secret_prose = "the secret = something the operator configures elsewhere"
+    assert redact_credentials(secret_prose) == secret_prose
+
+
+def test_pem_bounded_span_no_redos_on_unterminated_opener():
+    """#243 (review): the PEM span is bounded to 8KB so an unterminated BEGIN
+    opener (semi-external GitHub issue bodies) can't force an O(n²) rescan.
+    A BEGIN with no matching END and a large body must NOT match, and must
+    complete quickly (bounded work).
+    """
+    import time
+
+    # 50 openers, each with no closer, followed by a large tail. Unbounded lazy
+    # matching would rescan to EOF per opener; the {0,8192} bound caps it.
+    junk = "-----BEGIN RSA PRIVATE KEY-----\n" + ("A" * 200 + "\n") * 50
+    payload = junk * 50  # ~0.5 MB of opener-heavy, closer-free text
+    start = time.perf_counter()
+    result = redact_credentials(payload)
+    elapsed = time.perf_counter() - start
+    # No END marker anywhere → nothing to redact for this pattern.
+    assert "<redacted:pem-private-key>" not in result
+    # Bounded work: comfortably under a second even on slow CI.
+    assert elapsed < 2.0, f"PEM matching took {elapsed:.3f}s — bound may be ineffective"
