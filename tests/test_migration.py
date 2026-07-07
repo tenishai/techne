@@ -2051,3 +2051,114 @@ class TestSchemaTableStatementsComments:
         )
         names = {name for name, _ in results}
         assert names == {"t1", "t2"}
+
+
+# ---------------------------------------------------------------------------
+# v13 -> v14: exactly-once reflect ingest (issue #236)
+# Partial UNIQUE(prompt_hash, content) WHERE origin='reflect' on
+# knowledge_candidates, with a dedup pass that must run BEFORE the index so a DB
+# already carrying duplicate reflect candidates upgrades cleanly.
+# ---------------------------------------------------------------------------
+
+_SCHEMA_V13_KC = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS knowledge_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tags TEXT,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    source_session_id TEXT NOT NULL,
+    source_thread_id TEXT,
+    model_used TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    raw_response TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    promoted_to_id INTEGER,
+    reviewed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    action TEXT NOT NULL DEFAULT 'add',
+    target_ids TEXT,
+    origin TEXT NOT NULL DEFAULT 'reflect',
+    faithfulness_ok INTEGER,
+    faithfulness_warning TEXT
+);
+"""
+
+
+class TestV13ToV14Migration:
+    """v14 dedups pre-existing reflect duplicates and adds the partial UNIQUE index."""
+
+    @pytest.fixture
+    def v13_conn(self, tmp_path):
+        db = tmp_path / "v13.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_V13_KC)
+        conn.execute("INSERT INTO schema_version (version) VALUES (13)")
+        conn.execute("INSERT INTO sessions (id) VALUES ('s1')")
+        # Two IDENTICAL reflect candidates (same prompt_hash + content) — exactly the
+        # duplicate a pre-#236 re-ingest produced. The migration must dedup them before
+        # the UNIQUE index, or CREATE UNIQUE INDEX would fail.
+        for _ in range(2):
+            conn.execute(
+                "INSERT INTO knowledge_candidates "
+                "(scope, type, content, source_session_id, model_used, prompt_hash, origin) "
+                "VALUES ('knowledge','decision','dup content','s1','m','hh','reflect')"
+            )
+        # A non-reflect row sharing the same (prompt_hash, content) must survive: the
+        # index (and the dedup) are scoped to origin='reflect'.
+        conn.execute(
+            "INSERT INTO knowledge_candidates "
+            "(scope, type, content, source_session_id, model_used, prompt_hash, origin) "
+            "VALUES ('knowledge','decision','dup content','s1','m','hh','dream')"
+        )
+        conn.commit()
+        return conn
+
+    def test_dedups_reflect_leaves_one_row(self, v13_conn):
+        _migrate(v13_conn, 13, SCHEMA_VERSION)
+        reflect_rows = v13_conn.execute(
+            "SELECT COUNT(*) FROM knowledge_candidates WHERE origin='reflect'"
+        ).fetchone()[0]
+        assert reflect_rows == 1
+
+    def test_non_reflect_row_untouched(self, v13_conn):
+        _migrate(v13_conn, 13, SCHEMA_VERSION)
+        dream_rows = v13_conn.execute(
+            "SELECT COUNT(*) FROM knowledge_candidates WHERE origin='dream'"
+        ).fetchone()[0]
+        assert dream_rows == 1
+
+    def test_partial_unique_index_created_and_enforced(self, v13_conn):
+        _migrate(v13_conn, 13, SCHEMA_VERSION)
+        idx = v13_conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_kc_reflect_dedup'"
+        ).fetchone()
+        assert idx is not None
+        # Enforced: a fresh duplicate reflect insert now raises (the ingest path uses
+        # ON CONFLICT DO NOTHING; a plain INSERT surfaces the constraint).
+        with pytest.raises(sqlite3.IntegrityError):
+            v13_conn.execute(
+                "INSERT INTO knowledge_candidates "
+                "(scope, type, content, source_session_id, model_used, prompt_hash, origin) "
+                "VALUES ('knowledge','decision','dup content','s1','m','hh','reflect')"
+            )
+
+    def test_schema_version_bumped_to_14(self, v13_conn):
+        _migrate(v13_conn, 13, SCHEMA_VERSION)
+        max_v = v13_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert max_v == SCHEMA_VERSION == 14
+
+    def test_migration_idempotent_on_replay(self, v13_conn):
+        _migrate(v13_conn, 13, SCHEMA_VERSION)
+        _migrate(v13_conn, SCHEMA_VERSION, SCHEMA_VERSION)  # no-op, must not raise
+        reflect_rows = v13_conn.execute(
+            "SELECT COUNT(*) FROM knowledge_candidates WHERE origin='reflect'"
+        ).fetchone()[0]
+        assert reflect_rows == 1

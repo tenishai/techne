@@ -226,11 +226,22 @@ def _insert_candidate(
         ):
             thread_id = None
         cur = conn.execute(
+            # Exactly-once ingest (techne#236): re-emitting/re-ingesting the same thread
+            # used to insert a DUPLICATE pending candidate. The partial UNIQUE index on
+            # (prompt_hash, content) WHERE origin='reflect' (schema v14) makes this a
+            # no-op on replay. Scoped to origin='reflect' so the consolidate/dream/
+            # conflict/federation passes — which share this table but carry their own
+            # anti-re-proposal guards and legitimately reuse prompt_hash values — are
+            # untouched. content is part of the key because one prompt yields many
+            # distinct candidates (all sharing prompt_hash); prompt_hash (NOT NULL) over
+            # source_thread_id (the FK safety-net can NULL it, and SQLite treats NULLs as
+            # distinct, which would silently defeat the dedup).
             """INSERT INTO knowledge_candidates
                  (scope, type, content, tags, confidence,
                   source_session_id, source_thread_id,
                   model_used, prompt_hash, raw_response, origin)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reflect')""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reflect')
+               ON CONFLICT(prompt_hash, content) WHERE origin = 'reflect' DO NOTHING""",
             (
                 candidate.scope,
                 candidate.type,
@@ -245,6 +256,10 @@ def _insert_candidate(
             ),
         )
         conn.commit()
+        # rowcount==0 → the ON CONFLICT fired (already ingested). lastrowid is unreliable
+        # after a skipped upsert (returns the prior insert's rowid), so gate on rowcount.
+        if cur.rowcount == 0:
+            return None
         return cur.lastrowid
     finally:
         conn.close()
@@ -295,19 +310,45 @@ def load_session_for_reflection(config: Config, session_id: str) -> tuple[list[T
     return threads, observations
 
 
+def _marker_has_unemitted_threads(marker: dict | None) -> bool:
+    """Is a session still pending reflection given its emit-cursor marker (techne#269)?
+
+    The ``reflect:emitted:<id>`` marker is a per-thread emit cursor: ``emitted`` is the
+    list of prompt_hashes already delivered and ``total`` the session's reflectable
+    thread count. A session is pending when threads remain (``len(emitted) < total``),
+    so the SessionStart auto-trigger keeps nudging a large session until it's drained
+    instead of the first partial emit silently marking the whole thing done.
+
+    Backward-compat: markers written by techne#268 carry {count,total,remaining} with
+    NO ``emitted`` list. Those predate the cursor; treat them as fully emitted (NOT
+    pending) — re-surfacing a session the operator already saw once would be a
+    surprising regression, and a #268-truncated marker deliberately recorded a nonzero
+    ``remaining`` while still considering itself done.
+    """
+    if marker is None:
+        return True  # never emitted → pending
+    emitted = marker.get("emitted")
+    if emitted is None:
+        return False  # #268-era marker (no per-thread cursor) → treat as fully emitted
+    return len(emitted) < marker.get("total", len(emitted))
+
+
 def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
-    """Recent sessions that look reflectable but haven't been emitted yet (techne#19).
+    """Recent sessions that look reflectable but aren't fully emitted yet (techne#19).
 
     A cheap SessionStart heuristic for the auto-trigger: a session with at least
-    ``reflect.min_observations_per_thread`` observations and no
-    ``reflect:emitted:<id>`` marker. It deliberately COUNTS observations rather than
-    running full thread detection (too costly for the bounded hook) — the emit
-    round-trip self-corrects: ``techne_reflect_emit`` sets the marker even when it
-    yields an empty batch, so a non-reflectable session is nudged at most once.
+    ``reflect.min_observations_per_thread`` observations whose ``reflect:emitted:<id>``
+    cursor still shows unemitted threads (techne#269). It deliberately COUNTS
+    observations rather than running full thread detection (too costly for the bounded
+    hook) and derives "threads remaining" straight from the marker payload — never a
+    fresh detection pass. The emit round-trip self-corrects: ``techne_reflect_emit``
+    sets the marker even when it yields an empty batch, so a non-reflectable session is
+    nudged at most once; a session larger than the emit cap keeps surfacing (its
+    ``emitted`` list grows each pass) until every thread is drained.
 
-    Returns the unemitted sessions among the ``limit`` most-recent (newest first),
+    Returns the still-pending sessions among the ``limit`` most-recent (newest first),
     each ``{"session_id", "observations"}`` — the marker filter runs *after* the
-    LIMIT, so a genuinely-old unemitted session past that window is intentionally not
+    LIMIT, so a genuinely-old pending session past that window is intentionally not
     surfaced (newest-unreflected is what the nudge cares about; explicit emit always
     works). Empty when nothing is pending.
     """
@@ -329,7 +370,7 @@ def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
         return [
             {"session_id": r["session_id"], "observations": r["n"]}
             for r in rows
-            if get_state(conn, f"reflect:emitted:{r['session_id']}") is None
+            if _marker_has_unemitted_threads(get_state(conn, f"reflect:emitted:{r['session_id']}"))
         ]
     finally:
         conn.close()
@@ -430,6 +471,10 @@ def ingest_reflection_response(
                 prompt_hash=prompt_hash,
                 raw_response=raw_for_store,
             )
+            # None → the exactly-once guard skipped a duplicate (techne#236): don't
+            # count it as written and don't re-promote it into live knowledge.
+            if cand_id is None:
+                continue
             counts["candidates_written"] += 1
             if effective_write_to(config) == "live":
                 promoted_id = _write_live(

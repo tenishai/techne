@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -259,6 +259,16 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
 CREATE INDEX IF NOT EXISTS idx_kc_action_status ON knowledge_candidates(action, status);
+-- Exactly-once reflect ingest (techne#236, schema v14). Partial UNIQUE on
+-- (prompt_hash, content) so re-ingesting the same thread's answer is a no-op
+-- (paired with INSERT ... ON CONFLICT DO NOTHING in reflect._insert_candidate).
+-- Scoped to origin='reflect': the consolidate/dream/conflict/federation passes share
+-- this table but carry their own re-proposal guards and reuse prompt_hash values, so
+-- they must stay unconstrained. prompt_hash (NOT NULL) not source_thread_id (the FK
+-- safety-net can NULL it, and SQLite treats NULLs as distinct — silently defeating the
+-- dedup); content is in the key because one prompt yields many distinct candidates.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
+    ON knowledge_candidates(prompt_hash, content) WHERE origin = 'reflect';
 
 -- FTS5 indexes. tokenize='porter unicode61' applies Porter stemming on top of
 -- the unicode61 tokenizer (#77) so morphological variants match: a query for
@@ -829,4 +839,40 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 conn, "knowledge_candidates", "faithfulness_warning", "TEXT"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (13)")
+    if from_version < 14 and to_version >= 14:
+        # Exactly-once reflect ingest (techne#236). knowledge_candidates had no
+        # uniqueness, so re-emitting/re-ingesting the same thread inserted a DUPLICATE
+        # pending candidate. Add a partial UNIQUE index over (prompt_hash, content)
+        # WHERE origin='reflect' so the ingest INSERT ... ON CONFLICT DO NOTHING is
+        # idempotent. Scoped to origin='reflect' to leave the consolidate/dream/conflict/
+        # federation passes (which share the table and reuse prompt_hash) unconstrained.
+        kc_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_candidates'"
+        ).fetchone()
+        if kc_exists:
+            # `origin` is an additive column the reconciler normally backfills AFTER
+            # _migrate runs — but both the dedup and the partial index below reference it,
+            # so ensure it exists first (same decl/default as SCHEMA_SQL; pre-origin rows
+            # were all reflect-origin, so 'reflect' is the correct backfill).
+            _add_column_if_missing(
+                conn, "knowledge_candidates", "origin", "TEXT NOT NULL DEFAULT 'reflect'"
+            )
+            # Dedup pre-existing reflect duplicates BEFORE creating the UNIQUE index —
+            # otherwise CREATE UNIQUE INDEX fails on a DB that already has dupes. Keep the
+            # lowest id per (prompt_hash, content) group; scoped to origin='reflect' to
+            # match the partial index's predicate (other origins are untouched).
+            conn.execute(
+                """DELETE FROM knowledge_candidates
+                     WHERE origin = 'reflect'
+                       AND id NOT IN (
+                           SELECT MIN(id) FROM knowledge_candidates
+                            WHERE origin = 'reflect'
+                         GROUP BY prompt_hash, content
+                       )"""
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup "
+                "ON knowledge_candidates(prompt_hash, content) WHERE origin = 'reflect'"
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (14)")
     conn.commit()
