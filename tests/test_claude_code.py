@@ -1,7 +1,9 @@
 """Tests for the Claude Code platform adapter (hook + MCP registration)."""
 
 import json
+import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -202,7 +204,7 @@ class TestPreflightGuard:
         cmd = self._session_start_cmd()
         # Command starts with /bin/sh <launcher>
         launcher = str(hooks_mod._launcher_path())
-        assert cmd.startswith(f"/bin/sh {shlex.quote(launcher)}") or launcher in cmd
+        assert cmd.startswith(f"/bin/sh {shlex.quote(launcher)}")
         # Absolute guard path still present
         assert str(hooks_mod.PREFLIGHT_GUARD) in cmd
         assert hooks_mod.PREFLIGHT_GUARD.is_absolute()
@@ -357,7 +359,8 @@ class TestLauncher:
         assert len(ss_groups) == 1, "shim group must be replaced, not duplicated"
 
     def test_unregister_removes_launcher_hooks(self, fake_home, cfg):
-        # After unregister, no techne groups must remain in settings.json.
+        # After unregister, no techne groups must remain in settings.json, and the
+        # launcher file must be deleted so it doesn't orphan after uninstall.
         from techne.platforms.claude_code import hooks as hooks_mod
         # Provide a minimal MCP config so unregister's MCP cleanup path runs cleanly.
         mcp = hooks_mod.MCP_CONFIG_PATH
@@ -365,8 +368,11 @@ class TestLauncher:
         mcp.write_text(json.dumps({"mcpServers": {"techne": {"command": sys.executable}}}))
 
         claude_code.register_hooks(cfg)
+        launcher = hooks_mod._launcher_path()
+        assert launcher.exists(), "launcher must exist after register"
         claude_code.unregister(cfg)
 
+        assert not launcher.exists(), "launcher must be removed by unregister"
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         for event, groups in settings.get("hooks", {}).items():
             techne_groups = [g for g in groups if claude_code._group_contains_techne(g)]
@@ -375,32 +381,37 @@ class TestLauncher:
             )
 
     def test_launcher_pipx_heal_content(self, fake_home, cfg, monkeypatch):
-        # When techne is installed under pipx, the baked heal command is
-        # `pipx reinstall techne` — uses pipx's own bundled python so it survives
-        # removal of the base python.
+        # When techne is installed under pipx, the baked heal command uses
+        # `pipx reinstall --python "$(command -v python3)" techne` — explicitly
+        # names python3 so a minor-version removal is survived as long as python3
+        # and pipx are on PATH at heal time.
         from techne.platforms.claude_code import hooks as hooks_mod
         monkeypatch.setattr(
             sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
         )
         claude_code.register_hooks(cfg)
         content = hooks_mod._launcher_path().read_text()
-        assert "pipx reinstall techne" in content
+        assert 'pipx reinstall --python "$(command -v python3)" techne' in content
 
 
 class TestHealCommand:
     """_heal_command() picks the right heal strategy per install method (techne#276)."""
 
     def test_pipx_install(self, monkeypatch):
-        # pipx path segment → safe auto-heal via pipx's own bundled python.
+        # pipx path segment → heal via pipx with explicit --python so a minor-version
+        # removal is survived (pipx's DEFAULT_PYTHON = its own sys.executable; by
+        # naming python3 we decouple from whatever Python pipx itself runs under).
         from techne.platforms.claude_code import hooks as hooks_mod
         monkeypatch.setattr(
             sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
         )
-        assert hooks_mod._heal_command() == "pipx reinstall techne"
+        assert hooks_mod._heal_command() == 'pipx reinstall --python "$(command -v python3)" techne'
 
     def test_system_non_venv(self, monkeypatch):
         # system install (prefix == base_prefix): pip reinstall with
-        # --break-system-packages (same flag logic as preflight_guard).
+        # --break-system-packages (same flag logic as preflight_guard), then PY
+        # is reassigned so exec targets the freshly-resolved python3, not the
+        # original dead interpreter (fixes the no-op heal bug from review #279).
         from techne.platforms.claude_code import hooks as hooks_mod
         monkeypatch.setattr(sys, "executable", "/usr/bin/python3.12")
         monkeypatch.setattr(sys, "prefix", "/usr")
@@ -409,6 +420,8 @@ class TestHealCommand:
         assert "pip install" in cmd
         assert "--break-system-packages" in cmd
         assert "python3" in cmd
+        # After install, PY must be re-pointed so exec uses the new interpreter.
+        assert 'PY="$(command -v python3)"' in cmd
 
     def test_plain_venv_warns_not_heals(self, monkeypatch, tmp_path):
         # plain venv (prefix != base_prefix, no pipx): safe auto-rebuild is
@@ -421,9 +434,11 @@ class TestHealCommand:
         monkeypatch.setattr(sys, "base_prefix", "/usr/local")
         cmd = hooks_mod._heal_command()
         assert "exit 1" in cmd
-        # Must warn and exit — NOT auto-run pipx or pip (those are in the
-        # echoed message text, not as executed auto-heal commands).
-        assert "pipx reinstall" not in cmd
+        # Must warn and exit — NOT auto-run pipx or pip as live commands.
+        # (pipx/uv reinstall *text* may appear in the echoed help message, but
+        # the command itself must start with `echo`, not be a live tool invocation.)
+        assert cmd.startswith("echo ")
+        assert not cmd.startswith("pipx reinstall")
         assert not cmd.startswith("python3 -m pip install")
 
     def test_pipx_detection_requires_path_segment(self, monkeypatch):
@@ -540,3 +555,148 @@ class TestConfigSafety:
         # _load_json returns the same dict; a missing file returns None.
         assert hooks_mod._load_json(target) == {"a": 1, "b": [2, 3]}
         assert hooks_mod._load_json(tmp_path / "nope.json") is None
+
+
+class TestLauncherExecution:
+    """Execute the generated launcher as a real shell script to verify the heal logic
+    composes and fires correctly (not just string-assertion coverage).
+
+    Strategy: monkeypatch sys.executable / sys.prefix to a dead path, generate the
+    launcher, then run it under /bin/sh with controlled PATH (shims replace real tools
+    so no actual install runs). Each shim writes a log line for later assertion.
+    """
+
+    @staticmethod
+    def _shim(bin_dir: Path, name: str, body: str, log: Path) -> None:
+        """Write an executable shim that appends 'CALLED: <name> <args>' to *log*."""
+        s = bin_dir / name
+        s.write_text(
+            "#!/bin/sh\n"
+            f'echo "CALLED: {name} $@" >> {shlex.quote(str(log))}\n'
+            + body + "\n"
+        )
+        s.chmod(0o755)
+
+    def test_plain_venv_exits_with_remediation(self, fake_home, cfg, monkeypatch, tmp_path):
+        """Plain-venv launcher with a dead interpreter: exit 1, remediation on stderr,
+        no install invoked."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        dead_py = tmp_path / "venv" / "bin" / "python"
+        monkeypatch.setattr(sys, "executable", str(dead_py))
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+        monkeypatch.setattr(sys, "base_prefix", "/usr/local")
+
+        claude_code.register_hooks(cfg)
+        launcher = hooks_mod._launcher_path()
+
+        # Minimal PATH — no python3/pip so any accidental install attempt would fail
+        # (but heal is echo+exit 1 so it won't try).
+        env = {"PATH": "/bin:/usr/bin", "HOME": str(tmp_path)}
+        result = subprocess.run(
+            ["/bin/sh", str(launcher), "dummy_arg"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert result.returncode == 1, (
+            f"expected exit 1, got {result.returncode}; stderr={result.stderr!r}"
+        )
+        assert "interpreter dead" in result.stderr, (
+            f"remediation message missing from stderr: {result.stderr!r}"
+        )
+        assert "recreate the venv" in result.stderr
+
+    def test_system_heal_fires_python3_and_reppoints_exec(
+        self, fake_home, cfg, monkeypatch, tmp_path
+    ):
+        """System-install launcher with a dead interpreter: heal calls python3 for install,
+        reassigns PY, then exec targets the re-pointed python3 (not the dead one)."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        dead_py = tmp_path / "usr" / "bin" / "python3.11"
+        monkeypatch.setattr(sys, "executable", str(dead_py))
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+        claude_code.register_hooks(cfg)
+        launcher = hooks_mod._launcher_path()
+
+        # Shims: python3 records every invocation, exits 0.
+        shim_dir = tmp_path / "shims"
+        shim_dir.mkdir()
+        log = tmp_path / "python3_calls.log"
+        self._shim(shim_dir, "python3", "exit 0", log)
+
+        env = {
+            "PATH": str(shim_dir) + ":/bin:/usr/bin",
+            "HOME": str(tmp_path),
+        }
+        # sentinel_arg is passed to the launcher; after the heal and PY re-point,
+        # exec should forward it to our python3 shim.
+        result = subprocess.run(
+            ["/bin/sh", str(launcher), "sentinel_arg"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert log.exists(), "python3 shim was never called — heal did not fire"
+        calls = log.read_text()
+
+        # First call: the install step (-m pip install ...)
+        assert "-m pip install" in calls, (
+            f"expected install call in log; got:\n{calls}"
+        )
+        # Second call: exec re-points to python3 and forwards the sentinel arg.
+        assert "sentinel_arg" in calls, (
+            f"expected exec to re-point to python3 and forward args; got:\n{calls}"
+        )
+
+    def test_pipx_heal_invokes_pipx_with_python_flag(
+        self, fake_home, cfg, monkeypatch, tmp_path
+    ):
+        """pipx-install launcher with a dead interpreter: heal calls `pipx reinstall
+        --python <python3-path> techne` (shim logs the call for assertion)."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        monkeypatch.setattr(
+            sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
+        )
+        monkeypatch.setattr(sys, "prefix", "/home/user/.local/pipx/venvs/techne")
+        monkeypatch.setattr(sys, "base_prefix", "/usr/local")
+
+        claude_code.register_hooks(cfg)
+        launcher = hooks_mod._launcher_path()
+
+        # Shims: pipx records args, exits 0; python3 records args (used for --python
+        # resolution via `command -v python3`), exits 0.
+        shim_dir = tmp_path / "shims"
+        shim_dir.mkdir()
+        log = tmp_path / "calls.log"
+        self._shim(shim_dir, "pipx", "exit 0", log)
+        self._shim(shim_dir, "python3", "exit 0", log)
+
+        env = {
+            "PATH": str(shim_dir) + ":/bin:/usr/bin",
+            "HOME": str(tmp_path),
+        }
+        # PY (/home/user/.local/pipx/venvs/techne/bin/python) doesn't exist, so
+        # exec after heal will fail (127). We don't assert on exit code — only that
+        # the pipx shim was called with the right arguments.
+        subprocess.run(
+            ["/bin/sh", str(launcher), "dummy_arg"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert log.exists(), "pipx shim was never called — heal did not fire"
+        calls = log.read_text()
+
+        assert "CALLED: pipx" in calls, (
+            f"expected pipx to be invoked; got:\n{calls}"
+        )
+        assert "reinstall" in calls, f"expected 'reinstall' in pipx call; got:\n{calls}"
+        assert "techne" in calls, f"expected 'techne' in pipx call; got:\n{calls}"
+        # --python flag must be present (verified against pipx CLI reference: reinstall
+        # accepts --python to override DEFAULT_PYTHON = sys.executable).
+        assert "--python" in calls, (
+            f"expected '--python' flag in pipx call (robustness against removed base "
+            f"python); got:\n{calls}"
+        )

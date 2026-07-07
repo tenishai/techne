@@ -52,18 +52,26 @@ def _heal_command() -> str:
 
     Three cases, mirroring preflight_guard._pip_install_editable's venv detection:
 
-    - **pipx** (sys.executable contains ``pipx/venvs/``): ``pipx reinstall techne``.
-      pipx uses its own bundled python so this works even if the base python is removed.
-      This is the only fully safe auto-heal path.
+    - **pipx** (sys.executable contains ``pipx/venvs/``):
+      ``pipx reinstall --python "$(command -v python3)" techne``.
+      Explicitly passes ``--python`` to force the PATH-resolved ``python3`` rather than
+      pipx's default (``sys.executable`` on non-Windows — i.e. the Python that pipx
+      itself runs under; verified against pipx source at pypa/pipx main, 2026-07-07).
+      By naming ``python3`` explicitly we survive the common case of a minor-version
+      removal (e.g. 3.11→3.12 Homebrew upgrade) as long as ``python3`` and ``pipx`` are
+      on PATH at heal time. MEDIUM confidence. Best-effort path.
 
     - **system/non-venv** (sys.prefix == sys.base_prefix): attempt ``pip install -e``
       under whatever ``python3`` PATH resolves to at heal time, with
-      ``--break-system-packages`` (same flag logic as preflight_guard). Best-effort:
-      if the old versioned interpreter is truly gone the exec after heal will still fail,
-      but a Homebrew upgrade that merely relinks leaves the path intact.
+      ``--break-system-packages`` (same flag logic as preflight_guard), then reassign
+      ``PY="$(command -v python3)"`` so the ``exec "$PY" "$@"`` that follows targets the
+      freshly-resolved interpreter rather than the original dead one. Works if ``python3``
+      is on PATH at heal time; ``command -v`` returning empty still fails loudly. Best-effort.
 
     - **plain venv, non-pipx**: safe automatic rebuild is impossible once the base
       interpreter is gone — print a clear remediation message to stderr and exit 1.
+      The message includes pipx/uv alternatives for users who may have installed via
+      those tools but whose interpreter path did not match the ``pipx/venvs/`` pattern.
       The user must recreate and reinstall manually (techne#276).
     """
     exe = sys.executable
@@ -72,21 +80,26 @@ def _heal_command() -> str:
     repo = _install_root()
 
     if is_pipx:
-        return "pipx reinstall techne"
+        # Use --python to avoid relying on pipx's DEFAULT_PYTHON (= its own sys.executable).
+        return 'pipx reinstall --python "$(command -v python3)" techne'
 
     if not in_venv:
-        # system install: attempt fresh editable install under whatever python3 PATH has
+        # system install: fresh editable install under PATH's python3, then re-point PY
+        # so the exec that follows targets the new interpreter, not the dead one.
         return (
             f"python3 -m pip install -e {shlex.quote(str(repo))} --break-system-packages"
+            '; PY="$(command -v python3)"'
         )
 
     # plain venv, non-pipx: safe automatic rebuild is impossible once the interpreter is
-    # gone — emit a clear remediation message and exit non-zero (techne#276).
+    # gone — emit a clear remediation message (with pipx/uv alternatives) and exit 1.
     msg = (
         f"[techne] interpreter dead ({exe}) — "
         f"recreate the venv and reinstall: "
         f"python3 -m venv {sys.prefix} && "
         f"{sys.prefix}/bin/pip install -e {repo}"
+        f"; or if installed via pipx/uv: "
+        f"pipx reinstall techne / uv tool install --force techne"
     )
     return f"echo {shlex.quote(msg)} >&2; exit 1"
 
@@ -104,17 +117,24 @@ def _write_launcher() -> Path:
 
     Regenerated on every ``register_hooks`` call so interpreter and heal stay in sync.
 
+    Written atomically (write to a sibling ``.tmp.<pid>`` then ``os.replace``): a hook
+    firing mid-write would otherwise read an empty/partial script and silently not fire.
+    Mirrors ``_save_json``'s atomic-write pattern.
+
     POSIX only (macOS + Linux). Windows ``.cmd``/``.ps1`` is a follow-up.
     """
     launcher = _launcher_path()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(
+    content = (
         "#!/bin/sh\n"
         f"PY={shlex.quote(sys.executable)}\n"
         '[ -x "$PY" ] || { ' + _heal_command() + "; }\n"
         'exec "$PY" "$@"\n'
     )
-    launcher.chmod(0o755)
+    tmp = launcher.with_name(f"{launcher.name}.tmp.{os.getpid()}")
+    tmp.write_text(content)
+    tmp.chmod(0o755)
+    os.replace(tmp, launcher)
     return launcher
 
 
@@ -269,6 +289,9 @@ def unregister(config: Config):
             if not hooks[event]:
                 del hooks[event]
         _save_json(SETTINGS_PATH, settings)
+
+    # Remove the generated launcher so it doesn't orphan after uninstall.
+    _launcher_path().unlink(missing_ok=True)
 
     # Remove MCP server
     try:
