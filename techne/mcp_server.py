@@ -1077,7 +1077,7 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     session can't exceed the transport's token cap (tenishai/techne#267).
     """
     from techne.core.database import connect
-    from techne.core.extension_state import set_state
+    from techne.core.extension_state import get_state, set_state
     from techne.core.reflect import (
         emit_reflection_batch,
         load_session_for_reflection,
@@ -1099,6 +1099,31 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     threads, observations = load_session_for_reflection(config, session_id)
     batch = emit_reflection_batch(config, session_id, threads, observations)
     total = len(batch)
+
+    # Per-thread emit cursor (techne#269/#236): a session with more reflectable threads
+    # than the emit cap must drain losslessly across passes — the #268 marker collapsed
+    # the whole session to "emitted" on the first partial emit, so threads past the cap
+    # were never reflected. Load the prompt_hashes already delivered and exclude them, so
+    # each pass takes the NEXT slice of unemitted threads: no overlap, no loss. The cursor
+    # is keyed on prompt_hash — the stable, always-present per-thread id (thread_id can be
+    # NULL for unpersisted threads) and the same key #236 dedups candidates on.
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    already = set(marker.get("emitted", [])) if marker else set()
+    # Stability invariant: prompt_hash is derived from the rendered prompt INCLUDING the
+    # per-thread existing-knowledge block (reflect._build_prompt), so it must not shift
+    # between cursor passes mid-drain — otherwise an already-emitted thread re-appears.
+    # This holds on the DEFAULT path (write_to='candidates'): that path never mutates live
+    # knowledge, and a completed session's observations are frozen, so the hash is stable.
+    # KNOWN LIVE-MODE LIMITATION (write_to='live'): promoting knowledge mid-drain can alter
+    # a drained thread's existing-knowledge block, changing its prompt_hash. The cursor
+    # would then re-emit it, and #236's (prompt_hash, content) dedup would be sidestepped
+    # (duplicate candidate / re-promotion). Re-engineering the cursor key is out of scope
+    # for this PR; document here as a known limitation of the live write path.
+    batch = [item for item in batch if item["prompt_hash"] not in already]
 
     # Bound the payload so a large session can't produce a batch that exceeds the MCP
     # transport's token cap — an oversized emit used to error out AND still mark the
@@ -1122,27 +1147,39 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
         running += item_len
     batch = kept if kept else batch[:1]
 
-    truncated = len(batch) < total
-    remaining = total - len(batch)
+    # Cursor-relative truncation: `remaining` counts threads NOT YET emitted across all
+    # passes (total minus the cumulative emitted set), so a multi-pass drain reports its
+    # true shortfall and reaches 0 only when the whole session is done (techne#269).
+    newly = [item["prompt_hash"] for item in batch]
+    emitted_ids = sorted(already | set(newly))
+    truncated = len(emitted_ids) < total
+    remaining = total - len(emitted_ids)
     # A lone thread that alone exceeds the budget can't be delivered whole. Marking
     # the session emitted here would silently skip it — footgun 3, unchanged (Prudence,
-    # #268). Detect it, leave the session UNMARKED so the auto-trigger keeps surfacing
-    # it, and flag the payload loudly. The real fix (per-thread chunking) is #269.
+    # #268). Detect it, leave the cursor UNADVANCED so the auto-trigger keeps surfacing
+    # it, and flag the payload loudly. (True per-thread chunking of one oversized prompt
+    # is still out of scope; the cursor drains whole threads only.)
     oversized = len(batch) == 1 and len(json.dumps(batch)) > max_chars
     delivered = bool(batch) and not oversized
 
-    # Mark the session emitted so the SessionStart auto-trigger won't re-nudge it,
-    # even if the agent's answers ultimately yield zero durable candidates (techne#19).
-    # On (count-)truncation we still mark it (to avoid a re-nudge loop) but surface the
-    # shortfall so the drop is loud — re-emit with an explicit session_id to get the
-    # rest. We do NOT mark when nothing deliverable was produced (empty or oversized).
+    # Advance the cursor: record the cumulative set of emitted thread prompt_hashes plus
+    # the session's total, so pending_reflection re-surfaces the session until every
+    # thread is drained (techne#269) and re-emits skip already-delivered threads. This is
+    # ALSO the exactly-once reflected-marker (techne#236 Gap 2) — one unified marker, not
+    # two. `count`/`remaining` are kept for continuity with the #268 payload. We do NOT
+    # advance when nothing deliverable was produced (empty or oversized single thread).
     if delivered:
         conn = connect(config.db_path)
         try:
             set_state(
                 conn,
                 f"reflect:emitted:{session_id}",
-                {"count": len(batch), "total": total, "remaining": remaining},
+                {
+                    "emitted": emitted_ids,
+                    "total": total,
+                    "remaining": remaining,
+                    "count": len(emitted_ids),
+                },
             )
         finally:
             conn.close()
@@ -1152,16 +1189,19 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
         result["truncated"] = True
         result["remaining"] = remaining
         result["note"] = (
-            f"Session has {total} threads; emitted {len(batch)} (cap={limit}). "
-            f"{remaining} not emitted — re-emit with the same session_id and a limit "
-            "to reflect the rest."
+            f"Session has {total} threads; emitted {len(batch)} this pass (cap={limit}). "
+            f"{remaining} not yet emitted — re-emit with the same session_id (the "
+            "per-thread cursor auto-resumes from where this pass stopped) to drain the rest."
         )
     if oversized:
         result["oversized"] = True
         result["note"] = (
             f"A single thread's serialized prompt exceeds emit_max_chars ({max_chars}) "
-            "and can't be delivered whole; the session is left UNMARKED so it isn't "
-            "silently skipped. Needs the per-thread cursor/chunking follow-up (#269)."
+            "and can't be delivered whole; the session cursor is left UNADVANCED so it "
+            "isn't silently skipped. Needs per-thread prompt chunking (#269 follow-up). "
+            "Because the cursor drains threads IN ORDER, an oversized lone thread also "
+            "blocks every thread after it in the session — the session remains pending "
+            "until per-thread chunking lands (#269 follow-up)."
         )
     return result
 

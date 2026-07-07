@@ -610,6 +610,33 @@ def test_ingest_writes_candidates(tmp_path):
     assert rows[0]["source_thread_id"] == thread_id
 
 
+def test_ingest_is_idempotent_on_replay(tmp_path):
+    """Exactly-once ingest (techne#236 Gap 1): re-ingesting the SAME thread's answer
+    (same prompt_hash + candidate content) must NOT insert a duplicate candidate — the
+    partial UNIQUE(prompt_hash, content) index + ON CONFLICT DO NOTHING collapse it to a
+    single row, and the second pass reports zero written."""
+    from techne.core.reflect import ingest_reflection_response
+
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    thread_id = f"{session_id}-1"
+
+    first = ingest_reflection_response(config, session_id, thread_id, "deadbeef", _candidate_array())
+    assert first["candidates_written"] == 1
+    second = ingest_reflection_response(
+        config, session_id, thread_id, "deadbeef", _candidate_array()
+    )
+    assert second["candidates_written"] == 0  # duplicate skipped, not re-inserted
+
+    rows = list_candidates(config.db_path, status="all")
+    assert len(rows) == 1, "re-ingest must not create a second candidate row"
+
+
 def test_ingest_write_to_live_promotes(tmp_path):
     from techne.core.knowledge import list_entries
     from techne.core.reflect import ingest_reflection_response
