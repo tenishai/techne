@@ -2,6 +2,7 @@
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -57,7 +58,12 @@ class TestRegisterHooks:
                 )
                 for h in group["hooks"]:
                     assert h["type"] == "command"
-                    assert " -m techne.hooks." in h["command"]
+                    # Every techne hook is either a `-m techne.hooks.<x>` module
+                    # invocation or the standalone preflight guard script.
+                    assert (
+                        " -m techne.hooks." in h["command"]
+                        or "preflight_guard.py" in h["command"]
+                    )
 
     def test_matcher_is_empty_string(self, fake_home, cfg):
         # techne wants every fire of every event, so matcher is "".
@@ -97,14 +103,17 @@ class TestRegisterHooks:
         assert "PostToolUse" not in settings["hooks"]
 
     def test_idempotent_no_duplicate_groups(self, fake_home, cfg):
-        # Two inits in a row should leave exactly one techne group per event,
-        # not two.
+        # Two inits in a row must not accumulate groups: SessionStart keeps its
+        # two techne groups (preflight + session_start), every other event one.
         claude_code.register_hooks(cfg)
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         for event, groups in settings["hooks"].items():
             techne_groups = [g for g in groups if claude_code._group_contains_techne(g)]
-            assert len(techne_groups) == 1, f"{event} has {len(techne_groups)} techne groups"
+            expected = 2 if event == "SessionStart" else 1
+            assert len(techne_groups) == expected, (
+                f"{event} has {len(techne_groups)} techne groups, expected {expected}"
+            )
 
     def test_replaces_legacy_flat_shape(self, fake_home, cfg):
         # A user upgrading from pre-0.4.1 will have legacy flat-shape entries
@@ -125,10 +134,11 @@ class TestRegisterHooks:
         claude_code.register_hooks(cfg)
         settings = json.loads(path.read_text())
 
-        # Legacy techne flat entries gone, new wrapped entries present
+        # Legacy techne flat entry gone, new wrapped entries present: SessionStart
+        # is now the two-group chain [preflight, session_start].
         ss_groups = settings["hooks"]["SessionStart"]
-        assert len(ss_groups) == 1
-        assert "matcher" in ss_groups[0]
+        assert len(ss_groups) == 2
+        assert all("matcher" in g for g in ss_groups)
         # Foreign hook in PostToolUse preserved
         ptu_groups = settings["hooks"]["PostToolUse"]
         foreign = [
@@ -137,6 +147,78 @@ class TestRegisterHooks:
         ]
         assert len(foreign) == 1
         assert foreign[0].get("command") == "/usr/bin/true"
+
+
+class TestPreflightGuard:
+    """The editable-install preflight guard is wired first in SessionStart and
+    survives re-init (techne#261)."""
+
+    def test_preflight_is_first_session_start_hook(self, fake_home, cfg):
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        ss = settings["hooks"]["SessionStart"]
+        assert len(ss) == 2, "expected [preflight, session_start]"
+        assert "preflight_guard.py" in ss[0]["hooks"][0]["command"]
+        assert " -m techne.hooks.session_start" in ss[1]["hooks"][0]["command"]
+
+    def test_preflight_command_uses_sys_executable_and_abs_path(self, fake_home, cfg):
+        # Portable-by-construction: the interpreter is sys.executable (not a
+        # hardcoded path) and the guard is referenced by its absolute on-disk path.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert cmd.startswith(sys.executable + " ") or cmd.startswith(
+            f'"{sys.executable}" '
+        ) or cmd.startswith(f"'{sys.executable}' ")
+        assert str(hooks_mod.PREFLIGHT_GUARD) in cmd
+        assert hooks_mod.PREFLIGHT_GUARD.is_absolute()
+
+    def test_preflight_survives_reinit(self, fake_home, cfg):
+        # register_hooks owns the preflight, so re-init strips-and-re-adds it
+        # rather than dropping it (unlike a hand-wired hook, which it migrates).
+        claude_code.register_hooks(cfg)
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        ss = settings["hooks"]["SessionStart"]
+        assert len(ss) == 2
+        assert "preflight_guard.py" in ss[0]["hooks"][0]["command"]
+
+    def test_migrates_hand_wired_preflight(self, fake_home, cfg):
+        # A hand-wired preflight (command contains "techne") is recognized and
+        # replaced by the packaged one — not duplicated.
+        path = claude_code.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "", "hooks": [{"type": "command",
+             "command": "/old/py /home/x/.claude/techne_preflight.py"}]},
+        ]}}))
+        claude_code.register_hooks(cfg)
+        settings = json.loads(path.read_text())
+        ss = settings["hooks"]["SessionStart"]
+        assert len(ss) == 2  # not 3 — the old hand-wired one was replaced
+        assert "/old/py" not in json.dumps(ss)
+
+    def test_refuses_worktree_install(self, fake_home, cfg, monkeypatch, tmp_path):
+        # If techne is installed from a worktree, register_hooks must refuse —
+        # baking that path in would just re-arm the -32000 footgun.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        worktree = tmp_path / "repo" / ".claude" / "worktrees" / "agent-DEADBEEF"
+        worktree.mkdir(parents=True)
+        monkeypatch.setattr(hooks_mod, "_install_root", lambda: worktree)
+        with pytest.raises(RuntimeError, match="worktree"):
+            claude_code.register_hooks(cfg)
+
+    def test_is_worktree_path_detection(self):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        assert hooks_mod._is_worktree_path(
+            Path("/home/shaz/techne/.claude/worktrees/agent-abc/techne")
+        )
+        assert not hooks_mod._is_worktree_path(Path("/home/shaz/working/techne"))
+        assert not hooks_mod._is_worktree_path(Path("/Users/x/working/claude/techne"))
 
 
 class TestRegisterMCP:
