@@ -273,6 +273,18 @@ def test_heuristic_config_round_trip(tmp_path):
     assert reloaded.heuristic.user_prompt_score == 0.2
 
 
+def test_reflect_emit_bounds_round_trip(tmp_path):
+    """The reflect emit-bounding knobs load and save losslessly (techne#268)."""
+    cfg = Config()
+    cfg.reflect.emit_max_threads = 7
+    cfg.reflect.emit_max_chars = 12345
+    out = tmp_path / "config.yaml"
+    cfg.save(out)
+    reloaded = Config.load(out)
+    assert reloaded.reflect.emit_max_threads == 7
+    assert reloaded.reflect.emit_max_chars == 12345
+
+
 def test_sync_round_trip_preserves_all_fields(tmp_path):
     """Config.save() previously wrote only sync.adapter (plus url/auth/path if
     truthy), silently dropping sync.audience and sync.extra. A round-trip on a

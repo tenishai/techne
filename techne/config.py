@@ -198,6 +198,10 @@ class ReflectConfig:
     # explicit limit. Bounds the payload so a large session can't produce a batch
     # that exceeds the MCP transport's token cap (see _techne_reflect_emit).
     emit_max_threads: int = 25
+    # Serialized-size ceiling (chars) for a reflect emit batch — a conservative
+    # proxy for the transport's token cap. The batch is trimmed to fit; a lone
+    # thread exceeding this can't be delivered whole (see _techne_reflect_emit).
+    emit_max_chars: int = 100_000
 
 
 @dataclass
@@ -463,6 +467,7 @@ class Config:
                 write_to=write_to,
                 log_raw_response=bool(r.get("log_raw_response", True)),
                 emit_max_threads=int(r.get("emit_max_threads", 25)),
+                emit_max_chars=int(r.get("emit_max_chars", 100_000)),
             )
 
         if "search" in raw and isinstance(raw["search"], dict):
@@ -575,6 +580,7 @@ class Config:
                 "write_to": self.reflect.write_to,
                 "log_raw_response": self.reflect.log_raw_response,
                 "emit_max_threads": self.reflect.emit_max_threads,
+                "emit_max_chars": self.reflect.emit_max_chars,
             },
             "search": {
                 "recency_weight": self.search.recency_weight,

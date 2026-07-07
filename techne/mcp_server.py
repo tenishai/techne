@@ -1103,31 +1103,49 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     # Bound the payload so a large session can't produce a batch that exceeds the MCP
     # transport's token cap — an oversized emit used to error out AND still mark the
     # session reflected, silently dropping the whole session's memory (techne#267).
-    limit = args.get("limit") or config.reflect.emit_max_threads
+    # `is not None` (not truthiness) so an explicit limit=0 is honored as "emit none"
+    # rather than silently reinterpreted as the default.
+    limit = args.get("limit")
+    if limit is None:
+        limit = config.reflect.emit_max_threads
     batch = batch[:limit]
-    # Hard guarantee the return is deliverable: trim by serialized size, keeping at
-    # least one prompt so a single huge thread still makes progress.
-    max_chars = 100_000
-    while len(batch) > 1 and len(json.dumps(batch)) > max_chars:
-        batch.pop()
+    # Trim by serialized size to a char budget (proxy for the transport token cap),
+    # keeping >=1 prompt so a lone huge thread still makes progress. Single O(n) pass
+    # — accumulate a prefix that fits — rather than re-dumping the whole batch per pop.
+    max_chars = config.reflect.emit_max_chars
+    kept, running = [], 2  # 2 = the enclosing "[]"
+    for item in batch:
+        item_len = len(json.dumps(item)) + 1  # + separator headroom
+        if kept and running + item_len > max_chars:
+            break
+        kept.append(item)
+        running += item_len
+    batch = kept if kept else batch[:1]
 
     truncated = len(batch) < total
     remaining = total - len(batch)
+    # A lone thread that alone exceeds the budget can't be delivered whole. Marking
+    # the session emitted here would silently skip it — footgun 3, unchanged (Prudence,
+    # #268). Detect it, leave the session UNMARKED so the auto-trigger keeps surfacing
+    # it, and flag the payload loudly. The real fix (per-thread chunking) is #269.
+    oversized = len(batch) == 1 and len(json.dumps(batch)) > max_chars
+    delivered = bool(batch) and not oversized
 
     # Mark the session emitted so the SessionStart auto-trigger won't re-nudge it,
     # even if the agent's answers ultimately yield zero durable candidates (techne#19).
-    # On truncation we still mark it (to avoid a re-nudge loop) but surface the count
-    # so the drop is loud, not silent — re-emit with an explicit session_id + limit to
-    # reflect the rest.
-    conn = connect(config.db_path)
-    try:
-        set_state(
-            conn,
-            f"reflect:emitted:{session_id}",
-            {"count": len(batch), "total": total, "remaining": remaining},
-        )
-    finally:
-        conn.close()
+    # On (count-)truncation we still mark it (to avoid a re-nudge loop) but surface the
+    # shortfall so the drop is loud — re-emit with an explicit session_id to get the
+    # rest. We do NOT mark when nothing deliverable was produced (empty or oversized).
+    if delivered:
+        conn = connect(config.db_path)
+        try:
+            set_state(
+                conn,
+                f"reflect:emitted:{session_id}",
+                {"count": len(batch), "total": total, "remaining": remaining},
+            )
+        finally:
+            conn.close()
 
     result = {"session_id": session_id, "count": len(batch), "batch": batch}
     if truncated:
@@ -1137,6 +1155,13 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
             f"Session has {total} threads; emitted {len(batch)} (cap={limit}). "
             f"{remaining} not emitted — re-emit with the same session_id and a limit "
             "to reflect the rest."
+        )
+    if oversized:
+        result["oversized"] = True
+        result["note"] = (
+            f"A single thread's serialized prompt exceeds emit_max_chars ({max_chars}) "
+            "and can't be delivered whole; the session is left UNMARKED so it isn't "
+            "silently skipped. Needs the per-thread cursor/chunking follow-up (#269)."
         )
     return result
 

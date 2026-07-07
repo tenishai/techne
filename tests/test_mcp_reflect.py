@@ -132,6 +132,53 @@ def test_emit_explicit_limit_overrides_default_cap(config, monkeypatch):
     assert out["count"] == 3 and out["truncated"] is True and out["remaining"] == 7
 
 
+def test_emit_trims_batch_by_serialized_size(config, monkeypatch):
+    """The by-size trim (not just the count cap) actually fires and keeps the
+    returned batch within emit_max_chars (techne#268, Prudence #3)."""
+    import techne.core.reflect as reflect_mod
+
+    _seed(config, "sz", n=6)
+    config.reflect.emit_max_chars = 400  # tiny budget forces the size trim
+    big = "x" * 150
+    fake = [
+        {"thread_id": f"t{i}", "session_id": "sz", "prompt_hash": f"h{i}", "prompt": big}
+        for i in range(6)
+    ]
+    monkeypatch.setattr(reflect_mod, "emit_reflection_batch", lambda *a, **k: list(fake))
+
+    out = _techne_reflect_emit({"session_id": "sz"}, config)
+    assert 1 <= out["count"] < 6  # trimmed below the 6 available threads
+    assert out["truncated"] is True
+    assert len(json.dumps(out["batch"])) <= 400  # the returned payload actually fits
+    conn = connect(config.db_path)
+    try:
+        assert get_state(conn, "reflect:emitted:sz") is not None  # delivered → marked
+    finally:
+        conn.close()
+
+
+def test_emit_oversized_single_thread_is_flagged_and_unmarked(config, monkeypatch):
+    """A lone thread that exceeds the size budget can't be delivered: it's flagged
+    `oversized` and the session is NOT marked emitted, so the auto-trigger keeps
+    surfacing it instead of silently skipping it (techne#268, Prudence #1 — the
+    single-oversized-thread reappearance of footgun 3)."""
+    import techne.core.reflect as reflect_mod
+
+    _seed(config, "huge", n=6)
+    config.reflect.emit_max_chars = 200
+    fake = [{"thread_id": "t0", "session_id": "huge", "prompt_hash": "h0", "prompt": "y" * 5000}]
+    monkeypatch.setattr(reflect_mod, "emit_reflection_batch", lambda *a, **k: list(fake))
+
+    out = _techne_reflect_emit({"session_id": "huge"}, config)
+    assert out.get("oversized") is True
+    conn = connect(config.db_path)
+    try:
+        assert get_state(conn, "reflect:emitted:huge") is None  # NOT marked → re-nudgeable
+    finally:
+        conn.close()
+    assert [p["session_id"] for p in pending_reflection(config)] == ["huge"]
+
+
 def test_emit_prompt_is_kind_aware(config):
     _seed(config, "sess-k")
     out = _techne_reflect_emit({"session_id": "sess-k"}, config)
