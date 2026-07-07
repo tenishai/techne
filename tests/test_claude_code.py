@@ -1,6 +1,7 @@
 """Tests for the Claude Code platform adapter (hook + MCP registration)."""
 
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -59,7 +60,8 @@ class TestRegisterHooks:
                 for h in group["hooks"]:
                     assert h["type"] == "command"
                     # Every techne hook is either a `-m techne.hooks.<x>` module
-                    # invocation or the standalone preflight guard script.
+                    # invocation or the standalone preflight guard script. Both are
+                    # now routed through the launcher (techne#276).
                     assert (
                         " -m techne.hooks." in h["command"]
                         or "preflight_guard.py" in h["command"]
@@ -73,28 +75,42 @@ class TestRegisterHooks:
             for group in groups:
                 assert group["matcher"] == ""
 
-    def test_hook_commands_use_sys_executable(self, fake_home, cfg):
-        # Regression: previously hardcoded "python -m ...", which fails on
-        # systems where only `python3` exists, or where `python` resolves to
-        # a system interpreter without techne installed.
+    def test_hook_commands_route_through_launcher(self, fake_home, cfg):
+        # After techne#276, hooks no longer invoke sys.executable directly —
+        # they route through the generated POSIX launcher so a dead Homebrew
+        # interpreter triggers auto-heal before any module is imported.
+        from techne.platforms.claude_code import hooks as hooks_mod
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        launcher = str(hooks_mod._launcher_path())
         for event, groups in settings["hooks"].items():
             for group in groups:
                 for h in group["hooks"]:
                     cmd = h["command"]
-                    assert cmd.startswith(sys.executable + " ") or cmd.startswith(
-                        f'"{sys.executable}" '
-                    ), f"{event} hook missing sys.executable: {cmd!r}"
+                    assert launcher in cmd, (
+                        f"{event} hook doesn't reference launcher: {cmd!r}"
+                    )
 
-    def test_hook_commands_quote_spaces(self, fake_home, cfg, monkeypatch):
+    def test_hook_commands_pin_interpreter_via_launcher(self, fake_home, cfg, monkeypatch):
+        # The launcher bakes in sys.executable so the right interpreter is used
+        # even if `python` on PATH is something else or absent (replaces the
+        # pre-#276 assertion that commands started with sys.executable directly).
+        from techne.platforms.claude_code import hooks as hooks_mod
+        claude_code.register_hooks(cfg)
+        launcher_content = hooks_mod._launcher_path().read_text()
+        # sys.executable must appear in the PY= line (possibly quoted by shlex)
+        assert sys.executable in launcher_content
+
+    def test_hook_commands_quote_spaces_in_launcher(self, fake_home, cfg, monkeypatch):
+        # A space in sys.executable must be shell-quoted inside the launcher
+        # file so exec "$PY" works correctly. The hook command itself references
+        # the launcher path (which has no spaces), not the interpreter directly.
+        from techne.platforms.claude_code import hooks as hooks_mod
         monkeypatch.setattr(sys, "executable", "/Users/some user/python")
         claude_code.register_hooks(cfg)
-        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
-        cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert cmd.startswith("'/Users/some user/python' ") or cmd.startswith(
-            '"/Users/some user/python" '
-        )
+        launcher_content = hooks_mod._launcher_path().read_text()
+        # shlex.quote wraps the spaced path in single quotes
+        assert "'/Users/some user/python'" in launcher_content
 
     def test_post_tool_use_respects_config(self, fake_home, cfg):
         cfg.hooks.post_tool_use = False
@@ -175,16 +191,19 @@ class TestPreflightGuard:
             "techne.hooks.session_start"
         ), "guard must run before session_start"
 
-    def test_preflight_command_uses_sys_executable_and_abs_path(self, fake_home, cfg):
-        # Portable-by-construction: the interpreter is sys.executable (not a
-        # hardcoded path) and the guard is referenced by its absolute on-disk path.
+    def test_preflight_command_uses_launcher_and_abs_path(self, fake_home, cfg):
+        # After techne#276, the preflight command routes through the launcher
+        # (so a dead interpreter triggers heal before the guard runs). The guard
+        # is still referenced by its absolute on-disk path — it cannot `import
+        # techne` so -m is a chicken-and-egg trap; absolute path is the only option.
         from techne.platforms.claude_code import hooks as hooks_mod
 
         claude_code.register_hooks(cfg)
         cmd = self._session_start_cmd()
-        assert cmd.startswith(sys.executable + " ") or cmd.startswith(
-            f'"{sys.executable}" '
-        ) or cmd.startswith(f"'{sys.executable}' ")
+        # Command starts with /bin/sh <launcher>
+        launcher = str(hooks_mod._launcher_path())
+        assert cmd.startswith(f"/bin/sh {shlex.quote(launcher)}") or launcher in cmd
+        # Absolute guard path still present
         assert str(hooks_mod.PREFLIGHT_GUARD) in cmd
         assert hooks_mod.PREFLIGHT_GUARD.is_absolute()
 
@@ -230,6 +249,194 @@ class TestPreflightGuard:
         )
         assert not hooks_mod._is_worktree_path(Path("/home/shaz/working/techne"))
         assert not hooks_mod._is_worktree_path(Path("/Users/x/working/claude/techne"))
+
+
+class TestLauncher:
+    """The generated POSIX launcher enables install-method-aware auto-heal
+    when a Homebrew upgrade/removal kills the baked-in interpreter (techne#276).
+    """
+
+    def test_launcher_generated_executable_on_register(self, fake_home, cfg):
+        # register_hooks must create the launcher before writing settings.json.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        claude_code.register_hooks(cfg)
+        launcher = hooks_mod._launcher_path()
+        assert launcher.exists(), "launcher file not created"
+        assert launcher.stat().st_mode & 0o111, "launcher must be executable"
+        content = launcher.read_text()
+        assert content.startswith("#!/bin/sh"), "must be a POSIX sh script"
+
+    def test_launcher_bakes_interpreter(self, fake_home, cfg):
+        # sys.executable is baked into the PY= assignment so the launcher pins
+        # to the exact interpreter techne was installed under.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        claude_code.register_hooks(cfg)
+        content = hooks_mod._launcher_path().read_text()
+        # shlex.quote may or may not add quotes depending on the path; the raw
+        # executable string must appear either way.
+        assert sys.executable in content
+
+    def test_launcher_heal_command_present(self, fake_home, cfg):
+        # A heal block is present (the [ -x ] || { ... } guard).
+        from techne.platforms.claude_code import hooks as hooks_mod
+        claude_code.register_hooks(cfg)
+        content = hooks_mod._launcher_path().read_text()
+        assert '[ -x "$PY" ] || {' in content
+        assert 'exec "$PY" "$@"' in content
+
+    def test_launcher_path_in_hook_commands(self, fake_home, cfg):
+        # Every registered hook command references the launcher, not sys.executable.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        launcher = str(hooks_mod._launcher_path())
+        for event, groups in settings["hooks"].items():
+            for group in groups:
+                for h in group["hooks"]:
+                    assert launcher in h["command"], (
+                        f"{event} hook missing launcher path: {h['command']!r}"
+                    )
+
+    def test_session_start_chains_both_through_launcher(self, fake_home, cfg):
+        # Both the preflight guard and session_start sides of the `;`-chain
+        # must route through the launcher — heal fires before either side runs.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        launcher = str(hooks_mod._launcher_path())
+        # Both halves of the chain reference the launcher
+        assert cmd.count(launcher) == 2, (
+            "both guard and session_start sides must use the launcher; "
+            f"found {cmd.count(launcher)} reference(s) in: {cmd!r}"
+        )
+        assert " ; " in cmd
+
+    def test_launcher_regenerated_on_reinit(self, fake_home, cfg):
+        # re-running register_hooks must regenerate the launcher (keeps in sync
+        # if sys.executable changes between installs).
+        from techne.platforms.claude_code import hooks as hooks_mod
+        claude_code.register_hooks(cfg)
+        launcher = hooks_mod._launcher_path()
+        assert launcher.exists()
+        # Write a stale marker; re-init must overwrite it.
+        launcher.write_text("stale")
+        claude_code.register_hooks(cfg)
+        content = launcher.read_text()
+        assert content.startswith("#!/bin/sh"), "launcher not regenerated on re-init"
+
+    def test_reinit_replaces_bare_pin_group(self, fake_home, cfg):
+        # A pre-existing bare sys.executable-pin group (pre-#276 format) is
+        # recognized by _group_contains_techne and replaced with the launcher form.
+        path = claude_code.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "", "hooks": [{"type": "command",
+             "command": f"{sys.executable} -m techne.hooks.session_start"}]},
+        ]}}))
+        claude_code.register_hooks(cfg)
+        settings = json.loads(path.read_text())
+        ss_groups = settings["hooks"]["SessionStart"]
+        assert len(ss_groups) == 1, "bare-pin group must be replaced, not kept"
+        # New command uses the launcher
+        cmd = ss_groups[0]["hooks"][0]["command"]
+        assert "techne-hook.sh" in cmd
+
+    def test_reinit_replaces_hand_wired_shim(self, fake_home, cfg):
+        # A hand-wired /bin/sh shim (techne#276 validated this shim works; re-init
+        # must replace it with the officially managed launcher, not duplicate it).
+        path = claude_code.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "", "hooks": [{"type": "command",
+             "command": "/bin/sh /some/.claude/techne-hook.sh -m techne.hooks.session_start"}]},
+        ]}}))
+        claude_code.register_hooks(cfg)
+        settings = json.loads(path.read_text())
+        ss_groups = settings["hooks"]["SessionStart"]
+        assert len(ss_groups) == 1, "shim group must be replaced, not duplicated"
+
+    def test_unregister_removes_launcher_hooks(self, fake_home, cfg):
+        # After unregister, no techne groups must remain in settings.json.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        # Provide a minimal MCP config so unregister's MCP cleanup path runs cleanly.
+        mcp = hooks_mod.MCP_CONFIG_PATH
+        mcp.parent.mkdir(parents=True, exist_ok=True)
+        mcp.write_text(json.dumps({"mcpServers": {"techne": {"command": sys.executable}}}))
+
+        claude_code.register_hooks(cfg)
+        claude_code.unregister(cfg)
+
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        for event, groups in settings.get("hooks", {}).items():
+            techne_groups = [g for g in groups if claude_code._group_contains_techne(g)]
+            assert not techne_groups, (
+                f"{event} still has techne groups after unregister: {techne_groups}"
+            )
+
+    def test_launcher_pipx_heal_content(self, fake_home, cfg, monkeypatch):
+        # When techne is installed under pipx, the baked heal command is
+        # `pipx reinstall techne` — uses pipx's own bundled python so it survives
+        # removal of the base python.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(
+            sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
+        )
+        claude_code.register_hooks(cfg)
+        content = hooks_mod._launcher_path().read_text()
+        assert "pipx reinstall techne" in content
+
+
+class TestHealCommand:
+    """_heal_command() picks the right heal strategy per install method (techne#276)."""
+
+    def test_pipx_install(self, monkeypatch):
+        # pipx path segment → safe auto-heal via pipx's own bundled python.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(
+            sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
+        )
+        assert hooks_mod._heal_command() == "pipx reinstall techne"
+
+    def test_system_non_venv(self, monkeypatch):
+        # system install (prefix == base_prefix): pip reinstall with
+        # --break-system-packages (same flag logic as preflight_guard).
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(sys, "executable", "/usr/bin/python3.12")
+        monkeypatch.setattr(sys, "prefix", "/usr")
+        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        cmd = hooks_mod._heal_command()
+        assert "pip install" in cmd
+        assert "--break-system-packages" in cmd
+        assert "python3" in cmd
+
+    def test_plain_venv_warns_not_heals(self, monkeypatch, tmp_path):
+        # plain venv (prefix != base_prefix, no pipx): safe auto-rebuild is
+        # impossible once the base interpreter is gone — emit remediation and
+        # exit 1 instead of attempting a fragile auto-rebuild.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        venv = tmp_path / "venv"
+        monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
+        monkeypatch.setattr(sys, "prefix", str(venv))
+        monkeypatch.setattr(sys, "base_prefix", "/usr/local")
+        cmd = hooks_mod._heal_command()
+        assert "exit 1" in cmd
+        # Must warn and exit — NOT auto-run pipx or pip (those are in the
+        # echoed message text, not as executed auto-heal commands).
+        assert "pipx reinstall" not in cmd
+        assert not cmd.startswith("python3 -m pip install")
+
+    def test_pipx_detection_requires_path_segment(self, monkeypatch):
+        # Only the `pipx/venvs/` PATH SEGMENT triggers pipx mode. A random
+        # path that contains 'pipx' elsewhere must not false-positive.
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(sys, "executable", "/opt/pipx-tools/bin/python")
+        monkeypatch.setattr(sys, "prefix", "/opt/pipx-tools")
+        monkeypatch.setattr(sys, "base_prefix", "/opt/pipx-tools")
+        cmd = hooks_mod._heal_command()
+        # system path without pipx/venvs/ → pip path, not pipx reinstall
+        assert cmd != "pipx reinstall techne"
+        assert "pip install" in cmd
 
 
 class TestRegisterMCP:
