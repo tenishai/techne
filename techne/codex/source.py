@@ -102,7 +102,7 @@ class _GrammarCache:
 
     def _load(self, language: str) -> None:
         try:
-            from tree_sitter import Language, Parser, QueryCursor  # noqa: F401
+            from tree_sitter import Language, Parser, Query, QueryCursor  # noqa: F401
 
             if language == "python":
                 import tree_sitter_python as tsp
@@ -124,11 +124,10 @@ class _GrammarCache:
                 line for line in pattern.splitlines() if not line.strip().startswith(";")
             )
 
-            import warnings
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                query = lang.query(clean)
+            # tree-sitter 0.26 removed the deprecated Language.query(); the
+            # Query(language, source) constructor is the forward-compatible API
+            # (works on 0.25 and 0.26). See #263 follow-up / CI red on 0.26.0.
+            query = Query(lang, clean)
 
             parser = Parser(lang)
             self._langs[language] = lang
