@@ -260,3 +260,78 @@ def test_pending_reflection_skips_after_emit(config):
 def test_pending_reflection_ignores_thin_sessions(config):
     _seed(config, "sess-thin", n=2)  # below min_observations_per_thread (3)
     assert pending_reflection(config) == []
+
+
+# ---- per-thread emit cursor (techne#269) ----------------------------------
+
+
+def test_emit_cursor_drains_large_session_across_passes(config, monkeypatch):
+    """A session with more reflectable threads than the emit cap drains losslessly
+    across passes: each pass emits the NEXT slice (no overlap, no loss), and
+    pending_reflection keeps surfacing it until every thread is drained, then stops
+    (techne#269)."""
+    import techne.core.reflect as reflect_mod
+
+    _seed(config, "multi", n=6)  # real observations so pending_reflection surfaces it
+    fake = [
+        {"thread_id": f"t{i}", "session_id": "multi", "prompt_hash": f"h{i}", "prompt": "p"}
+        for i in range(7)
+    ]
+    monkeypatch.setattr(reflect_mod, "emit_reflection_batch", lambda *a, **k: list(fake))
+    config.reflect.emit_max_threads = 3
+
+    seen: list[str] = []
+    passes = 0
+    while pending_reflection(config):  # cursor must keep surfacing until drained
+        out = _techne_reflect_emit({}, config)  # no session_id → most-recent pending
+        assert out["session_id"] == "multi"
+        hashes = [item["prompt_hash"] for item in out["batch"]]
+        assert not (set(hashes) & set(seen)), "passes must not overlap"
+        seen.extend(hashes)
+        passes += 1
+        assert passes <= 5, "cursor failed to terminate"
+
+    assert sorted(seen) == [f"h{i}" for i in range(7)]  # every thread emitted exactly once
+    assert passes == 3  # ceil(7 / cap=3)
+    assert pending_reflection(config) == []  # drained → no longer pending
+
+
+def test_emit_cursor_marker_records_emitted_threads(config, monkeypatch):
+    """The cursor marker carries the cumulative per-thread 'emitted' list + total, and
+    a re-emit skips already-delivered threads (techne#269/#236)."""
+    import techne.core.reflect as reflect_mod
+
+    _seed(config, "cur", n=6)
+    fake = [
+        {"thread_id": f"t{i}", "session_id": "cur", "prompt_hash": f"h{i}", "prompt": "p"}
+        for i in range(5)
+    ]
+    monkeypatch.setattr(reflect_mod, "emit_reflection_batch", lambda *a, **k: list(fake))
+    config.reflect.emit_max_threads = 2
+
+    _techne_reflect_emit({"session_id": "cur"}, config)  # pass 1 → h0,h1
+    out2 = _techne_reflect_emit({"session_id": "cur"}, config)  # pass 2 → h2,h3
+    assert sorted(item["prompt_hash"] for item in out2["batch"]) == ["h2", "h3"]
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, "reflect:emitted:cur")
+    finally:
+        conn.close()
+    assert sorted(marker["emitted"]) == ["h0", "h1", "h2", "h3"]
+    assert marker["total"] == 5 and marker["remaining"] == 1
+
+
+def test_pending_reflection_ignores_old_shape_marker(config):
+    """Backward-compat (techne#269): a #268-era marker ({count,total,remaining} with NO
+    per-thread 'emitted' list) is treated as fully emitted — NOT re-surfaced — even
+    though it recorded a nonzero `remaining`."""
+    from techne.core.extension_state import set_state
+
+    _seed(config, "legacy", n=6)
+    conn = connect(config.db_path)
+    try:
+        set_state(conn, "reflect:emitted:legacy", {"count": 25, "total": 30, "remaining": 5})
+    finally:
+        conn.close()
+    assert pending_reflection(config) == []
