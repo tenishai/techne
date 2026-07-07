@@ -41,7 +41,7 @@ From a source read of the current code (`techne/core/{knowledge,database,search,
 | Capability | Status | Where |
 |---|---|---|
 | **Supersession** — `superseded_by` FK, `supersede()`, `merge_into()`, `reconfirm()` | ✅ built | `knowledge.py:136-165` |
-| **Dependency cascade** — `knowledge_deps` + `_cascade_uncertain` (flip dependents to `uncertain`) | ⚠️ built but wired to **nothing** in production (`add_dependency()` only called in the eval fixture) | `database.py:146-153` |
+| **Dependency cascade** — `knowledge_deps` + `_cascade_uncertain` (flip dependents to `uncertain`) | ⚠️ (at proposal time) built but wired to **nothing** — since resolved by D3/#215: edges are written via `_add_dep_in_conn` on the dream-promote path; the dead public `add_dependency()` was removed in #251 | `database.py:146-153` |
 | **Decay formula** — `confidence_numeric × 0.5^(age/half_life)` + `reaffirm()` + `last_confirmed_at` clock | ⚠️ computed by `effective_confidence()` but **never called by any retrieval/egress path** | `knowledge.py:544-595` |
 | **Hybrid ranking** — BM25 (FTS5, per-table normalized) + recency `exp(-age·ln2/30)` at 0.7/0.3; optional RRF with a vector channel; optional MMR | ✅ built | `search.py:135-194, 539-605` |
 | **Git-anchored freshness** — 5-state (unchanged/modified/moved/deleted/unknown) | ✅ built, but **annotates only — never ranks** | `anchor.py:258-315` |
@@ -56,7 +56,7 @@ From a source read of the current code (`techne/core/{knowledge,database,search,
 
 1. **No contradiction detection anywhere.** Consolidate clusters only *FTS-similar* rows and asks "same or distinct?" — never "do these conflict?" A contradiction in different vocabulary (`"use postgres"` → `"we switched to sqlite"`) never clusters, so the (fully-built) `supersede()` is never triggered. **The retirement machinery exists; nothing detects what to feed it.**
 2. **Decay is inert.** `effective_confidence()` exists but no path calls it. Egress selects by the stored `confidence='high'` text enum → a deeply-decayed old "high" outranks a fresh "medium". The formula has *zero* effect on what gets recalled.
-3. **The dependency cascade has no inputs.** `_cascade_uncertain` is live infrastructure; `add_dependency()` is never called in a real flow.
+3. **The dependency cascade has no inputs.** `_cascade_uncertain` is live infrastructure; at proposal time nothing fed it. *(Resolved by D3/#215: `_add_dep_in_conn` now writes edges on the dream-promote path; the dead public `add_dependency()` was removed in #251.)*
 4. **Freshness annotates but never ranks;** there is no config for the decay half-life (a dead pointer in `knowledge.py:47`); there is no lifecycle (archive/retire) — knowledge grows forever.
 
 ---
