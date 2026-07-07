@@ -15,6 +15,32 @@ from techne.platforms.claude_code.paths import claude_config_dir, claude_json_pa
 SETTINGS_PATH = claude_config_dir() / "settings.json"
 MCP_CONFIG_PATH = claude_json_path()
 
+# The standalone editable-install guard, shipped alongside this adapter. Wired as
+# the first SessionStart hook; see preflight_guard.py for why it must be invoked
+# by absolute path (it heals the very pointer that `-m techne...` depends on).
+PREFLIGHT_GUARD = Path(__file__).resolve().parent / "preflight_guard.py"
+
+
+def _install_root() -> Path:
+    """Repo root of the running techne install — the editable pointer's target.
+
+    ``<repo>/techne/platforms/claude_code/hooks.py`` → ``parents[3]`` is ``<repo>``.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def _is_worktree_path(p: Path) -> bool:
+    """True if ``p`` sits under a ``.claude/worktrees/`` directory."""
+    parts = p.resolve().parts
+    return any(
+        parts[i] == ".claude" and parts[i + 1] == "worktrees"
+        for i in range(len(parts) - 1)
+    )
+
+
+def _preflight_command() -> str:
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(PREFLIGHT_GUARD))}"
+
 
 def _hook_command(module: str) -> str:
     # Pin to the interpreter that techne is installed in, not whatever `python`
@@ -45,14 +71,42 @@ def register_hooks(config: Config):
     ``{<Event>: [{"matcher": "", "hooks": [{"type": "command", "command": "..."}]}]}``.
     Empty matcher means "every tool / every fire of this event".
     """
+    # Refuse to bake a worktree path into the config. If techne is installed from
+    # a git worktree, its editable pointer — and everything we're about to wire —
+    # will break the moment that worktree is pruned (the -32000 footgun). Fail
+    # loud with the remediation rather than register a self-destructing install.
+    root = _install_root()
+    if _is_worktree_path(root):
+        raise RuntimeError(
+            f"techne is installed from a git worktree ({root}). That editable "
+            "pointer will break when the worktree is pruned, taking the MCP server "
+            "and all techne hooks down with it. Reinstall from your canonical "
+            "checkout, then re-run `techne init`:\n"
+            f"  {sys.executable} -m pip install -e <canonical-techne-checkout>"
+        )
+
     settings = _load_json(SETTINGS_PATH)
     if settings is None:
         settings = {}
 
     hooks = settings.setdefault("hooks", {})
 
+    # SessionStart chains the preflight guard and session_start into ONE shell
+    # command joined by `;`. This is load-bearing: Claude Code runs all hooks
+    # matching an event IN PARALLEL with no ordering guarantee — even multiple
+    # commands inside a single group's `hooks` array
+    # (https://code.claude.com/docs/en/hooks-guide). So two separate hooks would
+    # RACE: session_start's `import techne` could fire before the guard heals the
+    # pointer. Sequencing them in one shell process is the only way to guarantee
+    # the guard runs to completion first; session_start then starts as a fresh
+    # process and reads the just-healed `.pth` at its own interpreter startup.
+    # `;` (not `&&`) so a guard crash can never suppress session_start — a broken
+    # guard must not regress the normal hook when the pointer was fine anyway.
+    session_start = (
+        f"{_preflight_command()} ; {_hook_command('techne.hooks.session_start')}"
+    )
     commands_per_event = {
-        "SessionStart": _hook_command("techne.hooks.session_start"),
+        "SessionStart": session_start,
         "PreCompact": _hook_command("techne.hooks.pre_compact"),
         "PostCompact": _hook_command("techne.hooks.post_compact"),
         "Stop": _hook_command("techne.hooks.session_end"),
@@ -63,6 +117,8 @@ def register_hooks(config: Config):
     for event, command in commands_per_event.items():
         groups = hooks.setdefault(event, [])
         # Strip any prior techne entry, in either the wrapped or legacy shape.
+        # This also migrates a hand-wired preflight hook: its command contains
+        # "techne", so it's recognized, removed, and replaced by the packaged one.
         groups[:] = [g for g in groups if not _group_contains_techne(g)]
         groups.append(
             {
