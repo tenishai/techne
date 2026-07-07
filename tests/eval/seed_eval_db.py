@@ -13,7 +13,7 @@ if insertion order ever changes.
 from pathlib import Path
 
 from techne.core.database import connect, init_db
-from techne.core.knowledge import add_dependency, delete, store, supersede
+from techne.core.knowledge import _add_dep_in_conn, delete, store, supersede
 
 _SESSION = "eval-sess"
 
@@ -206,7 +206,13 @@ def seed(db_path: Path) -> dict[str, str]:
         tags="deploy,eval,logs",
         source="eval",
     )
-    add_dependency(db_path, _derived_id, _trigger_id)
+    # Write dep edge via _add_dep_in_conn (add_dependency removed as dead code, #251).
+    _conn = connect(db_path)
+    try:
+        _add_dep_in_conn(_conn, _derived_id, _trigger_id)
+        _conn.commit()
+    finally:
+        _conn.close()
     # Superseding the trigger cascades `uncertain` to the derived row.
     supersede(
         db_path,

@@ -139,9 +139,9 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by);
 -- Dependency edges between knowledge entries (techne#117). A junction table, NOT
 -- a graph engine. `dependent_id` is derived from / depends on `trigger_id` — when
 -- the trigger is superseded, the cascade marks the dependent `uncertain`. Edges are
--- written explicitly (add_dependency) at extraction/reconcile time against the
--- CURRENT revision (they do not auto-follow a supersession chain), never inferred
--- on the hot ingest path. idx on trigger_id powers the cascade lookup.
+-- written via promote_candidate's dream-promote dispatch (_add_dep_in_conn, techne#215/#251)
+-- against the CURRENT revision (they do not auto-follow a supersession chain).
+-- idx on trigger_id powers the cascade lookup.
 -- (No semicolons in this comment — the SCHEMA_SQL parser's stop heuristic, #56.)
 CREATE TABLE IF NOT EXISTS knowledge_deps (
     dependent_id INTEGER NOT NULL REFERENCES knowledge(id),

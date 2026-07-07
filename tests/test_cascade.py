@@ -12,7 +12,7 @@ import pytest
 from techne.core.database import connect
 from techne.core.knowledge import (
     UNCERTAIN_CONFIDENCE_PENALTY,
-    add_dependency,
+    _add_dep_in_conn,
     annotate_uncertain,
     cascade_uncertain,
     effective_confidence,
@@ -20,6 +20,20 @@ from techne.core.knowledge import (
     store,
     supersede,
 )
+
+
+def _write_dep_edge(db, dependent_id: int, trigger_id: int, kind: str = "derived_from") -> None:
+    """Test helper: write a dependency edge via _add_dep_in_conn inside a short-lived
+    connection.  Mirrors what promote_candidate does on the dream-promote path but
+    exposes a db_path interface for test setup convenience. (add_dependency was removed
+    as dead production code in techne#251; tests that exercised its cascade behaviour
+    are preserved here using this helper instead.)"""
+    conn = connect(db)
+    try:
+        _add_dep_in_conn(conn, dependent_id, trigger_id, kind)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _status(db, kid: int) -> str:
@@ -45,7 +59,7 @@ def test_supersede_cascades_dependents_to_uncertain(db):
     to `uncertain` (their basis changed; reconfirm before trusting)."""
     trigger = store(db, "Richard's primary machine is dev04", type="fact")
     derived = store(db, "the canonical techne.db lives on dev04", type="fact")
-    add_dependency(db, dependent_id=derived, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)
 
     assert _status(db, derived) == "current"
     supersede(db, trigger, "Richard's primary machine is dev05")
@@ -56,7 +70,7 @@ def test_cascade_leaves_non_dependents_untouched(db):
     trigger = store(db, "trigger fact", type="fact")
     derived = store(db, "depends on trigger", type="fact")
     unrelated = store(db, "an unrelated fact", type="fact")
-    add_dependency(db, dependent_id=derived, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)
 
     supersede(db, trigger, "trigger fact, revised")
     assert _status(db, derived) == "uncertain"
@@ -68,7 +82,7 @@ def test_cascade_skips_already_superseded_dependent(db):
     cascade only touches live (superseded_by IS NULL) rows."""
     trigger = store(db, "trigger", type="fact")
     derived = store(db, "derived v1", type="fact")
-    add_dependency(db, dependent_id=derived, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)
     supersede(db, derived, "derived v2")  # derived is now superseded
 
     cascade_uncertain(db, trigger)
@@ -78,7 +92,7 @@ def test_cascade_skips_already_superseded_dependent(db):
 def test_reconfirm_clears_uncertain(db):
     trigger = store(db, "trigger", type="fact")
     derived = store(db, "derived", type="fact")
-    add_dependency(db, dependent_id=derived, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)
     supersede(db, trigger, "trigger, revised")
     assert _status(db, derived) == "uncertain"
 
@@ -91,24 +105,35 @@ def test_cascade_uncertain_returns_count_and_is_idempotent(db):
     trigger = store(db, "trigger", type="fact")
     d1 = store(db, "derived one", type="fact")
     d2 = store(db, "derived two", type="fact")
-    add_dependency(db, dependent_id=d1, trigger_id=trigger)
-    add_dependency(db, dependent_id=d2, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=d1, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=d2, trigger_id=trigger)
 
     assert cascade_uncertain(db, trigger) == 2  # both flipped
     assert cascade_uncertain(db, trigger) == 0  # already uncertain → no re-flip
 
 
-def test_add_dependency_rejects_self_edge(db):
+def test_dep_self_edge_silently_not_written(db):
+    """_add_dep_in_conn silently skips self-edges (no row written, no exception).
+    The old public add_dependency() raised ValueError for self-edges; _add_dep_in_conn
+    silently skips them to support bulk iteration without per-item raises (#215)."""
     kid = store(db, "a fact", type="fact")
-    with pytest.raises(ValueError, match="cannot depend on itself"):
-        add_dependency(db, dependent_id=kid, trigger_id=kid)
+    _write_dep_edge(db, dependent_id=kid, trigger_id=kid)  # must not raise
+    conn = connect(db)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_deps WHERE dependent_id=? AND trigger_id=?",
+            (kid, kid),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0, "self-edge must not be written"
 
 
 def _make_uncertain(db, content="derived fact", confidence="medium"):
     """Store a derived fact, supersede its trigger, return the now-uncertain id."""
     trigger = store(db, "trigger fact", type="fact")
     derived = store(db, content, type="fact", confidence=confidence)
-    add_dependency(db, dependent_id=derived, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)
     supersede(db, trigger, "trigger fact, revised")
     assert _status(db, derived) == "uncertain"
     return derived
@@ -172,11 +197,12 @@ def test_effective_confidence_penalty_independent_of_decay(db):
     assert restored == base / UNCERTAIN_CONFIDENCE_PENALTY
 
 
-def test_add_dependency_idempotent(db):
+def test_dep_edge_idempotent(db):
+    """_add_dep_in_conn is idempotent — writing the same edge twice produces one row."""
     trigger = store(db, "trigger", type="fact")
     derived = store(db, "derived", type="fact")
-    add_dependency(db, dependent_id=derived, trigger_id=trigger)
-    add_dependency(db, dependent_id=derived, trigger_id=trigger)  # no-op, no error
+    _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)
+    _write_dep_edge(db, dependent_id=derived, trigger_id=trigger)  # no-op, no error
 
     conn = connect(db)
     try:
