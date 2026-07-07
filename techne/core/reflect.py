@@ -29,6 +29,20 @@ from techne.core.threads import Thread, _make_generate_fn
 MAX_OBS_FOR_PROMPT = 40
 MAX_OBS_CONTENT_CHARS = 200
 
+# Actions that require a faithfulness check before promotion (techne#252, 2026-07-06).
+# Must stay in sync with faithfulness_emit's SQL filter (action IN ('merge','supersede')).
+_FAITHFULNESS_GATED_ACTIONS = frozenset({"merge", "supersede"})
+
+
+class FaithfulnessGateError(ValueError):
+    """Raised by promote_candidate when an explicitly-unfaithful merge or supersede
+    candidate is promoted without ``force=True``.
+
+    Subclasses ValueError so existing ``except ValueError`` callers (e.g. the CLI)
+    continue to work without change. The message cites the stored
+    ``faithfulness_warning`` so the operator knows exactly what the concern was.
+    """
+
 PROMPT_TEMPLATE = """You are reviewing a thread of work an AI agent just finished.
 Decide what (if anything) should be saved for the agent's future sessions.
 
@@ -718,6 +732,7 @@ def promote_candidate(
     *,
     decided_by: str | None = None,
     decision_reason: str | None = None,
+    force: bool = False,
 ) -> int | None:
     """Promote a candidate to live knowledge / identity. Returns the new
     knowledge.id (or None for identity entries). Raises if already reviewed.
@@ -731,6 +746,14 @@ def promote_candidate(
     The `action` column (techne#108) selects how the proposal is applied; a NULL
     action (legacy rows) routes to 'add'. `decided_by`/`decision_reason` record the
     review provenance.
+
+    Faithfulness soft gate (techne#252): for merge/supersede candidates that have
+    been explicitly flagged unfaithful (faithfulness_ok == 0), promotion is refused
+    and a FaithfulnessGateError (subclass of ValueError) is raised — the candidate
+    status is NOT changed.  Pass ``force=True`` to override after reviewing the
+    warning.  Unchecked (faithfulness_ok IS NULL) and faithful (== 1) candidates
+    always promote normally; the gate only blocks explicitly-flagged-unfaithful
+    merge/supersede candidates.
     """
     conn = connect(db_path)
     try:
@@ -746,6 +769,22 @@ def promote_candidate(
         applier = _APPLIERS.get(action)
         if applier is None:
             raise ValueError(f"Candidate {candidate_id} has unknown action {action!r}")
+
+        # Faithfulness soft gate (techne#252): refuse explicitly-unfaithful
+        # merge/supersede candidates before touching status. The check fires only when
+        # faithfulness_ok == 0 (checked and flagged); NULL (unchecked) and 1 (faithful)
+        # pass through. force=True bypasses the gate after operator review.
+        if (
+            not force
+            and action in _FAITHFULNESS_GATED_ACTIONS
+            and row["faithfulness_ok"] == 0
+        ):
+            warning = row["faithfulness_warning"] or "candidate was flagged unfaithful"
+            raise FaithfulnessGateError(
+                f"Candidate {candidate_id} ({action}) was flagged unfaithful: "
+                f"{warning}. "
+                f"Promote with force=True (CLI: --force) to override after reviewing."
+            )
 
         # Atomic guard: only one concurrent caller can flip status from pending.
         cur = conn.execute(

@@ -1728,9 +1728,18 @@ def reflect_ingest(ctx, responses_file):
 @click.argument("candidate_id", type=int)
 @click.option("--by", "decided_by", default="human", help="Who/what decided (audit trail).")
 @click.option("--reason", "decision_reason", default=None, help="Why (audit trail).")
+@click.option(
+    "--force", is_flag=True, default=False,
+    help="Override the faithfulness gate for a merge/supersede candidate that was "
+         "flagged unfaithful. Review the FAITHFULNESS WARNING first.",
+)
 @click.pass_context
-def reflect_promote(ctx, candidate_id, decided_by, decision_reason):
-    """Promote a pending candidate to the live knowledge or identity store."""
+def reflect_promote(ctx, candidate_id, decided_by, decision_reason, force):
+    """Promote a pending candidate to the live knowledge or identity store.
+
+    Unfaithful merge/supersede candidates (those flagged by the faithfulness check)
+    are refused by default — use --force after reviewing the warning to override.
+    """
     config = ctx.obj["config"]
     from techne.core.reflect import promote_candidate
 
@@ -1740,6 +1749,7 @@ def reflect_promote(ctx, candidate_id, decided_by, decision_reason):
             candidate_id,
             decided_by=decided_by,
             decision_reason=decision_reason,
+            force=force,
         )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
