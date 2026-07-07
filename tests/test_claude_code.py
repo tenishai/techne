@@ -103,17 +103,15 @@ class TestRegisterHooks:
         assert "PostToolUse" not in settings["hooks"]
 
     def test_idempotent_no_duplicate_groups(self, fake_home, cfg):
-        # Two inits in a row must not accumulate groups: SessionStart keeps its
-        # two techne groups (preflight + session_start), every other event one.
+        # Two inits in a row should leave exactly one techne group per event,
+        # not two. (SessionStart's single group chains preflight + session_start
+        # in one command, so it's still one group.)
         claude_code.register_hooks(cfg)
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         for event, groups in settings["hooks"].items():
             techne_groups = [g for g in groups if claude_code._group_contains_techne(g)]
-            expected = 2 if event == "SessionStart" else 1
-            assert len(techne_groups) == expected, (
-                f"{event} has {len(techne_groups)} techne groups, expected {expected}"
-            )
+            assert len(techne_groups) == 1, f"{event} has {len(techne_groups)} techne groups"
 
     def test_replaces_legacy_flat_shape(self, fake_home, cfg):
         # A user upgrading from pre-0.4.1 will have legacy flat-shape entries
@@ -134,11 +132,11 @@ class TestRegisterHooks:
         claude_code.register_hooks(cfg)
         settings = json.loads(path.read_text())
 
-        # Legacy techne flat entry gone, new wrapped entries present: SessionStart
-        # is now the two-group chain [preflight, session_start].
+        # Legacy techne flat entry gone, new wrapped single entry present:
+        # SessionStart is one group whose command chains preflight + session_start.
         ss_groups = settings["hooks"]["SessionStart"]
-        assert len(ss_groups) == 2
-        assert all("matcher" in g for g in ss_groups)
+        assert len(ss_groups) == 1
+        assert "matcher" in ss_groups[0]
         # Foreign hook in PostToolUse preserved
         ptu_groups = settings["hooks"]["PostToolUse"]
         foreign = [
@@ -150,16 +148,32 @@ class TestRegisterHooks:
 
 
 class TestPreflightGuard:
-    """The editable-install preflight guard is wired first in SessionStart and
-    survives re-init (techne#261)."""
+    """The editable-install preflight guard is chained ahead of session_start in
+    a single SessionStart command, and survives re-init (techne#261).
 
-    def test_preflight_is_first_session_start_hook(self, fake_home, cfg):
-        claude_code.register_hooks(cfg)
+    The chaining (not two separate hooks) is load-bearing: Claude Code runs all
+    hooks matching an event in parallel with no ordering guarantee, so two hooks
+    would race — the guard must sequence before session_start within one command.
+    """
+
+    def _session_start_cmd(self):
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         ss = settings["hooks"]["SessionStart"]
-        assert len(ss) == 2, "expected [preflight, session_start]"
-        assert "preflight_guard.py" in ss[0]["hooks"][0]["command"]
-        assert " -m techne.hooks.session_start" in ss[1]["hooks"][0]["command"]
+        assert len(ss) == 1, "SessionStart must be a single chained group"
+        assert len(ss[0]["hooks"]) == 1, "single command entry, not two"
+        return ss[0]["hooks"][0]["command"]
+
+    def test_preflight_sequenced_before_session_start(self, fake_home, cfg):
+        # Both run in ONE command, guard first, joined by `;` (not `&&`, so a
+        # guard failure can't suppress session_start).
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        assert "preflight_guard.py" in cmd
+        assert "-m techne.hooks.session_start" in cmd
+        assert " ; " in cmd, "commands must be sequenced, not two parallel hooks"
+        assert cmd.index("preflight_guard.py") < cmd.index(
+            "techne.hooks.session_start"
+        ), "guard must run before session_start"
 
     def test_preflight_command_uses_sys_executable_and_abs_path(self, fake_home, cfg):
         # Portable-by-construction: the interpreter is sys.executable (not a
@@ -167,8 +181,7 @@ class TestPreflightGuard:
         from techne.platforms.claude_code import hooks as hooks_mod
 
         claude_code.register_hooks(cfg)
-        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
-        cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        cmd = self._session_start_cmd()
         assert cmd.startswith(sys.executable + " ") or cmd.startswith(
             f'"{sys.executable}" '
         ) or cmd.startswith(f"'{sys.executable}' ")
@@ -180,10 +193,9 @@ class TestPreflightGuard:
         # rather than dropping it (unlike a hand-wired hook, which it migrates).
         claude_code.register_hooks(cfg)
         claude_code.register_hooks(cfg)
-        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
-        ss = settings["hooks"]["SessionStart"]
-        assert len(ss) == 2
-        assert "preflight_guard.py" in ss[0]["hooks"][0]["command"]
+        cmd = self._session_start_cmd()
+        assert "preflight_guard.py" in cmd
+        assert "-m techne.hooks.session_start" in cmd
 
     def test_migrates_hand_wired_preflight(self, fake_home, cfg):
         # A hand-wired preflight (command contains "techne") is recognized and
@@ -195,10 +207,9 @@ class TestPreflightGuard:
              "command": "/old/py /home/x/.claude/techne_preflight.py"}]},
         ]}}))
         claude_code.register_hooks(cfg)
-        settings = json.loads(path.read_text())
-        ss = settings["hooks"]["SessionStart"]
-        assert len(ss) == 2  # not 3 — the old hand-wired one was replaced
-        assert "/old/py" not in json.dumps(ss)
+        cmd = self._session_start_cmd()  # asserts exactly one group
+        assert "/old/py" not in cmd  # old hand-wired one replaced, not kept
+        assert "preflight_guard.py" in cmd
 
     def test_refuses_worktree_install(self, fake_home, cfg, monkeypatch, tmp_path):
         # If techne is installed from a worktree, register_hooks must refuse —

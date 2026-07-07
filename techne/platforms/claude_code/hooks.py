@@ -91,34 +91,41 @@ def register_hooks(config: Config):
 
     hooks = settings.setdefault("hooks", {})
 
-    # Each event maps to an ORDERED list of commands. SessionStart runs the
-    # standalone preflight guard FIRST — it heals a hijacked editable pointer
-    # before session_start (which needs `import techne`) is even attempted.
+    # SessionStart chains the preflight guard and session_start into ONE shell
+    # command joined by `;`. This is load-bearing: Claude Code runs all hooks
+    # matching an event IN PARALLEL with no ordering guarantee — even multiple
+    # commands inside a single group's `hooks` array
+    # (https://code.claude.com/docs/en/hooks-guide). So two separate hooks would
+    # RACE: session_start's `import techne` could fire before the guard heals the
+    # pointer. Sequencing them in one shell process is the only way to guarantee
+    # the guard runs to completion first; session_start then starts as a fresh
+    # process and reads the just-healed `.pth` at its own interpreter startup.
+    # `;` (not `&&`) so a guard crash can never suppress session_start — a broken
+    # guard must not regress the normal hook when the pointer was fine anyway.
+    session_start = (
+        f"{_preflight_command()} ; {_hook_command('techne.hooks.session_start')}"
+    )
     commands_per_event = {
-        "SessionStart": [
-            _preflight_command(),
-            _hook_command("techne.hooks.session_start"),
-        ],
-        "PreCompact": [_hook_command("techne.hooks.pre_compact")],
-        "PostCompact": [_hook_command("techne.hooks.post_compact")],
-        "Stop": [_hook_command("techne.hooks.session_end")],
+        "SessionStart": session_start,
+        "PreCompact": _hook_command("techne.hooks.pre_compact"),
+        "PostCompact": _hook_command("techne.hooks.post_compact"),
+        "Stop": _hook_command("techne.hooks.session_end"),
     }
     if config.hooks.post_tool_use:
-        commands_per_event["PostToolUse"] = [_hook_command("techne.hooks.post_tool_use")]
+        commands_per_event["PostToolUse"] = _hook_command("techne.hooks.post_tool_use")
 
-    for event, commands in commands_per_event.items():
+    for event, command in commands_per_event.items():
         groups = hooks.setdefault(event, [])
         # Strip any prior techne entry, in either the wrapped or legacy shape.
         # This also migrates a hand-wired preflight hook: its command contains
         # "techne", so it's recognized, removed, and replaced by the packaged one.
         groups[:] = [g for g in groups if not _group_contains_techne(g)]
-        for command in commands:
-            groups.append(
-                {
-                    "matcher": "",
-                    "hooks": [{"type": "command", "command": command}],
-                }
-            )
+        groups.append(
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": command}],
+            }
+        )
 
     _save_json(SETTINGS_PATH, settings)
 
