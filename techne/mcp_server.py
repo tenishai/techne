@@ -590,7 +590,7 @@ TOOLS = [
             "(scope/type/content/tags/confidence), then call techne_reflect_ingest once per "
             "thread with your answer. Run this when wrapping up a chunk of work, or when the "
             "SessionStart banner flags a session with unreflected threads. Defaults to the "
-            "most recent session."
+            "most recent session with unreflected work (skipping empty/already-emitted ones)."
         ),
         "inputSchema": {
             "type": "object",
@@ -606,7 +606,11 @@ TOOLS = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max threads to emit prompts for (default: all).",
+                    "description": (
+                        "Max threads to emit prompts for. Default: reflect.emit_max_threads "
+                        "(25). The batch is also trimmed by size to stay under the transport "
+                        "cap; a truncated response sets `truncated` + `remaining`."
+                    ),
                 },
             },
         },
@@ -1068,43 +1072,73 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     observations into threads and renders one prompt per thread; the in-session agent
     answers each `prompt` as a JSON candidate array, then feeds them back via
     techne_reflect_ingest. No API key, no MCP sampling — the model already running this
-    session does the work. Defaults to the most recent session.
+    session does the work. Defaults to the most recent session with unreflected
+    work (skipping empty/already-emitted sessions), and caps the batch so a large
+    session can't exceed the transport's token cap (tenishai/techne#267).
     """
     from techne.core.database import connect
     from techne.core.extension_state import set_state
-    from techne.core.reflect import emit_reflection_batch, load_session_for_reflection
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        load_session_for_reflection,
+        pending_reflection,
+    )
 
     session_id = args.get("session_id")
     if not session_id:
-        conn = connect(config.db_path)
-        try:
-            row = conn.execute(
-                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-        finally:
-            conn.close()
-        session_id = row["id"] if row else None
+        # Default to the most-recent session that actually has unreflected work,
+        # NOT simply the newest session by started_at: the canonical reflect-before-
+        # restart call fires while a fresh (empty) session is the newest, so the raw
+        # "ORDER BY started_at DESC" default landed on a count:0 session and forced a
+        # manual hunt for the real id (tenishai/techne#267).
+        pend = pending_reflection(config)
+        session_id = pend[0]["session_id"] if pend else None
     if not session_id:
-        return {"batch": [], "count": 0, "note": "no session to reflect on"}
+        return {"batch": [], "count": 0, "note": "no session with unreflected work"}
 
     threads, observations = load_session_for_reflection(config, session_id)
     batch = emit_reflection_batch(config, session_id, threads, observations)
-    limit = args.get("limit")
-    if limit:
-        # NB: the marker below covers the WHOLE session, so threads beyond `limit`
-        # won't be re-surfaced by the auto-trigger — call without a limit, or re-emit
-        # with an explicit session_id, to reflect the rest.
-        batch = batch[:limit]
+    total = len(batch)
+
+    # Bound the payload so a large session can't produce a batch that exceeds the MCP
+    # transport's token cap — an oversized emit used to error out AND still mark the
+    # session reflected, silently dropping the whole session's memory (techne#267).
+    limit = args.get("limit") or config.reflect.emit_max_threads
+    batch = batch[:limit]
+    # Hard guarantee the return is deliverable: trim by serialized size, keeping at
+    # least one prompt so a single huge thread still makes progress.
+    max_chars = 100_000
+    while len(batch) > 1 and len(json.dumps(batch)) > max_chars:
+        batch.pop()
+
+    truncated = len(batch) < total
+    remaining = total - len(batch)
 
     # Mark the session emitted so the SessionStart auto-trigger won't re-nudge it,
     # even if the agent's answers ultimately yield zero durable candidates (techne#19).
+    # On truncation we still mark it (to avoid a re-nudge loop) but surface the count
+    # so the drop is loud, not silent — re-emit with an explicit session_id + limit to
+    # reflect the rest.
     conn = connect(config.db_path)
     try:
-        set_state(conn, f"reflect:emitted:{session_id}", {"count": len(batch)})
+        set_state(
+            conn,
+            f"reflect:emitted:{session_id}",
+            {"count": len(batch), "total": total, "remaining": remaining},
+        )
     finally:
         conn.close()
 
-    return {"session_id": session_id, "count": len(batch), "batch": batch}
+    result = {"session_id": session_id, "count": len(batch), "batch": batch}
+    if truncated:
+        result["truncated"] = True
+        result["remaining"] = remaining
+        result["note"] = (
+            f"Session has {total} threads; emitted {len(batch)} (cap={limit}). "
+            f"{remaining} not emitted — re-emit with the same session_id and a limit "
+            "to reflect the rest."
+        )
+    return result
 
 
 def _techne_reflect_ingest(args: dict, config: Config) -> dict:

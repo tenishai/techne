@@ -77,6 +77,61 @@ def test_emit_no_session_is_clean(config):
     assert out["batch"] == [] and out["count"] == 0
 
 
+def test_emit_default_skips_thin_newest_session(config):
+    """Reflect-before-restart regression (techne#267): the newest session is a fresh
+    (thin) one, so the default must fall through to the real work session, not the
+    empty newest one."""
+    _seed(config, "work", n=6)
+    _seed(config, "thin-newer", n=1)  # newest, but below min_observations → not reflectable
+    conn = connect(config.db_path)
+    conn.execute("UPDATE sessions SET started_at = '2026-01-01 00:00:00' WHERE id = 'work'")
+    conn.execute("UPDATE sessions SET started_at = '2026-06-01 00:00:00' WHERE id = 'thin-newer'")
+    conn.commit()
+    conn.close()
+    out = _techne_reflect_emit({}, config)  # no session_id
+    assert out["session_id"] == "work"
+
+
+def test_emit_caps_large_session_and_flags_truncation(config, monkeypatch):
+    """A large session must not emit an oversized batch: it's capped, the drop is
+    surfaced loudly, and the marker records the shortfall (techne#267)."""
+    import techne.core.reflect as reflect_mod
+
+    _seed(config, "big", n=6)
+    fake = [
+        {"thread_id": f"t{i}", "session_id": "big", "prompt_hash": f"h{i}", "prompt": "p"}
+        for i in range(30)
+    ]
+    monkeypatch.setattr(reflect_mod, "emit_reflection_batch", lambda *a, **k: list(fake))
+    config.reflect.emit_max_threads = 25
+
+    out = _techne_reflect_emit({"session_id": "big"}, config)
+    assert out["count"] == 25
+    assert out["truncated"] is True
+    assert out["remaining"] == 5
+    assert "re-emit" in out["note"]
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, "reflect:emitted:big")
+    finally:
+        conn.close()
+    assert marker["total"] == 30 and marker["remaining"] == 5
+
+
+def test_emit_explicit_limit_overrides_default_cap(config, monkeypatch):
+    import techne.core.reflect as reflect_mod
+
+    _seed(config, "lim", n=6)
+    fake = [
+        {"thread_id": f"t{i}", "session_id": "lim", "prompt_hash": f"h{i}", "prompt": "p"}
+        for i in range(10)
+    ]
+    monkeypatch.setattr(reflect_mod, "emit_reflection_batch", lambda *a, **k: list(fake))
+    out = _techne_reflect_emit({"session_id": "lim", "limit": 3}, config)
+    assert out["count"] == 3 and out["truncated"] is True and out["remaining"] == 7
+
+
 def test_emit_prompt_is_kind_aware(config):
     _seed(config, "sess-k")
     out = _techne_reflect_emit({"session_id": "sess-k"}, config)
