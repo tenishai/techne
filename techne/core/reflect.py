@@ -215,7 +215,7 @@ def _insert_candidate(
     model_used: str,
     prompt_hash: str,
     raw_response: str | None,
-) -> int:
+) -> int | None:
     conn = connect(db_path)
     try:
         # FK safety net (techne#106): never let a stale/missing thread id drop a

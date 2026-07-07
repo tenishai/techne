@@ -1113,6 +1113,16 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     finally:
         conn.close()
     already = set(marker.get("emitted", [])) if marker else set()
+    # Stability invariant: prompt_hash is derived from the rendered prompt INCLUDING the
+    # per-thread existing-knowledge block (reflect._build_prompt), so it must not shift
+    # between cursor passes mid-drain — otherwise an already-emitted thread re-appears.
+    # This holds on the DEFAULT path (write_to='candidates'): that path never mutates live
+    # knowledge, and a completed session's observations are frozen, so the hash is stable.
+    # KNOWN LIVE-MODE LIMITATION (write_to='live'): promoting knowledge mid-drain can alter
+    # a drained thread's existing-knowledge block, changing its prompt_hash. The cursor
+    # would then re-emit it, and #236's (prompt_hash, content) dedup would be sidestepped
+    # (duplicate candidate / re-promotion). Re-engineering the cursor key is out of scope
+    # for this PR; document here as a known limitation of the live write path.
     batch = [item for item in batch if item["prompt_hash"] not in already]
 
     # Bound the payload so a large session can't produce a batch that exceeds the MCP
@@ -1188,7 +1198,10 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
         result["note"] = (
             f"A single thread's serialized prompt exceeds emit_max_chars ({max_chars}) "
             "and can't be delivered whole; the session cursor is left UNADVANCED so it "
-            "isn't silently skipped. Needs per-thread prompt chunking (#269 follow-up)."
+            "isn't silently skipped. Needs per-thread prompt chunking (#269 follow-up). "
+            "Because the cursor drains threads IN ORDER, an oversized lone thread also "
+            "blocks every thread after it in the session — the session remains pending "
+            "until per-thread chunking lands (#269 follow-up)."
         )
     return result
 

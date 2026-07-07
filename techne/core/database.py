@@ -861,6 +861,10 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
             # otherwise CREATE UNIQUE INDEX fails on a DB that already has dupes. Keep the
             # lowest id per (prompt_hash, content) group; scoped to origin='reflect' to
             # match the partial index's predicate (other origins are untouched).
+            # MIN(id) is kept regardless of status: if an earlier identical candidate was
+            # already discarded or promoted and a later identical one is pending, the pending
+            # row is deleted. This is benign — the content is byte-identical to something
+            # already judged, so no work is lost.
             conn.execute(
                 """DELETE FROM knowledge_candidates
                      WHERE origin = 'reflect'
