@@ -38,15 +38,123 @@ def _is_worktree_path(p: Path) -> bool:
     )
 
 
+def _launcher_path() -> Path:
+    """Path to the generated POSIX launcher in the claude config dir (techne#276).
+
+    Derived from SETTINGS_PATH so test monkeypatching of SETTINGS_PATH
+    automatically redirects the launcher to the fake home too.
+    """
+    return SETTINGS_PATH.parent / "techne-hook.sh"
+
+
+def _heal_command() -> str:
+    """Install-method-aware heal command baked into the launcher (techne#276).
+
+    Three cases, mirroring preflight_guard._pip_install_editable's venv detection:
+
+    - **pipx** (sys.executable contains ``pipx/venvs/``):
+      ``pipx reinstall --python "$(command -v python3)" techne``.
+      Explicitly passes ``--python`` to force the PATH-resolved ``python3`` rather than
+      pipx's default (``sys.executable`` on non-Windows — i.e. the Python that pipx
+      itself runs under; verified against pipx source at pypa/pipx main, 2026-07-07).
+      By naming ``python3`` explicitly we survive the common case of a minor-version
+      removal (e.g. 3.11→3.12 Homebrew upgrade) as long as ``python3`` and ``pipx`` are
+      on PATH at heal time. MEDIUM confidence. Best-effort path.
+
+    - **system/non-venv** (sys.prefix == sys.base_prefix): attempt ``pip install -e``
+      under whatever ``python3`` PATH resolves to at heal time, with
+      ``--break-system-packages`` (same flag logic as preflight_guard), then reassign
+      ``PY="$(command -v python3)"`` so the ``exec "$PY" "$@"`` that follows targets the
+      freshly-resolved interpreter rather than the original dead one. Works if ``python3``
+      is on PATH at heal time; ``command -v`` returning empty still fails loudly. Best-effort.
+
+    - **plain venv, non-pipx**: safe automatic rebuild is impossible once the base
+      interpreter is gone — print a clear remediation message to stderr and exit 1.
+      The message includes pipx/uv alternatives for users who may have installed via
+      those tools but whose interpreter path did not match the ``pipx/venvs/`` pattern.
+      The user must recreate and reinstall manually (techne#276).
+    """
+    exe = sys.executable
+    in_venv = sys.prefix != sys.base_prefix
+    is_pipx = "pipx/venvs/" in exe
+    repo = _install_root()
+
+    if is_pipx:
+        # Use --python to avoid relying on pipx's DEFAULT_PYTHON (= its own sys.executable).
+        return 'pipx reinstall --python "$(command -v python3)" techne'
+
+    if not in_venv:
+        # system install: fresh editable install under PATH's python3, then re-point PY
+        # so the exec that follows targets the new interpreter, not the dead one.
+        return (
+            f"python3 -m pip install -e {shlex.quote(str(repo))} --break-system-packages"
+            '; PY="$(command -v python3)"'
+        )
+
+    # plain venv, non-pipx: safe automatic rebuild is impossible once the interpreter is
+    # gone — emit a clear remediation message (with pipx/uv alternatives) and exit 1.
+    msg = (
+        f"[techne] interpreter dead ({exe}) — "
+        f"recreate the venv and reinstall: "
+        f"python3 -m venv {sys.prefix} && "
+        f"{sys.prefix}/bin/pip install -e {repo}"
+        f"; or if installed via pipx/uv: "
+        f"pipx reinstall techne / uv tool install --force techne"
+    )
+    return f"echo {shlex.quote(msg)} >&2; exit 1"
+
+
+def _write_launcher() -> Path:
+    """Generate (or regenerate) the POSIX launcher; called by register_hooks (techne#276).
+
+    The launcher is an executable ``/bin/sh`` script that:
+
+    1. Tests whether the baked-in interpreter (``$PY``) is still executable — a single
+       ``-x`` stat. A dangling symlink tests as non-executable, so the happy path costs
+       one stat and no subprocess.
+    2. Fires the install-method-aware heal command only when the interpreter is dead.
+    3. ``exec``'s ``$PY`` with all original arguments.
+
+    Regenerated on every ``register_hooks`` call so interpreter and heal stay in sync.
+
+    Written atomically (write to a sibling ``.tmp.<pid>`` then ``os.replace``): a hook
+    firing mid-write would otherwise read an empty/partial script and silently not fire.
+    Mirrors ``_save_json``'s atomic-write pattern.
+
+    POSIX only (macOS + Linux). Windows ``.cmd``/``.ps1`` is a follow-up.
+    """
+    launcher = _launcher_path()
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "#!/bin/sh\n"
+        f"PY={shlex.quote(sys.executable)}\n"
+        '[ -x "$PY" ] || { ' + _heal_command() + "; }\n"
+        'exec "$PY" "$@"\n'
+    )
+    tmp = launcher.with_name(f"{launcher.name}.tmp.{os.getpid()}")
+    tmp.write_text(content)
+    tmp.chmod(0o755)
+    os.replace(tmp, launcher)
+    return launcher
+
+
 def _preflight_command() -> str:
-    return f"{shlex.quote(sys.executable)} {shlex.quote(str(PREFLIGHT_GUARD))}"
+    # Route through the launcher (#276) so a dead interpreter triggers the
+    # install-method heal before the guard runs. The guard is still invoked by
+    # absolute path — it cannot ``import techne``, so ``-m`` would be a
+    # chicken-and-egg trap; see preflight_guard.py for the full rationale.
+    return (
+        f"/bin/sh {shlex.quote(str(_launcher_path()))} "
+        f"{shlex.quote(str(PREFLIGHT_GUARD))}"
+    )
 
 
 def _hook_command(module: str) -> str:
-    # Pin to the interpreter that techne is installed in, not whatever `python`
-    # happens to resolve to on the user's PATH (which may be missing, or may
-    # point at a system python without techne installed).
-    return f"{shlex.quote(sys.executable)} -m {module}"
+    # Route through the launcher (#276) so a dead Homebrew interpreter triggers
+    # auto-heal before the module is imported. Same interpreter pin as before —
+    # the launcher bakes in sys.executable at register time; the happy-path overhead
+    # is a single -x stat then exec.
+    return f"/bin/sh {shlex.quote(str(_launcher_path()))} -m {module}"
 
 
 def _group_contains_techne(group: dict) -> bool:
@@ -55,7 +163,12 @@ def _group_contains_techne(group: dict) -> bool:
     Handles both the wrapped shape ``{matcher, hooks: [{type, command}, ...]}``
     and the legacy flat shape ``{type, command}`` that earlier techne versions
     (pre-0.4.1) wrote — we still need to recognize and replace those so a
-    re-init cleans up an old install."""
+    re-init cleans up an old install.
+
+    Also recognizes the new launcher-based shape (techne#276): commands contain
+    ``techne`` via both the launcher filename (``techne-hook.sh``) and the
+    ``-m techne.hooks.X`` module argument, so this check requires no change.
+    """
     if "command" in group and "techne" in (group.get("command") or ""):
         return True
     for h in group.get("hooks") or []:
@@ -85,6 +198,11 @@ def register_hooks(config: Config):
             f"  {sys.executable} -m pip install -e <canonical-techne-checkout>"
         )
 
+    # Generate the interpreter launcher before baking paths into settings.json
+    # (techne#276): hooks route through the launcher so a Homebrew upgrade/removal
+    # that kills sys.executable triggers auto-heal rather than silently breaking.
+    _write_launcher()
+
     settings = _load_json(SETTINGS_PATH)
     if settings is None:
         settings = {}
@@ -102,6 +220,8 @@ def register_hooks(config: Config):
     # process and reads the just-healed `.pth` at its own interpreter startup.
     # `;` (not `&&`) so a guard crash can never suppress session_start — a broken
     # guard must not regress the normal hook when the pointer was fine anyway.
+    # Both halves route through the launcher (#276) so interpreter-death heal
+    # fires before either the guard or session_start tries to import anything.
     session_start = (
         f"{_preflight_command()} ; {_hook_command('techne.hooks.session_start')}"
     )
@@ -131,7 +251,12 @@ def register_hooks(config: Config):
 
 
 def register_mcp(config: Config):
-    """Register the techne MCP server in Claude's MCP config."""
+    """Register the techne MCP server in Claude's MCP config.
+
+    NOTE: MCP config is command+args (not a shell line) with different restart
+    semantics — the interpreter launcher from register_hooks deliberately does not
+    cover MCP yet (follow-up, techne#276).
+    """
     mcp_config = _load_json(MCP_CONFIG_PATH)
     if mcp_config is None:
         mcp_config = {}
@@ -164,6 +289,9 @@ def unregister(config: Config):
             if not hooks[event]:
                 del hooks[event]
         _save_json(SETTINGS_PATH, settings)
+
+    # Remove the generated launcher so it doesn't orphan after uninstall.
+    _launcher_path().unlink(missing_ok=True)
 
     # Remove MCP server
     try:
