@@ -638,12 +638,13 @@ class TestSearchVec:
         straight out of search()/search_vec().)"""
         import struct
 
-        import numpy as np
-
         import techne.core.search as _search_mod
         from techne.core.search import _VEC_TABLE_NAMES, _ensure_vec_table
 
+        # Guard BEFORE importing numpy: a base install (no [vectors] extra) has
+        # neither sqlite_vec nor numpy, so skip cleanly rather than ImportError.
         sqlite_vec = pytest.importorskip("sqlite_vec")
+        np = pytest.importorskip("numpy")
 
         # Stub the active backend at 256-d (independent of what's installed / any
         # model download) so the query embeds at 256 while the table is 384.

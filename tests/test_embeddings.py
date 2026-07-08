@@ -12,8 +12,13 @@ import os
 import sys
 from unittest.mock import patch
 
-import numpy as np
 import pytest
+
+# numpy ships only with the [vectors] extra; a base install (as CI runs on
+# <3.14) has none. Skip the whole module cleanly there instead of crashing
+# collection — the wrapper tests need a real backend (hence numpy) anyway, and
+# they still run on any env with [vectors] installed (e.g. the 3.14 dev venv).
+np = pytest.importorskip("numpy")
 
 from techne.core import embeddings
 
