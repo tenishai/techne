@@ -2,9 +2,16 @@
 
 Provides verification helpers that let a holder of an original (pre-redaction)
 payload prove it was present without re-exposing the plaintext. The core
-invariant: when add_observation() redacts credentials, it stores a SHA-256
-hash of the RAW content alongside the redacted text. This module lets callers
-verify a candidate plaintext against that stored hash.
+invariant: when redaction fires, a SHA-256 hash of the RAW content is stored
+alongside the redacted text. This module lets callers verify a candidate
+plaintext against that stored hash.
+
+Invariant scope (techne#270):
+  - add_observation() (techne/core/state.py): FULL invariant — content_hash IS
+    NOT NULL iff redaction fired.
+  - transcript_import.py and jsonl_transcript.py importer paths: FULL invariant
+    — backfilled on techne#270 to compute and store content_hash alongside every
+    redacted INSERT, matching add_observation's behaviour.
 
 Placement rationale: verify_observation_hash is a read-only, audit-path
 function with no write-side coupling to the hot observation ingest path.
@@ -45,6 +52,12 @@ def verify_observation_hash(db_path: Path, obs_id: int, candidate_plaintext: str
 
     if row is None or row["content_hash"] is None:
         # Either the row doesn't exist, or no redaction occurred (nothing to prove).
+        return False
+
+    # Guard: a non-str candidate (e.g. None) must return False, not raise.
+    # The contract is "verifier always returns bool" — callers should not need
+    # to handle TypeError from an unexpected argument type. (techne#270)
+    if not isinstance(candidate_plaintext, str):
         return False
 
     candidate_hash = hashlib.sha256(candidate_plaintext.encode()).hexdigest()

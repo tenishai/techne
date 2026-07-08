@@ -5,6 +5,7 @@ memory store contains the same shape of observations regardless of capture
 mechanism.
 """
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -170,11 +171,20 @@ def import_transcript(
                         }
                 text = extract_text(blocks)
                 if text:
+                    # Compute hash BEFORE redaction so the audit invariant holds:
+                    # content_hash IS NOT NULL iff redaction fired. (techne#270)
+                    raw_text = text[:4000]
+                    redacted_text = redact_credentials(raw_text)
+                    text_hash = (
+                        hashlib.sha256(raw_text.encode()).hexdigest()
+                        if redacted_text != raw_text
+                        else None
+                    )
                     conn.execute(
                         """INSERT INTO observations
-                           (session_id, timestamp, tool_name, content, tier, event_at)
-                           VALUES (?, ?, 'AssistantText', ?, 'hot', ?)""",
-                        (session_id, ts, redact_credentials(text[:4000]), ts),
+                           (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
+                           VALUES (?, ?, 'AssistantText', ?, 'hot', ?, ?)""",
+                        (session_id, ts, redacted_text, ts, text_hash),
                     )
                     assistant_text_count += 1
 
@@ -192,16 +202,24 @@ def import_transcript(
                         output = tool_result_text(b.get("content"))
                         content = summarize(tool_name, tu["input"], output)
                         event_ts = tu["ts"] or ts
+                        # Compute hash BEFORE redaction (techne#270).
+                        redacted_content = redact_credentials(content)
+                        content_hash = (
+                            hashlib.sha256(content.encode()).hexdigest()
+                            if redacted_content != content
+                            else None
+                        )
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at)
-                               VALUES (?, ?, ?, ?, 'hot', ?)""",
+                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
+                               VALUES (?, ?, ?, ?, 'hot', ?, ?)""",
                             (
                                 session_id,
                                 event_ts,
                                 tool_name,
-                                redact_credentials(content),
+                                redacted_content,
                                 event_ts,
+                                content_hash,
                             ),
                         )
                         tool_count += 1
@@ -213,11 +231,19 @@ def import_transcript(
                 if include_user_prompts:
                     text = extract_text(blocks)
                     if text and not text.startswith("<"):
+                        # Compute hash BEFORE redaction (techne#270).
+                        raw_prompt = text[:4000]
+                        redacted_prompt = redact_credentials(raw_prompt)
+                        prompt_hash = (
+                            hashlib.sha256(raw_prompt.encode()).hexdigest()
+                            if redacted_prompt != raw_prompt
+                            else None
+                        )
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at)
-                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?)""",
-                            (session_id, ts, redact_credentials(text[:4000]), ts),
+                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
+                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?, ?)""",
+                            (session_id, ts, redacted_prompt, ts, prompt_hash),
                         )
                         prompt_count += 1
 

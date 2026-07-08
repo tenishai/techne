@@ -128,6 +128,28 @@ def touch_surfaced_many(db_path: Path, reminder_ids: list[int]) -> None:
         conn.close()
 
 
+def list_active(db_path: Path) -> list[dict]:
+    """Return all active reminders (regardless of due_at), ordered by due_at ascending.
+
+    Unlike list_due, which filters to reminders whose due_at <= now, this
+    function returns ALL active reminders so callers (e.g. the MCP management
+    tool) can display what's armed — including future ones. (techne#207)
+    """
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, note, due_at, status, created_at, last_surfaced_at"
+            "  FROM reminders"
+            " WHERE status = 'active'"
+            " ORDER BY due_at",
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def dismiss(db_path: Path, reminder_id: int) -> None:
     """Mark a reminder as done so it no longer surfaces.
 

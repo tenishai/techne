@@ -195,13 +195,21 @@ def _ingest_records_from_offset(
                     text = extract_text(blocks)
                     if text:
                         header = _tag_header("transcript", "assistant", session_id, project)
-                        content = redact_credentials(f"{header}\n{text[:4000]}")
+                        # Compute hash BEFORE redaction so invariant holds:
+                        # content_hash IS NOT NULL iff redaction fired. (techne#270)
+                        raw_content = f"{header}\n{text[:4000]}"
+                        content = redact_credentials(raw_content)
+                        content_hash = (
+                            hashlib.sha256(raw_content.encode()).hexdigest()
+                            if content != raw_content
+                            else None
+                        )
                         _ensure_session(conn, session_id, jsonl_path)
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at)
-                               VALUES (?, ?, 'AssistantText', ?, 'hot', ?)""",
-                            (session_id, ts, content, ts),
+                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
+                               VALUES (?, ?, 'AssistantText', ?, 'hot', ?, ?)""",
+                            (session_id, ts, content, ts, content_hash),
                         )
                         obs_count += 1
 
@@ -221,14 +229,21 @@ def _ingest_records_from_offset(
                             header = _tag_header(
                                 "transcript", "tool_result", tu["session_id"], project
                             )
-                            content = redact_credentials(f"{header}\n{body}")
+                            # Compute hash BEFORE redaction (techne#270).
+                            raw_body = f"{header}\n{body}"
+                            content = redact_credentials(raw_body)
+                            content_hash = (
+                                hashlib.sha256(raw_body.encode()).hexdigest()
+                                if content != raw_body
+                                else None
+                            )
                             _ensure_session(conn, tu["session_id"], jsonl_path)
                             event_ts = tu["ts"] or ts
                             conn.execute(
                                 """INSERT INTO observations
-                                   (session_id, timestamp, tool_name, content, tier, event_at)
-                                   VALUES (?, ?, ?, ?, 'hot', ?)""",
-                                (tu["session_id"], event_ts, tool_name, content, event_ts),
+                                   (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
+                                   VALUES (?, ?, ?, ?, 'hot', ?, ?)""",
+                                (tu["session_id"], event_ts, tool_name, content, event_ts, content_hash),
                             )
                             obs_count += 1
 
@@ -236,13 +251,20 @@ def _ingest_records_from_offset(
                     text = extract_text(blocks)
                     if text and not text.startswith("<"):
                         header = _tag_header("transcript", "user", session_id, project)
-                        content = redact_credentials(f"{header}\n{text[:4000]}")
+                        # Compute hash BEFORE redaction (techne#270).
+                        raw_prompt = f"{header}\n{text[:4000]}"
+                        content = redact_credentials(raw_prompt)
+                        prompt_hash = (
+                            hashlib.sha256(raw_prompt.encode()).hexdigest()
+                            if content != raw_prompt
+                            else None
+                        )
                         _ensure_session(conn, session_id, jsonl_path)
                         conn.execute(
                             """INSERT INTO observations
-                               (session_id, timestamp, tool_name, content, tier, event_at)
-                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?)""",
-                            (session_id, ts, content, ts),
+                               (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
+                               VALUES (?, ?, 'UserPrompt', ?, 'hot', ?, ?)""",
+                            (session_id, ts, content, ts, prompt_hash),
                         )
                         obs_count += 1
 
