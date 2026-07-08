@@ -2153,7 +2153,7 @@ class TestV13ToV14Migration:
     def test_schema_version_bumped_to_14(self, v13_conn):
         _migrate(v13_conn, 13, SCHEMA_VERSION)
         max_v = v13_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert max_v == SCHEMA_VERSION == 14
+        assert max_v == SCHEMA_VERSION  # bumped past 14 by #207 (v15)
 
     def test_migration_idempotent_on_replay(self, v13_conn):
         _migrate(v13_conn, 13, SCHEMA_VERSION)
@@ -2268,4 +2268,4 @@ class TestV13ToV14MigrationPreOriginSchema:
         max_v = v13_no_origin_conn.execute(
             "SELECT MAX(version) FROM schema_version"
         ).fetchone()[0]
-        assert max_v == SCHEMA_VERSION == 14
+        assert max_v == SCHEMA_VERSION  # bumped past 14 by #207 (v15)
