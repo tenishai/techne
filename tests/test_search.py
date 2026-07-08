@@ -628,6 +628,52 @@ class TestSearchVec:
         results = search_vec(db_path, "anything")
         assert results == []
 
+    def test_search_vec_degrades_on_stale_dim_vec_table(self, db_path, monkeypatch):
+        """techne#601 BLOCKER regression: a vec0 table embedded by a PREVIOUS
+        backend at a different width (e.g. 384-d fastembed/MiniLM) survives into a
+        query after a py3.14 upgrade flips the active backend to 256-d potion —
+        and nothing has re-embedded yet. The `embedding MATCH ?` then raises
+        "Dimension mismatch"; that must degrade to FTS-only ([]), NEVER crash the
+        top-level recall path. (Before the fix, this OperationalError propagated
+        straight out of search()/search_vec().)"""
+        import struct
+
+        import numpy as np
+
+        import techne.core.search as _search_mod
+        from techne.core.search import _VEC_TABLE_NAMES, _ensure_vec_table
+
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+
+        # Stub the active backend at 256-d (independent of what's installed / any
+        # model download) so the query embeds at 256 while the table is 384.
+        class _FakeBackend:
+            name = "model2vec:stub-256"
+            dim = 256
+
+            def embed(self, texts):
+                return [np.full(256, 0.1, dtype="float32") for _ in texts]
+
+        monkeypatch.setattr(_search_mod, "_get_embedding_model", lambda: _FakeBackend())
+
+        # Lay down 384-d vec tables with a row each — the pre-upgrade cache.
+        conn = connect(db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            emb384 = struct.pack("384f", *([0.1] * 384))
+            for name in sorted(_VEC_TABLE_NAMES):
+                _ensure_vec_table(conn, name, 384)
+                conn.execute(f"INSERT INTO {name}(rowid, embedding) VALUES (1, ?)", (emb384,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Query with the 256-d backend against 384-d tables — must NOT raise.
+        results = search_vec(db_path, "anything", table="all")
+        assert results == []
+
     def test_search_degrades_to_fts_when_vec_extension_unavailable(self, db_path, monkeypatch):
         """#84: search(..., use_vectors=True) falls through to FTS-only results
         when enable_load_extension raises AttributeError (vec returns [])."""
@@ -856,8 +902,10 @@ class TestEnsureVecBackendIdentity:
                 conn.execute(f"INSERT INTO {name}(rowid, embedding) VALUES (1, ?)", (emb384,))
             conn.commit()
 
-            # New world: switch to a 512-d model2vec backend (matches the real
-            # potion-retrieval-32M default).
+            # New world: switch to a 512-d model2vec backend (an explicit
+            # non-default variant chosen so the dim differs from the old 384-d
+            # tables — exercises the drop/recreate path regardless of the shipped
+            # default, which is potion-base-8M/256-d).
             new_backend = EmbeddingBackend(
                 "model2vec", "minishlab/potion-retrieval-32M", impl=None, dim=512
             )

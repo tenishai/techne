@@ -679,6 +679,17 @@ def search_vec(
         results.sort(key=lambda x: x.get("distance", 999))
         return results[:limit]
 
+    except sqlite3.OperationalError:
+        # A stale vec0 cache embedded by a *different* backend raises here on the
+        # `embedding MATCH ?` — most importantly "Dimension mismatch: expected N
+        # ... received M" when a DB embedded at 384-d (fastembed/MiniLM) is queried
+        # after a py3.14 upgrade flips the active backend to 256-d potion. The
+        # tables are a derived cache and the drop+re-embed migration
+        # (_ensure_vec_backend_identity, run from backfill_vectors) is what
+        # actually reconciles them; until an operator re-embeds we must NEVER crash
+        # the top-level recall path — degrade to FTS-only, matching this module's
+        # existing extension-load fallback above.
+        return []
     finally:
         conn.close()
 
@@ -855,14 +866,22 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"
             extra_where = " AND t.superseded_by IS NULL" if tbl == "knowledge" else ""
-            rows = conn.execute(
-                f"""SELECT t.{id_col}, t.{content_col} FROM {tbl} t
-                    WHERE t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl}){extra_where}
-                    ORDER BY t.{id_col} DESC LIMIT ?""",
-                (batch_size,),
-            ).fetchall()
-
-            if rows:
+            # Loop until no un-embedded rows remain — one call must fully re-embed a
+            # table, not just the newest `batch_size` rows. This matters most right
+            # after a backend swap: _ensure_vec_backend_identity has just dropped and
+            # recreated the table empty, so EVERY row needs (re-)embedding and a
+            # single capped batch would silently leave older rows unembedded. Each
+            # pass embeds rows NOT already in vec_tbl and inserts them, so the
+            # NOT IN set strictly shrinks and the loop terminates.
+            while True:
+                rows = conn.execute(
+                    f"""SELECT t.{id_col}, t.{content_col} FROM {tbl} t
+                        WHERE t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl}){extra_where}
+                        ORDER BY t.{id_col} DESC LIMIT ?""",
+                    (batch_size,),
+                ).fetchall()
+                if not rows:
+                    break
                 ids, texts = zip(*rows)
                 embeddings = np.stack(list(model.embed(list(texts))))
                 for row_id, emb in zip(ids, embeddings):
@@ -871,7 +890,7 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
                         (row_id, emb.astype("float32").tobytes()),
                     )
                 conn.commit()
-                counts[tbl] = len(rows)
+                counts[tbl] += len(rows)
 
     finally:
         conn.close()

@@ -147,7 +147,7 @@ class SearchConfig:
     # Explicit values: "model2vec" or "fastembed".
     embedding_backend: str = ""
     # Embedding model name override. "" = backend-specific default (see
-    # embeddings.py: potion-retrieval-32M for model2vec, MiniLM for fastembed).
+    # embeddings.py: potion-base-8M for model2vec, MiniLM for fastembed).
     embedding_model: str = ""
 
 
@@ -596,6 +596,12 @@ class Config:
                 "bm25_weight": self.search.bm25_weight,
                 "expansion_ratio": self.search.expansion_ratio,
                 "mmr_lambda": self.search.mmr_lambda,
+                # embedding_backend/embedding_model are parsed by _from_dict but
+                # must also be serialized here, else `techne init`'s load→save
+                # round-trip silently drops an operator's backend override — the
+                # same staleness bug the injection note below records (techne#601).
+                "embedding_backend": self.search.embedding_backend,
+                "embedding_model": self.search.embedding_model,
             },
             "posture": {
                 "mode": self.posture.mode,
