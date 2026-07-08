@@ -103,6 +103,9 @@ class TestHandleRequest:
             "techne_faithfulness_emit",
             "techne_faithfulness_ingest",
             "techne_federation_conflict_ingest",
+            "techne_reminder_add",
+            "techne_reminder_list",
+            "techne_reminder_dismiss",
         }
 
     def test_notifications_initialized_returns_none(self, config):

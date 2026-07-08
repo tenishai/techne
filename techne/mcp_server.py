@@ -346,6 +346,52 @@ def _techne_recall(args: dict, config: Config) -> dict:
     return out
 
 
+# --- Reminder helpers (#207) ---
+
+import re as _re
+
+
+def _parse_due_at(s: str) -> str:
+    """Parse a due_at string and return a UTC ISO timestamp ("YYYY-MM-DD HH:%M:%S").
+
+    Accepts two forms:
+    - Relative offset: ``+<N><unit>`` where unit ∈ d/h/m (days/hours/minutes).
+      Examples: ``+1d``, ``+3h``, ``+30m``.  Offset is computed from
+      ``datetime.now(timezone.utc)`` at call time.
+    - Absolute ISO timestamp: ``YYYY-MM-DD HH:MM:SS``.  Assumed to be already
+      UTC — the caller is responsible for supplying UTC values. (techne#207)
+
+    Raises ValueError for any input that matches neither form.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    s = s.strip()
+
+    # Relative offset: +<N><unit>
+    m = _re.fullmatch(r"\+(\d+)([dhm])", s)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        if n <= 0:
+            raise ValueError(f"_parse_due_at: offset must be positive, got {s!r}")
+        delta = {
+            "d": timedelta(days=n),
+            "h": timedelta(hours=n),
+            "m": timedelta(minutes=n),
+        }[unit]
+        return (datetime.now(timezone.utc) + delta).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Absolute ISO timestamp: YYYY-MM-DD HH:MM:SS
+    try:
+        datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise ValueError(
+            f"_parse_due_at: unrecognised format {s!r}. "
+            "Use '+<N>d/h/m' (e.g. '+1d', '+3h', '+30m') "
+            "or 'YYYY-MM-DD HH:MM:SS' (UTC)."
+        )
+    return s
+
+
 # --- Tool definitions ---
 
 TOOLS = [
@@ -992,6 +1038,65 @@ TOOLS = [
             "required": ["candidate_id", "response"],
         },
     },
+    {
+        "name": "techne_reminder_add",
+        "description": (
+            "Arm a durable reminder that will surface in future sessions via the "
+            "PostToolUse hook. Provide a note (what to remember) and a due_at time. "
+            "due_at accepts a relative offset (+1d, +3h, +30m) or an absolute ISO "
+            "timestamp in UTC ('YYYY-MM-DD HH:MM:SS'). Returns the new reminder id "
+            "and the normalised UTC due_at. (techne#207)"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note": {
+                    "type": "string",
+                    "description": "Human-readable reminder text (what to remember).",
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": (
+                        "When the reminder becomes due. Relative: '+<N>d/h/m' (e.g. "
+                        "'+1d', '+3h', '+30m'). Absolute: 'YYYY-MM-DD HH:MM:SS' "
+                        "(UTC). Absolute values are assumed to be UTC — caller is "
+                        "responsible for UTC consistency."
+                    ),
+                },
+            },
+            "required": ["note", "due_at"],
+        },
+    },
+    {
+        "name": "techne_reminder_list",
+        "description": (
+            "List all ACTIVE reminders (including future ones) for in-session "
+            "management. Returns id, note, due_at, and last_surfaced_at for each. "
+            "Use techne_reminder_dismiss to dismiss a reminder. (techne#207)"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "techne_reminder_dismiss",
+        "description": (
+            "Dismiss a reminder by id so it no longer surfaces. The row is kept as "
+            "status='done' for audit; it will not appear in future hook injections. "
+            "(techne#207)"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "The reminder id returned by techne_reminder_add or techne_reminder_list.",
+                },
+            },
+            "required": ["id"],
+        },
+    },
 ]
 
 
@@ -1447,6 +1552,55 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
     }
 
 
+def _techne_reminder_add(args: dict, config: Config) -> dict:
+    """Arm a new reminder and return its id + normalised due_at. (techne#207)
+
+    Accepts relative offsets (+1d/+3h/+30m) or absolute UTC ISO timestamps.
+    All due_at values are stored as UTC; the post_tool_use hook compares against
+    UTC now() so UTC consistency here is critical.
+    """
+    from techne import reminders
+
+    note = args.get("note", "").strip()
+    if not note:
+        raise ValueError("techne_reminder_add requires 'note' (non-empty string)")
+    raw_due = args.get("due_at", "").strip()
+    if not raw_due:
+        raise ValueError("techne_reminder_add requires 'due_at'")
+
+    due_at_utc = _parse_due_at(raw_due)
+    reminder_id = reminders.add(config.db_path, note, due_at_utc)
+    return {"id": reminder_id, "due_at_utc": due_at_utc}
+
+
+def _techne_reminder_list(args: dict, config: Config) -> dict:
+    """List all active reminders (including future ones) for in-session management. (techne#207)
+
+    Returns id, note, due_at, and last_surfaced_at for each active reminder so
+    the operator can review what's armed and decide what to dismiss.
+    """
+    from techne import reminders
+
+    rows = reminders.list_active(config.db_path)
+    return {"reminders": rows}
+
+
+def _techne_reminder_dismiss(args: dict, config: Config) -> dict:
+    """Dismiss a reminder so it no longer surfaces. (techne#207)
+
+    The row is kept as status='done' for audit; it will not appear in
+    list_due() or list_active() after dismissal.
+    """
+    from techne import reminders
+
+    reminder_id = args.get("id")
+    if reminder_id is None:
+        raise ValueError("techne_reminder_dismiss requires 'id' (integer)")
+    reminder_id = int(reminder_id)
+    reminders.dismiss(config.db_path, reminder_id)
+    return {"dismissed": reminder_id}
+
+
 TOOL_HANDLERS = {
     "techne_search": _techne_search,
     "techne_store": _techne_store,
@@ -1473,6 +1627,9 @@ TOOL_HANDLERS = {
     "techne_conflict_emit": _techne_conflict_emit,
     "techne_conflict_ingest": _techne_conflict_ingest,
     "techne_federation_conflict_ingest": _techne_federation_conflict_ingest,
+    "techne_reminder_add": _techne_reminder_add,
+    "techne_reminder_list": _techne_reminder_list,
+    "techne_reminder_dismiss": _techne_reminder_dismiss,
 }
 
 

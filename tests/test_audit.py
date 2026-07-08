@@ -202,6 +202,17 @@ class TestVerifyObservationHash:
         """Returns False when the observation row doesn't exist."""
         assert verify_observation_hash(db_path, 999999, _RAW_WITH_CRED) is False
 
+    def test_returns_false_for_none_candidate(self, db_path):
+        """verify_observation_hash returns False (not TypeError) when candidate_plaintext is None.
+
+        The 'verifier always returns bool' contract means a non-str argument must
+        never raise — it must silently return False. (techne#270)
+        """
+        obs_id = self._insert_observation(db_path, _RAW_WITH_CRED)
+        # Must not raise; must return False.
+        result = verify_observation_hash(db_path, obs_id, None)  # type: ignore[arg-type]
+        assert result is False
+
 
 # ---------------------------------------------------------------------------
 # (d) Migration v15→v16: adds content_hash column to an existing DB
