@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from techne.core import embeddings as embeddings_mod
 from techne.core.database import connect
 from techne.core.embeddings import _get_embedding_model
 from techne.core.knowledge import decay_score
@@ -31,11 +32,13 @@ def _mmr_reorder(
     """Greedy MMR second pass over a pre-scored candidate list.
 
     Each candidate must already have ``relevance_key`` set (higher = better).
-    Embeddings are lazily computed via fastembed (same model as #19 inference)
-    and cached per candidate in ``_emb`` so no row is embedded twice per query.
+    Embeddings are lazily computed via the active embedding backend (model2vec
+    or fastembed — techne#601/#602, same singleton as #19 inference) and
+    cached per candidate in ``_emb`` so no row is embedded twice per query.
 
-    When fastembed is not installed the function returns candidates[:limit] in
-    relevance order — identical to the pre-MMR behaviour (graceful degradation).
+    When no embedding backend is installed the function returns
+    candidates[:limit] in relevance order — identical to the pre-MMR
+    behaviour (graceful degradation).
 
     Args:
         candidates: Pre-sorted (desc relevance) candidate dicts.
@@ -60,7 +63,7 @@ def _mmr_reorder(
     try:
         model = _get_embedding_model()
     except Exception:
-        # fastembed not installed or model unavailable — no-op.
+        # No embedding backend installed/available — no-op.
         return candidates[:limit]
 
     # Embed all candidates that don't already have a cached embedding.
@@ -192,7 +195,8 @@ def _rerank(
 
     Stage 2 — Greedy MMR selection from the stage-1 ordered pool.  When
     mmr_lambda=0 (default) MMR is skipped and pure relevance ordering is kept.
-    When fastembed is unavailable MMR degrades silently to relevance ordering.
+    When no embedding backend is available MMR degrades silently to relevance
+    ordering.
     """
     if not candidates:
         return candidates
@@ -236,7 +240,7 @@ def _rerank(
 
     candidates.sort(key=lambda x: -x["_combined"])
 
-    # Stage 2: MMR diversity pass (no-op when mmr_lambda=0 or fastembed absent).
+    # Stage 2: MMR diversity pass (no-op when mmr_lambda=0 or no embedding backend).
     result = _mmr_reorder(candidates, limit, mmr_lambda=mmr_lambda, relevance_key="_combined")
 
     # Clean scratch keys before returning.
@@ -391,9 +395,10 @@ def search_fts(
         bm25_weight:             Weight for normalised BM25 score (0..1).
         expansion_ratio:         Candidate pool = expansion_ratio * limit per table.
         mmr_lambda:              MMR diversity weight λ ∈ [0, 1].  0 = pure relevance
-                                 (default, matches legacy behaviour).  Requires
-                                 fastembed; degrades silently to relevance order if
-                                 the dep is not installed.
+                                 (default, matches legacy behaviour).  Requires an
+                                 embedding backend (model2vec or fastembed);
+                                 degrades silently to relevance order if neither
+                                 is installed.
         confidence_decay_weight: Small additive weight for effective_confidence()
                                  tiebreak (techne#214).  Default 0.1 — deliberately
                                  modest, decay is operational not accuracy-driving.
@@ -535,7 +540,8 @@ def search_vec(
     limit: int = 10,
     include_archived: bool = True,
 ) -> list[dict]:
-    """Semantic vector search. Requires sqlite-vec and fastembed extras.
+    """Semantic vector search. Requires sqlite-vec and an embedding backend
+    (model2vec or fastembed — techne#601/#602; see core/embeddings.py).
 
     Falls back gracefully if vector dependencies aren't installed.
 
@@ -545,8 +551,11 @@ def search_vec(
     """
     try:
         import sqlite_vec
-        from fastembed import TextEmbedding as TextEmbedding  # availability probe
     except ImportError:
+        return []
+    if not embeddings_mod.backend_available():
+        # Neither model2vec nor fastembed importable — degrade to FTS-only,
+        # same as the pre-#601 fastembed-only probe (techne#601/#602).
         return []
 
     import numpy as np
@@ -670,6 +679,17 @@ def search_vec(
         results.sort(key=lambda x: x.get("distance", 999))
         return results[:limit]
 
+    except sqlite3.OperationalError:
+        # A stale vec0 cache embedded by a *different* backend raises here on the
+        # `embedding MATCH ?` — most importantly "Dimension mismatch: expected N
+        # ... received M" when a DB embedded at 384-d (fastembed/MiniLM) is queried
+        # after a py3.14 upgrade flips the active backend to 256-d potion. The
+        # tables are a derived cache and the drop+re-embed migration
+        # (_ensure_vec_backend_identity, run from backfill_vectors) is what
+        # actually reconciles them; until an operator re-embeds we must NEVER crash
+        # the top-level recall path — degrade to FTS-only, matching this module's
+        # existing extension-load fallback above.
+        return []
     finally:
         conn.close()
 
@@ -799,6 +819,9 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
         import sqlite_vec
     except ImportError:
         return {}
+    if not embeddings_mod.backend_available():
+        # Neither model2vec nor fastembed importable — nothing to embed with.
+        return {}
 
     model = _get_embedding_model()
     conn = connect(db_path)
@@ -814,12 +837,20 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
     counts = {"threads": 0, "observations": 0, "knowledge": 0}
 
     try:
+        # techne#601/#602: detect a backend/model swap (e.g. upgrading to py3.14,
+        # where fastembed can't install and model2vec takes over) BEFORE touching
+        # any per-table vec data. A mismatch drops all three vec tables so the
+        # per-table loop below recreates them at the new dim and the
+        # "NOT IN (SELECT rowid FROM vec_tbl)" backfill query naturally re-embeds
+        # every row against an empty table. See _ensure_vec_backend_identity.
+        _ensure_vec_backend_identity(conn, model)
+
         for tbl, content_col, vec_tbl in [
             ("threads", "summary", "threads_vec"),
             ("observations", "content", "observations_vec"),
             ("knowledge", "content", "knowledge_vec"),
         ]:
-            _ensure_vec_table(conn, vec_tbl)
+            _ensure_vec_table(conn, vec_tbl, model.dim)
             # Superseded/merged knowledge must NOT have a live ANN embedding: search_vec
             # filters superseded rows only AFTER the k-nearest cut, so a stale embedding
             # occupies a top-k slot (techne#168). The audit suggested deleting from
@@ -835,14 +866,22 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"
             extra_where = " AND t.superseded_by IS NULL" if tbl == "knowledge" else ""
-            rows = conn.execute(
-                f"""SELECT t.{id_col}, t.{content_col} FROM {tbl} t
-                    WHERE t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl}){extra_where}
-                    ORDER BY t.{id_col} DESC LIMIT ?""",
-                (batch_size,),
-            ).fetchall()
-
-            if rows:
+            # Loop until no un-embedded rows remain — one call must fully re-embed a
+            # table, not just the newest `batch_size` rows. This matters most right
+            # after a backend swap: _ensure_vec_backend_identity has just dropped and
+            # recreated the table empty, so EVERY row needs (re-)embedding and a
+            # single capped batch would silently leave older rows unembedded. Each
+            # pass embeds rows NOT already in vec_tbl and inserts them, so the
+            # NOT IN set strictly shrinks and the loop terminates.
+            while True:
+                rows = conn.execute(
+                    f"""SELECT t.{id_col}, t.{content_col} FROM {tbl} t
+                        WHERE t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl}){extra_where}
+                        ORDER BY t.{id_col} DESC LIMIT ?""",
+                    (batch_size,),
+                ).fetchall()
+                if not rows:
+                    break
                 ids, texts = zip(*rows)
                 embeddings = np.stack(list(model.embed(list(texts))))
                 for row_id, emb in zip(ids, embeddings):
@@ -851,7 +890,7 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
                         (row_id, emb.astype("float32").tobytes()),
                     )
                 conn.commit()
-                counts[tbl] = len(rows)
+                counts[tbl] += len(rows)
 
     finally:
         conn.close()
@@ -881,8 +920,14 @@ def _purge_superseded_knowledge_vec(conn: sqlite3.Connection) -> int:
 
 _VEC_TABLE_NAMES = frozenset({"threads_vec", "observations_vec", "knowledge_vec"})
 
+# extension_state row name for the embedding-backend identity stamp (techne#601/#602).
+# Reuses the existing extension_state sidecar table (core/extension_state.py) rather
+# than adding a bespoke meta table — it's already the "durable key-value sidecar"
+# home for exactly this kind of small, versioned marker.
+_VEC_BACKEND_STATE_NAME = "embedding_backend"
 
-def _ensure_vec_table(conn: sqlite3.Connection, name: str):
+
+def _ensure_vec_table(conn: sqlite3.Connection, name: str, dim: int):
     # Defense in depth: name is f-string-interpolated into CREATE TABLE below.
     # Today callers only pass from the hardcoded list in backfill_vectors, but
     # this is a module-public-looking helper — assert at the SQL construction
@@ -893,7 +938,89 @@ def _ensure_vec_table(conn: sqlite3.Connection, name: str):
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone()
     if not exists:
-        conn.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[384])")
+        # dim comes from the active EmbeddingBackend (was hardcoded 384 for
+        # fastembed/MiniLM pre-#601) — vec0's column width must match whatever
+        # backend is about to write into it, see _ensure_vec_backend_identity
+        # for what happens when the active backend's dim changes after tables
+        # already exist at the old width.
+        conn.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[{dim}])")
+
+
+def _ensure_vec_backend_identity(conn: sqlite3.Connection, backend) -> bool:
+    """Detect an embedding-backend swap and drop+restamp the vec tables if so.
+
+    vec0 tables are fixed-width (`float[N]`) at CREATE time — there is no
+    ALTER to widen/narrow an existing vec0 column, and even at a constant
+    width, embeddings from two different models are not comparable (different
+    semantic space entirely; L2 distance between a MiniLM vector and a
+    potion vector is meaningless). So ANY backend or model change — not just
+    a dim change — invalidates every existing embedding, not just the ones
+    that no longer fit the column width.
+
+    Identity is stamped as ``{"name": backend.name, "dim": backend.dim}`` in
+    extension_state (see core/extension_state.py) under
+    ``_VEC_BACKEND_STATE_NAME``. On mismatch (or no prior stamp — the vec
+    tables may already exist from before this migration shipped, stamped
+    implicitly as fastembed MiniLM/384 since that was the only backend that
+    ever existed):
+      1. DROP each of the three vec tables (allow-listed by _VEC_TABLE_NAMES —
+         same guard _ensure_vec_table uses; no dynamic/user-controlled names).
+      2. Restamp extension_state to the new identity.
+      3. Return True so the caller knows a full re-embed is needed.
+
+    Recreating the (now-empty) tables happens lazily in the normal
+    _ensure_vec_table call right after this — an empty table's
+    ``NOT IN (SELECT rowid FROM vec_tbl)`` selects every row, so
+    backfill_vectors' existing batch loop re-embeds everything with zero
+    special-casing needed there.
+
+    A DB created before this migration shipped (no stamp yet) is treated as
+    "stamped fastembed:sentence-transformers/all-MiniLM-L6-v2 @ 384" — the
+    only backend/model that ever wrote those tables — so upgrading techne
+    on an existing fastembed-embedded DB with no backend change is a no-op
+    here (correctly does NOT trigger a needless re-embed).
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    state = get_state(conn, _VEC_BACKEND_STATE_NAME)
+    if state is None:
+        # No stamp yet. Any vec table already present must have been written
+        # by the only backend that ever existed pre-#601 (fastembed MiniLM,
+        # 384-d) — assume that identity rather than treating "unstamped" as
+        # "different" (which would force a needless re-embed on every existing
+        # install on first run after upgrading).
+        any_vec_table_exists = any(
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (t,)
+            ).fetchone()
+            for t in _VEC_TABLE_NAMES
+        )
+        assumed_name = "fastembed:sentence-transformers/all-MiniLM-L6-v2"
+        assumed_dim = 384
+        if any_vec_table_exists and (backend.name == assumed_name and backend.dim == assumed_dim):
+            set_state(conn, _VEC_BACKEND_STATE_NAME, {"name": assumed_name, "dim": assumed_dim})
+            return False
+        if not any_vec_table_exists:
+            # Fresh DB, nothing to migrate away from — just stamp current identity.
+            set_state(conn, _VEC_BACKEND_STATE_NAME, {"name": backend.name, "dim": backend.dim})
+            return False
+        # Existing tables assumed-fastembed, but the active backend is something
+        # else (e.g. this is a 3.14 upgrade where model2vec is now selected) —
+        # fall through to the mismatch path below.
+        state = {"name": assumed_name, "dim": assumed_dim}
+
+    if state.get("name") == backend.name and state.get("dim") == backend.dim:
+        return False  # unchanged — no-op, the common case on every call.
+
+    # Mismatch: drop all three vec tables (allow-listed names only) so stale,
+    # semantically-incomparable embeddings can never be queried against the
+    # new backend, then restamp. Tables are recreated lazily by the
+    # _ensure_vec_table call that follows in backfill_vectors.
+    for name in sorted(_VEC_TABLE_NAMES):
+        conn.execute(f"DROP TABLE IF EXISTS {name}")
+    set_state(conn, _VEC_BACKEND_STATE_NAME, {"name": backend.name, "dim": backend.dim})
+    conn.commit()
+    return True
 
 
 def _fts_terms(query: str) -> list[str]:

@@ -2,18 +2,18 @@
 
 import pytest
 
-from techne.core.database import init_db, connect
+from techne.core.database import connect, init_db
+from techne.core.knowledge import store as store_knowledge
 from techne.core.search import (
-    search_fts,
-    search_vec,
-    search,
+    _build_or_fts_query,
     _rerank,
     _sanitize_fts_query,
-    _build_or_fts_query,
+    search,
+    search_fts,
+    search_vec,
 )
-from techne.core.threads import Thread, save_threads
-from techne.core.knowledge import store as store_knowledge
 from techne.core.state import start_session
+from techne.core.threads import Thread, save_threads
 
 
 @pytest.fixture
@@ -200,13 +200,13 @@ class TestSearchFtsAll:
         threads = [
             Thread(
                 thread_num=1,
-                label=f"wombat habitat analysis",
-                summary=f"Analyzed wombat burrowing patterns in southern Australia.",
+                label="wombat habitat analysis",
+                summary="Analyzed wombat burrowing patterns in southern Australia.",
             )
         ]
         save_threads(threads, session_id, db_path)
 
-        store_knowledge(db_path, f"wombat populations are declining in dry regions", type="fact")
+        store_knowledge(db_path, "wombat populations are declining in dry regions", type="fact")
 
         conn = connect(db_path)
         conn.execute(
@@ -507,7 +507,6 @@ class TestSearchCombined:
 
     def test_search_combined_use_vectors_false_no_vec_import(self, db_path, monkeypatch):
         """use_vectors=False path must not attempt to import vector dependencies."""
-        import sys
 
         # Block sqlite_vec import to confirm it's never reached
         original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else None
@@ -547,26 +546,32 @@ class TestSearchCombined:
 
 class TestSearchVec:
     def test_search_vec_returns_empty_without_extras(self, db_path):
-        """search_vec returns [] gracefully when sqlite_vec/fastembed not installed.
+        """search_vec returns [] gracefully when sqlite_vec or NO embedding
+        backend (neither model2vec nor fastembed) is installed.
 
-        On Python 3.14 these extras have no wheel, so the ImportError path is tested.
-        If extras ARE present, skip this specific assertion and test the happy path instead.
+        techne#601/#602: on Python 3.14, fastembed has no wheel but model2vec
+        DOES install — so checking `import fastembed` alone would wrongly
+        conclude "no extras" and test the wrong path on 3.14. Use
+        `embeddings.backend_available()` (the same probe search_vec() itself
+        now calls) so this test's notion of "extras available" matches
+        production on every python version, not just <3.14.
         """
-        try:
-            import sqlite_vec
-            import fastembed
+        import importlib.util
 
-            extras_available = True
-        except ImportError:
-            extras_available = False
+        from techne.core import embeddings as embeddings_mod
+
+        sqlite_vec_available = importlib.util.find_spec("sqlite_vec") is not None
+        extras_available = sqlite_vec_available and embeddings_mod.backend_available()
 
         if not extras_available:
             # ImportError path: should return [] without raising
             results = search_vec(db_path, "any query")
             assert results == [], f"Expected [] without extras, got {results}"
         else:
-            # If extras are somehow available, just confirm it returns a list
-            pytest.skip("Vector extras are installed; skipping graceful-degradation test")
+            # Extras present (sqlite-vec + a real embedding backend, e.g. this
+            # 3.14 venv with model2vec) — just confirm it returns a list.
+            results = search_vec(db_path, "any query")
+            assert isinstance(results, list)
 
     def test_search_vec_degrades_on_attribute_error(self, db_path, monkeypatch):
         """#84: AttributeError from enable_load_extension (interpreter compiled
@@ -599,6 +604,7 @@ class TestSearchVec:
     def test_search_vec_degrades_on_operational_error(self, db_path, monkeypatch):
         """#84: sqlite3.OperationalError from enable_load_extension must return []."""
         import sqlite3 as _sqlite3
+
         import techne.core.search as _search_mod
         from techne.core.database import connect as _real_connect
 
@@ -620,6 +626,53 @@ class TestSearchVec:
         monkeypatch.setattr(_search_mod, "connect", lambda path: _OpErrConn(_real_connect(path)))
 
         results = search_vec(db_path, "anything")
+        assert results == []
+
+    def test_search_vec_degrades_on_stale_dim_vec_table(self, db_path, monkeypatch):
+        """techne#601 BLOCKER regression: a vec0 table embedded by a PREVIOUS
+        backend at a different width (e.g. 384-d fastembed/MiniLM) survives into a
+        query after a py3.14 upgrade flips the active backend to 256-d potion —
+        and nothing has re-embedded yet. The `embedding MATCH ?` then raises
+        "Dimension mismatch"; that must degrade to FTS-only ([]), NEVER crash the
+        top-level recall path. (Before the fix, this OperationalError propagated
+        straight out of search()/search_vec().)"""
+        import struct
+
+        import techne.core.search as _search_mod
+        from techne.core.search import _VEC_TABLE_NAMES, _ensure_vec_table
+
+        # Guard BEFORE importing numpy: a base install (no [vectors] extra) has
+        # neither sqlite_vec nor numpy, so skip cleanly rather than ImportError.
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        np = pytest.importorskip("numpy")
+
+        # Stub the active backend at 256-d (independent of what's installed / any
+        # model download) so the query embeds at 256 while the table is 384.
+        class _FakeBackend:
+            name = "model2vec:stub-256"
+            dim = 256
+
+            def embed(self, texts):
+                return [np.full(256, 0.1, dtype="float32") for _ in texts]
+
+        monkeypatch.setattr(_search_mod, "_get_embedding_model", lambda: _FakeBackend())
+
+        # Lay down 384-d vec tables with a row each — the pre-upgrade cache.
+        conn = connect(db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            emb384 = struct.pack("384f", *([0.1] * 384))
+            for name in sorted(_VEC_TABLE_NAMES):
+                _ensure_vec_table(conn, name, 384)
+                conn.execute(f"INSERT INTO {name}(rowid, embedding) VALUES (1, ?)", (emb384,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Query with the 256-d backend against 384-d tables — must NOT raise.
+        results = search_vec(db_path, "anything", table="all")
         assert results == []
 
     def test_search_degrades_to_fts_when_vec_extension_unavailable(self, db_path, monkeypatch):
@@ -656,10 +709,18 @@ class TestSearchVec:
     def test_search_combined_dedupes(self, db_path):
         """Combined search deduplicates results that appear in both FTS and vec.
 
-        Requires vector extras. Skipped cleanly if not available.
+        Requires vector extras (sqlite-vec + an embedding backend). Skipped
+        cleanly if not available. techne#601/#602: checks
+        `embeddings.backend_available()` rather than `importorskip("fastembed")`
+        directly, since fastembed alone is absent-by-design on py3.14 while
+        model2vec provides working vector search there — importorskip on
+        fastembed specifically would wrongly skip real coverage on 3.14.
         """
-        sqlite_vec = pytest.importorskip("sqlite_vec")
-        pytest.importorskip("fastembed")
+        from techne.core import embeddings as embeddings_mod
+
+        pytest.importorskip("sqlite_vec")
+        if not embeddings_mod.backend_available():
+            pytest.skip("no embedding backend (model2vec or fastembed) available")
 
         session_id = start_session(db_path)
         threads = [
@@ -742,7 +803,7 @@ class TestPurgeSupersededKnowledgeVec:
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
-            _ensure_vec_table(conn, "knowledge_vec")
+            _ensure_vec_table(conn, "knowledge_vec", 384)
             emb = struct.pack("384f", *([0.1] * 384))
             for rid in (live_id, old_id, new_id):
                 conn.execute(
@@ -769,12 +830,213 @@ class TestPurgeSupersededKnowledgeVec:
             conn.close()
 
 
+class TestEnsureVecBackendIdentity:
+    """techne#601/#602: an embedding-backend/model swap (e.g. upgrading to
+    py3.14, where fastembed can't install and model2vec takes over — a 384-d
+    -> 512-d dim change) must drop and recreate the fixed-width vec0 tables,
+    or vec0 INSERTs at the new dim would fail against the old column width
+    (and even at equal width, cross-backend vectors aren't comparable)."""
+
+    def test_unstamped_db_with_existing_384d_table_assumed_fastembed_noop(self, db_path):
+        """A DB predating this migration has vec tables but no extension_state
+        stamp. If the ACTIVE backend today happens to still be fastembed
+        MiniLM/384 (unchanged), assume that identity retroactively — no drop,
+        no wasted re-embed of an already-correct index."""
+        import struct
+
+        from techne.core.embeddings import EmbeddingBackend
+        from techne.core.search import _ensure_vec_backend_identity, _ensure_vec_table
+
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        conn = connect(db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+
+            _ensure_vec_table(conn, "threads_vec", 384)
+            emb = struct.pack("384f", *([0.1] * 384))
+            conn.execute("INSERT INTO threads_vec(rowid, embedding) VALUES (1, ?)", (emb,))
+            conn.commit()
+
+            fake_backend = EmbeddingBackend(
+                "fastembed", "sentence-transformers/all-MiniLM-L6-v2", impl=None, dim=384
+            )
+            changed = _ensure_vec_backend_identity(conn, fake_backend)
+            assert changed is False
+
+            # Existing row untouched — table was NOT dropped.
+            rows = conn.execute("SELECT rowid FROM threads_vec").fetchall()
+            assert [r[0] for r in rows] == [1]
+        finally:
+            conn.close()
+
+    def test_dim_change_drops_and_recreates_at_new_dim(self, db_path):
+        """Simulate an existing float[384] vec table (pre-migration, unstamped)
+        with a row in it, then switch the active backend to a different dim.
+        The three vec tables must be dropped; recreating (via _ensure_vec_table,
+        as backfill_vectors does right after) must build them at the NEW dim,
+        and the dropped-then-recreated table is empty — so backfill_vectors'
+        `NOT IN (SELECT rowid FROM vec_tbl)` query re-embeds every row on an
+        empty table with zero special-casing needed there."""
+        import struct
+
+        from techne.core.embeddings import EmbeddingBackend
+        from techne.core.extension_state import get_state
+        from techne.core.search import (
+            _VEC_TABLE_NAMES,
+            _ensure_vec_backend_identity,
+            _ensure_vec_table,
+        )
+
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        conn = connect(db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+
+            # Old world: all three vec0 tables at 384-d, one row each, no stamp.
+            emb384 = struct.pack("384f", *([0.1] * 384))
+            for name in sorted(_VEC_TABLE_NAMES):
+                _ensure_vec_table(conn, name, 384)
+                conn.execute(f"INSERT INTO {name}(rowid, embedding) VALUES (1, ?)", (emb384,))
+            conn.commit()
+
+            # New world: switch to a 512-d model2vec backend (an explicit
+            # non-default variant chosen so the dim differs from the old 384-d
+            # tables — exercises the drop/recreate path regardless of the shipped
+            # default, which is potion-base-8M/256-d).
+            new_backend = EmbeddingBackend(
+                "model2vec", "minishlab/potion-retrieval-32M", impl=None, dim=512
+            )
+            changed = _ensure_vec_backend_identity(conn, new_backend)
+            assert changed is True
+
+            # All three tables gone (they'll be recreated lazily by the caller's
+            # per-table _ensure_vec_table loop, same as backfill_vectors does).
+            for name in _VEC_TABLE_NAMES:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+                ).fetchone()
+                assert exists is None, f"{name} should have been dropped"
+
+            # Identity stamp updated to the new backend.
+            stamp = get_state(conn, "embedding_backend")
+            assert stamp == {"name": "model2vec:minishlab/potion-retrieval-32M", "dim": 512}
+
+            # Recreate at the new dim (what backfill_vectors does next) and
+            # verify the column width actually matches — inserting a 512-float
+            # blob must succeed; a stale 384-wide column would reject it.
+            _ensure_vec_table(conn, "threads_vec", 512)
+            emb512 = struct.pack("512f", *([0.2] * 512))
+            conn.execute("INSERT INTO threads_vec(rowid, embedding) VALUES (1, ?)", (emb512,))
+            conn.commit()
+            rows = conn.execute("SELECT rowid FROM threads_vec").fetchall()
+            assert [r[0] for r in rows] == [1]  # old rowid 1 is gone-then-reinserted, table was empty
+
+        finally:
+            conn.close()
+
+    def test_matching_identity_is_noop_and_preserves_rows(self, db_path):
+        """Calling with the SAME backend identity as already stamped must not
+        drop anything — the common case on every search/backfill call."""
+        import struct
+
+        from techne.core.embeddings import EmbeddingBackend
+        from techne.core.search import _ensure_vec_backend_identity, _ensure_vec_table
+
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        conn = connect(db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+
+            backend = EmbeddingBackend("model2vec", "minishlab/potion-retrieval-32M", impl=None, dim=512)
+
+            # First call stamps identity (fresh DB, no existing tables).
+            assert _ensure_vec_backend_identity(conn, backend) is False
+            _ensure_vec_table(conn, "threads_vec", 512)
+            emb = struct.pack("512f", *([0.3] * 512))
+            conn.execute("INSERT INTO threads_vec(rowid, embedding) VALUES (7, ?)", (emb,))
+            conn.commit()
+
+            # Second call, same backend identity — must be a no-op.
+            changed = _ensure_vec_backend_identity(conn, backend)
+            assert changed is False
+            rows = conn.execute("SELECT rowid FROM threads_vec").fetchall()
+            assert [r[0] for r in rows] == [7]  # untouched
+        finally:
+            conn.close()
+
+    def test_backfill_vectors_end_to_end_dim_change_reembeds(self, db_path):
+        """Full integration: stamp an old 384-d identity + populate a vec table
+        with a stale row, then call backfill_vectors() with the REAL active
+        embedding backend (whatever's installed — model2vec on this venv,
+        512-d) and confirm it ends up re-embedded at the new dim rather than
+        erroring on a width mismatch or silently keeping the stale rows."""
+        import struct
+
+        from techne.core.embeddings import backend_available
+        from techne.core.extension_state import get_state, set_state
+        from techne.core.knowledge import store as store_knowledge
+        from techne.core.search import _ensure_vec_table, backfill_vectors
+
+        pytest.importorskip("sqlite_vec")
+        if not backend_available():
+            pytest.skip("no embedding backend (model2vec or fastembed) available")
+
+        store_knowledge(db_path, "a fact that will need embedding at the new dimension", type="fact")
+
+        conn = connect(db_path)
+        try:
+            conn.enable_load_extension(True)
+            import sqlite_vec
+
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+
+            _ensure_vec_table(conn, "knowledge_vec", 384)
+            emb384 = struct.pack("384f", *([0.1] * 384))
+            conn.execute("INSERT INTO knowledge_vec(rowid, embedding) VALUES (999999, ?)", (emb384,))
+            # Stamp a DIFFERENT identity than whatever's actually active, so the
+            # real backfill_vectors call is guaranteed to observe a mismatch.
+            set_state(conn, "embedding_backend", {"name": "fastembed:bogus-old-model", "dim": 384})
+            conn.commit()
+        finally:
+            conn.close()
+
+        counts = backfill_vectors(db_path)
+        assert counts.get("knowledge", 0) >= 1
+
+        conn = connect(db_path)
+        try:
+            # knowledge_vec is a vec0 virtual table — querying it (even just
+            # rowid) requires the extension loaded on THIS connection too;
+            # plain connect() doesn't load it (same reason backfill_vectors
+            # itself loads it explicitly).
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+
+            # Stale rowid 999999 (from the dropped-and-recreated table) is gone.
+            remaining = {r[0] for r in conn.execute("SELECT rowid FROM knowledge_vec").fetchall()}
+            assert 999999 not in remaining
+
+            stamp = get_state(conn, "embedding_backend")
+            assert stamp["name"] != "fastembed:bogus-old-model"
+        finally:
+            conn.close()
+
+
 class TestSearchNoMutation:
     def test_use_vectors_does_not_mutate_fts_results(self, db_path):
         """search(use_vectors=True) must not overwrite the 'source' field
         on results returned by search_fts — callers may read 'source' as
         the knowledge provenance, not the match origin."""
-        import sqlite3
 
         session_id = start_session(db_path)
         threads = [

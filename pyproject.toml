@@ -36,8 +36,16 @@ vectors = [
     # vector search degrades to empty via the import guard in core/search.py).
     # Drop the marker when onnxruntime ships 3.14 wheels.
     "fastembed>=0.4.0; python_version < '3.14'",
+    # model2vec/potion is the py3.14 embedding backend (techne#601/#602): numpy-only
+    # static embeddings, no onnxruntime/torch dependency, so it installs where
+    # fastembed can't. core/embeddings.py auto-selects between the two backends
+    # (model2vec on 3.14+, fastembed on <3.14) — see EmbeddingBackend. Mirrors the
+    # fastembed marker above so `[vectors]` gets a working backend on both sides
+    # of the 3.14 boundary.
+    "model2vec>=0.8.0; python_version >= '3.14'",
     # Direct import in core/search.py and core/inference.py; currently satisfied
-    # transitively via fastembed but declared here to make the dependency explicit.
+    # transitively via fastembed/model2vec but declared here to make the
+    # dependency explicit.
     "numpy",
 ]
 # `llm` enables the optional operator-model path for autonomous/headless
