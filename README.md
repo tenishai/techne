@@ -56,7 +56,9 @@ pip install -e ".[security]"      # CVE pre-install audit for the shell gate (fa
 pip install -e ".[watch]"         # continuous filesystem ingest (techne watch)
 ```
 
-**Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `pip install -e ".[vectors]"` succeeds on 3.14 (installs `sqlite-vec` only); semantic search returns empty gracefully until the ecosystem catches up. FTS5 search works fully on every supported Python (3.11+).
+**Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
+
+**Upgrading an existing `[vectors]` DB to Python 3.14:** switching interpreters swaps the active embedding backend (fastembed/MiniLM-384 → model2vec/potion-256) — the two are not comparable vector spaces, so existing embeddings are dropped on next backfill and semantic search silently degrades to FTS-only until you re-embed. Run `techne vectors status` to check, then `techne vectors backfill` to restore the vector channel.
 
 ---
 
