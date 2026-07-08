@@ -2297,6 +2297,116 @@ def architect_retire_legacy(ctx, dry_run):
     click.echo(f"{verb} {n} legacy type='pattern' knowledge rows from techne.db")
 
 
+@main.group()
+@click.pass_context
+def vectors(ctx):
+    """Manage the personal-memory vector search channel (techne#284).
+
+    Vector search (search_vec/search()) degrades silently to FTS-only when
+    the embedding backend or sqlite-vec is unavailable, OR when the vec0
+    tables are stale after a backend swap (techne#601/#602 — e.g. upgrading
+    to Python 3.14 flips fastembed/MiniLM-384 to model2vec/potion-256). Use
+    `techne vectors status` to check, `techne vectors backfill` to fix.
+    """
+    pass
+
+
+@vectors.command("backfill")
+@click.pass_context
+def vectors_backfill(ctx):
+    """Embed un-embedded rows; re-embed everything if the backend changed.
+
+    Thin CLI wrapper around search.backfill_vectors() (techne#283 stack) —
+    the actual embedding-backend-identity migration (drop+recreate+re-embed
+    threads_vec/observations_vec/knowledge_vec on a backend/model swap) is
+    NOT reimplemented here, only invoked. See search.py's
+    _ensure_vec_backend_identity for the migration itself.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core import embeddings as embeddings_mod
+
+    # Graceful, non-error exit when there's nothing to embed with — matches
+    # search_vec/backfill_vectors' own degrade-to-FTS-only behavior rather
+    # than surfacing an ImportError to a user who simply didn't install the
+    # optional [vectors] extra.
+    try:
+        import sqlite_vec  # noqa: F401
+    except ImportError:
+        click.echo(
+            "vector search unavailable: no embedding backend installed — "
+            "install techne[vectors]"
+        )
+        ctx.exit(0)
+    if not embeddings_mod.backend_available():
+        click.echo(
+            "vector search unavailable: no embedding backend installed — "
+            "install techne[vectors]"
+        )
+        ctx.exit(0)
+
+    from techne.core.search import backfill_vectors
+
+    counts = backfill_vectors(config.db_path)
+    click.echo(json.dumps(counts, indent=2))
+
+
+@vectors.command("status")
+@click.pass_context
+def vectors_status(ctx):
+    """Report the vector channel's health without mutating anything.
+
+    Shows the active embedding backend, the stored backend-identity stamp
+    (if any), per-table vec0 row counts, and whether a re-embed is needed
+    (a backend/model swap happened since the vec tables were last built).
+    Never calls _ensure_vec_backend_identity — that function DROPs the vec
+    tables on a mismatch, which is exactly the mutation a read-only status
+    check must not risk triggering as a side effect of merely looking.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core.vector_status import vector_channel_status
+
+    status = vector_channel_status(config.db_path)
+
+    if status["active_backend"] is None:
+        click.echo("active embedding backend: none available")
+    else:
+        click.echo(
+            f"active embedding backend: {status['active_backend']['name']}"
+            f" (dim={status['active_backend']['dim']})"
+        )
+
+    if status["stamp"] is None:
+        click.echo("stored identity stamp: none")
+    else:
+        click.echo(
+            f"stored identity stamp: {status['stamp']['name']}"
+            f" (dim={status['stamp']['dim']})"
+        )
+
+    click.echo("vec table rows:")
+    for table_name in ("threads_vec", "observations_vec", "knowledge_vec"):
+        info = status["tables"][table_name]
+        if not info["exists"]:
+            click.echo(f"  {table_name}: absent")
+        else:
+            click.echo(f"  {table_name}: {info['rows']} row(s) (dim={info['dim']})")
+
+    click.echo(f"re-embed needed: {status['reembed_needed']}")
+    if status["reembed_needed"]:
+        click.echo(
+            "vector channel is stale after a backend change — "
+            "run `techne vectors backfill` to restore it."
+        )
+
+
 @main.group(invoke_without_command=True)
 @click.pass_context
 def codex(ctx):
