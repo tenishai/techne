@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from techne.core.database import init_db
-from techne.reminders import add, dismiss, list_due, touch_surfaced
+from techne.reminders import add, dismiss, list_due, touch_surfaced, touch_surfaced_many
 
 
 # ---------------------------------------------------------------------------
@@ -269,42 +269,24 @@ class TestPostToolUseReminderInjection:
         assert "⏰ Reminder:" in result
 
     def test_recently_surfaced_reminder_is_throttled(self, db_path: Path) -> None:
-        """A reminder surfaced within the throttle window is skipped on subsequent calls."""
+        """A reminder surfaced within the throttle window is skipped on subsequent same-session calls."""
         from techne.hooks.post_tool_use import _inject_due_reminders
 
         past = _iso(_utcnow() - timedelta(minutes=30))
-        reminder_id = add(db_path, "throttled note", past)
-
-        # Simulate a very recent surface by writing a recent last_surfaced_at directly.
-        # We use touch_surfaced() then override the stamp to "1 minute ago" to be
-        # clearly within the 3h window.
-        touch_surfaced(db_path, reminder_id)
-
-        # Force-update last_surfaced_at to 1 minute ago (within the 3h throttle).
-        from techne.core.database import connect
-        recent = _iso(_utcnow() - timedelta(minutes=1))
-        conn = connect(db_path)
-        try:
-            conn.execute(
-                "UPDATE reminders SET last_surfaced_at = ? WHERE id = ?",
-                (recent, reminder_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        add(db_path, "throttled note", past)
 
         cfg = self._make_config(db_path)
-        # Use a fresh session that is ALREADY recorded as seen, so the session-start
-        # bypass does not apply. We first call with session-s2 to register it, then
-        # call again with the same session.
-        _inject_due_reminders(cfg, "session-s2")  # registers session-s2 as seen
-        result = _inject_due_reminders(cfg, "session-s2")  # second call — throttle active
-        # The throttled reminder should not appear (may be None or empty).
+        # First call: id not yet in session-s2's surfaced-set → surfaces, stamps
+        # last_surfaced_at=now, records id in the session state.
+        _inject_due_reminders(cfg, "session-s2")
+        # Second call within the same session: id IS in session state AND
+        # last_surfaced_at is very recent → throttled.
+        result = _inject_due_reminders(cfg, "session-s2")
         if result is not None:
             assert "throttled note" not in result
 
     def test_old_surface_bypasses_throttle(self, db_path: Path) -> None:
-        """A reminder last surfaced >3h ago surfaces again on a non-session-start call."""
+        """A reminder last surfaced >3h ago re-surfaces even within the same session."""
         from techne.hooks.post_tool_use import _inject_due_reminders
         from techne.core.database import connect
         from techne.core.extension_state import set_state
@@ -322,26 +304,29 @@ class TestPostToolUseReminderInjection:
                 (old_surface, reminder_id),
             )
             conn.commit()
-            # Register "session-s3" as already seen so the session-start bypass
-            # does NOT apply — we want to test the time-based bypass only.
-            set_state(conn, "reminders:last_session_id", {"session_id": "session-s3"})
+            # Pre-populate session-s3's surfaced-set so the per-session "not yet seen"
+            # bypass does NOT apply — we want to test the time-based bypass only.
+            set_state(conn, "reminders:surfaced:session-s3", {"ids": [reminder_id]})
         finally:
             conn.close()
 
         cfg = self._make_config(db_path)
-        # Non-session-start call — stale surface is outside the throttle window.
+        # id IS in session state, but last_surfaced_at is outside the throttle window
+        # → the time-based condition fires, so the reminder surfaces again.
         result = _inject_due_reminders(cfg, "session-s3")
         assert result is not None
         assert "stale reminder" in result
 
-    def test_session_start_bypasses_throttle(self, db_path: Path) -> None:
-        """A new session_id bypasses the throttle even for recently-surfaced reminders."""
+    def test_new_session_surfaces_despite_recent_stamp(self, db_path: Path) -> None:
+        """A session whose surfaced-set is empty always surfaces due reminders,
+        even if last_surfaced_at is within the throttle window (from another session)."""
         from techne.hooks.post_tool_use import _inject_due_reminders
 
         past = _iso(_utcnow() - timedelta(minutes=30))
         reminder_id = add(db_path, "new-session bypass", past)
 
-        # Stamp a very recent last_surfaced_at (within throttle window).
+        # Stamp a very recent last_surfaced_at (within throttle window) — simulates
+        # this reminder having been surfaced by a different session moments ago.
         from techne.core.database import connect
         recent = _iso(_utcnow() - timedelta(minutes=1))
         conn = connect(db_path)
@@ -355,7 +340,7 @@ class TestPostToolUseReminderInjection:
             conn.close()
 
         cfg = self._make_config(db_path)
-        # First call with a brand-new session_id — must bypass throttle.
+        # "brand-new-session" has an empty surfaced-set → id not in set → bypass throttle.
         result = _inject_due_reminders(cfg, "brand-new-session")
         assert result is not None
         assert "new-session bypass" in result
@@ -380,3 +365,99 @@ class TestPostToolUseReminderInjection:
         cfg = self._make_config(db_path)
         result = _inject_due_reminders(cfg, "session-done")
         assert result is None
+
+    def test_two_concurrent_sessions_each_surface_same_reminder(self, db_path: Path) -> None:
+        """Two different session_ids each surface the same due reminder on their first call.
+
+        With the old global last-session-id approach, alternating sessions would
+        each look like a "new" session on every call, flooding both. With the
+        per-session surfaced-set approach, each session independently sees the
+        reminder once and then throttles within its own session.
+        """
+        from techne.hooks.post_tool_use import _inject_due_reminders
+
+        past = _iso(_utcnow() - timedelta(minutes=30))
+        add(db_path, "concurrent reminder", past)
+        cfg = self._make_config(db_path)
+
+        # Session A surfaces the reminder (first time for A's surfaced-set).
+        result_a = _inject_due_reminders(cfg, "session-concurrent-A")
+        assert result_a is not None
+        assert "concurrent reminder" in result_a
+
+        # Session B is independent — its surfaced-set is empty, so it also surfaces.
+        # The ~3h throttle on last_surfaced_at would block it with the old design,
+        # but with per-session state it surfaces correctly.
+        result_b = _inject_due_reminders(cfg, "session-concurrent-B")
+        assert result_b is not None
+        assert "concurrent reminder" in result_b
+
+    def test_within_session_second_call_is_throttled(self, db_path: Path) -> None:
+        """Within one session, a second call within the throttle window does not re-surface."""
+        from techne.hooks.post_tool_use import _inject_due_reminders
+
+        past = _iso(_utcnow() - timedelta(minutes=30))
+        add(db_path, "within-session note", past)
+        cfg = self._make_config(db_path)
+
+        # First call: id not in session-ws's set → surfaces, records id, stamps now.
+        result1 = _inject_due_reminders(cfg, "session-ws")
+        assert result1 is not None
+        assert "within-session note" in result1
+
+        # Second call: id IS in session-ws's set, last_surfaced_at=now → throttled.
+        result2 = _inject_due_reminders(cfg, "session-ws")
+        if result2 is not None:
+            assert "within-session note" not in result2
+
+
+# ---------------------------------------------------------------------------
+# TestTouchSurfacedMany
+# ---------------------------------------------------------------------------
+
+
+class TestTouchSurfacedMany:
+    """Tests for the batch touch_surfaced_many helper (techne#207)."""
+
+    def test_batch_stamps_multiple_reminders(self, db_path: Path) -> None:
+        """touch_surfaced_many stamps last_surfaced_at for all ids in one call."""
+        past = _iso(_utcnow() - timedelta(minutes=1))
+        id1 = add(db_path, "first batch", past)
+        id2 = add(db_path, "second batch", past)
+
+        touch_surfaced_many(db_path, [id1, id2])
+
+        now_str = _iso(_utcnow())
+        due = list_due(db_path, now_str)
+        stamped = {r["id"]: r["last_surfaced_at"] for r in due}
+        assert stamped[id1] is not None, "id1 not stamped by touch_surfaced_many"
+        assert stamped[id2] is not None, "id2 not stamped by touch_surfaced_many"
+
+    def test_empty_list_is_noop(self, db_path: Path) -> None:
+        """touch_surfaced_many([]) raises no error and changes nothing."""
+        past = _iso(_utcnow() - timedelta(minutes=1))
+        rid = add(db_path, "untouched", past)
+        touch_surfaced_many(db_path, [])  # must not raise
+        now_str = _iso(_utcnow())
+        row = next(r for r in list_due(db_path, now_str) if r["id"] == rid)
+        assert row["last_surfaced_at"] is None  # unchanged
+
+    def test_single_id_equivalent_to_touch_surfaced(self, db_path: Path) -> None:
+        """touch_surfaced_many([id]) is equivalent to touch_surfaced(id)."""
+        past = _iso(_utcnow() - timedelta(minutes=5))
+        rid = add(db_path, "solo batch", past)
+        touch_surfaced_many(db_path, [rid])
+        now_str = _iso(_utcnow())
+        row = next(r for r in list_due(db_path, now_str) if r["id"] == rid)
+        assert row["last_surfaced_at"] is not None
+
+    def test_reminder_still_active_after_batch_touch(self, db_path: Path) -> None:
+        """touch_surfaced_many does not dismiss or archive the reminders."""
+        past = _iso(_utcnow() - timedelta(minutes=1))
+        id1 = add(db_path, "keep active 1", past)
+        id2 = add(db_path, "keep active 2", past)
+        touch_surfaced_many(db_path, [id1, id2])
+        now_str = _iso(_utcnow())
+        active_ids = {r["id"] for r in list_due(db_path, now_str)}
+        assert id1 in active_ids
+        assert id2 in active_ids

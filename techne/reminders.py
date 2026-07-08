@@ -100,14 +100,28 @@ def touch_surfaced(db_path: Path, reminder_id: int) -> None:
     Called by the post_tool_use hook each time a reminder is injected so the
     ~3h repeat-throttle knows when it was last shown. (techne#207)
     """
+    touch_surfaced_many(db_path, [reminder_id])
+
+
+def touch_surfaced_many(db_path: Path, reminder_ids: list[int]) -> None:
+    """Batch-stamp last_surfaced_at for multiple reminders in a single UPDATE.
+
+    Equivalent to calling touch_surfaced for each id but uses one connection
+    and one UPDATE WHERE id IN (...). Called by the post_tool_use hook when
+    surfacing N reminders at session start to avoid one connection per reminder.
+    (techne#207)
+    """
+    if not reminder_ids:
+        return
     from techne.core.database import connect
 
     now = _now_iso()
+    placeholders = ",".join("?" * len(reminder_ids))
     conn = connect(db_path)
     try:
         conn.execute(
-            "UPDATE reminders SET last_surfaced_at = ? WHERE id = ?",
-            (now, reminder_id),
+            f"UPDATE reminders SET last_surfaced_at = ? WHERE id IN ({placeholders})",
+            [now, *reminder_ids],
         )
         conn.commit()
     finally:

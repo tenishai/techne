@@ -898,8 +898,8 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         conn.execute("INSERT INTO schema_version (version) VALUES (14)")
     if from_version < 15 and to_version >= 15:
         # Durable due-dated reminders (techne#207). Purely additive new table,
-        # so this is safe to re-run (CREATE TABLE IF NOT EXISTS). The partial
-        # UNIQUE index on (status, due_at) covers the hot-path SELECT in the
+        # so this is safe to re-run (CREATE TABLE IF NOT EXISTS). A plain
+        # covering index on (status, due_at) covers the hot-path SELECT in the
         # post_tool_use hook — added here so existing DBs get it without
         # requiring `techne reconcile` (the reconcile sentinel skips additive
         # index-only changes on already-stamped DBs at the current version).
