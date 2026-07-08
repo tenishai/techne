@@ -501,4 +501,4 @@ Semantic versioning. **Full release history: [`CHANGELOG.md`](CHANGELOG.md).**
 
 ## License
 
-Apache-2.0. See `LICENSE` file.
+AGPL-3.0-or-later. See `LICENSE` file.

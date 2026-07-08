@@ -7,7 +7,7 @@ name = "techne"
 version = "0.8.0"
 description = "Agentic memory and knowledge system for AI coding agents"
 readme = "README.md"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 authors = [
     { name = "Richard DiMartino" },
