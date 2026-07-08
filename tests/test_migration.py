@@ -2091,8 +2091,8 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
 """
 
 
-class TestV13ToV14Migration:
-    """v14 dedups pre-existing reflect duplicates and adds the partial UNIQUE index."""
+class TestV13ToCurrentMigration:
+    """v13 → SCHEMA_VERSION: dedup reflect candidates (v14) and add reminders table (v15+)."""
 
     @pytest.fixture
     def v13_conn(self, tmp_path):
@@ -2150,10 +2150,10 @@ class TestV13ToV14Migration:
                 "VALUES ('knowledge','decision','dup content','s1','m','hh','reflect')"
             )
 
-    def test_schema_version_bumped_to_14(self, v13_conn):
+    def test_schema_version_bumped_to_current(self, v13_conn):
         _migrate(v13_conn, 13, SCHEMA_VERSION)
         max_v = v13_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert max_v == SCHEMA_VERSION == 14
+        assert max_v == SCHEMA_VERSION
 
     def test_migration_idempotent_on_replay(self, v13_conn):
         _migrate(v13_conn, 13, SCHEMA_VERSION)
@@ -2203,8 +2203,8 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
 """
 
 
-class TestV13ToV14MigrationPreOriginSchema:
-    """v14 migration on a DB whose knowledge_candidates has no `origin` column.
+class TestV13ToCurrentMigrationPreOriginSchema:
+    """v13 → SCHEMA_VERSION on a DB whose knowledge_candidates has no `origin` column.
 
     This exercises the _add_column_if_missing backfill path that is always a
     no-op under the standard v13 fixture (which pre-declares `origin`).
@@ -2263,9 +2263,114 @@ class TestV13ToV14MigrationPreOriginSchema:
         assert idx is not None
 
     def test_schema_version_bumped(self, v13_no_origin_conn):
-        """Version bumps to 14 on the pre-origin path."""
+        """Version bumps to SCHEMA_VERSION on the pre-origin path."""
         _migrate(v13_no_origin_conn, 13, SCHEMA_VERSION)
         max_v = v13_no_origin_conn.execute(
             "SELECT MAX(version) FROM schema_version"
         ).fetchone()[0]
-        assert max_v == SCHEMA_VERSION == 14
+        assert max_v == SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# v15 step: reminders table (techne#207)
+#
+# The fresh-init path (init_db / SCHEMA_SQL) already covers the reminders table
+# in test_reminders.py. This class covers the MIGRATION path specifically:
+# a pre-v15 db must gain the table and its covering index via _migrate.
+# ---------------------------------------------------------------------------
+
+_SCHEMA_V14_MINIMAL = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS knowledge_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tags TEXT,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    source_session_id TEXT NOT NULL,
+    source_thread_id TEXT,
+    model_used TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    raw_response TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    promoted_to_id INTEGER,
+    reviewed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    action TEXT NOT NULL DEFAULT 'add',
+    target_ids TEXT,
+    origin TEXT NOT NULL DEFAULT 'reflect',
+    faithfulness_ok INTEGER,
+    faithfulness_warning TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
+    ON knowledge_candidates(prompt_hash, content) WHERE origin = 'reflect';
+"""
+
+
+class TestV15StepReminders:
+    """v15 migration step creates the reminders table and its covering index (techne#207).
+
+    Tests here verify the MIGRATION path. The fresh-db path is covered by
+    tests/test_reminders.py which builds via init_db / SCHEMA_SQL.
+    """
+
+    @pytest.fixture
+    def v14_conn(self, tmp_path):
+        db = tmp_path / "v14.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_V14_MINIMAL)
+        conn.execute("INSERT INTO schema_version (version) VALUES (14)")
+        conn.commit()
+        return conn
+
+    def test_reminders_table_created_by_migration(self, v14_conn):
+        """Migrating from v14 to SCHEMA_VERSION creates the reminders table."""
+        tables_before = {
+            r[0]
+            for r in v14_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "reminders" not in tables_before
+
+        _migrate(v14_conn, 14, SCHEMA_VERSION)
+
+        tables_after = {
+            r[0]
+            for r in v14_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "reminders" in tables_after, "reminders table not created by v15 migration step"
+
+    def test_reminders_index_created_by_migration(self, v14_conn):
+        """The covering index idx_reminders_status_due is created alongside the table."""
+        _migrate(v14_conn, 14, SCHEMA_VERSION)
+        idx = v14_conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='index' AND name='idx_reminders_status_due'"
+        ).fetchone()
+        assert idx is not None, "idx_reminders_status_due not created by v15 migration step"
+
+    def test_reminders_table_accepts_insert_and_query(self, v14_conn):
+        """The migrated reminders table has the expected columns and accepts rows."""
+        _migrate(v14_conn, 14, SCHEMA_VERSION)
+        v14_conn.execute(
+            "INSERT INTO reminders (note, due_at, status) VALUES (?, ?, 'active')",
+            ("migration-probe reminder", "2026-12-01 09:00:00"),
+        )
+        v14_conn.commit()
+        row = v14_conn.execute(
+            "SELECT note, status, last_surfaced_at FROM reminders"
+        ).fetchone()
+        assert row["note"] == "migration-probe reminder"
+        assert row["status"] == "active"
+        assert row["last_surfaced_at"] is None
+
+    def test_schema_version_bumped_to_current(self, v14_conn):
+        """Version is bumped to SCHEMA_VERSION after the v15 step."""
+        _migrate(v14_conn, 14, SCHEMA_VERSION)
+        max_v = v14_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert max_v == SCHEMA_VERSION

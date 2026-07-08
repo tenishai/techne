@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -312,6 +312,23 @@ CREATE TABLE IF NOT EXISTS curated_memory (
 CREATE INDEX IF NOT EXISTS idx_curated_memory_path ON curated_memory(source_path);
 CREATE INDEX IF NOT EXISTS idx_curated_memory_slug ON curated_memory(slug);
 CREATE INDEX IF NOT EXISTS idx_curated_memory_superseded ON curated_memory(superseded_by);
+
+-- Durable due-dated reminders (techne#207).
+-- status is constrained to 'active' | 'done' in the application layer.
+-- due_at: ISO text timestamp (same TIMESTAMP convention as all other tables).
+-- last_surfaced_at: stamped each time the post_tool_use hook injects this
+--   reminder; NULL means never surfaced. Powers the ~3h repeat-throttle.
+-- Hot-path SELECT is: status='active' AND due_at <= :now; index covers both.
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note TEXT NOT NULL,
+    due_at TIMESTAMP NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_surfaced_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_status_due
+    ON reminders(status, due_at);
 
 -- NOTE: the `documents` domain moved out of core to its own db (librarian.db)
 -- under db-per-domain (techne#99). Its schema now lives in core/librarian.py
@@ -879,4 +896,24 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 "ON knowledge_candidates(prompt_hash, content) WHERE origin = 'reflect'"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (14)")
+    if from_version < 15 and to_version >= 15:
+        # Durable due-dated reminders (techne#207). Purely additive new table,
+        # so this is safe to re-run (CREATE TABLE IF NOT EXISTS). A plain
+        # covering index on (status, due_at) covers the hot-path SELECT in the
+        # post_tool_use hook — added here so existing DBs get it without
+        # requiring `techne reconcile` (the reconcile sentinel skips additive
+        # index-only changes on already-stamped DBs at the current version).
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note TEXT NOT NULL,
+                due_at TIMESTAMP NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_surfaced_at TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_reminders_status_due
+                ON reminders(status, due_at);
+        """)
+        conn.execute("INSERT INTO schema_version (version) VALUES (15)")
     conn.commit()
