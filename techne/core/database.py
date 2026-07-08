@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS observations (
     content TEXT NOT NULL,
     tier TEXT NOT NULL DEFAULT 'hot',
     tags TEXT,
-    kind TEXT
+    kind TEXT,
+    content_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
 CREATE INDEX IF NOT EXISTS idx_observations_thread ON observations(thread_id);
@@ -916,4 +917,18 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 ON reminders(status, due_at);
         """)
         conn.execute("INSERT INTO schema_version (version) VALUES (15)")
+    if from_version < 16 and to_version >= 16:
+        # Audit content hash for redacted observations (techne#270). Purely
+        # additive nullable column — existing rows get NULL, which is correct:
+        # they were written before this feature existed and have no stored hash.
+        # Hash is only computed+stored when redaction fires (content changed),
+        # so NULL also naturally encodes "no redaction occurred, nothing to prove".
+        # Guard on table existence: minimal-schema migration-test DBs may not
+        # have the observations table yet (mirrors the v13/v14 kc_exists guard).
+        obs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='observations'"
+        ).fetchone()
+        if obs_exists:
+            _add_column_if_missing(conn, "observations", "content_hash", "TEXT")
+        conn.execute("INSERT INTO schema_version (version) VALUES (16)")
     conn.commit()

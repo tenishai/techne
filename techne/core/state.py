@@ -1,5 +1,6 @@
 """Session state management — starting, ending, and querying sessions."""
 
+import hashlib
 import re
 import uuid
 from pathlib import Path
@@ -365,6 +366,18 @@ def add_observation(
     from techne.core.inference import infer
 
     redacted = redact_credentials(content)
+
+    # Hash the RAW payload BEFORE redaction, but only store it when redaction
+    # actually changed the content (techne#270). When nothing was redacted,
+    # `content` already IS the raw text, so a hash adds nothing — the stored
+    # `content` is already verifiable directly. Storing a hash only when
+    # redaction fired gives crisp audit semantics: content_hash IS NOT NULL iff
+    # something was stripped, and the hash lets a holder of the original prove
+    # the exact pre-redaction payload without re-exposing it.
+    content_hash = (
+        hashlib.sha256(content.encode()).hexdigest() if redacted != content else None
+    )
+
     result = infer(redacted, config)
     tags_str = " ".join(result.tags) if result.tags else None
 
@@ -372,9 +385,9 @@ def add_observation(
     try:
         conn.execute(
             """INSERT INTO observations
-                   (session_id, tool_name, content, tier, tags, kind, event_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, tool_name, redacted, tier, tags_str, result.kind, event_at),
+                   (session_id, tool_name, content, tier, tags, kind, event_at, content_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, tool_name, redacted, tier, tags_str, result.kind, event_at, content_hash),
         )
         conn.commit()
     finally:
