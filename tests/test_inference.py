@@ -100,12 +100,20 @@ class TestLoadPrototypes:
 
     def test_get_prototype_embeddings_populated_path_and_two_slots(self):
         """techne#168: exercise the REAL _get_prototype_embeddings body (the populated
-        path, normally gated behind fastembed+numpy) with injected fakes. Guards the
-        `_embed_cache[key] = result` write: an `_embed_cache = result` rebind WITHOUT a
-        `global` (as a careless refactor would write) makes the name local and the
-        top-of-function `_embed_cache.get(key)` raise UnboundLocalError — so reaching the
-        body at all is the regression guard. Also asserts the two embed-cache slots are
-        independent."""
+        path, normally gated behind an embedding backend + numpy) with injected fakes.
+        Guards the `_embed_cache[key] = result` write: an `_embed_cache = result` rebind
+        WITHOUT a `global` (as a careless refactor would write) makes the name local and
+        the top-of-function `_embed_cache.get(key)` raise UnboundLocalError — so reaching
+        the body at all is the regression guard. Also asserts the two embed-cache slots
+        are independent.
+
+        techne#601/#602: the availability probe is now `embeddings.backend_available()`
+        rather than a bare `from fastembed import TextEmbedding` — faking `sys.modules`
+        no longer short-circuits it (backend_available() does a REAL `import model2vec`
+        internally, which would import the REAL numpy and collide with the faked numpy
+        module below). Patch `backend_available` directly instead — cleaner, and matches
+        the new interface.
+        """
         import types
 
         from techne.core import inference
@@ -118,7 +126,6 @@ class TestLoadPrototypes:
                 return ("centroid", tuple(self._vals))
 
         fake_np = types.SimpleNamespace(stack=lambda lst: _FakeArr(lst))
-        fake_fastembed = types.SimpleNamespace(TextEmbedding=object)
 
         class _FakeModel:
             def embed(self, sentences):
@@ -126,7 +133,8 @@ class TestLoadPrototypes:
 
         _reset_cache()
         with (
-            patch.dict(sys.modules, {"numpy": fake_np, "fastembed": fake_fastembed}),
+            patch.dict(sys.modules, {"numpy": fake_np}),
+            patch("techne.core.embeddings.backend_available", return_value=True),
             patch("techne.core.embeddings._get_embedding_model", return_value=_FakeModel()),
         ):
             protos = {"decision": ["a sentence"], "fact": ["b"], "empty": []}

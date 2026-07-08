@@ -1,8 +1,10 @@
 """Embedding-based tag + kind inference for observation ingest.
 
-Uses the fastembed model already loaded for vector search. Zero new deps.
-Prototypes ship in techne/inference/prototypes.yaml; operator can override
-or extend via ~/.techne/prototypes.yaml (merged, user entries win on conflict).
+Uses whichever embedding backend is already loaded for vector search — model2vec
+or fastembed (techne#601/#602, see core/embeddings.py). Zero new deps beyond
+what core/search.py already pulls in. Prototypes ship in
+techne/inference/prototypes.yaml; operator can override or extend via
+~/.techne/prototypes.yaml (merged, user entries win on conflict).
 
 Public API
 ----------
@@ -37,10 +39,11 @@ _BUNDLED_PROTOTYPES = Path(__file__).parent.parent / "inference" / "prototypes.y
 _proto_cache: dict[bool, dict] = {}
 _embed_cache: dict[bool, dict] = {}  # override_active -> {label: np.ndarray mean}
 
-# Sentinel for the fastembed+numpy availability check in infer() (techne#56-14).
-# None = not yet attempted; True = deps present; False = ImportError on first attempt.
-# Short-circuits the failing import on every subsequent call when deps are absent,
-# instead of re-attempting a known-failing import each time.
+# Sentinel for the embedding-backend+numpy availability check in infer()
+# (techne#56-14). None = not yet attempted; True = deps present; False =
+# ImportError/no-backend on first attempt. Short-circuits the failing check on
+# every subsequent call when deps are absent, instead of re-attempting a
+# known-failing import each time.
 _INFER_DEPS: bool | None = None
 
 
@@ -96,36 +99,58 @@ def _get_prototype_embeddings(
     prototypes: dict[str, list[str]],
     *,
     key: bool = False,
+    config: "Config | None" = None,
 ) -> dict:
     """Embed each prototype label's sentences and cache mean vectors.
 
     *key* selects the cache slot (same key as load_prototypes — whether operator
     overrides are active) so the embeddings always match the prototype set they
     were built from. (techne#168)
+
+    *config* is only consulted to build the embedding-backend singleton on the
+    first call in-process (see embeddings._get_embedding_model) — it's not
+    part of the cache key, since the singleton itself is process-wide.
     """
     cached = _embed_cache.get(key)
     if cached is not None:
         return cached
 
-    try:
-        import numpy as np
-        from fastembed import TextEmbedding
-    except ImportError:
-        log.debug("fastembed not available; tag inference disabled")
+    # techne#601/#602: was a bare `from fastembed import TextEmbedding` probe —
+    # that's wrong on py3.14 (fastembed/onnxruntime can't install there) even
+    # when model2vec IS available. backend_available() checks both.
+    from techne.core.embeddings import backend_available
+
+    if not backend_available():
+        log.debug("no embedding backend available; tag inference disabled")
         _embed_cache[key] = {}
         return _embed_cache[key]
+
+    import numpy as np
 
     # Reuse the already-loaded singleton from search.py if available.
     # Import here to avoid circular imports.
     from techne.core.embeddings import _get_embedding_model
 
-    model: TextEmbedding = _get_embedding_model()
+    # allow_download=False (techne#601/#602): infer() runs inside the
+    # post_tool_use hook subprocess, wrapped in a SIGALRM-bounded timeout that
+    # can't reliably preempt a blocking cold-cache HF download (see
+    # embeddings.py's "Cold-cache downloads and hooks" module docstring
+    # section — this was verified empirically to hang the hook past its
+    # budget). An uncached model raises here (backend-dependent exception,
+    # e.g. LocalEntryNotFoundError) — caught below and treated exactly like
+    # "package not installed": disabled, not a crash.
+    try:
+        model = _get_embedding_model(config, allow_download=False)
+    except Exception:
+        log.debug("embedding backend unavailable (not installed/cached); disabling tag inference")
+        _embed_cache[key] = {}
+        return _embed_cache[key]
 
     result: dict[str, np.ndarray] = {}
     for label, sentences in prototypes.items():
         if not sentences:
             continue
-        vecs = np.stack(list(model.embed(sentences)))  # (N, 384)
+        vecs = np.stack(list(model.embed(sentences)))  # (N, model.dim)
         result[label] = vecs.mean(axis=0)  # centroid
 
     _embed_cache[key] = result
@@ -149,36 +174,53 @@ def infer(
     """Embed *content*, cosine-sim against prototypes, return tags + kind.
 
     Returns a default InferenceResult (empty tags, kind="observation-shaped")
-    if fastembed is unavailable — callers must not fail on that path.
+    if no embedding backend (model2vec or fastembed) is available — callers
+    must not fail on that path.
 
     Args:
         content: Raw observation text.
-        config: Config object (used to find operator prototype overrides).
+        config: Config object (used to find operator prototype overrides, and
+            to resolve an explicit embedding_backend/embedding_model override).
         tag_threshold: Minimum cosine similarity to attach a tag (default 0.6).
         top_k: Max number of tags to attach (by score).
     """
     global _INFER_DEPS
     if _INFER_DEPS is False:
         return InferenceResult()
+
+    # techne#601/#602: was a bare `from fastembed import TextEmbedding` probe —
+    # that's wrong on py3.14 (fastembed/onnxruntime can't install there) even
+    # when model2vec IS available. backend_available() checks both.
+    from techne.core.embeddings import _get_embedding_model, backend_available
+
     try:
         import numpy as np
-        from fastembed import TextEmbedding  # noqa: F401 — import guard
+
+        if not backend_available():
+            raise ImportError("no embedding backend available")
 
         _INFER_DEPS = True
     except ImportError:
         _INFER_DEPS = False
         return InferenceResult()
 
-    from techne.core.embeddings import _get_embedding_model
-
     key = _override_active(config)
     prototypes = load_prototypes(config)
-    proto_embs = _get_prototype_embeddings(prototypes, key=key)
+    proto_embs = _get_prototype_embeddings(prototypes, key=key, config=config)
     if not proto_embs:
         return InferenceResult()
 
-    model = _get_embedding_model()
-    content_vec: np.ndarray = np.stack(list(model.embed([content])))[0]
+    # allow_download=False (techne#601/#602) — see the matching call+comment in
+    # _get_prototype_embeddings just above: infer() is hook-reachable and must
+    # never risk blocking on a cold-cache network fetch. An uncached model
+    # raises here (LocalEntryNotFoundError/OSError-family, backend-dependent)
+    # rather than downloading — caught below and degraded, same as "no backend
+    # installed" from the caller's point of view.
+    try:
+        model = _get_embedding_model(config, allow_download=False)
+        content_vec: np.ndarray = np.stack(list(model.embed([content])))[0]
+    except Exception:
+        return InferenceResult()
 
     tag_scores: dict[str, float] = {}
     kind_scores: dict[str, float] = {}

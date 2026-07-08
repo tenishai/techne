@@ -142,6 +142,13 @@ class SearchConfig:
     bm25_weight: float = 0.7
     expansion_ratio: int = 2
     mmr_lambda: float = 0.3
+    # Embedding backend override (techne#601/#602). "" = auto-select (model2vec
+    # on py3.14+/fastembed-absent, else fastembed) — see core/embeddings.py.
+    # Explicit values: "model2vec" or "fastembed".
+    embedding_backend: str = ""
+    # Embedding model name override. "" = backend-specific default (see
+    # embeddings.py: potion-retrieval-32M for model2vec, MiniLM for fastembed).
+    embedding_model: str = ""
 
 
 @dataclass
@@ -477,6 +484,8 @@ class Config:
                 bm25_weight=float(s.get("bm25_weight", 0.7)),
                 expansion_ratio=int(s.get("expansion_ratio", 2)),
                 mmr_lambda=float(s.get("mmr_lambda", 0.3)),
+                embedding_backend=str(s.get("embedding_backend", "")),
+                embedding_model=str(s.get("embedding_model", "")),
             )
 
         if "injection" in raw and isinstance(raw["injection"], dict):
