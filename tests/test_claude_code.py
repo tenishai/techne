@@ -729,6 +729,23 @@ class TestHookDrift:
         # The always-on hooks are all present — only PreToolUse drifts.
         assert not any("SessionStart" in w for w in drift), drift
 
+    def test_userpromptsubmit_registered_when_recall_flag_on(self, fake_home, cfg):
+        # per_turn_recall ON → UserPromptSubmit wired and drift-clean (techne#109/#277).
+        cfg.hooks = HookConfig(post_tool_use=True, per_turn_recall=True)
+        claude_code.register_hooks(cfg)
+        assert claude_code.check_hook_drift(cfg) == []
+
+    def test_missing_userpromptsubmit_when_recall_flag_flipped_on(self, fake_home, cfg):
+        # Same silent-no-op incident shape as grep-assist: the flag is flipped ON in
+        # config without a re-init → UserPromptSubmit never registered.
+        cfg.hooks = HookConfig(post_tool_use=True, per_turn_recall=False)
+        claude_code.register_hooks(cfg)
+
+        cfg.hooks = HookConfig(post_tool_use=True, per_turn_recall=True)
+        drift = claude_code.check_hook_drift(cfg)
+        assert any("UserPromptSubmit" in w and "NOT registered" in w for w in drift), drift
+        assert not any("SessionStart" in w for w in drift), drift
+
     def test_orphaned_posttooluse_when_flag_flipped_off(self, fake_home, cfg):
         # Reverse drift: PostToolUse was registered, then the flag was turned off in
         # config without re-init → the techne hook keeps firing until reconciled.

@@ -365,7 +365,12 @@ hooks:
                               #   own Grep with matching Codex symbols (needs an indexed repo).
                               #   Re-run 'techne init' after flipping; restart the session to load it.
   codex_grep_assist_limit: 8  # max symbols injected per Grep
-  timeout_s: 5.0              # wall-clock budget for a hook (grep-assist degrades to no-op if slow)
+  per_turn_recall: false      # opt-in (#109/#277): a UserPromptSubmit hook injects the durable
+                              #   facts most relevant to each prompt — the DYNAMIC per-turn
+                              #   complement to the STABLE SessionStart block. Re-run 'techne init'
+                              #   after flipping; loads from the next session.
+  per_turn_recall_limit: 5    # max knowledge rows injected per turn
+  timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
 sync:
   adapter: noop               # or 'filesystem'; custom adapters via entry points
