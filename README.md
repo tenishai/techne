@@ -6,6 +6,8 @@
 
 Concretely: a SQLite-backed memory store whose core is a **single local file** (`techne.db`) — yours, offline, inspectable with `sqlite3`. It gives an agent three things to be useful over time: a structured record of *what it did* (sessions + auto-detected threads), a curated record of *what it learned* (knowledge), and a stable record of *who it is and who it works with* (identity). Its self-maintenance — distilling sessions into durable memory, deduping, evidence-checking claims — runs on **the agent's own model** (no API key, no extra inference bill). Larger or team-scoped domains — documents, patterns, code — each get their own SQLite file behind a `StoreAdapter` (db-per-domain).
 
+> **New here? Start with the brochure:** [**Welcome to your new memory**](docs/welcome.md) — the friendly first-timer tour (the memory loop, the good bits you'd never find on your own, and the five things worth turning on). This README is the reference manual; read the welcome guide first.
+>
 > **Tour the pieces:** [`docs/modules.md`](docs/modules.md) — a short sales-pitch for each module (what it does, why it's different, how to enable it).
 
 ```bash
@@ -29,7 +31,7 @@ techne init
 | **Identity** | Key-value store for who-the-agent-is and who-it-works-with. Ingests structured markdown (`contacts.md`, `invariants.md`) and YAML on init. |
 | **Outbox** | Pluggable sync for shipping curated knowledge to a team-memory backend. Default adapter is `noop`; ships with a `filesystem` adapter; the protocol is open for custom adapters via entry points. |
 | **Search** | FTS5 across all content layers. Optional vector search via `sqlite-vec` + `fastembed` for semantic similarity. |
-| **Domain stores** | `techne.db` is personal memory; larger/team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **Librarian** (`librarian.db`, documents), **Architect** (`architect.db`, patterns), **Codex** (`codex.db`, code graph — *experimental*). Each db carries only its own schema. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
+| **Domain stores** | `techne.db` is personal memory; larger/team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **Librarian** (`librarian.db`, documents), **Architect** (`architect.db`, patterns), **Codex** (code graph, *experimental* — **one db per repo** at `codex/<slug>-<hash>.db`). Each db carries only its own schema. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
 
 The schema and triggers all live in `techne/core/database.py`. Schema migrations are tracked in a `schema_version` table; `connect()` is lazy-init so library callers don't need to remember to call `init_db()` first.
 
@@ -72,6 +74,8 @@ techne status
 ```
 
 From there, every Claude Code session is captured, thread-summarized at session end, and queryable via the CLI or MCP tools.
+
+`techne status` also **self-checks hook registration** — if a hook is enabled in config but not actually wired into Claude Code's `settings.json`, it prints a `⚠ Hook registration drift` warning; `techne init` reconciles it. (Claude Code loads hooks at session *start*, so a newly-registered hook — e.g. opt-in [grep-assist](docs/welcome.md) — fires from the *next* session, not the current one.)
 
 Inspect what's been captured:
 
@@ -298,10 +302,12 @@ techne architect applies TARGET            # patterns tagged as applying to TARG
 techne architect backfill                  # re-derive the relation/applies graph (idempotent)
 techne architect retire-legacy [--dry-run] # delete superseded type='pattern' rows from techne.db
 
-# Codex (codex.db) — code graph (symbols + call/import/def-use edges)
+# Codex — code graph (symbols + call/import/def-use edges), ONE db PER repo (db-per-repo, #209)
 techne codex index PATH                    # ingest a repo (Tree-sitter; pip install 'techne[codex]')
-techne codex                               # symbol / edge counts
-techne codex search QUERY
+                                           #   → writes codex/<slug>-<hash>.db for THAT repo
+techne codex index-all                     # re-index every repo that already has a codex db
+techne codex stats [--repo PATH] [--all]   # symbol / edge counts — one repo, or every indexed repo
+techne codex search QUERY [--repo PATH]    # symbols in the repo for cwd, or --repo
 techne codex callers SYMBOL_ID
 techne codex blast-radius SYMBOL_ID [--direction out|in] [--depth N]
 techne codex watch REPO [--language LIST] [--debounce-ms N]
@@ -317,7 +323,7 @@ techne codex watch REPO [--language LIST] [--debounce-ms N]
 
 - **Librarian** (`librarian.db`) — **documents**: your session *transcripts* (the conversation prose, not just tool calls) and *markdown directories*. Recall returns a compact **gist card** that rides normal knowledge recall; the full document is fetched on demand via the card's pointer (a cross-db lookup). Long multi-topic transcripts get a deterministic **thread-index** gist; single-topic docs get an agent-written prose gist (`cards emit/ingest`, no API key). **New here, or setting up a teammate's machine? → [Using the Librarian](docs/librarian-guide.md)** (the documents↔cards model, getting your transcripts in, and an agent-instructions block).
 - **Architect** (`architect.db`) — the **architectural-patterns** corpus: `investigations` (lens-aware dedup, keyed `url × surveyed_by × lens`, so two reviewer lenses on one URL is a join) + the `patterns` lifted from them. Team-scope — queried directly, not folded into personal recall. **Bootstrap your store from the shared corpus:** `techne architect ingest patterns/architectural-patterns.md` (the corpus is a generated export — `architect export` regenerates it; see [`patterns/README.md`](patterns/README.md) for the one-writer/many-readers workflow).
-- **Codex** (`codex.db`) — **a code graph (experimental):** `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest works — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, `pip install 'techne[codex]'`). **Experimental:** indexing is **manual** — the graph goes stale as code changes; re-run `codex index` to refresh (auto-refresh is the next cycle).
+- **Codex** — **a code graph (experimental):** `symbols` + call/import/def-use `edges`. Reachability and blast-radius are recursive CTEs (graph queries without a graph DB; `graphqlite` is an optional future upgrade, techne#89). Real-repo ingest works — a Tree-sitter `SourceAdapter` (`techne codex index <repo>`, Python+TS, `pip install 'techne[codex]'`). **One db per repo (db-per-repo, techne#209):** each indexed repo lives at `<data_dir>/codex/<slug>-<hash8>.db`, derived deterministically from the repo's absolute root — indexing a second repo can never collide with or bleed into the first. A pre-#209 single `codex.db` migrates to its per-repo home automatically the first time any consumer resolves a codex db. **Experimental:** indexing is **manual** — the graph goes stale as code changes; re-run `codex index` (or `codex index-all`) to refresh (auto-refresh is the next cycle).
 
 Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **SQLite-only by decision** (techne#135): the domains are isolated db files behind a thin path/schema registry, not a backend-portability seam.
 
@@ -355,6 +361,11 @@ hooks:
   post_tool_use: true         # capture tool use as observations
   capture_bash: false         # include Bash tool calls
   capture_read: false         # include Read tool calls
+  codex_grep_assist: false    # opt-in (#206): a PreToolUse hook that augments the agent's
+                              #   own Grep with matching Codex symbols (needs an indexed repo).
+                              #   Re-run 'techne init' after flipping; restart the session to load it.
+  codex_grep_assist_limit: 8  # max symbols injected per Grep
+  timeout_s: 5.0              # wall-clock budget for a hook (grep-assist degrades to no-op if slow)
 
 sync:
   adapter: noop               # or 'filesystem'; custom adapters via entry points
