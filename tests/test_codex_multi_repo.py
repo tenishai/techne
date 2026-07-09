@@ -362,7 +362,9 @@ def test_mcp_codex_search_scoped_by_repo_arg(tmp_path):
     repo.mkdir()
     (repo / ".git").mkdir()
     db = codex_db_for_repo(cfg, repo)
-    add_symbol(db, id="svc.py::handler::function::1", file="svc.py", name="handler", kind="function")
+    add_symbol(
+        db, id="svc.py::handler::function::1", file="svc.py", name="handler", kind="function"
+    )
 
     out = _codex_search({"query": "handler", "repo": str(repo)}, cfg)
     assert out["count"] == 1
@@ -393,3 +395,91 @@ def test_mcp_codex_blast_radius_no_repo_returns_hint(tmp_path):
     out = _codex_blast_radius({"symbol_id": "x", "repo": str(plain)}, cfg)
     assert out["nodes"] == []
     assert "no codex index" in out["notice"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — full two-real-repo integration through the CLI.
+#
+# The adversarial case: both repos have the SAME relative file path (svc.py)
+# AND a same-named symbol (shared) — exactly what collides/bleeds under a single
+# global db. db-per-repo must keep them fully isolated end-to-end.
+# ---------------------------------------------------------------------------
+
+_REPO_A_SRC = "def alpha_handler():\n    return shared()\n\n\ndef shared():\n    return 1\n"
+_REPO_B_SRC = "def beta_handler():\n    return shared()\n\n\ndef shared():\n    return 2\n"
+
+
+def _symbol_lines(output: str) -> list[str]:
+    """The symbol rows of `codex search` output (id is the first token)."""
+    return [ln.strip() for ln in output.splitlines() if "[function]" in ln]
+
+
+def test_two_real_repos_end_to_end_cli(tmp_path, monkeypatch):
+    """Index two real repos via the CLI and prove full isolation + scoping."""
+    pytest.importorskip("tree_sitter_python")
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    (tmp_path / "techne.db").touch()
+    runner, main = _cli(monkeypatch, cfg)
+
+    repo_a = tmp_path / "alpha"
+    repo_b = tmp_path / "beta"
+    for repo, src in ((repo_a, _REPO_A_SRC), (repo_b, _REPO_B_SRC)):
+        repo.mkdir()
+        (repo / ".git").mkdir()  # so cwd-based resolution could also find it
+        (repo / "svc.py").write_text(src)  # SAME relative path in both repos
+
+    # 1. Index both via the CLI.
+    for repo in (repo_a, repo_b):
+        r = runner.invoke(main, ["codex", "index", str(repo)])
+        assert r.exit_code == 0, r.output
+    assert repo_db_path(cfg, repo_a) != repo_db_path(cfg, repo_b)
+
+    # 2. stats --all reports both, each with its own symbols.
+    import json as _json
+
+    r = runner.invoke(main, ["codex", "stats", "--all"])
+    stats_all = _json.loads(r.output)
+    assert set(stats_all) == {str(repo_a.resolve()), str(repo_b.resolve())}
+    assert stats_all[str(repo_a.resolve())]["symbols"] >= 2
+    assert stats_all[str(repo_b.resolve())]["symbols"] >= 2
+
+    # 3. Repo-only symbol is visible in its repo, INVISIBLE in the other.
+    ra = runner.invoke(main, ["codex", "search", "alpha_handler", "--repo", str(repo_a)])
+    assert "alpha_handler" in ra.output
+    rb = runner.invoke(main, ["codex", "search", "alpha_handler", "--repo", str(repo_b)])
+    assert "alpha_handler" not in rb.output  # no cross-repo bleed
+
+    # 4. The SAME-named symbol resolves independently in each db (no collision).
+    for repo in (repo_a, repo_b):
+        rs = runner.invoke(main, ["codex", "search", "shared", "--repo", str(repo)])
+        lines = _symbol_lines(rs.output)
+        assert any("shared" in ln for ln in lines), rs.output
+
+    # 5. blast-radius stays within a repo: shared's dependents in A include
+    #    alpha_handler and NOT beta_handler.
+    shared_id = next(
+        s["id"]
+        for s in search_symbols(repo_db_path(cfg, repo_a), "shared")
+        if s["name"] == "shared"
+    )
+    rbr = runner.invoke(
+        main, ["codex", "blast-radius", shared_id, "--repo", str(repo_a), "--direction", "in"]
+    )
+    assert "alpha_handler" in rbr.output
+    assert "beta_handler" not in rbr.output
+
+    # 6. index-all reindexes both (idempotent — unchanged files skipped).
+    r = runner.invoke(main, ["codex", "index-all"])
+    assert r.exit_code == 0
+    assert str(repo_a) in r.output and str(repo_b) in r.output
+
+    # 7. Per-repo freshness: editing A marks A stale, leaves B fresh.
+    (repo_a / "svc.py").write_text(_REPO_A_SRC.replace("return 1", "return 42"))
+    ra2 = runner.invoke(main, ["codex", "search", "shared", "--repo", str(repo_a)])
+    assert "[stale]" in ra2.output
+    rb2 = runner.invoke(main, ["codex", "search", "shared", "--repo", str(repo_b)])
+    assert "[stale]" not in rb2.output  # B untouched by A's edit
+
+    # 8. The group overview lists both indexed repos.
+    r = runner.invoke(main, ["codex"])
+    assert str(repo_a.resolve()) in r.output and str(repo_b.resolve()) in r.output
