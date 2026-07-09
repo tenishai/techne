@@ -13,3 +13,6 @@ htmlcov/
 
 # Agent worktrees created by Claude Code (isolation: worktree) — transient
 .claude/worktrees/
+
+# Runtime logs (e.g. MCP server logs swept in by accident)
+*.log
