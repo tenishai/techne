@@ -1,10 +1,12 @@
-"""Tests for the PreToolUse grep-assist hook (techne#206).
+"""Tests for the PreToolUse grep-assist hook (techne#206, per-repo since #209).
 
 The hook augments the agent's own Grep calls with Codex symbol matches,
-injected via hookSpecificOutput.additionalContext. It is strictly best-effort:
-it must NEVER block the tool, ALWAYS exit 0, and emit NOTHING on any error or
-empty path. These tests drive main() directly with a monkeypatched stdin and
-capture stdout via capsys.
+injected via hookSpecificOutput.additionalContext. Since techne#209 it resolves
+the *per-repo* codex db from the Grep's target `path` (else the session `cwd`),
+so symbols are scoped to the repo the agent is actually working in. It remains
+strictly best-effort: it must NEVER block the tool, ALWAYS exit 0, and emit
+NOTHING on any error, empty path, or unindexed repo. These tests drive main()
+directly with a monkeypatched stdin and capture stdout via capsys.
 """
 
 from __future__ import annotations
@@ -15,8 +17,6 @@ import json
 import pytest
 
 from techne.core.codegraph import add_symbol
-from techne.core.codex import CODEX_SCHEMA
-from techne.core.stores import SqliteStore
 from techne.hooks import pre_tool_use
 
 
@@ -36,11 +36,25 @@ def _write_config(home, **hook_flags):
     (home / "config.yaml").write_text(yaml.safe_dump({"hooks": hook_flags}))
 
 
-def _make_codex_db(home):
-    """Create <home>/codex.db (where codex_db(config) resolves) with the v1 schema."""
-    p = home / "codex.db"
-    SqliteStore("codex", p).migrate(CODEX_SCHEMA)
-    return p
+def _make_repo(home, *, indexed: bool):
+    """Create a git repo under home. When `indexed`, also create its per-repo
+    codex db so the hook resolves to a real graph. Returns (repo, db_or_None)."""
+    from techne.config import Config
+    from techne.core.codex import codex_db_for_repo
+
+    repo = home / "workrepo"
+    repo.mkdir(exist_ok=True)
+    (repo / ".git").mkdir(exist_ok=True)  # marker: find_repo_root just checks existence
+    db = codex_db_for_repo(Config.load(), repo) if indexed else None
+    return repo, db
+
+
+def _grep(pattern, repo=None):
+    """Build a Grep PreToolUse payload; when repo given, set cwd to it."""
+    payload = {"tool_name": "Grep", "tool_input": {"pattern": pattern}}
+    if repo is not None:
+        payload["cwd"] = str(repo)
+    return payload
 
 
 def _run(monkeypatch, capsys, payload: dict) -> str:
@@ -53,78 +67,72 @@ def _run(monkeypatch, capsys, payload: dict) -> str:
 
 
 def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
-    """Flag OFF (default) → no stdout, even with a populated codex.db."""
-    db = _make_codex_db(home)
+    """Flag OFF (default) → no stdout, even with a populated per-repo db."""
+    repo, db = _make_repo(home, indexed=True)
     add_symbol(
-        db,
-        id="s1",
-        file="auth.py",
-        name="authenticate",
-        kind="function",
+        db, id="s1", file="auth.py", name="authenticate", kind="function",
         signature="def authenticate(user): ...",
     )
     # No config.yaml at all → codex_grep_assist defaults to False.
-    out = _run(
-        monkeypatch, capsys, {"tool_name": "Grep", "tool_input": {"pattern": "authenticate"}}
-    )
+    out = _run(monkeypatch, capsys, _grep("authenticate", repo))
     assert out == ""
 
 
 def test_non_grep_glob_tool_emits_nothing(home, monkeypatch, capsys):
     """A tool that isn't Grep → no stdout (short-circuits before config load)."""
     _write_config(home, codex_grep_assist=True)
-    db = _make_codex_db(home)
+    repo, db = _make_repo(home, indexed=True)
     add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
     out = _run(
-        monkeypatch, capsys, {"tool_name": "Read", "tool_input": {"pattern": "authenticate"}}
+        monkeypatch, capsys,
+        {"tool_name": "Read", "tool_input": {"pattern": "authenticate"}, "cwd": str(repo)},
     )
     assert out == ""
 
 
-def test_missing_codex_db_emits_nothing(home, monkeypatch, capsys):
-    """Flag ON but no codex.db present → best-effort no-op, no crash, no stdout."""
+def test_unindexed_repo_emits_nothing(home, monkeypatch, capsys):
+    """Flag ON but the repo has no codex index → best-effort no-op, no stdout."""
     _write_config(home, codex_grep_assist=True)
-    # Intentionally do NOT create codex.db.
-    out = _run(
-        monkeypatch, capsys, {"tool_name": "Grep", "tool_input": {"pattern": "authenticate"}}
-    )
+    repo, _ = _make_repo(home, indexed=False)  # git repo, but never indexed
+    out = _run(monkeypatch, capsys, _grep("authenticate", repo))
+    assert out == ""
+
+
+def test_not_in_repo_emits_nothing(home, monkeypatch, capsys):
+    """cwd outside any git repo → no repo to resolve → no stdout."""
+    _write_config(home, codex_grep_assist=True)
+    plain = home / "notarepo"
+    plain.mkdir()
+    out = _run(monkeypatch, capsys, _grep("authenticate", plain))
     assert out == ""
 
 
 def test_empty_pattern_emits_nothing(home, monkeypatch, capsys):
     """Empty search pattern → no stdout."""
     _write_config(home, codex_grep_assist=True)
-    _make_codex_db(home)
-    out = _run(monkeypatch, capsys, {"tool_name": "Grep", "tool_input": {"pattern": ""}})
+    repo, _ = _make_repo(home, indexed=True)
+    out = _run(monkeypatch, capsys, _grep("", repo))
     assert out == ""
 
 
 def test_no_matching_symbol_emits_nothing(home, monkeypatch, capsys):
     """Flag ON, db present, but pattern matches nothing → no stdout."""
     _write_config(home, codex_grep_assist=True)
-    db = _make_codex_db(home)
+    repo, db = _make_repo(home, indexed=True)
     add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
-    out = _run(
-        monkeypatch, capsys, {"tool_name": "Grep", "tool_input": {"pattern": "nonexistentxyz"}}
-    )
+    out = _run(monkeypatch, capsys, _grep("nonexistentxyz", repo))
     assert out == ""
 
 
 def test_matching_symbol_injects_context(home, monkeypatch, capsys):
-    """Flag ON + matching symbol → protocol JSON with the symbol in additionalContext."""
+    """Flag ON + matching symbol in the cwd's repo → protocol JSON injection."""
     _write_config(home, codex_grep_assist=True)
-    db = _make_codex_db(home)
+    repo, db = _make_repo(home, indexed=True)
     add_symbol(
-        db,
-        id="s1",
-        file="auth.py",
-        name="authenticate",
-        kind="function",
+        db, id="s1", file="auth.py", name="authenticate", kind="function",
         signature="def authenticate(user, token): ...",
     )
-    out = _run(
-        monkeypatch, capsys, {"tool_name": "Grep", "tool_input": {"pattern": "authenticate"}}
-    )
+    out = _run(monkeypatch, capsys, _grep("authenticate", repo))
     assert out.strip(), "expected protocol JSON on stdout"
     payload = json.loads(out)
     hso = payload["hookSpecificOutput"]
@@ -136,13 +144,55 @@ def test_matching_symbol_injects_context(home, monkeypatch, capsys):
     assert "auth.py" in ctx
 
 
+def test_grep_path_overrides_cwd_for_repo_scope(home, monkeypatch, capsys):
+    """The Grep `path` (what's being searched) selects the repo over cwd (#209)."""
+    _write_config(home, codex_grep_assist=True)
+    repo, db = _make_repo(home, indexed=True)
+    add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
+    # cwd is a non-repo dir; the Grep path points into the indexed repo.
+    outside = home / "elsewhere"
+    outside.mkdir()
+    payload = {
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "authenticate", "path": str(repo)},
+        "cwd": str(outside),
+    }
+    out = _run(monkeypatch, capsys, payload)
+    assert "authenticate" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_cross_repo_symbol_not_injected(home, monkeypatch, capsys):
+    """A symbol indexed in repo B must NOT surface when grepping in repo A (#209).
+
+    This is the signal/noise fix #206 was blocked on: the old single global
+    graph injected unrelated repos' symbols.
+    """
+    from techne.config import Config
+    from techne.core.codex import codex_db_for_repo
+
+    _write_config(home, codex_grep_assist=True)
+    repo_a = home / "alpha"
+    repo_b = home / "beta"
+    for r in (repo_a, repo_b):
+        r.mkdir()
+        (r / ".git").mkdir()
+    codex_db_for_repo(Config.load(), repo_a)  # A: empty
+    db_b = codex_db_for_repo(Config.load(), repo_b)
+    add_symbol(db_b, id="s1", file="b.py", name="beta_secret", kind="function")
+
+    # Grep for beta_secret while working in repo A → no injection (A has no such symbol).
+    out = _run(monkeypatch, capsys, _grep("beta_secret", repo_a))
+    assert out == ""
+
+
 def test_glob_tool_not_augmented(home, monkeypatch, capsys):
     """Glob is NOT augmented — its pattern is a file glob, not a symbol name (techne#206)."""
     _write_config(home, codex_grep_assist=True)
-    db = _make_codex_db(home)
+    repo, db = _make_repo(home, indexed=True)
     add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
     out = _run(
-        monkeypatch, capsys, {"tool_name": "Glob", "tool_input": {"pattern": "authenticate"}}
+        monkeypatch, capsys,
+        {"tool_name": "Glob", "tool_input": {"pattern": "authenticate"}, "cwd": str(repo)},
     )
     assert out == ""
 
@@ -154,20 +204,13 @@ def test_stale_symbol_shows_freshness_marker(home, monkeypatch, capsys):
     — so the honesty marker must appear in the injected context.
     """
     _write_config(home, codex_grep_assist=True)
-    db = _make_codex_db(home)
+    repo, db = _make_repo(home, indexed=True)
     ghost = home / "gone" / "auth.py"  # absolute path that does not exist
     add_symbol(
-        db,
-        id="s1",
-        file=str(ghost),
-        name="authenticate",
-        kind="function",
-        signature="def authenticate(user): ...",
-        file_hash="deadbeef",
+        db, id="s1", file=str(ghost), name="authenticate", kind="function",
+        signature="def authenticate(user): ...", file_hash="deadbeef",
     )
-    out = _run(
-        monkeypatch, capsys, {"tool_name": "Grep", "tool_input": {"pattern": "authenticate"}}
-    )
+    out = _run(monkeypatch, capsys, _grep("authenticate", repo))
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "[missing]" in ctx
 

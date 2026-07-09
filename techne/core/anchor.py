@@ -51,19 +51,10 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _find_repo_root(path: Path) -> Path | None:
-    """Walk up from *path* looking for a ``.git`` entry; return the repo root.
-
-    Works whether or not *path* itself exists — we start from its parent and
-    climb, so a deleted file's repo is still discoverable as long as an ancestor
-    directory still holds ``.git``. Returns None when no ancestor is a repo.
-    """
-    # Start from the file's directory (path may be a file that no longer exists).
-    current = path.parent if path.name else path
-    for candidate in [current, *current.parents]:
-        if (candidate / ".git").exists():
-            return candidate
-    return None
+# Promoted to techne.core.repo (techne#209) so the Codex per-repo router shares
+# the same "which repo owns this path" logic. Re-exported under the original
+# private name to keep this module's callers (and any tests) untouched.
+from techne.core.repo import find_repo_root as _find_repo_root  # noqa: E402
 
 
 def _git(repo_root: Path, *args: str) -> tuple[bool, str]:

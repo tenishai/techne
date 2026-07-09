@@ -2407,13 +2407,40 @@ def vectors_status(ctx):
         )
 
 
+def _active_codex_db(config, repo, *, require_indexed: bool = True):
+    """Resolve the per-repo codex db for a codex query command (techne#209).
+
+    ``repo`` given → that repo root; else walk up from the cwd for ``.git``.
+    Raises a clean ClickException when there's no repo to target, or (when
+    ``require_indexed``) when that repo has no codex index yet. Returns
+    ``(repo_root, db_path)``.
+    """
+    from techne.core.codex import ensure_legacy_migrated, repo_db_path
+    from techne.core.repo import find_repo_root
+
+    ensure_legacy_migrated(config)
+    if repo is not None:
+        root = Path(repo).expanduser().resolve()
+    else:
+        root = find_repo_root(Path.cwd())
+        if root is None:
+            raise click.ClickException(
+                "not inside a git repository — pass --repo PATH to select a codex repo."
+            )
+    db_path = repo_db_path(config, root)
+    if require_indexed and not db_path.exists():
+        raise click.ClickException(f"no codex index for {root}\n  run: techne codex index {root}")
+    return root, db_path
+
+
 @main.group(invoke_without_command=True)
 @click.pass_context
 def codex(ctx):
-    """Code-graph store (codex.db) — symbols + edges, graph queries (techne#89).
+    """Code-graph store — per-repo symbols + edges, graph queries (techne#89, #209).
 
-    EXPERIMENTAL (techne#89): indexing is manual — the graph can go stale as code
-    changes; re-run `codex index` to refresh.
+    EXPERIMENTAL: indexing is manual — the graph can go stale as code changes;
+    re-run `codex index` to refresh. Each repo gets its own graph (db-per-repo,
+    techne#209), so queries are scoped to the repo you're in.
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -2422,10 +2449,16 @@ def codex(ctx):
         click.echo("techne not initialized. Run: techne init")
         return
     from techne.core.codegraph import stats
-    from techne.core.codex import codex_db
+    from techne.core.codex import list_codex_repos
 
-    s = stats(codex_db(config))
-    click.echo(f"Symbols: {s['symbols']}  Edges: {s['edges']}  Files: {s['files']}")
+    repos = list_codex_repos(config)
+    if not repos:
+        click.echo("no repos indexed. Run: techne codex index <repo>")
+        return
+    click.echo(f"Indexed repos: {len(repos)}")
+    for root, db_path in repos:
+        s = stats(db_path)
+        click.echo(f"  {root}  —  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
 
 
 @codex.command("index")
@@ -2439,7 +2472,7 @@ def codex(ctx):
 )
 @click.pass_context
 def codex_index(ctx, repo, languages):
-    """Walk REPO and index Python + TypeScript symbols into codex.db.
+    """Walk REPO and index Python + TypeScript symbols into its per-repo db.
 
     Uses tree-sitter for parsing; requires `pip install techne[codex]`.
     Incremental: files whose SHA-256 hash is unchanged are skipped.
@@ -2449,42 +2482,86 @@ def codex_index(ctx, repo, languages):
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
     from techne.codex.source import RepoSource
-    from techne.core.codex import codex_db
+    from techne.core.codegraph import stats
+    from techne.core.codex import codex_db_for_repo
 
     lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
-    db_path = codex_db(config)
+    db_path = codex_db_for_repo(config, repo)
     src = RepoSource(db_path, repo, languages=lang_list)
     count = src.initial_walk()
-    from techne.core.codegraph import stats
 
     s = stats(db_path)
     click.echo(f"Indexed: {count} symbols from {repo}")
     click.echo(f"Totals:  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
 
 
-@codex.command("stats")
+@codex.command("index-all")
+@click.option(
+    "--language",
+    "languages",
+    default="python,typescript",
+    show_default=True,
+    help="Comma-separated list of languages to index (python,typescript).",
+)
 @click.pass_context
-def codex_stats(ctx):
-    """Show codex.db symbol/edge/file counts."""
+def codex_index_all(ctx, languages):
+    """Re-index every repo that already has a codex db (techne#209).
+
+    Iterates the known per-repo dbs and re-walks each repo. Repos whose root no
+    longer exists on disk are reported and skipped.
+    """
+    config = ctx.obj["config"]
+    from techne.codex.source import RepoSource
+    from techne.core.codex import codex_db_for_repo, list_codex_repos
+
+    repos = list_codex_repos(config)
+    if not repos:
+        click.echo("no repos indexed. Run: techne codex index <repo>")
+        return
+    lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
+    for root_str, _db in repos:
+        root = Path(root_str)
+        if not root.exists():
+            click.echo(f"skip (missing): {root}")
+            continue
+        db_path = codex_db_for_repo(config, root)
+        count = RepoSource(db_path, root, languages=lang_list).initial_walk()
+        click.echo(f"reindexed {root}: {count} symbols")
+
+
+@codex.command("stats")
+@click.option(
+    "--repo", type=click.Path(path_type=Path), default=None, help="Repo to report (default: cwd)."
+)
+@click.option("--all", "all_repos", is_flag=True, help="Report every indexed repo.")
+@click.pass_context
+def codex_stats(ctx, repo, all_repos):
+    """Show symbol/edge/file counts — for the current repo, or all with --all."""
     config = ctx.obj["config"]
     from techne.core.codegraph import stats
-    from techne.core.codex import codex_db
+    from techne.core.codex import list_codex_repos
 
-    s = stats(codex_db(config))
-    click.echo(json.dumps(s, indent=2))
+    if all_repos:
+        out = {root: stats(db) for root, db in list_codex_repos(config)}
+        click.echo(json.dumps(out, indent=2))
+        return
+    _root, db_path = _active_codex_db(config, repo)
+    click.echo(json.dumps(stats(db_path), indent=2))
 
 
 @codex.command("search")
 @click.argument("query")
+@click.option(
+    "--repo", type=click.Path(path_type=Path), default=None, help="Repo to search (default: cwd)."
+)
 @click.option("--limit", default=20)
 @click.pass_context
-def codex_search(ctx, query, limit):
-    """FTS over symbol names + signatures."""
+def codex_search(ctx, query, repo, limit):
+    """FTS over symbol names + signatures, scoped to the active repo."""
     config = ctx.obj["config"]
     from techne.core.codegraph import annotate_freshness, search_symbols
-    from techne.core.codex import codex_db
 
-    db_path = codex_db(config)
+    _root, db_path = _active_codex_db(config, repo)
     results = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
     for s in results:
         freshness = s.get("freshness", "unknown")
@@ -2495,14 +2572,16 @@ def codex_search(ctx, query, limit):
 
 @codex.command("callers")
 @click.argument("symbol_id")
+@click.option(
+    "--repo", type=click.Path(path_type=Path), default=None, help="Repo to query (default: cwd)."
+)
 @click.pass_context
-def codex_callers(ctx, symbol_id):
-    """Who calls this symbol (direct)."""
+def codex_callers(ctx, symbol_id, repo):
+    """Who calls this symbol (direct), scoped to the active repo."""
     config = ctx.obj["config"]
     from techne.core.codegraph import annotate_freshness, callers
-    from techne.core.codex import codex_db
 
-    db_path = codex_db(config)
+    _root, db_path = _active_codex_db(config, repo)
     for s in annotate_freshness(db_path, callers(db_path, symbol_id)):
         freshness = s.get("freshness", "unknown")
         marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
@@ -2511,16 +2590,18 @@ def codex_callers(ctx, symbol_id):
 
 @codex.command("blast-radius")
 @click.argument("symbol_id")
+@click.option(
+    "--repo", type=click.Path(path_type=Path), default=None, help="Repo to query (default: cwd)."
+)
 @click.option("--direction", type=click.Choice(["out", "in"]), default="out", show_default=True)
 @click.option("--depth", default=5, show_default=True)
 @click.pass_context
-def codex_blast(ctx, symbol_id, direction, depth):
+def codex_blast(ctx, symbol_id, repo, direction, depth):
     """Transitive reachability via recursive CTE — out=dependencies, in=dependents."""
     config = ctx.obj["config"]
     from techne.core.codegraph import annotate_freshness, reachable
-    from techne.core.codex import codex_db
 
-    db_path = codex_db(config)
+    _root, db_path = _active_codex_db(config, repo)
     raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
     rows = annotate_freshness(db_path, raw)
     if not rows:
@@ -2549,7 +2630,7 @@ def codex_blast(ctx, symbol_id, direction, depth):
 )
 @click.pass_context
 def codex_watch(ctx, repo, languages, debounce_ms):
-    """Watch REPO for file changes and re-index incrementally (Ctrl-C to stop).
+    """Watch REPO for file changes and re-index its per-repo db (Ctrl-C to stop).
 
     Runs an initial index first (fresh baseline + persists repo_root), then
     starts the watchdog observer. Requires `pip install techne[codex]` for
@@ -2563,10 +2644,10 @@ def codex_watch(ctx, repo, languages, debounce_ms):
         ctx.exit(1)
     from techne.codex.source import RepoSource
     from techne.core.codegraph import stats
-    from techne.core.codex import codex_db
+    from techne.core.codex import codex_db_for_repo
 
     lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
-    db_path = codex_db(config)
+    db_path = codex_db_for_repo(config, repo)
     src = RepoSource(db_path, repo, languages=lang_list, debounce_ms=debounce_ms)
 
     click.echo(f"indexing {repo} ...")
