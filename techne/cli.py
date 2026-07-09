@@ -55,6 +55,19 @@ def status(ctx):
         for plat, counts in breakdown.items():
             click.echo(f"  {plat}: {counts['sessions']} sessions, {counts['observations']} obs")
 
+    # Hook-registration drift (claude-code only): a hooks.* flag can be enabled in
+    # config.yaml but never written to settings.json (init not re-run) — a silent
+    # no-op the user has no other way to notice. Surface it here (techne#287).
+    if config.platform == "claude-code":
+        from techne.platforms.claude_code import check_hook_drift
+
+        drift = check_hook_drift(config)
+        if drift:
+            click.echo()
+            click.echo("⚠ Hook registration drift — run 'techne init' to reconcile:")
+            for w in drift:
+                click.echo(f"  {w}")
+
 
 @main.group(invoke_without_command=True)
 @click.option("--active", is_flag=True, help="Only show threads with unfinished resume points")
