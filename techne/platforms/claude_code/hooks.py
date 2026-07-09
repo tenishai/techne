@@ -269,6 +269,86 @@ def register_hooks(config: Config):
     _save_json(SETTINGS_PATH, settings)
 
 
+def _expected_registrations(config: Config) -> list[tuple[str, str]]:
+    """The ``(event, matcher)`` techne registrations ``register_hooks`` writes for
+    this config — the single source of truth for "correctly registered" (techne#287).
+
+    MUST stay in lockstep with ``register_hooks`` above: any hook whose registration
+    is gated on a config flag there needs its gate mirrored here, or ``check_hook_drift``
+    will diverge from what init actually writes.
+    """
+    expected = [
+        ("SessionStart", ""),
+        ("PreCompact", ""),
+        ("PostCompact", ""),
+        ("Stop", ""),
+    ]
+    if config.hooks.post_tool_use:
+        expected.append(("PostToolUse", ""))
+    if config.hooks.codex_grep_assist:
+        expected.append(("PreToolUse", "Grep"))
+    return expected
+
+
+def check_hook_drift(config: Config) -> list[str]:
+    """Report drift between config-enabled techne hooks and what's actually wired
+    in settings.json. Returns human-readable warnings; empty list == in sync (techne#287).
+
+    Catches the silent-no-op failure mode where a ``hooks.*`` flag is flipped in
+    ``config.yaml`` but ``techne init`` was never re-run, so the hook is enabled in
+    config yet absent from settings.json and never fires — with no other diagnostic.
+
+    Comparison is COARSE: by ``(event, matcher)`` presence of a techne-referencing
+    group (``_group_contains_techne``), NOT exact command match. Interpreter and
+    launcher-path differences (a re-pinned shim, a moved home) must not false-positive;
+    only genuinely missing or orphaned registrations are reported.
+    """
+    try:
+        settings = _load_json(SETTINGS_PATH)
+    except RuntimeError:
+        # settings.json exists but is unparseable — register/unregister already
+        # surface that loudly with remediation; don't double-report it here.
+        return []
+    if settings is None:
+        settings = {}
+    hooks = settings.get("hooks", {})
+
+    def _has_techne_group(event: str, matcher: str) -> bool:
+        for g in hooks.get(event, []):
+            if (g.get("matcher") or "") == matcher and _group_contains_techne(g):
+                return True
+        return False
+
+    expected = _expected_registrations(config)
+    expected_set = set(expected)
+    warnings: list[str] = []
+
+    def _label(event: str, matcher: str) -> str:
+        return f"{event}/{matcher}" if matcher else event
+
+    # Missing: config enables it, settings.json has no techne group for it. This is
+    # the reported incident — grep-assist ON in config, PreToolUse absent (techne#287).
+    for event, matcher in expected:
+        if not _has_techne_group(event, matcher):
+            warnings.append(
+                f"{_label(event, matcher)} hook enabled in config but NOT "
+                f"registered in settings.json"
+            )
+
+    # Orphaned: a techne group wired for an (event, matcher) config no longer enables
+    # (e.g. a flag flipped off without a re-init) — it will keep firing until re-init.
+    for event, groups in hooks.items():
+        for g in groups:
+            matcher = g.get("matcher") or ""
+            if _group_contains_techne(g) and (event, matcher) not in expected_set:
+                warnings.append(
+                    f"{_label(event, matcher)} techne hook registered in "
+                    f"settings.json but not enabled in config"
+                )
+
+    return warnings
+
+
 def register_mcp(config: Config):
     """Register the techne MCP server in Claude's MCP config.
 

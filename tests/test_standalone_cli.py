@@ -10,7 +10,14 @@ from techne.cli import main
 
 @pytest.fixture
 def isolated_config(tmp_path, monkeypatch):
-    """Run CLI commands against a tmp_path config + db location."""
+    """Run CLI commands against a tmp_path config + db location.
+
+    The claude-code init path (register_hooks/register_mcp) is kept off the real
+    ~/.claude by the autouse `_isolate_host_config` guard in conftest.py, which pins
+    the frozen SETTINGS_PATH/MCP_CONFIG_PATH module attrs into a per-test tmp for
+    every test (techne#288). This fixture only needs to relocate HOME for techne's
+    own ~/.techne state.
+    """
     # techne reads HOME for default ~/.techne/...
     monkeypatch.setenv("HOME", str(tmp_path))
     # Some envs honor XDG; cover both.
