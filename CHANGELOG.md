@@ -7,6 +7,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Per-turn recall injection (#109 / #277)** — an opt-in `UserPromptSubmit` hook
+  (`hooks.per_turn_recall`, default off) that runs a knowledge search scoped to each
+  submitted prompt and injects the most relevant durable facts via
+  `hookSpecificOutput.additionalContext` — the **dynamic** per-turn complement to the
+  **stable** SessionStart injection. Strictly best-effort: never blocks the turn
+  (always exit 0), no-ops on flag-off / empty prompt / no match / timeout, and
+  excludes soft-archived rows (mirrors egress discipline). `per_turn_recall_limit`
+  (default 5) caps rows per turn. The stdin prompt-field name is undocumented in the
+  CC hooks reference, so the hook defensively accepts `prompt` / `user_prompt` / `text`
+  and no-ops safely otherwise. (Note: whether Claude Code exploits Anthropic prompt
+  caching across the stable/dynamic boundary is harness-controlled and undocumented —
+  this delivers the per-turn recall capability regardless; any cache benefit is a bonus
+  techne can't set from a hook.)
+
 - **Federation brick #1: deposit-and-drain (#221)** — the first step toward
   one-distiller-many-sources memory federation.
 

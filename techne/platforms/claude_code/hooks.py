@@ -266,6 +266,26 @@ def register_hooks(config: Config):
     if not pre_groups:
         del hooks["PreToolUse"]
 
+    # UserPromptSubmit per-turn recall (techne#109/#277) — OPT-IN, experimental.
+    # The DYNAMIC per-turn complement to the stable SessionStart injection: on each
+    # prompt, inject the durable facts most relevant to it. Gated on
+    # hooks.per_turn_recall; empty matcher (UserPromptSubmit isn't tool-scoped). It's
+    # the sole techne UserPromptSubmit entry, so a flipped-off flag on re-init cleanly
+    # removes it (the strip drops any prior techne UserPromptSubmit group).
+    ups_groups = hooks.setdefault("UserPromptSubmit", [])
+    ups_groups[:] = [g for g in ups_groups if not _group_contains_techne(g)]
+    if config.hooks.per_turn_recall:
+        ups_groups.append(
+            {
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": _hook_command("techne.hooks.user_prompt_submit")}
+                ],
+            }
+        )
+    if not ups_groups:
+        del hooks["UserPromptSubmit"]
+
     _save_json(SETTINGS_PATH, settings)
 
 
@@ -287,6 +307,8 @@ def _expected_registrations(config: Config) -> list[tuple[str, str]]:
         expected.append(("PostToolUse", ""))
     if config.hooks.codex_grep_assist:
         expected.append(("PreToolUse", "Grep"))
+    if config.hooks.per_turn_recall:
+        expected.append(("UserPromptSubmit", ""))
     return expected
 
 
