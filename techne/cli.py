@@ -2415,9 +2415,10 @@ def _active_codex_db(config, repo, *, require_indexed: bool = True):
     ``require_indexed``) when that repo has no codex index yet. Returns
     ``(repo_root, db_path)``.
     """
-    from techne.core.codex import repo_db_path
+    from techne.core.codex import ensure_legacy_migrated, repo_db_path
     from techne.core.repo import find_repo_root
 
+    ensure_legacy_migrated(config)
     if repo is not None:
         root = Path(repo).expanduser().resolve()
     else:

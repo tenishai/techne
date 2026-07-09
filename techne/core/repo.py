@@ -13,13 +13,18 @@ from pathlib import Path
 def find_repo_root(path: Path) -> Path | None:
     """Walk up from *path* looking for a ``.git`` entry; return the repo root.
 
-    Works whether or not *path* itself exists — we start from its parent and
-    climb, so a deleted file's repo is still discoverable as long as an ancestor
-    directory still holds ``.git``. Returns None when no ancestor is a repo.
+    Directory-aware: when *path* is an existing directory (e.g. a hook's cwd or
+    a repo root) the walk starts AT it, so a repo root passed directly is found.
+    Otherwise — a file, existing or deleted — the walk starts at its parent, so
+    a deleted file's repo is still discoverable as long as an ancestor still
+    holds ``.git``. Returns None when no ancestor is a repo.
     """
-    # Start from the file's directory (path may be a file that no longer exists).
-    current = path.parent if path.name else path
-    for candidate in [current, *current.parents]:
+    if path.is_dir():
+        start = path
+    else:
+        # A file (possibly deleted): climb from its containing directory.
+        start = path.parent if path.name else path
+    for candidate in [start, *start.parents]:
         if (candidate / ".git").exists():
             return candidate
     return None

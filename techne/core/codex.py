@@ -27,6 +27,7 @@ from pathlib import Path
 
 from techne.config import Config
 from techne.core import migrator
+from techne.core.repo import find_repo_root
 from techne.core.stores import (
     SqliteStore,
     StoreAdapter,
@@ -301,10 +302,51 @@ def codex_db_for_repo(config: Config, repo_root: Path) -> Path:
     Creates ``<data_dir>/codex/`` if needed and applies the schema, so callers
     get a ready-to-use db path. Returns the path (mirrors ``codex_db``).
     """
+    ensure_legacy_migrated(config)
     db_path = repo_db_path(config, repo_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     codex_store(config, db_path)  # applies schema + migration at this path
     return db_path
+
+
+# Guards the one-time legacy migration to at most once per (process × data_dir).
+# Keyed on data_dir (not a bare bool) so per-test temp dirs each migrate.
+_legacy_checked: set[Path] = set()
+
+
+def ensure_legacy_migrated(config: Config) -> None:
+    """Run the one-time legacy-db migration at most once per process × data_dir.
+
+    Safe to call from every consumer's resolution path (CLI, hook, MCP) so the
+    legacy ``<data_dir>/codex.db`` moves to its per-repo home the first time any
+    consumer resolves a codex db — after which all consumers see the same
+    per-repo layout. Best-effort: failures are logged, never raised.
+    """
+    data_dir = Path(config.data_dir)
+    if data_dir in _legacy_checked:
+        return
+    _legacy_checked.add(data_dir)
+    try:
+        migrate_legacy_codex_db(config)
+    except Exception:  # noqa: BLE001
+        log.warning("codex: legacy migration check failed", exc_info=True)
+
+
+def resolve_repo_db_for_query(config: Config, start_path: Path | str) -> Path | None:
+    """Resolve an EXISTING per-repo codex db for *start_path*, or None (techne#209).
+
+    For read-only consumers (grep-assist hook, MCP query tools): runs the
+    one-time legacy migration, finds the repo root by walking up from
+    *start_path*, and returns that repo's db path IFF it already exists. Returns
+    None when *start_path* is in no repo, or the repo has never been indexed —
+    read consumers must no-op on None rather than create an empty db.
+    """
+    ensure_legacy_migrated(config)
+    root = find_repo_root(Path(start_path))
+    if root is None:
+        return None
+    db_path = repo_db_path(config, root)
+    return db_path if db_path.exists() else None
 
 
 def list_codex_repos(config: Config) -> list[tuple[str, Path]]:

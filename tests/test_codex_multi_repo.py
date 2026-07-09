@@ -346,3 +346,50 @@ def test_cli_index_all_reindexes_known_repos(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert "reindexed" in r.output
     assert str(repo) in r.output
+
+
+# ---------------------------------------------------------------------------
+# MCP tools — per-repo scoping (techne#209 Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_codex_search_scoped_by_repo_arg(tmp_path):
+    """codex_search's `repo` arg selects which repo's graph to search."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo = tmp_path / "svc"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    db = codex_db_for_repo(cfg, repo)
+    add_symbol(db, id="svc.py::handler::function::1", file="svc.py", name="handler", kind="function")
+
+    out = _codex_search({"query": "handler", "repo": str(repo)}, cfg)
+    assert out["count"] == 1
+    assert out["results"][0]["name"] == "handler"
+
+
+def test_mcp_codex_search_no_repo_returns_hint(tmp_path):
+    """No indexed repo at the given path → empty results with a run-index hint."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    plain = tmp_path / "plain"
+    plain.mkdir()  # not a git repo
+
+    out = _codex_search({"query": "anything", "repo": str(plain)}, cfg)
+    assert out["count"] == 0
+    assert out["results"] == []
+    assert "no codex index" in out["notice"]
+
+
+def test_mcp_codex_blast_radius_no_repo_returns_hint(tmp_path):
+    from techne.mcp_server import _codex_blast_radius
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    out = _codex_blast_radius({"symbol_id": "x", "repo": str(plain)}, cfg)
+    assert out["nodes"] == []
+    assert "no codex index" in out["notice"]
