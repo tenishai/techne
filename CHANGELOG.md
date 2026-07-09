@@ -40,6 +40,38 @@ All notable changes to techne are documented here. Format loosely follows
   **Follow-up:** candidates land in the foreign store; Archivist-promotion
   (surfacing them to the owning agent's curated memory) is tracked in #222.
 
+- **Codex db-per-repo (#209, PR #286)** — each indexed repo now gets its **own**
+  code-graph db at `<data_dir>/codex/<slug>-<hash8>.db`, derived deterministically
+  from the repo's resolved absolute root, replacing the single shared `codex.db`.
+  Indexing a second repo can no longer collide with, overwrite, or bleed into the
+  first. A pre-#209 single `codex.db` migrates to its per-repo home automatically
+  (WAL-checkpointed move) the first time any consumer — CLI, hook, or MCP — resolves
+  a codex db. New API: `repo_db_path` / `codex_db_for_repo` /
+  `resolve_repo_db_for_query` / `list_codex_repos` / `migrate_legacy_codex_db`. New
+  CLI: `techne codex index-all` (refresh every indexed repo) and
+  `techne codex stats --all|--repo`. Read consumers (MCP query tools, grep-assist)
+  scope to the repo under cwd, or `--repo`.
+
+- **grep-assist — graph-augment the agent's own Grep (#206, PR #208)** — an opt-in
+  `PreToolUse` hook (`hooks.codex_grep_assist`, default off) that runs a Codex symbol
+  search for a Grep's pattern and injects the matching symbols (name, signature, file,
+  freshness marker) into the model's context via `additionalContext`. Never blocks the
+  tool; degrades to a no-op on any error, a missing/empty index, or a wall-clock
+  timeout. Scopes symbols to the repo actually being searched (via the #209 db-per-repo
+  router), fixing the single-global-graph signal/noise problem. `codex_grep_assist_limit`
+  (default 8) caps injected symbols. Claude Code loads hooks at session start, so it
+  fires from the next session after `techne init`.
+
+- **Hook-registration drift check (#287, PR #289)** — `check_hook_drift(config)`
+  compares the techne hooks enabled in config against what's actually wired into Claude
+  Code's `settings.json`; `techne status` surfaces a `⚠ Hook registration drift — run
+  'techne init' to reconcile` warning when they diverge (e.g. grep-assist ON in config
+  but the `PreToolUse` group missing after a re-init or stray edit).
+
+- **Test suite no longer clobbers the real `~/.claude` (#288, PR #289)** — a
+  `conftest.py` guard points hook-registration tests at a throwaway home, so running the
+  suite can't strip or rewrite a developer's real `settings.json`.
+
 ## [0.8.0] — 2026-06-28
 
 The "memory that maintains itself, honestly" release: a self-curating memory loop
