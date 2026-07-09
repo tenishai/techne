@@ -103,6 +103,13 @@ class HookConfig:
     # SIGALRM fires and the hook exits 0 silently.  Overrides the
     # TECHNE_HOOK_TIMEOUT env-var default (5.0 s) when set explicitly.
     timeout_s: float = 5.0
+    # Experimental (techne#206): opt-in graph-assist on the agent's own Grep/Glob.
+    # When ON, a PreToolUse hook runs a Codex symbol search for the search pattern
+    # and injects matching symbols into the model's context via additionalContext.
+    # Strictly best-effort — never blocks the tool. Default OFF.
+    codex_grep_assist: bool = False
+    # Hard cap on the number of symbols injected per Grep/Glob (config-over-hardcode).
+    codex_grep_assist_limit: int = 8
 
 
 ReflectWriteTo = Literal["candidates", "live"]
@@ -441,6 +448,8 @@ class Config:
                 capture_bash=h.get("capture_bash", False),
                 capture_read=h.get("capture_read", False),
                 timeout_s=float(h.get("timeout_s", _hd.timeout_s)),
+                codex_grep_assist=h.get("codex_grep_assist", False),
+                codex_grep_assist_limit=int(h.get("codex_grep_assist_limit", 8)),
             )
 
         if "heuristic" in raw and isinstance(raw["heuristic"], dict):
@@ -573,6 +582,8 @@ class Config:
                 "capture_bash": self.hooks.capture_bash,
                 "capture_read": self.hooks.capture_read,
                 "timeout_s": self.hooks.timeout_s,
+                "codex_grep_assist": self.hooks.codex_grep_assist,
+                "codex_grep_assist_limit": self.hooks.codex_grep_assist_limit,
             },
             "heuristic": {
                 "boundary_threshold": self.heuristic.boundary_threshold,
