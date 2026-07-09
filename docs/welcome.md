@@ -74,6 +74,27 @@ Then `techne init` to (re-)register the hook. It only fires for repos you've ind
 with Codex (below). *Claude Code loads hooks at session start — restart the session
 after enabling.*
 
+### 💬 Per-turn recall — the right memory, right when you ask
+
+At session start, techne injects a **stable** block of durable knowledge once. But
+what's relevant to *this* prompt changes turn to turn. With per-turn recall on, a
+`UserPromptSubmit` hook searches your knowledge for each prompt and injects the
+handful of facts most relevant to it — the **dynamic** complement to the stable
+session-start block. So "how did we decide the auth flow?" pulls the actual decision
+into context the moment you ask, without you running a recall by hand.
+
+Best-effort by design: it never blocks or delays your turn, and stays silent when
+nothing relevant turns up. **Opt-in, experimental** — off by default:
+
+```yaml
+# ~/.techne/config.yaml
+hooks:
+  per_turn_recall: true       # default: false
+  per_turn_recall_limit: 5    # max facts injected per prompt
+```
+
+Then `techne init` and restart the session to load the hook.
+
 ### 🗺️ Codex — a code graph, one per repo
 
 Codex is a code graph — typed **symbols** plus call / import / def-use **edges** — in
