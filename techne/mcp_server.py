@@ -546,9 +546,10 @@ TOOLS = [
         "name": "codex_search",
         "description": (
             "Search Codex symbols (functions, classes, methods) by name or signature. "
-            "Requires `techne codex index <repo>` to have been run first. "
-            "Experimental: the index is built manually and may be stale — re-run "
-            "`techne codex index` after code changes."
+            "Requires `techne codex index <repo>` to have been run first. Scoped to one "
+            "repo (db-per-repo, techne#209): pass `repo` to pick it, else the server's "
+            "working directory's repo is used. Experimental: the index is built manually "
+            "and may be stale — re-run `techne codex index` after code changes."
         ),
         "inputSchema": {
             "type": "object",
@@ -556,6 +557,10 @@ TOOLS = [
                 "query": {
                     "type": "string",
                     "description": "Symbol name or signature fragment to search",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Path within the repo to search (default: server cwd)",
                 },
                 "limit": {"type": "integer", "default": 20},
             },
@@ -567,9 +572,10 @@ TOOLS = [
         "description": (
             "Compute the transitive reachability (blast radius) of a Codex symbol — "
             "out=what this symbol reaches (dependencies), in=what reaches this symbol "
-            "(dependents). Uses recursive CTE BFS over the call/import graph. "
-            "Experimental: the index is built manually and may be stale — re-run "
-            "`techne codex index` after code changes."
+            "(dependents). Uses recursive CTE BFS over the call/import graph. Scoped to "
+            "one repo (db-per-repo, techne#209): pass `repo` to pick it, else the "
+            "server's working directory's repo is used. Experimental: the index is built "
+            "manually and may be stale — re-run `techne codex index` after code changes."
         ),
         "inputSchema": {
             "type": "object",
@@ -577,6 +583,10 @@ TOOLS = [
                 "symbol_id": {
                     "type": "string",
                     "description": "Symbol id (file::name::kind::line) from codex_search",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Path within the repo to query (default: server cwd)",
                 },
                 "depth": {"type": "integer", "default": 5},
                 "direction": {
@@ -1100,14 +1110,35 @@ TOOLS = [
 ]
 
 
+def _codex_repo_db(args: dict, config: Config):
+    """Resolve the per-repo codex db for an MCP codex call (techne#209).
+
+    ``repo`` arg (a path within the repo) if given, else the server's cwd.
+    Returns the db Path, or None when there's no indexed repo there — callers
+    return an empty result with a hint rather than erroring.
+    """
+    import os
+
+    from techne.core.codex import resolve_repo_db_for_query
+
+    return resolve_repo_db_for_query(config, args.get("repo") or os.getcwd())
+
+
+_NO_REPO_HINT = (
+    "no codex index for the active repo — run `techne codex index <repo>`, "
+    "or pass `repo` to select an indexed repo."
+)
+
+
 def _codex_search(args: dict, config: Config) -> dict:
-    """FTS over Codex symbols — search across all indexed repos."""
+    """FTS over Codex symbols, scoped to the active repo (db-per-repo, techne#209)."""
     from techne.core.codegraph import annotate_freshness, search_symbols
-    from techne.core.codex import codex_db
 
     query = args.get("query", "")
     limit = args.get("limit", 20)
-    db_path = codex_db(config)
+    db_path = _codex_repo_db(args, config)
+    if db_path is None:
+        return {"results": [], "count": 0, "notice": _NO_REPO_HINT}
     hits = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
     stale_count = sum(1 for h in hits if h.get("freshness") in ("stale", "missing"))
     result: dict = {"results": hits, "count": len(hits)}
@@ -1119,14 +1150,18 @@ def _codex_search(args: dict, config: Config) -> dict:
 
 
 def _codex_blast_radius(args: dict, config: Config) -> dict:
-    """Transitive reachability (blast-radius / dependency walk) for a symbol."""
+    """Transitive reachability for a symbol, scoped to the active repo (techne#209)."""
     from techne.core.codegraph import annotate_freshness, reachable
-    from techne.core.codex import codex_db
 
     symbol_id = args.get("symbol_id", "")
     depth = args.get("depth", 5)
     direction = args.get("direction", "out")
-    db_path = codex_db(config)
+    db_path = _codex_repo_db(args, config)
+    if db_path is None:
+        return {
+            "symbol_id": symbol_id, "direction": direction, "depth": depth,
+            "nodes": [], "notice": _NO_REPO_HINT,
+        }
     raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
     rows = annotate_freshness(db_path, raw)
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))

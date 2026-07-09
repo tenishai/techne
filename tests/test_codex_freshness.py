@@ -443,10 +443,9 @@ def test_cli_search_shows_stale_marker(tmp_path, monkeypatch):
     from techne.cli import main
     from techne.codex.source import RepoSource
     from techne.config import Config
-    from techne.core.codex import CODEX_SCHEMA
-    from techne.core.stores import SqliteStore
+    from techne.core.codex import codex_db_for_repo
 
-    # Set up a minimal techne data dir + codex.db.
+    # Set up a minimal techne data dir.
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     (data_dir / "techne.db").touch()
@@ -455,33 +454,21 @@ def test_cli_search_shows_stale_marker(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / "mymod.py").write_text("def stalefn(): pass\n")
 
-    db_path = data_dir / "codex.db"
-    store = SqliteStore("codex", db_path)
-    store.migrate(CODEX_SCHEMA)
-    conn = store.connect()
-    try:
-        conn.executescript("""
-            CREATE INDEX IF NOT EXISTS idx_edges_to_name   ON edges(to_name);
-            CREATE INDEX IF NOT EXISTS idx_edges_to_symbol ON edges(to_symbol);
-            CREATE INDEX IF NOT EXISTS idx_edges_src_hash  ON edges(src_file_hash);
-        """)
-    finally:
-        conn.close()
-
-    # Build a config that points to our test data dir.
+    # Build a config pointing at our test data dir, then index the repo into its
+    # own per-repo codex db (techne#209).
     cfg = Config()
     cfg.db_path = data_dir / "techne.db"
     cfg.data_dir = data_dir
-
     monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
 
+    db_path = codex_db_for_repo(cfg, repo)
     RepoSource(db_path, repo, languages=["python"]).initial_walk()
 
     # Edit the file so its symbols become stale.
     (repo / "mymod.py").write_text("def stalefn(): return 99\n")
 
     runner = CliRunner()
-    result = runner.invoke(main, ["codex", "search", "stalefn"])
+    result = runner.invoke(main, ["codex", "search", "stalefn", "--repo", str(repo)])
     assert result.exit_code == 0, f"CLI exited {result.exit_code}:\n{result.output}"
     assert "[stale]" in result.output, (
         f"expected [stale] in output:\n{result.output}"

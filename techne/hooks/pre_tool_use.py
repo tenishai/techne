@@ -21,6 +21,7 @@ Protocol shape (confirmed: PreToolUse honors additionalContext without blocking)
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 # Tools whose pattern is a symbol-ish search worth augmenting with the code graph.
@@ -78,23 +79,34 @@ def main() -> None:
     if not config.hooks.codex_grep_assist:
         sys.exit(0)
 
-    pattern = data.get("tool_input", {}).get("pattern", "")
+    tool_input = data.get("tool_input", {})
+    pattern = tool_input.get("pattern", "")
     if not pattern:
         sys.exit(0)
+
+    # Resolve which repo the agent is actually working in: the Grep's target
+    # `path` when given, else the session cwd. This scopes the injected symbols
+    # to the repo being searched (techne#209 db-per-repo) — the fix for the
+    # #206 signal/noise problem, where a single global graph injected an
+    # unrelated repo's symbols.
+    start_path = tool_input.get("path") or data.get("cwd") or os.getcwd()
 
     from techne.hooks._timeout import bounded_hook
 
     # ------------------------------------------------------------------
-    # Run the Codex query inside the wall-clock budget. Any failure (missing/empty
-    # codex.db → search_symbols raises; slow SQLite → HookTimeout) is swallowed and
-    # degrades to emitting nothing.
+    # Resolve the per-repo codex db and run the query inside the wall-clock
+    # budget. No indexed db for this repo → no-op. Any failure (search_symbols
+    # raises; slow SQLite → HookTimeout) is swallowed and degrades to emitting
+    # nothing.
     # ------------------------------------------------------------------
     try:
-        with bounded_hook(config.hooks.timeout_s):
-            from techne.core.codegraph import annotate_freshness, search_symbols
-            from techne.core.codex import codex_db
+        from techne.core.codegraph import annotate_freshness, search_symbols
+        from techne.core.codex import resolve_repo_db_for_query
 
-            db_path = codex_db(config)
+        db_path = resolve_repo_db_for_query(config, start_path)
+        if db_path is None:
+            sys.exit(0)
+        with bounded_hook(config.hooks.timeout_s):
             results = annotate_freshness(
                 db_path,
                 search_symbols(db_path, pattern, limit=config.hooks.codex_grep_assist_limit),
