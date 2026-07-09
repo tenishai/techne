@@ -700,3 +700,76 @@ class TestLauncherExecution:
             f"expected '--python' flag in pipx call (robustness against removed base "
             f"python); got:\n{calls}"
         )
+
+
+class TestHookDrift:
+    """techne#287: check_hook_drift surfaces config↔settings.json mismatch.
+
+    The silent-no-op failure mode: a hooks.* flag is enabled in config.yaml but
+    `techne init` was never re-run, so the hook is absent from settings.json and
+    never fires — with no other diagnostic. check_hook_drift reports it (and the
+    reverse: a techne hook still wired for a flag that's since been turned off).
+    """
+
+    def test_clean_after_register_is_no_drift(self, fake_home, cfg):
+        # In-sync config and settings must report nothing.
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        claude_code.register_hooks(cfg)
+        assert claude_code.check_hook_drift(cfg) == []
+
+    def test_missing_pretooluse_when_grep_flag_flipped_on(self, fake_home, cfg):
+        # The reported incident: init ran with grep-assist OFF, user later flips the
+        # flag ON in config without re-running init → PreToolUse never registered.
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)  # writes always-on + PostToolUse, no PreToolUse
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        drift = claude_code.check_hook_drift(cfg)
+        assert any("PreToolUse/Grep" in w and "NOT registered" in w for w in drift), drift
+        # The always-on hooks are all present — only PreToolUse drifts.
+        assert not any("SessionStart" in w for w in drift), drift
+
+    def test_orphaned_posttooluse_when_flag_flipped_off(self, fake_home, cfg):
+        # Reverse drift: PostToolUse was registered, then the flag was turned off in
+        # config without re-init → the techne hook keeps firing until reconciled.
+        cfg.hooks = HookConfig(post_tool_use=True)
+        claude_code.register_hooks(cfg)
+
+        cfg.hooks = HookConfig(post_tool_use=False)
+        drift = claude_code.check_hook_drift(cfg)
+        assert any("PostToolUse" in w and "not enabled in config" in w for w in drift), drift
+
+    def test_no_false_positive_on_foreign_hooks(self, fake_home, cfg):
+        # A user's own PreToolUse/Bash hook must never be read as a techne group,
+        # so with grep-assist off it is neither "missing" nor "orphaned".
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]}
+                ]
+            }
+        }))
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)  # preserves the foreign hook
+        assert claude_code.check_hook_drift(cfg) == []
+
+    def test_missing_when_settings_file_absent(self, fake_home, cfg):
+        # No settings.json at all + flags on → everything expected is reported missing.
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        drift = claude_code.check_hook_drift(cfg)
+        assert any("SessionStart" in w and "NOT registered" in w for w in drift), drift
+        assert any("PreToolUse/Grep" in w and "NOT registered" in w for w in drift), drift
+
+    def test_corrupt_settings_returns_empty(self, fake_home, cfg):
+        # An unparseable settings.json is already reported loudly by register/unregister;
+        # drift must not double-report (or crash) on it.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{corrupt not json")
+        assert claude_code.check_hook_drift(cfg) == []
