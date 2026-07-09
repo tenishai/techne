@@ -19,11 +19,23 @@ Schema versions (PRAGMA user_version on codex.db):
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import re
+import shutil
 from pathlib import Path
 
 from techne.config import Config
 from techne.core import migrator
-from techne.core.stores import StoreAdapter, load_store, plain_connect
+from techne.core.stores import (
+    SqliteStore,
+    StoreAdapter,
+    load_store,
+    plain_connect,
+    store_path,
+)
+
+log = logging.getLogger(__name__)
 
 CODEX_VERSION = 2
 
@@ -208,18 +220,22 @@ def _apply_codex_migration(db_path: Path) -> None:
         conn.close()
 
 
-def codex_store(config: Config) -> StoreAdapter:
+def codex_store(config: Config, db_path: Path | None = None) -> StoreAdapter:
     """The Codex store (codex.db), schema applied and migrated.
 
-    Resolved via the registry, so a `config.stores['codex']` dsn override
-    takes effect (techne#102); default <data_dir>/codex.db.
+    Default (``db_path=None``): the single global store, resolved via the
+    registry so a ``config.stores['codex']`` dsn override takes effect
+    (techne#102); default ``<data_dir>/codex.db``.
+
+    Per-repo (``db_path`` given, techne#209): a store at that explicit path —
+    used by ``codex_db_for_repo`` so each repo gets its own graph. The migration
+    machinery is keyed by db_path (``_migration_done``/``_migrated`` sets), so
+    multiple per-repo stores in one process each migrate independently.
 
     Ordering guarantee: migration runs BEFORE schema application so that
     executescript(CODEX_SCHEMA) never encounters a v0 table missing new columns.
-    Both operations are gated on process-lifetime `_migration_done` /
-    `_migrated` sets — safe for concurrent callers within one process.
     """
-    store = load_store(config, "codex")
+    store = SqliteStore("codex", db_path) if db_path is not None else load_store(config, "codex")
     db_path = store.db_path
 
     if db_path not in _migration_done:
@@ -247,6 +263,111 @@ def codex_store(config: Config) -> StoreAdapter:
 
 def codex_db(config: Config) -> Path:
     return codex_store(config).db_path
+
+
+# ---------------------------------------------------------------------------
+# Per-repo db router (techne#209) — db-per-repo, mirroring db-per-domain.
+#
+# Each repo gets its own codex db at <data_dir>/codex/<slug>-<hash8>.db, so
+# indexing a second repo can never collide with, overwrite, or bleed into the
+# first. The path derivation is deliberately PURE and STABLE (repo_root → path,
+# deterministic) so the future cross-repo federation layer (techne#210) can key
+# its links store on repo_root and re-derive each repo's db path.
+# ---------------------------------------------------------------------------
+
+
+def _repo_slug(name: str) -> str:
+    """Filesystem-safe, human-readable slug of a repo directory basename."""
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", name).strip("-.").lower()
+    return slug or "repo"
+
+
+def repo_db_path(config: Config, repo_root: Path) -> Path:
+    """Pure, stable derivation: repo_root → its per-repo codex db path (techne#209).
+
+    ``<data_dir>/codex/<slug>-<hash8>.db``. The slug (repo basename) keeps the
+    path human-readable; the 8-hex sha256 of the *resolved absolute* root keeps
+    it collision-free across same-named repos in different locations. No I/O,
+    no side effects — safe for the #210 links store to call.
+    """
+    resolved = repo_root.expanduser().resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
+    return Path(config.data_dir) / "codex" / f"{_repo_slug(resolved.name)}-{digest}.db"
+
+
+def codex_db_for_repo(config: Config, repo_root: Path) -> Path:
+    """Resolve AND prepare (schema + migration) the per-repo codex db (techne#209).
+
+    Creates ``<data_dir>/codex/`` if needed and applies the schema, so callers
+    get a ready-to-use db path. Returns the path (mirrors ``codex_db``).
+    """
+    db_path = repo_db_path(config, repo_root)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    codex_store(config, db_path)  # applies schema + migration at this path
+    return db_path
+
+
+def list_codex_repos(config: Config) -> list[tuple[str, Path]]:
+    """Enumerate the per-repo codex dbs as ``(repo_root, db_path)`` pairs.
+
+    Reads each ``<data_dir>/codex/*.db``'s ``codex_meta.repo_root``. Powers
+    ``codex stats --all`` and ``codex index-all``. Dbs with no stored repo_root
+    (never fully indexed) are skipped. Sorted by db path for stable output.
+    """
+    codex_dir = Path(config.data_dir) / "codex"
+    if not codex_dir.is_dir():
+        return []
+    out: list[tuple[str, Path]] = []
+    for db_path in sorted(codex_dir.glob("*.db")):
+        root = get_meta(db_path, "repo_root")
+        if root:
+            out.append((root, db_path))
+    return out
+
+
+def migrate_legacy_codex_db(config: Config) -> Path | None:
+    """One-time move of the legacy single ``<data_dir>/codex.db`` to its per-repo
+    path (techne#209). Idempotent; returns the destination path if it migrated,
+    else ``None`` (nothing to do).
+
+    NOT auto-invoked while consumers still read the legacy path — wiring it in
+    is the job of the consumer-rewiring phase, so the move happens together with
+    the switch to per-repo resolution rather than out from under a live reader.
+
+    WAL safety: checkpoints (TRUNCATE) before moving so no committed pages are
+    stranded in a ``-wal`` sidecar, then moves the main db and clears any stale
+    sidecars (empty after the truncate).
+    """
+    legacy = store_path(config, "codex")
+    if not legacy.exists():
+        return None
+
+    root = get_meta(legacy, "repo_root")
+    if not root:
+        log.warning("codex: legacy %s has no repo_root — leaving in place", legacy)
+        return None
+
+    dest = repo_db_path(config, Path(root))
+    if dest.exists():
+        log.info("codex: per-repo db already exists at %s — leaving legacy db in place", dest)
+        return None
+
+    # Flush WAL into the main db file so the move can't strand committed pages.
+    conn = plain_connect(legacy)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(legacy), str(dest))
+    # Sidecars are empty after a TRUNCATE checkpoint; drop any that linger.
+    for suffix in ("-wal", "-shm"):
+        stale = Path(str(legacy) + suffix)
+        if stale.exists():
+            stale.unlink()
+    log.info("codex: migrated legacy db %s → per-repo %s (repo_root=%s)", legacy, dest, root)
+    return dest
 
 
 # ---------------------------------------------------------------------------
