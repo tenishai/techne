@@ -2374,3 +2374,84 @@ class TestV15StepReminders:
         _migrate(v14_conn, 14, SCHEMA_VERSION)
         max_v = v14_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert max_v == SCHEMA_VERSION
+
+
+class TestV16ToV17ThreadBoundariesDedup:
+    """v16 -> v17: collapse duplicate thread_boundaries rows (run_session_end
+    re-inserted a session's full boundary set every turn before the delete-before-
+    insert fix, with no dedup guard) and enforce one-row-per-(session, pair) so the
+    class can never silently recur.
+
+    This is a *temporal* property — the defect only appears after the same session
+    is recomputed N times, which a single-call unit test never exercises. That is
+    precisely why it escaped review and tests originally; this class pins it down.
+    """
+
+    @pytest.fixture
+    def v16_conn(self):
+        """A pre-v17 DB: old thread_boundaries index + 3 distinct boundary triples
+        each duplicated across 5 simulated turns (15 rows), later turns scored higher."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL,
+                                         applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+            INSERT INTO schema_version (version) VALUES (16);
+            CREATE TABLE sessions (id TEXT PRIMARY KEY);
+            INSERT INTO sessions (id) VALUES ('s1');
+            CREATE TABLE thread_boundaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                obs_index_a INTEGER NOT NULL, obs_index_b INTEGER NOT NULL,
+                gap_seconds REAL NOT NULL, family_a TEXT NOT NULL, family_b TEXT NOT NULL,
+                signals_json TEXT NOT NULL, total_score REAL NOT NULL,
+                is_boundary INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE INDEX idx_thread_boundaries_session
+                ON thread_boundaries(session_id, obs_index_a);
+            """
+        )
+        for turn in range(5):  # 5 recomputes of the same session
+            for a in range(3):
+                conn.execute(
+                    "INSERT INTO thread_boundaries (session_id, obs_index_a, obs_index_b, "
+                    "gap_seconds, family_a, family_b, signals_json, total_score, is_boundary) "
+                    "VALUES ('s1', ?, ?, 60.0, 'fs', 'fs', '{}', ?, 0)",
+                    (a, a + 1, float(turn)),
+                )
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM thread_boundaries").fetchone()[0] == 15
+        return conn
+
+    def test_collapses_to_distinct_triples(self, v16_conn):
+        _migrate(v16_conn, 16, 17)
+        assert v16_conn.execute("SELECT COUNT(*) FROM thread_boundaries").fetchone()[0] == 3
+
+    def test_keeps_most_recent_row_per_triple(self, v16_conn):
+        """MAX(id) is kept, so the surviving rows carry the latest recompute's score."""
+        _migrate(v16_conn, 16, 17)
+        scores = {r[0] for r in v16_conn.execute("SELECT total_score FROM thread_boundaries")}
+        assert scores == {4.0}  # last turn
+
+    def test_swaps_to_unique_triple_index(self, v16_conn):
+        _migrate(v16_conn, 16, 17)
+        idx = {r["name"]: r["unique"] for r in v16_conn.execute(
+            "SELECT name, \"unique\" FROM pragma_index_list('thread_boundaries')"
+        )}
+        assert idx.get("idx_thread_boundaries_triple") == 1
+        assert "idx_thread_boundaries_session" not in idx
+
+    def test_unique_constraint_blocks_future_duplicate(self, v16_conn):
+        """The whole point: a future non-atomic re-insert fails loudly, not silently."""
+        _migrate(v16_conn, 16, 17)
+        with pytest.raises(sqlite3.IntegrityError):
+            v16_conn.execute(
+                "INSERT INTO thread_boundaries (session_id, obs_index_a, obs_index_b, "
+                "gap_seconds, family_a, family_b, signals_json, total_score, is_boundary) "
+                "VALUES ('s1', 0, 1, 60.0, 'fs', 'fs', '{}', 9.0, 0)"
+            )
+
+    def test_version_bumped(self, v16_conn):
+        _migrate(v16_conn, 16, 17)
+        assert v16_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 17

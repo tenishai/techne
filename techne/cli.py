@@ -69,6 +69,96 @@ def status(ctx):
                 click.echo(f"  {w}")
 
 
+# Tables whose rows must be unique by a logical key. A table here with
+# COUNT(*) > COUNT(DISTINCT key) is silently accumulating duplicate rows — a
+# class of bug with no functional symptom (queries still work), invisible to
+# behavior tests and code review, only visible as storage growth. thread_boundaries
+# hit exactly this (recompute-and-reinsert per turn without a dedup guard). Add a
+# (table, key-columns) pair here whenever a table gains a uniqueness invariant so
+# the audit catches regressions instead of us noticing the DB got fat. Only list
+# tables with an UNCONDITIONAL uniqueness invariant — partial/scoped uniqueness
+# (e.g. knowledge_candidates' WHERE origin='reflect') would false-positive here.
+_DEDUP_CHECKS = [
+    ("thread_boundaries", ("session_id", "obs_index_a", "obs_index_b")),
+]
+
+
+@main.command()
+@click.option("--vacuum", is_flag=True, help="Reclaim freelist space (VACUUM) after the checks.")
+@click.pass_context
+def doctor(ctx, vacuum):
+    """Health checks for the memory store.
+
+    Flags silent-accumulation bugs (duplicate rows a table shouldn't have) and
+    reclaimable space — failure modes that have no functional symptom and so are
+    invisible to behavior tests. Exits non-zero if duplicate-row debt is found,
+    so it is safe to run in CI / a scheduled audit.
+    """
+    import sqlite3
+    import sys
+
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    conn = sqlite3.connect(config.db_path)
+    issues = 0
+    click.echo(f"Database: {config.db_path}")
+    click.echo()
+    click.echo("Duplicate-row checks (total rows vs distinct logical key):")
+    for table, key_cols in _DEDUP_CHECKS:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
+        key = ", ".join(key_cols)
+        total = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        distinct = conn.execute(
+            f"SELECT COUNT(*) FROM (SELECT DISTINCT {key} FROM {table})"
+        ).fetchone()[0]
+        dupes = total - distinct
+        if dupes > 0:
+            ratio = total / distinct if distinct else float("inf")
+            click.echo(
+                f"  ⚠ {table}: {total} rows, {distinct} distinct ({key}) "
+                f"— {dupes} duplicate rows ({ratio:.1f}×)"
+            )
+            issues += 1
+        else:
+            click.echo(f"  ✓ {table}: {total} rows, no duplicates")
+
+    # Freelist: dedup/deletes free pages but SQLite only returns them to the OS on VACUUM.
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    freelist = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    reclaimable_mb = (page_size * freelist) / 1048576
+    click.echo()
+    if reclaimable_mb >= 1.0:
+        click.echo(f"Reclaimable space: {reclaimable_mb:.1f} MB on the freelist.")
+        if not vacuum:
+            click.echo("  Run 'techne doctor --vacuum' to return it to the OS.")
+    else:
+        click.echo(f"Reclaimable space: {reclaimable_mb:.1f} MB (nothing to reclaim).")
+
+    if vacuum:
+        before = config.db_path.stat().st_size
+        conn.isolation_level = None  # VACUUM cannot run inside a transaction
+        conn.execute("VACUUM")
+        after = config.db_path.stat().st_size
+        click.echo(
+            f"  VACUUM: {before / 1048576:.1f} MB → {after / 1048576:.1f} MB "
+            f"({(before - after) / 1048576:.1f} MB reclaimed)."
+        )
+
+    conn.close()
+    click.echo()
+    if issues:
+        click.echo(f"{issues} issue(s) found.")
+        sys.exit(1)
+    click.echo("All checks passed.")
+
+
 @main.group(invoke_without_command=True)
 @click.option("--active", is_flag=True, help="Only show threads with unfinished resume points")
 @click.option("--topic", default="", help="Search threads by topic")
