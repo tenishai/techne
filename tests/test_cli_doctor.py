@@ -60,3 +60,35 @@ def test_doctor_flags_duplicates_and_exits_nonzero(cli_db):
     assert "thread_boundaries" in result.output
     assert "duplicate rows" in result.output
     assert "issue(s) found" in result.output
+
+
+def test_doctor_vacuum_reports_and_shrinks_the_file(cli_db):
+    """The --vacuum path must reclaim space and report an honest figure.
+
+    Guards against the WAL/stat concern: techne runs journal_mode=WAL, so this
+    asserts the main-file stat() actually drops after VACUUM (it does — VACUUM
+    rewrites the main db file directly, not via the -wal sidecar).
+    """
+    import os
+
+    # Grow the file with ~2.5 MB of distinct-triple rows, then delete them all so
+    # the pages sit on the freelist (reclaimable but not yet returned to the OS).
+    conn = sqlite3.connect(cli_db.db_path)
+    conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES ('s1')")
+    conn.executemany(
+        "INSERT INTO thread_boundaries (session_id, obs_index_a, obs_index_b, "
+        "gap_seconds, family_a, family_b, signals_json, total_score, is_boundary) "
+        "VALUES ('s1', ?, ?, 60.0, 'fs', 'fs', ?, 0.0, 0)",
+        [(i, i + 1, "x" * 500) for i in range(5000)],
+    )
+    conn.commit()
+    conn.execute("DELETE FROM thread_boundaries")
+    conn.commit()
+    conn.close()
+
+    before = os.path.getsize(cli_db.db_path)
+    result = CliRunner().invoke(main, ["doctor", "--vacuum"])
+    assert result.exit_code == 0, result.output
+    assert "VACUUM" in result.output and "reclaimed" in result.output
+    after = os.path.getsize(cli_db.db_path)
+    assert after < before, f"file did not shrink: {before} -> {after}"

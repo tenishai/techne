@@ -103,6 +103,9 @@ def doctor(ctx, vacuum):
         return
 
     conn = sqlite3.connect(config.db_path)
+    # Wait for the write lock like the rest of techne (connect() sets the same), so
+    # `doctor --vacuum` against a live agent queues instead of erroring "database is locked".
+    conn.execute("PRAGMA busy_timeout=5000")
     issues = 0
     click.echo(f"Database: {config.db_path}")
     click.echo()
@@ -120,6 +123,7 @@ def doctor(ctx, vacuum):
         ).fetchone()[0]
         dupes = total - distinct
         if dupes > 0:
+            # distinct is never 0 here: the key columns are NOT NULL, so dupes > 0 implies distinct > 0.
             ratio = total / distinct if distinct else float("inf")
             click.echo(
                 f"  ⚠ {table}: {total} rows, {distinct} distinct ({key}) "
