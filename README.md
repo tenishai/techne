@@ -18,6 +18,18 @@ pip install -e .
 techne init
 ```
 
+> **Just want to _run_ techne, not develop it?** Install a pinned release straight
+> from git — no clone, non-editable, and the Claude Code hook launcher self-heals
+> across interpreter changes:
+>
+> ```bash
+> pipx install "git+https://github.com/tenishai/techne.git@v0.9.0"
+> techne init
+> ```
+>
+> Upgrade later by re-running with a newer tag. The `git clone` + `pip install -e .`
+> flow above is for **developing** techne (live local edits).
+
 ---
 
 ## What's inside
