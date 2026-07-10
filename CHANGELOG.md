@@ -5,7 +5,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-10
+
 ### Added
+
+- **`techne doctor` — core-DB health audit (#295, PR #296)** — a new top-level
+  command that flags silent-accumulation bugs (duplicate rows a table shouldn't
+  have) and reports reclaimable freelist space, with `--vacuum` to reclaim it in
+  place. Exits non-zero on duplication debt, so it's safe to run in CI or a
+  scheduled audit. Extensible via a `_DEDUP_CHECKS` registry of `(table, key)`.
 
 - **Per-turn recall injection (#109 / #277)** — an opt-in `UserPromptSubmit` hook
   (`hooks.per_turn_recall`, default off) that runs a knowledge search scoped to each
@@ -85,6 +93,17 @@ All notable changes to techne are documented here. Format loosely follows
 - **Test suite no longer clobbers the real `~/.claude` (#288, PR #289)** — a
   `conftest.py` guard points hook-registration tests at a throwaway home, so running the
   suite can't strip or rewrite a developer's real `settings.json`.
+
+### Fixed
+
+- **`thread_boundaries` duplicate-row debt (#295, PR #296)** — a schema **v17**
+  migration collapses the duplicate `(session_id, obs_index_a, obs_index_b)` rows
+  (keeps the most recent per triple) that had accumulated because `run_session_end`
+  re-inserts a session's full boundary set every turn, and no backfill had shipped
+  after the delete-before-insert write-path fix. A new `UNIQUE` index makes any future
+  non-atomic regression fail loudly instead of silently re-accumulating; the redundant
+  prefix index is dropped (the unique index serves `load_boundaries` as a prefix). On
+  the reference DB this collapsed 76,343 rows → 9,438 and reclaimed ~26% after `VACUUM`.
 
 ## [0.8.0] — 2026-06-28
 
