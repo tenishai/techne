@@ -27,8 +27,9 @@ techne init
 > techne init
 > ```
 >
-> Upgrade later by re-running with a newer tag. The `git clone` + `pip install -e .`
-> flow above is for **developing** techne (live local edits).
+> Upgrade later with `pipx install --force "git+https://github.com/tenishai/techne.git@<newer-tag>"`
+> (a plain `pipx install` on an already-installed techne refuses without `--force`). The
+> `git clone` + `pip install -e .` flow above is for **developing** techne (live local edits).
 
 ---
 
