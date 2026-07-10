@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -188,6 +188,12 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
 -- Thread boundaries (per-pair scores from the heuristic detector).
 -- One row per consecutive observation pair within a session. Persisted
 -- alongside threads so the audit surface can show why each split happened.
+-- The UNIQUE index enforces one row per (session, pair): run_session_end
+-- deletes-then-reinserts a session's boundaries each turn, and the constraint
+-- makes any future non-atomic regression fail loudly instead of silently
+-- re-accumulating duplicates (the v17 migration; techne thread_boundaries debt).
+-- It also serves load_boundaries' (session_id, obs_index_a) lookup as a prefix,
+-- so no separate non-unique index is needed.
 CREATE TABLE IF NOT EXISTS thread_boundaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -201,8 +207,8 @@ CREATE TABLE IF NOT EXISTS thread_boundaries (
     is_boundary INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_thread_boundaries_session
-    ON thread_boundaries(session_id, obs_index_a);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_boundaries_triple
+    ON thread_boundaries(session_id, obs_index_a, obs_index_b);
 
 -- Extension state (durable key-value sidecar for hooks and adapters).
 -- Thin JSON payload per named extension; upserted on write, read on start.
@@ -931,4 +937,35 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         if obs_exists:
             _add_column_if_missing(conn, "observations", "content_hash", "TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (16)")
+    if from_version < 17 and to_version >= 17:
+        # thread_boundaries accumulated duplicate (session_id, obs_index_a, obs_index_b)
+        # rows. run_session_end recomputes and re-inserts a session's FULL boundary set
+        # once per turn; before the delete-before-insert fix (7d45067, made atomic in
+        # 93890d5) that append had no dedup guard, so a session touched N turns kept N
+        # copies — observed 8x avg / 85x max, ~30% of the DB. The write path is correct
+        # now, but no backfill shipped, so existing DBs carry the debt forever. Collapse
+        # duplicates keeping the most-recent row per triple (MAX(id) preserves the current
+        # heuristic's scoring if it changed between recomputes), then add a UNIQUE index so
+        # any future non-atomic regression fails loudly instead of silently re-accumulating,
+        # and drop the now-redundant prefix index (the unique index covers
+        # (session_id, obs_index_a) as a prefix for load_boundaries). Dedup BEFORE the
+        # UNIQUE index or its creation fails on a DB that already has dupes (mirrors the
+        # v14 kc_reflect_dedup idiom). Guard on table existence (mirrors the v8/v16 guards).
+        tb_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_boundaries'"
+        ).fetchone()
+        if tb_exists:
+            conn.execute(
+                """DELETE FROM thread_boundaries
+                     WHERE id NOT IN (
+                         SELECT MAX(id) FROM thread_boundaries
+                       GROUP BY session_id, obs_index_a, obs_index_b
+                     )"""
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_thread_boundaries_session")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_boundaries_triple "
+                "ON thread_boundaries(session_id, obs_index_a, obs_index_b)"
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (17)")
     conn.commit()
