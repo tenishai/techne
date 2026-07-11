@@ -1182,6 +1182,10 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             result["candidates"] = [
                 {"id": c["id"], "file": c["file"]} for c in exc.candidates[:10]
             ]
+            # Signal the cap rather than silently truncating (parity with the
+            # CLI's "... and N more"; the total is already in the error text).
+            if len(exc.candidates) > 10:
+                result["candidates_truncated"] = True
         return result
     raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
     rows = annotate_freshness(db_path, raw)

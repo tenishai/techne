@@ -390,3 +390,27 @@ def test_codex_blast_radius_unresolvable_symbol_returns_error(tmp_path, config, 
     r3 = mcp_server._codex_blast_radius({"symbol_id": "solo"}, config)
     assert "error" not in r3
     assert r3["symbol_id"] == "c.py::solo::function::1"
+
+    # Overflowing candidate list is flagged as truncated, not silently capped.
+    for i in range(12):
+        add_symbol(codex_db, id=f"m{i}.py::dup::function::1", file=f"m{i}.py", name="dup", kind="function")
+    r4 = mcp_server._codex_blast_radius({"symbol_id": "dup"}, config)
+    assert len(r4["candidates"]) == 10
+    assert r4.get("candidates_truncated") is True
+
+    # Through the dispatch envelope: a resolution error is normal content
+    # (NOT isError) carrying the error text — the agent still sees it, and the
+    # structured candidates aren't flattened into an isError string.
+    resp = handle_request(
+        {
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_blast_radius",
+                "arguments": {"symbol_id": "does_not_exist"},
+            },
+        },
+        config,
+    )
+    assert resp["result"].get("isError") is not True
+    assert "no symbol named" in resp["result"]["content"][0]["text"]
