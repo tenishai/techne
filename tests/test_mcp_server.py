@@ -352,3 +352,65 @@ class TestMainLoopNonDictGuard:
         resp = json.loads(out_lines[0])
         assert resp["id"] == 1
         assert resp["result"]["serverInfo"]["name"] == "techne"
+
+
+def test_codex_blast_radius_unresolvable_symbol_returns_error(tmp_path, config, monkeypatch):
+    """techne#303: a bare name / bogus id on the MCP codex_blast_radius tool
+    must return an explicit error (not an empty node list that reads as
+    'nothing reachable') — the MCP twin of the CLI fix in #300.
+    """
+    from techne import mcp_server
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA
+    from techne.core.stores import SqliteStore
+
+    codex_db = tmp_path / "codex.db"
+    SqliteStore("codex", codex_db).migrate(CODEX_SCHEMA)
+    add_symbol(codex_db, id="a.py::verify::function::1", file="a.py", name="verify", kind="function")
+    add_symbol(codex_db, id="b.py::verify::method::5", file="b.py", name="verify", kind="method")
+    add_symbol(codex_db, id="c.py::solo::function::1", file="c.py", name="solo", kind="function")
+
+    # Point the handler at our hand-built db regardless of cwd.
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: codex_db)
+
+    # Bogus name → explicit error, no silent-empty nodes.
+    r = mcp_server._codex_blast_radius({"symbol_id": "does_not_exist"}, config)
+    assert r["nodes"] == []
+    assert "no symbol named" in r.get("error", "")
+
+    # Ambiguous bare name → error carrying the candidates.
+    r2 = mcp_server._codex_blast_radius({"symbol_id": "verify"}, config)
+    assert r2["nodes"] == []
+    assert {c["id"] for c in r2.get("candidates", [])} == {
+        "a.py::verify::function::1",
+        "b.py::verify::method::5",
+    }
+
+    # Unique bare name → resolves to its id, no error key.
+    r3 = mcp_server._codex_blast_radius({"symbol_id": "solo"}, config)
+    assert "error" not in r3
+    assert r3["symbol_id"] == "c.py::solo::function::1"
+
+    # Overflowing candidate list is flagged as truncated, not silently capped.
+    for i in range(12):
+        add_symbol(codex_db, id=f"m{i}.py::dup::function::1", file=f"m{i}.py", name="dup", kind="function")
+    r4 = mcp_server._codex_blast_radius({"symbol_id": "dup"}, config)
+    assert len(r4["candidates"]) == 10
+    assert r4.get("candidates_truncated") is True
+
+    # Through the dispatch envelope: a resolution error is normal content
+    # (NOT isError) carrying the error text — the agent still sees it, and the
+    # structured candidates aren't flattened into an isError string.
+    resp = handle_request(
+        {
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_blast_radius",
+                "arguments": {"symbol_id": "does_not_exist"},
+            },
+        },
+        config,
+    )
+    assert resp["result"].get("isError") is not True
+    assert "no symbol named" in resp["result"]["content"][0]["text"]
