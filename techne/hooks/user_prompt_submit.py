@@ -60,9 +60,10 @@ _SEED_NUDGE = (
     "\n"
     "If a durable **fact**, **decision**, or **correction** emerged this turn — "
     "one worth recalling in a future session — call `techne_store` once (one "
-    "line; pick the type: fact / decision / evaluation / procedure). If nothing "
-    "durable emerged, do nothing. Skip transient chatter, restatements of "
-    "existing memory, and this turn's mechanics."
+    "line; pick the type: fact / decision / evaluation / procedure — store a "
+    "correction as a fact). If nothing durable emerged, do nothing. Skip "
+    "transient chatter, restatements of existing memory, and this turn's "
+    "mechanics."
 )
 
 
@@ -93,6 +94,10 @@ def main() -> None:
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        sys.exit(0)
+    # Valid-but-non-object JSON ([], "foo", 5) would make data.get raise below;
+    # keep the "malformed stdin → clean no-op" contract for those too.
+    if not isinstance(data, dict):
         sys.exit(0)
 
     # Resolve the prompt text from whichever known key is present (field name is

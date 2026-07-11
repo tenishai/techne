@@ -162,3 +162,14 @@ def test_both_off_emits_nothing(home, monkeypatch, capsys):
     _seed("Postgres decision.", type="decision", confidence="high")
     out = _run(monkeypatch, capsys, {"prompt": "postgres"})
     assert out == ""
+
+
+def test_non_dict_json_emits_nothing(home, monkeypatch, capsys):
+    """Valid-but-non-object JSON on stdin ([], 5, "foo") → clean no-op, not a
+    traceback (the malformed-stdin contract covers these too)."""
+    _write_config(home, per_turn_seed=True)
+    monkeypatch.setattr("sys.stdin", io.StringIO("[1, 2, 3]"))
+    with pytest.raises(SystemExit) as exc:
+        user_prompt_submit.main()
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == ""
