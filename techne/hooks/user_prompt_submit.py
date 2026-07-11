@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook — inject per-turn recalled knowledge (techne#109/#277).
+"""UserPromptSubmit hook — per-turn recall (read) + seed (write) (techne#109/#277).
 
-The DYNAMIC per-turn complement to the STABLE SessionStart injection: on each user
-prompt, when the opt-in flag ``hooks.per_turn_recall`` is ON, run a knowledge
-search scoped to the submitted prompt and inject the most relevant durable facts
-into the model's context via ``hookSpecificOutput.additionalContext``.
+The DYNAMIC per-turn complement to the STABLE SessionStart injection. Two
+independent, opt-in (default-OFF) blocks land in ``additionalContext`` after the
+stable prefix:
+
+  - RECALL (``hooks.per_turn_recall``, techne#109): search knowledge scoped to
+    the submitted prompt and inject the most relevant durable facts — the READ
+    half. Injected only when the search returns rows.
+  - SEED (``hooks.per_turn_seed``, techne#277): a static nudge asking the
+    in-session agent to ``techne_store`` a durable fact/decision/correction if
+    one emerged this turn — the WRITE half, riding the already-warm context.
+    Best-effort and model-self-gated; the session-end reflect batch
+    reconciles/dedups the stream of seeds. This is the interactive complement to
+    end-of-session reflect, NOT a replacement — the batch stays the safety net.
+
+Either block can fire alone; a recall failure never suppresses the seed nudge.
 
 Design note (techne#109): SessionStart content is injected once and stays stable
 for the session; per-turn recall belongs on UserPromptSubmit so it lands *after*
@@ -38,6 +49,21 @@ import sys
 # The stdin key holding the submitted prompt text is undocumented (see module
 # docstring). Accept known candidates in priority order.
 PROMPT_KEYS = ("prompt", "user_prompt", "text")
+
+
+# Per-turn SEED nudge (techne#277). Static text — rides the already-warm
+# context, costs no DB query, and the model self-gates (stores only a genuine
+# durable). The session-end reflect batch reconciles/dedups the stream of seeds.
+_SEED_NUDGE = (
+    "## techne — seed check (techne#277)\n"
+    "> Per-turn seed nudge; best-effort, reconciled + deduped at session end.\n"
+    "\n"
+    "If a durable **fact**, **decision**, or **correction** emerged this turn — "
+    "one worth recalling in a future session — call `techne_store` once (one "
+    "line; pick the type: fact / decision / evaluation / procedure). If nothing "
+    "durable emerged, do nothing. Skip transient chatter, restatements of "
+    "existing memory, and this turn's mechanics."
+)
 
 
 def _build_context(rows: list[dict]) -> str:
@@ -92,54 +118,62 @@ def main() -> None:
         print(f"techne: config load failed, skipping per-turn recall: {e}", file=sys.stderr)
         sys.exit(0)
 
-    # Default-off gate: this is opt-in, experimental.
-    if not config.hooks.per_turn_recall:
+    # Both per-turn injections are opt-in (default OFF). Neither on → no-op.
+    if not (config.hooks.per_turn_recall or config.hooks.per_turn_seed):
         sys.exit(0)
 
-    from techne.hooks._timeout import bounded_hook
+    blocks: list[str] = []
 
     # ------------------------------------------------------------------
-    # Run the query inside the wall-clock budget. Scope to durable knowledge (not
-    # raw observations) and exclude soft-archived rows — mirrors egress discipline:
-    # archived stays searchable but is never auto-injected. Any failure
-    # (DB unreachable, slow SQLite → HookTimeout) is swallowed → emit nothing.
+    # Recall block (techne#109) — durable facts relevant to this prompt. Scope
+    # to knowledge (not raw observations), exclude soft-archived rows. Any
+    # failure (DB unreachable, slow SQLite → HookTimeout) degrades to no recall
+    # block WITHOUT aborting — the seed block can still emit.
+    # ------------------------------------------------------------------
+    if config.hooks.per_turn_recall:
+        try:
+            from techne.core.search import search
+            from techne.hooks._timeout import bounded_hook
+
+            with bounded_hook(config.hooks.timeout_s):
+                rows = search(
+                    config.db_path,
+                    prompt,
+                    table="knowledge",
+                    limit=config.hooks.per_turn_recall_limit,
+                    include_archived=False,
+                )
+            if rows:
+                blocks.append(_build_context(rows))
+        except Exception as e:  # noqa: BLE001  — catches HookTimeout too
+            print(f"techne: per-turn recall degraded: {e}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # Seed block (techne#277) — static nudge to store a durable if one emerged.
+    # No DB query; the model self-gates and the session-end batch reconciles.
+    # ------------------------------------------------------------------
+    if config.hooks.per_turn_seed:
+        blocks.append(_SEED_NUDGE)
+
+    if not blocks:
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # Emit the combined protocol JSON (additionalContext) and exit 0.
     # ------------------------------------------------------------------
     try:
-        from techne.core.search import search
-
-        with bounded_hook(config.hooks.timeout_s):
-            rows = search(
-                config.db_path,
-                prompt,
-                table="knowledge",
-                limit=config.hooks.per_turn_recall_limit,
-                include_archived=False,
-            )
-    except Exception as e:  # noqa: BLE001  — catches HookTimeout too
-        print(f"techne: per-turn recall degraded: {e}", file=sys.stderr)
-        sys.exit(0)
-
-    if not rows:
-        sys.exit(0)
-
-    # ------------------------------------------------------------------
-    # Emit the protocol JSON (additionalContext) and exit 0.
-    # ------------------------------------------------------------------
-    try:
-        context = _build_context(rows)
         print(
             json.dumps(
                 {
                     "hookSpecificOutput": {
                         "hookEventName": "UserPromptSubmit",
-                        "additionalContext": context,
+                        "additionalContext": "\n\n".join(blocks),
                     }
                 }
             )
         )
     except Exception as e:  # noqa: BLE001
-        print(f"techne: per-turn recall emit failed: {e}", file=sys.stderr)
-        sys.exit(0)
+        print(f"techne: per-turn hook emit failed: {e}", file=sys.stderr)
 
     sys.exit(0)
 
