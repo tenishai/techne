@@ -111,6 +111,11 @@ def resolve_symbol_id(db_path: Path, arg: str) -> str:
     means callers no longer have to copy a full id out of ``search`` for the
     common unambiguous case.
     """
+    # Heuristic: a full symbol id contains "::" (file::name::kind::line), and a
+    # bare name cannot — the indexer handles only Python/TypeScript, whose
+    # identifiers are "::"-free. If a "::"-using language (Rust/C++/Ruby, e.g.
+    # Foo::bar) is ever indexed, tighten this to a full-id shape check so such a
+    # name isn't misrouted into the id branch. See techne#300 review.
     if "::" in arg:
         if get_symbol(db_path, arg) is None:
             raise SymbolResolutionError(
