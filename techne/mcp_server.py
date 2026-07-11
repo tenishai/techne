@@ -1151,7 +1151,12 @@ def _codex_search(args: dict, config: Config) -> dict:
 
 def _codex_blast_radius(args: dict, config: Config) -> dict:
     """Transitive reachability for a symbol, scoped to the active repo (techne#209)."""
-    from techne.core.codegraph import annotate_freshness, reachable
+    from techne.core.codegraph import (
+        SymbolResolutionError,
+        annotate_freshness,
+        reachable,
+        resolve_symbol_id,
+    )
 
     symbol_id = args.get("symbol_id", "")
     depth = args.get("depth", 5)
@@ -1162,6 +1167,26 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             "symbol_id": symbol_id, "direction": direction, "depth": depth,
             "nodes": [], "notice": _NO_REPO_HINT,
         }
+    # Resolve a bare name / reject an unresolvable id, so a mistyped argument
+    # returns an explicit error instead of an empty node list that reads as
+    # "nothing reachable" (techne#303 — the MCP twin of the CLI fix in #300).
+    try:
+        symbol_id = resolve_symbol_id(db_path, symbol_id)
+    except SymbolResolutionError as exc:
+        result = {
+            "symbol_id": args.get("symbol_id", ""),
+            "direction": direction, "depth": depth,
+            "nodes": [], "error": str(exc),
+        }
+        if exc.candidates:
+            result["candidates"] = [
+                {"id": c["id"], "file": c["file"]} for c in exc.candidates[:10]
+            ]
+            # Signal the cap rather than silently truncating (parity with the
+            # CLI's "... and N more"; the total is already in the error text).
+            if len(exc.candidates) > 10:
+                result["candidates_truncated"] = True
+        return result
     raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
     rows = annotate_freshness(db_path, raw)
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
