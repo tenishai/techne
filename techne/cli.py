@@ -2677,6 +2677,24 @@ def codex_search(ctx, query, repo, limit):
         click.echo(f"    {s['file']}")
 
 
+def _resolve_codex_symbol_or_exit(db_path: Path, arg: str) -> str:
+    """Resolve a symbol argument (full id or bare name) to a concrete id,
+    printing a helpful error and exiting non-zero on failure — so callers /
+    blast-radius never silently return an empty result for an unresolvable
+    argument (techne#300)."""
+    from techne.core.codegraph import SymbolResolutionError, resolve_symbol_id
+
+    try:
+        return resolve_symbol_id(db_path, arg)
+    except SymbolResolutionError as exc:
+        click.echo(str(exc), err=True)
+        for c in exc.candidates[:10]:
+            click.echo(f"  {c['id']}  ({c['file']})", err=True)
+        if len(exc.candidates) > 10:
+            click.echo(f"  ... and {len(exc.candidates) - 10} more", err=True)
+        raise SystemExit(1) from exc
+
+
 @codex.command("callers")
 @click.argument("symbol_id")
 @click.option(
@@ -2684,11 +2702,16 @@ def codex_search(ctx, query, repo, limit):
 )
 @click.pass_context
 def codex_callers(ctx, symbol_id, repo):
-    """Who calls this symbol (direct), scoped to the active repo."""
+    """Who calls this symbol (direct), scoped to the active repo.
+
+    SYMBOL_ID is a full id (path::name::kind::line, from `codex search`) or a
+    bare name that resolves to exactly one symbol.
+    """
     config = ctx.obj["config"]
     from techne.core.codegraph import annotate_freshness, callers
 
     _root, db_path = _active_codex_db(config, repo)
+    symbol_id = _resolve_codex_symbol_or_exit(db_path, symbol_id)
     for s in annotate_freshness(db_path, callers(db_path, symbol_id)):
         freshness = s.get("freshness", "unknown")
         marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
@@ -2704,11 +2727,16 @@ def codex_callers(ctx, symbol_id, repo):
 @click.option("--depth", default=5, show_default=True)
 @click.pass_context
 def codex_blast(ctx, symbol_id, repo, direction, depth):
-    """Transitive reachability via recursive CTE — out=dependencies, in=dependents."""
+    """Transitive reachability via recursive CTE — out=dependencies, in=dependents.
+
+    SYMBOL_ID is a full id (path::name::kind::line, from `codex search`) or a
+    bare name that resolves to exactly one symbol.
+    """
     config = ctx.obj["config"]
     from techne.core.codegraph import annotate_freshness, reachable
 
     _root, db_path = _active_codex_db(config, repo)
+    symbol_id = _resolve_codex_symbol_or_exit(db_path, symbol_id)
     raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
     rows = annotate_freshness(db_path, raw)
     if not rows:

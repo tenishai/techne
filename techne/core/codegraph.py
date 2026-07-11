@@ -84,6 +84,67 @@ def get_symbol(db_path: Path, symbol_id: str) -> dict | None:
         conn.close()
 
 
+class SymbolResolutionError(ValueError):
+    """A user-supplied symbol argument could not be resolved to exactly one
+    symbol id. ``candidates`` holds the matches for the ambiguous case."""
+
+    def __init__(self, message: str, candidates: list[dict] | None = None) -> None:
+        super().__init__(message)
+        self.candidates = candidates or []
+
+
+def resolve_symbol_id(db_path: Path, arg: str) -> str:
+    """Resolve a symbol argument to a concrete symbol id, or raise.
+
+    Accepts either a full symbol id (``path::name::kind::line``) or a bare
+    name:
+
+    - **full id** → returned if it exists in this repo's graph, else
+      ``SymbolResolutionError``.
+    - **bare name** → the single symbol with that name is returned; if several
+      share the name it's ``SymbolResolutionError`` with ``candidates``; if
+      none, ``SymbolResolutionError``.
+
+    This exists so ``callers`` / ``blast-radius`` fail loudly on an
+    unresolvable argument instead of returning an empty result that is
+    indistinguishable from "no results" (techne#300). Bare-name convenience
+    means callers no longer have to copy a full id out of ``search`` for the
+    common unambiguous case.
+    """
+    # Heuristic: a full symbol id contains "::" (file::name::kind::line), and a
+    # bare name cannot — the indexer handles only Python/TypeScript, whose
+    # identifiers are "::"-free. If a "::"-using language (Rust/C++/Ruby, e.g.
+    # Foo::bar) is ever indexed, tighten this to a full-id shape check so such a
+    # name isn't misrouted into the id branch. See techne#300 review.
+    if "::" in arg:
+        if get_symbol(db_path, arg) is None:
+            raise SymbolResolutionError(
+                f"no symbol with id {arg!r} in this repo's graph "
+                "(is the repo indexed? run `codex index`)"
+            )
+        return arg
+    # Bare name — exact-name match (NOT the FTS search, which is fuzzy).
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, file, name, kind FROM symbols WHERE name = ? ORDER BY id",
+            (arg,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise SymbolResolutionError(
+            f"no symbol named {arg!r} in this repo's graph; try `codex search {arg}`"
+        )
+    if len(rows) > 1:
+        raise SymbolResolutionError(
+            f"{arg!r} is ambiguous — {len(rows)} symbols share that name; "
+            "pass a full symbol id (path::name::kind::line):",
+            candidates=[dict(r) for r in rows],
+        )
+    return rows[0]["id"]
+
+
 def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
     """FTS over symbol name + signature."""
     from techne.core.search import prepare_fts_query
