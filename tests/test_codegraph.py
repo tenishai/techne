@@ -10,11 +10,13 @@ from __future__ import annotations
 import pytest
 
 from techne.core.codegraph import (
+    SymbolResolutionError,
     add_edge,
     add_symbol,
     callees,
     callers,
     reachable,
+    resolve_symbol_id,
     search_symbols,
     stats,
 )
@@ -106,3 +108,41 @@ def test_stats(db):
     _graph(db)
     s = stats(db)
     assert s["symbols"] == 4 and s["edges"] == 4 and s["files"] == 4
+
+
+# ---- resolve_symbol_id: no silent-empty on unresolvable input (techne#300) --
+
+
+def test_resolve_symbol_id_bare_name_unique(db):
+    """A bare name resolves to the single symbol with that name — so callers
+    no longer have to copy a full id out of `search` for the common case."""
+    _sym(db, "a", "main")
+    assert resolve_symbol_id(db, "main") == "a"
+
+
+def test_resolve_symbol_id_full_id_passes_through_or_errors(db):
+    add_symbol(db, id="pkg/x.py::foo::function::1", file="pkg/x.py", name="foo", kind="function")
+    # An existing full id is returned as-is.
+    assert resolve_symbol_id(db, "pkg/x.py::foo::function::1") == "pkg/x.py::foo::function::1"
+    # A non-existent full id ERRORS rather than returning empty downstream.
+    with pytest.raises(SymbolResolutionError, match="no symbol with id"):
+        resolve_symbol_id(db, "no/such.py::bar::function::9")
+
+
+def test_resolve_symbol_id_no_match_errors(db):
+    """The core of #300: a bare name that matches nothing raises, instead of
+    the old silent empty result that looked like 'no callers'."""
+    _sym(db, "a", "main")
+    with pytest.raises(SymbolResolutionError, match="no symbol named"):
+        resolve_symbol_id(db, "does_not_exist")
+
+
+def test_resolve_symbol_id_ambiguous_lists_candidates(db):
+    add_symbol(db, id="a.py::verify::function::1", file="a.py", name="verify", kind="function")
+    add_symbol(db, id="b.py::verify::method::5", file="b.py", name="verify", kind="method")
+    with pytest.raises(SymbolResolutionError, match="ambiguous") as ei:
+        resolve_symbol_id(db, "verify")
+    assert {c["id"] for c in ei.value.candidates} == {
+        "a.py::verify::function::1",
+        "b.py::verify::method::5",
+    }
