@@ -349,6 +349,45 @@ def resolve_repo_db_for_query(config: Config, start_path: Path | str) -> Path | 
     return db_path if db_path.exists() else None
 
 
+def reindex_edited_file(config: Config, file_path: str | Path) -> int | None:
+    """Incrementally reindex a single edited file into its repo's codex db —
+    the mid-session freshness path (techne#301).
+
+    The SessionStart `codex index-all` only refreshes at session start, so a
+    file edited mid-session leaves the graph stale until the next session. This
+    reindexes just the touched file after an edit.
+
+    Only touches repos ALREADY indexed (never creates a db — mirrors
+    resolve_repo_db_for_query's read-consumer posture) and only supported
+    languages. Returns the symbol count indexed, or None when skipped
+    (unsupported extension / not in a repo / repo not indexed). Cheap:
+    index_file is incremental — an unchanged file is a no-op via its stored
+    content hash.
+
+    NOTE on latency (techne#301 review): index_file opens the db with
+    busy_timeout=5000, so under a concurrent writer (an active `codex watch`)
+    this can block up to ~5s before SQLite's file lock frees; bounded_hook's
+    SIGALRM does not pre-empt SQLite's busy-wait, so busy_timeout is the real
+    backstop. Bounded and rare, but the caller runs this best-effort.
+    """
+    from techne.codex.source import index_file, is_indexable_path
+
+    p = Path(file_path)
+    if not is_indexable_path(p):
+        return None
+    # Run the one-time legacy-layout migration first, for parity with
+    # resolve_repo_db_for_query — else a legacy install's first edit would skip
+    # until some other process triggers it (techne#301 review).
+    ensure_legacy_migrated(config)
+    root = find_repo_root(p)
+    if root is None:
+        return None
+    db_path = repo_db_path(config, root)
+    if not db_path.exists():
+        return None  # repo never indexed → don't spawn an empty db
+    return index_file(db_path, p, root)
+
+
 def list_codex_repos(config: Config) -> list[tuple[str, Path]]:
     """Enumerate the per-repo codex dbs as ``(repo_root, db_path)`` pairs.
 
