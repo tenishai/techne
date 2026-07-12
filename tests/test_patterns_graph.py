@@ -240,6 +240,50 @@ def test_migrate_v1_to_v2_adds_topic_absorbed(tmp_path):
         conn.close()
 
 
+def test_schema_apply_then_reconcile_on_existing_v1_db(tmp_path):
+    # Reproduces the REAL architect_store() entry path on a PRE-EXISTING v1 db:
+    # migrated_store() executescripts ARCHITECT_SCHEMA (schema-apply) BEFORE the
+    # numbered migration adds topic/absorbed — so NOTHING in the base schema may
+    # reference those columns (e.g. an index on `topic`), or the apply crashes on
+    # a db where `CREATE TABLE IF NOT EXISTS` is a no-op. (Regression: an index on
+    # `topic` in the base schema broke live-db upgrades though fresh-db tests passed.)
+    db = tmp_path / "architect.db"
+    conn = plain_connect(db)
+    # The real pre-#308 (v1) patterns table: every v1 column EXCEPT topic/absorbed.
+    conn.executescript(
+        """CREATE TABLE patterns (
+               id TEXT PRIMARY KEY, investigation_id TEXT, name TEXT NOT NULL,
+               source_url TEXT NOT NULL, source_path TEXT, lens_kind TEXT, body TEXT NOT NULL,
+               confidence TEXT DEFAULT 'medium', status TEXT DEFAULT 'active',
+               superseded_by TEXT,
+               created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
+           CREATE TABLE pattern_relations (
+               src_pattern_id TEXT NOT NULL, dst_name TEXT NOT NULL, dst_pattern_id TEXT,
+               kind TEXT NOT NULL DEFAULT 'related',
+               resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+               PRIMARY KEY (src_pattern_id, dst_name, kind));"""
+    )
+    conn.execute("INSERT INTO patterns (id, name, source_url, body) VALUES ('p1','A','http://x','b')")
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    # Schema-apply (what migrated_store does on every open) must NOT raise here...
+    SqliteStore("architect", db).migrate(ARCHITECT_SCHEMA)
+    # ...then the numbered migration adds the columns + the topic index.
+    architect._reconcile_relations(db)
+
+    conn = plain_connect(db)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(patterns)")}
+        assert {"topic", "absorbed"} <= cols
+        idx = {r[1] for r in conn.execute("PRAGMA index_list('patterns')")}
+        assert "idx_patterns_topic" in idx
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
 def test_reconcile_relations_noop_on_fresh_schema(db):
     # A db built from the current ARCHITECT_SCHEMA is already new-shape.
     before = {r[1] for r in plain_connect(db).execute("PRAGMA table_info(pattern_relations)")}
