@@ -40,6 +40,7 @@ class ParsedPattern:
     source_url: str
     surveyed_date: str  # YYYY-MM-DD
     body: str  # full markdown body — everything after the Source/Surveyed lines
+    relations: tuple[tuple[str, str], ...] = ()  # (kind, dst_name) — typed graph edges (techne#308)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,27 @@ NO_LIFT_HEADING = "surveyed (no patterns worth saving)"
 # decorative and not stored separately.
 _URL_RE = re.compile(r"https?://\S+")
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+# Typed graph edges declared as preamble fields (techne#308), e.g.
+#   - **Composes-with**: [[Other pattern]], [[Another]]
+#   - **Variant-of**: [[Base pattern]]
+# Only the coexistence kinds are declarative here; `supersedes` is a deliberate,
+# reviewed curation action (`architect tag … --superseded-by`), never an ingest
+# side-effect. The `[[wikilink]]` targets are resolved to ids by the store layer.
+_RELATION_LABELS = {"composes-with": "composes-with", "variant-of": "variant-of"}
+_REL_BULLET_RE = re.compile(r"^-\s+\*\*(?P<label>[\w-]+)\*\*:\s*(?P<rest>.+)$")
+_WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
+def _relation_targets(rest: str) -> list[str]:
+    """Extract `[[...]]` target names from a relation-field value, dropping any
+    `file#heading` prefix (heading after the last `#`). Order-preserved."""
+    out: list[str] = []
+    for raw in _WIKILINK_RE.findall(rest):
+        name = raw.rsplit("#", 1)[-1].strip()
+        if name:
+            out.append(name)
+    return out
 
 
 def parse(text: str) -> ParseResult:
@@ -145,6 +167,7 @@ def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | None:
     source_line: str | None = None
     date_line: str | None = None
     body_lines: list[str] = []
+    relations: list[tuple[str, str]] = []
 
     state: Literal["preamble", "body"] = "preamble"
     for line in body.splitlines():
@@ -156,10 +179,15 @@ def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | None:
             if stripped.startswith("- **Surveyed**:"):
                 date_line = stripped
                 continue
+            rel = _REL_BULLET_RE.match(stripped)
+            if rel is not None and rel.group("label").lower() in _RELATION_LABELS:
+                kind = _RELATION_LABELS[rel.group("label").lower()]
+                relations.extend((kind, name) for name in _relation_targets(rel.group("rest")))
+                continue
             if stripped == "":
                 # Blank line still in preamble — skip
                 continue
-            # First non-source/date/blank line: body starts
+            # First non-source/date/relation/blank line: body starts
             state = "body"
         if state == "body":
             body_lines.append(line)
@@ -185,6 +213,7 @@ def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | None:
         source_url=url_match.group(0).rstrip("),.;"),
         surveyed_date=date_match.group(1),
         body="\n".join(body_lines).strip(),
+        relations=tuple(relations),
     )
 
 
