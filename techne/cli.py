@@ -2392,16 +2392,34 @@ def architect_backfill(ctx):
 
 @architect.command("topic")
 @click.argument("name", required=False)
+@click.option(
+    "--as-of",
+    "as_of",
+    default=None,
+    help="Point-in-time view (techne#306): show what was current as of this time "
+    "(YYYY-MM-DD[ HH:MM:SS]) via the validity window, instead of the live view.",
+)
 @click.pass_context
-def architect_topic(ctx, name):
+def architect_topic(ctx, name, as_of):
     """Topic index (techne#597). No NAME → list topics + counts (crowded first).
     With NAME → the topic's active patterns, each superseded predecessor folded
-    under it with its salvage note. Use '(untopiced)' for the ungrouped bucket."""
+    under it with its salvage note. Use '(untopiced)' for the ungrouped bucket.
+    --as-of <ts> switches to the point-in-time view (what was current then)."""
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
-    from techne.core.patterns import topic_list, topic_show
+    from techne.core.patterns import current_as_of, topic_list, topic_show
 
     db = architect_db(config)
+    if as_of is not None:
+        rows = current_as_of(db, as_of, topic=name)
+        if not rows:
+            scope = f" in topic {name!r}" if name else ""
+            click.echo(f"No patterns current as of {as_of}{scope}.")
+            return
+        click.echo(f"# current as of {as_of}:")
+        for r in rows:
+            click.echo(f"  {r['id']}  {r['name']}  [{r['topic'] or '(untopiced)'}]")
+        return
     if name is None:
         rows = topic_list(db)
         if not rows:
