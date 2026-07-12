@@ -16,6 +16,7 @@ from techne.core.patterns import (
     add_relation,
     backfill_graph,
     get_pattern,
+    graph_data,
     ingest_patterns_md,
     list_patterns,
     patterns_for_target,
@@ -446,6 +447,91 @@ def search_by_name(db, name):
         return conn.execute("SELECT id FROM patterns WHERE name = ?", (name,)).fetchone()["id"]
     finally:
         conn.close()
+
+
+# --- graph export (techne#305) ----------------------------------------------
+
+
+def test_graph_data_full_and_topic_scoped(db):
+    a = _mk(db, "A", "x")
+    b = _mk(db, "B", "y")
+    c = _mk(db, "C", "z")
+    tag_pattern(db, a, topic="retrieval")
+    tag_pattern(db, b, topic="retrieval")
+    tag_pattern(db, c, topic="policy")
+    add_relation(db, src_pattern_id=a, dst_name="B", kind="composes-with")
+    add_relation(db, src_pattern_id=a, dst_name="C", kind="related")  # cross-topic
+
+    full = graph_data(db)
+    assert {n["name"] for n in full["nodes"]} == {"A", "B", "C"}
+    assert {e["kind"] for e in full["edges"]} == {"composes-with", "related"}
+
+    # Topic scope: only retrieval nodes, and the cross-topic edge to C is dropped
+    # (both endpoints must be in the node set — no dangling edges).
+    ret = graph_data(db, topic="retrieval")
+    assert {n["name"] for n in ret["nodes"]} == {"A", "B"}
+    assert len(ret["edges"]) == 1 and ret["edges"][0]["kind"] == "composes-with"
+
+
+def test_graph_data_superseded_included_unresolved_excluded(db):
+    a = _mk(db, "A", "x")
+    old = _mk(db, "Old", "o")
+    add_relation(db, src_pattern_id=a, dst_name="Ghost", kind="related")  # unresolved
+    supersede(db, old_id=old, new_id=a)  # resolved supersedes edge old→a; Old goes superseded
+
+    data = graph_data(db)
+    statuses = {n["name"]: n["status"] for n in data["nodes"]}
+    assert statuses == {"A": "active", "Old": "superseded"}
+    # Only the resolved supersedes edge; the dangling 'Ghost' edge is excluded.
+    assert [e["kind"] for e in data["edges"]] == ["supersedes"]
+
+
+def test_render_mermaid_structure():
+    from techne.core.pattern_graph import render_mermaid
+
+    data = {
+        "nodes": [
+            {"id": "1a", "name": "Alpha", "topic": "t1", "status": "active"},
+            {"id": "2b", "name": "Old", "topic": "t1", "status": "superseded"},
+        ],
+        "edges": [
+            {"src": "2b", "dst": "1a", "kind": "supersedes"},
+            {"src": "1a", "dst": "2b", "kind": "composes-with"},
+        ],
+    }
+    out = render_mermaid(data)
+    assert out.startswith("flowchart LR")
+    assert 'subgraph t0["t1"]' in out
+    assert 'n1a["Alpha"]' in out
+    assert "n2b -.->|supersedes| n1a" in out  # supersedes reads dashed
+    assert "n1a -->|composes-with| n2b" in out
+    assert "classDef superseded" in out and "class n2b superseded" in out
+
+
+def test_render_dot_structure():
+    from techne.core.pattern_graph import render_dot
+
+    data = {
+        "nodes": [
+            {"id": "1a", "name": "Alpha", "topic": None, "status": "active"},
+            {"id": "2b", "name": "Old", "topic": None, "status": "superseded"},
+        ],
+        "edges": [{"src": "1a", "dst": "2b", "kind": "variant-of"}],
+    }
+    out = render_dot(data)
+    assert out.startswith("digraph patterns {")
+    assert 'label="(untopiced)"' in out
+    assert '"n1a" [label="Alpha"]' in out
+    assert 'style="dashed"' in out  # superseded node de-emphasized
+    assert '"n1a" -> "n2b" [label="variant-of", color="seagreen"]' in out
+
+
+def test_render_escapes_quotes():
+    from techne.core.pattern_graph import render_dot, render_mermaid
+
+    data = {"nodes": [{"id": "1", "name": 'Quote " here', "topic": "t", "status": "active"}], "edges": []}
+    assert "&quot;" in render_mermaid(data)
+    assert '\\"' in render_dot(data)
 
 
 # --- legacy retirement ------------------------------------------------------
