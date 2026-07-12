@@ -111,7 +111,7 @@ class HookConfig:
     # Hard cap on the number of symbols injected per Grep/Glob (config-over-hardcode).
     codex_grep_assist_limit: int = 8
     # Mid-session codex freshness (techne#301): when ON, a PostToolUse on
-    # Write/Edit incrementally reindexes just the edited file into its repo's
+    # Write/Edit/MultiEdit incrementally reindexes just the edited file into its repo's
     # codex db, so codex queries don't go stale between SessionStart reindexes.
     # Best-effort, only touches already-indexed repos + supported langs. Off by
     # default (adds a small per-edit reindex).

@@ -514,6 +514,24 @@ def _walk_repo(root: Path, languages: set[str]) -> Iterator[Path]:
 
 
 # ---------------------------------------------------------------------------
+# Public single-file surface — for external callers (e.g. the reindex-on-edit
+# freshness path, techne#301) that need one file indexed without a RepoSource.
+# Depend on these, NOT the leading-underscore internals.
+# ---------------------------------------------------------------------------
+
+
+def index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
+    """Index a single file into a repo's codex db; returns the symbol count
+    (incremental — an unchanged file is a no-op via its stored hash)."""
+    return _index_file(db_path, file_path, repo_root)
+
+
+def is_indexable_path(file_path: Path) -> bool:
+    """True if this file's extension maps to a codex-indexable language."""
+    return file_path.suffix.lower() in _EXT_LANGUAGE
+
+
+# ---------------------------------------------------------------------------
 # RepoSource — the SourceAdapter
 # ---------------------------------------------------------------------------
 
