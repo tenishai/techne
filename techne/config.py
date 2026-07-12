@@ -118,6 +118,12 @@ class HookConfig:
     per_turn_recall: bool = False
     # Hard cap on the number of knowledge rows injected per turn.
     per_turn_recall_limit: int = 5
+    # Per-turn SEED nudge (techne#277): on each turn, remind the in-session
+    # agent to techne_store a durable fact/decision/correction if one emerged —
+    # the interactive complement to end-of-session reflect. Best-effort, rides
+    # the already-warm context; the session-end batch reconciles/dedups. The
+    # model self-gates (stores only when something durable emerged). Default OFF.
+    per_turn_seed: bool = False
 
 
 ReflectWriteTo = Literal["candidates", "live"]
@@ -460,6 +466,7 @@ class Config:
                 codex_grep_assist_limit=int(h.get("codex_grep_assist_limit", 8)),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
+                per_turn_seed=h.get("per_turn_seed", False),
             )
 
         if "heuristic" in raw and isinstance(raw["heuristic"], dict):
@@ -596,6 +603,7 @@ class Config:
                 "codex_grep_assist_limit": self.hooks.codex_grep_assist_limit,
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
+                "per_turn_seed": self.hooks.per_turn_seed,
             },
             "heuristic": {
                 "boundary_threshold": self.heuristic.boundary_threshold,

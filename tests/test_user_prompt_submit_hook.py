@@ -114,3 +114,62 @@ def test_alternate_prompt_key_user_prompt(home, monkeypatch, capsys):
     out = _run(monkeypatch, capsys, {"user_prompt": "postgres join"})
     payload = json.loads(out)
     assert "Postgres" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+# ---- Seed block (techne#277) ----------------------------------------------
+
+
+def test_seed_flag_on_injects_nudge(home, monkeypatch, capsys):
+    """per_turn_seed ON → the static seed nudge is injected (no DB needed)."""
+    _write_config(home, per_turn_seed=True)
+    out = _run(monkeypatch, capsys, {"prompt": "anything"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "seed check" in ctx and "techne_store" in ctx
+
+
+def test_seed_flag_off_no_nudge(home, monkeypatch, capsys):
+    """Recall ON but seed OFF → recalled fact present, seed nudge absent."""
+    _write_config(home, per_turn_recall=True)
+    _seed("Postgres was chosen for join semantics.", type="decision", confidence="high")
+    out = _run(monkeypatch, capsys, {"prompt": "postgres join"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "Postgres" in ctx
+    assert "seed check" not in ctx
+
+
+def test_seed_and_recall_compose(home, monkeypatch, capsys):
+    """Both flags ON + a matching fact → additionalContext carries BOTH the
+    recalled fact and the seed nudge."""
+    _write_config(home, per_turn_recall=True, per_turn_seed=True)
+    _seed("Postgres was chosen for join semantics.", type="decision", confidence="high")
+    out = _run(monkeypatch, capsys, {"prompt": "postgres join"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "Postgres" in ctx and "seed check" in ctx
+
+
+def test_seed_only_fires_without_a_recall_match(home, monkeypatch, capsys):
+    """Seed ON, recall OFF, nothing matches → the nudge still fires (static,
+    independent of any search hit)."""
+    _write_config(home, per_turn_seed=True)  # per_turn_recall stays False
+    out = _run(monkeypatch, capsys, {"prompt": "zzznomatchqqq"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "techne_store" in ctx
+
+
+def test_both_off_emits_nothing(home, monkeypatch, capsys):
+    """Explicit config with both per-turn flags off → clean no-op."""
+    _write_config(home, per_turn_recall=False, per_turn_seed=False)
+    _seed("Postgres decision.", type="decision", confidence="high")
+    out = _run(monkeypatch, capsys, {"prompt": "postgres"})
+    assert out == ""
+
+
+def test_non_dict_json_emits_nothing(home, monkeypatch, capsys):
+    """Valid-but-non-object JSON on stdin ([], 5, "foo") → clean no-op, not a
+    traceback (the malformed-stdin contract covers these too)."""
+    _write_config(home, per_turn_seed=True)
+    monkeypatch.setattr("sys.stdin", io.StringIO("[1, 2, 3]"))
+    with pytest.raises(SystemExit) as exc:
+        user_prompt_submit.main()
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == ""
