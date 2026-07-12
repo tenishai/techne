@@ -83,11 +83,6 @@ class TaskResult:
 
 # --- context building (per variant) ----------------------------------------
 
-_NO_MEMORY_PREAMBLE = (
-    "Answer the question from your own knowledge only; no notes are provided."
-)
-
-
 def build_context(task: EvalTask, variant: Variant, recall: RecallFn) -> str:
     """Assemble the answerer's context for one (task, variant).
 
@@ -107,14 +102,28 @@ def build_context(task: EvalTask, variant: Variant, recall: RecallFn) -> str:
 
 
 def _answer_prompt(task: EvalTask, context: str) -> str:
-    head = _NO_MEMORY_PREAMBLE if not context else context
-    return f"{head}\n\nQuestion: {task.question}\n\nAnswer concisely."
+    # Framing is held CONSTANT across variants — only the material differs — so
+    # the measured delta is the memory's, not a per-variant instruction (a
+    # benchmark is a measurement instrument; confounds matter). Empty-recall
+    # curated collapses to the same "(no notes provided)" as no_memory, which
+    # is the correct symmetry.
+    material = context if context else "(no notes provided)"
+    return (
+        "Answer the question using the provided notes if any, otherwise your "
+        f"own knowledge.\n\n{material}\n\nQuestion: {task.question}\n\n"
+        "Answer concisely."
+    )
 
 
 # --- defensive judge (cultivar) --------------------------------------------
 
 # The judge is told to emit the verdict token FIRST so a truncated response is
-# still salvageable; we accept PASS/FAIL anywhere but prefer the leading token.
+# still salvageable; we take the first standalone PASS/FAIL token. Word
+# boundaries keep "PASSED"/"surpass" from matching. CAVEAT: the salvage path
+# trusts TOKEN ORDER, not semantics — a judge that ignores the "token first"
+# instruction and writes "does not pass; FAIL" would be read as PASS. That's the
+# accepted cost of truncation-robustness, sound only while the judge obeys the
+# leading-token instruction (which _judge_prompt demands).
 _VERDICT_RE = re.compile(r"\b(PASS|FAIL)\b", re.IGNORECASE)
 
 
@@ -149,7 +158,9 @@ def judge(
         return False, f"autofail: judge call failed: {exc}"
     m = _VERDICT_RE.search(raw or "")
     if m is None:
-        return False, f"autofail: no PASS/FAIL token in judge output: {raw[:120]!r}"
+        # (raw or '') — a judge_fn that RETURNS None (vs raising) must not crash
+        # the debug path; the whole point here is not trusting the judge output.
+        return False, f"autofail: no PASS/FAIL token in judge output: {(raw or '')[:120]!r}"
     passed = m.group(1).upper() == "PASS"
     reason = (raw or "").strip().splitlines()
     detail = reason[1] if len(reason) > 1 else reason[0] if reason else ""
@@ -178,6 +189,10 @@ def is_abstention(answer: str) -> bool:
         return False
     # "Bare" ~ under a dozen words: a substantive answer that happens to include
     # an abstention phrase (e.g. "The value is 5, the rest is unknown") is not.
+    # The length gate assumes a NON-ADVERSARIAL answerer — a padded abstention
+    # ("After reviewing all memory I regret I cannot determine this") exceeds 12
+    # words and escapes. Fine here: the natural no_memory baseline abstains
+    # concisely, which the gate catches.
     return len(a.split()) <= 12
 
 
@@ -185,7 +200,16 @@ def detect_trivial_pass(task: EvalTask, answer: str, passed: bool) -> bool:
     """A PASS is TRIVIAL when the task is gameable by blanket abstention
     (deletion/absence with abstention_correct) and the answer is a bare
     abstention. Such passes shouldn't count as evidence the memory system works
-    — a system that answers "I don't know" to everything would ace them."""
+    — a system that answers "I don't know" to everything would ace them.
+
+    DESIGN PROPERTY (techne#118 review): on abstention_correct tasks the
+    CORRECT answer *is* an abstention, so a genuinely-correct concise curated
+    answer ("unknown — no budget recorded") is also flagged trivial and drops
+    out of `credited`. So absence/deletion do NOT contribute a "does memory
+    help?" signal — they contribute a "don't OVER-answer" signal: they catch the
+    regression where memory makes the model stop abstaining and hallucinate.
+    Read the curated-vs-none delta only over the non-abstention categories.
+    """
     if not passed:
         return False
     if not task.abstention_correct:
@@ -215,28 +239,30 @@ def run_task(
     variant's, not the model's)."""
     results: list[TaskResult] = []
     for variant in variants:
-        context = build_context(task, variant, recall)
+        # Guard the WHOLE per-variant body — context build (which calls recall,
+        # real SQLite/FTS5 in Phase 2), answerer, and judge — so one variant
+        # erroring becomes an autofail result, never a crash of the whole run.
         try:
+            context = build_context(task, variant, recall)
             answer = answerer(_answer_prompt(task, context))
-        except Exception as exc:  # noqa: BLE001 — one variant erroring must not sink the rest
+            passed, reason = judge(task.question, task.expected, answer, judge_fn)
+            results.append(
+                TaskResult(
+                    task_id=task.id, category=task.category, variant=variant,
+                    answer=answer, passed=passed,
+                    trivial_pass=detect_trivial_pass(task, answer, passed),
+                    judge_reason=reason, answer_tokens=_rough_tokens(answer),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — one variant must not sink the rest
             results.append(
                 TaskResult(
                     task_id=task.id, category=task.category, variant=variant,
                     answer="", passed=False, trivial_pass=False,
-                    judge_reason=f"autofail: answerer call failed: {exc}",
+                    judge_reason=f"autofail: {variant.value} errored: {exc}",
                     answer_tokens=0,
                 )
             )
-            continue
-        passed, reason = judge(task.question, task.expected, answer, judge_fn)
-        results.append(
-            TaskResult(
-                task_id=task.id, category=task.category, variant=variant,
-                answer=answer, passed=passed,
-                trivial_pass=detect_trivial_pass(task, answer, passed),
-                judge_reason=reason, answer_tokens=_rough_tokens(answer),
-            )
-        )
     return results
 
 

@@ -147,7 +147,26 @@ def test_run_task_answerer_error_becomes_autofail_result():
         answerer=boom, judge_fn=lambda p: "PASS", recall=lambda q: [],
     )
     assert len(results) == 1
-    assert results[0].passed is False and "answerer call failed" in results[0].judge_reason
+    assert results[0].passed is False and "answerer down" in results[0].judge_reason
+
+
+def test_run_task_recall_error_does_not_sink_the_run():
+    """A recall failure (real SQLite/FTS5 in Phase 2) on the curated variant
+    must become an autofail result, not crash the whole run — the guard now
+    spans context-build, not just the answerer (techne#118 review)."""
+    def boom_recall(q):
+        raise RuntimeError("search exploded")
+
+    results = run_task(
+        _task(),
+        [Variant.NO_MEMORY, Variant.CURATED_RECALL, Variant.RAW_SOURCE_DUMP],
+        answerer=lambda p: "Strelsau", judge_fn=lambda p: "PASS", recall=boom_recall,
+    )
+    assert len(results) == 3  # all three variants produced a result
+    curated = next(r for r in results if r.variant is Variant.CURATED_RECALL)
+    assert curated.passed is False and "search exploded" in curated.judge_reason
+    # the variants that don't touch recall still ran and passed
+    assert all(r.passed for r in results if r.variant is not Variant.CURATED_RECALL)
 
 
 def test_score_excludes_trivial_passes_from_credit():
