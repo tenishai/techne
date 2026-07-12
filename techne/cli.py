@@ -2459,6 +2459,61 @@ def architect_tag(ctx, pattern_id, topic, status, superseded_by, absorbed):
     click.echo("updated" if changed else "no change")
 
 
+@architect.command("graph")
+@click.option(
+    "--topic",
+    default=None,
+    help="Render only this topic's subgraph ('(untopiced)' for the ungrouped bucket). "
+    "Default: the whole store.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["mermaid", "dot"]),
+    default="mermaid",
+    help="Output format (default: mermaid).",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the graph here (default: stdout).",
+)
+@click.pass_context
+def architect_graph(ctx, topic, fmt, output):
+    """Render the topic-index + relation graph as Mermaid or DOT (techne#305).
+
+    Nodes cluster by topic; superseded patterns are dashed/de-emphasized; edges
+    are labeled by relation kind (supersedes dashed). Scope a focused view with
+    --topic — a whole-store render of the full corpus is dense."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.pattern_graph import render_dot, render_mermaid
+    from techne.core.patterns import graph_data
+
+    data = graph_data(architect_db(config), topic=topic)
+    if not data["nodes"]:
+        where = f" in topic {topic!r}" if topic else ""
+        click.echo(f"No patterns{where}.", err=True)
+        return
+    text = (render_dot if fmt == "dot" else render_mermaid)(data)
+    if output:
+        output.write_text(text, encoding="utf-8")
+        click.echo(
+            f"Wrote {fmt} graph: {len(data['nodes'])} nodes, {len(data['edges'])} edges → {output}",
+            err=True,
+        )
+    else:
+        click.echo(text)
+    if topic is None and len(data["nodes"]) > 60:
+        click.echo(
+            f"[{len(data['nodes'])} nodes — consider --topic <name> for a focused view; "
+            "`architect topic` lists them]",
+            err=True,
+        )
+
+
 @architect.command("retire-legacy")
 @click.option("--dry-run", is_flag=True, help="Report the count without deleting.")
 @click.pass_context
