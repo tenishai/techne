@@ -57,7 +57,10 @@ CREATE TABLE IF NOT EXISTS patterns (
 );
 CREATE INDEX IF NOT EXISTS idx_patterns_investigation ON patterns(investigation_id);
 CREATE INDEX IF NOT EXISTS idx_patterns_status ON patterns(status);
-CREATE INDEX IF NOT EXISTS idx_patterns_topic ON patterns(topic);
+-- NOTE: the index on `topic` is created by the v1→v2 migration step
+-- (_step_v1_to_v2_topic_absorbed), NOT here. This schema string is executescript'd
+-- on every open BEFORE the numbered migration runs; an index referencing `topic`
+-- would crash the apply on an existing pre-v2 db where the column isn't added yet.
 
 CREATE TABLE IF NOT EXISTS pattern_relations (
     src_pattern_id    TEXT NOT NULL REFERENCES patterns(id),
