@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from techne.core import architect
-from techne.core.architect import ARCHITECT_SCHEMA
+from techne.core.architect import ARCHITECT_SCHEMA, ARCHITECT_VERSION
 from techne.core.patterns import (
     _apply_targets,
     _norm,
@@ -15,6 +15,7 @@ from techne.core.patterns import (
     add_pattern,
     add_relation,
     backfill_graph,
+    current_as_of,
     get_pattern,
     graph_data,
     ingest_patterns_md,
@@ -228,7 +229,7 @@ def test_migrate_v1_to_v2_adds_topic_absorbed(tmp_path):
         # Existing data survives the additive migration (new columns default NULL).
         row = conn.execute("SELECT name, topic, absorbed FROM patterns WHERE id='p1'").fetchone()
         assert (row["name"], row["topic"], row["absorbed"]) == ("Alpha", None, None)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION
     finally:
         conn.close()
 
@@ -236,7 +237,7 @@ def test_migrate_v1_to_v2_adds_topic_absorbed(tmp_path):
     architect._reconcile_relations(db)
     conn = plain_connect(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION
     finally:
         conn.close()
 
@@ -280,7 +281,7 @@ def test_schema_apply_then_reconcile_on_existing_v1_db(tmp_path):
         assert {"topic", "absorbed"} <= cols
         idx = {r[1] for r in conn.execute("PRAGMA index_list('patterns')")}
         assert "idx_patterns_topic" in idx
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION
     finally:
         conn.close()
 
@@ -447,6 +448,81 @@ def search_by_name(db, name):
         return conn.execute("SELECT id FROM patterns WHERE name = ?", (name,)).fetchone()["id"]
     finally:
         conn.close()
+
+
+# --- validity-windowed supersession (techne#306) ----------------------------
+
+
+def test_migrate_v2_to_v3_adds_validity_window(tmp_path):
+    # Real architect_store() path on an EXISTING v2 db (has topic/absorbed, not the
+    # window cols): schema-apply THEN reconcile — the #315 lesson, applied up front.
+    db = tmp_path / "architect.db"
+    conn = plain_connect(db)
+    conn.executescript(
+        """CREATE TABLE patterns (
+               id TEXT PRIMARY KEY, investigation_id TEXT, name TEXT NOT NULL,
+               source_url TEXT NOT NULL, source_path TEXT, lens_kind TEXT, body TEXT NOT NULL,
+               confidence TEXT DEFAULT 'medium', status TEXT DEFAULT 'active',
+               superseded_by TEXT, topic TEXT, absorbed TEXT,
+               created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
+           CREATE INDEX idx_patterns_topic ON patterns(topic);
+           CREATE TABLE pattern_relations (
+               src_pattern_id TEXT NOT NULL, dst_name TEXT NOT NULL, dst_pattern_id TEXT,
+               kind TEXT NOT NULL DEFAULT 'related',
+               resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+               PRIMARY KEY (src_pattern_id, dst_name, kind));"""
+    )
+    conn.execute(
+        "INSERT INTO patterns (id, name, source_url, body, topic) VALUES ('p1','A','http://x','b','t')"
+    )
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    SqliteStore("architect", db).migrate(ARCHITECT_SCHEMA)  # schema-apply must not raise
+    architect._reconcile_relations(db)
+
+    conn = plain_connect(db)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(patterns)")}
+        assert {"valid_at", "invalid_at"} <= cols
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        row = conn.execute("SELECT topic, valid_at, invalid_at FROM patterns WHERE id='p1'").fetchone()
+        assert (row["topic"], row["valid_at"], row["invalid_at"]) == ("t", None, None)
+    finally:
+        conn.close()
+
+
+def test_supersede_stamps_validity_window(db):
+    old = _mk(db, "Old", "o")
+    new = _mk(db, "New", "n")
+    supersede(db, old_id=old, new_id=new, invalid_at="2026-06-15 12:00:00")
+    assert get_pattern(db, old)["invalid_at"] == "2026-06-15 12:00:00"
+    assert get_pattern(db, new)["valid_at"] == "2026-06-15 12:00:00"
+    # Idempotent: re-superseding keeps the original window (COALESCE).
+    supersede(db, old_id=old, new_id=new, invalid_at="2026-07-01 00:00:00")
+    assert get_pattern(db, old)["invalid_at"] == "2026-06-15 12:00:00"
+    assert get_pattern(db, new)["valid_at"] == "2026-06-15 12:00:00"
+
+
+def test_current_as_of_window(db):
+    old = _mk(db, "Old", "o")
+    new = _mk(db, "New", "n")
+    # Pin created_at so the window math is deterministic.
+    conn = plain_connect(db)
+    with conn:
+        conn.execute(
+            "UPDATE patterns SET created_at='2026-01-01 00:00:00' WHERE id IN (?, ?)", (old, new)
+        )
+    conn.close()
+    supersede(db, old_id=old, new_id=new, invalid_at="2026-06-01 00:00:00")
+
+    # Before the handoff: Old was current, New not yet.
+    assert {p["name"] for p in current_as_of(db, "2026-03-01 00:00:00")} == {"Old"}
+    # After: New is current, Old retired.
+    assert {p["name"] for p in current_as_of(db, "2026-09-01 00:00:00")} == {"New"}
+    # Before either existed: neither.
+    assert current_as_of(db, "2025-12-01 00:00:00") == []
 
 
 # --- graph export (techne#305) ----------------------------------------------

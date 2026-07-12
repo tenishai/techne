@@ -200,14 +200,22 @@ def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
 
 
 def supersede(
-    db_path: Path, *, old_id: str, new_id: str, absorbed: str | None = None
+    db_path: Path,
+    *,
+    old_id: str,
+    new_id: str,
+    absorbed: str | None = None,
+    invalid_at: str | None = None,
 ) -> bool:
     """Mark *old_id* as superseded by *new_id*, atomically (techne#308, closes #307).
 
     In ONE transaction: stamp `old.status='superseded'`, `old.superseded_by=new_id`,
-    `old.absorbed=<salvage note>` (kept if not re-supplied), AND upsert a resolved
-    `supersedes` edge (old → new) so the relation graph reflects the supersession.
-    Both patterns must exist and differ. Idempotent. Returns True if the row changed.
+    `old.absorbed=<salvage note>` (kept if not re-supplied), record the validity
+    window (techne#306) — `old.invalid_at` and `new.valid_at` get the SAME handoff
+    timestamp (default now; *invalid_at* overrides it) so the read-path can ask
+    "what was current as of T?" — AND upsert a resolved `supersedes` edge (old → new)
+    so the relation graph reflects it. Both patterns must exist and differ. Idempotent
+    (COALESCE keeps the original window on a re-run). Returns True if the row changed.
 
     Columns are the source of truth for supersession; the edge is written by the
     same atomic op purely so the graph view (techne#308 → #305) stays consistent."""
@@ -221,13 +229,21 @@ def supersede(
             raise ValueError(f"unknown pattern id (old): {old_id}")
         if new is None:
             raise ValueError(f"unknown pattern id (new): {new_id}")
-        with conn:  # atomic: both writes commit together, or neither does
+        with conn:  # atomic: all writes commit together, or none do
+            # One timestamp for the handoff: old stops being current and new becomes
+            # current at the same instant (techne#306 validity window).
+            ts = invalid_at or conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
             cur = conn.execute(
                 """UPDATE patterns
                      SET status = 'superseded', superseded_by = ?,
-                         absorbed = COALESCE(?, absorbed)
+                         absorbed = COALESCE(?, absorbed),
+                         invalid_at = COALESCE(invalid_at, ?)
                    WHERE id = ?""",
-                (new_id, absorbed, old_id),
+                (new_id, absorbed, ts, old_id),
+            )
+            conn.execute(
+                "UPDATE patterns SET valid_at = COALESCE(valid_at, ?) WHERE id = ?",
+                (ts, new_id),
             )
             conn.execute(
                 """INSERT INTO pattern_relations
@@ -446,6 +462,37 @@ def topic_show(db_path: Path, topic: str) -> list[dict]:
             row["superseded"] = [dict(s) for s in superseded]
             out.append(row)
         return out
+    finally:
+        conn.close()
+
+
+def current_as_of(db_path: Path, when: str, *, topic: str | None = None) -> list[dict]:
+    """Patterns that were CURRENT at timestamp *when* (techne#306 validity windows).
+
+    A pattern is current at T when it had become valid — COALESCE(valid_at,
+    created_at) <= T — and had not yet been superseded — invalid_at IS NULL OR
+    invalid_at > T. *when* is a SQLite datetime string ('YYYY-MM-DD[ HH:MM:SS]').
+    Optional *topic* scope ('(untopiced)' = the NULL bucket). This is the temporal
+    read-path: "what was the current pattern for this topic as of D?"."""
+    conn = plain_connect(db_path)
+    try:
+        clauses = [
+            "COALESCE(valid_at, created_at) <= ?",
+            "(invalid_at IS NULL OR invalid_at > ?)",
+        ]
+        params: list = [when, when]
+        if topic is not None:
+            if topic == "(untopiced)":
+                clauses.append("topic IS NULL")
+            else:
+                clauses.append("topic = ?")
+                params.append(topic)
+        rows = conn.execute(
+            f"""SELECT id, name, topic, status, valid_at, invalid_at FROM patterns
+                WHERE {" AND ".join(clauses)} ORDER BY name""",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 

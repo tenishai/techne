@@ -23,7 +23,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 2  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 3  # PRAGMA user_version on architect.db
 
 ARCHITECT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS investigations (
@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS patterns (
     superseded_by    TEXT,                    -- id of the pattern that replaced this one
     topic            TEXT,                    -- problem-solved grouping key (techne#597 topic-index)
     absorbed         TEXT,                    -- salvage note: what this pattern contributed before being folded in
+    valid_at         TEXT,                    -- when this pattern became current (NULL = since created_at) — techne#306
+    invalid_at       TEXT,                    -- when it stopped being current / was superseded (NULL = still current) — techne#306
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_patterns_investigation ON patterns(investigation_id);
@@ -151,6 +153,22 @@ def _step_v1_to_v2_topic_absorbed(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_topic ON patterns(topic)")
 
 
+def _step_v2_to_v3_validity_window(conn) -> None:
+    """v2 → v3 step (techne#306; validity-windowed supersession).
+
+    Add nullable `valid_at`/`invalid_at` timestamps to `patterns` so supersession
+    carries a temporal window: a superseded pattern records WHEN it stopped being
+    current (`invalid_at`), letting the read-path ask "what was current as of T?".
+    Binary status is preserved — existing rows keep NULL (an open-ended window).
+    Structurally idempotent (column-presence guard). No index in the base schema
+    (the #315 lesson) and none here either — point-in-time filtering is rare."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(patterns)")}
+    if "valid_at" not in cols:
+        conn.execute("ALTER TABLE patterns ADD COLUMN valid_at TEXT")
+    if "invalid_at" not in cols:
+        conn.execute("ALTER TABLE patterns ADD COLUMN invalid_at TEXT")
+
+
 def _architect_run_steps(conn, current: int, target: int) -> None:
     """Apply architect.db migration steps from *current* up to *target*.
 
@@ -163,6 +181,8 @@ def _architect_run_steps(conn, current: int, target: int) -> None:
         _step_v0_to_v1_reshape_relations(conn)
     if current < 2:
         _step_v1_to_v2_topic_absorbed(conn)
+    if current < 3:
+        _step_v2_to_v3_validity_window(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
