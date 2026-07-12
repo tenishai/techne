@@ -199,6 +199,108 @@ def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
         conn.close()
 
 
+def supersede(
+    db_path: Path, *, old_id: str, new_id: str, absorbed: str | None = None
+) -> bool:
+    """Mark *old_id* as superseded by *new_id*, atomically (techne#308, closes #307).
+
+    In ONE transaction: stamp `old.status='superseded'`, `old.superseded_by=new_id`,
+    `old.absorbed=<salvage note>` (kept if not re-supplied), AND upsert a resolved
+    `supersedes` edge (old → new) so the relation graph reflects the supersession.
+    Both patterns must exist and differ. Idempotent. Returns True if the row changed.
+
+    Columns are the source of truth for supersession; the edge is written by the
+    same atomic op purely so the graph view (techne#308 → #305) stays consistent."""
+    if old_id == new_id:
+        raise ValueError("a pattern cannot supersede itself")
+    conn = plain_connect(db_path)
+    try:
+        old = conn.execute("SELECT id FROM patterns WHERE id = ?", (old_id,)).fetchone()
+        new = conn.execute("SELECT id, name FROM patterns WHERE id = ?", (new_id,)).fetchone()
+        if old is None:
+            raise ValueError(f"unknown pattern id (old): {old_id}")
+        if new is None:
+            raise ValueError(f"unknown pattern id (new): {new_id}")
+        with conn:  # atomic: both writes commit together, or neither does
+            cur = conn.execute(
+                """UPDATE patterns
+                     SET status = 'superseded', superseded_by = ?,
+                         absorbed = COALESCE(?, absorbed)
+                   WHERE id = ?""",
+                (new_id, absorbed, old_id),
+            )
+            conn.execute(
+                """INSERT INTO pattern_relations
+                     (src_pattern_id, dst_name, dst_pattern_id, kind, resolution_status)
+                   VALUES (?, ?, ?, 'supersedes', 'resolved')
+                   ON CONFLICT(src_pattern_id, dst_name, kind) DO UPDATE SET
+                     dst_pattern_id = excluded.dst_pattern_id,
+                     resolution_status = excluded.resolution_status""",
+                (old_id, new["name"], new_id),
+            )
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def tag_pattern(
+    db_path: Path,
+    pattern_id: str,
+    *,
+    topic: str | None = None,
+    status: str | None = None,
+    superseded_by: str | None = None,
+    absorbed: str | None = None,
+) -> bool:
+    """Curation mutator for a single pattern (techne#308 `architect tag`).
+
+    If *superseded_by* is given, routes to the atomic `supersede()` (status is
+    forced to 'superseded' and the `supersedes` edge written); a *topic* supplied
+    alongside is applied too. Otherwise updates whichever of topic/status/absorbed
+    are provided. Returns True if a row changed. Raises ValueError on unknown id."""
+    conn = plain_connect(db_path)
+    try:
+        if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone() is None:
+            raise ValueError(f"unknown pattern id: {pattern_id}")
+    finally:
+        conn.close()
+
+    if superseded_by is not None:
+        changed = supersede(db_path, old_id=pattern_id, new_id=superseded_by, absorbed=absorbed)
+        if topic is not None:
+            changed = _set_fields(db_path, pattern_id, {"topic": topic}) or changed
+        return changed
+
+    fields: dict[str, str] = {}
+    if topic is not None:
+        fields["topic"] = topic
+    if status is not None:
+        fields["status"] = status
+    if absorbed is not None:
+        fields["absorbed"] = absorbed
+    if not fields:
+        return False
+    return _set_fields(db_path, pattern_id, fields)
+
+
+def _set_fields(db_path: Path, pattern_id: str, fields: dict[str, str]) -> bool:
+    """Update a whitelisted set of columns on one pattern. Column names are from a
+    fixed internal allowlist (never user input), so the f-string is injection-safe."""
+    allowed = {"topic", "status", "absorbed", "superseded_by"}
+    cols = [c for c in fields if c in allowed]
+    if not cols:
+        return False
+    assignments = ", ".join(f"{c} = ?" for c in cols)
+    values = [fields[c] for c in cols] + [pattern_id]
+    conn = plain_connect(db_path)
+    try:
+        cur = conn.execute(f"UPDATE patterns SET {assignments} WHERE id = ?", values)
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def backfill_graph(db_path: Path) -> dict:
     """Populate pattern_relations + pattern_applies from the signals already in
     pattern bodies (techne#87 P2). Parses `[[wikilinks]]` → relations and
@@ -298,6 +400,52 @@ def patterns_for_target(db_path: Path, target: str, *, limit: int = 100) -> list
                 (target, limit),
             )
         ]
+    finally:
+        conn.close()
+
+
+def topic_list(db_path: Path) -> list[dict]:
+    """The topic INDEX (techne#597): every topic with its active-pattern count,
+    plus an `(untopiced)` bucket for patterns not yet grouped. Count-desc so the
+    crowded topics — the ones worth curating first — surface at the top."""
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT COALESCE(topic, '(untopiced)') AS topic, COUNT(*) AS count
+               FROM patterns WHERE status = 'active'
+               GROUP BY COALESCE(topic, '(untopiced)')
+               ORDER BY count DESC, topic"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def topic_show(db_path: Path, topic: str) -> list[dict]:
+    """The read-path for one topic (techne#597): active patterns in *topic*, each
+    with its superseded predecessors folded in under a `superseded` list (their
+    `absorbed` salvage notes carried along). `(untopiced)` selects the ungrouped
+    bucket, matching `topic_list`."""
+    conn = plain_connect(db_path)
+    try:
+        where = "topic IS NULL" if topic == "(untopiced)" else "topic = ?"
+        params: tuple = () if topic == "(untopiced)" else (topic,)
+        actives = conn.execute(
+            f"""SELECT id, name, source_url, confidence FROM patterns
+                WHERE status = 'active' AND {where} ORDER BY name""",
+            params,
+        ).fetchall()
+        out = []
+        for a in actives:
+            superseded = conn.execute(
+                """SELECT id, name, absorbed FROM patterns
+                   WHERE status = 'superseded' AND superseded_by = ? ORDER BY name""",
+                (a["id"],),
+            ).fetchall()
+            row = dict(a)
+            row["superseded"] = [dict(s) for s in superseded]
+            out.append(row)
+        return out
     finally:
         conn.close()
 
@@ -512,6 +660,11 @@ def ingest_patterns_md(db_path: Path, md_text: str) -> dict:
             db_path, investigation_id=inv_id, name=p.name, source_url=p.source_url, body=p.body
         )
         patterns_added += int(stored)
+        # Typed graph edges declared as md fields (techne#308). Resolution is
+        # idempotent and upgrades unresolved→resolved on later re-ingests, same as
+        # the wikilink `related` edges backfilled below.
+        for kind, dst_name in p.relations:
+            add_relation(db_path, src_pattern_id=_pid, dst_name=dst_name, kind=kind)
     for nl in parsed.no_lifts:
         upsert_investigation(
             db_path,

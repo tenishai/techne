@@ -2390,6 +2390,75 @@ def architect_backfill(ctx):
     click.echo(json.dumps(counts, indent=2))
 
 
+@architect.command("topic")
+@click.argument("name", required=False)
+@click.pass_context
+def architect_topic(ctx, name):
+    """Topic index (techne#597). No NAME → list topics + counts (crowded first).
+    With NAME → the topic's active patterns, each superseded predecessor folded
+    under it with its salvage note. Use '(untopiced)' for the ungrouped bucket."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import topic_list, topic_show
+
+    db = architect_db(config)
+    if name is None:
+        rows = topic_list(db)
+        if not rows:
+            click.echo("No patterns yet.")
+            return
+        for r in rows:
+            click.echo(f"  {r['count']:>4}  {r['topic']}")
+        return
+    entries = topic_show(db, name)
+    if not entries:
+        click.echo(f"No active patterns in topic {name!r}.")
+        return
+    for e in entries:
+        click.echo(f"  {e['id']}  {e['name']}")
+        for s in e["superseded"]:
+            note = f" — {s['absorbed']}" if s.get("absorbed") else ""
+            click.echo(f"      ⤷ superseded: {s['id']}  {s['name']}{note}")
+
+
+@architect.command("tag")
+@click.argument("pattern_id")
+@click.option("--topic", default=None, help="Set the pattern's topic (problem-solved grouping key).")
+@click.option("--status", default=None, help="Set status directly (active|superseded).")
+@click.option(
+    "--superseded-by",
+    default=None,
+    help="Mark superseded by this pattern id — atomic: stamps status/superseded_by/absorbed "
+    "and writes a resolved 'supersedes' edge.",
+)
+@click.option(
+    "--absorbed",
+    default=None,
+    help="Salvage note: what this pattern contributed before being folded into its successor.",
+)
+@click.pass_context
+def architect_tag(ctx, pattern_id, topic, status, superseded_by, absorbed):
+    """Curate a pattern (techne#597): set its --topic, and/or supersede it via
+    --superseded-by (the atomic supersession path). Any subset of options applies."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import tag_pattern
+
+    try:
+        changed = tag_pattern(
+            architect_db(config),
+            pattern_id,
+            topic=topic,
+            status=status,
+            superseded_by=superseded_by,
+            absorbed=absorbed,
+        )
+    except ValueError as exc:
+        click.echo(str(exc), err=True)
+        ctx.exit(1)
+    click.echo("updated" if changed else "no change")
+
+
 @architect.command("retire-legacy")
 @click.option("--dry-run", is_flag=True, help="Report the count without deleting.")
 @click.pass_context
