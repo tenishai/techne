@@ -110,6 +110,12 @@ class HookConfig:
     codex_grep_assist: bool = False
     # Hard cap on the number of symbols injected per Grep/Glob (config-over-hardcode).
     codex_grep_assist_limit: int = 8
+    # Mid-session codex freshness (techne#301): when ON, a PostToolUse on
+    # Write/Edit incrementally reindexes just the edited file into its repo's
+    # codex db, so codex queries don't go stale between SessionStart reindexes.
+    # Best-effort, only touches already-indexed repos + supported langs. Off by
+    # default (adds a small per-edit reindex).
+    codex_reindex_on_edit: bool = False
     # Experimental (techne#109/#277): opt-in per-turn recall injection. When ON, a
     # UserPromptSubmit hook runs a knowledge search scoped to the submitted prompt
     # and injects the most relevant durable facts into context via additionalContext
@@ -464,6 +470,7 @@ class Config:
                 timeout_s=float(h.get("timeout_s", _hd.timeout_s)),
                 codex_grep_assist=h.get("codex_grep_assist", False),
                 codex_grep_assist_limit=int(h.get("codex_grep_assist_limit", 8)),
+                codex_reindex_on_edit=h.get("codex_reindex_on_edit", False),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
                 per_turn_seed=h.get("per_turn_seed", False),
@@ -601,6 +608,7 @@ class Config:
                 "timeout_s": self.hooks.timeout_s,
                 "codex_grep_assist": self.hooks.codex_grep_assist,
                 "codex_grep_assist_limit": self.hooks.codex_grep_assist_limit,
+                "codex_reindex_on_edit": self.hooks.codex_reindex_on_edit,
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
                 "per_turn_seed": self.hooks.per_turn_seed,

@@ -179,6 +179,29 @@ def _inject_due_reminders(config: Config, session_id: str) -> str | None:
         return None
 
 
+def _maybe_reindex_codex(config: Config, tool_name: str, tool_input: dict) -> None:
+    """Best-effort mid-session codex refresh (techne#301): after a Write/Edit,
+    incrementally reindex the touched file into its repo's codex db so codex
+    queries don't go stale between SessionStart reindexes. Opt-in and fail-safe
+    — any error is swallowed so the hook exit stays 0 and never breaks a tool
+    call. `reindex_edited_file` no-ops on non-code files / un-indexed repos."""
+    if not config.hooks.codex_reindex_on_edit:
+        return
+    if tool_name not in ("Write", "Edit", "MultiEdit"):
+        return
+    file_path = tool_input.get("file_path")
+    if not file_path:
+        return
+    try:
+        from techne.core.codex import reindex_edited_file
+        from techne.hooks._timeout import bounded_hook
+
+        with bounded_hook(config.hooks.timeout_s):
+            reindex_edited_file(config, file_path)
+    except Exception as e:  # noqa: BLE001 — never break the tool call
+        print(f"techne: codex reindex-on-edit skipped: {e}", file=sys.stderr)
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -213,6 +236,9 @@ def main():
     except Exception as e:
         print(f"techne: capture failed: {e}", file=sys.stderr)
         sys.exit(0)  # don't fail the tool call
+
+    # Mid-session codex freshness (techne#301) — best-effort, opt-in.
+    _maybe_reindex_codex(config, tool_name, tool_input)
 
     # Inject due reminders into additionalContext — runs outside bounded_hook so a
     # slow reminder check doesn't count against the observation-capture timeout, but

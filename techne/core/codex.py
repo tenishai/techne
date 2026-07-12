@@ -349,6 +349,35 @@ def resolve_repo_db_for_query(config: Config, start_path: Path | str) -> Path | 
     return db_path if db_path.exists() else None
 
 
+def reindex_edited_file(config: Config, file_path: str | Path) -> int | None:
+    """Incrementally reindex a single edited file into its repo's codex db —
+    the mid-session freshness path (techne#301).
+
+    The SessionStart `codex index-all` only refreshes at session start, so a
+    file edited mid-session leaves the graph stale until the next session. This
+    reindexes just the touched file after an edit.
+
+    Only touches repos ALREADY indexed (never creates a db — mirrors
+    resolve_repo_db_for_query's read-consumer posture) and only supported
+    languages. Returns the symbol count indexed, or None when skipped
+    (unsupported extension / not in a repo / repo not indexed). Cheap:
+    `_index_file` is incremental — an unchanged file is a no-op via its stored
+    content hash.
+    """
+    from techne.codex.source import _EXT_LANGUAGE, _index_file
+
+    p = Path(file_path)
+    if p.suffix.lower() not in _EXT_LANGUAGE:
+        return None
+    root = find_repo_root(p)
+    if root is None:
+        return None
+    db_path = repo_db_path(config, root)
+    if not db_path.exists():
+        return None  # repo never indexed → don't spawn an empty db
+    return _index_file(db_path, p, root)
+
+
 def list_codex_repos(config: Config) -> list[tuple[str, Path]]:
     """Enumerate the per-repo codex dbs as ``(repo_root, db_path)`` pairs.
 
