@@ -450,6 +450,42 @@ def topic_show(db_path: Path, topic: str) -> list[dict]:
         conn.close()
 
 
+def graph_data(db_path: Path, topic: str | None = None) -> dict:
+    """Nodes + resolved edges for a relation-graph render (techne#305).
+
+    Full store when *topic* is None, else scoped to that topic ('(untopiced)' =
+    the NULL bucket). Each node carries `status` so a renderer can de-emphasize
+    superseded ones. Edges are RESOLVED relations whose BOTH endpoints are in the
+    node set — so a topic-scoped subgraph has no dangling edges. Unresolved edges
+    are omitted (they point at a name with no node yet)."""
+    conn = plain_connect(db_path)
+    try:
+        if topic is None:
+            node_rows = conn.execute(
+                "SELECT id, name, topic, status FROM patterns ORDER BY name"
+            ).fetchall()
+        else:
+            where = "topic IS NULL" if topic == "(untopiced)" else "topic = ?"
+            params: tuple = () if topic == "(untopiced)" else (topic,)
+            node_rows = conn.execute(
+                f"SELECT id, name, topic, status FROM patterns WHERE {where} ORDER BY name",
+                params,
+            ).fetchall()
+        nodes = [dict(r) for r in node_rows]
+        node_ids = {n["id"] for n in nodes}
+        edges = [
+            {"src": r["src_pattern_id"], "dst": r["dst_pattern_id"], "kind": r["kind"]}
+            for r in conn.execute(
+                """SELECT src_pattern_id, dst_pattern_id, kind FROM pattern_relations
+                   WHERE resolution_status = 'resolved'"""
+            )
+            if r["src_pattern_id"] in node_ids and r["dst_pattern_id"] in node_ids
+        ]
+        return {"nodes": nodes, "edges": edges}
+    finally:
+        conn.close()
+
+
 def investigation_exists(
     db_path: Path, url: str, *, surveyed_by: str = "raven", lens: str = "infra"
 ) -> bool:
