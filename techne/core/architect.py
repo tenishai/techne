@@ -23,7 +23,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 1  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 2  # PRAGMA user_version on architect.db
 
 ARCHITECT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS investigations (
@@ -50,11 +50,14 @@ CREATE TABLE IF NOT EXISTS patterns (
     body             TEXT NOT NULL,
     confidence       TEXT DEFAULT 'medium',
     status           TEXT DEFAULT 'active',   -- active | superseded
-    superseded_by    TEXT,
+    superseded_by    TEXT,                    -- id of the pattern that replaced this one
+    topic            TEXT,                    -- problem-solved grouping key (techne#597 topic-index)
+    absorbed         TEXT,                    -- salvage note: what this pattern contributed before being folded in
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_patterns_investigation ON patterns(investigation_id);
 CREATE INDEX IF NOT EXISTS idx_patterns_status ON patterns(status);
+CREATE INDEX IF NOT EXISTS idx_patterns_topic ON patterns(topic);
 
 CREATE TABLE IF NOT EXISTS pattern_relations (
     src_pattern_id    TEXT NOT NULL REFERENCES patterns(id),
@@ -97,8 +100,8 @@ _migrated: set[Path] = set()
 _reconciled: set[Path] = set()
 
 
-def _architect_v0_to_v1(conn, current: int, target: int) -> None:
-    """architect.db v0 → v1 run-step (techne#136; reshape introduced in #87 P2).
+def _step_v0_to_v1_reshape_relations(conn) -> None:
+    """v0 → v1 step (techne#136; reshape introduced in #87 P2).
 
     Reshape `pattern_relations` from the resolved-only `(src, dst_pattern_id, kind)`
     to the unresolved-edge model (`dst_name` + nullable `dst_pattern_id` +
@@ -127,35 +130,56 @@ def _architect_v0_to_v1(conn, current: int, target: int) -> None:
             "ON pattern_relations(dst_pattern_id);\n"
             "COMMIT;"
         )
+
+
+def _step_v1_to_v2_topic_absorbed(conn) -> None:
+    """v1 → v2 step (techne#308; topic-index redesign, decision techne#597).
+
+    Add the `topic` grouping key and the `absorbed` supersession-salvage note to
+    `patterns`. Structurally idempotent via a column-presence guard, so it is safe
+    on a retrofit-versioned db (reads `user_version = 0` regardless of real shape)
+    and on a re-run. Additive `ALTER TABLE … ADD COLUMN` — existing rows keep NULL.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(patterns)")}
+    if "topic" not in cols:
+        conn.execute("ALTER TABLE patterns ADD COLUMN topic TEXT")
+    if "absorbed" not in cols:
+        conn.execute("ALTER TABLE patterns ADD COLUMN absorbed TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_topic ON patterns(topic)")
+
+
+def _architect_run_steps(conn, current: int, target: int) -> None:
+    """Apply architect.db migration steps from *current* up to *target*.
+
+    Each step is individually, STRUCTURALLY idempotent (column-presence guards),
+    so a retrofit-versioned db (`user_version = 0` regardless of real shape)
+    re-applies the ladder safely. Per the `guarded_migrate` contract, the runner
+    owns the single version stamp — written once here after all steps succeed.
+    """
+    if current < 1:
+        _step_v0_to_v1_reshape_relations(conn)
+    if current < 2:
+        _step_v1_to_v2_topic_absorbed(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
 
 def _reconcile_relations(db_path: Path) -> None:
-    """Versioned `pattern_relations` shape migration (techne#136).
+    """Run architect.db schema migrations through the shared engine (techne#136, #308).
 
-    Now routed through the shared engine, gaining the cross-process lock + online
-    backup it previously lacked (the old hand-rolled version had neither, justified
-    by the table being provably empty — true, but unnecessary now that the engine
-    makes locking + backup free). Kept as a named entrypoint (tests call it).
-
-    A fresh or already-migrated db — `pattern_relations` already has `dst_name`, or
-    the table doesn't exist yet (schema-apply creates it new-shape) — just gets its
-    version stamped, quietly. An old-shape db takes the guarded, backed-up reshape.
+    Routed through `guarded_migrate`: cross-process lock + online backup, and a
+    double-checked version guard that no-ops the moment the db is already at
+    `ARCHITECT_VERSION`. Steps are structurally idempotent. Kept under this name
+    because `architect_store()` and the tests call it directly.
     """
     conn = plain_connect(db_path)
     try:
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(pattern_relations)")}
-        if not cols or "dst_name" in cols:
-            migrator.user_version_io.write(conn, ARCHITECT_VERSION)
-            conn.commit()
-            return
         migrator.guarded_migrate(
             conn,
             db_path,
             target_version=ARCHITECT_VERSION,
             read_version=migrator.user_version_io.read,
-            run_steps=_architect_v0_to_v1,
+            run_steps=_architect_run_steps,
             label="architect schema",
         )
     finally:
