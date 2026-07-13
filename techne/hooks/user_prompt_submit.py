@@ -155,12 +155,13 @@ def main() -> None:
             # this couldn't see the rail at all). Best-effort; the helper never
             # raises. Log even an empty recall (fired but matched nothing = signal).
             if config.hooks.per_turn_recall_log:
-                from techne.hooks._recall_log import log_recall_injection
+                from techne.hooks._injection_log import log_context_injection
 
-                log_recall_injection(
+                log_context_injection(
                     config.db_path,
+                    source="per_turn_recall",
                     session_id=data.get("session_id"),
-                    prompt=prompt,
+                    trigger=prompt,
                     rows=rows,
                     injected_text=recall_block,
                 )

@@ -52,8 +52,8 @@ def _run(monkeypatch, capsys, payload: dict) -> str:
     return capsys.readouterr().out
 
 
-def _recall_log_rows() -> list[dict]:
-    """Read the techne#329 recall_injections visibility log from the TECHNE_HOME db."""
+def _injection_log_rows(source: str | None = None) -> list[dict]:
+    """Read the techne#329 context_injections visibility log from the TECHNE_HOME db."""
     import sqlite3
 
     from techne.config import Config
@@ -64,14 +64,15 @@ def _recall_log_rows() -> list[dict]:
             r[0]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        if "recall_injections" not in names:
+        if "context_injections" not in names:
             return []
         cur = conn.execute(
-            "SELECT session_id, prompt_snippet, hit_count, hit_ids, scores, approx_tokens "
-            "FROM recall_injections ORDER BY id"
+            "SELECT source, session_id, trigger_snippet, hit_count, hit_ids, scores, "
+            "approx_tokens FROM context_injections ORDER BY id"
         )
         cols = [c[0] for c in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [r for r in rows if source is None or r["source"] == source]
     finally:
         conn.close()
 
@@ -101,7 +102,7 @@ def test_flag_on_matching_injects_context(home, monkeypatch, capsys):
 
 
 def test_recall_injection_is_logged_with_hit_ids(home, monkeypatch, capsys):
-    """A recall that injects is recorded in recall_injections with the injected
+    """A recall that injects is recorded in context_injections with the injected
     knowledge ids + token cost — the READ path is now auditable.
 
     Fail-without-fix: pre-#329 the rail left no trace, so this log stays empty.
@@ -118,9 +119,10 @@ def test_recall_injection_is_logged_with_hit_ids(home, monkeypatch, capsys):
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "Postgres" in ctx  # still injects as before
 
-    rows = _recall_log_rows()
+    rows = _injection_log_rows("per_turn_recall")
     assert len(rows) == 1
     r = rows[0]
+    assert r["source"] == "per_turn_recall"
     assert r["session_id"] == "sess-1"
     assert r["hit_count"] >= 1
     ids = json.loads(r["hit_ids"])
@@ -137,7 +139,7 @@ def test_empty_recall_is_logged_with_zero_hits(home, monkeypatch, capsys):
     _seed("Postgres was chosen over MongoDB.", type="decision", confidence="high")
     _run(monkeypatch, capsys, {"prompt": "zzznomatchqqq", "session_id": "sess-2"})
 
-    rows = _recall_log_rows()
+    rows = _injection_log_rows("per_turn_recall")
     assert len(rows) == 1
     assert rows[0]["hit_count"] == 0
     assert rows[0]["approx_tokens"] == 0
@@ -152,17 +154,18 @@ def test_recall_log_can_be_disabled(home, monkeypatch, capsys):
     )
     out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
     assert "Postgres" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert _recall_log_rows() == []
+    assert _injection_log_rows() == []
 
 
-def test_recall_log_helper_never_raises_on_bad_db():
+def test_injection_log_helper_never_raises_on_bad_db():
     """Instrumentation must never break the turn — a bad db path is swallowed."""
-    from techne.hooks._recall_log import log_recall_injection
+    from techne.hooks._injection_log import log_context_injection
 
-    log_recall_injection(
+    log_context_injection(
         "/nonexistent/dir/nope.db",
+        source="per_turn_recall",
         session_id="x",
-        prompt="p",
+        trigger="p",
         rows=[{"id": 1, "rank": -1.0}],
         injected_text="hi",
     )  # must not raise
