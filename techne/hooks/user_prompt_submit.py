@@ -148,8 +148,22 @@ def main() -> None:
                     limit=config.hooks.per_turn_recall_limit,
                     include_archived=False,
                 )
-            if rows:
-                blocks.append(_build_context(rows))
+            recall_block = _build_context(rows) if rows else ""
+            if recall_block:
+                blocks.append(recall_block)
+            # techne#329 — make the READ path auditable (the audit that motivated
+            # this couldn't see the rail at all). Best-effort; the helper never
+            # raises. Log even an empty recall (fired but matched nothing = signal).
+            if config.hooks.per_turn_recall_log:
+                from techne.hooks._recall_log import log_recall_injection
+
+                log_recall_injection(
+                    config.db_path,
+                    session_id=data.get("session_id"),
+                    prompt=prompt,
+                    rows=rows,
+                    injected_text=recall_block,
+                )
         except Exception as e:  # noqa: BLE001  — catches HookTimeout too
             print(f"techne: per-turn recall degraded: {e}", file=sys.stderr)
 

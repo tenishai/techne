@@ -124,6 +124,12 @@ class HookConfig:
     per_turn_recall: bool = False
     # Hard cap on the number of knowledge rows injected per turn.
     per_turn_recall_limit: int = 5
+    # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
+    # token cost) to the recall_injections table so the READ path is auditable.
+    # The audit that motivated this couldn't see the rail at all: it's the
+    # primary memory read-path and left no trace. Observability of the feature,
+    # not a new feature, so it's ON by default whenever per_turn_recall is on.
+    per_turn_recall_log: bool = True
     # Per-turn SEED nudge (techne#277): on each turn, remind the in-session
     # agent to techne_store a durable fact/decision/correction if one emerged —
     # the interactive complement to end-of-session reflect. Best-effort, rides
@@ -473,6 +479,7 @@ class Config:
                 codex_reindex_on_edit=h.get("codex_reindex_on_edit", False),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
+                per_turn_recall_log=h.get("per_turn_recall_log", True),
                 per_turn_seed=h.get("per_turn_seed", False),
             )
 
@@ -611,6 +618,7 @@ class Config:
                 "codex_reindex_on_edit": self.hooks.codex_reindex_on_edit,
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
+                "per_turn_recall_log": self.hooks.per_turn_recall_log,
                 "per_turn_seed": self.hooks.per_turn_seed,
             },
             "heuristic": {
