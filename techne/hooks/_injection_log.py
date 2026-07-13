@@ -19,9 +19,10 @@ Design:
   hook (same contract as the hooks themselves).
 - **Source-discriminated** — one table + a ``source`` column, so the two paths
   are comparable in a single query, not a cross-table UNION.
-- **Row-shape agnostic** — recall rows are dicts (from ``search()``);
-  session-start rows are ``EgressRow`` objects (from ``select_tier0_injection``).
-  Field access handles both.
+- **Row-shape agnostic** — recall rows are dicts (from ``search()``) and
+  session-start rows are ``EgressRow`` (a ``TypedDict`` — also a dict at
+  runtime), so ``_field`` reads both via ``.get``; its ``getattr`` fallback is
+  defensive for any future non-dict row type.
 - **Attribution-ready** — ``hit_ids`` recorded so a later pass can join "was the
   injected item actually used" (the counterfactual — deferred).
 """
@@ -48,7 +49,9 @@ CREATE TABLE IF NOT EXISTS context_injections (
 
 
 def _field(r: Any, key: str) -> Any:
-    """Read a field from either a dict row (recall) or an object row (EgressRow)."""
+    """Read a field from a row. Both current sources are dict-shaped (recall
+    dicts; session-start ``EgressRow`` is a ``TypedDict``); the ``getattr``
+    branch is a defensive fallback for any future non-dict row type."""
     if isinstance(r, dict):
         return r.get(key)
     return getattr(r, key, None)

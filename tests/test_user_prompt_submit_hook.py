@@ -102,7 +102,7 @@ def test_flag_on_matching_injects_context(home, monkeypatch, capsys):
 
 
 def test_recall_injection_is_logged_with_hit_ids(home, monkeypatch, capsys):
-    """A recall that injects is recorded in recall_injections with the injected
+    """A recall that injects is recorded in context_injections with the injected
     knowledge ids + token cost — the READ path is now auditable.
 
     Fail-without-fix: pre-#329 the rail left no trace, so this log stays empty.

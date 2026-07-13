@@ -125,10 +125,10 @@ class HookConfig:
     # Hard cap on the number of knowledge rows injected per turn.
     per_turn_recall_limit: int = 5
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
-    # token cost) to the recall_injections table so the READ path is auditable.
-    # The audit that motivated this couldn't see the rail at all: it's the
-    # primary memory read-path and left no trace. Observability of the feature,
-    # not a new feature, so it's ON by default whenever per_turn_recall is on.
+    # token cost) to the context_injections table so this READ path is auditable
+    # (it left no trace before). The SessionStart tier-0 block is logged the same
+    # way (source="session_start"). Observability of the feature, not a new
+    # feature, so it's ON by default whenever per_turn_recall is on.
     per_turn_recall_log: bool = True
     # Per-turn SEED nudge (techne#277): on each turn, remind the in-session
     # agent to techne_store a durable fact/decision/correction if one emerged —
