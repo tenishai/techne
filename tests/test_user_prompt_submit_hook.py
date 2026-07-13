@@ -52,6 +52,30 @@ def _run(monkeypatch, capsys, payload: dict) -> str:
     return capsys.readouterr().out
 
 
+def _recall_log_rows() -> list[dict]:
+    """Read the techne#329 recall_injections visibility log from the TECHNE_HOME db."""
+    import sqlite3
+
+    from techne.config import Config
+
+    conn = sqlite3.connect(str(Config.load().db_path))
+    try:
+        names = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "recall_injections" not in names:
+            return []
+        cur = conn.execute(
+            "SELECT session_id, prompt_snippet, hit_count, hit_ids, scores, approx_tokens "
+            "FROM recall_injections ORDER BY id"
+        )
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
     """Flag OFF (no config.yaml → default False) → no stdout, even with a match."""
     _seed("Postgres was chosen over MongoDB for join semantics.",
@@ -71,6 +95,77 @@ def test_flag_on_matching_injects_context(home, monkeypatch, capsys):
     hso = payload["hookSpecificOutput"]
     assert hso["hookEventName"] == "UserPromptSubmit"
     assert "Postgres" in hso["additionalContext"]
+
+
+# ---- techne#329: recall visibility log --------------------------------------
+
+
+def test_recall_injection_is_logged_with_hit_ids(home, monkeypatch, capsys):
+    """A recall that injects is recorded in recall_injections with the injected
+    knowledge ids + token cost — the READ path is now auditable.
+
+    Fail-without-fix: pre-#329 the rail left no trace, so this log stays empty.
+    """
+    _write_config(home, per_turn_recall=True)
+    _seed(
+        "Postgres was chosen over MongoDB for join semantics.",
+        type="decision", tags="storage", confidence="high",
+    )
+    out = _run(
+        monkeypatch, capsys,
+        {"prompt": "postgres join decision", "session_id": "sess-1"},
+    )
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "Postgres" in ctx  # still injects as before
+
+    rows = _recall_log_rows()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["session_id"] == "sess-1"
+    assert r["hit_count"] >= 1
+    ids = json.loads(r["hit_ids"])
+    assert ids and ids[0] is not None
+    # the logged ids are exactly what was injected (⟦techne#<id>⟧ in the block)
+    assert f"techne#{ids[0]}" in ctx
+    assert r["approx_tokens"] > 0
+
+
+def test_empty_recall_is_logged_with_zero_hits(home, monkeypatch, capsys):
+    """A recall that fires but matches nothing is logged with hit_count=0 —
+    'fired but found nothing' is signal (wasted rail cost), not silence."""
+    _write_config(home, per_turn_recall=True)
+    _seed("Postgres was chosen over MongoDB.", type="decision", confidence="high")
+    _run(monkeypatch, capsys, {"prompt": "zzznomatchqqq", "session_id": "sess-2"})
+
+    rows = _recall_log_rows()
+    assert len(rows) == 1
+    assert rows[0]["hit_count"] == 0
+    assert rows[0]["approx_tokens"] == 0
+
+
+def test_recall_log_can_be_disabled(home, monkeypatch, capsys):
+    """per_turn_recall_log=False → recall still injects, but nothing is logged."""
+    _write_config(home, per_turn_recall=True, per_turn_recall_log=False)
+    _seed(
+        "Postgres was chosen over MongoDB for join semantics.",
+        type="decision", confidence="high",
+    )
+    out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
+    assert "Postgres" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert _recall_log_rows() == []
+
+
+def test_recall_log_helper_never_raises_on_bad_db():
+    """Instrumentation must never break the turn — a bad db path is swallowed."""
+    from techne.hooks._recall_log import log_recall_injection
+
+    log_recall_injection(
+        "/nonexistent/dir/nope.db",
+        session_id="x",
+        prompt="p",
+        rows=[{"id": 1, "rank": -1.0}],
+        injected_text="hi",
+    )  # must not raise
 
 
 def test_no_match_emits_nothing(home, monkeypatch, capsys):
