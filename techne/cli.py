@@ -2719,12 +2719,20 @@ def codex(ctx):
     show_default=True,
     help="Comma-separated list of languages to index (python,typescript).",
 )
+@click.option(
+    "--lsp/--no-lsp",
+    default=False,
+    help="After indexing, resolve Python call edges via a language server (pyright) for "
+    "ground-truth `callers` — semantic, not name-matched (techne#321). Slower (per-symbol), "
+    "so opt-in for now.",
+)
 @click.pass_context
-def codex_index(ctx, repo, languages):
+def codex_index(ctx, repo, languages, lsp):
     """Walk REPO and index Python + TypeScript symbols into its per-repo db.
 
     Uses tree-sitter for parsing; requires `pip install techne[codex]`.
     Incremental: files whose SHA-256 hash is unchanged are skipped.
+    With --lsp, a language server then resolves call edges to exact symbols.
     """
     config = ctx.obj["config"]
     if not config.db_path.exists():
@@ -2742,6 +2750,15 @@ def codex_index(ctx, repo, languages):
     s = stats(db_path)
     click.echo(f"Indexed: {count} symbols from {repo}")
     click.echo(f"Totals:  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
+
+    if lsp:
+        from techne.codex.lsp_resolve import resolve_edges_lsp
+
+        rep = resolve_edges_lsp(db_path, repo, settle=(8, 1.5))
+        if rep.get("skipped"):
+            click.echo(f"LSP resolution skipped: {rep['skipped']}", err=True)
+        else:
+            click.echo(f"LSP-resolved: {rep['resolved']} call edges (of {rep['symbols']} symbols)")
 
 
 @codex.command("index-all")
