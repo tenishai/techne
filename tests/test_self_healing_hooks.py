@@ -186,6 +186,64 @@ class TestSessionRegistrationSurvivesFailures:
 
 
 # ---------------------------------------------------------------------------
+# techne#329 — SessionStart injection visibility log
+# ---------------------------------------------------------------------------
+
+
+class TestSessionStartInjectionLog:
+    """The SessionStart tier-0 knowledge injection is the memory read-path that's
+    live by default; #329 makes it auditable by logging to context_injections
+    (source='session_start')."""
+
+    def test_session_start_injection_is_logged(self, tmp_path: Path):
+        from techne.core import knowledge
+
+        home = tmp_path
+        db_path = home / ".techne" / "techne.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        init_db(db_path).close()
+        # A high-confidence fact tier-0 selection will inject.
+        knowledge.store(
+            db_path,
+            "Postgres was chosen over MongoDB for join semantics.",
+            type="decision",
+            confidence="high",
+        )
+
+        result = _run_hook(
+            hook_input={"cwd": str(home), "session_id": "sess-ss"},
+            env_overrides={"HOME": str(home)},
+        )
+        assert result.returncode == 0
+
+        conn = connect(db_path)
+        try:
+            names = {
+                r[0]
+                for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            # Fail-without-fix: without the Phase-7 wiring this table is never
+            # created by the session-start path.
+            assert "context_injections" in names, (
+                "session-start injection was not logged (techne#329 wiring missing)"
+            )
+            rows = conn.execute(
+                "SELECT source, session_id, hit_count, hit_ids, approx_tokens "
+                "FROM context_injections WHERE source = 'session_start' ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert len(rows) == 1
+        source, session_id, hit_count, hit_ids, approx_tokens = rows[0]
+        assert source == "session_start"
+        assert session_id == "sess-ss"
+        assert hit_count >= 1
+        assert json.loads(hit_ids), "expected at least one injected knowledge id"
+        assert approx_tokens > 0
+
+
+# ---------------------------------------------------------------------------
 # extension_state persistence
 # ---------------------------------------------------------------------------
 

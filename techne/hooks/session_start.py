@@ -61,7 +61,10 @@ def main() -> None:
     try:
         data = json.load(sys.stdin)
     except Exception as exc:  # noqa: BLE001
-        print(f"techne: session_start received invalid JSON on stdin — context limited: {exc}", file=sys.stderr)
+        print(
+            f"techne: session_start received invalid JSON on stdin — context limited: {exc}",
+            file=sys.stderr,
+        )
         data = {}
 
     # ------------------------------------------------------------------
@@ -308,6 +311,19 @@ def _run_phases_2_to_9(
             knowledge_block = render_tier0_block(tier0_rows)
             if knowledge_block:
                 output_parts.append(knowledge_block)
+            # techne#329 — instrument the session-start injection (the memory
+            # read-path that's actually live by default). Best-effort; the
+            # helper never raises. Logs even an empty selection (signal).
+            from techne.hooks._injection_log import log_context_injection
+
+            log_context_injection(
+                config.db_path,
+                source="session_start",
+                session_id=session_id,
+                trigger=None,
+                rows=tier0_rows,
+                injected_text=knowledge_block,
+            )
     except ImportError as exc:
         failures.append(f"knowledge injection (import): {exc}")
         print(
