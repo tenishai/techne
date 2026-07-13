@@ -43,6 +43,20 @@ def _approx_tokens(text: str) -> int:
     return (len(text) + 3) // 4 if text else 0
 
 
+def _inclusion_score(r: dict) -> float | None:
+    """The signal that actually determined inclusion/order.
+
+    Prefer ``rrf_score`` (the fused score when search ran the hybrid vector path,
+    ``use_vectors=True``); fall back to the raw FTS BM25 ``rank``. The per-turn
+    rail is FTS-only today, so ``rank`` is what's present — but preferring the
+    fused score keeps the log faithful if the rail ever enables vectors.
+    """
+    v = r.get("rrf_score")
+    if v is None:
+        v = r.get("rank")
+    return round(v, 4) if isinstance(v, (int, float)) else None
+
+
 def log_recall_injection(
     db_path: Any,
     *,
@@ -59,12 +73,16 @@ def log_recall_injection(
     """
     try:
         hit_ids = [r.get("id") for r in rows]
-        scores = [
-            round(r.get("rank"), 4) if isinstance(r.get("rank"), (int, float)) else None
-            for r in rows
-        ]
+        scores = [_inclusion_score(r) for r in rows]
         conn = sqlite3.connect(str(db_path))
         try:
+            # Parity with every other writer to this db (database.py:471,
+            # stores.py:103): the db is WAL, which serializes writers, so without
+            # this a concurrent write (post_tool_use / reflect / federation) makes
+            # our INSERT hit SQLITE_BUSY immediately and the best-effort except
+            # would silently drop the row — punching gaps in the very audit data
+            # this table exists to produce.
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute(_DDL)
             conn.execute(
                 "INSERT INTO recall_injections "
