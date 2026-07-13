@@ -5,6 +5,39 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-13
+
+### Added
+
+- **Codex LSP-grounded call graph** — a reusable LSP client foundation (#320, PR
+  #326) plus pyright-resolved call edges so callers are ground-truth rather than
+  heuristic (#321, PR #327). Symbol resolution now accepts bare names and errors
+  hard on an unresolvable symbol id (#300, PR #302), applied to the MCP
+  blast-radius tool as well (#303, PR #304). The codex index reindexes the edited
+  file on Write/Edit for mid-session freshness (#301, PR #314).
+
+- **Architect curation** — topic-index + supersession curation (#308, PR #313),
+  validity-windowed supersession (#306, PR #317), and the relation graph rendered
+  as Mermaid/DOT (#305, PR #316).
+
+- **Per-turn memory-seed nudge (#277, PR #309)** — closes the write half of the
+  recall loop begun in 0.9.0. SessionStart injection is instrumented and unified
+  with per-turn recall into a single `context_injections` surface, and per-turn
+  recall injections are logged so the READ path is auditable (#329, PRs #330/#331).
+
+- **Memory/skill eval harness — engine + seed corpus (#118, Phase 1, PR #312).**
+
+- **Content-addressed spawn contracts (prototype, #318)** — handoff drift
+  detection between spawner and spawned agent.
+
+### Fixed
+
+- architect: create the topic index in the migration, not the base schema (#315).
+
+### Docs
+
+- README "run vs develop" install note documenting the pinned pipx path (#297).
+
 ## [0.9.0] — 2026-07-10
 
 ### Added
