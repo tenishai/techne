@@ -73,6 +73,54 @@ def librarian_store(config: Config) -> StoreAdapter:
     return migrated_store(config, "librarian", LIBRARIAN_SCHEMA, _migrated, reconcile=True)
 
 
+# Documents can be whole web pages; recall returns a snippet + source_url so the
+# agent can fetch the full text via `techne library show` rather than paying to
+# inline it. Snippet length is a fixed cost bound (the count is config-capped).
+_RECALL_SNIPPET_CHARS = 500
+
+
+def recall_documents(config: Config, topic: str, *, limit: int | None = None) -> list[dict]:
+    """Top library documents for *topic*, normalised as recall rows (techne#340).
+
+    Each row is labelled ``origin='library'`` (vs memory's ``origin='memory'``) so
+    a folded recall result stays clearly sourced, ``type='document'``, and carries
+    a capped content snippet plus ``source_url`` for full retrieval. Best-effort:
+    a missing/unreadable ``librarian.db`` (or ``limit<=0``) yields ``[]`` so recall
+    degrades to memory-only rather than failing.
+    """
+    if limit is None:
+        limit = config.search.recall_documents_limit
+    if limit <= 0:
+        return []
+    try:
+        from techne.core.documents import search_documents
+
+        rows = search_documents(librarian_db(config), topic, limit=limit)
+    except Exception:  # noqa: BLE001 — doc fold-in must never break recall
+        return []
+
+    out: list[dict] = []
+    for d in rows:
+        content = d.get("content") or ""
+        snippet = content[:_RECALL_SNIPPET_CHARS]
+        if len(content) > _RECALL_SNIPPET_CHARS:
+            snippet += "…"
+        out.append(
+            {
+                "type": "document",
+                "origin": "library",
+                "id": d["id"],
+                "title": d.get("title"),
+                "content": snippet,
+                "source_url": d.get("source_url"),
+                "source_type": d.get("source_type"),
+                "updated_at": d.get("updated_at"),
+                "rank": d.get("rank"),
+            }
+        )
+    return out
+
+
 def librarian_db(config: Config) -> Path:
     """Path to the migrated librarian.db — what the low-level documents.py functions
     (db_path-shaped, the SQLite SQL layer) operate on."""
