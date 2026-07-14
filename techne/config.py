@@ -116,6 +116,18 @@ class HookConfig:
     # Best-effort, only touches already-indexed repos + supported langs. Off by
     # default (adds a small per-edit reindex).
     codex_reindex_on_edit: bool = False
+    # Experimental (techne#335): opt-in codex "edit rail". When ON, a PostToolUse on
+    # Edit/MultiEdit maps the edit to its enclosing symbol and injects that symbol's
+    # blast-radius (transitive dependents — "what breaks if I change this") into
+    # context, but only when the symbol has >= codex_edit_rail_min_deps dependents
+    # (threshold-gated so leaf edits stay silent). Best-effort; never blocks the
+    # tool; logs to context_injections (source=codex_edit_rail) so its utilization
+    # is measurable against the other injection paths (#329/#684). Default OFF.
+    codex_edit_rail: bool = False
+    # Minimum transitive-dependent count for the edit rail to fire (skip low-risk edits).
+    codex_edit_rail_min_deps: int = 3
+    # Hard cap on dependents injected per edit (closest-first by depth).
+    codex_edit_rail_limit: int = 10
     # Experimental (techne#109/#277): opt-in per-turn recall injection. When ON, a
     # UserPromptSubmit hook runs a knowledge search scoped to the submitted prompt
     # and injects the most relevant durable facts into context via additionalContext
@@ -477,6 +489,9 @@ class Config:
                 codex_grep_assist=h.get("codex_grep_assist", False),
                 codex_grep_assist_limit=int(h.get("codex_grep_assist_limit", 8)),
                 codex_reindex_on_edit=h.get("codex_reindex_on_edit", False),
+                codex_edit_rail=h.get("codex_edit_rail", False),
+                codex_edit_rail_min_deps=int(h.get("codex_edit_rail_min_deps", 3)),
+                codex_edit_rail_limit=int(h.get("codex_edit_rail_limit", 10)),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
@@ -616,6 +631,9 @@ class Config:
                 "codex_grep_assist": self.hooks.codex_grep_assist,
                 "codex_grep_assist_limit": self.hooks.codex_grep_assist_limit,
                 "codex_reindex_on_edit": self.hooks.codex_reindex_on_edit,
+                "codex_edit_rail": self.hooks.codex_edit_rail,
+                "codex_edit_rail_min_deps": self.hooks.codex_edit_rail_min_deps,
+                "codex_edit_rail_limit": self.hooks.codex_edit_rail_limit,
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
                 "per_turn_recall_log": self.hooks.per_turn_recall_log,

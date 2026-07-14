@@ -19,6 +19,7 @@ from techne.core.codegraph import (
     resolve_symbol_id,
     search_symbols,
     stats,
+    symbol_at,
 )
 from techne.core.codex import CODEX_SCHEMA
 from techne.core.stores import SqliteStore
@@ -128,6 +129,28 @@ def test_reachable_kind_filter(db):
     assert "m" not in {s["id"] for s in calls_only}  # import edge not followed
     with_imports = reachable(db, "a", direction="out", kinds=["call", "import"])
     assert "m" in {s["id"] for s in with_imports}
+
+
+def test_symbol_at_returns_innermost(db):
+    """techne#335: symbol_at maps an edited line to the innermost enclosing
+    symbol (smallest span containing the line) — the edit-rail's anchor."""
+    add_symbol(db, id="m", file="mod.py", name="mod", kind="module", span="1:100")
+    add_symbol(db, id="c", file="mod.py", name="Klass", kind="class", span="10:50")
+    add_symbol(db, id="f", file="mod.py", name="method", kind="method", span="20:30")
+
+    assert symbol_at(db, "mod.py", 25)["id"] == "f"  # inside method → innermost
+    assert symbol_at(db, "mod.py", 40)["id"] == "c"  # in class, outside method → class
+    assert symbol_at(db, "mod.py", 5)["id"] == "m"  # module-level only → module
+    assert symbol_at(db, "mod.py", 200) is None  # past every span → None
+    assert symbol_at(db, "other.py", 25) is None  # unknown file → None
+
+
+def test_symbol_at_skips_malformed_span(db):
+    """A missing/garbage span is skipped, not raised (defensive)."""
+    add_symbol(db, id="bad", file="x.py", name="bad", kind="function", span=None)
+    add_symbol(db, id="ok", file="x.py", name="ok", kind="function", span="1:9")
+    assert symbol_at(db, "x.py", 5)["id"] == "ok"
+    assert symbol_at(db, "x.py", 100) is None
 
 
 def test_stats(db):
