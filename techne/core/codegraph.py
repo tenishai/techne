@@ -163,6 +163,39 @@ def resolve_symbol_id(db_path: Path, arg: str) -> str:
     return rows[0]["id"]
 
 
+def symbol_at(db_path: Path, file: str, line: int) -> dict | None:
+    """Return the innermost symbol whose span contains *line* in *file*, or None.
+
+    *file* must match ``symbols.file`` as stored (repo-relative). Spans are
+    ``"start:end"`` 1-indexed line ranges (techne#89). "Innermost" = the symbol
+    with the smallest span still containing the line, so a function wins over the
+    class or module enclosing it — the symbol the agent actually edited (the
+    edit-rail's anchor, techne#335). Rows with an absent/malformed span are
+    skipped rather than raising.
+    """
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM symbols WHERE file = ?", (file,)).fetchall()
+    finally:
+        conn.close()
+    best: dict | None = None
+    best_width: int | None = None
+    for r in rows:
+        span = r["span"]
+        if not span or ":" not in span:
+            continue
+        try:
+            start_s, end_s = span.split(":", 1)
+            start, end = int(start_s), int(end_s)
+        except ValueError:
+            continue
+        if start <= line <= end:
+            width = end - start
+            if best_width is None or width < best_width:
+                best, best_width = dict(r), width
+    return best
+
+
 def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
     """FTS over symbol name + signature."""
     from techne.core.search import prepare_fts_query

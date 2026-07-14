@@ -202,6 +202,132 @@ def _maybe_reindex_codex(config: Config, tool_name: str, tool_input: dict) -> No
         print(f"techne: codex reindex-on-edit skipped: {e}", file=sys.stderr)
 
 
+def _edited_line(file_path, tool_input: dict) -> int | None:
+    """1-indexed line of the edit inside the (post-edit) file on disk, or None.
+
+    PostToolUse fires after the edit is applied, so ``new_string`` is present in
+    the file. We locate it to get a line to anchor the enclosing-symbol lookup.
+    Handles Edit (``new_string``) and MultiEdit (first entry of ``edits``).
+    """
+    from pathlib import Path
+
+    new_string = tool_input.get("new_string")
+    if new_string is None:
+        edits = tool_input.get("edits")
+        if isinstance(edits, list) and edits:
+            new_string = edits[0].get("new_string")
+    if not new_string:
+        return None
+    try:
+        text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    pos = text.find(new_string)
+    if pos < 0:
+        # Fall back to the first line of the replacement (whitespace/newlines in
+        # the stored string may not match the file byte-for-byte).
+        first = new_string.split("\n", 1)[0].strip()
+        pos = text.find(first) if first else -1
+    if pos < 0:
+        return None
+    return text.count("\n", 0, pos) + 1
+
+
+def _build_edit_rail_context(symbol: dict, rows: list, total: int) -> str:
+    """Render the edited symbol's dependents into a compact additionalContext block."""
+    shown = len(rows)
+    header = (
+        f"## Codex — editing `{symbol['name']}` may affect {total} dependent(s)"
+    )
+    lines = [
+        header,
+        "> Experimental blast-radius rail (techne#335); the graph may be stale — "
+        "verify before relying.",
+        "",
+    ]
+    for s in rows:
+        freshness = s.get("freshness", "unknown")
+        marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
+        lines.append(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']}){marker}")
+    if total > shown:
+        lines.append(f"  … and {total - shown} more (closest {shown} shown by depth)")
+    return "\n".join(lines)
+
+
+def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, tool_input: dict):
+    """Edit rail (techne#335): after an Edit/MultiEdit, map the edit to its
+    enclosing symbol and surface that symbol's transitive dependents ("what
+    breaks if I change this") inline — but only when the symbol has at least
+    ``codex_edit_rail_min_deps`` dependents (threshold-gated to skip leaf edits).
+
+    Opt-in (default OFF) and strictly best-effort: any failure — no indexed repo,
+    unmappable edit, slow query — degrades to None so the hook exit stays 0.
+    Logs to context_injections (source=codex_edit_rail) so utilization is
+    measurable against the other injection paths (#329/#684).
+    """
+    if not config.hooks.codex_edit_rail:
+        return None
+    if tool_name not in ("Edit", "MultiEdit"):
+        return None
+    file_path = tool_input.get("file_path")
+    if not file_path:
+        return None
+    try:
+        from pathlib import Path
+
+        from techne.core.codegraph import annotate_freshness, reachable, symbol_at
+        from techne.core.codex import resolve_repo_db_for_query
+        from techne.core.repo import find_repo_root
+        from techne.hooks._injection_log import log_context_injection
+        from techne.hooks._timeout import bounded_hook
+
+        p = Path(file_path)
+        db_path = resolve_repo_db_for_query(config, p)
+        if db_path is None:
+            return None  # repo not indexed → no-op
+        root = find_repo_root(p)
+        if root is None:
+            return None
+        try:
+            rel = str(p.relative_to(root))
+        except ValueError:
+            return None
+
+        line = _edited_line(p, tool_input)
+        if line is None:
+            return None
+
+        with bounded_hook(config.hooks.timeout_s):
+            symbol = symbol_at(db_path, rel, line)
+            if symbol is None or symbol.get("kind") == "module":
+                # No enclosing symbol, or only the whole module — a module's
+                # "dependents" is every importer, too coarse to be useful inline.
+                return None
+            deps = reachable(db_path, symbol["id"], direction="in")
+
+        if len(deps) < config.hooks.codex_edit_rail_min_deps:
+            return None  # low-risk edit — stay silent
+
+        total = len(deps)
+        shown = annotate_freshness(db_path, deps[: config.hooks.codex_edit_rail_limit])
+        text = _build_edit_rail_context(symbol, shown, total)
+
+        # Instrumentation: record the injection alongside the other read-paths so
+        # the #329 audit can compare them. Logs to the main techne.db, not codex.db.
+        log_context_injection(
+            config.db_path,
+            source="codex_edit_rail",
+            session_id=session_id,
+            trigger=symbol["id"],
+            rows=shown,
+            injected_text=text,
+        )
+        return text
+    except Exception as e:  # noqa: BLE001 — the rail must never break the tool call
+        print(f"techne: codex edit-rail skipped: {e}", file=sys.stderr)
+        return None
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -237,20 +363,34 @@ def main():
         print(f"techne: capture failed: {e}", file=sys.stderr)
         sys.exit(0)  # don't fail the tool call
 
-    # Mid-session codex freshness (techne#301) — best-effort, opt-in.
+    # Mid-session codex freshness (techne#301) — best-effort, opt-in. Runs BEFORE
+    # the edit rail so the blast-radius query sees the just-edited symbol.
     _maybe_reindex_codex(config, tool_name, tool_input)
 
-    # Inject due reminders into additionalContext — runs outside bounded_hook so a
-    # slow reminder check doesn't count against the observation-capture timeout, but
-    # errors are always swallowed so the hook exit code stays 0. (#207)
+    # Assemble additionalContext from every contributor, then emit at most once
+    # (a hook can carry only one additionalContext). Each contributor is
+    # best-effort and returns None to add nothing. (#207, #335)
+    context_parts: list[str] = []
+
+    # Codex edit rail: blast-radius of the edited symbol (techne#335).
+    edit_rail_context = _inject_edit_blast_radius(config, session_id, tool_name, tool_input)
+    if edit_rail_context:
+        context_parts.append(edit_rail_context)
+
+    # Due reminders — runs outside bounded_hook so a slow reminder check doesn't
+    # count against the observation-capture timeout, but errors are always
+    # swallowed so the hook exit code stays 0. (#207)
     reminder_context = _inject_due_reminders(config, session_id)
     if reminder_context:
+        context_parts.append(reminder_context)
+
+    if context_parts:
         print(
             json.dumps(
                 {
                     "hookSpecificOutput": {
                         "hookEventName": "PostToolUse",
-                        "additionalContext": reminder_context,
+                        "additionalContext": "\n\n".join(context_parts),
                     }
                 }
             )
