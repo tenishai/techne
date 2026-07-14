@@ -2859,8 +2859,14 @@ def _resolve_codex_symbol_or_exit(db_path: Path, arg: str) -> str:
 @click.option(
     "--repo", type=click.Path(path_type=Path), default=None, help="Repo to query (default: cwd)."
 )
+@click.option(
+    "--include-fixtures",
+    is_flag=True,
+    default=False,
+    help="Include tests/fixtures/** nodes (excluded by default; techne#325).",
+)
 @click.pass_context
-def codex_callers(ctx, symbol_id, repo):
+def codex_callers(ctx, symbol_id, repo, include_fixtures):
     """Who calls this symbol (direct), scoped to the active repo.
 
     SYMBOL_ID is a full id (path::name::kind::line, from `codex search`) or a
@@ -2871,7 +2877,9 @@ def codex_callers(ctx, symbol_id, repo):
 
     _root, db_path = _active_codex_db(config, repo)
     symbol_id = _resolve_codex_symbol_or_exit(db_path, symbol_id)
-    for s in annotate_freshness(db_path, callers(db_path, symbol_id)):
+    for s in annotate_freshness(
+        db_path, callers(db_path, symbol_id, exclude_fixtures=not include_fixtures)
+    ):
         freshness = s.get("freshness", "unknown")
         marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
         click.echo(f"  {s['id']}  {s['name']}  ({s['file']}){marker}")
@@ -2882,21 +2890,37 @@ def codex_callers(ctx, symbol_id, repo):
 @click.option(
     "--repo", type=click.Path(path_type=Path), default=None, help="Repo to query (default: cwd)."
 )
-@click.option("--direction", type=click.Choice(["out", "in"]), default="out", show_default=True)
+@click.option(
+    "--direction",
+    type=click.Choice(["in", "out"]),
+    default="in",
+    show_default=True,
+    help="in=dependents (what breaks if you change this); out=dependencies (what this reaches).",
+)
 @click.option("--depth", default=5, show_default=True)
+@click.option(
+    "--include-fixtures",
+    is_flag=True,
+    default=False,
+    help="Include tests/fixtures/** nodes (excluded by default; techne#325).",
+)
 @click.pass_context
-def codex_blast(ctx, symbol_id, repo, direction, depth):
-    """Transitive reachability via recursive CTE — out=dependencies, in=dependents.
+def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures):
+    """Transitive reachability via recursive CTE — in=dependents (blast radius), out=dependencies.
 
-    SYMBOL_ID is a full id (path::name::kind::line, from `codex search`) or a
-    bare name that resolves to exactly one symbol.
+    The default `in` answers "what breaks if I change this symbol". SYMBOL_ID is
+    a full id (path::name::kind::line, from `codex search`) or a bare name that
+    resolves to exactly one symbol.
     """
     config = ctx.obj["config"]
     from techne.core.codegraph import annotate_freshness, reachable
 
     _root, db_path = _active_codex_db(config, repo)
     symbol_id = _resolve_codex_symbol_or_exit(db_path, symbol_id)
-    raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
+    raw = reachable(
+        db_path, symbol_id, direction=direction, max_depth=depth,
+        exclude_fixtures=not include_fixtures,
+    )
     rows = annotate_freshness(db_path, raw)
     if not rows:
         click.echo("(nothing reachable)")

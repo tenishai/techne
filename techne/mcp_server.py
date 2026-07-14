@@ -570,9 +570,12 @@ TOOLS = [
     {
         "name": "codex_blast_radius",
         "description": (
-            "Compute the transitive reachability (blast radius) of a Codex symbol — "
-            "out=what this symbol reaches (dependencies), in=what reaches this symbol "
-            "(dependents). Uses recursive CTE BFS over the call/import graph. Scoped to "
+            "Compute the transitive reachability (blast radius) of a Codex symbol. "
+            "direction defaults to `in`=what reaches this symbol (dependents) — the "
+            "\"what breaks if I change this\" impact set; `out`=what this symbol reaches "
+            "(dependencies). Uses recursive CTE BFS over the call/import graph. "
+            "tests/fixtures/** nodes are excluded by default (name-collision noise in the "
+            "v1 name-based edge model; set include_fixtures=true to keep them). Scoped to "
             "one repo (db-per-repo, techne#209): pass `repo` to pick it, else the "
             "server's working directory's repo is used. Experimental: the index is built "
             "manually and may be stale — re-run `techne codex index` after code changes."
@@ -591,10 +594,18 @@ TOOLS = [
                 "depth": {"type": "integer", "default": 5},
                 "direction": {
                     "type": "string",
-                    "enum": ["out", "in"],
-                    "default": "out",
+                    "enum": ["in", "out"],
+                    "default": "in",
                     "description": (
-                        "out=dependencies (what this reaches), in=dependents (what reaches this)"
+                        "in=dependents (what breaks if you change this — the blast radius), "
+                        "out=dependencies (what this reaches)"
+                    ),
+                },
+                "include_fixtures": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Include tests/fixtures/** nodes (excluded by default; techne#325)."
                     ),
                 },
             },
@@ -1160,7 +1171,8 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
 
     symbol_id = args.get("symbol_id", "")
     depth = args.get("depth", 5)
-    direction = args.get("direction", "out")
+    direction = args.get("direction", "in")
+    include_fixtures = args.get("include_fixtures", False)
     db_path = _codex_repo_db(args, config)
     if db_path is None:
         return {
@@ -1187,7 +1199,10 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             if len(exc.candidates) > 10:
                 result["candidates_truncated"] = True
         return result
-    raw = reachable(db_path, symbol_id, direction=direction, max_depth=depth)
+    raw = reachable(
+        db_path, symbol_id, direction=direction, max_depth=depth,
+        exclude_fixtures=not include_fixtures,
+    )
     rows = annotate_freshness(db_path, raw)
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
     result: dict = {"symbol_id": symbol_id, "direction": direction, "depth": depth, "nodes": rows}
