@@ -194,6 +194,10 @@ class SearchConfig:
     # Embedding model name override. "" = backend-specific default (see
     # embeddings.py: potion-base-8M for model2vec, MiniLM for fastembed).
     embedding_model: str = ""
+    # Max librarian documents folded into a recall result (techne#340). Recall
+    # returns memory + this many top library docs, each labelled origin=library.
+    # 0 disables the doc fold-in.
+    recall_documents_limit: int = 3
 
 
 @dataclass
@@ -541,6 +545,7 @@ class Config:
                 mmr_lambda=float(s.get("mmr_lambda", 0.3)),
                 embedding_backend=str(s.get("embedding_backend", "")),
                 embedding_model=str(s.get("embedding_model", "")),
+                recall_documents_limit=int(s.get("recall_documents_limit", 3)),
             )
 
         if "injection" in raw and isinstance(raw["injection"], dict):
@@ -667,6 +672,7 @@ class Config:
                 # same staleness bug the injection note below records (techne#601).
                 "embedding_backend": self.search.embedding_backend,
                 "embedding_model": self.search.embedding_model,
+                "recall_documents_limit": self.search.recall_documents_limit,
             },
             "posture": {
                 "mode": self.posture.mode,
