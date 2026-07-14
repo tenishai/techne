@@ -378,6 +378,12 @@ hooks:
                               #   own Grep with matching Codex symbols (needs an indexed repo).
                               #   Re-run 'techne init' after flipping; restart the session to load it.
   codex_grep_assist_limit: 8  # max symbols injected per Grep
+  codex_edit_rail: false      # opt-in (#335): a PostToolUse hook that, after an Edit, injects the
+                              #   edited symbol's blast-radius (its dependents — "what breaks if I
+                              #   change this"), but only when it has enough dependents to matter.
+                              #   Re-run 'techne init' after flipping; restart the session to load it.
+  codex_edit_rail_min_deps: 3 # min transitive dependents before the edit rail fires (skip leaf edits)
+  codex_edit_rail_limit: 10   # max dependents injected per edit (closest-first by depth)
   per_turn_recall: false      # opt-in (#109/#277): a UserPromptSubmit hook injects the durable
                               #   facts most relevant to each prompt — the DYNAMIC per-turn
                               #   complement to the STABLE SessionStart block. Re-run 'techne init'

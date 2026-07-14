@@ -5,6 +5,25 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **Codex edit rail** (#335) — an opt-in PostToolUse hook (`hooks.codex_edit_rail`,
+  default off) that, after an Edit/MultiEdit, maps the edit to its enclosing
+  symbol and injects that symbol's blast-radius (transitive dependents — "what
+  breaks if I change this") into context. Threshold-gated
+  (`codex_edit_rail_min_deps`, default 3) so low-risk leaf edits stay silent, and
+  capped (`codex_edit_rail_limit`, default 10, closest-first by depth). Logs every
+  injection to `context_injections` (`source=codex_edit_rail`) so its utilization
+  is measurable against the other read-paths (#329). New `codegraph.symbol_at()`
+  maps a file+line to the innermost enclosing symbol via its span.
+
+### Fixed
+
+- **Codex blast-radius direction + fixture noise** (#325, PR #336) — `blast-radius`
+  now defaults to dependents (`direction=in`, "what breaks if I change this")
+  instead of dependencies, and `tests/fixtures/**` name-collision phantom nodes are
+  excluded by default (`--include-fixtures` / `include_fixtures` to opt back in).
+
 ## [0.10.0] — 2026-07-13
 
 ### Added
