@@ -200,6 +200,18 @@ def _techne_status(args: dict, config: Config) -> dict:
     return collect_health(config)
 
 
+def _fold_in_documents(config: Config, topic: str, memory_results: list[dict]) -> list[dict]:
+    """Label memory rows ``origin='memory'`` and append the top library documents
+    (``origin='library'``) so a recall request returns both, each clearly sourced
+    (techne#340). Best-effort — ``recall_documents`` swallows its own errors, so a
+    missing/broken librarian.db degrades to memory-only."""
+    from techne.core.librarian import recall_documents
+
+    for r in memory_results:
+        r.setdefault("origin", "memory")
+    return memory_results + recall_documents(config, topic)
+
+
 def _techne_recall(args: dict, config: Config) -> dict:
     """Retrieve context for a specific topic — searches all layers.
 
@@ -245,7 +257,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         # carry both.
         annotate_uncertain(config.db_path, results)
         return {
-            "search_results": results,
+            "search_results": _fold_in_documents(config, topic, results),
             "identity_matches": _identity_matches(),
         }
 
@@ -330,7 +342,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
     annotate_uncertain(config.db_path, local_only)
 
     out: dict = {
-        "search_results": merged,
+        "search_results": _fold_in_documents(config, topic, merged),
         "identity_matches": _identity_matches(),
     }
 

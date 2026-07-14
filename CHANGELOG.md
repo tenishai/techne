@@ -7,6 +7,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Recall returns memory + librarian documents** (#340) — `techne_recall` now
+  folds the top library documents (from `librarian.db`, resolved locally) into
+  its result set alongside memory. Every row is labelled `origin` (`memory` vs
+  `library`) so results stay clearly sourced; documents come as capped snippets
+  with `source_url` for full retrieval. Capped by `search.recall_documents_limit`
+  (default 3; 0 disables). Best-effort — a missing/broken `librarian.db` degrades
+  to memory-only. New `librarian.recall_documents()`. Previously the 62-document
+  store was reachable only via the `techne library` CLI, invisible to recall.
+
 - **`techne audit`** (#329) — a utilization audit with two descriptive panels:
   the injection read-path (per-source events / hits / tokens / sessions /
   empty-fires over `context_injections`) and the ledger read/write ratios per
