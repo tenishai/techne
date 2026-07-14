@@ -112,7 +112,18 @@ def test_read_write_ledger_never_queried_is_none_not_zerodiv(db):
     assert led["librarian"]["read"] == 0
 
 
+def test_librarian_flagged_not_mcp_exposed(db):
+    """techne exposes no librarian MCP tool, so the ledger can't measure it —
+    the row must be flagged mcp_read_tool=False (not reported as 'never queried',
+    which would imply an ignored tool). architect DOES have MCP tools → True.
+    (techne#329 review.)"""
+    led = read_write_ledger(db)
+    assert led["librarian"]["mcp_read_tool"] is False
+    assert led["architect"]["mcp_read_tool"] is True
+
+
 def test_read_write_ledger_counts_librarian_by_prefix(db):
+    """The prefix match still lights up if a librarian_* MCP tool is ever added."""
     _obs(db, "mcp__techne__librarian_search", 2)
     _obs(db, "mcp__techne__librarian_show", 1)
     led = read_write_ledger(db)

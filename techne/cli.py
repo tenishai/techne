@@ -1095,13 +1095,20 @@ def audit(ctx, since_days, as_json):
         f"1 query / {cx['edits_per_read']:.0f} edits" if cx["edits_per_read"] is not None
         else "no codex reads"
     )
-    arch_note = "" if ledger["architect"]["read"] else "   → never queried"
-    lib_note = "" if ledger["librarian"]["read"] else "   → never queried"
+    arch = ledger["architect"]
+    lib = ledger["librarian"]
+    arch_note = "" if arch["read"] else "   → never queried"
     click.echo("LEDGER READ/WRITE")
     click.echo(f"  memory:    store {m['write']} · recall+search {m['read']}   → {mem_ratio}")
     click.echo(f"  codex:     reads {cx['read']} · Edit {cx['edit']:,}   → {codex_ratio}")
-    click.echo(f"  architect: pattern reads {ledger['architect']['read']}{arch_note}")
-    click.echo(f"  librarian: reads {ledger['librarian']['read']}{lib_note}")
+    click.echo(f"  architect: pattern reads {arch['read']}{arch_note}")
+    if lib["mcp_read_tool"]:
+        lib_note = "" if lib["read"] else "   → never queried"
+        click.echo(f"  librarian: reads {lib['read']}{lib_note}")
+    else:
+        # No librarian MCP tool exists (CLI-only store), so the ledger can't see
+        # it — say that, don't imply an ignored tool. (techne#329 review)
+        click.echo("  librarian: CLI-only store — no MCP read tool, not visible to this ledger")
     click.echo("")
     click.echo('Attribution ("was the injected item used") — not computed; see techne#105.')
 

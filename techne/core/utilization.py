@@ -24,7 +24,14 @@ _MEMORY_WRITE = ("mcp__techne__techne_store",)
 _MEMORY_READ = ("mcp__techne__techne_recall", "mcp__techne__techne_search")
 _CODEX_READ = ("mcp__techne__codex_search", "mcp__techne__codex_blast_radius")
 _ARCHITECT_READ = ("mcp__techne__pattern_search", "mcp__techne__pattern_related")
-_LIBRARIAN_READ_PREFIX = "mcp__techne__librarian_"  # the librarian_* family
+# NOTE (techne#329 review): techne exposes NO librarian/library MCP read tool
+# (verified 2026-07-14 — the library store is reachable only via the `techne
+# library` CLI, which is not a tool-use observation). So a ledger of MCP
+# tool-uses structurally CANNOT measure librarian utilization — the prefix count
+# stays 0 by construction and must NOT be reported as "never queried" (that
+# implies a tool agents ignore, not a store the ledger can't see). The prefix
+# match is kept to auto-light-up if a librarian_* MCP tool is ever added.
+_LIBRARIAN_READ_PREFIX = "mcp__techne__librarian_"
 # Code-write baseline for the codex "reads per edit" ratio. Edit only, to stay
 # directly comparable to #329's original finding (Edit dominates by ~100x).
 _CODE_EDIT = ("Edit",)
@@ -150,6 +157,9 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
             "edit": code_edit,
             "edits_per_read": round(code_edit / codex_read, 1) if codex_read else None,
         },
-        "architect": {"read": architect_read},
-        "librarian": {"read": librarian_read},
+        # mcp_read_tool distinguishes "0 because agents don't call an existing
+        # MCP tool" (architect — a real behavioural signal) from "0 because there
+        # is no MCP tool to call" (librarian — ledger-invisible, not neglect).
+        "architect": {"read": architect_read, "mcp_read_tool": True},
+        "librarian": {"read": librarian_read, "mcp_read_tool": False},
     }
