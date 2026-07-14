@@ -21,8 +21,18 @@ from techne.core.stores import plain_connect
 # exercise the indexer. Because v1 edges are name-based (techne#325), their common
 # names (execute/run/add/…) collide with real callees and inject phantom nodes into
 # a blast radius. Excluded by default from callers/callees/reachable results;
-# opt back in with exclude_fixtures=False. A real resolver pass (LSP, #319) removes
-# the need for this heuristic.
+# opt back in with exclude_fixtures=False.
+#
+# Two known limitations of this heuristic (both dissolve once the LSP resolver in
+# techne#319 gives edges real to_symbol ids, ending name-collision traversal):
+#   1. PROJECTION-ONLY. The filter drops fixture rows from the final result, but the
+#      recursive traversal still walks THROUGH fixture nodes. So a real symbol
+#      reachable *only* via a fixture's collision edge (anchor→fixture→real) still
+#      surfaces — as an orphan, minus the fixture breadcrumb that flagged it as
+#      noise. Strictly better than before (the fixture node itself is gone), but
+#      deep leaks persist. Leaf collisions (the common case) are fully filtered.
+#   2. PATH-CONVENTION-LOCKED. Matches this repo's POSIX `tests/fixtures/` layout;
+#      a `tests\fixtures\` (Windows) or `test/fixtures` (singular) path would leak.
 _FIXTURE_LIKE = "%tests/fixtures/%"
 
 
@@ -256,7 +266,9 @@ def reachable(
     the anchor. The anchor itself is excluded.
 
     exclude_fixtures drops tests/fixtures/** phantom nodes (name collisions in
-    the v1 name-based edge model) from the result by default (techne#325).
+    the v1 name-based edge model) from the RESULT by default (techne#325). This
+    is a projection-level filter — see _FIXTURE_LIKE for its two known limits
+    (deep leaks through fixtures; POSIX-path-locked), both retired by techne#319.
 
     UNION (not UNION ALL) deduplicates (id, depth) pairs, which naturally
     terminates cycles without requiring explicit visited-set tracking.
