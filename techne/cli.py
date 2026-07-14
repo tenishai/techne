@@ -1039,6 +1039,80 @@ def migrate_summaries_cmd(ctx, dry_run: bool):
     )
 
 
+@main.command()
+@click.option(
+    "--since", "since_days", type=int, default=None,
+    help="Window to the last N days (default: all-time).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+@click.pass_context
+def audit(ctx, since_days, as_json):
+    """Utilization audit (techne#329): injection read-path + ledger read/write ratios.
+
+    Two descriptive panels — which injection sources fire and at what token cost,
+    and the read-vs-write balance per memory domain. Attribution ("was the
+    injected item actually used") is out of scope here — see techne#105.
+    """
+    config = ctx.obj["config"]
+    from techne.core.utilization import injection_utilization, read_write_ledger
+
+    inj = injection_utilization(config.db_path, since_days=since_days)
+    ledger = read_write_ledger(config.db_path, since_days=since_days)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {"since_days": since_days, "injection": inj, "ledger": ledger}, indent=2
+            )
+        )
+        return
+
+    window = f"last {since_days}d" if since_days else "all-time"
+    click.echo(
+        f"techne utilization audit — {window} (N={ledger['total_observations']:,} obs)\n"
+    )
+
+    click.echo("INJECTION READ-PATH (context_injections)")
+    if not inj:
+        click.echo("  (no injections logged yet)")
+    else:
+        click.echo(
+            f"  {'source':22} {'events':>7} {'hits':>6} {'avg_tok':>8} {'sessions':>9} {'empty':>6}"
+        )
+        for r in inj:
+            click.echo(
+                f"  {r['source']:22} {r['events']:>7} {r['total_hits']:>6} "
+                f"{r['avg_tokens']:>8} {r['sessions']:>9} {r['empty_events']:>6}"
+            )
+    click.echo("")
+
+    m, cx = ledger["memory"], ledger["codex"]
+    mem_ratio = (
+        f"{m['writes_per_read']} writes/read" if m["writes_per_read"] is not None
+        else "no reads yet"
+    )
+    codex_ratio = (
+        f"1 query / {cx['edits_per_read']:.0f} edits" if cx["edits_per_read"] is not None
+        else "no codex reads"
+    )
+    arch = ledger["architect"]
+    lib = ledger["librarian"]
+    arch_note = "" if arch["read"] else "   → never queried"
+    click.echo("LEDGER READ/WRITE")
+    click.echo(f"  memory:    store {m['write']} · recall+search {m['read']}   → {mem_ratio}")
+    click.echo(f"  codex:     reads {cx['read']} · Edit {cx['edit']:,}   → {codex_ratio}")
+    click.echo(f"  architect: pattern reads {arch['read']}{arch_note}")
+    if lib["mcp_read_tool"]:
+        lib_note = "" if lib["read"] else "   → never queried"
+        click.echo(f"  librarian: reads {lib['read']}{lib_note}")
+    else:
+        # No librarian MCP tool exists (CLI-only store), so the ledger can't see
+        # it — say that, don't imply an ignored tool. (techne#329 review)
+        click.echo("  librarian: CLI-only store — no MCP read tool, not visible to this ledger")
+    click.echo("")
+    click.echo('Attribution ("was the injected item used") — not computed; see techne#105.')
+
+
 @main.command("init")
 @click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
 @click.option(
