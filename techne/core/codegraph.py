@@ -17,6 +17,24 @@ from pathlib import Path
 
 from techne.core.stores import plain_connect
 
+# Symbols under tests/fixtures/** are deliberately-isolated sample code used to
+# exercise the indexer. Because v1 edges are name-based (techne#325), their common
+# names (execute/run/add/…) collide with real callees and inject phantom nodes into
+# a blast radius. Excluded by default from callers/callees/reachable results;
+# opt back in with exclude_fixtures=False.
+#
+# Two known limitations of this heuristic (both dissolve once the LSP resolver in
+# techne#319 gives edges real to_symbol ids, ending name-collision traversal):
+#   1. PROJECTION-ONLY. The filter drops fixture rows from the final result, but the
+#      recursive traversal still walks THROUGH fixture nodes. So a real symbol
+#      reachable *only* via a fixture's collision edge (anchor→fixture→real) still
+#      surfaces — as an orphan, minus the fixture breadcrumb that flagged it as
+#      noise. Strictly better than before (the fixture node itself is gone), but
+#      deep leaks persist. Leaf collisions (the common case) are fully filtered.
+#   2. PATH-CONVENTION-LOCKED. Matches this repo's POSIX `tests/fixtures/` layout;
+#      a `tests\fixtures\` (Windows) or `test/fixtures` (singular) path would leak.
+_FIXTURE_LIKE = "%tests/fixtures/%"
+
 
 def add_symbol(
     db_path: Path,
@@ -166,16 +184,22 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
         conn.close()
 
 
-def callers(db_path: Path, symbol_id: str) -> list[dict]:
+def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> list[dict]:
     """Direct callers — which symbols call this one.
 
     Finds edges where to_symbol = symbol_id (resolved) OR
     to_name = symbol.name (unresolved name match).
+
+    exclude_fixtures drops tests/fixtures/** noise by default (techne#325).
     """
+    fixture_clause = " AND s.file NOT LIKE ?" if exclude_fixtures else ""
+    params: list = [symbol_id, symbol_id]
+    if exclude_fixtures:
+        params.append(_FIXTURE_LIKE)
     conn = plain_connect(db_path)
     try:
         rows = conn.execute(
-            """SELECT s.*
+            f"""SELECT s.*
                FROM edges e
                JOIN symbols s ON s.id = e.from_symbol
                WHERE e.kind = 'call'
@@ -183,32 +207,38 @@ def callers(db_path: Path, symbol_id: str) -> list[dict]:
                      e.to_symbol = ?
                      OR (e.to_symbol IS NULL
                          AND e.to_name = (SELECT name FROM symbols WHERE id = ?))
-                 )""",
-            (symbol_id, symbol_id),
+                 ){fixture_clause}""",
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
 
 
-def callees(db_path: Path, symbol_id: str) -> list[dict]:
+def callees(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> list[dict]:
     """Direct callees — which symbols this one calls.
 
     Resolves targets by to_symbol when set, else by symbols.name = to_name.
     Multiple symbols may share a name; all are returned.
+
+    exclude_fixtures drops tests/fixtures/** noise by default (techne#325).
     """
+    fixture_clause = " AND s.file NOT LIKE ?" if exclude_fixtures else ""
+    params: list = [symbol_id]
+    if exclude_fixtures:
+        params.append(_FIXTURE_LIKE)
     conn = plain_connect(db_path)
     try:
         rows = conn.execute(
-            """SELECT s.*
+            f"""SELECT s.*
                FROM edges e
                JOIN symbols s ON (
                    s.id = e.to_symbol
                    OR (e.to_symbol IS NULL AND s.name = e.to_name)
                )
                WHERE e.from_symbol = ?
-                 AND e.kind = 'call'""",
-            (symbol_id,),
+                 AND e.kind = 'call'{fixture_clause}""",
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -219,19 +249,26 @@ def reachable(
     db_path: Path,
     symbol_id: str,
     *,
-    direction: str = "out",
+    direction: str = "in",
     kinds: list[str] | None = None,
     max_depth: int = 5,
     limit: int = 500,
+    exclude_fixtures: bool = True,
 ) -> list[dict]:
-    """Transitive reachability via a recursive CTE — the blast-radius query, dep-free.
+    """Transitive reachability via a recursive CTE, dep-free.
 
+    direction='in'  follows to→from (dependents / what reaches this) — the
+      "what breaks if I change this" blast radius, and the default (techne#325).
     direction='out' follows from→to (dependencies / what this reaches).
-    direction='in'  follows to→from (dependents / what reaches this).
 
     Name-based traversal: when to_symbol IS NULL, resolves callee by matching
     symbols.name = edges.to_name. Each result carries its minimum `depth` from
     the anchor. The anchor itself is excluded.
+
+    exclude_fixtures drops tests/fixtures/** phantom nodes (name collisions in
+    the v1 name-based edge model) from the RESULT by default (techne#325). This
+    is a projection-level filter — see _FIXTURE_LIKE for its two known limits
+    (deep leaks through fixtures; POSIX-path-locked), both retired by techne#319.
 
     UNION (not UNION ALL) deduplicates (id, depth) pairs, which naturally
     terminates cycles without requiring explicit visited-set tracking.
@@ -265,7 +302,11 @@ def reachable(
             WHERE r.depth < ?{kind_filter}
         """
 
-    params.extend([symbol_id, limit])
+    fixture_clause = " AND s.file NOT LIKE ?" if exclude_fixtures else ""
+    params.append(symbol_id)
+    if exclude_fixtures:
+        params.append(_FIXTURE_LIKE)
+    params.append(limit)
 
     sql = f"""
         WITH RECURSIVE reach(id, depth) AS (
@@ -275,7 +316,7 @@ def reachable(
         )
         SELECT s.*, MIN(r.depth) AS depth
         FROM reach r JOIN symbols s ON s.id = r.id
-        WHERE r.id != ?
+        WHERE r.id != ?{fixture_clause}
         GROUP BY s.id ORDER BY depth, s.name LIMIT ?
     """
     conn = plain_connect(db_path)

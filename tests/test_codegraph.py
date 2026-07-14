@@ -72,7 +72,8 @@ def test_callers_callees_direct(db):
     assert {s["id"] for s in callers(db, "a")} == set()
 
 
-def test_reachable_out_is_blast_radius(db):
+def test_reachable_out_is_dependencies(db):
+    # techne#325: 'out' = dependencies (what this reaches), NOT the blast radius.
     _graph(db)
     out = reachable(db, "a", direction="out")
     assert {s["id"] for s in out} == {"b", "c", "d"}  # everything a transitively reaches
@@ -80,10 +81,13 @@ def test_reachable_out_is_blast_radius(db):
     assert depths["b"] == 1 and depths["d"] == 1 and depths["c"] == 2  # min depth to c
 
 
-def test_reachable_in_is_dependents(db):
+def test_reachable_in_is_dependents_and_default(db):
+    # techne#325: 'in' = dependents (what breaks if you change this) — the blast
+    # radius, and the default direction.
     _graph(db)
     incoming = reachable(db, "c", direction="in")
     assert {s["id"] for s in incoming} == {"a", "b", "d"}  # everything that reaches c
+    assert {s["id"] for s in reachable(db, "c")} == {"a", "b", "d"}  # default is 'in'
 
 
 def test_reachable_respects_depth_and_excludes_anchor(db):
@@ -91,6 +95,28 @@ def test_reachable_respects_depth_and_excludes_anchor(db):
     shallow = reachable(db, "a", direction="out", max_depth=1)
     assert {s["id"] for s in shallow} == {"b", "d"}  # depth-1 only; c (depth 2) excluded
     assert "a" not in {s["id"] for s in reachable(db, "a")}  # anchor never in results
+
+
+def test_fixtures_excluded_by_default(db):
+    """techne#325: tests/fixtures/** symbols are name-collision noise and are
+    dropped from callers/callees/reachable by default, opt back in explicitly."""
+    # Real chain: caller(main) → target(handle). A fixture also defines "handle",
+    # so the name-based edge match pulls it in — that's the phantom node to filter.
+    _sym(db, "caller", "main")
+    _sym(db, "target", "handle")
+    add_symbol(db, id="fix", file="tests/fixtures/codex/callee.py", name="handle", kind="function")
+    add_edge(db, "caller", "handle", "call")  # unresolved name edge → matches BOTH
+
+    # callees of caller: real "target" only, fixture "fix" filtered by default.
+    assert {s["id"] for s in callees(db, "caller")} == {"target"}
+    assert {s["id"] for s in callees(db, "caller", exclude_fixtures=False)} == {"target", "fix"}
+
+    # callers of the shared name: caller reaches both symbols named "handle";
+    # the fixture one is excluded from a dependents query by default too.
+    assert "fix" not in {s["id"] for s in reachable(db, "caller", direction="out")}
+    assert "fix" in {
+        s["id"] for s in reachable(db, "caller", direction="out", exclude_fixtures=False)
+    }
 
 
 def test_reachable_kind_filter(db):
