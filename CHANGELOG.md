@@ -7,6 +7,13 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **`techne audit`** (#329) — a utilization audit with two descriptive panels:
+  the injection read-path (per-source events / hits / tokens / sessions /
+  empty-fires over `context_injections`) and the ledger read/write ratios per
+  memory domain (store-vs-recall, codex-reads-vs-edits, architect + librarian).
+  `--since N` windows to the last N days; `--json` for machine output.
+  Attribution ("was the injected item used") is out of scope — see #105.
+
 - **Codex edit rail** (#335) — an opt-in PostToolUse hook (`hooks.codex_edit_rail`,
   default off) that, after an Edit/MultiEdit, maps the edit to its enclosing
   symbol and injects that symbol's blast-radius (transitive dependents — "what
