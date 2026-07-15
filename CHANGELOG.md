@@ -7,6 +7,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Base Archivist — write target + topology lane selector** (#346 PR 1, #224) — a
+  `standalone` config flag selects the outbox lane for thread summaries: `true`
+  (default, behaviour-preserving) keeps the `sync:` adapter lane; `false` routes to
+  `sink:archivist`, a techne-native Archivist that writes pushed team memory into a
+  techne-schema `archivist.db` (`archivist_db_path`, default `<data_dir>/archivist.db`).
+  `_has_live_consumer` is now lane-aware (sync adapter vs. registered sink). techne
+  never touches git in either lane. The federation read-back loop is PR 2.
+
 - **Operator-editable maintenance prompts** (#219, completes the Coherence track of
   #212) — the reflect / consolidate / dream prompts that drive knowledge maintenance
   are now overridable per-install: drop a file at `<data_dir>/prompts/<name>.md` and
