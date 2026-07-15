@@ -799,8 +799,12 @@ def outbox_dead(ctx):
 def outbox_flush_sinks(ctx):
     """Flush pending rows to registered sinks (manual trigger)."""
     config = ctx.obj["config"]
+    from techne.core.archivist import ensure_registered_for
     from techne.sync.outbox import flush_sinks
 
+    # Register sink:archivist so a fresh CLI process can drain pending team-memory
+    # rows that failed immediate delivery (techne#346 review).
+    ensure_registered_for(config)
     summary = flush_sinks(config.db_path)
     if not summary:
         click.echo("No pending rows.")
