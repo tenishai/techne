@@ -7,6 +7,17 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Base Archivist — closed team-memory loop** (#346 PR 2) — a non-standalone
+  instance now egresses live durable knowledge to the Archivist (`sink:archivist_knowledge`)
+  at session end, and recall automatically federates over its `archivist.db` as a
+  `team` connection. So a fact stored by one agent is read back as team memory by
+  another sharing the Archivist — locally, no cabal, no git. Re-pushing the same
+  fact doesn't duplicate it (the handler skips one already live in the Archivist).
+  Known v1 gaps, both closed by the #223 export ledger: superseded facts leave a
+  stale revision live in the Archivist (append-only, no supersession propagation),
+  and every session re-enqueues all live knowledge (the outbox's partial unique
+  index only collapses still-pending duplicates).
+
 - **Base Archivist — write target + topology lane selector** (#346 PR 1, #224) — a
   `standalone` config flag selects the outbox lane for thread summaries: `true`
   (default, behaviour-preserving) keeps the `sync:` adapter lane; `false` routes to

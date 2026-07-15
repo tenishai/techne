@@ -78,7 +78,8 @@ def test_run_session_end_full_lifecycle(config, db_path, monkeypatch):
 
     # Check the returned dict has all expected keys
     assert set(result.keys()) == {
-        "threads", "linked", "aged_completed", "aged_stale", "queued", "reflect"
+        "threads", "linked", "aged_completed", "aged_stale", "queued",
+        "knowledge_pushed", "reflect",
     }
     assert isinstance(result["threads"], int)
     assert isinstance(result["linked"], int)

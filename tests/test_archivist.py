@@ -10,9 +10,12 @@ from __future__ import annotations
 import pytest
 
 from techne.core.archivist import (
+    ARCHIVIST_KNOWLEDGE_TARGET,
     ARCHIVIST_SINK,
+    archivist_connection,
     archivist_db,
     ensure_registered_for,
+    push_knowledge_to_archivist,
     register_base_archivist,
 )
 from techne.lifecycle import (
@@ -192,6 +195,112 @@ def test_pending_sink_row_drains_from_fresh_process(config):
     finally:
         conn.close()
     assert n == 1
+
+
+# ---- PR 2: knowledge egress + federation read-back loop ---------------------
+
+
+def test_knowledge_push_lands_in_archivist_knowledge_table(config):
+    from techne.core.database import init_db
+    from techne.core.stores import plain_connect
+    from techne.sync.outbox import enqueue
+
+    init_db(config.db_path)
+    config.standalone = False
+    with use_registry({}):
+        register_base_archivist(config)
+        enqueue(
+            config.db_path, ARCHIVIST_KNOWLEDGE_TARGET,
+            {"content": "fact X", "type": "fact", "tags": "t", "confidence": "high"},
+            deliver=True,
+        )
+    conn = plain_connect(archivist_db(config))
+    try:
+        row = conn.execute("SELECT content, source FROM knowledge").fetchone()
+    finally:
+        conn.close()
+    assert row["content"] == "fact X"
+    assert row["source"] == "team"  # marks team provenance
+
+
+def test_push_knowledge_noop_when_standalone(config):
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+
+    init_db(config.db_path)
+    store(config.db_path, "local fact", type="fact")
+    config.standalone = True
+    with use_registry({}):
+        assert push_knowledge_to_archivist(config) == 0
+
+
+def test_push_knowledge_is_idempotent(config):
+    """Re-pushing doesn't duplicate — the outbox dedups by content-hash (#346 PR2)."""
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.core.stores import plain_connect
+
+    init_db(config.db_path)
+    config.standalone = False
+    store(config.db_path, "fact one", type="fact")
+    with use_registry({}):
+        register_base_archivist(config)
+        push_knowledge_to_archivist(config)
+        push_knowledge_to_archivist(config)  # second pass must not re-deliver
+    conn = plain_connect(archivist_db(config))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1
+
+
+def test_archivist_connection_and_effective_connections_gate_on_standalone(config):
+    from techne.mcp_server import _effective_connections
+
+    config.standalone = True
+    assert archivist_connection(config) is None
+    assert "archivist" not in _effective_connections(config)
+
+    config.standalone = False
+    spec = archivist_connection(config)
+    assert spec is not None and spec.role == "team"
+    assert spec.db_path.endswith("archivist.db")
+    assert "archivist" in _effective_connections(config)
+
+
+def test_end_to_end_team_recall_loop(config, tmp_path):
+    """The whole point (#346): agent A stores a fact + pushes to a shared Archivist;
+    agent B (different local db, same Archivist) recalls it back as team memory."""
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.mcp_server import _techne_recall
+
+    shared = str(tmp_path / "shared-archivist.db")
+
+    # Agent A: store locally, push to the shared Archivist.
+    config.standalone = False
+    config.archivist_db_path = shared
+    init_db(config.db_path)
+    store(config.db_path, "The deploy runbook lives in ops/deploy.md",
+          type="fact", tags="ops", confidence="high")
+    with use_registry({}):
+        register_base_archivist(config)
+        assert push_knowledge_to_archivist(config) == 1
+
+    # Agent B: a DIFFERENT empty local db, the SAME Archivist.
+    cfg_b = Config.load()
+    cfg_b.db_path = tmp_path / "agentB.db"
+    cfg_b.standalone = False
+    cfg_b.archivist_db_path = shared
+    init_db(cfg_b.db_path)
+
+    result = _techne_recall({"topic": "deploy runbook"}, cfg_b)
+    team = [r for r in result["search_results"] if r.get("_role") == "team"]
+    assert len(team) == 1
+    assert "deploy runbook" in team[0]["content"]
+    assert team[0]["_store"] == "archivist"
 
 
 def test_invalid_payload_rejected_at_enqueue(config):
