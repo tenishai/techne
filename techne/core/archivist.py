@@ -205,10 +205,20 @@ def push_knowledge_to_archivist(config) -> int:
     (techne#346 PR2). Enqueues each live entry (``superseded_by IS NULL``) to
     ``sink:archivist_knowledge``. Returns the number enqueued. No-op when standalone.
 
-    Idempotent at the ARCHIVIST: the sink handler skips a fact already live there,
-    so a fact isn't duplicated across re-pushes. v1 re-enqueues all live knowledge
-    each call (cheap deliveries that no-op on dup); the per-sink export ledger that
-    avoids re-enqueuing entirely is techne#223."""
+    The sink handler skips a fact already live in the Archivist, so re-pushing the
+    same fact doesn't duplicate it. Two KNOWN GAPS in this v1, both requiring the
+    export ledger / reconciliation in techne#223:
+
+    1. STALE REVISIONS PERSIST. When a fact is superseded locally (a new revision),
+       this pushes the NEW version but never supersedes/removes the OLD one already
+       in the Archivist — so both revisions stay live there and recall can surface
+       the stale one. v1 is append-only to the team store; propagating supersession
+       needs a ledger that maps local ids → archivist rows.
+    2. RE-ENQUEUE COST. It re-enqueues ALL live knowledge each call. The outbox's
+       unique index is PARTIAL (``WHERE status='pending'``), so it only collapses
+       still-pending duplicates — already-synced rows accumulate and each call
+       re-delivers every fact (the handler no-ops on dup, but pays a SELECT per
+       row). The ledger avoids re-enqueuing entirely."""
     if config.standalone:
         return 0
     from techne.core.knowledge_export import query_live_knowledge
