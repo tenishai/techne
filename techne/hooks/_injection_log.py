@@ -43,9 +43,23 @@ CREATE TABLE IF NOT EXISTS context_injections (
     hit_count       INTEGER NOT NULL,
     hit_ids         TEXT,
     scores          TEXT,
-    approx_tokens   INTEGER NOT NULL
+    approx_tokens   INTEGER NOT NULL,
+    total_hits      INTEGER
 )
 """
+
+
+def _ensure_total_hits_column(conn) -> None:
+    """Idempotent self-migration for the total_hits column (techne#343).
+
+    context_injections is created lazily here (not via the core schema-reconcile
+    path), so a table made before total_hits existed won't have the column. Add
+    it once; the PRAGMA check makes this a cheap no-op thereafter. SQLite has no
+    ADD COLUMN IF NOT EXISTS, hence the guard.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(context_injections)").fetchall()}
+    if "total_hits" not in cols:
+        conn.execute("ALTER TABLE context_injections ADD COLUMN total_hits INTEGER")
 
 
 def _field(r: Any, key: str) -> Any:
@@ -83,14 +97,18 @@ def log_context_injection(
     trigger: str | None,
     rows: list,
     injected_text: str,
+    total_hits: int | None = None,
 ) -> None:
     """Record one context-injection event. Best-effort — never raises.
 
-    ``source`` is ``"per_turn_recall"`` or ``"session_start"``. ``rows`` is what
-    was selected (possibly empty — an injection path that fired and selected
-    nothing is itself signal). ``injected_text`` is the rendered block actually
-    added to context ("" when there were no rows). ``trigger`` is the prompt for
-    recall, ``None`` for the (untriggered) session-start path.
+    ``source`` is ``"per_turn_recall"`` / ``"session_start"`` / ``"codex_edit_rail"``.
+    ``rows`` is what was INJECTED (possibly empty — an injection path that fired and
+    selected nothing is itself signal); ``hit_count`` is ``len(rows)``. ``total_hits``
+    is the pre-cap count of candidates the injection concerns when it differs from
+    what was shown (e.g. the edit rail's full blast-radius vs. the capped display,
+    techne#343) — ``None`` when the source doesn't cap. ``injected_text`` is the
+    rendered block actually added to context; ``trigger`` is the recall prompt (or
+    the edited symbol id), ``None`` for the untriggered session-start path.
     """
     try:
         hit_ids = [_field(r, "id") for r in rows]
@@ -104,10 +122,12 @@ def log_context_injection(
             # data this table exists to produce.
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute(_DDL)
+            _ensure_total_hits_column(conn)  # self-migrate pre-#343 tables
             conn.execute(
                 "INSERT INTO context_injections "
-                "(source, session_id, trigger_snippet, hit_count, hit_ids, scores, approx_tokens) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(source, session_id, trigger_snippet, hit_count, hit_ids, scores, "
+                "approx_tokens, total_hits) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     source,
                     session_id,
@@ -116,6 +136,7 @@ def log_context_injection(
                     json.dumps(hit_ids),
                     json.dumps(scores),
                     _approx_tokens(injected_text),
+                    total_hits,
                 ),
             )
             conn.commit()

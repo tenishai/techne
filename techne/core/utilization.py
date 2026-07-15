@@ -71,13 +71,18 @@ def injection_utilization(db_path: Path, *, since_days: int | None = None) -> li
     try:
         if not _table_exists(conn, "context_injections"):
             return []
+        # total_hits (pre-cap radius, techne#343) is a later column — a table
+        # written before it exists lacks it, so only AVG it when present.
+        cols = {c[1] for c in conn.execute("PRAGMA table_info(context_injections)").fetchall()}
+        radius_expr = "AVG(total_hits)" if "total_hits" in cols else "NULL"
         rows = conn.execute(
             f"""SELECT source,
                        COUNT(*)                                    AS events,
-                       COALESCE(SUM(hit_count), 0)                 AS total_hits,
+                       COALESCE(SUM(hit_count), 0)                 AS sum_hits,
                        COALESCE(SUM(approx_tokens), 0)             AS total_tokens,
                        COUNT(DISTINCT session_id)                  AS sessions,
                        SUM(CASE WHEN hit_count = 0 THEN 1 ELSE 0 END) AS empty_events,
+                       {radius_expr}                              AS avg_radius,
                        MIN(timestamp)                             AS first_at,
                        MAX(timestamp)                             AS last_at
                 FROM context_injections
@@ -92,16 +97,21 @@ def injection_utilization(db_path: Path, *, since_days: int | None = None) -> li
     out: list[dict] = []
     for r in rows:
         events = r["events"]
+        avg_radius = r["avg_radius"]
         out.append(
             {
                 "source": r["source"],
                 "events": events,
-                "total_hits": r["total_hits"],
-                "avg_hits": round(r["total_hits"] / events, 1) if events else 0.0,
+                # total_hits = injected items summed across events (the shown/cost
+                # basis); avg_radius = mean pre-cap blast-radius size, only for
+                # sources that cap their injection (codex_edit_rail). (techne#343)
+                "total_hits": r["sum_hits"],
+                "avg_hits": round(r["sum_hits"] / events, 1) if events else 0.0,
                 "total_tokens": r["total_tokens"],
                 "avg_tokens": round(r["total_tokens"] / events) if events else 0,
                 "sessions": r["sessions"],
                 "empty_events": r["empty_events"],
+                "avg_radius": round(avg_radius, 1) if avg_radius is not None else None,
                 "first_at": r["first_at"],
                 "last_at": r["last_at"],
             }
