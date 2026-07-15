@@ -44,10 +44,22 @@ def test_override_wins_when_present(config):
     assert render_prompt(config, "reflect", _DEFAULT, label="X") == "OVERRIDE for X"
 
 
-def test_broken_override_falls_back_to_default(config):
-    """A missing/typo'd placeholder in an override must NOT break the run — fall
-    back to the built-in default instead."""
-    _write_override(config, "reflect", "BROKEN {label} {nonexistent}")
+@pytest.mark.parametrize(
+    "bad_template",
+    [
+        "BROKEN {nonexistent}",  # KeyError — missing field
+        "BROKEN {0}",  # IndexError — positional with no positional args
+        "BROKEN {label",  # ValueError — unbalanced brace
+        "BROKEN {label.nope}",  # AttributeError — attribute access on a field
+        "BROKEN {label[abc]}",  # TypeError — string indices must be integers
+    ],
+)
+def test_broken_override_falls_back_to_default(config, bad_template):
+    """ANY way an override breaks str.format — missing field, stray brace,
+    attribute access, bad subscript — must fall back to the default, never raise.
+    (Regression for the KeyError/IndexError/ValueError-only catch that let
+    AttributeError/TypeError through — #219 review.)"""
+    _write_override(config, "reflect", bad_template)
     assert render_prompt(config, "reflect", _DEFAULT, label="X") == "DEFAULT reflect for X"
 
 

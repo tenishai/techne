@@ -70,7 +70,14 @@ def render_prompt(config, name: str, default_template: str, **fields: object) ->
     if template is not None:
         try:
             return template.format(**fields)
-        except (KeyError, IndexError, ValueError) as e:
+        except Exception as e:  # noqa: BLE001
+            # An override is arbitrary operator text — str.format on a broken one
+            # can raise KeyError (missing {field}), IndexError ({0}), ValueError
+            # (stray brace / bad spec), AttributeError ({field.attr}), TypeError
+            # ({field[key]}), and more. The promise is that NO fat-fingered
+            # override breaks the maintenance loop, so catch broadly and fall back.
+            # A genuine field-passing bug is NOT masked: the default format below
+            # runs with the same **fields and will surface it.
             log.warning(
                 "prompts: override %r failed to render (%s); using built-in default",
                 name,
