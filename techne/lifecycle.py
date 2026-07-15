@@ -7,19 +7,33 @@ custom agent process or notebook).
 
 from techne.config import Config
 
-# Thread summaries are adapter-bound: enqueued under the `sync:` namespace so
-# flush(adapter) drains them to the team backend, and flush_sinks never touches
-# them (#51). No sink stub needed — the `sync:` prefix declares the lane.
-THREAD_SUMMARY_TARGET = "sync:thread_summary"
+# Thread-summary outbox lanes, selected by topology (techne#224). One flag picks
+# the lane; techne behaviour is otherwise identical.
+#   standalone → sync:  — adapter-bound; flush(adapter) drains to the team backend.
+#   team       → sink:  — delivered to the Archivist sink, which owns the push.
+THREAD_SUMMARY_SYNC_TARGET = "sync:thread_summary"
+ARCHIVIST_SINK_TARGET = "sink:archivist"
+# Back-compat alias (was the only, sync-only, target before #224).
+THREAD_SUMMARY_TARGET = THREAD_SUMMARY_SYNC_TARGET
+
+
+def _thread_summary_target(config) -> str:
+    """The outbox lane for thread summaries, by topology (techne#224)."""
+    return THREAD_SUMMARY_SYNC_TARGET if config.standalone else ARCHIVIST_SINK_TARGET
 
 
 def _has_live_consumer(config) -> bool:
-    """True when a real team backend can drain the outbox.
+    """True when the SELECTED egress lane has a real drain — gate enqueue on it so a
+    noop lane doesn't grow an undrainable backlog (#79, #224).
 
-    With the noop adapter there is no consumer for `sync:` rows, so enqueuing
-    only grows an undrainable backlog (#79). Gate enqueue on this.
+    standalone → the sync adapter drains `sync:` rows (noop = no consumer).
+    team       → a registered `sink:archivist` delivers `sink:` rows.
     """
-    return config.sync.adapter != "noop"
+    if config.standalone:
+        return config.sync.adapter != "noop"
+    from techne.sync.sinks import get_sink
+
+    return get_sink(ARCHIVIST_SINK_TARGET) is not None
 
 
 def run_session_start(
@@ -169,11 +183,18 @@ def run_session_end(
 
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     queued = 0
+    if not config.standalone:
+        # Team topology: stand up the local Archivist sink so the gate + delivery
+        # see it (techne#224/#346).
+        from techne.core.archivist import register_base_archivist
+
+        register_base_archivist(config)
     if _has_live_consumer(config):
+        target = _thread_summary_target(config)
         for t in threads:
             enqueue(
                 config.db_path,
-                THREAD_SUMMARY_TARGET,
+                target,
                 {
                     "session_id": session_id,
                     # Real threads.id (heuristic threads are `t-<hash>`, not the legacy
@@ -301,12 +322,17 @@ def redetect_threads(
     )
 
     queued = 0
+    if sync and not config.standalone:
+        from techne.core.archivist import register_base_archivist
+
+        register_base_archivist(config)
     if sync and _has_live_consumer(config):
         agent_identity = os.environ.get("TECHNE_IDENTITY", "")
+        target = _thread_summary_target(config)
         for t in threads:
             enqueue(
                 config.db_path,
-                THREAD_SUMMARY_TARGET,
+                target,
                 {
                     "session_id": session_id,
                     # Real threads.id (heuristic threads are `t-<hash>`, not the legacy

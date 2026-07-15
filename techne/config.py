@@ -343,6 +343,15 @@ class Config:
     conflict: ConflictConfig = field(default_factory=ConflictConfig)
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     platform: Platform = "claude-code"
+    # Federation topology (techne#224): am I a lone agent that pushes memory
+    # directly, or part of a team that routes through an Archivist? standalone=true
+    # → the sync adapter pushes (the sync: outbox lane); standalone=false → route to
+    # the Archivist sink (sink:archivist owns the push). techne behaviour is
+    # otherwise identical. Default true = behaviour-preserving + the lone-agent case.
+    standalone: bool = True
+    # Base Archivist store (techne#346): the techne-schema SQLite db a non-standalone
+    # instance's sink:archivist writes team memory into. "" → <data_dir>/archivist.db.
+    archivist_db_path: str = ""
     # Staleness alarm: if the prior last_session is older than this many hours,
     # the banner and collect_health emit a visible warning. Default 12h.
     staleness_hours: int = 12
@@ -390,6 +399,10 @@ class Config:
                     f"Invalid platform '{raw['platform']}'. Must be one of: {', '.join(PLATFORMS)}"
                 )
             cfg.platform = raw["platform"]
+        if "standalone" in raw:
+            cfg.standalone = bool(raw["standalone"])
+        if "archivist_db_path" in raw:
+            cfg.archivist_db_path = str(raw["archivist_db_path"])
         if "model" in raw:
             cfg.model = raw["model"]
         if "llm_api_base" in raw:
@@ -616,6 +629,8 @@ class Config:
             "db_path": str(self.db_path),
             "data_dir": str(self.data_dir),
             "platform": self.platform,
+            "standalone": self.standalone,
+            "archivist_db_path": self.archivist_db_path,
             "model": self.model,
             "sync": {
                 "adapter": self.sync.adapter,
