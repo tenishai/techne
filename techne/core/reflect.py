@@ -196,7 +196,12 @@ def _build_prompt(
             f"{thread.label} {thread.summary[:200]}",
             config.reflect.existing_knowledge_k,
         )
-    return PROMPT_TEMPLATE.format(
+    from techne.core.prompts import render_prompt
+
+    return render_prompt(
+        config,
+        "reflect",
+        PROMPT_TEMPLATE,
         label=thread.label,
         summary=thread.summary[:1000],
         observations=_render_observations(observations),
