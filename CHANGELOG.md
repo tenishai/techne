@@ -7,6 +7,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Operator-editable maintenance prompts** (#219, completes the Coherence track of
+  #212) — the reflect / consolidate / dream prompts that drive knowledge maintenance
+  are now overridable per-install: drop a file at `<data_dir>/prompts/<name>.md` and
+  the change is picked up on the next run — no code edit, no restart. A broken
+  override (bad `{placeholder}`) falls back to the built-in default with a warning,
+  so it can never break the maintenance loop. `techne prompts export` scaffolds the
+  defaults to edit from; `techne prompts path` prints the directory. Contract in
+  `docs/prompts.md`.
+
 - **Codex edit-rail telemetry hygiene** (#342, #343) — two tuning fixes so the
   edit-rail data is trustworthy for the fix-or-cut read (#338). (1) Per-symbol
   -per-session throttle: a symbol's blast radius is injected at most once per
