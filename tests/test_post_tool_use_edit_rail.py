@@ -176,6 +176,52 @@ def test_logs_injection_for_instrumentation(home, monkeypatch, capsys):
     assert rows[0]["hit_count"] == 4
 
 
+def test_repeat_edit_same_symbol_throttled(home, monkeypatch, capsys):
+    """techne#342: a symbol's blast radius is injected at most once per session —
+    a re-edit stays silent, and only ONE row is logged (no count inflation)."""
+    from techne.config import Config
+    from techne.core.stores import plain_connect
+
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=3)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 4)
+
+    assert _edit_rail_context(_run(monkeypatch, capsys, _edit_payload(repo))) is not None
+    # second edit of the SAME symbol, same session → throttled
+    assert _edit_rail_context(_run(monkeypatch, capsys, _edit_payload(repo))) is None
+
+    conn = plain_connect(Config.load().db_path)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM context_injections WHERE source='codex_edit_rail'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1  # only the first firing logged; the repeat did not inflate the count
+
+
+def test_logs_total_hits_precap_radius(home, monkeypatch, capsys):
+    """techne#343: total_hits records the true (pre-cap) radius; hit_count the shown."""
+    from techne.config import Config
+    from techne.core.stores import plain_connect
+
+    _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=3,
+                  codex_edit_rail_limit=2)
+    repo, db = _make_indexed_repo(home)
+    _seed_handle_with_deps(repo, db, 6)  # 6 dependents, limit 2
+    _run(monkeypatch, capsys, _edit_payload(repo))
+
+    conn = plain_connect(Config.load().db_path)
+    try:
+        row = conn.execute(
+            "SELECT hit_count, total_hits FROM context_injections WHERE source='codex_edit_rail'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["hit_count"] == 2  # shown (capped by limit)
+    assert row["total_hits"] == 6  # true blast-radius size
+
+
 def test_non_edit_tool_emits_nothing(home, monkeypatch, capsys):
     """A non-Edit tool (e.g. Read) → the rail short-circuits, no injection."""
     _write_config(home, codex_edit_rail=True, codex_edit_rail_min_deps=3)

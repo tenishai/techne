@@ -254,6 +254,58 @@ def _build_edit_rail_context(symbol: dict, rows: list, total: int) -> str:
     return "\n".join(lines)
 
 
+def _edit_rail_surfaced_key(session_id: str) -> str:
+    return f"codex_edit_rail:surfaced:{session_id}"
+
+
+def _edit_rail_already_surfaced(config: Config, session_id: str, symbol_id: str) -> bool:
+    """True if this symbol's blast radius was already surfaced this session
+    (techne#342 throttle). Fail-OPEN: on any error return False, so a hiccup in the
+    throttle store re-surfaces rather than silently suppresses a real injection."""
+    try:
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state
+
+        conn = connect(config.db_path)
+        try:
+            st = get_state(conn, _edit_rail_surfaced_key(session_id)) or {}
+        finally:
+            conn.close()
+        return symbol_id in set(st.get("symbols", []))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _edit_rail_mark_surfaced(config: Config, session_id: str, symbol_id: str) -> None:
+    """Record that this symbol was surfaced this session + prune stale session keys
+    (techne#342). Best-effort — a failure just means the symbol may surface again,
+    never a broken hook. Mirrors the reminder surfaced-set in _inject_due_reminders."""
+    try:
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state, set_state
+
+        key = _edit_rail_surfaced_key(session_id)
+        conn = connect(config.db_path)
+        try:
+            st = get_state(conn, key) or {}
+            symbols = set(st.get("symbols", []))
+            if symbol_id in symbols:
+                return
+            symbols.add(symbol_id)
+            set_state(conn, key, {"symbols": sorted(symbols)}, commit=False)
+            stale_cutoff = int(time.time()) - _SESSION_STATE_TTL_SECONDS
+            conn.execute(
+                "DELETE FROM extension_state"
+                " WHERE name LIKE 'codex_edit_rail:surfaced:%' AND updated_at < ?",
+                (stale_cutoff,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, tool_input: dict):
     """Edit rail (techne#335): after an Edit/MultiEdit, map the edit to its
     enclosing symbol and surface that symbol's transitive dependents ("what
@@ -303,10 +355,16 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
                 # No enclosing symbol, or only the whole module — a module's
                 # "dependents" is every importer, too coarse to be useful inline.
                 return None
+            # Per-symbol-per-session throttle (techne#342): once a symbol's blast
+            # radius has been surfaced this session, re-edits of it stay silent so
+            # repeats don't spam context or inflate the #338 utilization counts.
+            # Checked before the reachable() query so repeats are also cheap.
+            if _edit_rail_already_surfaced(config, session_id, symbol["id"]):
+                return None
             deps = reachable(db_path, symbol["id"], direction="in")
 
         if len(deps) < config.hooks.codex_edit_rail_min_deps:
-            return None  # low-risk edit — stay silent
+            return None  # low-risk edit — stay silent (NOT marked surfaced)
 
         total = len(deps)
         shown = annotate_freshness(db_path, deps[: config.hooks.codex_edit_rail_limit])
@@ -314,6 +372,9 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
 
         # Instrumentation: record the injection alongside the other read-paths so
         # the #329 audit can compare them. Logs to the main techne.db, not codex.db.
+        # total_hits carries the pre-cap blast-radius size (techne#343) so the audit
+        # sees a 252-dependent hub differs from a 10-dependent leaf, even though
+        # only `limit` rows are shown.
         log_context_injection(
             config.db_path,
             source="codex_edit_rail",
@@ -321,7 +382,11 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
             trigger=symbol["id"],
             rows=shown,
             injected_text=text,
+            total_hits=total,
         )
+        # Mark surfaced only after a real injection — symbols that fell below the
+        # threshold are NOT recorded, so they're re-evaluated on a later edit.
+        _edit_rail_mark_surfaced(config, session_id, symbol["id"])
         return text
     except Exception as e:  # noqa: BLE001 — the rail must never break the tool call
         print(f"techne: codex edit-rail skipped: {e}", file=sys.stderr)

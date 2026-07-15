@@ -7,6 +7,15 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **Codex edit-rail telemetry hygiene** (#342, #343) — two tuning fixes so the
+  edit-rail data is trustworthy for the fix-or-cut read (#338). (1) Per-symbol
+  -per-session throttle: a symbol's blast radius is injected at most once per
+  session, so re-edits don't spam context or inflate utilization counts. (2) The
+  injection log now records `total_hits` — the true pre-cap blast-radius size —
+  alongside `hit_count` (the shown/cost count), so `techne audit` shows a
+  `radius` column distinguishing a 252-dependent hub from a 10-dependent leaf.
+  `context_injections` self-migrates the new nullable column.
+
 - **Recall returns memory + librarian documents** (#340) — `techne_recall` now
   folds the top library documents (from `librarian.db`, resolved locally) into
   its result set alongside memory. Every row is labelled `origin` (`memory` vs
