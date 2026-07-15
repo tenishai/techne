@@ -12,6 +12,7 @@ import pytest
 from techne.core.archivist import (
     ARCHIVIST_SINK,
     archivist_db,
+    ensure_registered_for,
     register_base_archivist,
 )
 from techne.lifecycle import (
@@ -139,6 +140,58 @@ def test_register_base_archivist_is_idempotent(config):
         register_base_archivist(config)
         register_base_archivist(config)  # must not raise (same singleton)
         assert get_sink(ARCHIVIST_SINK_TARGET) is ARCHIVIST_SINK
+
+
+def test_archivist_db_rejects_personal_db_collision(config):
+    """Guard: archivist_db_path must not be the personal techne db, else team intake
+    pollutes personal memory (techne#346 review)."""
+    config.archivist_db_path = str(config.db_path)
+    with pytest.raises(ValueError, match="separate team store"):
+        archivist_db(config)
+
+
+def test_ensure_registered_for_gates_on_standalone(config):
+    with use_registry({}):
+        config.standalone = True
+        ensure_registered_for(config)
+        assert get_sink(ARCHIVIST_SINK_TARGET) is None  # standalone → no-op
+        config.standalone = False
+        ensure_registered_for(config)
+        assert get_sink(ARCHIVIST_SINK_TARGET) is ARCHIVIST_SINK
+
+
+def test_pending_sink_row_drains_from_fresh_process(config):
+    """The recovery path (techne#346 review): a sink:archivist row deferred at
+    enqueue is drainable by a later flush_sinks in a FRESH process (empty registry)
+    once ensure_registered_for re-registers the sink — as the CLI/hook now do."""
+    from techne.core.database import init_db
+    from techne.core.state import ensure_session
+    from techne.core.stores import plain_connect
+    from techne.sync.outbox import enqueue, flush_sinks
+
+    init_db(config.db_path)
+    ensure_session(config.db_path, "src-sess")
+    config.standalone = False
+
+    # Session A: enqueue with delivery DEFERRED (row stays pending), then registry gone.
+    with use_registry({}):
+        register_base_archivist(config)
+        enqueue(config.db_path, ARCHIVIST_SINK_TARGET, _payload(), deliver=False)
+
+    # Fresh process (empty registry): ensure_registered_for re-registers, flush drains.
+    with use_registry({}):
+        ensure_registered_for(config)
+        summary = flush_sinks(config.db_path)
+
+    assert summary.get(ARCHIVIST_SINK_TARGET, (0, 0))[0] == 1  # 1 synced
+    conn = plain_connect(archivist_db(config))
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE tool_name = 'thread_summary'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1
 
 
 def test_invalid_payload_rejected_at_enqueue(config):

@@ -32,6 +32,15 @@ def archivist_db(config) -> Path:
         if config.archivist_db_path
         else Path(config.data_dir) / "archivist.db"
     )
+    # The base Archivist is a SEPARATE team store. If archivist_db_path is
+    # misconfigured to the personal db, team intake would pollute personal memory
+    # (and federation would read the instance's own rows back) — refuse loudly
+    # rather than silently corrupt (techne#346 review).
+    if p.resolve() == Path(config.db_path).resolve():
+        raise ValueError(
+            "archivist_db_path must not be the personal techne db (config.db_path); "
+            "the base Archivist is a separate team store (techne#346)."
+        )
     init_db(p)
     return p
 
@@ -88,3 +97,14 @@ def register_base_archivist(config=None) -> None:
     from techne.sync.sinks import register_sink
 
     register_sink(ARCHIVIST_SINK)
+
+
+def ensure_registered_for(config) -> None:
+    """Register ``sink:archivist`` iff this instance routes to it (``standalone`` is
+    false). Idempotent and cheap — call at EVERY entry point that enqueues OR drains
+    sink rows (the two session-end sites, the session-end hook's ``flush_sinks``, and
+    ``techne outbox flush-sinks``), so a row that failed immediate delivery is still
+    deliverable from a fresh CLI/hook process (techne#346 review). No-op when
+    standalone (the sink lane is unused)."""
+    if not config.standalone:
+        register_base_archivist(config)

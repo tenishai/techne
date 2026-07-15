@@ -183,12 +183,9 @@ def run_session_end(
 
     agent_identity = os.environ.get("TECHNE_IDENTITY", "")
     queued = 0
-    if not config.standalone:
-        # Team topology: stand up the local Archivist sink so the gate + delivery
-        # see it (techne#224/#346).
-        from techne.core.archivist import register_base_archivist
+    from techne.core.archivist import ensure_registered_for
 
-        register_base_archivist(config)
+    ensure_registered_for(config)  # team topology: stand up sink:archivist (#224/#346)
     if _has_live_consumer(config):
         target = _thread_summary_target(config)
         for t in threads:
@@ -322,10 +319,10 @@ def redetect_threads(
     )
 
     queued = 0
-    if sync and not config.standalone:
-        from techne.core.archivist import register_base_archivist
+    if sync:
+        from techne.core.archivist import ensure_registered_for
 
-        register_base_archivist(config)
+        ensure_registered_for(config)
     if sync and _has_live_consumer(config):
         agent_identity = os.environ.get("TECHNE_IDENTITY", "")
         target = _thread_summary_target(config)
