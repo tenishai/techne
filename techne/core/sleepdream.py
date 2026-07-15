@@ -200,8 +200,11 @@ def consolidate_emit(config: Config, *, max_clusters: int = 20) -> list[dict]:
             ch = _cluster_hash(c["target_ids"])
             if _already_proposed(conn, ch):
                 continue
-            prompt = CONSOLIDATE_PROMPT.format(
-                entries=_render_cluster(c["rows"]), types=", ".join(VALID_TYPES)
+            from techne.core.prompts import render_prompt
+
+            prompt = render_prompt(
+                config, "consolidate", CONSOLIDATE_PROMPT,
+                entries=_render_cluster(c["rows"]), types=", ".join(VALID_TYPES),
             )
             batch.append({"cluster_hash": ch, "target_ids": c["target_ids"], "prompt": prompt})
     finally:
@@ -510,8 +513,11 @@ def dream_emit(config: Config, *, max_groups: int = 10) -> list[dict]:
             gh = _cluster_hash(g["group_ids"])
             if _already_proposed_dream(conn, gh):
                 continue
-            prompt = DREAM_PROMPT.format(
-                entries=_render_cluster(g["rows"]), types=", ".join(VALID_TYPES)
+            from techne.core.prompts import render_prompt
+
+            prompt = render_prompt(
+                config, "dream", DREAM_PROMPT,
+                entries=_render_cluster(g["rows"]), types=", ".join(VALID_TYPES),
             )
             batch.append({"group_hash": gh, "group_ids": g["group_ids"], "prompt": prompt})
     finally:

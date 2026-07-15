@@ -1117,6 +1117,44 @@ def audit(ctx, since_days, as_json):
     click.echo('Attribution ("was the injected item used") — not computed; see techne#105.')
 
 
+@main.group()
+def prompts():
+    """Operator-editable maintenance prompts (reflect/consolidate/dream) — techne#219.
+
+    The prompts that drive knowledge maintenance ship with baked-in defaults but
+    are overridable per-install: edit a file under `techne prompts path` and the
+    change is picked up on the next reflect/consolidate/dream run — no code edit.
+    A broken override falls back to the built-in default (see docs/prompts.md).
+    """
+
+
+@prompts.command("export")
+@click.option(
+    "--overwrite", is_flag=True, help="Replace existing prompt files (discards edits)."
+)
+@click.pass_context
+def prompts_export(ctx, overwrite):
+    """Write the built-in maintenance prompts to <data_dir>/prompts/*.md to edit from."""
+    config = ctx.obj["config"]
+    from techne.core.prompts import export_defaults, prompts_dir
+
+    res = export_defaults(config, overwrite=overwrite)
+    click.echo(f"prompts dir: {prompts_dir(config)}")
+    for name, status in res.items():
+        click.echo(f"  {name}.md: {status}")
+    if any(s == "skipped" for s in res.values()):
+        click.echo("(existing files kept; pass --overwrite to replace them)")
+
+
+@prompts.command("path")
+@click.pass_context
+def prompts_path(ctx):
+    """Print the directory where prompt overrides live."""
+    from techne.core.prompts import prompts_dir
+
+    click.echo(str(prompts_dir(ctx.obj["config"])))
+
+
 @main.command("init")
 @click.option("--platform", type=click.Choice(list(PLATFORMS)), default="claude-code")
 @click.option(
