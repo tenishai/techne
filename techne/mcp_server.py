@@ -212,6 +212,19 @@ def _fold_in_documents(config: Config, topic: str, memory_results: list[dict]) -
     return memory_results + recall_documents(config, topic)
 
 
+def _effective_connections(config: Config) -> dict:
+    """config.connections plus the local base Archivist as a `team` connection when
+    not standalone (techne#346 PR2) — a non-standalone instance recalls over its own
+    archivist.db without manual config. setdefault so an explicit config entry wins."""
+    from techne.core.archivist import ARCHIVIST_CONNECTION_NAME, archivist_connection
+
+    conns = dict(config.connections)
+    ac = archivist_connection(config)
+    if ac is not None:
+        conns.setdefault(ARCHIVIST_CONNECTION_NAME, ac)
+    return conns
+
+
 def _techne_recall(args: dict, config: Config) -> dict:
     """Retrieve context for a specific topic — searches all layers.
 
@@ -227,6 +240,11 @@ def _techne_recall(args: dict, config: Config) -> dict:
 
     topic = args.get("topic", "")
 
+    # Effective connections = configured remotes + the local base Archivist as a
+    # `team` store when not standalone (techne#346 PR2), so a non-standalone
+    # instance recalls over its own archivist.db without manual config.
+    connections = _effective_connections(config)
+
     # Helper: shared identity search (same in both paths)
     def _identity_matches() -> list[dict]:
         results_i = []
@@ -236,7 +254,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         return results_i[:5]
 
     # ---- Noop gate (techne#222 §2): no connections → local-only, unchanged shape ----
-    if not config.connections:
+    if not connections:
         # techne#216: DEFAULT recall excludes soft-archived knowledge.
         results = search(
             config.db_path,
@@ -296,7 +314,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         # but we already hold it — we only need remote_results here.
         _, remote_results = fan_out_search(
             config.db_path,
-            config.connections,
+            connections,
             topic,
             limit=10,
             half_life_days=config.knowledge_confidence_half_life_days,
