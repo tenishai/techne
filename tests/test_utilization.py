@@ -83,7 +83,77 @@ def test_injection_utilization_empty_when_no_table(db):
     assert injection_utilization(db) == []
 
 
+def test_injection_utilization_reports_avg_radius(db):
+    """techne#343: avg_radius = mean pre-cap total_hits for a capping source;
+    None for a source that never sets it."""
+    log_context_injection(
+        db, source="codex_edit_rail", session_id="s1", trigger="sym",
+        rows=[{"id": 1}, {"id": 2}], injected_text="x" * 20, total_hits=14,
+    )
+    log_context_injection(
+        db, source="codex_edit_rail", session_id="s1", trigger="sym2",
+        rows=[{"id": 3}], injected_text="y" * 10, total_hits=6,
+    )
+    # session_start never sets total_hits → avg_radius stays None.
+    log_context_injection(
+        db, source="session_start", session_id="s1", trigger=None,
+        rows=[{"id": 9}], injected_text="z" * 8,
+    )
+    by = {r["source"]: r for r in injection_utilization(db)}
+    assert by["codex_edit_rail"]["avg_radius"] == 10.0  # (14 + 6) / 2
+    assert by["codex_edit_rail"]["total_hits"] == 3  # sum of hit_count (2 + 1)
+    assert by["session_start"]["avg_radius"] is None
+
+
 # ---- read_write_ledger -----------------------------------------------------
+
+
+_OLD_INJECTION_DDL = (
+    "CREATE TABLE context_injections (id INTEGER PRIMARY KEY, source TEXT, "
+    "session_id TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, trigger_snippet TEXT, "
+    "hit_count INTEGER, hit_ids TEXT, scores TEXT, approx_tokens INTEGER)"  # no total_hits
+)
+
+
+def test_log_context_injection_self_migrates_total_hits(tmp_path):
+    """techne#343: writing to a pre-total_hits table ADDs the column so the value
+    persists rather than erroring (the guarded ALTER)."""
+    import sqlite3
+
+    p = tmp_path / "old.db"
+    c = sqlite3.connect(p)
+    c.execute(_OLD_INJECTION_DDL)
+    c.commit()
+    c.close()
+
+    log_context_injection(
+        p, source="codex_edit_rail", session_id="s", trigger="x",
+        rows=[{"id": 1}], injected_text="x" * 8, total_hits=9,
+    )
+    c = sqlite3.connect(p)
+    c.row_factory = sqlite3.Row
+    row = c.execute("SELECT total_hits FROM context_injections").fetchone()
+    c.close()
+    assert row["total_hits"] == 9
+
+
+def test_injection_utilization_handles_pre_migration_table(tmp_path):
+    """The audit must not crash on a table lacking total_hits (a row written before
+    #343) — avg_radius is guarded to None."""
+    import sqlite3
+
+    p = tmp_path / "old.db"
+    c = sqlite3.connect(p)
+    c.execute(_OLD_INJECTION_DDL)
+    c.execute(
+        "INSERT INTO context_injections (source, hit_count, approx_tokens) "
+        "VALUES ('session_start', 3, 40)"
+    )
+    c.commit()
+    c.close()
+
+    rows = injection_utilization(p)
+    assert rows[0]["avg_radius"] is None  # column absent → NULL, no crash
 
 
 def test_read_write_ledger_ratios(db):

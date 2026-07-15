@@ -1077,12 +1077,16 @@ def audit(ctx, since_days, as_json):
         click.echo("  (no injections logged yet)")
     else:
         click.echo(
-            f"  {'source':22} {'events':>7} {'hits':>6} {'avg_tok':>8} {'sessions':>9} {'empty':>6}"
+            f"  {'source':22} {'events':>7} {'hits':>6} {'avg_tok':>8} "
+            f"{'sessions':>9} {'empty':>6} {'radius':>7}"
         )
         for r in inj:
+            # avg_radius (pre-cap blast-radius) only applies to capping sources
+            # like codex_edit_rail; '—' where the source doesn't cap. (techne#343)
+            radius = "—" if r.get("avg_radius") is None else f"{r['avg_radius']:g}"
             click.echo(
                 f"  {r['source']:22} {r['events']:>7} {r['total_hits']:>6} "
-                f"{r['avg_tokens']:>8} {r['sessions']:>9} {r['empty_events']:>6}"
+                f"{r['avg_tokens']:>8} {r['sessions']:>9} {r['empty_events']:>6} {radius:>7}"
             )
     click.echo("")
 
