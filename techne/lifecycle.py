@@ -236,12 +236,24 @@ def run_session_end(
             source="heuristic",
         )
 
+    # Team topology: egress live knowledge to the base Archivist AFTER reflection
+    # (which may have promoted new live knowledge). No-op when standalone; the
+    # outbox dedups so re-pushing is cheap (techne#346 PR2).
+    knowledge_pushed = 0
+    try:
+        from techne.core.archivist import push_knowledge_to_archivist
+
+        knowledge_pushed = push_knowledge_to_archivist(config)
+    except Exception as e:  # noqa: BLE001 — egress must never break session teardown
+        print(f"techne: archivist knowledge push deferred: {e}", file=sys.stderr)
+
     return {
         "threads": len(threads),
         "linked": sum(1 for _, p in parent_links if p),
         "aged_completed": aged.get("completed", 0),
         "aged_stale": aged.get("stale", 0),
         "queued": queued,
+        "knowledge_pushed": knowledge_pushed,
         "reflect": reflect_result,
     }
 
