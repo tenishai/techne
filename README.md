@@ -56,7 +56,7 @@ The schema and triggers all live in `techne/core/database.py`. Schema migrations
 
 ## Install
 
-techne is in early alpha — installed from source. Public PyPI distribution is on the roadmap.
+techne is in alpha — installed from source. Public PyPI distribution is on the roadmap.
 
 **Requires:** Python 3.11+, git.
 
