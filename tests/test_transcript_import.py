@@ -72,11 +72,11 @@ def transcript(tmp_path):
         p,
         [
             {"type": "mode", "mode": "normal", "sessionId": "sess-fixture"},
-            _user_text("Hello, please run ls", "2026-06-01T10:00:00.000Z"),
-            _bash_use("tu_1", "ls /tmp", "2026-06-01T10:00:01.000Z"),
+            _user_text("Hello, please run the tests", "2026-06-01T10:00:00.000Z"),
+            _bash_use("tu_1", "pytest tests/", "2026-06-01T10:00:01.000Z"),
             _tool_result("tu_1", "file1\nfile2", "2026-06-01T10:00:02.000Z"),
-            _user_text("Now check disk space", "2026-06-01T10:00:10.000Z"),
-            _bash_use("tu_2", "df -h", "2026-06-01T10:00:11.000Z"),
+            _user_text("Now commit it", "2026-06-01T10:00:10.000Z"),
+            _bash_use("tu_2", "git commit -m wip", "2026-06-01T10:00:11.000Z"),
             _tool_result("tu_2", "Filesystem  Size  Used", "2026-06-01T10:00:12.000Z"),
         ],
     )
@@ -114,7 +114,7 @@ def test_idless_tool_use_skipped_no_clobber(db_path, tmp_path):
             _bash_use_no_id("rm -rf /a", "2026-06-01T10:00:00.000Z"),
             _bash_use_no_id("rm -rf /b", "2026-06-01T10:00:01.000Z"),  # clobbered "" on old code
             _tool_result_no_id("done", "2026-06-01T10:00:02.000Z"),    # popped "" on old code
-            _bash_use("tu_real", "ls /tmp", "2026-06-01T10:00:03.000Z"),
+            _bash_use("tu_real", "pytest -q", "2026-06-01T10:00:03.000Z"),
             _tool_result("tu_real", "file1", "2026-06-01T10:00:04.000Z"),
         ],
     )
@@ -129,7 +129,7 @@ def test_idless_tool_use_skipped_no_clobber(db_path, tmp_path):
         )
     finally:
         conn.close()
-    assert "ls /tmp" in contents              # the real, id-bearing tool call imported
+    assert "pytest -q" in contents            # the real, id-bearing tool call imported
     assert "rm -rf" not in contents           # the id-less ones did NOT (no phantom)
 
 
@@ -157,7 +157,7 @@ def test_imports_tool_calls_and_prompts(db_path, transcript):
         names = [r["tool_name"] for r in rows]
         assert names == ["UserPrompt", "Bash", "UserPrompt", "Bash"]
         # Bash content is run through the live summarize() formatter
-        assert "ls /tmp" in rows[1]["content"]
+        assert "pytest tests/" in rows[1]["content"]
         assert "file1" in rows[1]["content"]
     finally:
         conn.close()
@@ -190,7 +190,7 @@ def test_import_directory_skips_empty(db_path, tmp_path):
     _write_jsonl(
         tmp_path / "good.jsonl",
         [
-            _bash_use("tu_x", "echo hi", "2026-06-01T10:00:00.000Z"),
+            _bash_use("tu_x", "make build", "2026-06-01T10:00:00.000Z"),
             _tool_result("tu_x", "hi", "2026-06-01T10:00:01.000Z"),
         ],
     )
@@ -239,7 +239,7 @@ def test_summary_backfills_on_reimport(db_path, tmp_path):
     _write_jsonl(
         p1,
         [
-            _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
+            _bash_use("tu_a", "git status", "2026-06-01T10:00:00.000Z"),
             _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
         ],
     )
@@ -252,7 +252,7 @@ def test_summary_backfills_on_reimport(db_path, tmp_path):
         p2,
         [
             _ai_title("Check techne status"),
-            _bash_use("tu_a", "ls", "2026-06-01T10:00:00.000Z"),
+            _bash_use("tu_a", "git status", "2026-06-01T10:00:00.000Z"),
             _tool_result("tu_a", "ok", "2026-06-01T10:00:01.000Z"),
         ],
     )
@@ -606,12 +606,12 @@ def test_assistant_text_alongside_tool_use_both_captured(db_path, tmp_path):
                 "timestamp": "2026-06-01T10:00:00.000Z",
                 "message": {
                     "content": [
-                        {"type": "text", "text": "Let me check the directory."},
+                        {"type": "text", "text": "Let me run the tests."},
                         {
                             "type": "tool_use",
                             "id": "tu_1",
                             "name": "Bash",
-                            "input": {"command": "ls /tmp"},
+                            "input": {"command": "pytest -q"},
                         },
                     ],
                 },
@@ -698,7 +698,7 @@ def test_force_bypasses_existing_observations_gate(db_path, tmp_path):
     _write_jsonl(
         p,
         [
-            _bash_use("tu_1", "ls /tmp", "2026-06-01T10:00:00.000Z"),
+            _bash_use("tu_1", "pytest -q", "2026-06-01T10:00:00.000Z"),
             _tool_result("tu_1", "file1", "2026-06-01T10:00:01.000Z"),
         ],
     )
@@ -729,7 +729,7 @@ def test_event_at_populated_from_transcript_timestamp(db_path, tmp_path):
     _write_jsonl(
         p,
         [
-            _bash_use("tu_ts", "echo hi", "2026-06-01T10:00:01.000Z"),
+            _bash_use("tu_ts", "make test", "2026-06-01T10:00:01.000Z"),
             _tool_result("tu_ts", "hi", "2026-06-01T10:00:02.000Z"),
             _user_text("check something", "2026-06-01T10:00:05.000Z"),
         ],
@@ -766,3 +766,138 @@ def test_unpaired_tool_use_does_not_crash(db_path, tmp_path):
     result = import_transcript(db_path, p)
     assert result["tool_obs"] == 0
     assert result["skipped"] is False
+
+
+# ---------------------------------------------------------------------------
+# backfill_uncaptured — session_end gap-fill (techne#734)
+# ---------------------------------------------------------------------------
+
+
+def _cfg(db_path, *, capture_bash=False, capture_read=False):
+    """A Config pointed at the test db with the given capture flags."""
+    from techne.config import Config
+
+    cfg = Config()
+    cfg.db_path = db_path
+    cfg.hooks.capture_bash = capture_bash
+    cfg.hooks.capture_read = capture_read
+    return cfg
+
+
+def _tool_use(tool_id, name, tool_input, ts):
+    return {
+        "type": "assistant",
+        "sessionId": "sess-fixture",
+        "timestamp": ts,
+        "message": {
+            "content": [{"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}]
+        },
+    }
+
+
+def test_backfill_imports_gap_tools_only(db_path, tmp_path):
+    """Gap-fill imports the tools the live hook skipped (Bash/Read), drops
+    read-only Bash noise, and never touches live-captured tools like Edit."""
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    # Simulate a live-captured Edit already in the ledger.
+    conn = connect(db_path)
+    try:
+        conn.execute("INSERT INTO sessions (id, platform) VALUES ('sess-fixture', 'claude-code')")
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+            "VALUES ('sess-fixture', '2026-06-01T10:00:00.000Z', 'Edit', 'Edited: foo.py')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_1", "git commit -m wip", "2026-06-01T10:00:01.000Z"),
+            _tool_result("tu_1", "1 file changed", "2026-06-01T10:00:02.000Z"),
+            _bash_use("tu_2", "ls -la", "2026-06-01T10:00:03.000Z"),  # read-only noise
+            _tool_result("tu_2", "file1\nfile2", "2026-06-01T10:00:04.000Z"),
+            _tool_use("tu_3", "Read", {"file_path": "bar.py"}, "2026-06-01T10:00:05.000Z"),
+            _tool_result("tu_3", "contents", "2026-06-01T10:00:06.000Z"),
+        ],
+    )
+
+    result = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert result["backfilled"] == 2  # git commit + Read; ls dropped
+    assert set(result["gap_tools"]) == {"Bash", "Read"}
+
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tool_name, content FROM observations WHERE session_id='sess-fixture'"
+        ).fetchall()
+        contents = "\n".join(r["content"] for r in rows)
+        names = sorted(r["tool_name"] for r in rows)
+        assert names == ["Bash", "Edit", "Read"]  # exactly one of each, ls excluded
+        assert "git commit -m wip" in contents
+        assert "ls -la" not in contents
+    finally:
+        conn.close()
+
+
+def test_backfill_is_idempotent(db_path, tmp_path):
+    """A second gap-fill (e.g. session_end after a compact) inserts nothing new."""
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_1", "pytest -q", "2026-06-01T10:00:01.000Z"),
+            _tool_result("tu_1", "2 passed", "2026-06-01T10:00:02.000Z"),
+        ],
+    )
+
+    first = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    second = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=p)
+    assert first["backfilled"] == 1
+    assert second["backfilled"] == 0
+    assert second["skipped_existing"] == 1
+
+    conn = connect(db_path)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE session_id='sess-fixture' AND tool_name='Bash'"
+        ).fetchone()[0]
+        assert count == 1  # not doubled
+    finally:
+        conn.close()
+
+
+def test_backfill_noop_when_captured_live(db_path, tmp_path):
+    """If capture_bash/read are ON, the live hook already has those tools — gap
+    is empty, so backfill inserts nothing (avoids duplicates)."""
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    p = tmp_path / "sess-fixture.jsonl"
+    _write_jsonl(
+        p,
+        [
+            _bash_use("tu_1", "git status", "2026-06-01T10:00:01.000Z"),
+            _tool_result("tu_1", "clean", "2026-06-01T10:00:02.000Z"),
+        ],
+    )
+    result = backfill_uncaptured(
+        _cfg(db_path, capture_bash=True, capture_read=True), "sess-fixture", jsonl_path=p
+    )
+    assert result["backfilled"] == 0
+    assert result["gap_tools"] == []
+    assert "all gap tools captured live" in result["reason"]
+
+
+def test_backfill_missing_transcript(db_path, tmp_path):
+    from techne.platforms.claude_code.transcript_import import backfill_uncaptured
+
+    result = backfill_uncaptured(
+        _cfg(db_path), "sess-fixture", jsonl_path=tmp_path / "nope.jsonl"
+    )
+    assert result["backfilled"] == 0
+    assert "transcript not found" in result["reason"]

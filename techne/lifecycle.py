@@ -438,7 +438,7 @@ def capture_tool_use(
 
     if not config.hooks.post_tool_use:
         return False
-    if not should_capture(config, tool_name):
+    if not should_capture(config, tool_name, tool_input):
         return False
     content = summarize(tool_name, tool_input, tool_output)
     add_observation(config.db_path, session_id, tool_name, content, event_at=event_at)

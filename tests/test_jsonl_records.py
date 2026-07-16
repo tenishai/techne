@@ -104,3 +104,19 @@ class TestShouldImport:
     def test_allows_ordinary_tool(self):
         assert should_import("Edit") is True
         assert should_import("mcp__techne__techne_search") is True
+
+    def test_bash_without_command_is_imported(self):
+        """No tool_input (or no command) → can't inspect it, so import it."""
+        assert should_import("Bash") is True
+        assert should_import("Bash", {}) is True
+
+    def test_readonly_bash_dropped(self):
+        """Pure read-only navigation carries no durable signal — dropped on import
+        too, matching the live-hook denylist (techne#734 consistent noise policy)."""
+        for cmd in ("ls -la", "cat foo.py", "cd x && grep -rn y src/", "pwd"):
+            assert should_import("Bash", {"command": cmd}) is False, cmd
+
+    def test_signal_bash_imported(self):
+        for cmd in ("git commit -m x", "pytest tests/", "cd r && git commit -m x",
+                    "echo hi > out.txt", "sed -i 's/a/b/' f.py"):
+            assert should_import("Bash", {"command": cmd}) is True, cmd
