@@ -171,7 +171,7 @@ def test_collect_health_maps_degraded_vector_status(config, monkeypatch):
         "reembed_needed": False,
     }
     monkeypatch.setattr(
-        "techne.core.vector_status.vector_channel_status", lambda db_path: fake
+        "techne.core.vector_status.vector_channel_status", lambda db_path, **kw: fake
     )
     h = collect_health(config)
     assert h["vectors"]["backend"] is None
@@ -187,8 +187,47 @@ def test_collect_health_vectors_healthy_not_degraded(config, monkeypatch):
         "reembed_needed": False,
     }
     monkeypatch.setattr(
-        "techne.core.vector_status.vector_channel_status", lambda db_path: fake
+        "techne.core.vector_status.vector_channel_status", lambda db_path, **kw: fake
     )
     h = collect_health(config)
     assert h["vectors"]["degraded"] is False
     assert h["vectors"]["backend"] == "model2vec (dim=256)"
+
+
+def test_collect_health_skips_backend_build_when_no_vectors(config, monkeypatch):
+    """#361 review: on an install with no vec tables and no stamp, the session-start
+    hot path must NOT build the embedding backend (the expensive load + dim probe)."""
+    from unittest.mock import MagicMock
+
+    spy = MagicMock()
+    monkeypatch.setattr("techne.core.embeddings._get_embedding_model", spy)
+    h = collect_health(config)  # fresh DB → no *_vec tables, no stamp
+    spy.assert_not_called()  # backend build short-circuited
+    assert h["vectors"]["degraded"] is False
+
+
+def test_vector_status_probes_with_allow_download_false(config, monkeypatch):
+    """The download-safety guarantee: when the backend IS built, it's with
+    allow_download=False so a cold-cache fetch can't block the hook."""
+    from unittest.mock import MagicMock
+
+    from techne.core.vector_status import vector_channel_status
+
+    fake_model = MagicMock()
+    fake_model.name, fake_model.dim = "model2vec", 256
+    spy = MagicMock(return_value=fake_model)
+    monkeypatch.setattr("techne.core.embeddings._get_embedding_model", spy)
+    # Default probe_backend_when_empty=True → build attempted even on an empty channel.
+    vector_channel_status(config.db_path)
+    spy.assert_called_once_with(allow_download=False)
+
+
+def test_collect_health_vectors_none_on_status_error(config, monkeypatch):
+    """collect_health degrades vectors→None (never raises) if the status check throws."""
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("techne.core.vector_status.vector_channel_status", boom)
+    h = collect_health(config)
+    assert h["vectors"] is None

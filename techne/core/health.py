@@ -136,7 +136,10 @@ def collect_health(config: Config) -> dict:
     try:
         from techne.core.vector_status import vector_channel_status
 
-        vstatus = vector_channel_status(config.db_path)
+        # probe_backend_when_empty=False: this runs in the session-start hook, so
+        # on an install with no vectors we must not pay the embedding-backend build
+        # (techne#361 review). The verdict there is "not degraded" regardless.
+        vstatus = vector_channel_status(config.db_path, probe_backend_when_empty=False)
         backend = vstatus["active_backend"]
         any_vectors = any(t.get("exists") for t in vstatus["tables"].values())
         health["vectors"] = {
