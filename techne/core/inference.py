@@ -246,3 +246,64 @@ def infer(
         tag_scores=tag_scores,
         kind_scores=kind_scores,
     )
+
+
+def backfill_tags(
+    db_path: Path,
+    config: "Config | None" = None,
+    *,
+    only_missing: bool = True,
+    batch_size: int = 500,
+) -> dict[str, int]:
+    """Re-run tag/kind inference over stored observations and fill the columns.
+
+    Observations are tagged at write time by ``infer()`` (see
+    ``state.record_observation``); rows stored while the embedding backend was
+    unavailable — e.g. before the ``[vectors]`` extra was installed — carry
+    ``tags = NULL``. This re-infers over the STORED (already-redacted) content
+    and writes the columns, mirroring the write-time logic exactly
+    (``tags_str = " ".join(result.tags) or None``; ``kind = result.kind``).
+
+    ``only_missing`` (default) touches only rows whose tags are NULL/empty;
+    pass False to re-infer every row (e.g. after a prototype change). No-ops
+    cleanly (zero counts, no writes) when no embedding backend is available —
+    the same degrade-to-nothing contract as ``infer()`` — so it never stamps a
+    default ``kind`` onto every row when the backend is missing.
+
+    Note: rows that legitimately infer to zero tags stay ``tags = NULL`` and are
+    re-scanned on the next ``only_missing`` run; this is cheap (a local embed)
+    and keeps the filter simple. Returns ``{"scanned": n, "tagged": m}`` where
+    ``tagged`` counts rows that received at least one tag.
+    """
+    from techne.core.database import connect
+    from techne.core.embeddings import backend_available
+
+    if not backend_available():
+        return {"scanned": 0, "tagged": 0}
+
+    where = "WHERE tags IS NULL OR tags = ''" if only_missing else ""
+    scanned = 0
+    tagged = 0
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            f"SELECT id, content FROM observations {where} ORDER BY id"
+        ).fetchall()
+        for i, (obs_id, content) in enumerate(rows, 1):
+            scanned += 1
+            result = infer(content or "", config)
+            tags_str = " ".join(result.tags) if result.tags else None
+            # Mirror record_observation: tags/kind columns only. The observations
+            # FTS shadow is kept in sync by the observations_au trigger.
+            conn.execute(
+                "UPDATE observations SET tags = ?, kind = ? WHERE id = ?",
+                (tags_str, result.kind, obs_id),
+            )
+            if tags_str:
+                tagged += 1
+            if i % batch_size == 0:
+                conn.commit()
+        conn.commit()
+    finally:
+        conn.close()
+    return {"scanned": scanned, "tagged": tagged}
