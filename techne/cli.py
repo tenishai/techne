@@ -3309,5 +3309,32 @@ def restore_cmd(ctx, backup_dir, yes, no_pre_backup):
         click.echo(f"prior state snapshotted at: {res.pre_restore_backup}")
 
 
+@main.command()
+@click.option(
+    "--session",
+    "session_id",
+    default=None,
+    help="Session to profile thread detection on (default: the largest).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the raw report as JSON.")
+@click.pass_context
+def profile(ctx, session_id, as_json):
+    """Profile the hot paths: import cost, thread detection, query plans.
+
+    Read-only. A repeatable latency-at-scale check the test suite can't provide
+    (techne#359) — run it against a real-size DB, or gate thresholds in CI, so
+    the #350/#351 class surfaces before it hits the hook budget.
+    """
+    config = ctx.obj["config"]
+    if not config.db_path.exists():
+        click.echo("techne not initialized. Run: techne init")
+        return
+
+    from techne.core.profiling import format_report, run_profile
+
+    report = run_profile(config.db_path, session_id)
+    click.echo(json.dumps(report, indent=2) if as_json else format_report(report))
+
+
 if __name__ == "__main__":
     main()
