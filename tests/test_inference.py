@@ -505,3 +505,13 @@ class TestBackfillTags:
         assert counts == {"scanned": 0, "tagged": 0}
         rows = get_observations(db_path, sid)
         assert all(r["tags"] is None for r in rows)  # untouched
+
+
+def test_default_threshold_matches_config_default():
+    """infer()'s no-config fallback (_DEFAULT_TAG_THRESHOLD) must not drift from
+    Config.tag_threshold — the two 0.42s are duplicated by design, so pin them
+    (Prudence, PR #367; techne#352)."""
+    from techne.config import Config
+    from techne.core.inference import _DEFAULT_TAG_THRESHOLD
+
+    assert _DEFAULT_TAG_THRESHOLD == Config().tag_threshold
