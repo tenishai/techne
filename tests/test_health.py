@@ -93,3 +93,102 @@ def test_banner_no_outbox_line_when_empty(config):
     h["pending_outbox"] = 0
     banner = format_banner(h)
     assert "outbox" not in banner
+
+
+# --- Vector channel health (techne#358) ---------------------------------------
+
+
+def _healthy_h(config):
+    h = collect_health(config)
+    h["build"] = "live"
+    return h
+
+
+def test_banner_vectors_no_backend_warns(config):
+    """Stored vectors but no backend = the silent FTS-only trap → ⚠️."""
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": None,
+        "has_vectors": True,
+        "reembed_needed": False,
+        "degraded": True,
+    }
+    banner = format_banner(h)
+    vline = [ln for ln in banner.splitlines() if "vector" in ln.lower()][0]
+    assert "⚠️" in vline
+    assert "keyword-only" in vline
+    assert "techne[vectors]" in vline
+
+
+def test_banner_vectors_reembed_needed_warns(config):
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": "model2vec (dim=256)",
+        "has_vectors": True,
+        "reembed_needed": True,
+        "degraded": True,
+    }
+    banner = format_banner(h)
+    vline = [ln for ln in banner.splitlines() if "vector" in ln.lower()][0]
+    assert "⚠️" in vline
+    assert "stale" in vline
+    assert "backfill" in vline
+
+
+def test_banner_vectors_healthy_silent(config):
+    """Healthy backend → no vector line (warnings-only banner)."""
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": "model2vec (dim=256)",
+        "has_vectors": True,
+        "reembed_needed": False,
+        "degraded": False,
+    }
+    banner = format_banner(h)
+    assert "vector" not in banner.lower()
+
+
+def test_banner_vectors_never_used_silent(config):
+    """No backend AND no vectors = never opted in → no false alarm."""
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": None,
+        "has_vectors": False,
+        "reembed_needed": False,
+        "degraded": False,
+    }
+    banner = format_banner(h)
+    assert "vector" not in banner.lower()
+
+
+def test_collect_health_maps_degraded_vector_status(config, monkeypatch):
+    """collect_health folds vector_channel_status into a degraded verdict:
+    stored vectors + no backend → degraded True."""
+    fake = {
+        "active_backend": None,
+        "stamp": None,
+        "tables": {"observations_vec": {"exists": True, "dim": 256, "rows": 10}},
+        "reembed_needed": False,
+    }
+    monkeypatch.setattr(
+        "techne.core.vector_status.vector_channel_status", lambda db_path: fake
+    )
+    h = collect_health(config)
+    assert h["vectors"]["backend"] is None
+    assert h["vectors"]["has_vectors"] is True
+    assert h["vectors"]["degraded"] is True
+
+
+def test_collect_health_vectors_healthy_not_degraded(config, monkeypatch):
+    fake = {
+        "active_backend": {"name": "model2vec", "dim": 256},
+        "stamp": {"name": "model2vec", "dim": 256},
+        "tables": {"observations_vec": {"exists": True, "dim": 256, "rows": 10}},
+        "reembed_needed": False,
+    }
+    monkeypatch.setattr(
+        "techne.core.vector_status.vector_channel_status", lambda db_path: fake
+    )
+    h = collect_health(config)
+    assert h["vectors"]["degraded"] is False
+    assert h["vectors"]["backend"] == "model2vec (dim=256)"

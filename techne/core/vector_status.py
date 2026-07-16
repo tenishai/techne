@@ -105,11 +105,16 @@ def vector_channel_status(db_path: Path) -> VectorChannelStatus:
     try:
         # Active backend — best-effort. No embedding backend installed is a
         # legitimate, common state (matches backfill's own graceful degrade).
+        # allow_download=False (techne#358): this is a non-mutating status check,
+        # also reached from the session-start banner (a hot hook). A cold-cache
+        # model download would block/hang the hook past its budget — the exact
+        # trap infer() guards against. An uncached model raises here and reports
+        # backend=None, same as "not installed"; a real backfill/search downloads.
         active_backend: dict | None = None
         try:
             from techne.core.embeddings import _get_embedding_model
 
-            model = _get_embedding_model()
+            model = _get_embedding_model(allow_download=False)
             active_backend = {"name": model.name, "dim": model.dim}
         except Exception:
             active_backend = None
