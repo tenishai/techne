@@ -355,6 +355,11 @@ class Config:
     # Staleness alarm: if the prior last_session is older than this many hours,
     # the banner and collect_health emit a visible warning. Default 12h.
     staleness_hours: int = 12
+    # Minimum cosine similarity for infer() to attach a tag (techne#352). The
+    # ceiling is backend-dependent: model2vec (potion-base-8M) tops out ~0.59, so
+    # the old hardcoded 0.6 tagged 0% of rows. 0.42 gives ~65-70% coverage on
+    # model2vec; raise it for a higher-cosine backend (e.g. fastembed/bge).
+    tag_threshold: float = 0.42
     model: str = "claude-haiku-4-5-20251001"
     # Optional LiteLLM proxy targeting. When unset, litellm.completion() uses
     # its standard env-var-based provider routing (ANTHROPIC_API_KEY, etc.).
@@ -577,6 +582,9 @@ class Config:
         if "staleness_hours" in raw:
             cfg.staleness_hours = int(raw["staleness_hours"])
 
+        if "tag_threshold" in raw:
+            cfg.tag_threshold = float(raw["tag_threshold"])
+
         if "knowledge_confidence_half_life_days" in raw:
             cfg.knowledge_confidence_half_life_days = float(
                 raw["knowledge_confidence_half_life_days"]
@@ -707,6 +715,7 @@ class Config:
                 "correction_reserve_frac": self.injection.correction_reserve_frac,
             },
             "staleness_hours": self.staleness_hours,
+            "tag_threshold": self.tag_threshold,
             "knowledge_confidence_half_life_days": self.knowledge_confidence_half_life_days,
             "archive": {
                 "confidence_floor": self.archive.confidence_floor,

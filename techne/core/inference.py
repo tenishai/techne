@@ -46,6 +46,11 @@ _embed_cache: dict[bool, dict] = {}  # override_active -> {label: np.ndarray mea
 # known-failing import each time.
 _INFER_DEPS: bool | None = None
 
+# Fallback tag_threshold when infer() is called with no config and no explicit
+# threshold (techne#352). The canonical default lives in Config.tag_threshold;
+# they must stay in sync. Backend-dependent ceiling — model2vec tops out ~0.59.
+_DEFAULT_TAG_THRESHOLD = 0.42
+
 
 @dataclass
 class InferenceResult:
@@ -168,7 +173,7 @@ def infer(
     content: str,
     config: "Config | None" = None,
     *,
-    tag_threshold: float = 0.6,
+    tag_threshold: float | None = None,
     top_k: int = 5,
 ) -> InferenceResult:
     """Embed *content*, cosine-sim against prototypes, return tags + kind.
@@ -179,11 +184,19 @@ def infer(
 
     Args:
         content: Raw observation text.
-        config: Config object (used to find operator prototype overrides, and
-            to resolve an explicit embedding_backend/embedding_model override).
-        tag_threshold: Minimum cosine similarity to attach a tag (default 0.6).
+        config: Config object (used to find operator prototype overrides, to
+            resolve an explicit embedding_backend/embedding_model override, and
+            for the default tag_threshold).
+        tag_threshold: Minimum cosine similarity to attach a tag. When None
+            (the default), resolved from ``config.tag_threshold`` (techne#352) —
+            the ceiling is backend-dependent, so it's config-driven rather than
+            hardcoded. Falls back to ``_DEFAULT_TAG_THRESHOLD`` with no config.
         top_k: Max number of tags to attach (by score).
     """
+    if tag_threshold is None:
+        tag_threshold = (
+            config.tag_threshold if config is not None else _DEFAULT_TAG_THRESHOLD
+        )
     global _INFER_DEPS
     if _INFER_DEPS is False:
         return InferenceResult()
