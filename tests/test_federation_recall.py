@@ -1808,3 +1808,87 @@ class TestPublicKnowledgeConnEntrypoint:
             "not hand-backfilled in _search_remote_knowledge)"
         )
         assert team_row["event_at"] == "2026-05-15 09:00:00"
+
+
+# ---------------------------------------------------------------------------
+# Relative connection db_path resolution (techne#332)
+# ---------------------------------------------------------------------------
+
+
+class TestRelativeConnDbPath:
+    """A connection db_path may be relative — resolved against TECHNE_HOME so a
+    committed config.yaml stays portable across machines (techne#332). Resolution
+    happens at open time, not config load, so the stored spec keeps the portable
+    string for save round-trips."""
+
+    def test_relative_resolves_against_techne_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        from techne.core.federation import _resolve_conn_db_path
+
+        assert _resolve_conn_db_path("team-mirror.db") == tmp_path / "team-mirror.db"
+
+    def test_nested_relative_resolves_against_techne_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        from techne.core.federation import _resolve_conn_db_path
+
+        assert _resolve_conn_db_path("mirrors/team.db") == tmp_path / "mirrors" / "team.db"
+
+    def test_absolute_is_unchanged(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        from techne.core.federation import _resolve_conn_db_path
+
+        abs_path = tmp_path / "elsewhere" / "team.db"
+        assert _resolve_conn_db_path(str(abs_path)) == abs_path
+
+    def test_tilde_expands_to_home_not_techne_home(self, tmp_path, monkeypatch):
+        # ~ is the user's home, independent of TECHNE_HOME — expanduser wins and
+        # the result is already absolute, so no techne_home join happens.
+        import pathlib
+
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        from techne.core.federation import _resolve_conn_db_path
+
+        assert _resolve_conn_db_path("~/team.db") == pathlib.Path.home() / "team.db"
+
+    def test_fan_out_opens_relative_remote(self, tmp_path, monkeypatch):
+        """End-to-end: a connection whose db_path is RELATIVE resolves against
+        TECHNE_HOME and federates — the portable-config path the issue exists for."""
+        from techne.core.federation import fan_out_search
+
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        local_db = _init_team_db(tmp_path / "techne.db")
+        # Team store lives at <TECHNE_HOME>/team-mirror.db, referenced RELATIVELY.
+        team_db = _init_team_db(tmp_path / "team-mirror.db")
+        store(team_db, "team deploys via blue-green on Fridays", type="fact", tags="deploy")
+
+        connections = {
+            "team": FederationConnectionSpec(role="team", db_path="team-mirror.db")
+        }
+        _, remote_results = fan_out_search(
+            local_db, connections, "deploy blue-green Fridays", limit=10, half_life_days=30.0
+        )
+        assert remote_results, "relative-path remote must resolve + return results"
+
+    def test_relative_db_path_survives_save_round_trip(self, tmp_path):
+        """The portable relative string must survive load → save → reload and NOT
+        be rewritten to absolute — the exact property the resolve-at-open (vs
+        resolve-at-config-load) design protects. A future refactor moving
+        resolution to load would pass every other test but silently break this
+        (Prudence, PR #365; techne#332)."""
+        from techne.config import Config
+
+        src = tmp_path / "config.yaml"
+        src.write_text(
+            "connections:\n"
+            "  team:\n"
+            "    role: team\n"
+            "    db_path: team-mirror.db\n"
+        )
+        cfg = Config.load(src)
+        assert cfg.connections["team"].db_path == "team-mirror.db"  # stored as-is
+
+        out = tmp_path / "out.yaml"
+        cfg.save(out)
+        assert "db_path: team-mirror.db" in out.read_text()  # relative, not absolutized
+        reloaded = Config.load(out)
+        assert reloaded.connections["team"].db_path == "team-mirror.db"
