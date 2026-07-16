@@ -337,8 +337,10 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
     * ``"completion"`` / ``"did_work"``
         Backed if ``active_tool_call`` or ``artifacts`` are non-empty — i.e. a
         deed happened.  A turn of only passive inspection (Read/Grep/Glob/
-        WebFetch) does NOT back completion (techne#105); it falls through to
-        ``unbacked`` (or ``unverifiable`` on an empty, Bash-off window).
+        WebFetch) does NOT back completion (techne#105).  With no deed, the
+        verdict is ``unverifiable`` when Bash capture is off (a Bash deed would be
+        invisible, so absence isn't disproof) and ``unbacked`` when Bash is on (a
+        real command would have been recorded, so no-deed is genuine).
     * ``"commit"``
         Backed if ``commits`` is non-empty.  If the optional ``sha`` field is
         given, at least one commit must start with it.
@@ -374,21 +376,31 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
                     "a deed (write/edit/command or non-inspection tool call) and/or "
                     "artifacts found in the ledger."
                 )
-            elif evidence.observation_count == 0 and not evidence.bash_captured:
-                # Nothing recorded AND Bash is off: the turn could have been all-Bash
-                # (uncaptured). Absent, not disproven — don't falsely flag (techne#105).
+            elif not evidence.bash_captured:
+                # No active deed and no artifacts, and Bash is off: a real
+                # write/commit/test could have happened via uncaptured Bash, so its
+                # absence here is not disproof. Report unverifiable, never a false
+                # 'unbacked' on an honest agent (techne#105; matches how commit /
+                # tests_green / ran_action treat Bash-off). This subsumes the
+                # empty-window case AND the passive-tool-only case — the mere
+                # presence of a captured Read must not flip a Bash-heavy honest turn
+                # to 'unbacked' (the regression Prudence caught on the first cut).
                 status = "unverifiable"
                 detail = (
-                    "No observations recorded and Bash capture is off — a Bash-only "
-                    "turn would leave no trace, so completion can't be confirmed or "
-                    "denied. " + _BASH_OFF_DETAIL
+                    "No deed recorded and Bash capture is off — a write/command done "
+                    "via Bash would leave no trace, so completion can't be confirmed "
+                    "or denied. " + _BASH_OFF_DETAIL
                 )
             else:
+                # Bash WAS captured and still no deed (only passive inspection or
+                # non-deed records) → genuinely unbacked: a real command would have
+                # been recorded.
                 status = "unbacked"
                 detail = (
                     "No deed found in the ledger for this session window — only "
                     "passive inspection (read/grep/glob/fetch) or non-deed records, "
-                    "which do not back a completion claim."
+                    "which do not back a completion claim (Bash capture is on, so a "
+                    "real command would have been recorded)."
                 )
 
         elif claim_type == "commit":
