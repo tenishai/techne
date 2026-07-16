@@ -1868,3 +1868,27 @@ class TestRelativeConnDbPath:
             local_db, connections, "deploy blue-green Fridays", limit=10, half_life_days=30.0
         )
         assert remote_results, "relative-path remote must resolve + return results"
+
+    def test_relative_db_path_survives_save_round_trip(self, tmp_path):
+        """The portable relative string must survive load → save → reload and NOT
+        be rewritten to absolute — the exact property the resolve-at-open (vs
+        resolve-at-config-load) design protects. A future refactor moving
+        resolution to load would pass every other test but silently break this
+        (Prudence, PR #365; techne#332)."""
+        from techne.config import Config
+
+        src = tmp_path / "config.yaml"
+        src.write_text(
+            "connections:\n"
+            "  team:\n"
+            "    role: team\n"
+            "    db_path: team-mirror.db\n"
+        )
+        cfg = Config.load(src)
+        assert cfg.connections["team"].db_path == "team-mirror.db"  # stored as-is
+
+        out = tmp_path / "out.yaml"
+        cfg.save(out)
+        assert "db_path: team-mirror.db" in out.read_text()  # relative, not absolutized
+        reloaded = Config.load(out)
+        assert reloaded.connections["team"].db_path == "team-mirror.db"
