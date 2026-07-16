@@ -394,3 +394,80 @@ class TestObservationInference:
         conn2.close()
         assert "tags" in cols
         assert "kind" in cols
+
+
+class TestBackfillTags:
+    """inference.backfill_tags — retroactively fill tags/kind on stored rows
+    (techne#352: obs stored before the [vectors] backend was installed have
+    tags=NULL)."""
+
+    def _seed_untagged(self, db_path, n=3):
+        from techne.core.database import connect
+
+        sid = start_session(db_path, session_id="s-backfill")
+        conn = connect(db_path)
+        try:
+            for i in range(n):
+                conn.execute(
+                    "INSERT INTO observations"
+                    "(session_id, tool_name, content, tier, tags, kind, event_at) "
+                    "VALUES (?, 'Bash', ?, 'hot', NULL, NULL, '2026-07-15T00:00:00Z')",
+                    (sid, f"content number {i}"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return sid
+
+    def test_backfills_missing_tags(self, db_path, config, monkeypatch):
+        from techne.core import inference
+        from techne.core.inference import InferenceResult, backfill_tags
+
+        sid = self._seed_untagged(db_path, 3)
+        monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: True)
+        monkeypatch.setattr(
+            inference,
+            "infer",
+            lambda content, cfg=None, **kw: InferenceResult(
+                tags=["alpha", "beta"], kind="decision-shaped"
+            ),
+        )
+        counts = backfill_tags(db_path, config)
+        assert counts == {"scanned": 3, "tagged": 3}
+        rows = get_observations(db_path, sid)
+        assert all(r["tags"] == "alpha beta" for r in rows)
+        assert all(r["kind"] == "decision-shaped" for r in rows)
+
+    def test_only_missing_skips_already_tagged(self, db_path, config, monkeypatch):
+        from techne.core import inference
+        from techne.core.database import connect
+        from techne.core.inference import InferenceResult, backfill_tags
+
+        sid = self._seed_untagged(db_path, 2)
+        conn = connect(db_path)
+        conn.execute(
+            "UPDATE observations SET tags='preexisting' "
+            "WHERE id=(SELECT MIN(id) FROM observations)"
+        )
+        conn.commit()
+        conn.close()
+
+        def _stub_new(content, cfg=None, **kw):
+            return InferenceResult(tags=["new"], kind="observation-shaped")
+
+        monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: True)
+        monkeypatch.setattr(inference, "infer", _stub_new)
+        counts = backfill_tags(db_path, config, only_missing=True)
+        assert counts["scanned"] == 1  # only the untagged row was touched
+        rows = get_observations(db_path, sid)
+        assert sorted(r["tags"] for r in rows) == ["new", "preexisting"]
+
+    def test_noop_when_backend_unavailable(self, db_path, config, monkeypatch):
+        from techne.core.inference import backfill_tags
+
+        sid = self._seed_untagged(db_path, 2)
+        monkeypatch.setattr("techne.core.embeddings.backend_available", lambda: False)
+        counts = backfill_tags(db_path, config)
+        assert counts == {"scanned": 0, "tagged": 0}
+        rows = get_observations(db_path, sid)
+        assert all(r["tags"] is None for r in rows)  # untouched

@@ -114,25 +114,47 @@ def extract_file_paths(content: str) -> tuple[set[str], list[str]]:
 def find_repo(
     path: str,
     fs_check: Callable[[Path, str], bool] | None = None,
+    cache: dict[str, str | None] | None = None,
 ) -> str | None:
     """Walk up from ``path`` until a repo-root marker is found.
 
     ``fs_check(directory, marker_name) -> bool`` is the filesystem probe;
     pass a stub in tests. Default uses the real filesystem.
+
+    ``cache`` is an optional per-detection-pass memo keyed by full path. The
+    same absolute paths recur across nearly every observation in a session, so
+    resolving each one once collapses tens of thousands of redundant filesystem
+    walks (``find_repo`` dominates feature extraction — see
+    ``_detect_summarize_heuristic``). It is scoped to a single pass (a fresh
+    dict per call site), never process-global, so a repo created mid-process is
+    still picked up on the next pass — no stale-negative risk.
     """
+    if cache is not None and path in cache:
+        return cache[path]
+
     if fs_check is None:
 
-        def fs_check(p: Path, m: str) -> bool:
+        def _probe(p: Path, m: str) -> bool:
             return (p / m).exists()
 
+        probe = _probe
+    else:
+        probe = fs_check
+
+    result: str | None = None
     p = Path(path)
-    if not p.is_absolute():
-        return None
-    for parent in p.parents:
-        for marker in REPO_MARKERS:
-            if fs_check(parent, marker):
-                return parent.name
-    return None
+    if p.is_absolute():
+        for parent in p.parents:
+            for marker in REPO_MARKERS:
+                if probe(parent, marker):
+                    result = parent.name
+                    break
+            if result is not None:
+                break
+
+    if cache is not None:
+        cache[path] = result
+    return result
 
 
 def extract_entities(
@@ -189,8 +211,13 @@ def extract_features(
     user_families: dict[str, str] | None = None,
     extra_entity_patterns: list[re.Pattern[str]] | None = None,
     fs_check: Callable[[Path, str], bool] | None = None,
+    repo_cache: dict[str, str | None] | None = None,
 ) -> ObsFeatures:
-    """Build the feature vector for one observation."""
+    """Build the feature vector for one observation.
+
+    ``repo_cache`` is an optional per-pass memo forwarded to ``find_repo`` so
+    repeated file paths across a session resolve their repo root only once.
+    """
     tool_name = obs.get("tool_name", "") or ""
     content = obs.get("content", "") or ""
     ts = _parse_timestamp(obs.get("timestamp", "") or "")
@@ -200,7 +227,7 @@ def extract_features(
 
     repos: set[str] = set()
     for full_path in full_paths:
-        repo = find_repo(full_path, fs_check=fs_check)
+        repo = find_repo(full_path, fs_check=fs_check, cache=repo_cache)
         if repo:
             repos.add(repo)
 

@@ -168,20 +168,31 @@ def detect_threads(
     user_prompt_score: float = USER_PROMPT_SCORE,
     min_segment_size: int = MIN_SEGMENT_SIZE,
     fs_check=None,
+    features=None,
 ):
     """Detect thread boundaries from a session's observations.
 
     Returns ``(segments, scores)``. Segments are lists of observation
     indices; scores are returned alongside so callers can persist them for
     the audit surface.
+
+    ``features`` lets a caller that already extracted the per-observation
+    feature vectors (e.g. the orchestrator, which reuses them for labels and
+    summaries) pass them in so we don't extract them a second time. When
+    ``None`` we build them here, sharing one per-pass ``repo_cache`` so the
+    repeated file paths across a session resolve their repo root once.
     """
     if not observations:
         return [], []
 
-    features = [
-        extract_features(i, obs, user_families, extra_entity_patterns, fs_check)
-        for i, obs in enumerate(observations)
-    ]
+    if features is None:
+        repo_cache: dict[str, str | None] = {}
+        features = [
+            extract_features(
+                i, obs, user_families, extra_entity_patterns, fs_check, repo_cache=repo_cache
+            )
+            for i, obs in enumerate(observations)
+        ]
     scores = score_boundaries(features, user_prompt_score=user_prompt_score)
     raw_segments = split_at_boundaries(len(observations), scores, threshold=boundary_threshold)
     segments = merge_pass(raw_segments, features, min_size=min_segment_size)

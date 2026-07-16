@@ -25,12 +25,11 @@ import json
 import os
 from pathlib import Path
 
-import structlog
-
+from techne._log import get_logger
 from techne.core.database import connect
 from techne.core.redaction import redact_credentials
 
-log = structlog.get_logger(__name__)
+log = get_logger(__name__)
 
 
 def _content_hash(content: str) -> str:

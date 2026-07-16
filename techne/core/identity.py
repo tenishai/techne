@@ -3,12 +3,12 @@
 import re
 from pathlib import Path
 
-import structlog
 import yaml
 
+from techne._log import get_logger
 from techne.core.database import connect, like_escape
 
-log = structlog.get_logger(__name__)
+log = get_logger(__name__)
 
 
 def get(db_path: Path, key: str) -> str | None:
