@@ -243,6 +243,30 @@ def _trigger_source_table(trigger_name: str, triggers_sql: str) -> str | None:
     return None
 
 
+def _normalize_ddl(sql: str) -> str:
+    """Normalize a CREATE statement for drift comparison: drop the optional
+    ``IF NOT EXISTS`` (sqlite_master never stores it), collapse whitespace, and
+    strip a trailing ``;``. A semantically-identical live/canonical pair then
+    compares equal, while a real body change (e.g. an FTS trigger going from
+    content-only to content+tags+kind) does not."""
+    s = re.sub(r"\bIF\s+NOT\s+EXISTS\b", " ", sql, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.rstrip(";").strip()
+
+
+def _warn_drift(kind: str, name: str) -> None:
+    """Surface a drifted schema object (techne#360). Reconcile is deliberately
+    additive — it won't heal a redefinition — so a body change under an existing
+    name would otherwise apply SILENTLY never (the #355 trigger-drift trap). This
+    makes it visible; the fix is a numbered migration that DROP+CREATEs it."""
+    print(
+        f"[techne] reconcile: WARNING {kind} '{name}' has DRIFTED — its live "
+        f"definition differs from SCHEMA. Additive reconcile cannot heal a "
+        f"redefinition; ship a numbered migration to DROP+CREATE it (techne#360).",
+        file=sys.stderr,
+    )
+
+
 def reconcile_tables(conn: sqlite3.Connection, schema_sql: str) -> None:
     """Create any tables present in *schema_sql* but absent from the live DB.
 
@@ -272,10 +296,13 @@ def reconcile_triggers(conn: sqlite3.Connection, triggers_sql: str) -> None:
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'shadow')")
     }
     existing = {
-        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        row[0]: row[1]
+        for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger'")
     }
     for name, create_sql in _trigger_statements(triggers_sql):
         if name in existing:
+            if _normalize_ddl(existing[name] or "") != _normalize_ddl(create_sql):
+                _warn_drift("trigger", name)
             continue
         src = _trigger_source_table(name, triggers_sql)
         if src is not None and src not in existing_tables:
@@ -378,9 +405,14 @@ def reconcile_indexes(conn: sqlite3.Connection, schema_sql: str) -> None:
     name it is NOT reconciled (the name is already present) — that's a redefinition
     and, per the SCHEMA_SQL-only-is-additive convention, requires a numbered
     migration + version bump, not the reconciler."""
-    existing = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    existing = {
+        row[0]: row[1]
+        for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type='index'")
+    }
     for name, create_sql in _index_statements(schema_sql):
         if name in existing:
+            if _normalize_ddl(existing[name] or "") != _normalize_ddl(create_sql):
+                _warn_drift("index", name)
             continue
         conn.execute(create_sql)  # one statement per entry; matches reconcile_columns
         conn.commit()

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -968,4 +968,52 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
                 "ON thread_boundaries(session_id, obs_index_a, obs_index_b)"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (17)")
+    if from_version < 18 and to_version >= 18:
+        # #355 (the #360 drift class): on DBs created before observations_fts
+        # indexed tags/kind, the observations_ai/ad/au triggers are stuck in their
+        # OLD content-only form. reconcile_triggers is name-only, so the
+        # FTS_TRIGGERS_SQL update never reached them — tags/kind are silently never
+        # FTS-indexed. Redeploy the triggers to the canonical content+tags+kind
+        # form (mirrors the v12 knowledge_* precedent), THEN rebuild
+        # observations_fts so existing rows are re-indexed with tags/kind. Unlike
+        # v12 (NULL vs '' both tokenize empty → no rebuild needed), this drift
+        # genuinely dropped tags/kind from the index, so the rebuild is required.
+        # Guard on table existence (mirrors the v16 obs guard).
+        obs_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='observations'"
+        ).fetchone()
+        if obs_exists:
+            # SQL is flush-left (leading whitespace is insignificant to SQLite) so
+            # the COALESCE VALUES lines stay under the line-length limit despite the
+            # depth of this migration block.
+            conn.executescript("""
+DROP TRIGGER IF EXISTS observations_ai;
+DROP TRIGGER IF EXISTS observations_ad;
+DROP TRIGGER IF EXISTS observations_au;
+CREATE TRIGGER observations_ai AFTER INSERT ON observations BEGIN
+    INSERT INTO observations_fts(rowid, content, tags, kind)
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''), COALESCE(NEW.kind, ''));
+END;
+CREATE TRIGGER observations_ad AFTER DELETE ON observations BEGIN
+    INSERT INTO observations_fts(observations_fts, rowid, content, tags, kind)
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''), COALESCE(OLD.kind, ''));
+END;
+CREATE TRIGGER observations_au AFTER UPDATE ON observations BEGIN
+    INSERT INTO observations_fts(observations_fts, rowid, content, tags, kind)
+    VALUES ('delete', OLD.id, OLD.content, COALESCE(OLD.tags, ''), COALESCE(OLD.kind, ''));
+    INSERT INTO observations_fts(rowid, content, tags, kind)
+    VALUES (NEW.id, NEW.content, COALESCE(NEW.tags, ''), COALESCE(NEW.kind, ''));
+END;
+""")
+            fts_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='observations_fts'"
+            ).fetchone()
+            if fts_exists:
+                conn.execute("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')")
+        # #353: drop the zombie idx_thread_boundaries_session on DBs where an older
+        # SCHEMA_SQL reconcile recreated it AFTER v17 already dropped it (v17 won't
+        # re-run on an already-migrated DB, so it lingers). Idempotent; the UNIQUE
+        # triple index covers its (session_id, obs_index_a) prefix.
+        conn.execute("DROP INDEX IF EXISTS idx_thread_boundaries_session")
+        conn.execute("INSERT INTO schema_version (version) VALUES (18)")
     conn.commit()
