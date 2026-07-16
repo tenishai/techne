@@ -159,6 +159,7 @@ class TestQueryTurnEvidence:
         assert "deadbeef" in ev.commits
         assert "git commit -m 'wip'" in ev.actions
         assert ev.any_tool_call is True
+        assert ev.active_tool_call is True  # Write/Edit/Bash are deeds
         assert ev.observation_count == 3
 
     def test_userprompt_does_not_set_any_tool_call(self, db_path):
@@ -174,6 +175,27 @@ class TestQueryTurnEvidence:
         _insert_obs(db_path, "sess-read", "Read", "Tool: Read\nInput: {}\nOutput: ...")
         ev = query_turn_evidence(db_path, "sess-read")
         assert ev.any_tool_call is True
+
+    def test_passive_tool_does_not_set_active_tool_call(self, db_path):
+        """Read/Grep/Glob are passive inspection: they set any_tool_call but NOT
+        active_tool_call, so a look-only turn cannot back completion (techne#105)."""
+        _insert_session(db_path, "sess-passive")
+        _insert_obs(db_path, "sess-passive", "Read", "Tool: Read\nInput: {}\nOutput: ...")
+        _insert_obs(db_path, "sess-passive", "Grep", "Tool: Grep\nInput: {}\nOutput: ...")
+        ev = query_turn_evidence(db_path, "sess-passive")
+        assert ev.any_tool_call is True
+        assert ev.active_tool_call is False
+
+    def test_non_passive_tool_sets_active_tool_call(self, db_path):
+        """A tool outside the passive set (e.g. an MCP call) counts as a deed — an
+        unknown/non-inspection tool is treated as active (safe direction)."""
+        _insert_session(db_path, "sess-active")
+        _insert_obs(
+            db_path, "sess-active", "mcp__techne__techne_store",
+            "Tool: mcp__techne__techne_store\nInput: {}\nOutput: ok",
+        )
+        ev = query_turn_evidence(db_path, "sess-active")
+        assert ev.active_tool_call is True
 
 
 # ---------------------------------------------------------------------------
@@ -326,18 +348,40 @@ class TestCheckClaims:
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "unbacked"
 
-    def test_completion_backed_when_tool_called(self):
-        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[])
+    def test_completion_backed_when_active_tool_called(self):
+        ev = self._ev(
+            any_tool_call=True, active_tool_call=True, artifacts=[], commits=[], actions=[]
+        )
+        verdicts = check_claims([{"type": "completion"}], ev)
+        assert verdicts[0]["status"] == "backed"
+
+    def test_completion_unbacked_when_only_passive_tools(self):
+        """A turn of only passive inspection (Read/Grep/…) sets any_tool_call but NOT
+        active_tool_call, so it must NOT back completion — looking is not doing (techne#105)."""
+        ev = self._ev(
+            any_tool_call=True, active_tool_call=False, artifacts=[], commits=[], actions=[]
+        )
+        verdicts = check_claims([{"type": "completion"}], ev)
+        assert verdicts[0]["status"] == "unbacked"
+
+    def test_completion_backed_by_artifacts_without_active_flag(self):
+        """Artifacts (Write/Edit) back completion on their own, even if the active flag
+        weren't set — a written file is a deed."""
+        ev = self._ev(any_tool_call=True, active_tool_call=False, artifacts=["/x/y.py"])
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "backed"
 
     def test_completion_unbacked_when_no_activity(self):
-        ev = self._ev(any_tool_call=False, artifacts=[], commits=[], actions=[])
+        ev = self._ev(
+            any_tool_call=False, active_tool_call=False, artifacts=[], commits=[], actions=[]
+        )
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "unbacked"
 
     def test_did_work_alias(self):
-        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[])
+        ev = self._ev(
+            any_tool_call=True, active_tool_call=True, artifacts=[], commits=[], actions=[]
+        )
         verdicts = check_claims([{"type": "did_work"}], ev)
         assert verdicts[0]["status"] == "backed"
 

@@ -3152,6 +3152,7 @@ def evidence_cmd(ctx, session_id, since):
         click.echo(f"Since:   {since}")
     click.echo(f"Observations: {ev.observation_count}")
     click.echo(f"Any tool call: {ev.any_tool_call}")
+    click.echo(f"Active (deed) tool call: {ev.active_tool_call}")
     if not config.hooks.capture_bash:
         click.echo(
             "NOTE: Bash capture is OFF (config.hooks.capture_bash=False) — commits, "

@@ -1641,6 +1641,7 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
     return {
         "evidence": {
             "any_tool_call": ev.any_tool_call,
+            "active_tool_call": ev.active_tool_call,
             "observation_count": ev.observation_count,
             "artifacts": ev.artifacts,
             "commits": ev.commits,
