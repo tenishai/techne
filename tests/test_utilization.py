@@ -11,7 +11,11 @@ import pytest
 
 from techne.core.database import init_db
 from techne.core.state import add_observation, ensure_session
-from techne.core.utilization import injection_utilization, read_write_ledger
+from techne.core.utilization import (
+    edit_rail_attribution,
+    injection_utilization,
+    read_write_ledger,
+)
 from techne.hooks._injection_log import log_context_injection
 
 
@@ -211,3 +215,115 @@ def test_since_days_windows_the_ledger(db):
     recent = read_write_ledger(db, since_days=2)
     assert recent["memory"]["write"] == 0  # backdated writes excluded
     assert recent["memory"]["read"] == 1  # recent read kept
+
+
+# ---- edit_rail_attribution (techne#374) ------------------------------------
+
+
+def _stamp(db, table, ts, where, params=()):
+    """Force a row's timestamp (both tables default CURRENT_TIMESTAMP)."""
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db)
+    conn.execute(f"UPDATE {table} SET timestamp = ? WHERE {where}", (ts, *params))
+    conn.commit()
+    conn.close()
+
+
+def _inject(db, ts, *, trigger, deps, session="s1"):
+    """Log a codex_edit_rail injection (deps = dependent symbol-id strings) at `ts`."""
+    log_context_injection(
+        db, source="codex_edit_rail", session_id=session, trigger=trigger,
+        rows=[{"id": d} for d in deps], injected_text="x" * 20,
+    )
+    _stamp(db, "context_injections", ts, "trigger_snippet = ?", (trigger,))
+
+
+def _edit(db, ts, path, *, change="", session="s1"):
+    """Record an Edit observation targeting `path` at `ts`."""
+    content = f"Edited: {path}\nChange: {change}"
+    add_observation(db, session, "Edit", content)
+    _stamp(db, "observations", ts, "tool_name = 'Edit' AND content = ?", (content,))
+
+
+def test_edit_rail_attribution_empty_db(db):
+    a = edit_rail_attribution(db)
+    assert a["injections"] == 0
+    assert a["file_attributed_pct"] is None
+    assert a["payload"]["dependents"] == 0
+
+
+def test_edit_rail_attribution_file_hit(db):
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")  # 30s later, same file
+    a = edit_rail_attribution(db)
+    assert a["injections"] == 1
+    assert a["file_attributed"] == 1
+    assert a["file_attributed_pct"] == 100.0
+
+
+def test_edit_rail_attribution_excludes_trigger_file(db):
+    # The only dependent shares the trigger's OWN file — editing it is not
+    # "used a dependent" (you were editing that symbol anyway).
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/foo.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")
+    a = edit_rail_attribution(db)
+    assert a["file_attributed"] == 0
+
+
+def test_edit_rail_attribution_window(db):
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    _edit(db, "2026-01-01 12:10:00", "/repo/techne/foo.py")  # 10 min later
+    tight = edit_rail_attribution(db, window_minutes=2.0)
+    assert tight["no_edits_in_window"] == 1
+    assert tight["file_attributed"] == 0
+    wide = edit_rail_attribution(db, window_minutes=15.0)
+    assert wide["file_attributed"] == 1
+
+
+def test_edit_rail_attribution_next_edits_cap(db):
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    # Two unrelated edits first, then the dependent — beyond next_edits=2, so uncredited.
+    _edit(db, "2026-01-01 12:00:10", "/repo/techne/a.py")
+    _edit(db, "2026-01-01 12:00:20", "/repo/techne/b.py")
+    _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")
+    assert edit_rail_attribution(db, next_edits=2)["file_attributed"] == 0
+    assert edit_rail_attribution(db, next_edits=5)["file_attributed"] == 1
+
+
+def test_edit_rail_attribution_symbol_name(db):
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::compute_total::function::10"])
+    _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py", change="compute_total(x)")
+    a = edit_rail_attribution(db)
+    assert a["symbol_attributed"] == 1  # the edit text names the dependent
+
+
+def test_edit_rail_attribution_payload_composition(db):
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=[
+                "techne/foo.py::bar::function::10",     # real
+                "tests/test_foo.py::baz::function::3",  # test file
+                "techne/foo.py::<module>::module::0",   # synthetic module node
+            ])
+    pay = edit_rail_attribution(db)["payload"]
+    assert pay["dependents"] == 3
+    assert pay["real_pct"] == round(100 / 3, 1)
+    assert pay["module_pct"] == round(100 / 3, 1)
+    assert pay["test_pct"] == round(100 / 3, 1)
+
+
+def test_edit_rail_attribution_noise_only(db):
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=[
+                "techne/foo.py::<module>::module::0",   # module noise
+                "tests/test_x.py::a::function::1",      # test noise
+            ])
+    a = edit_rail_attribution(db)
+    assert a["noise_only_injections"] == 1
+    assert a["noise_only_pct"] == 100.0
+    assert a["payload"]["real_pct"] == 0.0

@@ -1,18 +1,26 @@
 """Utilization audit over the observation ledger + injection log (techne#329).
 
-Two read-only panels, no writes:
+Read-only panels, no writes:
   - ``injection_utilization`` — per-source aggregate over ``context_injections``
     (the memory read-path that #331 made visible).
   - ``read_write_ledger`` — read-vs-write counts per memory domain over
     ``observations`` (refreshes #329's original findings table on live data).
+  - ``edit_rail_attribution`` — proximity-attribution for ``codex_edit_rail``
+    (techne#374): did a SUBSEQUENT edit touch an injected dependent?
 
-Deliberately DESCRIPTIVE only. Attribution — "was the injected item actually
-used this turn" — is the harder counterfactual and lives in techne#105; this
-module does not attempt it.
+The first two are DESCRIPTIVE only. ``edit_rail_attribution`` is deliberately
+PROXIMITY-attribution — "an injected dependent was edited within the next few
+edits" — NOT causation. The confounder it guards against (rail-tripping sessions
+broadly edit those files anyway, inflating whole-session overlap) is exactly why
+its window is tight and the trigger's own file is excluded. A true counterfactual
+("would the edit have happened WITHOUT the injection") remains techne#105.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from datetime import datetime
 from pathlib import Path
 
 from techne.core.stores import plain_connect
@@ -172,4 +180,209 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
         # is no MCP tool to call" (librarian — ledger-invisible, not neglect).
         "architect": {"read": architect_read, "mcp_read_tool": True},
         "librarian": {"read": librarian_read, "mcp_read_tool": False},
+    }
+
+
+# ---- edit-rail attribution (techne#374) ------------------------------------
+
+# Edit observations record their target as "Edited: <abspath>" (state.py). Paths
+# are absolute + machine-specific, but injected dependent ids are repo-RELATIVE
+# ("techne/cli.py::name::kind::line"), so we match by path suffix rather than
+# trying to reconstruct the repo root (portable across machines/checkouts).
+_EDIT_PATH_RE = re.compile(r"Edited?:\s*(\S+)")
+_EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
+# A synthetic module-scope symbol — the from_symbol codex assigns to calls/imports
+# outside any def (source.py). As an injected "dependent" it's near-useless noise.
+_MODULE_MARKER = "::<module>::module::"
+
+
+def _sym_file(symbol_id: str) -> str:
+    """Repo-relative file of a codex symbol id ('file::name::kind::line')."""
+    return symbol_id.split("::", 1)[0]
+
+
+def _sym_name(symbol_id: str) -> str | None:
+    """The symbol's name segment, or None for a synthetic module node."""
+    parts = symbol_id.split("::")
+    if len(parts) < 2 or parts[1] == "<module>":
+        return None
+    return parts[1]
+
+
+def _is_test_path(path: str) -> bool:
+    """Heuristic: a test file (tests/… dir or a test_*.py basename)."""
+    p = path.replace("\\", "/")
+    base = p.rsplit("/", 1)[-1]
+    return "tests/" in p or "/test/" in p or base.startswith("test_")
+
+
+def _edit_hits_file(edit_abspath: str, rel_files: set[str]) -> bool:
+    """True if the edited absolute path ends with any injected relative file."""
+    p = edit_abspath.replace("\\", "/")
+    return any(p == f or p.endswith("/" + f) for f in rel_files)
+
+
+def edit_rail_attribution(
+    db_path: Path,
+    *,
+    since_days: int | None = None,
+    window_minutes: float = 2.0,
+    next_edits: int = 3,
+) -> dict:
+    """Proximity-attribution for ``codex_edit_rail`` injections (techne#374).
+
+    For each injection, look at the SAME session's edits that follow it — capped
+    to the next ``next_edits`` edits within ``window_minutes`` — and ask whether
+    any touched an injected dependent, at two granularities:
+
+      - **file** — an injected dependent's file was edited. The trigger's OWN file
+        (``trigger_snippet``'s file — the symbol you're already changing) is
+        excluded from credit; editing it is not "used a dependent".
+      - **symbol** — a following edit's captured text MENTIONS an injected
+        dependent's name. Stronger (the edit plausibly touched the dependent
+        itself), but name-based, so short/common names can false-positive.
+
+    Also reports **payload composition** — what the rail actually injected: the
+    share of dependents that are synthetic module nodes / test files / 'real'
+    symbols — because #374's telemetry showed the payload is polluted with both,
+    which caps real attribution regardless of thresholds.
+
+    Window default (next 3 edits / 2 min) is deliberately tight: the naive
+    whole-session number is confounded (see module docstring). Returns a dict with
+    ``injections`` == 0 when nothing has been logged.
+    """
+    where, params = _window(since_days)
+    clause = (where + " AND " if where else "WHERE ") + "source = 'codex_edit_rail'"
+    conn = plain_connect(db_path)
+    try:
+        if not _table_exists(conn, "context_injections"):
+            return _empty_attribution(window_minutes, next_edits)
+        injs = conn.execute(
+            f"""SELECT session_id, timestamp, trigger_snippet, hit_ids
+                FROM context_injections
+                {clause}
+                ORDER BY session_id, timestamp""",
+            params,
+        ).fetchall()
+        # Edits only for the sessions that fired the rail (bounds the scan). Store
+        # (ts, abspath, content): abspath drives file matching, content the name
+        # scan. Only edits whose target path parses are kept.
+        sessions = {r["session_id"] for r in injs if r["session_id"]}
+        edits: dict[str, list[tuple[str, str, str]]] = {s: [] for s in sessions}
+        if sessions:
+            placeholders = ",".join("?" * len(sessions))
+            tool_ph = ",".join("?" * len(_EDIT_TOOLS))
+            for r in conn.execute(
+                f"""SELECT session_id, timestamp, content FROM observations
+                    WHERE session_id IN ({placeholders})
+                      AND tool_name IN ({tool_ph})
+                    ORDER BY timestamp""",
+                [*sessions, *_EDIT_TOOLS],
+            ):
+                m = _EDIT_PATH_RE.search(r["content"] or "")
+                if m:
+                    edits[r["session_id"]].append((r["timestamp"], m.group(1), r["content"]))
+    finally:
+        conn.close()
+
+    total = file_hit = symbol_hit = empty_window = noise_only = 0
+    dep_total = dep_module = dep_test = dep_real = 0
+
+    for inj in injs:
+        total += 1
+        try:
+            ids = [i for i in json.loads(inj["hit_ids"] or "[]") if i]
+        except (ValueError, TypeError):
+            ids = []
+        trigger_file = _sym_file(inj["trigger_snippet"]) if inj["trigger_snippet"] else None
+
+        # Payload composition (over every injected dependent).
+        real_ids = []
+        for sid in ids:
+            dep_total += 1
+            if _MODULE_MARKER in sid:
+                dep_module += 1
+            elif _is_test_path(_sym_file(sid)):
+                dep_test += 1
+            else:
+                dep_real += 1
+                real_ids.append(sid)
+        if not real_ids:
+            noise_only += 1
+
+        # Credited targets: dependents minus anything in the trigger's own file.
+        credited_files = {_sym_file(s) for s in ids if _sym_file(s) != trigger_file}
+        credited_names = {
+            n for s in ids
+            if _sym_file(s) != trigger_file and (n := _sym_name(s)) is not None
+        }
+
+        # The next `next_edits` edits within `window_minutes` after the injection.
+        inj_dt = _parse_ts(inj["timestamp"])
+        following: list[tuple[str, str]] = []  # (abspath, content)
+        for ts, abspath, content in edits.get(inj["session_id"], []):
+            if ts <= inj["timestamp"]:  # lexical ISO compare == chronological
+                continue
+            if inj_dt is not None:
+                edt = _parse_ts(ts)
+                if edt is not None and (edt - inj_dt).total_seconds() > window_minutes * 60:
+                    continue
+            following.append((abspath, content))
+            if len(following) >= next_edits:
+                break
+
+        if not following:
+            empty_window += 1
+            continue
+        if any(_edit_hits_file(abspath, credited_files) for abspath, _ in following):
+            file_hit += 1
+        if any(any(name in c for name in credited_names) for _, c in following):
+            symbol_hit += 1
+
+    def pct(n: int) -> float | None:
+        return round(100 * n / total, 1) if total else None
+
+    return {
+        "window_minutes": window_minutes,
+        "next_edits": next_edits,
+        "injections": total,
+        "file_attributed": file_hit,
+        "file_attributed_pct": pct(file_hit),
+        "symbol_attributed": symbol_hit,
+        "symbol_attributed_pct": pct(symbol_hit),
+        "no_edits_in_window": empty_window,
+        "noise_only_injections": noise_only,  # 100% module/test payload
+        "noise_only_pct": pct(noise_only),
+        "payload": {
+            "dependents": dep_total,
+            "module_pct": round(100 * dep_module / dep_total, 1) if dep_total else None,
+            "test_pct": round(100 * dep_test / dep_total, 1) if dep_total else None,
+            "real_pct": round(100 * dep_real / dep_total, 1) if dep_total else None,
+        },
+    }
+
+
+def _parse_ts(s: str | None) -> datetime | None:
+    """Parse a stored 'YYYY-MM-DD HH:MM:SS' timestamp; None if unparseable."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _empty_attribution(window_minutes: float, next_edits: int) -> dict:
+    return {
+        "window_minutes": window_minutes,
+        "next_edits": next_edits,
+        "injections": 0,
+        "file_attributed": 0,
+        "file_attributed_pct": None,
+        "symbol_attributed": 0,
+        "symbol_attributed_pct": None,
+        "no_edits_in_window": 0,
+        "noise_only_injections": 0,
+        "noise_only_pct": None,
+        "payload": {"dependents": 0, "module_pct": None, "test_pct": None, "real_pct": None},
     }

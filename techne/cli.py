@@ -1058,15 +1058,26 @@ def audit(ctx, since_days, as_json):
     injected item actually used") is out of scope here — see techne#105.
     """
     config = ctx.obj["config"]
-    from techne.core.utilization import injection_utilization, read_write_ledger
+    from techne.core.utilization import (
+        edit_rail_attribution,
+        injection_utilization,
+        read_write_ledger,
+    )
 
     inj = injection_utilization(config.db_path, since_days=since_days)
     ledger = read_write_ledger(config.db_path, since_days=since_days)
+    attrib = edit_rail_attribution(config.db_path, since_days=since_days)
 
     if as_json:
         click.echo(
             json.dumps(
-                {"since_days": since_days, "injection": inj, "ledger": ledger}, indent=2
+                {
+                    "since_days": since_days,
+                    "injection": inj,
+                    "ledger": ledger,
+                    "edit_rail_attribution": attrib,
+                },
+                indent=2,
             )
         )
         return
@@ -1118,7 +1129,42 @@ def audit(ctx, since_days, as_json):
         # it — say that, don't imply an ignored tool. (techne#329 review)
         click.echo("  librarian: CLI-only store — no MCP read tool, not visible to this ledger")
     click.echo("")
-    click.echo('Attribution ("was the injected item used") — not computed; see techne#105.')
+
+    # Edit-rail proximity-attribution (techne#374).
+    click.echo("EDIT-RAIL ATTRIBUTION (codex_edit_rail)")
+    if not attrib["injections"]:
+        click.echo("  (no codex_edit_rail injections logged yet)")
+    else:
+        pay = attrib["payload"]
+        # In this branch injections > 0, so the *_pct fields are non-None; payload
+        # pcts can still be None if every injection had an empty payload.
+        def _p(v):
+            return f"{v:g}%" if v is not None else "—"
+
+        click.echo(
+            f"  window: next {attrib['next_edits']} edits ≤ {attrib['window_minutes']:g} min "
+            f"· N={attrib['injections']} injections"
+        )
+        click.echo(
+            f"  a dependent's FILE re-edited   : {attrib['file_attributed']:>3} "
+            f"({_p(attrib['file_attributed_pct'])})"
+        )
+        click.echo(
+            f"  a dependent's NAME in the edit : {attrib['symbol_attributed']:>3} "
+            f"({_p(attrib['symbol_attributed_pct'])})   ← stronger, name-based"
+        )
+        click.echo(
+            f"  no edit followed in window     : {attrib['no_edits_in_window']:>3}"
+        )
+        click.echo(
+            f"  payload: real {_p(pay['real_pct'])} · module-noise {_p(pay['module_pct'])} "
+            f"· test {_p(pay['test_pct'])}   (100%-noise injections: {_p(attrib['noise_only_pct'])})"
+        )
+    click.echo("")
+    click.echo(
+        "Attribution above is PROXIMITY (tight window), not causation — the true "
+        'counterfactual ("used vs would-have-anyway") is techne#105.'
+    )
 
 
 @main.group()
