@@ -106,7 +106,7 @@ def main() -> None:
         db_path = resolve_repo_db_for_query(config, start_path)
         if db_path is None:
             sys.exit(0)
-        with bounded_hook(config.hooks.timeout_s):
+        with bounded_hook(config.hooks.timeout_s, label="pre_tool_use"):
             results = annotate_freshness(
                 db_path,
                 search_symbols(db_path, pattern, limit=config.hooks.codex_grep_assist_limit),

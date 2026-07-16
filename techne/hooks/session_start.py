@@ -102,7 +102,7 @@ def main() -> None:
     from techne.hooks._timeout import bounded_hook
 
     try:
-        with bounded_hook(config.hooks.timeout_s):
+        with bounded_hook(config.hooks.timeout_s, label="session_start"):
             _run_phases_2_to_9(
                 config,
                 data,
