@@ -159,6 +159,7 @@ class TestQueryTurnEvidence:
         assert "deadbeef" in ev.commits
         assert "git commit -m 'wip'" in ev.actions
         assert ev.any_tool_call is True
+        assert ev.active_tool_call is True  # Write/Edit/Bash are deeds
         assert ev.observation_count == 3
 
     def test_userprompt_does_not_set_any_tool_call(self, db_path):
@@ -174,6 +175,30 @@ class TestQueryTurnEvidence:
         _insert_obs(db_path, "sess-read", "Read", "Tool: Read\nInput: {}\nOutput: ...")
         ev = query_turn_evidence(db_path, "sess-read")
         assert ev.any_tool_call is True
+
+    def test_passive_tool_does_not_set_active_tool_call(self, db_path):
+        """Read/Grep/Glob are passive inspection: they set any_tool_call but NOT
+        active_tool_call, so a look-only turn cannot back completion (techne#105)."""
+        _insert_session(db_path, "sess-passive")
+        _insert_obs(db_path, "sess-passive", "Read", "Tool: Read\nInput: {}\nOutput: ...")
+        _insert_obs(db_path, "sess-passive", "Grep", "Tool: Grep\nInput: {}\nOutput: ...")
+        ev = query_turn_evidence(db_path, "sess-passive")
+        assert ev.any_tool_call is True
+        assert ev.active_tool_call is False
+
+    def test_non_passive_tool_sets_active_tool_call(self, db_path):
+        """A tool outside the passive set (e.g. an MCP call) counts as a deed — an
+        unknown/non-inspection tool is treated as active (safe direction).
+        NOTE: read-only MCP lookups (e.g. techne_recall) also land here as 'active' —
+        a known, documented limitation (PASSIVE_TOOLS lists only built-in inspection
+        tools); it fails in the safe direction (false-back, not false-flag)."""
+        _insert_session(db_path, "sess-active")
+        _insert_obs(
+            db_path, "sess-active", "mcp__techne__techne_store",
+            "Tool: mcp__techne__techne_store\nInput: {}\nOutput: ok",
+        )
+        ev = query_turn_evidence(db_path, "sess-active")
+        assert ev.active_tool_call is True
 
 
 # ---------------------------------------------------------------------------
@@ -319,25 +344,62 @@ class TestCheckClaims:
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "unverifiable"
 
-    def test_completion_unbacked_when_recorded_but_no_deed(self):
-        """The carve-out is narrow: observations exist (e.g. a UserPrompt) but no deed →
-        genuinely unbacked, even with bash off (something WAS recorded, just no work)."""
+    def test_completion_unverifiable_when_recorded_but_no_deed_and_bash_off(self):
+        """Records exist (e.g. UserPrompts) but no deed, Bash off → UNVERIFIABLE, not
+        unbacked: the real work could be uncaptured Bash, so absence isn't disproof.
+        (techne#105 honesty; the no-deed+Bash-off verdict is unverifiable regardless of
+        whether the recorded rows were non-deeds or passive tools.)"""
         ev = self._ev(any_tool_call=False, artifacts=[], observation_count=3, bash_captured=False)
+        verdicts = check_claims([{"type": "completion"}], ev)
+        assert verdicts[0]["status"] == "unverifiable"
+
+    def test_completion_unverifiable_when_only_passive_tools_and_bash_off(self):
+        """The regression Prudence caught: a captured passive tool (Read) in an otherwise
+        Bash-off turn must NOT flip an honest agent's completion claim to 'unbacked'. With
+        no deed and Bash off, the deeds could be uncaptured Bash → unverifiable."""
+        ev = self._ev(
+            any_tool_call=True, active_tool_call=False, artifacts=[],
+            observation_count=1, bash_captured=False,
+        )
+        verdicts = check_claims([{"type": "completion"}], ev)
+        assert verdicts[0]["status"] == "unverifiable"
+
+    def test_completion_backed_when_active_tool_called(self):
+        ev = self._ev(
+            any_tool_call=True, active_tool_call=True, artifacts=[], commits=[], actions=[]
+        )
+        verdicts = check_claims([{"type": "completion"}], ev)
+        assert verdicts[0]["status"] == "backed"
+
+    def test_completion_unbacked_when_only_passive_tools_and_bash_on(self):
+        """Bash ON + only passive inspection (Read/Grep/…): sets any_tool_call but NOT
+        active_tool_call → unbacked. Looking is not doing, and with Bash captured a real
+        command WOULD have been recorded, so no-deed is genuine (techne#105).
+        (Contrast the Bash-off companion above, which is unverifiable.)"""
+        ev = self._ev(
+            any_tool_call=True, active_tool_call=False, artifacts=[], commits=[], actions=[]
+        )  # bash_captured defaults True
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "unbacked"
 
-    def test_completion_backed_when_tool_called(self):
-        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[])
+    def test_completion_backed_by_artifacts_without_active_flag(self):
+        """Artifacts (Write/Edit) back completion on their own, even if the active flag
+        weren't set — a written file is a deed."""
+        ev = self._ev(any_tool_call=True, active_tool_call=False, artifacts=["/x/y.py"])
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "backed"
 
     def test_completion_unbacked_when_no_activity(self):
-        ev = self._ev(any_tool_call=False, artifacts=[], commits=[], actions=[])
+        ev = self._ev(
+            any_tool_call=False, active_tool_call=False, artifacts=[], commits=[], actions=[]
+        )
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "unbacked"
 
     def test_did_work_alias(self):
-        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[])
+        ev = self._ev(
+            any_tool_call=True, active_tool_call=True, artifacts=[], commits=[], actions=[]
+        )
         verdicts = check_claims([{"type": "did_work"}], ev)
         assert verdicts[0]["status"] == "backed"
 
@@ -489,10 +551,15 @@ class TestMcpCheckEvidence:
     def test_unbacked_count_correct(self, config, db_path):
         _insert_session(db_path, "sess-ub")
         # A recorded-but-no-deed turn (a UserPrompt, no Write/Edit/Bash) with
-        # capture_bash off: completion is genuinely UNBACKED (something WAS recorded,
-        # just no work — the bash-off carve-out only fires at zero observations),
-        # while commit is UNVERIFIABLE (absent + Bash not recorded). So unbacked_count
-        # is 1, not 2 — techne#105 no-false-flag, and the count distinguishes the two.
+        # capture_bash off. Under techne#105 honesty:
+        #   - completion → UNVERIFIABLE: no deed, but a write/command via uncaptured
+        #     Bash would leave no trace, so absence isn't disproof. (Prudence-caught:
+        #     a recorded passive/non-deed row must NOT flip this to a false 'unbacked'.)
+        #   - commit     → UNVERIFIABLE: absent + Bash not recorded.
+        #   - wrote_file(absent) → UNBACKED: artifacts are captured regardless of Bash,
+        #     so a missing path is a genuine, verifiable no.
+        # unbacked_count is therefore exactly 1 — the counter isolates the genuine
+        # unbacked from the two honest unverifiables (no false flags).
         _insert_obs(db_path, "sess-ub", "UserPrompt", "fix the bug")
 
         response = handle_request(
@@ -506,6 +573,7 @@ class TestMcpCheckEvidence:
                         "claims": [
                             {"type": "completion"},
                             {"type": "commit"},
+                            {"type": "wrote_file", "path": "never_written.py"},
                         ],
                     },
                 },
@@ -514,10 +582,11 @@ class TestMcpCheckEvidence:
         )
         import json
         data = json.loads(response["result"]["content"][0]["text"])
-        assert data["unbacked_count"] == 1
         by_type = {v["claim"]["type"]: v["status"] for v in data["verdicts"]}
-        assert by_type["completion"] == "unbacked"
+        assert by_type["completion"] == "unverifiable"
         assert by_type["commit"] == "unverifiable"
+        assert by_type["wrote_file"] == "unbacked"
+        assert data["unbacked_count"] == 1
 
     def test_missing_session_id_returns_error(self, config):
         response = handle_request(
