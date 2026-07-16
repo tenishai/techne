@@ -23,11 +23,15 @@ techne init
 > across interpreter changes:
 >
 > ```bash
-> pipx install "git+https://github.com/tenishai/techne.git@v0.11.0"
+> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.11.0"
 > techne init
 > ```
 >
-> Upgrade later with `pipx install --force "git+https://github.com/tenishai/techne.git@<newer-tag>"`
+> `[recommended]` pulls semantic recall + the CVE pre-install audit (`vectors` + `security`).
+> Drop it for a **core-only** install, or swap in any other set — see the
+> [extras matrix](#extras--what-to-install) for the full possibility space.
+>
+> Upgrade later with `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
 > (a plain `pipx install` on an already-installed techne refuses without `--force`). The
 > `git clone` + `pip install -e .` flow above is for **developing** techne (live local edits).
 
@@ -62,14 +66,31 @@ Use a virtual environment — required on Debian/Ubuntu (PEP 668), recommended e
 git clone https://github.com/tenishai/techne.git
 cd techne
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .                  # core: capture, FTS recall, threads, knowledge, identity (lightweight)
-pip install -e ".[vectors]"       # semantic recall — sqlite-vec + fastembed (FTS works without it)
-pip install -e ".[codex]"         # code-graph (experimental) — tree-sitter symbol/call extraction
-pip install -e ".[llm]"           # OPTIONAL operator-model path for autonomous/headless runs;
-                                  #   the default memory-hygiene loop uses the agent's own model — no extra
-pip install -e ".[security]"      # CVE pre-install audit for the shell gate (fails open without it)
-pip install -e ".[watch]"         # continuous filesystem ingest (techne watch)
+pip install -e .          # core only
+techne init
 ```
+
+### Extras — what to install
+
+Everything past core is an opt-in extra. Nothing here is required — core (capture, FTS
+recall, threads, knowledge, identity) runs standalone, and every extra **degrades
+gracefully** when absent (vector search returns empty, the CVE gate fails open, `watch`/
+`codex` subcommands are unavailable). Pick deliberately — this is the complete option space.
+
+| Install                 | Enables                                                        | Pulls                                              | Reach for it when |
+|-------------------------|---------------------------------------------------------------|----------------------------------------------------|-------------------|
+| `.`                     | Core: capture, FTS5 recall, threads, knowledge, identity      | `click`, `pyyaml`, `structlog` (lightweight)       | Always — the baseline. |
+| `.[vectors]`            | Semantic (vector) recall alongside FTS                        | `sqlite-vec`, `numpy`, + `model2vec` (py≥3.14) / `fastembed` (py<3.14) | You want similarity search, not just keyword match. |
+| `.[security]`           | CVE pre-install audit for the shell gate (`shell_guard`)      | `pip-audit`                                         | Running the anti-chaining shell gate and you want the audit sharpened (fails open without). |
+| `.[watch]`              | `techne watch <dir>` — continuous filesystem-change ingest    | `watchdog`                                          | You want a background daemon ingesting file changes (vs per-session hook capture). |
+| `.[llm]`                | Operator-model path for autonomous/headless reflect/consolidate | `litellm`                                        | Running headless/autonomous loops that can't use the agent's own model. |
+| `.[codex]`              | `techne codex index <repo>` — Tree-sitter code graph (experimental) | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript`, `watchdog` | Indexing a repo's symbols/edges for reachability/blast-radius queries. |
+| **`.[recommended]`**    | **`vectors` + `security`** as one bundle                      | union of those two                                 | **The blessed default** — semantic recall + the safety audit, skipping situational/experimental deps. |
+| `.[dev]`                | Test/lint toolchain                                            | `pytest`, `pytest-cov`, `ruff`, `litellm`          | Developing techne itself. |
+
+Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
+non-editable pinned install, use the direct-reference form:
+`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.11.0"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 
