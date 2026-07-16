@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-16
+
 ### Added
 
 - **Base Archivist — closed team-memory loop** (#346 PR 2) — a non-standalone
@@ -70,12 +72,80 @@ All notable changes to techne are documented here. Format loosely follows
   is measurable against the other read-paths (#329). New `codegraph.symbol_at()`
   maps a file+line to the innermost enclosing symbol via its span.
 
+- **Config-driven tag inference threshold — tag revival** (#352) — `tag_threshold`
+  is now a `Config` field (default `0.42`). The old hardcoded `0.6` sat above the
+  model2vec (potion-base-8M) cosine ceiling (~0.59), so `infer()` tagged 0% of
+  rows — the embedding stack was revived (#356) but tags stayed empty. `infer()`
+  resolves the threshold from config when none is passed explicitly; the ceiling is
+  backend-dependent, so it's a dial. Re-running `vectors backfill --tags` took the
+  live store from 147 to 8.4k / 11.4k tagged. (Prototype over-fire on `todo` /
+  `context` is tracked in #368.)
+
+- **Per-category memory fill-state in the banner** (#334) — the session-start banner
+  breaks its opaque `knowledge` total into per-type counts (+ identity) on a
+  `memory:` line, so the agent can see WHERE memory accumulates and self-regulate
+  what it writes. `db_stats` gains `knowledge_by_type`; non-canonical types are
+  appended after the canonical ones so the line always accounts for the full total.
+
+- **`techne profile`** (#359) — a repeatable hot-path profiling command (read-only,
+  never mutates). `profile_import_cost()` measures the cold `import techne.config`
+  price every hook pays before any work (#351); `profile_thread_detection()` times
+  heuristic detection over the largest session and surfaces the top functions by
+  cumulative time (#350). Latency-at-scale had no harness; now it does.
+
+- **Hook budget-burn is observable** (#362) — `bounded_hook` hard-killed on timeout
+  and otherwise exited 0 with no signal, so a hook creeping toward (or blowing) its
+  budget was invisible — the #350 pathology where thread detection sat at 4.45s
+  under a 5s budget and silently dropped detection every turn. It now warns on
+  stderr at `warn_ratio` (default 0.7) of budget, and more loudly on an actual
+  timeout, naming the hook + elapsed/budget.
+
+- **Vector-channel degradation in the banner** (#358) — a missing embedding backend
+  silently downgrades recall to FTS-only and a backend/model swap leaves the vec
+  index stale, both with zero signal (this is how the embedding stack sat dead in
+  prod, #352). `collect_health` folds `vector_channel_status` into a `vectors`
+  summary and the banner alarms (⚠️) only when recall has actually degraded —
+  stored vectors but no usable backend, or a stale index after a swap.
+
+- **Schema-drift detector + v18 migration heal** (#364) — reconcile is deliberately
+  additive (`CREATE IF NOT EXISTS`), so a redefinition under an existing name
+  applies silently never and drift goes unnoticed. A detector now compares live
+  trigger/index definitions (from `sqlite_master`) against canonical via DDL
+  normalization and reports mismatches, and a v18 migration heals the two drifts
+  surfaced in the perf review — without overturning the additive convention.
+
 ### Fixed
 
 - **Codex blast-radius direction + fixture noise** (#325, PR #336) — `blast-radius`
   now defaults to dependents (`direction=in`, "what breaks if I change this")
   instead of dependencies, and `tests/fixtures/**` name-collision phantom nodes are
   excluded by default (`--include-fixtures` / `include_fixtures` to opt back in).
+
+- **Evidence gate: passive inspection can't back a completion claim** (#105, PR #354)
+  — the completion check backed on `any_tool_call`, set by ANY captured tool
+  including read-only inspection (Read/Grep/Glob/WebFetch), so an agent that only
+  *looked* at a file and claimed "done" got a green "backed" — the gate affirming
+  work that never happened, the worst failure direction for a "no unbacked word"
+  check. Split out `active_tool_call` (a deed — anything outside a new
+  `PASSIVE_TOOLS` set) and back completion on `active_tool_call or artifacts`.
+
+- **Federation: relative connection db_path resolves against TECHNE_HOME** (#332) —
+  a federation connection's `db_path` had to be absolute, making a committed
+  `config.yaml` machine-specific. A relative path now resolves against
+  `techne_home()` at open time (absolute paths and `~` unchanged), so a shared
+  config can carry `db_path: team-mirror.db` and each machine resolves it locally.
+  Resolved at the open site, not config load, so the portable string survives
+  save round-trips.
+
+### Performance
+
+- **Hook hot-path fixes + embedding/tag revival** (#356, staff review) — steady-state
+  hook cost: `find_repo()` gained a per-pass path cache (thread detection was making
+  ~126k `stat()` calls on a 1695-obs session by re-walking the same recurring
+  paths), and feature extraction now runs once per pass. Also restored the embedding
+  stack — the pipx runtime was missing `model2vec` / `sqlite-vec`, so recall had
+  silently degraded to FTS-only and observations stored `tags=NULL`; vectors are
+  backfilled here (the tag half lands via #352).
 
 ## [0.10.0] — 2026-07-13
 
