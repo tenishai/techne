@@ -38,6 +38,20 @@ from pathlib import Path
 # set is intentionally minimal and stable: only true non-deeds belong.
 NON_DEED: frozenset[str] = frozenset({"UserPrompt", "AskUserQuestion"})
 
+# Read-only inspection tools. A turn made up ONLY of these did not *do* anything,
+# so they must not, on their own, back a "completion"/"did_work" claim (techne#105:
+# "a lone Read currently backs it").  They still count as ``any_tool_call`` (they
+# ARE tool calls) — the distinction is ``active_tool_call``, which drives the
+# completion verdict.  Deed tools (Write/Edit/Bash/NotebookEdit) and any tool NOT
+# listed here still count as activity.  This is deliberately a small, stable list
+# of built-in inspection tools rather than an exhaustive passive-tool taxonomy:
+# the goal is to stop pure-inspection turns from false-BACKING completion without
+# risking a false 'unbacked' for genuine deeds done via less common / MCP tools
+# (an unknown tool is treated as active, the safe direction for an advisory gate).
+PASSIVE_TOOLS: frozenset[str] = frozenset(
+    {"Read", "Grep", "Glob", "LS", "NotebookRead", "WebFetch", "WebSearch"}
+)
+
 # Regex: extract 7-40 hex chars from git's commit summary line:
 #   [branch-name abc1234] commit message
 # The word-boundary anchors the SHA's LEFT edge inside the brackets. This is
@@ -99,6 +113,17 @@ class Evidence:
     """
 
     any_tool_call: bool = False
+    """True if the window contains any deed-eligible tool call (anything outside
+    ``NON_DEED``), including passive inspection tools like Read/Grep. Surfaced for
+    visibility; ``active_tool_call`` is what backs a completion claim."""
+
+    active_tool_call: bool = False
+    """True if the window contains a tool call that is NOT purely passive
+    inspection — i.e. any tool outside ``NON_DEED`` and ``PASSIVE_TOOLS``
+    (Write/Edit/Bash/NotebookEdit and non-inspection MCP tools). This is the
+    signal that backs a ``completion``/``did_work`` claim: a turn that only read,
+    grepped, or fetched did not *do* the work (techne#105)."""
+
     artifacts: list[str] = field(default_factory=list)
     """File paths written or edited (Write + Edit tools), deduped, order-preserved."""
 
@@ -194,6 +219,7 @@ def query_turn_evidence(
 
     observation_count = len(rows)
     any_tool_call = False
+    active_tool_call = False
     artifacts: list[str] = []
     artifacts_seen: set[str] = set()
     commits: list[str] = []
@@ -212,6 +238,8 @@ def query_turn_evidence(
 
         if tool_name not in NON_DEED:
             any_tool_call = True
+            if tool_name not in PASSIVE_TOOLS:
+                active_tool_call = True
 
         if tool_name == "Write":
             # "Wrote: <file_path>\nContent: ..."
@@ -276,6 +304,7 @@ def query_turn_evidence(
 
     return Evidence(
         any_tool_call=any_tool_call,
+        active_tool_call=active_tool_call,
         artifacts=artifacts,
         commits=commits,
         actions=actions,
@@ -306,7 +335,12 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
     Supported claim types
     ---------------------
     * ``"completion"`` / ``"did_work"``
-        Backed if ``any_tool_call`` or ``artifacts`` are non-empty.
+        Backed if ``active_tool_call`` or ``artifacts`` are non-empty — i.e. a
+        deed happened.  A turn of only passive inspection (Read/Grep/Glob/
+        WebFetch) does NOT back completion (techne#105).  With no deed, the
+        verdict is ``unverifiable`` when Bash capture is off (a Bash deed would be
+        invisible, so absence isn't disproof) and ``unbacked`` when Bash is on (a
+        real command would have been recorded, so no-deed is genuine).
     * ``"commit"``
         Backed if ``commits`` is non-empty.  If the optional ``sha`` field is
         given, at least one commit must start with it.
@@ -332,24 +366,42 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
         claim_type = claim.get("type", "")
 
         if claim_type in ("completion", "did_work"):
-            if evidence.any_tool_call or evidence.artifacts:
+            if evidence.active_tool_call or evidence.artifacts:
+                # A deed — a write/edit/command or any non-inspection tool. Passive
+                # inspection alone (Read/Grep/Glob/WebFetch, techne#105) does NOT
+                # back completion: looking at code is not doing the work.
                 status = "backed"
                 detail = (
                     f"Agent made {evidence.observation_count} observations; "
-                    "tool calls and/or artifacts found in the ledger."
+                    "a deed (write/edit/command or non-inspection tool call) and/or "
+                    "artifacts found in the ledger."
                 )
-            elif evidence.observation_count == 0 and not evidence.bash_captured:
-                # Nothing recorded AND Bash is off: the turn could have been all-Bash
-                # (uncaptured). Absent, not disproven — don't falsely flag (techne#105).
+            elif not evidence.bash_captured:
+                # No active deed and no artifacts, and Bash is off: a real
+                # write/commit/test could have happened via uncaptured Bash, so its
+                # absence here is not disproof. Report unverifiable, never a false
+                # 'unbacked' on an honest agent (techne#105; matches how commit /
+                # tests_green / ran_action treat Bash-off). This subsumes the
+                # empty-window case AND the passive-tool-only case — the mere
+                # presence of a captured Read must not flip a Bash-heavy honest turn
+                # to 'unbacked' (the regression Prudence caught on the first cut).
                 status = "unverifiable"
                 detail = (
-                    "No observations recorded and Bash capture is off — a Bash-only "
-                    "turn would leave no trace, so completion can't be confirmed or "
-                    "denied. " + _BASH_OFF_DETAIL
+                    "No deed recorded and Bash capture is off — a write/command done "
+                    "via Bash would leave no trace, so completion can't be confirmed "
+                    "or denied. " + _BASH_OFF_DETAIL
                 )
             else:
+                # Bash WAS captured and still no deed (only passive inspection or
+                # non-deed records) → genuinely unbacked: a real command would have
+                # been recorded.
                 status = "unbacked"
-                detail = "No tool calls or artifacts found in the ledger for this session window."
+                detail = (
+                    "No deed found in the ledger for this session window — only "
+                    "passive inspection (read/grep/glob/fetch) or non-deed records, "
+                    "which do not back a completion claim (Bash capture is on, so a "
+                    "real command would have been recorded)."
+                )
 
         elif claim_type == "commit":
             # Positive evidence wins regardless of capture config: if we found
