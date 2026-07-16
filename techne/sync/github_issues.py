@@ -34,8 +34,7 @@ import json
 import subprocess
 from pathlib import Path
 
-import structlog
-
+from techne._log import get_logger
 from techne.config import Config
 from techne.core.database import connect
 from techne.core.documents import store_document
@@ -43,7 +42,7 @@ from techne.core.extension_state import get_state, set_state
 from techne.core.librarian import librarian_db
 from techne.core.redaction import redact_credentials
 
-log = structlog.get_logger(__name__)
+log = get_logger(__name__)
 
 _STATE_KEY_PREFIX = "github_issues"
 _DEFAULT_LIMIT = 500

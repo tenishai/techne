@@ -17,8 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import structlog
-
+from techne._log import get_logger
 from techne.config import Config
 from techne.core._resident import extract_json_array
 from techne.core._resident import prompt_hash as _prompt_hash
@@ -26,7 +25,7 @@ from techne.core.curated import live_curated_memory
 from techne.core.state import deed_log
 from techne.platforms.claude_code.paths import memory_project_slug
 
-log = structlog.get_logger(__name__)
+log = get_logger(__name__)
 
 MEMORY_BUDGET = 8000  # max chars of curated-memory content fed to the prompt
 DEED_DIGEST_CAP = 200  # deeds pulled AND shown per project-path candidate (newest-first)

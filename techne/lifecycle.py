@@ -120,7 +120,7 @@ def run_session_end(
     import os
 
     from techne.core.database import connect
-    from techne.core.extension_state import set_state
+    from techne.core.extension_state import get_state, set_state
     from techne.core.heuristic_threads import (
         boundary_indices_from_segments,
         save_boundaries,
@@ -137,6 +137,46 @@ def run_session_end(
     from techne.sync.outbox import enqueue
 
     observations = get_observations(config.db_path, session_id)
+
+    # Incremental gate (perf): the SessionEnd hook fires once per turn and would
+    # otherwise reprocess the ENTIRE session history on every firing — full
+    # thread detection over the whole observation list, dominated by filesystem
+    # walks (see _detect_summarize_heuristic). Observations are append-only, so
+    # an unchanged count since the last completed detection means the detector's
+    # inputs — and therefore the threads, boundaries, and reflection derived from
+    # them — are identical to the prior run; recomputing and re-saving them is
+    # pure waste. Skip straight to the time-based tail (age_threads depends on
+    # wall-clock, not on this session's observations). The hook's
+    # MIN_NEW_OBSERVATIONS check is a floor on TOTAL obs, not a per-turn delta,
+    # so it does not cover this. Only the heuristic path records last_obs_count
+    # (below), so the LLM detector is never gated here.
+    ext_key = f"heuristic_threads.{session_id}"
+    if observations:
+        gate_conn = connect(config.db_path)
+        try:
+            prev = get_state(gate_conn, ext_key)
+        finally:
+            gate_conn.close()
+        if prev is not None and prev.get("last_obs_count") == len(observations):
+            aged = age_threads(config.db_path, config)
+            return {
+                "threads": 0,
+                "linked": 0,
+                "aged_completed": aged.get("completed", 0),
+                "aged_stale": aged.get("stale", 0),
+                "queued": 0,
+                "knowledge_pushed": 0,
+                "reflect": {
+                    "threads_considered": 0,
+                    "threads_reflected": 0,
+                    "candidates_proposed": 0,
+                    "candidates_written": 0,
+                    "candidates_promoted": 0,
+                    "errors": 0,
+                },
+                "skipped": "no_new_observations",
+            }
+
     threads, scores = detect_summarize_with_metadata(observations, config)
 
     # Compute parent links before opening the write connection — link_threads

@@ -16,14 +16,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
-import structlog
-
+from techne._log import get_logger
 from techne.config import Config
 from techne.core.curated import ingest_memory_file
 from techne.core.memory_doctor import find_curated_memory_files
 from techne.platforms.claude_code.paths import memory_project_slug
 
-log = structlog.get_logger(__name__)
+log = get_logger(__name__)
 
 
 class CCMemorySource:
