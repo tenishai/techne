@@ -128,6 +128,33 @@ def collect_health(config: Config) -> dict:
         health["stale"] = False
         health["capture_alive"] = False
 
+    # Vector-channel health (techne#358). A missing embedding backend silently
+    # downgrades recall to FTS-only (search_vec returns []), and a backend/model
+    # swap leaves the vec index stale — both with zero signal today. Surface it
+    # so the banner can alarm. Reuses vector_channel_status (the same non-mutating
+    # source `techne vectors status` uses) so the two never drift. Never fatal.
+    try:
+        from techne.core.vector_status import vector_channel_status
+
+        # probe_backend_when_empty=False: this runs in the session-start hook, so
+        # on an install with no vectors we must not pay the embedding-backend build
+        # (techne#361 review). The verdict there is "not degraded" regardless.
+        vstatus = vector_channel_status(config.db_path, probe_backend_when_empty=False)
+        backend = vstatus["active_backend"]
+        any_vectors = any(t.get("exists") for t in vstatus["tables"].values())
+        health["vectors"] = {
+            "backend": (f"{backend['name']} (dim={backend['dim']})" if backend else None),
+            "has_vectors": any_vectors,
+            "reembed_needed": vstatus["reembed_needed"],
+            # Degraded = stored vectors exist but no backend can use them (the
+            # silent FTS-only trap), OR the index is stale after a backend swap.
+            # A brand-new install with no backend AND no vectors is NOT degraded
+            # (never opted into vectors) — so it doesn't false-alarm.
+            "degraded": (backend is None and any_vectors) or bool(vstatus["reembed_needed"]),
+        }
+    except Exception:  # noqa: BLE001 — banner must survive any vector-status failure
+        health["vectors"] = None
+
     return health
 
 
@@ -178,6 +205,22 @@ def format_banner(health: dict) -> str:
             f"> ⚠️ techne capture gap: no observations for {_format_age(last_capture_str)}"
             f" — hook may be down"
         )
+
+    # Vector channel (techne#358): alarm when recall has silently degraded to
+    # FTS-only — stored vectors but no backend to use them — or the vec index is
+    # stale after a backend/model swap. Healthy and never-used states stay silent,
+    # consistent with the outbox/staleness lines above (warnings-only banner).
+    vec = health.get("vectors")
+    if vec and vec.get("degraded"):
+        if not vec.get("backend"):
+            lines.append(
+                "> ⚠️ vector search off — no embedding backend; recall is keyword-only. "
+                "Install techne[vectors], then `techne vectors backfill`"
+            )
+        elif vec.get("reembed_needed"):
+            lines.append(
+                "> ⚠️ vectors stale after a backend/model swap — run `techne vectors backfill`"
+            )
 
     # Hook error surfacing (techne#95): surface last persisted failure.
     hook_err = health.get("hook_last_error")

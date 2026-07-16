@@ -81,8 +81,19 @@ def _table_row_count(conn: sqlite3.Connection, name: str) -> int | None:
         return None
 
 
-def vector_channel_status(db_path: Path) -> VectorChannelStatus:
+def vector_channel_status(
+    db_path: Path, *, probe_backend_when_empty: bool = True
+) -> VectorChannelStatus:
     """Report the vector channel's health without mutating the database.
+
+    ``probe_backend_when_empty`` (default True) controls whether the embedding
+    backend is built when the channel is empty — no stored vectors and no
+    identity stamp. Building it runs a model load (and, for fastembed, a live
+    dim-probe encode), which is real cost on the session-start hot path
+    (techne#358/#361 review). When there are no vectors and no stamp the verdict
+    is deterministically "not degraded", so the hot-path caller (collect_health)
+    passes False to skip the build entirely; the `techne vectors status` CLI
+    keeps the default so it still reports the backend on an empty channel.
 
     Never drops/recreates/writes anything — this is the non-mutating twin of
     search._ensure_vec_backend_identity's mismatch DETECTION (not its DROP
@@ -103,17 +114,6 @@ def vector_channel_status(db_path: Path) -> VectorChannelStatus:
     """
     conn = connect(db_path)
     try:
-        # Active backend — best-effort. No embedding backend installed is a
-        # legitimate, common state (matches backfill's own graceful degrade).
-        active_backend: dict | None = None
-        try:
-            from techne.core.embeddings import _get_embedding_model
-
-            model = _get_embedding_model()
-            active_backend = {"name": model.name, "dim": model.dim}
-        except Exception:
-            active_backend = None
-
         stamp = get_state(conn, _VEC_BACKEND_STATE_NAME)
 
         # Try to load sqlite-vec read-only so we can report row counts too.
@@ -140,6 +140,25 @@ def vector_channel_status(db_path: Path) -> VectorChannelStatus:
                 existing_dims.add(dim)
             rows = _table_row_count(conn, name) if (exists and vec_loadable) else None
             tables[name] = {"exists": exists, "dim": dim, "rows": rows}
+
+        # Active backend — best-effort, and DEFERRED until we know it can matter.
+        # No embedding backend installed is a legitimate, common state (matches
+        # backfill's own graceful degrade). Building it is the expensive part (a
+        # model load + a live dim-probe encode for fastembed), so we skip it on an
+        # empty channel (no stamp, no tables) where the verdict is already
+        # "not degraded" — sparing the session-start hot path (techne#361 review).
+        # allow_download=False (techne#358): a cold-cache download would block the
+        # hook past its budget (the trap infer() guards against); an uncached model
+        # raises and reports backend=None, same as "not installed".
+        active_backend: dict | None = None
+        if stamp is not None or any_table_exists or probe_backend_when_empty:
+            try:
+                from techne.core.embeddings import _get_embedding_model
+
+                model = _get_embedding_model(allow_download=False)
+                active_backend = {"name": model.name, "dim": model.dim}
+            except Exception:
+                active_backend = None
 
         # Staleness predicate — read-only mirror of
         # search._ensure_vec_backend_identity's mismatch check, minus the DROP.

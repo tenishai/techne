@@ -93,3 +93,141 @@ def test_banner_no_outbox_line_when_empty(config):
     h["pending_outbox"] = 0
     banner = format_banner(h)
     assert "outbox" not in banner
+
+
+# --- Vector channel health (techne#358) ---------------------------------------
+
+
+def _healthy_h(config):
+    h = collect_health(config)
+    h["build"] = "live"
+    return h
+
+
+def test_banner_vectors_no_backend_warns(config):
+    """Stored vectors but no backend = the silent FTS-only trap → ⚠️."""
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": None,
+        "has_vectors": True,
+        "reembed_needed": False,
+        "degraded": True,
+    }
+    banner = format_banner(h)
+    vline = [ln for ln in banner.splitlines() if "vector" in ln.lower()][0]
+    assert "⚠️" in vline
+    assert "keyword-only" in vline
+    assert "techne[vectors]" in vline
+
+
+def test_banner_vectors_reembed_needed_warns(config):
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": "model2vec (dim=256)",
+        "has_vectors": True,
+        "reembed_needed": True,
+        "degraded": True,
+    }
+    banner = format_banner(h)
+    vline = [ln for ln in banner.splitlines() if "vector" in ln.lower()][0]
+    assert "⚠️" in vline
+    assert "stale" in vline
+    assert "backfill" in vline
+
+
+def test_banner_vectors_healthy_silent(config):
+    """Healthy backend → no vector line (warnings-only banner)."""
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": "model2vec (dim=256)",
+        "has_vectors": True,
+        "reembed_needed": False,
+        "degraded": False,
+    }
+    banner = format_banner(h)
+    assert "vector" not in banner.lower()
+
+
+def test_banner_vectors_never_used_silent(config):
+    """No backend AND no vectors = never opted in → no false alarm."""
+    h = _healthy_h(config)
+    h["vectors"] = {
+        "backend": None,
+        "has_vectors": False,
+        "reembed_needed": False,
+        "degraded": False,
+    }
+    banner = format_banner(h)
+    assert "vector" not in banner.lower()
+
+
+def test_collect_health_maps_degraded_vector_status(config, monkeypatch):
+    """collect_health folds vector_channel_status into a degraded verdict:
+    stored vectors + no backend → degraded True."""
+    fake = {
+        "active_backend": None,
+        "stamp": None,
+        "tables": {"observations_vec": {"exists": True, "dim": 256, "rows": 10}},
+        "reembed_needed": False,
+    }
+    monkeypatch.setattr(
+        "techne.core.vector_status.vector_channel_status", lambda db_path, **kw: fake
+    )
+    h = collect_health(config)
+    assert h["vectors"]["backend"] is None
+    assert h["vectors"]["has_vectors"] is True
+    assert h["vectors"]["degraded"] is True
+
+
+def test_collect_health_vectors_healthy_not_degraded(config, monkeypatch):
+    fake = {
+        "active_backend": {"name": "model2vec", "dim": 256},
+        "stamp": {"name": "model2vec", "dim": 256},
+        "tables": {"observations_vec": {"exists": True, "dim": 256, "rows": 10}},
+        "reembed_needed": False,
+    }
+    monkeypatch.setattr(
+        "techne.core.vector_status.vector_channel_status", lambda db_path, **kw: fake
+    )
+    h = collect_health(config)
+    assert h["vectors"]["degraded"] is False
+    assert h["vectors"]["backend"] == "model2vec (dim=256)"
+
+
+def test_collect_health_skips_backend_build_when_no_vectors(config, monkeypatch):
+    """#361 review: on an install with no vec tables and no stamp, the session-start
+    hot path must NOT build the embedding backend (the expensive load + dim probe)."""
+    from unittest.mock import MagicMock
+
+    spy = MagicMock()
+    monkeypatch.setattr("techne.core.embeddings._get_embedding_model", spy)
+    h = collect_health(config)  # fresh DB → no *_vec tables, no stamp
+    spy.assert_not_called()  # backend build short-circuited
+    assert h["vectors"]["degraded"] is False
+
+
+def test_vector_status_probes_with_allow_download_false(config, monkeypatch):
+    """The download-safety guarantee: when the backend IS built, it's with
+    allow_download=False so a cold-cache fetch can't block the hook."""
+    from unittest.mock import MagicMock
+
+    from techne.core.vector_status import vector_channel_status
+
+    fake_model = MagicMock()
+    fake_model.name, fake_model.dim = "model2vec", 256
+    spy = MagicMock(return_value=fake_model)
+    monkeypatch.setattr("techne.core.embeddings._get_embedding_model", spy)
+    # Default probe_backend_when_empty=True → build attempted even on an empty channel.
+    vector_channel_status(config.db_path)
+    spy.assert_called_once_with(allow_download=False)
+
+
+def test_collect_health_vectors_none_on_status_error(config, monkeypatch):
+    """collect_health degrades vectors→None (never raises) if the status check throws."""
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("techne.core.vector_status.vector_channel_status", boom)
+    h = collect_health(config)
+    assert h["vectors"] is None
