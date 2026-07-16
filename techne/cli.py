@@ -2681,8 +2681,22 @@ def vectors(ctx):
 
 
 @vectors.command("backfill")
+@click.option(
+    "--tags",
+    "do_tags",
+    is_flag=True,
+    help="Also backfill observation tags/kind via embedding inference — fills rows "
+    "stored before the embedding backend was available (tags=NULL).",
+)
+@click.option(
+    "--all-tags",
+    "all_tags",
+    is_flag=True,
+    help="With --tags, re-infer EVERY observation, not just untagged rows "
+    "(e.g. after a prototype change).",
+)
 @click.pass_context
-def vectors_backfill(ctx):
+def vectors_backfill(ctx, do_tags, all_tags):
     """Embed un-embedded rows; re-embed everything if the backend changed.
 
     Thin CLI wrapper around search.backfill_vectors() (techne#283 stack) —
@@ -2690,6 +2704,11 @@ def vectors_backfill(ctx):
     threads_vec/observations_vec/knowledge_vec on a backend/model swap) is
     NOT reimplemented here, only invoked. See search.py's
     _ensure_vec_backend_identity for the migration itself.
+
+    With --tags, also re-runs tag/kind inference over stored observations
+    (inference.backfill_tags) — the same embedding backend, so it needs no
+    extra deps beyond [vectors]. Rows stored while the backend was missing
+    carry tags=NULL; this fills them.
     """
     config = ctx.obj["config"]
     if not config.db_path.exists():
@@ -2721,6 +2740,12 @@ def vectors_backfill(ctx):
 
     counts = backfill_vectors(config.db_path)
     click.echo(json.dumps(counts, indent=2))
+
+    if do_tags:
+        from techne.core.inference import backfill_tags
+
+        tag_counts = backfill_tags(config.db_path, config, only_missing=not all_tags)
+        click.echo(json.dumps({"tags": tag_counts}, indent=2))
 
 
 @vectors.command("status")

@@ -180,6 +180,53 @@ def test_run_session_end_persists_boundaries_under_heuristic(tmp_path):
     assert sum(r["is_boundary"] for r in rows) >= 1
 
 
+def test_skip_gate_still_persists_caller_summary(tmp_path):
+    """The incremental-skip gate must NOT drop a caller-supplied summary when the
+    observation count is unchanged since the last detection (Prudence, #356). The
+    CLI/plugin path (`techne session-end --summary`, opencode session.idle) passes
+    a summary on turns that add no new observations."""
+    from techne.config import Config
+    from techne.core.database import connect, init_db
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+
+    db_path = tmp_path / "skip.db"
+    init_db(db_path)
+    config = Config()
+    config.db_path = db_path
+    config.threads.detector = "heuristic"
+    config.threads.summarizer = "heuristic"
+
+    session_id = start_session(db_path, project_path="/tmp/p", agent_identity="t")
+    for i in range(6):
+        conn = connect(db_path)
+        conn.execute(
+            "INSERT INTO observations (session_id, tool_name, content) VALUES (?, ?, ?)",
+            (session_id, "Edit", f"/proj/a.py line {i}"),
+        )
+        conn.commit()
+        conn.close()
+
+    # First pass runs heuristic detection and records last_obs_count.
+    first = run_session_end(config, session_id)
+    assert "skipped" not in first
+
+    # Second pass: SAME observation count, but a summary is supplied. Detection is
+    # skipped (the gate fires) — yet the summary must still be persisted.
+    second = run_session_end(config, session_id, summary="final summary text")
+    assert second["skipped"] == "no_new_observations"
+
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT summary, ended_at FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["summary"] == "final summary text"  # not silently dropped
+    assert row["ended_at"] is not None  # ended_at stamped on the skip path too
+
+
 def test_redetect_threads_replaces_threads_and_refreshes_heuristic_summary(tmp_path):
     """Redetect: post-hoc add of UserPrompt obs should produce a new boundary
     landing on the prompt (now that prompts amplify gap signals), and replace

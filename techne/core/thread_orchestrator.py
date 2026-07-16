@@ -9,12 +9,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import structlog
-
+from techne._log import get_logger
 from techne.config import Config
 from techne.core.redaction import redact_credentials
 
-log = structlog.get_logger(__name__)
+log = get_logger(__name__)
 
 MAX_SAMPLED_OBSERVATIONS = 60
 
@@ -143,19 +142,31 @@ def _detect_summarize_heuristic(
     user_families = config.threads.tool_families or None
     extras = extra_patterns or None
 
+    # Build features ONCE and reuse them for detection, labels, and fallback
+    # summaries. find_repo's filesystem walks dominate extraction, so a shared
+    # per-pass repo_cache collapses the many repeated path probes within a
+    # session; passing features into detect_threads avoids a second full pass
+    # (previously features were extracted twice per observation per run).
+    repo_cache: dict[str, str | None] = {}
+    features = [
+        ht.extract_features(
+            i,
+            obs,
+            user_families=user_families,
+            extra_entity_patterns=extras,
+            repo_cache=repo_cache,
+        )
+        for i, obs in enumerate(observations)
+    ]
+
     segments, scores = ht.detect_threads(
         observations,
         user_families=user_families,
         extra_entity_patterns=extras,
         boundary_threshold=config.heuristic.boundary_threshold,
         user_prompt_score=config.heuristic.user_prompt_score,
+        features=features,
     )
-
-    # Build features once and reuse for label / fallback summary.
-    features = [
-        ht.extract_features(i, obs, user_families=user_families, extra_entity_patterns=extras)
-        for i, obs in enumerate(observations)
-    ]
 
     use_llm_summary = config.threads.summarizer == "llm"
     if use_llm_summary and generate_fn is None:

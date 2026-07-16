@@ -25,13 +25,13 @@ Deferred (note in-module so reviewers can track scope):
 import hashlib
 from pathlib import Path
 
-import structlog
+from techne._log import get_logger
 
 # Plain connection (no core schema) — documents live in their own domain db
 # (librarian.db); core.database.connect would core-initialize it (techne#99).
 from techne.core.stores import plain_connect as connect
 
-log = structlog.get_logger(__name__)
+log = get_logger(__name__)
 
 
 def _content_hash(content: str) -> str:
