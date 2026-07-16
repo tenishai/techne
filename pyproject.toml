@@ -68,6 +68,12 @@ codex = [
     "tree-sitter-typescript>=0.23",
     "watchdog>=4.0",
 ]
+# `recommended` is the convenience bundle behind the blessed pipx install in the
+# README. Semantic recall + the CVE pre-install audit — the two extras most users
+# benefit from, minus the situational (watch daemon), headless-only (llm), and
+# experimental (codex) ones. Self-referencing extra: pip (>=21.2) resolves
+# `techne[...]` to the sibling extras above, so the set lives in exactly one place.
+recommended = ["techne[vectors,security]"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
