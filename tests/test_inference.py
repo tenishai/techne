@@ -214,11 +214,14 @@ class TestInferTagAndKindSelection:
     here we intercept at the cosine boundary and inject float scores directly.
     """
 
-    def _stub_infer(self, proto_embs: dict, cosine_scores: dict):
+    def _stub_infer(self, proto_embs: dict, cosine_scores: dict, **infer_kwargs):
         """Run infer() with stubbed embedding + cosine, return InferenceResult.
 
         proto_embs: label -> anything (values are only passed to _cosine, which is mocked)
         cosine_scores: label -> float similarity score
+        infer_kwargs: passed through to infer(); defaults to tag_threshold=0.5 so
+            the existing score-based assertions keep their 0.5 cut. Pass
+            ``config=...`` to exercise config-driven threshold resolution (techne#352).
         """
         dummy_fe = MagicMock()
         mock_model = MagicMock()
@@ -245,7 +248,9 @@ class TestInferTagAndKindSelection:
             patch("techne.core.inference._cosine", side_effect=fake_cosine),
         ):
             _reset_cache()
-            return infer("dummy content", tag_threshold=0.5)
+            if not infer_kwargs:
+                infer_kwargs = {"tag_threshold": 0.5}
+            return infer("dummy content", **infer_kwargs)
 
     def test_highest_sim_tag_attached(self):
         proto_embs = {
@@ -274,6 +279,35 @@ class TestInferTagAndKindSelection:
         scores = {"decision": 0.9, "fact": 0.4, "kind:observation-shaped": 0.5}
         result = self._stub_infer(proto_embs, scores)
         assert "decision" in result.tags
+        assert "fact" not in result.tags
+
+    def test_config_tag_threshold_used_when_not_explicit(self):
+        """With no explicit tag_threshold, infer() honours config.tag_threshold
+        (techne#352) — a 0.45 score is tagged at config.tag_threshold=0.42 but
+        NOT at the old hardcoded 0.6."""
+        from techne.config import Config
+
+        proto_embs = {"fact": object(), "kind:observation-shaped": object()}
+        scores = {"fact": 0.45, "kind:observation-shaped": 0.1}
+
+        cfg_low = Config()
+        cfg_low.tag_threshold = 0.42
+        assert "fact" in self._stub_infer(proto_embs, scores, config=cfg_low).tags
+
+        cfg_high = Config()
+        cfg_high.tag_threshold = 0.6
+        assert "fact" not in self._stub_infer(proto_embs, scores, config=cfg_high).tags
+
+    def test_explicit_threshold_overrides_config(self):
+        """An explicit tag_threshold wins over config.tag_threshold."""
+        from techne.config import Config
+
+        proto_embs = {"fact": object(), "kind:observation-shaped": object()}
+        scores = {"fact": 0.45, "kind:observation-shaped": 0.1}
+
+        cfg = Config()
+        cfg.tag_threshold = 0.42  # would tag; explicit 0.6 must veto
+        result = self._stub_infer(proto_embs, scores, config=cfg, tag_threshold=0.6)
         assert "fact" not in result.tags
 
     def test_top_k_limits_tags(self):
@@ -471,3 +505,13 @@ class TestBackfillTags:
         assert counts == {"scanned": 0, "tagged": 0}
         rows = get_observations(db_path, sid)
         assert all(r["tags"] is None for r in rows)  # untouched
+
+
+def test_default_threshold_matches_config_default():
+    """infer()'s no-config fallback (_DEFAULT_TAG_THRESHOLD) must not drift from
+    Config.tag_threshold — the two 0.42s are duplicated by design, so pin them
+    (Prudence, PR #367; techne#352)."""
+    from techne.config import Config
+    from techne.core.inference import _DEFAULT_TAG_THRESHOLD
+
+    assert _DEFAULT_TAG_THRESHOLD == Config().tag_threshold

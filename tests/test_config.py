@@ -362,6 +362,7 @@ def test_injection_and_staleness_round_trip(tmp_path):
     cfg.injection.char_budget = 4096
     cfg.injection.recent_reserve_frac = 0.25
     cfg.staleness_hours = 36
+    cfg.tag_threshold = 0.5  # techne#352: config-driven, must survive round-trip
     out = tmp_path / "config.yaml"
     cfg.save(out)
     reloaded = Config.load(out)
@@ -369,6 +370,7 @@ def test_injection_and_staleness_round_trip(tmp_path):
     assert reloaded.injection.char_budget == 4096
     assert reloaded.injection.recent_reserve_frac == 0.25
     assert reloaded.staleness_hours == 36
+    assert reloaded.tag_threshold == 0.5
 
 
 def test_save_is_owner_only(tmp_path):
