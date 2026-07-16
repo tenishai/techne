@@ -284,3 +284,29 @@ def test_banner_memory_line_includes_identity(config):
     h = collect_health(config)
     banner = format_banner(h)
     assert "1 identity" in banner
+
+
+def test_banner_memory_line_appends_non_canonical_types_after_canonical(config):
+    """A knowledge type not in VALID_TYPES (e.g. a legacy/other-domain 'pattern'
+    row) still renders — appended AFTER the canonical types so the breakdown
+    always accounts for the full total (techne#334, Prudence PR #366)."""
+    from techne.core.database import connect
+    from techne.core.knowledge import store
+
+    store(config.db_path, "a real fact", type="fact")
+    # 'pattern' is not in VALID_TYPES, so store() would reject it — insert direct.
+    conn = connect(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO knowledge (type, content) VALUES ('pattern', 'some pattern')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    h = collect_health(config)
+    assert h["knowledge_by_type"].get("pattern") == 1
+    banner = format_banner(h)
+    assert "1 pattern" in banner
+    # canonical 'fact' renders BEFORE the non-canonical 'pattern'
+    assert banner.index("1 fact") < banner.index("1 pattern")

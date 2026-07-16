@@ -193,7 +193,9 @@ def format_banner(health: dict) -> str:
     # its types (+ identity) so the agent sees WHERE memory accumulates and can
     # self-regulate what it writes, instead of an opaque store-level total. Terse:
     # canonical type order first, then any non-canonical types so the breakdown
-    # always accounts for the full total; non-zero categories only.
+    # always accounts for the full total; non-zero categories only. Note: identity
+    # lives in its own table, appended as an extra category — so this line totals
+    # knowledge + identity, i.e. slightly more than the `knowledge` count above.
     by_type = dict(health.get("knowledge_by_type") or {})
     if by_type or health.get("identity"):
         from techne.core.knowledge import VALID_TYPES
