@@ -31,7 +31,7 @@ def main():
         sys.exit(0)
 
     try:
-        with bounded_hook(config.hooks.timeout_s):
+        with bounded_hook(config.hooks.timeout_s, label="post_compact"):
             # Get the latest checkpoint
             checkpoint = get_latest_checkpoint(config.db_path, session_id)
             if not checkpoint:

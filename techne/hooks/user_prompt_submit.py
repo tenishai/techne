@@ -140,7 +140,7 @@ def main() -> None:
             from techne.core.search import search
             from techne.hooks._timeout import bounded_hook
 
-            with bounded_hook(config.hooks.timeout_s):
+            with bounded_hook(config.hooks.timeout_s, label="user_prompt_submit"):
                 rows = search(
                     config.db_path,
                     prompt,

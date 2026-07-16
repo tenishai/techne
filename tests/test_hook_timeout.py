@@ -94,6 +94,41 @@ class TestBoundedHookContextManager:
         assert isinstance(DEFAULT_TIMEOUT_S, float)
         assert DEFAULT_TIMEOUT_S > 0
 
+    # --- Budget observability (techne#357) ---
+
+    def test_warns_when_near_budget(self, capsys):
+        """A block that consumes >= warn_ratio of the budget (without timing out)
+        emits a stderr warning naming the hook — the #350 cliff, made visible."""
+        with bounded_hook(timeout_s=1.0, label="demo", warn_ratio=0.05):
+            time.sleep(0.1)
+        err = capsys.readouterr().err
+        assert "demo" in err
+        assert "approaching timeout" in err
+
+    def test_no_warning_when_well_under_budget(self, capsys):
+        """Fast work stays silent — no budget noise on the healthy path."""
+        with bounded_hook(timeout_s=1.0, label="demo", warn_ratio=0.9):
+            pass
+        err = capsys.readouterr().err
+        assert "approaching timeout" not in err
+        assert "exceeded" not in err
+
+    def test_timeout_emits_exceeded_warning(self, capsys):
+        """On an actual timeout, a stronger warning records the dropped work —
+        and HookTimeout still propagates (control flow unchanged)."""
+        with pytest.raises(HookTimeout):
+            with bounded_hook(timeout_s=0.1, label="demo"):
+                time.sleep(5)
+        err = capsys.readouterr().err
+        assert "demo exceeded" in err
+        assert "work was dropped" in err
+
+    def test_timeout_message_uses_label(self):
+        """The HookTimeout message carries the label for attribution."""
+        with pytest.raises(HookTimeout, match=r"demo timed out"):
+            with bounded_hook(timeout_s=0.1, label="demo"):
+                time.sleep(5)
+
 
 # ---------------------------------------------------------------------------
 # Subprocess-level tests: hook processes exit 0 on failure

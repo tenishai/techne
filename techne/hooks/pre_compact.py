@@ -36,7 +36,7 @@ def main():
         sys.exit(0)
 
     try:
-        with bounded_hook(config.hooks.timeout_s):
+        with bounded_hook(config.hooks.timeout_s, label="pre_compact"):
             # Parse transcript for state
             transcript_data: dict = {}
             if transcript_path:
