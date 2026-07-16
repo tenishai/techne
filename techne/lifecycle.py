@@ -158,6 +158,15 @@ def run_session_end(
         finally:
             gate_conn.close()
         if prev is not None and prev.get("last_obs_count") == len(observations):
+            # Detection is skipped, but a caller-supplied summary must STILL be
+            # persisted (and ended_at stamped): the CLI/plugin session-end path
+            # (`techne session-end --summary`, opencode session.idle) passes one
+            # on turns that add no new observations, and before the gate that
+            # write always ran. Dropping it here would be a silent data loss
+            # (Prudence, #356). The heuristic-summary branch is intentionally NOT
+            # re-run — that's the recompute the gate exists to avoid.
+            if summary:
+                end_session(config.db_path, session_id, summary=summary, source="manual")
             aged = age_threads(config.db_path, config)
             return {
                 "threads": 0,
