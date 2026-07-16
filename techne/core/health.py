@@ -189,6 +189,23 @@ def format_banner(health: dict) -> str:
         f"· last session {last}"
     )
 
+    # Per-category memory fill-state (techne#334): break the knowledge total into
+    # its types (+ identity) so the agent sees WHERE memory accumulates and can
+    # self-regulate what it writes, instead of an opaque store-level total. Terse:
+    # canonical type order first, then any non-canonical types so the breakdown
+    # always accounts for the full total; non-zero categories only.
+    by_type = dict(health.get("knowledge_by_type") or {})
+    if by_type or health.get("identity"):
+        from techne.core.knowledge import VALID_TYPES
+
+        ordered = [t for t in VALID_TYPES if by_type.get(t)]
+        extras = sorted(t for t in by_type if t not in VALID_TYPES and by_type.get(t))
+        cats = [(t, by_type[t]) for t in (*ordered, *extras)]
+        if health.get("identity"):
+            cats.append(("identity", health["identity"]))
+        if cats:
+            lines.append("> memory: " + " · ".join(f"{n} {t}" for t, n in cats))
+
     # Outbox: a noop adapter never drains by design, so a backlog there is
     # informational, not a warning. A real adapter with a backlog is a ⚠️.
     pending = health.get("pending_outbox", 0)

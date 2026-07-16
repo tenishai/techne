@@ -231,3 +231,56 @@ def test_collect_health_vectors_none_on_status_error(config, monkeypatch):
     monkeypatch.setattr("techne.core.vector_status.vector_channel_status", boom)
     h = collect_health(config)
     assert h["vectors"] is None
+
+
+# ---------------------------------------------------------------------------
+# Per-category memory fill-state (techne#334)
+# ---------------------------------------------------------------------------
+
+
+def test_banner_memory_line_breaks_down_by_type(config):
+    """The banner surfaces per-category knowledge counts so the agent can
+    self-regulate what it writes (techne#334)."""
+    from techne.core.knowledge import store
+
+    store(config.db_path, "postgres is the datastore", type="fact")
+    store(config.db_path, "another fact about caching", type="fact")
+    store(config.db_path, "always use type hints", type="procedure")
+    store(config.db_path, "chose FastAPI", type="decision")
+
+    h = collect_health(config)
+    assert h["knowledge_by_type"] == {"fact": 2, "procedure": 1, "decision": 1}
+
+    banner = format_banner(h)
+    assert "> memory:" in banner
+    # canonical VALID_TYPES order: fact before decision before procedure
+    assert "2 fact" in banner
+    assert "1 decision" in banner
+    assert "1 procedure" in banner
+    assert banner.index("2 fact") < banner.index("1 decision") < banner.index("1 procedure")
+
+
+def test_banner_memory_line_absent_on_empty_store(config):
+    """No knowledge and no identity → no memory line (nothing to self-regulate)."""
+    h = collect_health(config)
+    assert h["knowledge_by_type"] == {}
+    banner = format_banner(h)
+    assert "> memory:" not in banner
+
+
+def test_banner_memory_line_includes_identity(config):
+    """Identity lives in its own table but folds into the same breakdown."""
+    from techne.core.database import connect
+
+    conn = connect(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO identity (key, value) VALUES ('user.name', 'Richard')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    h = collect_health(config)
+    banner = format_banner(h)
+    assert "1 identity" in banner
