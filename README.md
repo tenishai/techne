@@ -23,7 +23,7 @@ techne init
 > across interpreter changes:
 >
 > ```bash
-> pipx install "git+https://github.com/tenishai/techne.git@v0.9.0"
+> pipx install "git+https://github.com/tenishai/techne.git@v0.11.0"
 > techne init
 > ```
 >
