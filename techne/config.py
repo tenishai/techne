@@ -61,7 +61,9 @@ class FederationConnectionSpec:
     """One remote techne store to federate recall over (techne#222).
 
     role: 'team' — shared team store; 'static' — read-only reference store.
-    db_path: absolute path to the remote techne.db (opened read-only, never written).
+    db_path: path to the remote techne.db (opened read-only, never written). A
+        relative path is resolved against techne_home() at open time (techne#332),
+        so a committed config.yaml stays portable; an absolute path is used as-is.
     label: human-readable label shown in surfaced federation conflicts.
     """
 

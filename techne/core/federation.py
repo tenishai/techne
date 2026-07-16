@@ -35,6 +35,25 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def _resolve_conn_db_path(raw: str) -> Path:
+    """Resolve a federation connection's db_path to an absolute Path (techne#332).
+
+    A relative db_path is resolved against ``techne_home()`` — mirroring how the
+    primary db_path/data_dir already default there — so a *committed* config.yaml
+    can carry a portable relative path (e.g. ``db_path: team-mirror.db``) and each
+    machine resolves it locally, no per-machine templating (the pain surfaced
+    wiring the prudence read-back, tenishai/agents#2). Absolute paths and ``~``
+    are unchanged. Resolution happens here at open time, not at config load, so
+    the stored spec keeps the portable string for save round-trips.
+    """
+    from techne.config import techne_home
+
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = techne_home() / path
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Read-only remote open (sovereignty guard)
 # ---------------------------------------------------------------------------
@@ -225,7 +244,7 @@ def fan_out_search(
 
     remote_results: list[dict] = []
     for conn_name, spec in connections.items():
-        db_path = Path(spec.db_path).expanduser()
+        db_path = _resolve_conn_db_path(spec.db_path)
         try:
             remote_conn = _open_remote_readonly(db_path)
         except Exception:
