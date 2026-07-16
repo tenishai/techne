@@ -196,7 +196,7 @@ def _maybe_reindex_codex(config: Config, tool_name: str, tool_input: dict) -> No
         from techne.core.codex import reindex_edited_file
         from techne.hooks._timeout import bounded_hook
 
-        with bounded_hook(config.hooks.timeout_s):
+        with bounded_hook(config.hooks.timeout_s, label="post_tool_use:codex-reindex"):
             reindex_edited_file(config, file_path)
     except Exception as e:  # noqa: BLE001 — never break the tool call
         print(f"techne: codex reindex-on-edit skipped: {e}", file=sys.stderr)
@@ -349,7 +349,7 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
         if line is None:
             return None
 
-        with bounded_hook(config.hooks.timeout_s):
+        with bounded_hook(config.hooks.timeout_s, label="post_tool_use:codex-symbol"):
             symbol = symbol_at(db_path, rel, line)
             if symbol is None or symbol.get("kind") == "module":
                 # No enclosing symbol, or only the whole module — a module's
@@ -420,7 +420,7 @@ def main():
         sys.exit(0)
 
     try:
-        with bounded_hook(config.hooks.timeout_s):
+        with bounded_hook(config.hooks.timeout_s, label="post_tool_use:capture"):
             from techne.lifecycle import capture_tool_use
 
             capture_tool_use(config, session_id, tool_name, tool_input, tool_output)

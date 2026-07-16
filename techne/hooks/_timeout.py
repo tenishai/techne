@@ -33,6 +33,8 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import sys
+import time
 from collections.abc import Generator
 
 # ---------------------------------------------------------------------------
@@ -49,12 +51,26 @@ class HookTimeout(RuntimeError):
 
 
 @contextlib.contextmanager
-def bounded_hook(timeout_s: float = DEFAULT_TIMEOUT_S) -> Generator[None, None, None]:
+def bounded_hook(
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    *,
+    label: str = "hook",
+    warn_ratio: float = 0.7,
+) -> Generator[None, None, None]:
     """Context manager that fires SIGALRM after *timeout_s* seconds.
 
     On alarm the running code receives a :class:`HookTimeout` exception.
     The caller is responsible for catching it (or catching ``Exception``
     broadly) and calling ``sys.exit(0)``.
+
+    Budget observability (techne#357): on exit, if the block consumed at least
+    ``warn_ratio`` of its budget WITHOUT timing out, a warning is written to
+    stderr naming ``label`` and the elapsed/budget — so a hook creeping toward
+    the cliff is visible *before* it silently starts losing work (the #350
+    pathology: thread detection sitting at 4.45s under a 5s budget dropped
+    detection every turn with zero signal). On an actual timeout, a stronger
+    warning records that ``label`` exceeded its budget and work was dropped.
+    Both are stderr-only and never change control flow.
 
     Design notes:
     - SIGALRM is Unix-only; on Windows the context manager is a transparent
@@ -71,12 +87,31 @@ def bounded_hook(timeout_s: float = DEFAULT_TIMEOUT_S) -> Generator[None, None, 
         return
 
     def _alarm_handler(signum: int, frame: object) -> None:  # noqa: ARG001
-        raise HookTimeout(f"hook timed out after {timeout_s:.1f}s")
+        raise HookTimeout(f"{label} timed out after {timeout_s:.1f}s")
 
     old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
     signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    start = time.monotonic()
+    timed_out = False
     try:
         yield
+    except HookTimeout:
+        timed_out = True
+        raise
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0.0)  # disarm before restoring
         signal.signal(signal.SIGALRM, old_handler)
+        elapsed = time.monotonic() - start
+        if timed_out:
+            print(
+                f"techne: {label} exceeded its {timeout_s:.1f}s budget "
+                f"(ran ~{elapsed:.1f}s) — work was dropped this run",
+                file=sys.stderr,
+            )
+        elif elapsed >= warn_ratio * timeout_s:
+            pct = int(round(100 * elapsed / timeout_s))
+            print(
+                f"techne: {label} used {elapsed:.1f}s of its {timeout_s:.1f}s "
+                f"budget ({pct}%) — approaching timeout",
+                file=sys.stderr,
+            )

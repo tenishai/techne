@@ -41,7 +41,7 @@ def main():
         sys.exit(0)
 
     try:
-        with bounded_hook(timeout_s):
+        with bounded_hook(timeout_s, label="session_end"):
             from techne.core.state import observation_count
             from techne.lifecycle import run_session_end
             from techne.sync.adapter import load_adapter
