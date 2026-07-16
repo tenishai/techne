@@ -710,6 +710,15 @@ def db_stats(db_path: Path) -> dict:
         stats["observations"] = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
         stats["knowledge"] = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
         stats["identity"] = conn.execute("SELECT COUNT(*) FROM identity").fetchone()[0]
+        # Per-category knowledge counts (techne#334) — lets the banner surface
+        # fill-state by type so the agent can self-regulate what it writes,
+        # instead of an opaque store-level total.
+        stats["knowledge_by_type"] = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT type, COUNT(*) FROM knowledge GROUP BY type"
+            ).fetchall()
+        }
         stats["outbox"] = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
 
         stats["active_threads"] = conn.execute(
