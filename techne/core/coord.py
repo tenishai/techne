@@ -221,6 +221,8 @@ def live_sessions(
         if not sid or sid == exclude_session:
             continue
         updated = rec.get("updatedAt") or 0
+        if not isinstance(updated, (int, float)):
+            continue  # malformed sidecar (non-numeric updatedAt) — treat as not-live
         if now_ms - updated > fresh_seconds * 1000:
             continue
         live.append(
