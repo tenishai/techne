@@ -127,6 +127,15 @@ def _bash_is_readonly_noise(command: str) -> bool:
             return False
         if head in ("sed", "awk") and any(t.startswith("-i") for t in tokens[i + 1:]):
             return False  # in-place edit mutates a file
+        if head == "find" and any(
+            t in ("-delete", "-exec", "-execdir", "-ok", "-okdir") or t.startswith("-fprint")
+            for t in tokens[i + 1:]
+        ):
+            return False  # find action that deletes / runs a command / writes a file
+        if head == "sort" and any(
+            t.startswith("-o") or t.startswith("--output") for t in tokens[i + 1:]
+        ):
+            return False  # `sort -o file` writes in place
     return True
 
 

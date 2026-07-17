@@ -29,7 +29,7 @@ def main():
 
     # Load config before arming the timer — reading a local YAML file is fast
     # and we need config.hooks.timeout_s to set the correct budget.
-    from techne.hooks._timeout import bounded_hook
+    from techne.hooks._timeout import HookTimeout, bounded_hook
 
     try:
         from techne.config import Config
@@ -60,6 +60,8 @@ def main():
                         f" ({', '.join(bf['gap_tools'])})",
                         file=sys.stderr,
                     )
+            except HookTimeout:
+                raise  # don't swallow the bounded_hook alarm — let teardown abort
             except Exception as e:
                 print(f"techne: backfill deferred: {e}", file=sys.stderr)
 

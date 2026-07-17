@@ -169,6 +169,10 @@ class TestBashReadonlyNoiseFilter:
         "sed -i 's/a/b/' file.py",               # in-place edit mutates
         "uv pip install requests",
         "ls && pytest",                          # any non-readonly segment => capture
+        # mutating find/sort: read word is read-only, but the action writes/deletes
+        "find . -name '*.pyc' -delete",
+        "find . -type d -exec rm -rf {} +",
+        "sort -o out.txt in.txt",
     ])
     def test_signal_commands_captured(self, cmd):
         assert should_capture(self._cfg(), "Bash", {"command": cmd}) is True

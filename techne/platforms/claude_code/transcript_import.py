@@ -326,6 +326,13 @@ def backfill_uncaptured(
     transcript, so the key is stable across re-runs yet still admits genuine repeats
     of an identical command at different times.
 
+    Dedup parity note: live-captured rows store ``event_at = NULL`` while backfill
+    stores the transcript timestamp, so their keys can never match. That asymmetry is
+    only safe because gap tools are NEVER live-captured (we backfill exactly the tools
+    the live hook skips). If ``capture_bash`` were toggled ON→OFF mid-session, the
+    live Bash rows (``event_at=NULL``) would not dedup against backfill's ts-keyed
+    rows and could double — an accepted edge, not a supported flow.
+
     Best-effort and side-effect-only on the ledger; returns a summary dict:
     ``{session_id, backfilled, skipped_existing, gap_tools, jsonl?, reason?}``.
     """

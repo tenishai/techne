@@ -118,5 +118,6 @@ class TestShouldImport:
 
     def test_signal_bash_imported(self):
         for cmd in ("git commit -m x", "pytest tests/", "cd r && git commit -m x",
-                    "echo hi > out.txt", "sed -i 's/a/b/' f.py"):
+                    "echo hi > out.txt", "sed -i 's/a/b/' f.py",
+                    "find . -name '*.pyc' -delete", "sort -o out.txt in.txt"):
             assert should_import("Bash", {"command": cmd}) is True, cmd
