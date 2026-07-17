@@ -21,8 +21,16 @@ TIMESTAMP column in techne.db.
 from __future__ import annotations
 
 import json
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+# A Claude Code session_id is a v4 UUID. Used to tell a real (possibly offline but
+# deliverable) session_id target from an unresolved display-name (a dead letter).
+_SESSION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 
 # The default broadcast channel. For the common <=2-instance case, every session
 # watches 'coord' and nobody needs to know anyone else's session_id to be heard.
@@ -37,6 +45,36 @@ _PRESENCE_FRESH_SECONDS = 90 * 60
 def _now_iso() -> str:
     """UTC now as an ISO text timestamp matching the TIMESTAMP column convention."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def resolve_recipient(to: str) -> str:
+    """Resolve a send target to the value stored in ``recipient`` (techne#376 phase 2).
+
+    Resolution order:
+    1. the broadcast channel ``'coord'`` — passes through unchanged;
+    2. a live session's display name (the CLI ``-n`` alias, e.g. 'claude_2') — resolved
+       to that session's ``session_id`` for a direct message;
+    3. a literal session_id (v4 UUID shape) — passes through; it's deliverable when that
+       session next reads its inbox, even if currently offline.
+
+    Anything else — a name that matches no live session and isn't a session_id — is a
+    **dead letter**: a bare name never matches any inbox filter, so the message could
+    never be read. Rather than store it and return a misleading id, we RAISE. (A single
+    mistyped name like 'claude2' for 'claude_2' would otherwise vanish silently — this
+    repo's "No Silent Failures" rule.) Newest-active session wins a name tie (first
+    match over the activity-sorted list), which is only reachable via duplicate -n names.
+    """
+    if to == DEFAULT_CHANNEL:
+        return to
+    for s in live_sessions():
+        if s.get("name") == to:
+            return s["session_id"]
+    if _SESSION_ID_RE.match(to):
+        return to
+    raise ValueError(
+        f"coord: no live session named {to!r} (and it is not a session_id or a channel). "
+        f"Use 'coord' to broadcast, or a session_id to reach a peer that's currently offline."
+    )
 
 
 def _channels_for(session_id: str, channels: list[str] | None) -> list[str]:
@@ -56,28 +94,91 @@ def send(
     to: str = DEFAULT_CHANNEL,
     from_name: str | None = None,
     thread_id: str | None = None,
+    reply_to: int | None = None,
 ) -> int:
     """Post a message and return its id.
 
-    ``to`` is a channel name (e.g. ``'coord'``) or a specific target session_id.
-    ``from_name`` is a display-name snapshot (resolve via ``session_name()`` if the
-    caller doesn't supply it).
+    ``to`` is a channel name (e.g. ``'coord'``), a live session's display-name alias,
+    or a target session_id. ``from_name`` is a display-name snapshot (resolved via
+    ``session_name()`` if omitted).
+
+    Threading (techne#376 phase 2): pass ``reply_to=<message_id>`` to attach this
+    message to that message's conversation — it inherits the parent's ``thread_id``,
+    or, if the parent had none, both are grouped under a new thread keyed on the
+    parent's id. An explicit ``thread_id`` takes precedence over ``reply_to``.
     """
     from techne.core.database import connect
 
     if from_name is None:
         from_name = session_name(from_session)
+    recipient = resolve_recipient(to)  # channel passthrough, or name-alias -> session_id
     conn = connect(db_path)
     try:
+        if reply_to is not None and thread_id is None:
+            parent = conn.execute(
+                "SELECT thread_id FROM coord_messages WHERE id = ?", (reply_to,)
+            ).fetchone()
+            if parent is not None:
+                thread_id = parent["thread_id"] or str(reply_to)
+                if parent["thread_id"] is None:
+                    # Pull the standalone parent into the new thread so the pair groups.
+                    # Race-safe by construction (intentional — no lock): the derived
+                    # thread_id is deterministic (str(reply_to)), so two sessions replying
+                    # to the same parent at once write the identical value, and this only
+                    # fires while the parent is still NULL — concurrent re-replies are no-ops.
+                    conn.execute(
+                        "UPDATE coord_messages SET thread_id = ? WHERE id = ?",
+                        (thread_id, reply_to),
+                    )
         cur = conn.execute(
             "INSERT INTO coord_messages (from_session, from_name, recipient, thread_id, body, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?)",
-            (from_session, from_name, to, thread_id, body, _now_iso()),
+            (from_session, from_name, recipient, thread_id, body, _now_iso()),
         )
         conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
     finally:
         conn.close()
+
+
+def threads(
+    db_path: Path, session_id: str, *, channels: list[str] | None = None, limit: int = 20
+) -> list[dict]:
+    """Conversation threads (messages sharing a thread_id) visible to ``session_id``,
+    most-recently-active first (techne#376 phase 2).
+
+    Only messages the session could see are included (its channels, direct-to-it, or
+    from it), so a thread surfaces with exactly the turns this session is party to.
+    Each thread: ``{thread_id, count, last_at, messages: [...]}`` — note ``count`` is
+    the number of VISIBLE turns, which can be fewer than the thread's true length if
+    some replies were directed to a different recipient the reader can't see.
+    """
+    from techne.core.database import connect
+
+    chans = _channels_for(session_id, channels)
+    placeholders = ",".join("?" for _ in chans)
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            f"SELECT id, from_session, from_name, recipient, thread_id, body, created_at"
+            f"  FROM coord_messages"
+            f" WHERE thread_id IS NOT NULL"
+            f"   AND (recipient IN ({placeholders}) OR from_session = ?)"
+            f" ORDER BY id",
+            (*chans, session_id),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    by_thread: dict[str, list[dict]] = {}
+    for r in rows:
+        by_thread.setdefault(r["thread_id"], []).append(dict(r))
+    out = [
+        {"thread_id": tid, "count": len(msgs), "last_at": msgs[-1]["created_at"], "messages": msgs}
+        for tid, msgs in by_thread.items()
+    ]
+    out.sort(key=lambda t: t["last_at"], reverse=True)
+    return out[:limit]
 
 
 def _unread_rows(conn, session_id: str, channels: list[str]):
@@ -237,3 +338,92 @@ def live_sessions(
         )
     live.sort(key=lambda r: r["updated_at_ms"], reverse=True)
     return live
+
+
+def _git_worktree(cwd: str | None) -> dict | None:
+    """Resolve a cwd to its git working tree: ``{toplevel, branch, is_primary}``.
+
+    One ``git rev-parse`` call. ``is_primary`` is False for a linked worktree (its
+    git-dir lives under ``.git/worktrees/``) — that's how we tell "the shared main
+    checkout" from an isolated per-session worktree. Returns None if cwd isn't a git
+    working tree (the sidecar cwd is the launch dir, so this can legitimately miss).
+    """
+    import subprocess
+
+    if not cwd:
+        return None
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-dir",
+             "--git-common-dir", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    parts = [p.strip() for p in r.stdout.splitlines()]
+    if len(parts) < 4:
+        return None
+    toplevel, git_dir, common_dir, branch = parts[0], parts[1], parts[2], parts[3]
+    # A linked worktree's git-dir (…/.git/worktrees/<name>) differs from its
+    # common-dir (…/.git); the primary checkout's two are equal. Robust vs a repo
+    # whose path merely contains '/worktrees/'.
+    is_primary = os.path.normpath(git_dir) == os.path.normpath(common_dir)
+    return {"toplevel": toplevel, "branch": branch, "is_primary": is_primary}
+
+
+def working_tree_collisions(session_id: str) -> list[dict]:
+    """Live peers that are a genuine collision risk under the worktree SOP (techne#376
+    phase 2) — NOT merely "same repo" (isolated worktrees of one repo are the whole
+    point). Two cases are flagged:
+
+    1. A peer sharing THIS session's exact git working tree (same ``toplevel``) — same
+       HEAD, the commit-bleed the SOP exists to prevent.
+    2. A peer doing feature work in the PRIMARY (non-worktree) checkout — i.e. on the
+       shared checkout, off the default branch — an SOP violation.
+
+    Best-effort: a peer (or self) whose sidecar cwd isn't a git working tree is
+    skipped, since that cwd is the launch dir and may not reflect a later ``cd``.
+    Each result: ``{session_id, name, branch, toplevel, reason}``.
+    """
+    sessions = {s["session_id"]: s for s in live_sessions()}
+    me = sessions.get(session_id)
+    if not me:
+        return []
+
+    # Memoize by cwd: many sessions can share one working tree (that's the very
+    # collision we're after), so we probe each distinct cwd with git at most once.
+    _wt_cache: dict = {}
+
+    def _wt(cwd):
+        if cwd not in _wt_cache:
+            _wt_cache[cwd] = _git_worktree(cwd)
+        return _wt_cache[cwd]
+
+    mine = _wt(me.get("cwd"))
+    if not mine:
+        return []
+    out: list[dict] = []
+    for sid, s in sessions.items():
+        if sid == session_id:
+            continue
+        wt = _wt(s.get("cwd"))
+        if not wt:
+            continue
+        if wt["toplevel"] == mine["toplevel"]:
+            reason = "same git working tree (shared HEAD — commit-bleed risk)"
+        elif wt["is_primary"] and wt["branch"] not in (None, "", "main", "master", "HEAD"):
+            reason = "feature work in the shared (non-worktree) checkout"
+        else:
+            continue
+        out.append(
+            {
+                "session_id": sid,
+                "name": s.get("name"),
+                "branch": wt["branch"],
+                "toplevel": wt["toplevel"],
+                "reason": reason,
+            }
+        )
+    return out

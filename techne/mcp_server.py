@@ -226,8 +226,23 @@ def _techne_send(args: dict, config: Config) -> dict:
     if not body:
         raise ValueError("techne_send requires 'body' (non-empty)")
     to = args.get("to") or coord.DEFAULT_CHANNEL
-    mid = coord.send(config.db_path, sid, body, to=to, thread_id=args.get("thread_id"))
+    mid = coord.send(
+        config.db_path, sid, body, to=to,
+        thread_id=args.get("thread_id"), reply_to=args.get("reply_to"),
+    )
     return {"id": mid, "from_session": sid, "to": to}
+
+
+def _techne_coord_threads(args: dict, config: Config) -> dict:
+    from techne.core import coord
+
+    sid = _resolve_session_id(args)
+    if not sid:
+        raise ValueError("techne_coord_threads: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+    return {
+        "session_id": sid,
+        "threads": coord.threads(config.db_path, sid, limit=args.get("limit", 20)),
+    }
 
 
 def _techne_inbox(args: dict, config: Config) -> dict:
@@ -1219,11 +1234,15 @@ TOOLS = [
                 "body": {"type": "string", "description": "The message text."},
                 "to": {
                     "type": "string",
-                    "description": "Channel name ('coord', the default) or a target session_id.",
+                    "description": "Channel name ('coord', the default), a live session's display name (e.g. 'claude_2'), or a target session_id.",
                 },
                 "thread_id": {
                     "type": "string",
                     "description": "Optional thread id to group a back-and-forth.",
+                },
+                "reply_to": {
+                    "type": "integer",
+                    "description": "Optional message id you're replying to — threads this message with it (see techne_coord_threads).",
                 },
                 "session_id": {
                     "type": "string",
@@ -1231,6 +1250,24 @@ TOOLS = [
                 },
             },
             "required": ["body"],
+        },
+    },
+    {
+        "name": "techne_coord_threads",
+        "description": (
+            "List coordination conversation threads you're party to (messages grouped by "
+            "thread), most-recently-active first. Reply into one with "
+            "techne_send(reply_to=<message id>). (techne#376)"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max threads to return (default 20)."},
+                "session_id": {
+                    "type": "string",
+                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID).",
+                },
+            },
         },
     },
     {
@@ -1866,6 +1903,7 @@ TOOL_HANDLERS = {
     "techne_send": _techne_send,
     "techne_inbox": _techne_inbox,
     "techne_mark_read": _techne_mark_read,
+    "techne_coord_threads": _techne_coord_threads,
 }
 
 
