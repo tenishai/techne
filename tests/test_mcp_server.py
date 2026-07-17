@@ -106,6 +106,9 @@ class TestHandleRequest:
             "techne_reminder_add",
             "techne_reminder_list",
             "techne_reminder_dismiss",
+            "techne_send",
+            "techne_inbox",
+            "techne_mark_read",
         }
 
     def test_notifications_initialized_returns_none(self, config):

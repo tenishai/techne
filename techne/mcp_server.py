@@ -39,6 +39,12 @@ SERVER_INSTRUCTIONS = (
     "techne_memory_claims_* (evidence-check). Before asserting completed work (committed, tested, "
     "wrote-file), call techne_check_evidence — it verifies your claims against the observation "
     "ledger. These use your model — no API key.\n"
+    "5. COORDINATE with peer sessions (techne#376). Other live Claude sessions on this machine "
+    "are shown in the session-start banner and pushed to you as a 📬 in-context nudge — you can "
+    "talk to them: techne_send(body, to='coord') broadcasts to every live session; techne_inbox "
+    "reads unread + who's live; techne_mark_read clears them. REFLEX, no prompting: announce on "
+    "'coord' when you claim a git branch/worktree or are about to commit/push in a shared repo, "
+    "and reply when a peer messages you — settle collisions between yourselves, not via the human.\n"
     "\n"
     "Honesty: recall results tagged `freshness` (modified/moved/deleted) or marked uncertain "
     "mean 'verify before relying', not fact. Stored knowledge is operator-owned — prefer "
@@ -198,6 +204,55 @@ def _techne_status(args: dict, config: Config) -> dict:
     from techne.core.health import collect_health
 
     return collect_health(config)
+
+
+def _resolve_session_id(args: dict) -> str | None:
+    """Identity for the coordination mailbox (techne#376): the caller's self-asserted
+    session_id, else the MCP server's own CLAUDE_CODE_SESSION_ID env — the server is
+    spawned per-session by Claude Code, so its env carries this session's id. No
+    token: the local techne.db is the whole trust boundary."""
+    import os
+
+    return args.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+
+
+def _techne_send(args: dict, config: Config) -> dict:
+    from techne.core import coord
+
+    sid = _resolve_session_id(args)
+    if not sid:
+        raise ValueError("techne_send: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+    body = args.get("body")
+    if not body:
+        raise ValueError("techne_send requires 'body' (non-empty)")
+    to = args.get("to") or coord.DEFAULT_CHANNEL
+    mid = coord.send(config.db_path, sid, body, to=to, thread_id=args.get("thread_id"))
+    return {"id": mid, "from_session": sid, "to": to}
+
+
+def _techne_inbox(args: dict, config: Config) -> dict:
+    from techne.core import coord
+
+    sid = _resolve_session_id(args)
+    if not sid:
+        raise ValueError("techne_inbox: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+    msgs = coord.inbox(config.db_path, sid, mark_read=bool(args.get("mark_read", False)))
+    return {
+        "session_id": sid,
+        "unread": len(msgs),
+        "messages": msgs,
+        "live_sessions": coord.live_sessions(exclude_session=sid),
+    }
+
+
+def _techne_mark_read(args: dict, config: Config) -> dict:
+    from techne.core import coord
+
+    sid = _resolve_session_id(args)
+    if not sid:
+        raise ValueError("techne_mark_read: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+    n = coord.mark_read(config.db_path, sid, args.get("message_ids"))
+    return {"marked_read": n}
 
 
 def _fold_in_documents(config: Config, topic: str, memory_results: list[dict]) -> list[dict]:
@@ -1148,6 +1203,78 @@ TOOLS = [
             "required": ["id"],
         },
     },
+    {
+        "name": "techne_send",
+        "description": (
+            "Send a message to another Claude Code session on this machine — coordinate "
+            "without a human router (techne#376). Post to the broadcast channel 'coord' "
+            "(default; every live session sees it) or address a specific session_id. Your "
+            "identity is taken from the server env — you don't pass it. REFLEX: announce "
+            "here when you claim a git branch/worktree or are about to commit, and reply "
+            "when you have unread from a peer."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "body": {"type": "string", "description": "The message text."},
+                "to": {
+                    "type": "string",
+                    "description": "Channel name ('coord', the default) or a target session_id.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional thread id to group a back-and-forth.",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID). Pass only from a client without that env.",
+                },
+            },
+            "required": ["body"],
+        },
+    },
+    {
+        "name": "techne_inbox",
+        "description": (
+            "Read unread coordination messages addressed to you or your channels, plus who "
+            "else is live (from Claude Code's session registry). Oldest first. Pass "
+            "mark_read=true to mark them read as you read them. (techne#376)"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mark_read": {
+                    "type": "boolean",
+                    "description": "Mark the returned messages read (default false).",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID).",
+                },
+            },
+        },
+    },
+    {
+        "name": "techne_mark_read",
+        "description": (
+            "Mark coordination messages read so they stop surfacing. With 'message_ids' "
+            "marks exactly those; otherwise marks everything currently unread. (techne#376)"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Specific message ids to mark read. Omit to mark all unread.",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID).",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -1736,6 +1863,9 @@ TOOL_HANDLERS = {
     "techne_reminder_add": _techne_reminder_add,
     "techne_reminder_list": _techne_reminder_list,
     "techne_reminder_dismiss": _techne_reminder_dismiss,
+    "techne_send": _techne_send,
+    "techne_inbox": _techne_inbox,
+    "techne_mark_read": _techne_mark_read,
 }
 
 
