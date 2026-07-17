@@ -240,6 +240,29 @@ def _run_phases_2_to_9(
         output_parts.append("")
 
     # ------------------------------------------------------------------
+    # Phase 5.5: Coordination presence + unread (techne#376)
+    # ------------------------------------------------------------------
+    try:
+        from techne.core import coord
+
+        live = coord.live_sessions(exclude_session=session_id)
+        unread = coord.unread_count(config.db_path, session_id) if session_id else 0
+        if unread or live:
+            bits = []
+            if unread:
+                bits.append(f"📬 {unread} unread coordination message(s) — techne_inbox to read")
+            if live:
+                who = ", ".join(
+                    f"{s.get('name') or (s['session_id'][:8])} ({s.get('status') or '?'})"
+                    for s in live
+                )
+                bits.append(f"live peer session(s): {who}")
+            output_parts.append("## Coordination (techne#376)\n> " + "\n> ".join(bits))
+            output_parts.append("")
+    except Exception as exc:  # noqa: BLE001 — coord banner must never break session start
+        print(f"techne: coord banner failed: {exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
     # Phase 6: Resume context (threads) — bounded (techne#95)
     # ------------------------------------------------------------------
     try:

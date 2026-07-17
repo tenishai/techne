@@ -337,6 +337,34 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE INDEX IF NOT EXISTS idx_reminders_status_due
     ON reminders(status, due_at);
 
+-- Inter-session coordination mailbox (techne#376). Additive (reconciled, no
+-- migration) — fresh DBs get these at init; an existing DB picks them up via
+-- `techne reconcile` (the connect-time reconcile is sentinel-gated, techne#140).
+-- Concurrent Claude Code sessions
+-- converse without a human router: a message targets a channel (e.g. 'coord') or a
+-- specific session_id, and is delivered via the post_tool_use injection rail.
+-- Identity is the self-asserted session_id (no bearer token, local trust boundary).
+CREATE TABLE IF NOT EXISTS coord_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_session TEXT NOT NULL,
+    from_name TEXT,
+    recipient TEXT NOT NULL,
+    thread_id TEXT,
+    body TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_coord_messages_recipient ON coord_messages(recipient, id);
+
+-- Per-reader read receipts, so a broadcast-channel message can be read independently
+-- by each session. Unread for a session = messages to its channels or itself, not
+-- authored by it, with no matching coord_reads row.
+CREATE TABLE IF NOT EXISTS coord_reads (
+    message_id INTEGER NOT NULL,
+    reader_session TEXT NOT NULL,
+    read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, reader_session)
+);
+
 -- NOTE: the `documents` domain moved out of core to its own db (librarian.db)
 -- under db-per-domain (techne#99). Its schema now lives in core/librarian.py
 -- (LIBRARIAN_SCHEMA), applied via the store registry -- NOT here. techne.db is
