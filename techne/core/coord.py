@@ -39,6 +39,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def resolve_recipient(to: str) -> str:
+    """Resolve a send target to the value stored in ``recipient`` (techne#376 phase 2).
+
+    A broadcast channel passes through unchanged. Otherwise ``to`` is treated as a
+    session **alias** — a live session's display name (the CLI ``-n`` name, e.g.
+    'claude_2') — and resolved to that session's ``session_id`` for a direct message.
+    Anything that matches no live name is returned as-is (a literal session_id, or an
+    offline/unknown target that simply stays undelivered until it connects).
+    """
+    if to == DEFAULT_CHANNEL:
+        return to
+    for s in live_sessions():
+        if s.get("name") == to:
+            return s["session_id"]
+    return to
+
+
 def _channels_for(session_id: str, channels: list[str] | None) -> list[str]:
     """Recipients a session's inbox covers: its watched channels plus itself
     (direct messages). Defaults to the single broadcast channel."""
@@ -56,28 +73,85 @@ def send(
     to: str = DEFAULT_CHANNEL,
     from_name: str | None = None,
     thread_id: str | None = None,
+    reply_to: int | None = None,
 ) -> int:
     """Post a message and return its id.
 
-    ``to`` is a channel name (e.g. ``'coord'``) or a specific target session_id.
-    ``from_name`` is a display-name snapshot (resolve via ``session_name()`` if the
-    caller doesn't supply it).
+    ``to`` is a channel name (e.g. ``'coord'``), a live session's display-name alias,
+    or a target session_id. ``from_name`` is a display-name snapshot (resolved via
+    ``session_name()`` if omitted).
+
+    Threading (techne#376 phase 2): pass ``reply_to=<message_id>`` to attach this
+    message to that message's conversation — it inherits the parent's ``thread_id``,
+    or, if the parent had none, both are grouped under a new thread keyed on the
+    parent's id. An explicit ``thread_id`` takes precedence over ``reply_to``.
     """
     from techne.core.database import connect
 
     if from_name is None:
         from_name = session_name(from_session)
+    recipient = resolve_recipient(to)  # channel passthrough, or name-alias -> session_id
     conn = connect(db_path)
     try:
+        if reply_to is not None and thread_id is None:
+            parent = conn.execute(
+                "SELECT thread_id FROM coord_messages WHERE id = ?", (reply_to,)
+            ).fetchone()
+            if parent is not None:
+                thread_id = parent["thread_id"] or str(reply_to)
+                if parent["thread_id"] is None:
+                    # pull the standalone parent into the new thread so the pair groups
+                    conn.execute(
+                        "UPDATE coord_messages SET thread_id = ? WHERE id = ?",
+                        (thread_id, reply_to),
+                    )
         cur = conn.execute(
             "INSERT INTO coord_messages (from_session, from_name, recipient, thread_id, body, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?)",
-            (from_session, from_name, to, thread_id, body, _now_iso()),
+            (from_session, from_name, recipient, thread_id, body, _now_iso()),
         )
         conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
     finally:
         conn.close()
+
+
+def threads(
+    db_path: Path, session_id: str, *, channels: list[str] | None = None, limit: int = 20
+) -> list[dict]:
+    """Conversation threads (messages sharing a thread_id) visible to ``session_id``,
+    most-recently-active first (techne#376 phase 2).
+
+    Only messages the session could see are included (its channels, direct-to-it, or
+    from it), so a thread surfaces with exactly the turns this session is party to.
+    Each thread: ``{thread_id, count, last_at, messages: [...]}``.
+    """
+    from techne.core.database import connect
+
+    chans = _channels_for(session_id, channels)
+    placeholders = ",".join("?" for _ in chans)
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            f"SELECT id, from_session, from_name, recipient, thread_id, body, created_at"
+            f"  FROM coord_messages"
+            f" WHERE thread_id IS NOT NULL"
+            f"   AND (recipient IN ({placeholders}) OR from_session = ?)"
+            f" ORDER BY id",
+            (*chans, session_id),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    by_thread: dict[str, list[dict]] = {}
+    for r in rows:
+        by_thread.setdefault(r["thread_id"], []).append(dict(r))
+    out = [
+        {"thread_id": tid, "count": len(msgs), "last_at": msgs[-1]["created_at"], "messages": msgs}
+        for tid, msgs in by_thread.items()
+    ]
+    out.sort(key=lambda t: t["last_at"], reverse=True)
+    return out[:limit]
 
 
 def _unread_rows(conn, session_id: str, channels: list[str]):

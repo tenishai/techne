@@ -126,6 +126,66 @@ def test_live_sessions_and_name(tmp_path, monkeypatch):
     assert coord.session_name("nope") is None
 
 
+def test_send_to_name_alias_resolves_to_direct(tmp_path, monkeypatch):
+    """Phase 2: `to='claude_2'` addresses that live session directly by resolving
+    its display name to its session_id."""
+    cfg = tmp_path / "dotclaude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    _write_sidecar(cfg, 200, session_id="uuid-2", name="claude_2")
+    db = tmp_path / "t.db"
+    init_db(db).close()
+
+    coord.send(db, "uuid-1", "just for you", to="claude_2", from_name="claude_1")
+    # delivered to uuid-2 directly, not to the broadcast channel
+    assert [m["body"] for m in coord.inbox(db, "uuid-2")] == ["just for you"]
+    assert coord.inbox(db, "someone-else") == []  # not a broadcast
+
+
+def test_reply_to_groups_into_thread(db_path):
+    """Phase 2: reply_to threads a message with its parent, pulling a standalone
+    parent into the new thread so the pair groups together."""
+    m1 = coord.send(db_path, A, "original", from_name="claude_1")  # no thread yet
+    m2 = coord.send(db_path, B, "reply", reply_to=m1, from_name="claude_2")
+
+    ths = coord.threads(db_path, "sess-C")  # a broadcast watcher sees the coord thread
+    assert len(ths) == 1
+    t = ths[0]
+    assert t["count"] == 2  # parent pulled in + reply
+    assert [m["body"] for m in t["messages"]] == ["original", "reply"]
+    assert t["thread_id"] == str(m1)
+
+    # a further reply inherits the same thread
+    coord.send(db_path, A, "and again", reply_to=m2, from_name="claude_1")
+    assert coord.threads(db_path, "sess-C")[0]["count"] == 3
+
+
+def test_explicit_thread_id_beats_reply_to(db_path):
+    coord.send(db_path, A, "x", thread_id="T", reply_to=999)  # explicit wins, bad reply_to ignored
+    ths = coord.threads(db_path, B)
+    assert ths[0]["thread_id"] == "T"
+
+
+def test_threads_empty_when_no_threaded_messages(db_path):
+    coord.send(db_path, A, "unthreaded")  # thread_id NULL
+    assert coord.threads(db_path, B) == []
+
+
+def test_mcp_coord_threads(db_path):
+    from techne.mcp_server import _techne_coord_threads, _techne_send
+
+    cfg = _config(db_path)
+    sent = _techne_send({"session_id": A, "body": "root"}, cfg)
+    _techne_send({"session_id": B, "body": "re", "reply_to": sent["id"]}, cfg)
+    out = _techne_coord_threads({"session_id": "sess-C"}, cfg)
+    assert len(out["threads"]) == 1 and out["threads"][0]["count"] == 2
+
+
+def test_resolve_recipient_passthrough_and_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+    assert coord.resolve_recipient("coord") == "coord"  # channel passthrough
+    assert coord.resolve_recipient("uuid-literal") == "uuid-literal"  # no live match -> literal
+
+
 def test_send_resolves_from_name_via_sidecar(tmp_path, monkeypatch):
     cfg = tmp_path / "dotclaude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
