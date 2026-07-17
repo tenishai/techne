@@ -15,8 +15,10 @@ def db_path(tmp_path):
     return p
 
 
-A = "sess-A"
-B = "sess-B"
+# Real CC session_ids are v4 UUIDs; use that shape so direct-addressing (to=<id>)
+# passes resolve_recipient's session_id check.
+A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +238,18 @@ def test_mcp_coord_threads(db_path):
     assert len(out["threads"]) == 1 and out["threads"][0]["count"] == 2
 
 
-def test_resolve_recipient_passthrough_and_fallback(tmp_path, monkeypatch):
+def test_resolve_recipient_channel_and_session_id(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
     assert coord.resolve_recipient("coord") == "coord"  # channel passthrough
-    assert coord.resolve_recipient("uuid-literal") == "uuid-literal"  # no live match -> literal
+    uid = "de4684d3-17ec-4d30-8ecd-9954ab1068b0"
+    assert coord.resolve_recipient(uid) == uid  # real session_id -> deliverable offline
+
+
+def test_resolve_recipient_unknown_name_raises(tmp_path, monkeypatch):
+    """A name matching no live session is a dead letter — raise, don't silently drop."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+    with pytest.raises(ValueError):
+        coord.resolve_recipient("claude_2")
 
 
 def test_send_resolves_from_name_via_sidecar(tmp_path, monkeypatch):
@@ -352,7 +362,7 @@ def test_injection_prunes_stale_surfaced_rows(db_path):
     names = {r[0] for r in conn.execute("SELECT name FROM extension_state").fetchall()}
     conn.close()
     assert "coord:surfaced:ancient-session" not in names  # reaped
-    assert "coord:surfaced:sess-B" in names  # B's own, fresh, kept
+    assert f"coord:surfaced:{B}" in names  # B's own, fresh, kept
 
 
 def test_live_sessions_skips_non_numeric_updatedat(tmp_path, monkeypatch):

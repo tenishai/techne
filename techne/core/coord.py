@@ -21,8 +21,16 @@ TIMESTAMP column in techne.db.
 from __future__ import annotations
 
 import json
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+# A Claude Code session_id is a v4 UUID. Used to tell a real (possibly offline but
+# deliverable) session_id target from an unresolved display-name (a dead letter).
+_SESSION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 
 # The default broadcast channel. For the common <=2-instance case, every session
 # watches 'coord' and nobody needs to know anyone else's session_id to be heard.
@@ -42,18 +50,31 @@ def _now_iso() -> str:
 def resolve_recipient(to: str) -> str:
     """Resolve a send target to the value stored in ``recipient`` (techne#376 phase 2).
 
-    A broadcast channel passes through unchanged. Otherwise ``to`` is treated as a
-    session **alias** — a live session's display name (the CLI ``-n`` name, e.g.
-    'claude_2') — and resolved to that session's ``session_id`` for a direct message.
-    Anything that matches no live name is returned as-is (a literal session_id, or an
-    offline/unknown target that simply stays undelivered until it connects).
+    Resolution order:
+    1. the broadcast channel ``'coord'`` — passes through unchanged;
+    2. a live session's display name (the CLI ``-n`` alias, e.g. 'claude_2') — resolved
+       to that session's ``session_id`` for a direct message;
+    3. a literal session_id (v4 UUID shape) — passes through; it's deliverable when that
+       session next reads its inbox, even if currently offline.
+
+    Anything else — a name that matches no live session and isn't a session_id — is a
+    **dead letter**: a bare name never matches any inbox filter, so the message could
+    never be read. Rather than store it and return a misleading id, we RAISE. (A single
+    mistyped name like 'claude2' for 'claude_2' would otherwise vanish silently — this
+    repo's "No Silent Failures" rule.) Newest-active session wins a name tie (first
+    match over the activity-sorted list), which is only reachable via duplicate -n names.
     """
     if to == DEFAULT_CHANNEL:
         return to
     for s in live_sessions():
         if s.get("name") == to:
             return s["session_id"]
-    return to
+    if _SESSION_ID_RE.match(to):
+        return to
+    raise ValueError(
+        f"coord: no live session named {to!r} (and it is not a session_id or a channel). "
+        f"Use 'coord' to broadcast, or a session_id to reach a peer that's currently offline."
+    )
 
 
 def _channels_for(session_id: str, channels: list[str] | None) -> list[str]:
@@ -100,7 +121,11 @@ def send(
             if parent is not None:
                 thread_id = parent["thread_id"] or str(reply_to)
                 if parent["thread_id"] is None:
-                    # pull the standalone parent into the new thread so the pair groups
+                    # Pull the standalone parent into the new thread so the pair groups.
+                    # Race-safe by construction (intentional — no lock): the derived
+                    # thread_id is deterministic (str(reply_to)), so two sessions replying
+                    # to the same parent at once write the identical value, and this only
+                    # fires while the parent is still NULL — concurrent re-replies are no-ops.
                     conn.execute(
                         "UPDATE coord_messages SET thread_id = ? WHERE id = ?",
                         (thread_id, reply_to),
@@ -124,7 +149,9 @@ def threads(
 
     Only messages the session could see are included (its channels, direct-to-it, or
     from it), so a thread surfaces with exactly the turns this session is party to.
-    Each thread: ``{thread_id, count, last_at, messages: [...]}``.
+    Each thread: ``{thread_id, count, last_at, messages: [...]}`` — note ``count`` is
+    the number of VISIBLE turns, which can be fewer than the thread's true length if
+    some replies were directed to a different recipient the reader can't see.
     """
     from techne.core.database import connect
 
@@ -327,18 +354,23 @@ def _git_worktree(cwd: str | None) -> dict | None:
         return None
     try:
         r = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-dir", "--abbrev-ref", "HEAD"],
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-dir",
+             "--git-common-dir", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode != 0:
         return None
-    parts = r.stdout.splitlines()
-    if len(parts) < 3:
+    parts = [p.strip() for p in r.stdout.splitlines()]
+    if len(parts) < 4:
         return None
-    toplevel, git_dir, branch = parts[0].strip(), parts[1].strip(), parts[2].strip()
-    return {"toplevel": toplevel, "branch": branch, "is_primary": "/worktrees/" not in git_dir}
+    toplevel, git_dir, common_dir, branch = parts[0], parts[1], parts[2], parts[3]
+    # A linked worktree's git-dir (…/.git/worktrees/<name>) differs from its
+    # common-dir (…/.git); the primary checkout's two are equal. Robust vs a repo
+    # whose path merely contains '/worktrees/'.
+    is_primary = os.path.normpath(git_dir) == os.path.normpath(common_dir)
+    return {"toplevel": toplevel, "branch": branch, "is_primary": is_primary}
 
 
 def working_tree_collisions(session_id: str) -> list[dict]:
@@ -359,14 +391,24 @@ def working_tree_collisions(session_id: str) -> list[dict]:
     me = sessions.get(session_id)
     if not me:
         return []
-    mine = _git_worktree(me.get("cwd"))
+
+    # Memoize by cwd: many sessions can share one working tree (that's the very
+    # collision we're after), so we probe each distinct cwd with git at most once.
+    _wt_cache: dict = {}
+
+    def _wt(cwd):
+        if cwd not in _wt_cache:
+            _wt_cache[cwd] = _git_worktree(cwd)
+        return _wt_cache[cwd]
+
+    mine = _wt(me.get("cwd"))
     if not mine:
         return []
     out: list[dict] = []
     for sid, s in sessions.items():
         if sid == session_id:
             continue
-        wt = _git_worktree(s.get("cwd"))
+        wt = _wt(s.get("cwd"))
         if not wt:
             continue
         if wt["toplevel"] == mine["toplevel"]:
