@@ -299,7 +299,7 @@ def test_tagging_tool_result_obs(db_path, tmp_path):
     _write_jsonl(
         p,
         [
-            _rec_tool_use("tu_1", "ls /tmp", session="session-xyz"),
+            _rec_tool_use("tu_1", "pytest -q", session="session-xyz"),
             _rec_tool_result("tu_1", "file1\nfile2", session="session-xyz"),
         ],
     )
@@ -457,7 +457,7 @@ def test_mixed_assistant_emits_text_and_registers_tool_use(db_path, tmp_path):
     _write_jsonl(
         p,
         [
-            _rec_assistant_mixed("Running ls now.", "tu_mix", "ls /tmp"),
+            _rec_assistant_mixed("Running the tests now.", "tu_mix", "pytest -q"),
             _rec_tool_result("tu_mix", "file1\nfile2"),
         ],
     )
@@ -469,7 +469,7 @@ def test_mixed_assistant_emits_text_and_registers_tool_use(db_path, tmp_path):
     # 1 AssistantText obs + 1 tool_result obs
     assert count == 2
     contents = _obs_contents(db_path)
-    assert any("role:assistant" in c and "Running ls now." in c for c in contents)
+    assert any("role:assistant" in c and "Running the tests now." in c for c in contents)
     assert any("role:tool_result" in c for c in contents)
 
 

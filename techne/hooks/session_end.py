@@ -29,7 +29,7 @@ def main():
 
     # Load config before arming the timer — reading a local YAML file is fast
     # and we need config.hooks.timeout_s to set the correct budget.
-    from techne.hooks._timeout import bounded_hook
+    from techne.hooks._timeout import HookTimeout, bounded_hook
 
     try:
         from techne.config import Config
@@ -44,8 +44,26 @@ def main():
         with bounded_hook(timeout_s, label="session_end"):
             from techne.core.state import observation_count
             from techne.lifecycle import run_session_end
+            from techne.platforms.claude_code.transcript_import import backfill_uncaptured
             from techne.sync.adapter import load_adapter
             from techne.sync.outbox import flush
+
+            # Backfill the tools the live hook skipped (Bash/Read) from this
+            # session's JSONL BEFORE counting/threading, so shell work counts
+            # toward the minimum and participates in thread detection. Best-effort:
+            # never let backfill block session teardown.
+            try:
+                bf = backfill_uncaptured(config, session_id)
+                if bf.get("backfilled"):
+                    print(
+                        f"techne: backfilled {bf['backfilled']} uncaptured obs"
+                        f" ({', '.join(bf['gap_tools'])})",
+                        file=sys.stderr,
+                    )
+            except HookTimeout:
+                raise  # don't swallow the bounded_hook alarm — let teardown abort
+            except Exception as e:
+                print(f"techne: backfill deferred: {e}", file=sys.stderr)
 
             obs_count = observation_count(config.db_path, session_id)
 

@@ -19,7 +19,7 @@ be promoted or duplicated. See #57 (memory portability across clients).
 import json
 from pathlib import Path
 
-from techne.hooks.post_tool_use import SKIP_TOOLS
+from techne.hooks.post_tool_use import SKIP_TOOLS, _bash_is_readonly_noise
 
 
 def iter_jsonl_records(jsonl_path: Path):
@@ -84,15 +84,25 @@ def tool_result_text(result) -> str:
     return json.dumps(result, default=str) if result is not None else ""
 
 
-def should_import(tool_name: str) -> bool:
+def should_import(tool_name: str, tool_input: dict | None = None) -> bool:
     """Filter for backfill — looser than the live ``should_capture`` hook.
 
-    Drops only the explicit blocklist (``SKIP_TOOLS``) and the memory-MCP tools.
-    Historical memory is more valuable than skipping the bash/read calls the
-    live hook bounds for runtime overhead.
+    Drops the explicit blocklist (``SKIP_TOOLS``) and the memory-MCP tools.
+    Historical Bash/Read is worth backfilling (the live hook skips them only for
+    runtime overhead) — BUT pure read-only Bash navigation (``ls``/``grep``/``cd``…)
+    carries no durable signal and only dilutes the ledger and vector index, so it
+    is dropped here too when the command is available. Anything with real signal
+    (``git``/``pytest``/…, mutations, redirects) is kept. Mirrors the live-hook
+    denylist so the noise policy is identical regardless of capture path.
     """
     if tool_name in SKIP_TOOLS:
         return False
     if tool_name.startswith("mcp__memory__"):
+        return False
+    if (
+        tool_name == "Bash"
+        and tool_input is not None
+        and _bash_is_readonly_noise(tool_input.get("command", ""))
+    ):
         return False
     return True
