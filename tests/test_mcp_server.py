@@ -109,6 +109,7 @@ class TestHandleRequest:
             "techne_send",
             "techne_inbox",
             "techne_mark_read",
+            "techne_coord_threads",
         }
 
     def test_notifications_initialized_returns_none(self, config):

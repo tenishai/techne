@@ -15,8 +15,10 @@ def db_path(tmp_path):
     return p
 
 
-A = "sess-A"
-B = "sess-B"
+# Real CC session_ids are v4 UUIDs; use that shape so direct-addressing (to=<id>)
+# passes resolve_recipient's session_id check.
+A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +114,62 @@ def _write_sidecar(cfg_dir, pid, *, session_id, name, status="busy", age_ms=0):
     )
 
 
+def _patch_wt(monkeypatch, sessions, wts):
+    monkeypatch.setattr(coord, "live_sessions", lambda **k: sessions)
+    monkeypatch.setattr(coord, "_git_worktree", lambda cwd: wts.get(cwd))
+
+
+def test_collision_same_working_tree(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/wt/a", "name": "claude_2"}],
+        {"/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False}},
+    )
+    cols = coord.working_tree_collisions("me")
+    assert len(cols) == 1
+    assert cols[0]["name"] == "claude_2"
+    assert "same git working tree" in cols[0]["reason"]
+
+
+def test_collision_feature_work_in_shared_checkout(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/shared", "name": "claude_2"}],
+        {
+            "/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False},
+            "/shared": {"toplevel": "/shared", "branch": "feat/y", "is_primary": True},
+        },
+    )
+    cols = coord.working_tree_collisions("me")
+    assert len(cols) == 1 and "shared (non-worktree) checkout" in cols[0]["reason"]
+
+
+def test_no_collision_separate_worktrees(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/wt/b"}],
+        {
+            "/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False},
+            "/wt/b": {"toplevel": "/wt/b", "branch": "feat/y", "is_primary": False},
+        },
+    )
+    assert coord.working_tree_collisions("me") == []  # isolated worktrees = the SOP working
+
+
+def test_collision_skips_non_git_cwd(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/not/a/repo"}],
+        {"/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False}},  # peer unresolved -> None
+    )
+    assert coord.working_tree_collisions("me") == []
+
+
+def test_collision_empty_when_self_cwd_not_git(monkeypatch):
+    _patch_wt(monkeypatch, [{"session_id": "me", "cwd": "/launch/dir"}], {})
+    assert coord.working_tree_collisions("me") == []  # can't resolve own tree -> best-effort no-op
+
+
 def test_live_sessions_and_name(tmp_path, monkeypatch):
     cfg = tmp_path / "dotclaude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
@@ -124,6 +182,74 @@ def test_live_sessions_and_name(tmp_path, monkeypatch):
     assert names == {"claude_2"}  # self excluded, stale dropped
     assert coord.session_name("uuid-2") == "claude_2"
     assert coord.session_name("nope") is None
+
+
+def test_send_to_name_alias_resolves_to_direct(tmp_path, monkeypatch):
+    """Phase 2: `to='claude_2'` addresses that live session directly by resolving
+    its display name to its session_id."""
+    cfg = tmp_path / "dotclaude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    _write_sidecar(cfg, 200, session_id="uuid-2", name="claude_2")
+    db = tmp_path / "t.db"
+    init_db(db).close()
+
+    coord.send(db, "uuid-1", "just for you", to="claude_2", from_name="claude_1")
+    # delivered to uuid-2 directly, not to the broadcast channel
+    assert [m["body"] for m in coord.inbox(db, "uuid-2")] == ["just for you"]
+    assert coord.inbox(db, "someone-else") == []  # not a broadcast
+
+
+def test_reply_to_groups_into_thread(db_path):
+    """Phase 2: reply_to threads a message with its parent, pulling a standalone
+    parent into the new thread so the pair groups together."""
+    m1 = coord.send(db_path, A, "original", from_name="claude_1")  # no thread yet
+    m2 = coord.send(db_path, B, "reply", reply_to=m1, from_name="claude_2")
+
+    ths = coord.threads(db_path, "sess-C")  # a broadcast watcher sees the coord thread
+    assert len(ths) == 1
+    t = ths[0]
+    assert t["count"] == 2  # parent pulled in + reply
+    assert [m["body"] for m in t["messages"]] == ["original", "reply"]
+    assert t["thread_id"] == str(m1)
+
+    # a further reply inherits the same thread
+    coord.send(db_path, A, "and again", reply_to=m2, from_name="claude_1")
+    assert coord.threads(db_path, "sess-C")[0]["count"] == 3
+
+
+def test_explicit_thread_id_beats_reply_to(db_path):
+    coord.send(db_path, A, "x", thread_id="T", reply_to=999)  # explicit wins, bad reply_to ignored
+    ths = coord.threads(db_path, B)
+    assert ths[0]["thread_id"] == "T"
+
+
+def test_threads_empty_when_no_threaded_messages(db_path):
+    coord.send(db_path, A, "unthreaded")  # thread_id NULL
+    assert coord.threads(db_path, B) == []
+
+
+def test_mcp_coord_threads(db_path):
+    from techne.mcp_server import _techne_coord_threads, _techne_send
+
+    cfg = _config(db_path)
+    sent = _techne_send({"session_id": A, "body": "root"}, cfg)
+    _techne_send({"session_id": B, "body": "re", "reply_to": sent["id"]}, cfg)
+    out = _techne_coord_threads({"session_id": "sess-C"}, cfg)
+    assert len(out["threads"]) == 1 and out["threads"][0]["count"] == 2
+
+
+def test_resolve_recipient_channel_and_session_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+    assert coord.resolve_recipient("coord") == "coord"  # channel passthrough
+    uid = "de4684d3-17ec-4d30-8ecd-9954ab1068b0"
+    assert coord.resolve_recipient(uid) == uid  # real session_id -> deliverable offline
+
+
+def test_resolve_recipient_unknown_name_raises(tmp_path, monkeypatch):
+    """A name matching no live session is a dead letter — raise, don't silently drop."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+    with pytest.raises(ValueError):
+        coord.resolve_recipient("claude_2")
 
 
 def test_send_resolves_from_name_via_sidecar(tmp_path, monkeypatch):
@@ -236,7 +362,7 @@ def test_injection_prunes_stale_surfaced_rows(db_path):
     names = {r[0] for r in conn.execute("SELECT name FROM extension_state").fetchall()}
     conn.close()
     assert "coord:surfaced:ancient-session" not in names  # reaped
-    assert "coord:surfaced:sess-B" in names  # B's own, fresh, kept
+    assert f"coord:surfaced:{B}" in names  # B's own, fresh, kept
 
 
 def test_live_sessions_skips_non_numeric_updatedat(tmp_path, monkeypatch):
