@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from techne.core.stores import plain_connect
@@ -185,12 +185,18 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
 
 # ---- edit-rail attribution (techne#374) ------------------------------------
 
-# Edit observations record their target as "Edited: <abspath>" (state.py). Paths
-# are absolute + machine-specific, but injected dependent ids are repo-RELATIVE
-# ("techne/cli.py::name::kind::line"), so we match by path suffix rather than
-# trying to reconstruct the repo root (portable across machines/checkouts).
-_EDIT_PATH_RE = re.compile(r"Edited?:\s*(\S+)")
+# Edit-family observations record their target path in a tool-specific shape
+# (post_tool_use.summarize): Edit → "Edited: <path>\nChange: <old> → <new>",
+# Write → "Wrote: <path>\nContent: <body>…", MultiEdit → the generic fallback
+# "Tool: MultiEdit\nInput: {json …\"file_path\": <path>…}". All three FIRE the
+# rail and all three are plausible follow-up edits to a dependent, so all three
+# must parse — an Edit-only regex silently drops Write/MultiEdit and biases
+# attribution downward (techne#374 review). Paths are absolute + machine-specific,
+# but injected dependent ids are repo-RELATIVE ("techne/cli.py::name::kind::line"),
+# so we match by path suffix rather than reconstructing the repo root.
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
+_EDIT_LABEL_RE = re.compile(r"^(?:Edited|Wrote):\s*(\S+)")
+_MULTIEDIT_PATH_RE = re.compile(r'"file_path":\s*"([^"]+)"')
 # A synthetic module-scope symbol — the from_symbol codex assigns to calls/imports
 # outside any def (source.py). As an injected "dependent" it's near-useless noise.
 _MODULE_MARKER = "::<module>::module::"
@@ -216,8 +222,37 @@ def _is_test_path(path: str) -> bool:
     return "tests/" in p or "/test/" in p or base.startswith("test_")
 
 
+def _parse_edit(content: str | None) -> tuple[str, str] | None:
+    """Extract (abspath, change_body) from an edit-family observation, or None.
+
+    change_body is the CHANGE text only, never the path line — so a dependent
+    whose name also appears in its own filename (symbol ``foo`` in ``foo.py``)
+    doesn't self-credit the symbol match (techne#374 review nit). Handles Edit,
+    Write, and MultiEdit (see _EDIT_TOOLS commentary above)."""
+    if not content:
+        return None
+    first, _, rest = content.partition("\n")
+    m = _EDIT_LABEL_RE.match(first)
+    if m:
+        # rest is "Change: <old> → <new>" or "Content: <body>…" — drop the label.
+        body = rest.split(":", 1)[1] if ":" in rest else rest
+        return m.group(1), body
+    if first.startswith("Tool: MultiEdit"):
+        m = _MULTIEDIT_PATH_RE.search(content)
+        if m:
+            path = m.group(1)
+            # Body = the whole observation minus the path value, so the path
+            # can't leak into the symbol scan.
+            return path, content.replace(path, "")
+    return None
+
+
 def _edit_hits_file(edit_abspath: str, rel_files: set[str]) -> bool:
-    """True if the edited absolute path ends with any injected relative file."""
+    """True if the edited absolute path ends with any injected relative file.
+
+    Suffix match (the "/" guard prevents ``barfoo.py``↔``foo.py``); a bare
+    top-level ``util.py`` could still match ``sub/util.py``, but that collision is
+    rare and dissolves once edges carry resolved paths (techne#374 review nit)."""
     p = edit_abspath.replace("\\", "/")
     return any(p == f or p.endswith("/" + f) for f in rel_files)
 
@@ -265,25 +300,29 @@ def edit_rail_attribution(
             params,
         ).fetchall()
         # Edits only for the sessions that fired the rail (bounds the scan). Store
-        # (ts, abspath, content): abspath drives file matching, content the name
-        # scan. Only edits whose target path parses are kept.
+        # (dt, abspath, body): dt = parsed naive-UTC time (NOT a raw string — live
+        # and transcript-imported observations use different timestamp formats, so
+        # lexical compare is unsound, techne#374 review). Keep only rows whose time
+        # AND target path both parse; sort by real time in Python.
         sessions = {r["session_id"] for r in injs if r["session_id"]}
-        edits: dict[str, list[tuple[str, str, str]]] = {s: [] for s in sessions}
+        edits: dict[str, list[tuple[datetime, str, str]]] = {s: [] for s in sessions}
         if sessions:
             placeholders = ",".join("?" * len(sessions))
             tool_ph = ",".join("?" * len(_EDIT_TOOLS))
             for r in conn.execute(
                 f"""SELECT session_id, timestamp, content FROM observations
                     WHERE session_id IN ({placeholders})
-                      AND tool_name IN ({tool_ph})
-                    ORDER BY timestamp""",
+                      AND tool_name IN ({tool_ph})""",
                 [*sessions, *_EDIT_TOOLS],
             ):
-                m = _EDIT_PATH_RE.search(r["content"] or "")
-                if m:
-                    edits[r["session_id"]].append((r["timestamp"], m.group(1), r["content"]))
+                dt = _parse_ts(r["timestamp"])
+                parsed = _parse_edit(r["content"])
+                if dt is not None and parsed is not None:
+                    edits[r["session_id"]].append((dt, parsed[0], parsed[1]))
     finally:
         conn.close()
+    for rows in edits.values():
+        rows.sort(key=lambda e: e[0])
 
     total = file_hit = symbol_hit = empty_window = noise_only = 0
     dep_total = dep_module = dep_test = dep_real = 0
@@ -318,29 +357,37 @@ def edit_rail_attribution(
         }
 
         # The next `next_edits` edits within `window_minutes` after the injection.
+        # Both sides are parsed naive-UTC datetimes (no lexical/format mixing).
         inj_dt = _parse_ts(inj["timestamp"])
-        following: list[tuple[str, str]] = []  # (abspath, content)
-        for ts, abspath, content in edits.get(inj["session_id"], []):
-            if ts <= inj["timestamp"]:  # lexical ISO compare == chronological
-                continue
-            if inj_dt is not None:
-                edt = _parse_ts(ts)
-                if edt is not None and (edt - inj_dt).total_seconds() > window_minutes * 60:
+        following: list[tuple[str, str]] = []  # (abspath, body)
+        if inj_dt is not None:
+            for edt, abspath, body in edits.get(inj["session_id"], []):
+                if edt <= inj_dt:
                     continue
-            following.append((abspath, content))
-            if len(following) >= next_edits:
-                break
+                if (edt - inj_dt).total_seconds() > window_minutes * 60:
+                    continue
+                following.append((abspath, body))
+                if len(following) >= next_edits:
+                    break
 
         if not following:
             empty_window += 1
             continue
         if any(_edit_hits_file(abspath, credited_files) for abspath, _ in following):
             file_hit += 1
-        if any(any(name in c for name in credited_names) for _, c in following):
+        if any(any(name in body for name in credited_names) for _, body in following):
             symbol_hit += 1
 
     def pct(n: int) -> float | None:
         return round(100 * n / total, 1) if total else None
+
+    # Attributable denominator = injections that HAD a follow-up edit in window.
+    # Rates over this base separate "the rail rarely precedes an edit" from "edits
+    # happen but miss the dependents" (techne#374 review suggestion).
+    attributable = total - empty_window
+
+    def apct(n: int) -> float | None:
+        return round(100 * n / attributable, 1) if attributable else None
 
     return {
         "window_minutes": window_minutes,
@@ -348,8 +395,11 @@ def edit_rail_attribution(
         "injections": total,
         "file_attributed": file_hit,
         "file_attributed_pct": pct(file_hit),
+        "file_attributed_pct_attributable": apct(file_hit),
         "symbol_attributed": symbol_hit,
         "symbol_attributed_pct": pct(symbol_hit),
+        "symbol_attributed_pct_attributable": apct(symbol_hit),
+        "attributable": attributable,
         "no_edits_in_window": empty_window,
         "noise_only_injections": noise_only,  # 100% module/test payload
         "noise_only_pct": pct(noise_only),
@@ -363,13 +413,23 @@ def edit_rail_attribution(
 
 
 def _parse_ts(s: str | None) -> datetime | None:
-    """Parse a stored 'YYYY-MM-DD HH:MM:SS' timestamp; None if unparseable."""
+    """Parse a stored timestamp to a NAIVE-UTC datetime; None if unparseable.
+
+    Two formats coexist in ``observations.timestamp``: live captures write naive
+    ``YYYY-MM-DD HH:MM:SS`` (SQLite CURRENT_TIMESTAMP, UTC), while transcript-
+    imported rows write the raw ISO transcript time with a ``Z``/offset suffix
+    (tz-AWARE). Mixing aware and naive datetimes in a subtraction raises TypeError
+    — which used to take down ``techne audit`` (techne#374 review). Normalising
+    everything to naive-UTC here makes all comparisons safe."""
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _empty_attribution(window_minutes: float, next_edits: int) -> dict:
@@ -379,8 +439,11 @@ def _empty_attribution(window_minutes: float, next_edits: int) -> dict:
         "injections": 0,
         "file_attributed": 0,
         "file_attributed_pct": None,
+        "file_attributed_pct_attributable": None,
         "symbol_attributed": 0,
         "symbol_attributed_pct": None,
+        "symbol_attributed_pct_attributable": None,
+        "attributable": 0,
         "no_edits_in_window": 0,
         "noise_only_injections": 0,
         "noise_only_pct": None,

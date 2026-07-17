@@ -1147,11 +1147,13 @@ def audit(ctx, since_days, as_json):
         )
         click.echo(
             f"  a dependent's FILE re-edited   : {attrib['file_attributed']:>3} "
-            f"({_p(attrib['file_attributed_pct'])})"
+            f"({_p(attrib['file_attributed_pct'])} of all · "
+            f"{_p(attrib['file_attributed_pct_attributable'])} of those w/ a follow-up edit)"
         )
         click.echo(
             f"  a dependent's NAME in the edit : {attrib['symbol_attributed']:>3} "
-            f"({_p(attrib['symbol_attributed_pct'])})   ← stronger, name-based"
+            f"({_p(attrib['symbol_attributed_pct'])} of all · "
+            f"{_p(attrib['symbol_attributed_pct_attributable'])} w/ follow-up)   ← stronger, name-based"
         )
         click.echo(
             f"  no edit followed in window     : {attrib['no_edits_in_window']:>3}"

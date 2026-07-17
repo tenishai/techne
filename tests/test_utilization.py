@@ -240,10 +240,27 @@ def _inject(db, ts, *, trigger, deps, session="s1"):
 
 
 def _edit(db, ts, path, *, change="", session="s1"):
-    """Record an Edit observation targeting `path` at `ts`."""
+    """Record an Edit observation targeting `path` at `ts` (post_tool_use shape)."""
     content = f"Edited: {path}\nChange: {change}"
     add_observation(db, session, "Edit", content)
     _stamp(db, "observations", ts, "tool_name = 'Edit' AND content = ?", (content,))
+
+
+def _write(db, ts, path, *, body="", session="s1"):
+    """Record a Write observation (post_tool_use shape: 'Wrote: <path>\\nContent: …')."""
+    content = f"Wrote: {path}\nContent: {body}..."
+    add_observation(db, session, "Write", content)
+    _stamp(db, "observations", ts, "tool_name = 'Write' AND content = ?", (content,))
+
+
+def _multiedit(db, ts, path, *, body="", session="s1"):
+    """Record a MultiEdit observation (generic 'Tool: MultiEdit\\nInput: {json}…')."""
+    import json as _json
+
+    inp = _json.dumps({"file_path": path, "edits": [{"old_string": body, "new_string": body}]})
+    content = f"Tool: MultiEdit\nInput: {inp}\nOutput: ok"
+    add_observation(db, session, "MultiEdit", content)
+    _stamp(db, "observations", ts, "tool_name = 'MultiEdit' AND content = ?", (content,))
 
 
 def test_edit_rail_attribution_empty_db(db):
@@ -327,3 +344,64 @@ def test_edit_rail_attribution_noise_only(db):
     assert a["noise_only_injections"] == 1
     assert a["noise_only_pct"] == 100.0
     assert a["payload"]["real_pct"] == 0.0
+
+
+# ---- techne#374 review regressions -----------------------------------------
+
+
+def test_edit_rail_attribution_tz_aware_timestamp_no_crash(db):
+    """Transcript-imported edits carry ISO '…Z' (tz-AWARE) timestamps while the
+    injection's is naive — subtracting them used to raise TypeError and take down
+    `techne audit` (review issue #1). Must not raise, and must still attribute."""
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    _edit(db, "2026-01-01T12:00:30.000Z", "/repo/techne/foo.py")  # tz-aware shape
+    a = edit_rail_attribution(db)  # no TypeError
+    assert a["file_attributed"] == 1
+
+
+def test_edit_rail_attribution_write_follow_up(db):
+    """Write ('Wrote: <path>') follow-ups must be counted, not silently dropped
+    (review issue #2)."""
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    _write(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")
+    assert edit_rail_attribution(db)["file_attributed"] == 1
+
+
+def test_edit_rail_attribution_multiedit_follow_up(db):
+    """MultiEdit fires the rail, so a MultiEdit fix-up to a dependent must attribute
+    at both file and symbol granularity (review issue #2)."""
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::compute_total::function::10"])
+    _multiedit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py", body="compute_total(x)")
+    a = edit_rail_attribution(db)
+    assert a["file_attributed"] == 1
+    assert a["symbol_attributed"] == 1  # dependent name in the change body
+
+
+def test_edit_rail_attribution_symbol_not_credited_from_path(db):
+    """A dependent whose name also appears in its own filename must NOT earn symbol
+    credit when the change body doesn't touch it (review nit — match body, not path)."""
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::foo::function::10"])  # symbol 'foo' also in foo.py
+    _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py", change="unrelated_change()")
+    a = edit_rail_attribution(db)
+    assert a["file_attributed"] == 1   # file still credited
+    assert a["symbol_attributed"] == 0  # symbol not — name only in the path
+
+
+def test_edit_rail_attribution_attributable_denominator(db):
+    """Rate over 'injections that had a follow-up edit' is reported alongside the
+    over-all rate (review suggestion)."""
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/t1.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")  # hits the dep
+    _inject(db, "2026-01-01 13:00:00", trigger="techne/t2.py::t::function::5",
+            deps=["techne/baz.py::qux::function::7"])  # no follow-up edit
+    a = edit_rail_attribution(db)
+    assert a["injections"] == 2 and a["no_edits_in_window"] == 1
+    assert a["attributable"] == 1
+    assert a["file_attributed"] == 1
+    assert a["file_attributed_pct"] == 50.0             # over all injections
+    assert a["file_attributed_pct_attributable"] == 100.0  # over those w/ a follow-up
