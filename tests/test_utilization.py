@@ -253,11 +253,19 @@ def _write(db, ts, path, *, body="", session="s1"):
     _stamp(db, "observations", ts, "tool_name = 'Write' AND content = ?", (content,))
 
 
-def _multiedit(db, ts, path, *, body="", session="s1"):
-    """Record a MultiEdit observation (generic 'Tool: MultiEdit\\nInput: {json}…')."""
+def _multiedit(db, ts, path, *, body="", session="s1", file_path_first=True):
+    """Record a MultiEdit observation, faithfully mirroring post_tool_use.summarize:
+    the generic branch renders 'Tool: MultiEdit\\nInput: {json.dumps(input)[:500]}…'.
+    `file_path_first` controls key order so the 500-char truncation boundary can be
+    exercised (file_path at the front survives; at the back can be truncated away)."""
     import json as _json
 
-    inp = _json.dumps({"file_path": path, "edits": [{"old_string": body, "new_string": body}]})
+    edit = {"old_string": body, "new_string": body}
+    tool_input = (
+        {"file_path": path, "edits": [edit]} if file_path_first
+        else {"edits": [edit], "file_path": path}
+    )
+    inp = _json.dumps(tool_input)[:500]  # summarize() truncation
     content = f"Tool: MultiEdit\nInput: {inp}\nOutput: ok"
     add_observation(db, session, "MultiEdit", content)
     _stamp(db, "observations", ts, "tool_name = 'MultiEdit' AND content = ?", (content,))
@@ -405,3 +413,27 @@ def test_edit_rail_attribution_attributable_denominator(db):
     assert a["file_attributed"] == 1
     assert a["file_attributed_pct"] == 50.0             # over all injections
     assert a["file_attributed_pct_attributable"] == 100.0  # over those w/ a follow-up
+
+
+def test_edit_rail_attribution_multiedit_truncation_boundary(db):
+    """MultiEdit's Input JSON is truncated to 500 chars by summarize(). With
+    file_path FIRST (schema order), it survives even a large edits payload →
+    still attributed (re-review boundary case)."""
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    # body >500 chars so the serialised Input is truncated; file_path is first.
+    _multiedit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py",
+               body="z" * 600, file_path_first=True)
+    assert edit_rail_attribution(db)["file_attributed"] == 1
+
+
+def test_edit_rail_attribution_multiedit_truncation_degrades_gracefully(db):
+    """The pathological case — file_path serialised AFTER a large edits array is
+    truncated away. Documents that this degrades to a silent DROP (undercount),
+    never a crash (re-review boundary case)."""
+    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
+            deps=["techne/foo.py::bar::function::10"])
+    _multiedit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py",
+               body="z" * 600, file_path_first=False)
+    a = edit_rail_attribution(db)  # must not raise
+    assert a["file_attributed"] == 0  # dropped, not crashed
