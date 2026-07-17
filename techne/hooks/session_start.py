@@ -247,8 +247,15 @@ def _run_phases_2_to_9(
 
         live = coord.live_sessions(exclude_session=session_id)
         unread = coord.unread_count(config.db_path, session_id) if session_id else 0
-        if unread or live:
+        collisions = coord.working_tree_collisions(session_id) if session_id else []
+        if unread or live or collisions:
             bits = []
+            for c in collisions:
+                peer = c.get("name") or c["session_id"][:8]
+                bits.append(
+                    f"⚠️ COLLISION: {peer} — {c['reason']} (branch {c.get('branch')}). "
+                    f"Coordinate via techne_send before you touch shared git state."
+                )
             if unread:
                 bits.append(f"📬 {unread} unread coordination message(s) — techne_inbox to read")
             if live:

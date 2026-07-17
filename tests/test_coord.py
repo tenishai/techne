@@ -112,6 +112,62 @@ def _write_sidecar(cfg_dir, pid, *, session_id, name, status="busy", age_ms=0):
     )
 
 
+def _patch_wt(monkeypatch, sessions, wts):
+    monkeypatch.setattr(coord, "live_sessions", lambda **k: sessions)
+    monkeypatch.setattr(coord, "_git_worktree", lambda cwd: wts.get(cwd))
+
+
+def test_collision_same_working_tree(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/wt/a", "name": "claude_2"}],
+        {"/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False}},
+    )
+    cols = coord.working_tree_collisions("me")
+    assert len(cols) == 1
+    assert cols[0]["name"] == "claude_2"
+    assert "same git working tree" in cols[0]["reason"]
+
+
+def test_collision_feature_work_in_shared_checkout(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/shared", "name": "claude_2"}],
+        {
+            "/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False},
+            "/shared": {"toplevel": "/shared", "branch": "feat/y", "is_primary": True},
+        },
+    )
+    cols = coord.working_tree_collisions("me")
+    assert len(cols) == 1 and "shared (non-worktree) checkout" in cols[0]["reason"]
+
+
+def test_no_collision_separate_worktrees(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/wt/b"}],
+        {
+            "/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False},
+            "/wt/b": {"toplevel": "/wt/b", "branch": "feat/y", "is_primary": False},
+        },
+    )
+    assert coord.working_tree_collisions("me") == []  # isolated worktrees = the SOP working
+
+
+def test_collision_skips_non_git_cwd(monkeypatch):
+    _patch_wt(
+        monkeypatch,
+        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/not/a/repo"}],
+        {"/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False}},  # peer unresolved -> None
+    )
+    assert coord.working_tree_collisions("me") == []
+
+
+def test_collision_empty_when_self_cwd_not_git(monkeypatch):
+    _patch_wt(monkeypatch, [{"session_id": "me", "cwd": "/launch/dir"}], {})
+    assert coord.working_tree_collisions("me") == []  # can't resolve own tree -> best-effort no-op
+
+
 def test_live_sessions_and_name(tmp_path, monkeypatch):
     cfg = tmp_path / "dotclaude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))

@@ -311,3 +311,77 @@ def live_sessions(
         )
     live.sort(key=lambda r: r["updated_at_ms"], reverse=True)
     return live
+
+
+def _git_worktree(cwd: str | None) -> dict | None:
+    """Resolve a cwd to its git working tree: ``{toplevel, branch, is_primary}``.
+
+    One ``git rev-parse`` call. ``is_primary`` is False for a linked worktree (its
+    git-dir lives under ``.git/worktrees/``) — that's how we tell "the shared main
+    checkout" from an isolated per-session worktree. Returns None if cwd isn't a git
+    working tree (the sidecar cwd is the launch dir, so this can legitimately miss).
+    """
+    import subprocess
+
+    if not cwd:
+        return None
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-dir", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    parts = r.stdout.splitlines()
+    if len(parts) < 3:
+        return None
+    toplevel, git_dir, branch = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    return {"toplevel": toplevel, "branch": branch, "is_primary": "/worktrees/" not in git_dir}
+
+
+def working_tree_collisions(session_id: str) -> list[dict]:
+    """Live peers that are a genuine collision risk under the worktree SOP (techne#376
+    phase 2) — NOT merely "same repo" (isolated worktrees of one repo are the whole
+    point). Two cases are flagged:
+
+    1. A peer sharing THIS session's exact git working tree (same ``toplevel``) — same
+       HEAD, the commit-bleed the SOP exists to prevent.
+    2. A peer doing feature work in the PRIMARY (non-worktree) checkout — i.e. on the
+       shared checkout, off the default branch — an SOP violation.
+
+    Best-effort: a peer (or self) whose sidecar cwd isn't a git working tree is
+    skipped, since that cwd is the launch dir and may not reflect a later ``cd``.
+    Each result: ``{session_id, name, branch, toplevel, reason}``.
+    """
+    sessions = {s["session_id"]: s for s in live_sessions()}
+    me = sessions.get(session_id)
+    if not me:
+        return []
+    mine = _git_worktree(me.get("cwd"))
+    if not mine:
+        return []
+    out: list[dict] = []
+    for sid, s in sessions.items():
+        if sid == session_id:
+            continue
+        wt = _git_worktree(s.get("cwd"))
+        if not wt:
+            continue
+        if wt["toplevel"] == mine["toplevel"]:
+            reason = "same git working tree (shared HEAD — commit-bleed risk)"
+        elif wt["is_primary"] and wt["branch"] not in (None, "", "main", "master", "HEAD"):
+            reason = "feature work in the shared (non-worktree) checkout"
+        else:
+            continue
+        out.append(
+            {
+                "session_id": sid,
+                "name": s.get("name"),
+                "branch": wt["branch"],
+                "toplevel": wt["toplevel"],
+                "reason": reason,
+            }
+        )
+    return out
