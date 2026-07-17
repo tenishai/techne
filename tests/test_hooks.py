@@ -122,6 +122,67 @@ class TestShouldCapture:
         assert should_capture(config, "WebSearch") is True
 
 
+class TestBashReadonlyNoiseFilter:
+    """capture_bash=True still drops pure read-only navigation noise, but keeps
+    anything that could carry durable evidence (commits, test runs, mutations)."""
+
+    def _cfg(self):
+        return _make_config(capture_bash=True)
+
+    def test_no_tool_input_captures_unconditionally(self):
+        """Callers without tool_input (unit tests, replay) can't inspect the
+        command, so Bash is captured whenever the flag is on."""
+        assert should_capture(self._cfg(), "Bash") is True
+
+    @pytest.mark.parametrize("cmd", [
+        "ls -la",
+        "cat foo.py",
+        "cd /tmp && ls",
+        "grep -rn pattern src/ | head -20",
+        "pwd",
+        "find . -name '*.py'",
+        "echo hello",
+        "sed -n '1,50p' file.py",
+        "FOO=bar ls",
+        "/bin/ls -a",
+        # quote-aware split: a `|` alternation inside a grep pattern must NOT be
+        # mistaken for a pipe to a non-read-only command (else noise leaks through).
+        'cd /repo && grep -n "post_tool_use|capture_bash" file.py',
+        "grep -E 'foo|bar|baz' src/ | head",
+        # `2>&1` is an fd-dup, not a file write — a read-only pipe through it
+        # must still count as noise.
+        "grep -n foo bar.py 2>&1 | tail",
+        "ls -la 2>&1",
+    ])
+    def test_readonly_commands_dropped(self, cmd):
+        assert should_capture(self._cfg(), "Bash", {"command": cmd}) is False
+
+    @pytest.mark.parametrize("cmd", [
+        "git commit -m 'x'",
+        "cd repo && git commit -m 'x'",          # signal hidden behind a cd
+        "pytest tests/",
+        "gh pr create",
+        "make build",
+        "docker build .",
+        "echo hi > out.txt",                     # redirect mutates a file
+        "cat template > config.yaml",
+        "sed -i 's/a/b/' file.py",               # in-place edit mutates
+        "uv pip install requests",
+        "ls && pytest",                          # any non-readonly segment => capture
+        # mutating find/sort: read word is read-only, but the action writes/deletes
+        "find . -name '*.pyc' -delete",
+        "find . -type d -exec rm -rf {} +",
+        "sort -o out.txt in.txt",
+    ])
+    def test_signal_commands_captured(self, cmd):
+        assert should_capture(self._cfg(), "Bash", {"command": cmd}) is True
+
+    def test_filter_inactive_when_flag_off(self):
+        """The noise filter never runs when capture_bash is off (Bash stays off)."""
+        cfg = _make_config(capture_bash=False)
+        assert should_capture(cfg, "Bash", {"command": "git commit -m x"}) is False
+
+
 # ---------------------------------------------------------------------------
 # TestSummarize
 # ---------------------------------------------------------------------------

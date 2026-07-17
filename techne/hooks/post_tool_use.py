@@ -30,12 +30,125 @@ SKIP_TOOLS = {
     "AskUserQuestion",
 }
 
+# Bash command "heads" that are pure read/navigation utilities. When capture_bash
+# is ON, a Bash call whose every pipeline/sequence segment starts with one of these
+# is treated as navigation noise and dropped: it produces no durable evidence (no
+# commit SHA, no test result) and would only dilute the observation ledger and the
+# vector index. Anything NOT in this set (git, gh, pytest, make, docker, uv, pip,
+# npm, terraform, …) is captured. This is what lets capture_bash be ON without the
+# noise cost that kept it OFF by default (techne#557 root-cause + capture_bash decision).
+_READONLY_BASH_HEADS = frozenset({
+    "ls", "ll", "pwd", "cd", "echo", "printf", "cat", "bat", "head", "tail",
+    "less", "more", "which", "type", "whoami", "id", "date", "env", "printenv",
+    "hostname", "uname", "clear", "true", "man", "tldr", "help",
+    "grep", "egrep", "fgrep", "rg", "ag", "find", "fd", "sed", "awk",
+    "wc", "sort", "uniq", "tr", "cut", "column", "stat", "file", "tree",
+    "du", "df", "ps", "realpath", "basename", "dirname", "readlink",
+})
 
-def should_capture(config: Config, tool_name: str) -> bool:
+def _split_bash_segments(command: str) -> list[str]:
+    """Split a compound command into top-level segments on shell operators
+    (``&&`` ``||`` ``;`` ``|`` ``&`` newline), ignoring operators that appear
+    inside single/double quotes.
+
+    Quote-awareness matters: a naive split on ``|`` would break a ``grep``
+    regex-alternation pattern (``grep "a|b"``) mid-quote, leaving a fragment whose
+    "head" looks like a non-read-only command — so pure grep noise would leak
+    through. We only need each segment's leading command word, so a light scanner
+    that respects quotes is enough (no full shell parse).
+    """
+    segs: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if command[i : i + 2] in ("&&", "||"):
+            segs.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        # Note: a lone `&` is NOT a separator here — splitting on it would shatter
+        # fd-dups like `2>&1`. Backgrounding (`cmd &`) is rare in agent commands and
+        # irrelevant to head detection, so leave `&` inside the segment.
+        if ch in (";", "|", "\n"):
+            segs.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    segs.append("".join(buf))
+    return [s.strip() for s in segs if s.strip()]
+
+
+def _bash_is_readonly_noise(command: str) -> bool:
+    """True when EVERY segment of a (possibly compound) Bash command is a pure
+    read-only utility — i.e. the whole command is navigation noise safe to drop.
+
+    Conservative by construction: a single non-read-only segment (e.g. a
+    ``git commit`` hidden behind ``cd x && …``), any output redirect (``>``/``>>``,
+    which mutates a file regardless of the head command), or an in-place
+    ``sed -i``/``awk -i`` makes the whole command capture-worthy. When in doubt we
+    CAPTURE — a missed observation is far cheaper than a silently-dropped commit or
+    test result the evidence gate needs.
+    """
+    if not command or not command.strip():
+        return False
+    # A real output redirect (`>` / `>>`) mutates a file → capture. Ignore fd-dups
+    # like `2>&1` / `>&2` (the `>` is followed by `&`): they don't write a file, so
+    # a read-only command piping through `2>&1` shouldn't be treated as a mutation.
+    if ">" in command.replace(">&", ""):
+        return False
+    segments = _split_bash_segments(command)
+    if not segments:
+        return False
+    for seg in segments:
+        tokens = seg.split()
+        # Skip leading `VAR=val` env assignments to find the real command head.
+        i = 0
+        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+            i += 1
+        if i >= len(tokens):
+            continue  # segment was only env assignments — benign
+        head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. /bin/ls
+        if head not in _READONLY_BASH_HEADS:
+            return False
+        if head in ("sed", "awk") and any(t.startswith("-i") for t in tokens[i + 1:]):
+            return False  # in-place edit mutates a file
+        if head == "find" and any(
+            t in ("-delete", "-exec", "-execdir", "-ok", "-okdir") or t.startswith("-fprint")
+            for t in tokens[i + 1:]
+        ):
+            return False  # find action that deletes / runs a command / writes a file
+        if head == "sort" and any(
+            t.startswith("-o") or t.startswith("--output") for t in tokens[i + 1:]
+        ):
+            return False  # `sort -o file` writes in place
+    return True
+
+
+def should_capture(config: Config, tool_name: str, tool_input: dict | None = None) -> bool:
     if not config.hooks.post_tool_use:
         return False
-    if tool_name == "Bash" and not config.hooks.capture_bash:
-        return False
+    if tool_name == "Bash":
+        if not config.hooks.capture_bash:
+            return False
+        # capture_bash ON: still drop pure read-only navigation noise. Requires the
+        # command; callers without tool_input (e.g. unit tests) capture unconditionally.
+        if tool_input is not None and _bash_is_readonly_noise(tool_input.get("command", "")):
+            return False
     if tool_name == "Read" and not config.hooks.capture_read:
         return False
     if tool_name in SKIP_TOOLS:

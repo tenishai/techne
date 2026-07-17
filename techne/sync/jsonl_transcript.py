@@ -222,7 +222,7 @@ def _ingest_records_from_offset(
                             if not tu:
                                 continue
                             tool_name = tu["name"]
-                            if not should_import(tool_name):
+                            if not should_import(tool_name, tu["input"]):
                                 continue
                             output = tool_result_text(b.get("content"))
                             body = summarize(tool_name, tu["input"], output)

@@ -8,6 +8,7 @@ mechanism.
 import hashlib
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from techne.core.database import connect
 from techne.core.redaction import redact_credentials
@@ -20,6 +21,9 @@ from techne.sync.jsonl_records import (
     should_import,
     tool_result_text,
 )
+
+if TYPE_CHECKING:
+    from techne.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -197,7 +201,7 @@ def import_transcript(
                         if not tu:
                             continue
                         tool_name = tu["name"]
-                        if not should_import(tool_name):
+                        if not should_import(tool_name, tu["input"]):
                             continue
                         output = tool_result_text(b.get("content"))
                         content = summarize(tool_name, tu["input"], output)
@@ -289,3 +293,141 @@ def import_directory(
                 }
             )
     return results
+
+
+def _session_jsonl(session_id: str) -> Path | None:
+    """Locate a session's transcript across all Claude Code project dirs.
+
+    Claude Code names each transcript ``<session_id>.jsonl`` and files it under
+    the slug for the session's cwd, so search every slug rather than assume the
+    current working directory.
+    """
+    hits = sorted(PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
+    return hits[0] if hits else None
+
+
+def backfill_uncaptured(
+    config: "Config", session_id: str, *, jsonl_path: Path | None = None
+) -> dict:
+    """Backfill the tools the LIVE PostToolUse hook skipped — flag-gated Bash/Read —
+    from a session's JSONL into the observation ledger.
+
+    Complementary to live capture (techne#734 topology): the hook records every
+    tool EXCEPT Bash (when ``capture_bash`` is off) and Read (when ``capture_read``
+    is off). This fills exactly that gap so reflect/recall/threads see shell work,
+    WITHOUT the duplication a full ``import_transcript(force=True)`` would cause —
+    that would re-insert every already-captured Edit/Write row. Read-only Bash
+    navigation noise (``ls``/``grep``/``cd``…) is dropped via ``should_import``'s
+    denylist; only gap tools are considered, so nothing collides with live rows.
+
+    Idempotent: a row already present for this session — matched on
+    ``(tool_name, stored content, event_at)`` — is skipped, so a second session_end
+    (e.g. after a compact) never double-inserts. ``event_at`` comes from the
+    transcript, so the key is stable across re-runs yet still admits genuine repeats
+    of an identical command at different times.
+
+    Dedup parity note: live-captured rows store ``event_at = NULL`` while backfill
+    stores the transcript timestamp, so their keys can never match. That asymmetry is
+    only safe because gap tools are NEVER live-captured (we backfill exactly the tools
+    the live hook skips). If ``capture_bash`` were toggled ON→OFF mid-session, the
+    live Bash rows (``event_at=NULL``) would not dedup against backfill's ts-keyed
+    rows and could double — an accepted edge, not a supported flow.
+
+    Best-effort and side-effect-only on the ledger; returns a summary dict:
+    ``{session_id, backfilled, skipped_existing, gap_tools, jsonl?, reason?}``.
+    """
+    # Only tools the live hook skipped are safe to backfill (else we duplicate).
+    gap_tools = set()
+    if not config.hooks.capture_bash:
+        gap_tools.add("Bash")
+    if not config.hooks.capture_read:
+        gap_tools.add("Read")
+    base = {
+        "session_id": session_id,
+        "backfilled": 0,
+        "skipped_existing": 0,
+        "gap_tools": sorted(gap_tools),
+    }
+    if not gap_tools:
+        return {**base, "reason": "all gap tools captured live"}
+
+    path = jsonl_path or _session_jsonl(session_id)
+    if not path or not path.exists():
+        return {**base, "reason": "transcript not found"}
+
+    conn = connect(config.db_path)
+    try:
+        # Ensure the parent session row exists (observations FK to sessions). It
+        # normally does — live capture created it — but a pure-shell session may
+        # have none, so make backfill self-sufficient rather than FK-failing.
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (id, platform) VALUES (?, 'claude-code')",
+            (session_id,),
+        )
+        # Dedup key already present for this session (idempotency across re-runs).
+        existing = {
+            (r[0], r[1], r[2])
+            for r in conn.execute(
+                "SELECT tool_name, content, event_at FROM observations WHERE session_id = ?",
+                (session_id,),
+            )
+        }
+        pending: dict[str, dict] = {}
+        backfilled = 0
+        skipped_existing = 0
+        for rec in iter_jsonl_records(path):
+            rtype = rec.get("type")
+            ts = rec.get("timestamp")
+            blocks = content_blocks(rec)
+
+            if rtype == "assistant":
+                for b in blocks:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                        pending[b["id"]] = {
+                            "name": b.get("name", ""),
+                            "input": b.get("input") or {},
+                            "ts": ts,
+                        }
+            elif rtype == "user":
+                for b in blocks:
+                    if not isinstance(b, dict) or b.get("type") != "tool_result":
+                        continue
+                    tu = pending.pop(b.get("tool_use_id", ""), None)
+                    if not tu:
+                        continue
+                    tool_name = tu["name"]
+                    if tool_name not in gap_tools:
+                        continue
+                    if not should_import(tool_name, tu["input"]):
+                        continue
+                    output = tool_result_text(b.get("content"))
+                    content = summarize(tool_name, tu["input"], output)
+                    event_ts = tu["ts"] or ts
+                    # Compute hash BEFORE redaction (techne#270 invariant).
+                    redacted_content = redact_credentials(content)
+                    key = (tool_name, redacted_content, event_ts)
+                    if key in existing:
+                        skipped_existing += 1
+                        continue
+                    content_hash = (
+                        hashlib.sha256(content.encode()).hexdigest()
+                        if redacted_content != content
+                        else None
+                    )
+                    conn.execute(
+                        """INSERT INTO observations
+                           (session_id, timestamp, tool_name, content, tier, event_at, content_hash)
+                           VALUES (?, ?, ?, ?, 'hot', ?, ?)""",
+                        (session_id, event_ts, tool_name, redacted_content, event_ts, content_hash),
+                    )
+                    existing.add(key)  # also dedup within this same run
+                    backfilled += 1
+        conn.commit()
+        return {
+            **base,
+            "backfilled": backfilled,
+            "skipped_existing": skipped_existing,
+            "jsonl": str(path),
+        }
+    finally:
+        conn.close()
