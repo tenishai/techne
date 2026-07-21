@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Architecture-card staleness gate.
+
+Each architecture card (ARCHITECTURE.md, docs/arch/*.md) declares the seam file(s)
+it describes via `anchor:` lines in its YAML frontmatter, each pinned to the git blob
+sha of that file when the card was last written/reviewed:
+
+    ---
+    card: arch-card:techne-domain-stores
+    anchor: techne/core/stores.py sha=fe749946756940d5109ac45a8d7d8d2b795caf59
+    ---
+
+This checker recomputes each anchor's current blob sha (`git hash-object`, so it sees
+the working tree) and FAILS if a seam file has drifted from what its card records — i.e.
+someone changed the code but not the card. Re-bless a card by updating its body and
+bumping the recorded sha in the same change.
+
+A card is any globbed file whose frontmatter declares a `card:` key; other `.md` files
+under the globs are skipped (reported, not failed). Any `anchor:` line that does not
+parse exactly is a hard failure — a malformed anchor must never be silently ignored,
+or a typo'd sha on a multi-anchor card would leave that seam unguarded.
+
+Deterministic, stdlib-only, no LLM.
+Exit 0 = all cards fresh · 1 = stale/malformed/missing · 2 = environment error.
+
+The repo root defaults to this script's repo; override with ARCH_CARDS_ROOT (for tests).
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+from pathlib import Path
+
+CARD_GLOBS = ("ARCHITECTURE.md", "docs/arch/*.md")
+# Tolerate an optional BOM and CRLF line endings around the frontmatter fence.
+FRONTMATTER_RE = re.compile(r"\A﻿?---[ \t]*\r?\n(.*?)\r?\n---", re.S)
+CARD_KEY_RE = re.compile(r"^card:\s*\S", re.M)
+ANCHOR_LINE_RE = re.compile(r"^anchor:.*$", re.M)          # every anchor line, valid or not
+ANCHOR_RE = re.compile(r"^anchor:\s*(?P<path>\S+)\s+sha=(?P<sha>[0-9a-f]{40})\s*$")
+
+
+def repo_root() -> Path:
+    env = os.environ.get("ARCH_CARDS_ROOT")
+    return Path(env).resolve() if env else Path(__file__).resolve().parent.parent
+
+
+def blob_sha(repo: Path, rel_path: str) -> str | None:
+    if not (repo / rel_path).exists():
+        return None
+    out = subprocess.run(
+        ["git", "hash-object", rel_path],
+        cwd=repo, capture_output=True, text=True,
+    )
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def find_cards(repo: Path) -> list[Path]:
+    cards: list[Path] = []
+    for g in CARD_GLOBS:
+        cards.extend(sorted(repo.glob(g)))
+    return cards
+
+
+def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
+    """Return (exit_code, problems, n_cards, n_anchors, n_skipped)."""
+    # Preflight: git present and repo is a work tree, else a clear env error (exit 2).
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return 2, [(repo, "git executable not found on PATH")], 0, 0, 0
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return 2, [(repo, f"not a git work tree: {repo}")], 0, 0, 0
+
+    problems: list[tuple[Path, str]] = []
+    n_cards = n_anchors = n_skipped = 0
+
+    for f in find_cards(repo):
+        fm = FRONTMATTER_RE.search(f.read_text(encoding="utf-8"))
+        # Only files whose frontmatter declares `card:` are cards; skip stray .md.
+        if not fm or not CARD_KEY_RE.search(fm.group(1)):
+            n_skipped += 1
+            continue
+        n_cards += 1
+        anchor_lines = ANCHOR_LINE_RE.findall(fm.group(1))
+        if not anchor_lines:
+            problems.append((f, "card has no `anchor:` line in frontmatter"))
+            continue
+        for line in anchor_lines:
+            n_anchors += 1
+            m = ANCHOR_RE.match(line)
+            if not m:
+                problems.append((
+                    f,
+                    "malformed anchor (want 'anchor: <path> sha=<40-hex>'): " + line.strip(),
+                ))
+                continue
+            path, recorded = m.group("path"), m.group("sha")
+            current = blob_sha(repo, path)
+            if current is None:
+                problems.append((f, f"anchor seam file missing: {path}"))
+            elif current != recorded:
+                problems.append((
+                    f,
+                    f"seam drifted: {path}\n        recorded {recorded}\n        current  {current}",
+                ))
+
+    if n_cards == 0:
+        return 1, [(repo, "no architecture cards found")], 0, 0, n_skipped
+    return (1 if problems else 0), problems, n_cards, n_anchors, n_skipped
+
+
+def main() -> int:
+    repo = repo_root()
+    code, problems, n_cards, n_anchors, n_skipped = check(repo)
+
+    if code != 2:
+        summary = f"checked {n_cards} card(s), {n_anchors} anchor(s)"
+        if n_skipped:
+            summary += f", skipped {n_skipped} non-card file(s)"
+        print(summary)
+
+    if problems:
+        header = "ERROR" if code == 2 else f"FAILED ({len(problems)})"
+        print(f"\n{header}:")
+        for where, why in problems:
+            try:
+                shown: Path | str = where.relative_to(repo)
+            except ValueError:
+                shown = where
+            print(f"  ✗ {shown}: {why}")
+        if code == 1:
+            print(
+                "\nA seam changed (or an anchor is malformed) without its card being "
+                "updated.\nFix the card body and bump its recorded `anchor:` sha in the "
+                "same change."
+            )
+        return code
+
+    print("all architecture cards fresh ✓")
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
