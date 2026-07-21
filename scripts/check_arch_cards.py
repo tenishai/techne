@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Architecture-card staleness gate (techne pilot).
+"""Architecture-card staleness gate.
 
 Each architecture card (ARCHITECTURE.md, docs/arch/*.md) declares the seam file(s)
 it describes via `anchor:` lines in its YAML frontmatter, each pinned to the git blob
@@ -11,85 +11,137 @@ sha of that file when the card was last written/reviewed:
     ---
 
 This checker recomputes each anchor's current blob sha (`git hash-object`, so it sees
-the working tree) and FAILS if a seam file has drifted from what its card records —
-i.e. someone changed the code but not the card. Re-bless a card by updating its body
-and bumping the recorded sha in the same change.
+the working tree) and FAILS if a seam file has drifted from what its card records — i.e.
+someone changed the code but not the card. Re-bless a card by updating its body and
+bumping the recorded sha in the same change.
 
-Deterministic, stdlib-only, no LLM. Exit 0 = all cards fresh, 1 = stale/malformed.
+A card is any globbed file whose frontmatter declares a `card:` key; other `.md` files
+under the globs are skipped (reported, not failed). Any `anchor:` line that does not
+parse exactly is a hard failure — a malformed anchor must never be silently ignored,
+or a typo'd sha on a multi-anchor card would leave that seam unguarded.
+
+Deterministic, stdlib-only, no LLM.
+Exit 0 = all cards fresh · 1 = stale/malformed/missing · 2 = environment error.
+
+The repo root defaults to this script's repo; override with ARCH_CARDS_ROOT (for tests).
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
 CARD_GLOBS = ("ARCHITECTURE.md", "docs/arch/*.md")
-FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.S)
-ANCHOR_RE = re.compile(r"^anchor:\s*(\S+)\s+sha=([0-9a-f]{40})\s*$", re.M)
+# Tolerate an optional BOM and CRLF line endings around the frontmatter fence.
+FRONTMATTER_RE = re.compile(r"\A﻿?---[ \t]*\r?\n(.*?)\r?\n---", re.S)
+CARD_KEY_RE = re.compile(r"^card:\s*\S", re.M)
+ANCHOR_LINE_RE = re.compile(r"^anchor:.*$", re.M)          # every anchor line, valid or not
+ANCHOR_RE = re.compile(r"^anchor:\s*(?P<path>\S+)\s+sha=(?P<sha>[0-9a-f]{40})\s*$")
 
 
-def blob_sha(rel_path: str) -> str | None:
-    p = REPO / rel_path
-    if not p.exists():
+def repo_root() -> Path:
+    env = os.environ.get("ARCH_CARDS_ROOT")
+    return Path(env).resolve() if env else Path(__file__).resolve().parent.parent
+
+
+def blob_sha(repo: Path, rel_path: str) -> str | None:
+    if not (repo / rel_path).exists():
         return None
     out = subprocess.run(
         ["git", "hash-object", rel_path],
-        cwd=REPO, capture_output=True, text=True,
+        cwd=repo, capture_output=True, text=True,
     )
     return out.stdout.strip() if out.returncode == 0 else None
 
 
-def find_cards() -> list[Path]:
+def find_cards(repo: Path) -> list[Path]:
     cards: list[Path] = []
     for g in CARD_GLOBS:
-        cards.extend(sorted(REPO.glob(g)))
+        cards.extend(sorted(repo.glob(g)))
     return cards
 
 
-def main() -> int:
-    cards = find_cards()
-    if not cards:
-        print("no architecture cards found", file=sys.stderr)
-        return 1
+def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
+    """Return (exit_code, problems, n_cards, n_anchors, n_skipped)."""
+    # Preflight: git present and repo is a work tree, else a clear env error (exit 2).
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return 2, [(repo, "git executable not found on PATH")], 0, 0, 0
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return 2, [(repo, f"not a git work tree: {repo}")], 0, 0, 0
 
-    stale: list[tuple[Path, str]] = []
-    n_anchors = 0
-    for card in cards:
-        fm = FRONTMATTER_RE.search(card.read_text())
-        if not fm:
-            stale.append((card, "no frontmatter block"))
+    problems: list[tuple[Path, str]] = []
+    n_cards = n_anchors = n_skipped = 0
+
+    for f in find_cards(repo):
+        fm = FRONTMATTER_RE.search(f.read_text(encoding="utf-8"))
+        # Only files whose frontmatter declares `card:` are cards; skip stray .md.
+        if not fm or not CARD_KEY_RE.search(fm.group(1)):
+            n_skipped += 1
             continue
-        anchors = ANCHOR_RE.findall(fm.group(1))
-        if not anchors:
-            stale.append((card, "no `anchor:` lines in frontmatter"))
+        n_cards += 1
+        anchor_lines = ANCHOR_LINE_RE.findall(fm.group(1))
+        if not anchor_lines:
+            problems.append((f, "card has no `anchor:` line in frontmatter"))
             continue
-        for path, recorded in anchors:
+        for line in anchor_lines:
             n_anchors += 1
-            current = blob_sha(path)
+            m = ANCHOR_RE.match(line)
+            if not m:
+                problems.append((
+                    f,
+                    "malformed anchor (want 'anchor: <path> sha=<40-hex>'): " + line.strip(),
+                ))
+                continue
+            path, recorded = m.group("path"), m.group("sha")
+            current = blob_sha(repo, path)
             if current is None:
-                stale.append((card, f"anchor seam file missing: {path}"))
+                problems.append((f, f"anchor seam file missing: {path}"))
             elif current != recorded:
-                stale.append((
-                    card,
-                    f"seam drifted: {path}\n"
-                    f"        recorded {recorded}\n"
-                    f"        current  {current}",
+                problems.append((
+                    f,
+                    f"seam drifted: {path}\n        recorded {recorded}\n        current  {current}",
                 ))
 
-    print(f"checked {len(cards)} card(s), {n_anchors} anchor(s)")
-    if stale:
-        print(f"\nSTALE ({len(stale)}):")
-        for card, why in stale:
-            print(f"  ✗ {card.relative_to(REPO)}: {why}")
-        print(
-            "\nA seam changed without its card. Update the card body and bump its "
-            "recorded `anchor:` sha in the same change."
-        )
-        return 1
+    if n_cards == 0:
+        return 1, [(repo, "no architecture cards found")], 0, 0, n_skipped
+    return (1 if problems else 0), problems, n_cards, n_anchors, n_skipped
+
+
+def main() -> int:
+    repo = repo_root()
+    code, problems, n_cards, n_anchors, n_skipped = check(repo)
+
+    if code != 2:
+        summary = f"checked {n_cards} card(s), {n_anchors} anchor(s)"
+        if n_skipped:
+            summary += f", skipped {n_skipped} non-card file(s)"
+        print(summary)
+
+    if problems:
+        header = "ERROR" if code == 2 else f"FAILED ({len(problems)})"
+        print(f"\n{header}:")
+        for where, why in problems:
+            try:
+                shown: Path | str = where.relative_to(repo)
+            except ValueError:
+                shown = where
+            print(f"  ✗ {shown}: {why}")
+        if code == 1:
+            print(
+                "\nA seam changed (or an anchor is malformed) without its card being "
+                "updated.\nFix the card body and bump its recorded `anchor:` sha in the "
+                "same change."
+            )
+        return code
+
     print("all architecture cards fresh ✓")
-    return 0
+    return code
 
 
 if __name__ == "__main__":

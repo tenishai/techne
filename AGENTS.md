@@ -21,10 +21,11 @@ deliberately NOT a portability seam", etc.
 `anchor:` sha in the card's frontmatter (the git blob sha of the seam file the card
 describes). A card whose recorded anchor sha no longer matches the seam file is *stale*.
 
-**Staleness is enforced, not hoped for.** `scripts/check_arch_cards.py` recomputes each
-card's anchor sha and fails if a seam drifted from its card. Run it locally before you
-push; CI runs it on every PR. Re-bless a card by updating its body and bumping its
-recorded sha together.
+**Staleness is checked, not hoped for.** `scripts/check_arch_cards.py` recomputes each
+card's anchor sha and fails if a seam drifted from its card (or an anchor is malformed).
+Run it locally before you push. Wiring it into CI to fail every PR on drift is a planned
+follow-up (see #383). Re-bless a card by updating its body and bumping its recorded sha
+together.
 
 ```
 python scripts/check_arch_cards.py
