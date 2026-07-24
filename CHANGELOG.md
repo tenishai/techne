@@ -5,6 +5,18 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-24
+
+### Added
+
+- **Inter-session coordination mailbox** (#376, #378, #379) — live Claude sessions on one host can message each other over a `coord` bus (`techne_send` / `techne_inbox` / `techne_threads`): broadcast + direct addressing, session aliases, threaded replies, and a collision warning when two sessions claim the same branch or worktree. Phase 1 (core mailbox) + Phase 2 (aliases, threads, collision warning).
+- **Architecture cards** (#383, #384) — an in-repo repo card (`ARCHITECTURE.md`) plus per-seam cards (`docs/arch/*.md`) with a git-anchored freshness gate and `AGENTS.md` wiring, so an agent grasps a subsystem from its card before reading source.
+- **Session-end Bash backfill** (#371, #375) — capture can backfill Bash activity at session end behind a shared read-only denylist, restoring partial visibility for otherwise-uncaptured Bash-only sessions.
+
+### Changed
+
+- **Honest edit-rail attribution** (#377) — utilization attributes edits at symbol granularity, turn-windowed, for truthful read-vs-write accounting.
+
 ## [0.11.0] — 2026-07-16
 
 ### Added
