@@ -54,8 +54,12 @@ tests/eval/
                            # rank-aware metrics (recall_at_k/mrr/false_positive_rate/
                            # aggregate_gold, #385)
   test_recall_eval.py     # pytest -m eval runner; prints table, writes JSONL
-  retrieval_gold.yaml     # #385: class-tagged gold tasks (exact/paraphrase/filter/negative)
-  test_retrieval_gate.py  # pytest -m eval_gate runner; prints per-task/per-class table
+  retrieval_gold.yaml     # #385: class-tagged gold tasks (exact/paraphrase/filter/negative);
+                           # also carries #399's config_vec: block (same 24 tasks)
+  test_retrieval_gate.py  # pytest -m eval_gate runner (FTS-only); prints per-task/per-class table
+  conftest.py              # #399: pinned_model2vec fixture (reset+pin singleton, skip-when-absent)
+  test_retrieval_gate_vec.py    # #399: pytest -m eval_vec gate runner (hybrid, use_vectors=True)
+  test_ranking_ablation_vec.py  # #399: pytest -m eval_vec RRF-vs-simple ablation (report-only)
   results/                # JSONL outputs (gitignored)
   EVAL.md, PHASE0.md      # (M2) methodology + frozen baseline scores + gate number
 ```
@@ -105,6 +109,74 @@ arm** (M3 / v2), which is where paraphrase retrieval will actually be gated.
 
 Run: `pytest -m eval_gate -s`. Excluded from the default suite via the
 `eval_gate` marker (same `addopts` exclusion pattern as `eval`/`eval_llm`).
+
+## Vector/hybrid retrieval gate + RRF-vs-simple ablation (#399)
+
+The VECTOR arm the #385 section above deferred to. Reuses the SAME 24-task
+gold set and `scoring.py` rank-aware metrics, but runs `search()` with
+`use_vectors=True` (BM25 + vector, RRF-fused) instead of FTS-only, reading a
+new `config_vec:` block in `retrieval_gold.yaml` (`config:` — #385's FTS
+gate — is untouched).
+
+**Determinism — pin model2vec.** The vector backend is normally AUTO-selected
+(model2vec on py3.14+/fastembed-absent, else fastembed — `core/embeddings.py`),
+which is python-version-dependent and would make scores non-reproducible
+across environments. `tests/eval/conftest.py`'s `pinned_model2vec` fixture
+resets the process-wide embedding singleton and rebuilds it pinned to
+model2vec/potion-base-8M — a numpy-only static backend, byte-identical
+run-to-run — BEFORE the test seeds the corpus or calls `search()`. Order
+matters: `_get_embedding_model()` only reads its `config` argument on the
+first build in a process, so the pin must happen before any unconfigured call
+(a bare `search()`/`search_vec()`/`backfill_vectors()` from an earlier test in
+the same session would otherwise have already locked the singleton to AUTO).
+
+**Skip-when-absent (CI-safe).** The fixture skips (does not fail) unless
+`sqlite_vec` imports, an embedding backend is installed, and the pinned model
+is already in the local Hugging Face cache. The cache probe goes through
+`_get_embedding_model(cfg, allow_download=False)`, which sets `HF_HUB_OFFLINE=1`
+for the call and raises (`LocalEntryNotFoundError`, backend-dependent) instead
+of blocking on a Hub download when the cache misses — same contract as
+`test_recall_eval_llm.py`'s resolver-returns-None skip, just for the vector
+backend instead of an LLM.
+
+**Backfill is mandatory.** `seed()` only populates the FTS index; the
+`*_vec` tables don't exist until `backfill_vectors(db_path)` runs. Skipping it
+silently degrades `search(use_vectors=True)` to FTS-only and paraphrase scores
+collapse back to ~0 — the exact regression this gate exists to catch.
+
+**`paraphrase` is gated here** (unlike #385's FTS gate) — RRF-fused vector
+recall is exactly the mechanism meant to serve the zero-literal-token-overlap
+queries FTS structurally cannot. Frozen floors, same observed-minus-0.15
+tolerance convention as #385:
+
+| class | recall@5 floor | recall@10 floor | mrr floor |
+|---|---|---|---|
+| exact | 0.85 | 0.85 | 0.85 |
+| filter | 0.85 | 0.85 | 0.85 |
+| paraphrase | 0.35 | 0.517 | 0.0 (clamped — see yaml comment) |
+| negative | — (FPR ceiling 0.0, no slack, same as #385) | | |
+
+Measured baseline (2026-07-25, `use_vectors=True`, model2vec/potion-base-8M
+pinned, `half_life_days=30.0`): exact/filter/negative held their FTS-only
+baseline exactly (1.0/1.0/1.0 recall, 0.0 FPR — RRF keeps an already-rank-1
+FTS hit at rank 1, so no regression); paraphrase went from 0.0/0.0/0.0
+(FTS-only) to recall@5=0.5, recall@10=0.667, mrr=0.144.
+
+**RRF-vs-simple ablation** (`test_ranking_ablation_vec.py`, same marker,
+report-only — asserts nothing beyond `len(results) <= limit`). Compares
+techne's actual RRF fusion (`search(..., use_vectors=True)`) against a
+"simple" union baseline that calls `search_vec()`/`search_fts()` directly
+(vec-first by ascending distance, then lex-only rows appended, deduped,
+truncated to the limit — no `_rrf_fuse`/`_rerank`/`_mmr_reorder`). Measured:
+simple beats RRF on `paraphrase` (recall@5 0.667 vs 0.5, recall@10 1.0 vs
+0.667, mrr 0.546 vs 0.144); RRF ties simple on `exact`/`filter`/`negative`
+(both arms are 1.0/1.0/1.0/0.0 there — both channels already agree). This is
+the expected shape: RRF's rank-smoothing helps when channels agree and can
+mute a lone strong signal when they don't; a plain union preserves that lone
+signal.
+
+Run: `pytest -m eval_vec -s`. Excluded from the default suite via the
+`eval_vec` marker (same `addopts` exclusion pattern as `eval`/`eval_gate`).
 
 ## Milestones
 - **M1 (done)** — corpus + schema + scoring + 3 starter tasks + runner; soft

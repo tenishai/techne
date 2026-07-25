@@ -60,6 +60,47 @@ config:
   negative:
     fpr_ceiling: 0.0
 
+# VECTOR-arm config (techne#399). Reuses the SAME 24 tasks below via
+# search(..., use_vectors=True) with the model2vec/potion-base-8M singleton
+# pinned (see tests/eval/conftest.py's pinned_model2vec fixture) — RRF-fused
+# BM25 + vector recall, not FTS-only. `paraphrase` gets a real floor here
+# (unlike `config:` above) because RRF fusion is exactly the mechanism meant
+# to serve zero-token-overlap queries that the FTS-only path structurally
+# cannot.
+#
+# Observed baseline (2026-07-25, use_vectors=True, model2vec/potion-base-8M
+# pinned, half_life_days=30.0 — measured via test_retrieval_gate_vec.py):
+#   exact     : recall@5=1.0   recall@10=1.0   mrr=1.0    (unchanged vs FTS-only)
+#   filter    : recall@5=1.0   recall@10=1.0   mrr=1.0    (unchanged vs FTS-only)
+#   negative  : fpr=0.0                                   (unchanged vs FTS-only)
+#   paraphrase: recall@5=0.5   recall@10=0.667 mrr=0.144  (was 0/0/0 FTS-only)
+# No class regressed with vectors on — exact/filter/negative held their FTS
+# baseline exactly (RRF keeps an already-rank-1 FTS hit at rank 1), so this is
+# a strict improvement, not a tradeoff.
+config_vec:
+  k_values: [5, 10]
+  exact:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.85
+  filter:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.85
+  # paraphrase is GATED here (unlike config: above) — floors at observed − 0.15,
+  # same tolerance convention as exact/filter/recall_baseline.yaml.
+  paraphrase:
+    recall_at_5_floor: 0.35
+    recall_at_10_floor: 0.517
+    # NO mrr_floor — paraphrase is gated on RECALL only (its meaningful axis),
+    # mirroring #385's negative-gated-on-FPR-only. The absolute -0.15 tolerance
+    # goes negative on MRR 0.144 (a metric never < 0), so a floor would be a dead
+    # `mrr >= 0.0` assert; and on this 6-task sample recall@10=0.517 already binds
+    # tighter than any non-vacuous MRR floor. paraphrase MRR is still reported
+    # (and drives the RRF-vs-simple ablation), just not gated.
+  negative:
+    fpr_ceiling: 0.0
+
 tasks:
   # --- exact: literal token overlap with the gold doc ---------------------
   - id: exact-ratelimiter
