@@ -5,9 +5,9 @@ import pytest
 from techne.core.database import connect, init_db
 from techne.core.knowledge import store as store_knowledge
 from techne.core.search import (
-    _build_or_fts_query,
     _rerank,
     _sanitize_fts_query,
+    build_or_fts_query,
     search,
     search_fts,
     search_vec,
@@ -404,32 +404,32 @@ class TestPrepareFtsQuery:
 
 
 # ---------------------------------------------------------------------------
-# _build_or_fts_query tests (#70)
+# build_or_fts_query tests (#70)
 # ---------------------------------------------------------------------------
 
 
 class TestBuildOrFtsQuery:
     def test_single_term_returns_empty(self):
         """Single term is identical under AND/OR — fallback is a no-op."""
-        assert _build_or_fts_query("python") == ""
+        assert build_or_fts_query("python") == ""
 
     def test_empty_query_returns_empty(self):
-        assert _build_or_fts_query("   ") == ""
+        assert build_or_fts_query("   ") == ""
 
     def test_two_terms_joined_with_or(self):
-        assert _build_or_fts_query("mongoose pattern") == '"mongoose" OR "pattern"'
+        assert build_or_fts_query("mongoose pattern") == '"mongoose" OR "pattern"'
 
     def test_multi_term_joined_with_or(self):
-        result = _build_or_fts_query("structured log ingestion")
+        result = build_or_fts_query("structured log ingestion")
         assert result == '"structured" OR "log" OR "ingestion"'
 
     def test_special_chars_quoted_as_phrase_literals(self):
         """Operator chars inside a term are neutralised by phrase-quoting."""
-        result = _build_or_fts_query("pre-compact thing")
+        result = build_or_fts_query("pre-compact thing")
         assert result == '"pre-compact" OR "thing"'
 
     def test_embedded_double_quote_doubled(self):
-        result = _build_or_fts_query('say "hi"')
+        result = build_or_fts_query('say "hi"')
         # the bare token `"hi"` has its quotes doubled inside the phrase literal
         assert '"say"' in result
         assert ' OR ' in result

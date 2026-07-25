@@ -54,6 +54,31 @@ def test_search_symbols(db):
     assert [h["id"] for h in hits] == ["x"]
 
 
+def test_search_symbols_multi_term_or_fallback(db):
+    """techne#392: a multi-term query whose terms match DIFFERENT symbols returns
+    their union (OR fallback), not a misleading 0 — an empty result reads as a
+    stale/missing index and drives a needless cold source-read."""
+    _sym(db, "a", "PolicyStore", kind="class")
+    _sym(db, "b", "ScopeGrant", kind="class")
+    _sym(db, "c", "has_scope")
+
+    # No single symbol contains all three terms → the implicit-AND pass matches
+    # nothing; the OR fallback must return the union.
+    hits = search_symbols(db, "PolicyStore ScopeGrant has_scope")
+    assert {h["name"] for h in hits} == {"PolicyStore", "ScopeGrant", "has_scope"}
+
+
+def test_search_symbols_and_precision_preserved(db):
+    """The OR fallback fires ONLY when AND matches nothing: when one symbol
+    contains every term, the AND pass returns it alone — the fallback must not
+    flatten in partial (single-term) matches."""
+    _sym(db, "full", "handle", sig="def handle(policy, scope): ...")  # policy AND scope
+    _sym(db, "partial", "policy_only", sig="def policy_only(): ...")  # policy only
+
+    hits = search_symbols(db, "policy scope")
+    assert [h["id"] for h in hits] == ["full"]  # AND matched 'full'; no OR fallback
+
+
 def test_search_symbols_blank_query_returns_empty(db):
     """#103: blank/whitespace must not crash (FTS5 MATCH '' is a syntax error)."""
     _sym(db, "x", "authenticate", sig="def authenticate(user, token): ...")

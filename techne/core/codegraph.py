@@ -197,22 +197,42 @@ def symbol_at(db_path: Path, file: str, line: int) -> dict | None:
 
 
 def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
-    """FTS over symbol name + signature."""
-    from techne.core.search import prepare_fts_query
+    """FTS over symbol name + signature.
+
+    Multi-term queries use the #70 AND-then-OR pattern (techne#392): an
+    implicit-AND pass first — a symbol matching every term ranks highest — then,
+    ONLY if that returns nothing, an OR-of-terms fallback. Without the fallback a
+    multi-term query (e.g. "PolicyStore ScopeGrant has_scope") ANDs into a single
+    symbol's name+signature, matches nothing, and the empty result reads as "the
+    index is stale/missing" — driving a needless cold source-read. The fallback
+    returns the ranked union of per-term matches instead of a misleading 0.
+    """
+    from techne.core.search import build_or_fts_query, prepare_fts_query
 
     fts = prepare_fts_query(query)  # None when empty/all-punctuation → MATCH '' crash (#143)
     if fts is None:
         return []
     conn = plain_connect(db_path)
     try:
-        rows = conn.execute(
-            """SELECT s.id, s.file, s.name, s.kind, s.signature, s.file_hash,
-                      bm25(symbols_fts) AS rank
-               FROM symbols_fts f JOIN symbols s ON s.rowid = f.rowid
-               WHERE symbols_fts MATCH ? ORDER BY rank LIMIT ?""",
-            (fts, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        def _match(match_str: str) -> list[dict]:
+            rows = conn.execute(
+                """SELECT s.id, s.file, s.name, s.kind, s.signature, s.file_hash,
+                          bm25(symbols_fts) AS rank
+                   FROM symbols_fts f JOIN symbols s ON s.rowid = f.rowid
+                   WHERE symbols_fts MATCH ? ORDER BY rank LIMIT ?""",
+                (match_str, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        results = _match(fts)
+        if not results:
+            # techne#392: the AND pass matched nothing — retry as OR-of-terms so a
+            # multi-term query returns the union rather than a false empty index.
+            # build_or_fts_query returns "" for <2 terms (AND==OR → no re-query).
+            or_query = build_or_fts_query(query)
+            if or_query:
+                results = _match(or_query)
+        return results
     finally:
         conn.close()
 
