@@ -9,7 +9,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from scoring import is_nonanswer, score_answer, score_task  # noqa: E402
+from scoring import (  # noqa: E402
+    aggregate_gold,
+    false_positive_rate,
+    is_nonanswer,
+    mrr,
+    recall_at_k,
+    score_answer,
+    score_task,
+)
 
 _RESOLVER = {"g": "knowledge:1"}
 
@@ -47,7 +55,7 @@ def test_detail_carries_cost_axis_fields():
 def test_precision_zero_guarded_on_empty_retrieval():
     """The bare/null arm returns nothing — precision must be 0.0, never a ZeroDivision."""
     task = {"gold_keys": ["g"]}
-    score, detail = score_task(task, [], _RESOLVER)
+    _, detail = score_task(task, [], _RESOLVER)
     assert detail["precision"] == 0.0
     assert detail["token_cost"] == 0
     assert detail["n_results"] == 0
@@ -120,3 +128,118 @@ def test_score_answer_detail_shape():
     verdict = {"verdict": "INCORRECT", "reason": "bad answer"}
     _, detail = score_answer(_STAGE2_TASK, "some answer", verdict)
     assert set(detail.keys()) == {"verdict", "reason", "nonanswer"}
+
+
+# ---------------------------------------------------------------------------
+# Rank-aware retrieval metrics (techne#385) — recall_at_k, mrr,
+# false_positive_rate, aggregate_gold
+# ---------------------------------------------------------------------------
+
+
+def test_recall_at_k_full_hit_within_k():
+    assert recall_at_k({"knowledge:1"}, ["knowledge:1", "knowledge:2"], 5) == 1.0
+
+
+def test_recall_at_k_hit_outside_k_truncated():
+    """A hit at rank 6 does not count toward recall@5."""
+    ranked = [f"knowledge:{i}" for i in range(1, 7)]  # gold is knowledge:6, rank 6
+    assert recall_at_k({"knowledge:6"}, ranked, 5) == 0.0
+    assert recall_at_k({"knowledge:6"}, ranked, 10) == 1.0
+
+
+def test_recall_at_k_partial_hit_multiple_expected():
+    ranked = ["knowledge:1", "knowledge:2", "knowledge:3"]
+    assert recall_at_k({"knowledge:1", "knowledge:9"}, ranked, 5) == 0.5
+
+
+def test_recall_at_k_empty_expected_is_vacuous_pass():
+    assert recall_at_k(set(), [], 5) == 1.0
+    assert recall_at_k(set(), ["knowledge:1"], 5) == 1.0
+
+
+def test_recall_at_k_empty_ranked_no_expected_hit():
+    assert recall_at_k({"knowledge:1"}, [], 5) == 0.0
+
+
+def test_mrr_first_rank_hit():
+    assert mrr({"knowledge:1"}, ["knowledge:1", "knowledge:2"]) == 1.0
+
+
+def test_mrr_third_rank_hit():
+    ranked = ["knowledge:9", "knowledge:8", "knowledge:1"]
+    assert mrr({"knowledge:1"}, ranked) == 1 / 3
+
+
+def test_mrr_no_hit_is_zero():
+    assert mrr({"knowledge:1"}, ["knowledge:9", "knowledge:8"]) == 0.0
+
+
+def test_mrr_empty_ranked_no_hit():
+    assert mrr({"knowledge:1"}, []) == 0.0
+
+
+def test_mrr_empty_expected_is_vacuous_pass():
+    assert mrr(set(), ["knowledge:1"]) == 1.0
+
+
+def test_mrr_uses_first_relevant_not_best():
+    """Multiple expected ids present — mrr uses whichever ranks FIRST, not the
+    highest-ranked among all expected (there's only one 'first')."""
+    ranked = ["knowledge:9", "knowledge:1", "knowledge:2"]
+    assert mrr({"knowledge:1", "knowledge:2"}, ranked) == 0.5  # rank 2
+
+
+def test_fpr_leak_at_top_scores_one():
+    assert false_positive_rate({"knowledge:1"}, ["knowledge:1", "knowledge:2"], 5) == 1.0
+
+
+def test_fpr_leak_outside_k_scores_zero():
+    ranked = [f"knowledge:{i}" for i in range(1, 7)]  # forbidden at rank 6
+    assert false_positive_rate({"knowledge:6"}, ranked, 5) == 0.0
+    assert false_positive_rate({"knowledge:6"}, ranked, 10) == 1.0
+
+
+def test_fpr_no_leak_scores_zero():
+    assert false_positive_rate({"knowledge:99"}, ["knowledge:1", "knowledge:2"], 5) == 0.0
+
+
+def test_fpr_empty_forbidden_scores_zero():
+    assert false_positive_rate(set(), ["knowledge:1"], 5) == 0.0
+
+
+def test_fpr_is_binary_not_fractional():
+    """Two forbidden ids both leaking still scores 1.0, not 2/2 fractional —
+    a single leak already fails the task (techne#118 must_exclude spirit)."""
+    ranked = ["knowledge:1", "knowledge:2"]
+    assert false_positive_rate({"knowledge:1", "knowledge:2"}, ranked, 5) == 1.0
+
+
+def test_aggregate_gold_means_per_class():
+    """Per-class means, NOT one blended positive-class mean (techne#385): a
+    regression in one servable class must not hide behind another's headroom."""
+    rows = [
+        {"class": "exact", "recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0, "fpr": 0.0},
+        {"class": "exact", "recall_at_5": 0.0, "recall_at_10": 0.5, "mrr": 0.5, "fpr": 0.0},
+        {"class": "paraphrase", "recall_at_5": 0.0, "recall_at_10": 0.0, "mrr": 0.0, "fpr": 0.0},
+        {"class": "filter", "recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0, "fpr": 0.0},
+        {"class": "negative", "recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0, "fpr": 1.0},
+    ]
+    agg = aggregate_gold(rows)
+    assert set(agg) == {"exact", "paraphrase", "filter", "negative"}
+    assert agg["exact"] == {
+        "recall_at_5": 0.5, "recall_at_10": 0.75, "mrr": 0.75, "fpr": 0.0, "n": 2,
+    }
+    assert agg["filter"]["recall_at_5"] == 1.0 and agg["filter"]["n"] == 1
+    assert agg["paraphrase"]["mrr"] == 0.0
+    assert agg["negative"]["fpr"] == 1.0 and agg["negative"]["n"] == 1
+
+
+def test_aggregate_gold_empty_input_is_empty_dict():
+    """No classes present → empty dict, never a ZeroDivisionError."""
+    assert aggregate_gold([]) == {}
+
+
+def test_aggregate_gold_only_keys_present_classes():
+    rows = [{"class": "exact", "recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0, "fpr": 0.0}]
+    agg = aggregate_gold(rows)
+    assert set(agg) == {"exact"}

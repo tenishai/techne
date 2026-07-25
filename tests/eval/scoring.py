@@ -89,7 +89,7 @@ def is_nonanswer(text: str) -> bool:
 
 
 def score_answer(
-    task: dict,  # noqa: ARG001 — reserved for future positive-task guard
+    _task: dict,  # reserved for a future positive-task guard; unused today
     answer: str,
     verdict: dict,
 ) -> tuple[float, dict]:
@@ -110,3 +110,93 @@ def score_answer(
         "nonanswer": is_nonanswer(answer),
     }
     return (1.0 if is_correct else 0.0), detail
+
+
+# ---------------------------------------------------------------------------
+# Rank-aware retrieval metrics (techne#385) — the recall-effectiveness eval's
+# score_task() above is rank-blind (a hit anywhere in the retrieved list counts
+# equally). These are pure, order-sensitive metrics for the retrieval-gate:
+# recall@k truncates to the top k before scoring, and mrr rewards hits that
+# rank higher. All three take `ranked: list[str]` — result ids in the exact
+# order search() returned them, built as f"{r['type']}:{r['id']}" (same
+# pattern as score_task's got_ids) — never raw dict rows, so these stay pure
+# and don't re-derive the id-building convention.
+# ---------------------------------------------------------------------------
+
+
+def recall_at_k(expected: set[str], ranked: list[str], k: int) -> float:
+    """Fraction of `expected` ids present in the top-k of `ranked`.
+
+    1.0 when `expected` is empty (vacuously satisfied — mirrors score_task's
+    `gold_ids` empty-set convention). Never raises on k <= 0 or empty ranked.
+    """
+    if not expected:
+        return 1.0
+    top_k = set(ranked[:k])
+    hits = expected & top_k
+    return len(hits) / len(expected)
+
+
+def mrr(expected: set[str], ranked: list[str]) -> float:
+    """1 / (rank of the first relevant hit), 0.0 if none of `expected` appear.
+
+    Rank is 1-based. 1.0 when `expected` is empty (nothing to find, no miss
+    possible) — mirrors recall_at_k's vacuous-pass convention.
+    """
+    if not expected:
+        return 1.0
+    for i, item in enumerate(ranked, start=1):
+        if item in expected:
+            return 1.0 / i
+    return 0.0
+
+
+def false_positive_rate(forbidden: set[str], ranked: list[str], k: int) -> float:
+    """1.0 if ANY `forbidden` id appears in the top-k of `ranked`, else 0.0.
+
+    Binary per-task leak indicator (not a fraction of `forbidden` matched) —
+    a single stale/deleted row surfacing is a full failure for that task,
+    same "whole-list, any-leak-fails" spirit as score_task's must_exclude_phrases
+    (techne#118). 0.0 when `forbidden` is empty (nothing to leak).
+    """
+    if not forbidden:
+        return 0.0
+    top_k = set(ranked[:k])
+    return 1.0 if (forbidden & top_k) else 0.0
+
+
+def aggregate_gold(per_task_results: list[dict]) -> dict:
+    """Aggregate per-task retrieval-gate results into PER-CLASS mean metrics.
+
+    Each item in `per_task_results` is expected to carry:
+      `class`      — "exact" | "paraphrase" | "filter" | "negative"
+      `recall_at_5`, `recall_at_10`, `mrr` — from recall_at_k/mrr, computed
+                     for every task (including negative, for the report).
+      `fpr`        — from false_positive_rate.
+
+    Returns ``{class_name: {recall_at_5, recall_at_10, mrr, fpr, n}, ...}`` —
+    one entry per class actually present in the input. Per-class rather than a
+    single blended aggregate ON PURPOSE (techne#385): a blended positive-class
+    mean lets a real regression in one class (e.g. exact recall 1.0→0.5) hide
+    behind another class's headroom (or behind paraphrase, which is pinned near
+    0 on the FTS-only path). The gate asserts each servable class's floor
+    SEPARATELY against these per-class means. Any mean over an empty group
+    never arises (only present classes are keyed); the group is never empty.
+    """
+    by_class: dict[str, list[dict]] = {}
+    for r in per_task_results:
+        by_class.setdefault(r.get("class", "unknown"), []).append(r)
+
+    def _mean(rows: list[dict], key: str) -> float:
+        return round(sum(r[key] for r in rows) / len(rows), 3) if rows else 0.0
+
+    return {
+        cls: {
+            "recall_at_5": _mean(rows, "recall_at_5"),
+            "recall_at_10": _mean(rows, "recall_at_10"),
+            "mrr": _mean(rows, "mrr"),
+            "fpr": _mean(rows, "fpr"),
+            "n": len(rows),
+        }
+        for cls, rows in by_class.items()
+    }
