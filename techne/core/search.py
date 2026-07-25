@@ -226,7 +226,14 @@ def _rerank(
     for r in candidates:
         rank = r.get("rank")
         if rank is None or r["type"] not in spread_by_type:
-            # No BM25 signal → neutral norm; the row ranks on recency/decay only.
+            # No BM25 signal (a pure vector-only hit reaching the merge path).
+            # 0.0 is the per-type FLOOR on the [0,1] norm scale, not a midpoint,
+            # so such a row leans entirely on recency/decay and can be demoted
+            # below rank-bearing peers — and, since the merge truncates to
+            # limit, possibly below the cut. Accepted: `distance` and BM25
+            # `rank` aren't foldable onto one scale, and this is the rare
+            # vec-only-on-federation case; the common fts+vec overlap keeps its
+            # FTS rank (Layer 1). (techne#401 / #402 review — Prudence.)
             r["_norm_bm25"] = 0.0
             continue
         max_r, spread = spread_by_type[r["type"]]

@@ -157,6 +157,11 @@ def test_search_hybrid_vec_first_union(db_path, monkeypatch) -> None:
     assert by_id[2]["match_source"] == "fts"
     assert all(r["fusion"] == "vec_first" for r in results)
     assert all("rrf_score" not in r for r in results)
+    # Layer 1 (techne#402 review): the fts+vec overlap row carries the FTS
+    # `rank` forward so downstream FTS-aware consumers (federation's
+    # merge_and_rank → _rerank) still see it; a pure vec row has only distance.
+    assert by_id[1]["rank"] == -1.0
+    assert "rank" not in by_id[3]
 
 
 def test_search_hybrid_marks_match_source_per_channel(db_path, monkeypatch) -> None:
