@@ -903,8 +903,11 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             id_col = "rowid" if tbl == "threads" else "id"
             extra_where = " AND t.superseded_by IS NULL" if tbl == "knowledge" else ""
             # techne#382: a knowledge row edited in place carries vec_stale=1, so
-            # re-embed it alongside never-embedded rows. Other tables have no
-            # in-place content-edit path, so they keep the plain missing-only set.
+            # re-embed it alongside never-embedded rows. Knowledge is the only
+            # table edited via a plain UPDATE (stable rowid → a stale embedding
+            # lingers on a live row). observations are append-only; threads rotate
+            # the rowid via INSERT OR REPLACE (old embedding orphaned on a dead
+            # rowid, new summary re-embedded as missing), so neither needs a flag.
             missing = f"t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl})"
             unembedded = f"({missing} OR t.vec_stale = 1)" if tbl == "knowledge" else missing
             # Loop until no un-embedded rows remain — one call must fully re-embed a
