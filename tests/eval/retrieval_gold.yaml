@@ -1,0 +1,242 @@
+# Retrieval-correctness regression gate (#385). Extends the #68/#118 recall
+# harness with a class-tagged task set that isolates FOUR distinct retrieval
+# behaviors instead of one blended recall number:
+#
+#   exact       — query shares literal tokens with the gold doc
+#   paraphrase  — query shares ZERO literal (post-porter-stem) tokens with the
+#                 gold doc; a natural-language rephrase. FTS is lexical, not
+#                 semantic, so this class is EXPECTED to score low under
+#                 use_vectors=False — that gap is itself the signal this class
+#                 exists to protect: a future change should not make it worse.
+#   filter      — gold doc reachable only when table= narrows correctly; a
+#                 same-text distractor lives in a different table and must
+#                 never leak in regardless of table scoping.
+#   negative    — a lexically-tempting distractor (hard-deleted, or a stale
+#                 superseded revision) that must never surface even though it
+#                 shares literal tokens with the query.
+#
+# Gold evidence is referenced by logical key, resolved to type:id via
+# seed_eval_db.seed()'s #385 gold block — never hardcoded ids.
+#
+# Run explicitly (excluded from the default unit suite via addopts):
+#   pytest -m eval_gate -s
+
+config:
+  k_values: [5, 10]
+  # PER-CLASS floors, asserted SEPARATELY (techne#385). A single blended
+  # positive-class mean was rejected in review: it lets a real regression in
+  # one servable class hide behind another class's headroom (e.g. exact recall
+  # dropping 1.0→0.5 still clears a 0.5 blended floor because filter=1.0 and
+  # paraphrase=0.0 average back up). Each class the FTS-only path can actually
+  # serve gets its own floor at observed − 0.15 (recall_baseline.yaml's
+  # tolerance convention).
+  #
+  # Observed baseline (2026-07-25, FTS-only, use_vectors=False):
+  #   exact   : recall@5=1.0  recall@10=1.0  mrr=1.0
+  #   filter  : recall@5=1.0  recall@10=1.0  mrr=1.0
+  #   negative: fpr=0.0
+  #   paraphrase (informational, NOT gated): recall@5=0.0 recall@10=0.0 mrr=0.0
+  #
+  # paraphrase is EXCLUDED from pass/fail: its tasks carry `deterministic:
+  # false`. Paraphrase queries share zero literal (post-porter-stem) tokens
+  # with their gold doc by construction, and FTS is lexical not semantic, so
+  # the FTS-only path structurally cannot serve them — gating the deterministic
+  # path on a capability it does not have would be dishonest. The 6 paraphrase
+  # tasks stay in this file (the gold set stays complete) as pre-authored
+  # targets for the future backend-pinned VECTOR arm; the runner reports their
+  # scores as informational only.
+  exact:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.85
+  filter:
+    recall_at_5_floor: 0.85
+    recall_at_10_floor: 0.85
+    mrr_floor: 0.85
+  # Negatives target 0.0 (nothing forbidden should ever surface); the observed
+  # baseline hit exactly 0.0 (deletion + supersession filtering both held even
+  # against lexically-tempting queries) — ceiling has NO slack; any leak is a
+  # regression.
+  negative:
+    fpr_ceiling: 0.0
+
+tasks:
+  # --- exact: literal token overlap with the gold doc ---------------------
+  - id: exact-ratelimiter
+    class: exact
+    query: "token bucket rate limiter client key refill"
+    table: knowledge
+    expected_keys: [g385_ratelimiter]
+    forbidden_keys: []
+
+  - id: exact-cacheinvalidation
+    class: exact
+    query: "cache invalidation write-through strategy stale reads"
+    table: knowledge
+    expected_keys: [g385_cacheinvalidation]
+    forbidden_keys: []
+
+  - id: exact-circuitbreaker
+    class: exact
+    query: "circuit breaker trips open consecutive downstream failures"
+    table: knowledge
+    expected_keys: [g385_circuitbreaker]
+    forbidden_keys: []
+
+  - id: exact-retrybackoff
+    class: exact
+    query: "retry backoff exponential delay jitter doubling wait time"
+    table: knowledge
+    expected_keys: [g385_retrybackoff]
+    forbidden_keys: []
+
+  - id: exact-tlsrotation
+    class: exact
+    query: "TLS certificate rotation web server active connections"
+    table: knowledge
+    expected_keys: [g385_tlsrotation]
+    forbidden_keys: []
+
+  - id: exact-dbpool
+    class: exact
+    query: "database connection pooling connections per service recycle"
+    table: knowledge
+    expected_keys: [g385_dbpool]
+    forbidden_keys: []
+
+  # --- paraphrase: zero literal-token overlap (verified via the porter
+  #     unicode61 tokenizer in a throwaway fts5 table, not eyeballed) --------
+  - id: paraphrase-ratelimiter
+    class: paraphrase
+    deterministic: false  # FTS-only can't serve zero-token-overlap; VECTOR-arm target
+    query: "How many calls can single caller make before we start rejecting extra load on our external interface"
+    table: knowledge
+    expected_keys: [g385_ratelimiter]
+    forbidden_keys: []
+
+  - id: paraphrase-cacheinvalidation
+    class: paraphrase
+    deterministic: false  # FTS-only can't serve zero-token-overlap; VECTOR-arm target
+    query: "When data changes how do we make sure stored copy never shows old information"
+    table: knowledge
+    expected_keys: [g385_cacheinvalidation]
+    forbidden_keys: []
+
+  - id: paraphrase-circuitbreaker
+    class: paraphrase
+    deterministic: false  # FTS-only can't serve zero-token-overlap; VECTOR-arm target
+    query: "Once several backend calls fail back to back the connector pauses briefly then tries again with one test call"
+    table: knowledge
+    expected_keys: [g385_circuitbreaker]
+    forbidden_keys: []
+
+  - id: paraphrase-retrybackoff
+    class: paraphrase
+    deterministic: false  # FTS-only can't serve zero-token-overlap; VECTOR-arm target
+    query: "When something goes wrong caller pauses progressively longer adding randomness before trying once more topping out near one minute"
+    table: knowledge
+    expected_keys: [g385_retrybackoff]
+    forbidden_keys: []
+
+  - id: paraphrase-tlsrotation
+    class: paraphrase
+    deterministic: false  # FTS-only can't serve zero-token-overlap; VECTOR-arm target
+    query: "How often do we swap out security credentials for our site does that disrupt anyone currently logged in"
+    table: knowledge
+    expected_keys: [g385_tlsrotation]
+    forbidden_keys: []
+
+  - id: paraphrase-dbpool
+    class: paraphrase
+    deterministic: false  # FTS-only can't serve zero-token-overlap; VECTOR-arm target
+    query: "What is maximum number of simultaneous links single caller may hold open to storage before unused ones get closed automatically"
+    table: knowledge
+    expected_keys: [g385_dbpool]
+    forbidden_keys: []
+
+  # --- filter: gold reachable only when table narrows; same-text distractor
+  #     lives in a different table ------------------------------------------
+  - id: filter-batch-compaction
+    class: filter
+    query: "nightly batch compaction job reclaim deleted row space archive table"
+    table: knowledge
+    expected_keys: [g385_filter_batch]
+    forbidden_keys: [g385_filter_batch_distractor]
+
+  - id: filter-log-retention
+    class: filter
+    query: "log retention policy fourteen days hot storage cold archive"
+    table: knowledge
+    expected_keys: [g385_filter_logretention]
+    forbidden_keys: [g385_filter_logretention_distractor]
+
+  - id: filter-sliding-window
+    class: filter
+    query: "sliding window counter burst control ratelimit module"
+    table: observations
+    expected_keys: [g385_filter_slidingwindow]
+    forbidden_keys: [g385_filter_slidingwindow_distractor]
+
+  - id: filter-test-suite
+    class: filter
+    query: "sliding window counter test suite twelve passed verified"
+    table: observations
+    expected_keys: [g385_filter_testsuite]
+    forbidden_keys: [g385_filter_testsuite_distractor]
+
+  - id: filter-flag-rollout
+    class: filter
+    query: "feature flag rollout percentage gating ramp error rate"
+    table: threads
+    expected_keys: [g385_filter_flagrollout]
+    forbidden_keys: [g385_filter_flagrollout_distractor]
+
+  - id: filter-queue-depth
+    class: filter
+    query: "queue depth backpressure alert threshold five hundred messages"
+    table: threads
+    expected_keys: [g385_filter_queuedepth]
+    forbidden_keys: [g385_filter_queuedepth_distractor]
+
+  # --- negative: lexically-tempting distractor must stay OUT of top-k ------
+  - id: negative-deleted-backup
+    class: negative
+    query: "backup schedule policy nightly full backup pg_dump S3 cold bucket"
+    table: all
+    expected_keys: []
+    forbidden_keys: [g385_neg_del_backup]
+
+  - id: negative-deleted-authmigration
+    class: negative
+    query: "auth provider migration Okta WorkOS SSO login"
+    table: all
+    expected_keys: []
+    forbidden_keys: [g385_neg_del_authmigration]
+
+  - id: negative-deleted-stagingregion
+    class: negative
+    query: "staging environment region AWS us-west-1 us-east-2 latency"
+    table: all
+    expected_keys: []
+    forbidden_keys: [g385_neg_del_stagingregion]
+
+  - id: negative-stale-oncall
+    class: negative
+    query: "on-call rotation cadence weekly Monday"
+    table: all
+    expected_keys: [g385_neg_sup_oncall_new]
+    forbidden_keys: [g385_neg_sup_oncall_old]
+
+  - id: negative-stale-redis
+    class: negative
+    query: "primary datastore session state Redis single-node"
+    table: all
+    expected_keys: [g385_neg_sup_redis_new]
+    forbidden_keys: [g385_neg_sup_redis_old]
+
+  - id: negative-stale-ci
+    class: negative
+    query: "CI runner pool size 10 concurrent workers"
+    table: all
+    expected_keys: [g385_neg_sup_ci_new]
+    forbidden_keys: [g385_neg_sup_ci_old]

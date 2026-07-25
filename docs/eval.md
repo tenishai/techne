@@ -49,13 +49,62 @@ is useful now and the judge question never gates it.
 ```
 tests/eval/
   recall_baseline.yaml    # frozen tasks + rubrics (M1: 3; M2: 5-10)
-  seed_eval_db.py         # deterministic synthetic corpus
-  scoring.py              # rubric scoring (recall@K + phrase coverage)
+  seed_eval_db.py         # deterministic synthetic corpus (incl. #385 gold block)
+  scoring.py              # rubric scoring (recall@K + phrase coverage) +
+                           # rank-aware metrics (recall_at_k/mrr/false_positive_rate/
+                           # aggregate_gold, #385)
   test_recall_eval.py     # pytest -m eval runner; prints table, writes JSONL
+  retrieval_gold.yaml     # #385: class-tagged gold tasks (exact/paraphrase/filter/negative)
+  test_retrieval_gate.py  # pytest -m eval_gate runner; prints per-task/per-class table
   results/                # JSONL outputs (gitignored)
   EVAL.md, PHASE0.md      # (M2) methodology + frozen baseline scores + gate number
 ```
 Run: `pytest -m eval -s`.
+
+## Retrieval-correctness regression gate (#385)
+Extends the harness above with a second, narrower gate that isolates FOUR
+distinct retrieval behaviors instead of one blended recall number, scored by
+rank-aware metrics (`recall_at_k`, `mrr`, `false_positive_rate` in
+`scoring.py` — order-sensitive, unlike `score_task`'s rank-blind rubric):
+
+| class | what it tests |
+|---|---|
+| `exact` | query shares literal tokens with the gold doc |
+| `paraphrase` | query shares **zero** literal (post-porter-stem) tokens with the gold doc — a natural-language rephrase |
+| `filter` | gold doc reachable only when `table=` narrows correctly; a same-text distractor lives in a different table |
+| `negative` | a lexically-tempting distractor (hard-deleted, or a stale superseded revision) that must never surface |
+
+Gold fixtures live in `seed_eval_db.py`'s clearly-delimited `#385 gold block`
+(append-only, new logical keys only — never touches the #68/#118 rows above
+it, so those frozen baselines don't shift). Tasks live in
+`retrieval_gold.yaml`, resolved via the same logical-key gold map.
+
+Like the recall eval, this gate is FTS-only and deterministic:
+`search(..., use_vectors=False)` with `half_life_days` pinned explicitly (no
+vector fusion — the vector backend is python-version-dependent — and no
+wall-clock recency drift).
+
+**Per-class floors, asserted separately.** The gate does NOT collapse the
+classes into one blended recall number — a single mean lets a real regression
+in one servable class hide behind another class's headroom (exact recall
+dropping 1.0→0.5 would still clear a 0.5 blended floor once filter=1.0 and
+paraphrase=0.0 average back up). Instead each servable class carries its own
+frozen floor in `retrieval_gold.yaml`'s `config:` block (`exact` and `filter`:
+recall@5 / recall@10 / mrr each ≥ observed − 0.15 ≈ 0.85; `negative`: FPR
+ceiling 0.0, no slack). Baseline (2026-07-25, FTS-only): exact and filter both
+1.0/1.0/1.0, negative FPR 0.0.
+
+**`paraphrase` is informational-only — NOT gated.** Its 6 tasks share zero
+literal (post-porter-stem) tokens with their gold doc by construction, and FTS
+is lexical not semantic, so the FTS-only path structurally cannot serve them
+(observed 0.0/0.0/0.0). Gating the deterministic path on a capability it does
+not have would be dishonest, so those tasks carry `deterministic: false` and
+the runner reports their scores but excludes them from pass/fail. They stay in
+the gold set as pre-authored targets for the future backend-pinned **VECTOR
+arm** (M3 / v2), which is where paraphrase retrieval will actually be gated.
+
+Run: `pytest -m eval_gate -s`. Excluded from the default suite via the
+`eval_gate` marker (same `addopts` exclusion pattern as `eval`/`eval_llm`).
 
 ## Milestones
 - **M1 (done)** — corpus + schema + scoring + 3 starter tasks + runner; soft

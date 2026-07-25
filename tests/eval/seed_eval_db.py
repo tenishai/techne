@@ -231,4 +231,249 @@ def seed(db_path: Path) -> dict[str, str]:
     #     test.  A model with no relevant memory should reply "I don't know."
     #     Adding a row here would defeat the task (it would be a positive hint).
 
+    # =========================================================================
+    # #385 gold block — retrieval-correctness regression gate
+    # (tests/eval/retrieval_gold.yaml + test_retrieval_gate.py)
+    #
+    # APPEND-ONLY: nothing above this line is touched. New rows only, new
+    # logical gold keys only — the #68/#118 frozen baselines must not shift.
+    # Vocabulary is deliberately disjoint from the #68/#118 corpus above
+    # (no "cabal"/"outbox"/"reflect"/"deploy"/"runbook"/"adapter" terms) so
+    # BM25 document-frequency stats for those queries stay unperturbed.
+    #
+    # Four query classes, each exercised via search(..., use_vectors=False):
+    #   exact       — query shares literal tokens with the gold doc
+    #   paraphrase  — query shares ZERO literal (post-porter-stem) tokens
+    #                 with the gold doc; a natural-language rephrase
+    #   filter      — gold doc reachable only when table= narrows correctly;
+    #                 a same-text distractor lives in a different table
+    #   negative    — a lexically-tempting distractor (deleted or a stale
+    #                 superseded revision) that must NEVER surface
+    # =========================================================================
+
+    # --- exact + paraphrase: one gold knowledge doc per topic serves BOTH an
+    #     exact-token query and a zero-overlap paraphrase query (retrieval_gold.yaml).
+    gold["g385_ratelimiter"] = "knowledge:%d" % store(
+        db_path,
+        "The public API enforces a token bucket rate limiter: each client key "
+        "refills at 100 tokens per minute, capping burst traffic.",
+        type="decision", tags="g385,exact", source="eval",
+    )
+    gold["g385_cacheinvalidation"] = "knowledge:%d" % store(
+        db_path,
+        "Cache invalidation uses a write-through strategy so every update lands "
+        "in the database and the cache simultaneously, avoiding stale reads.",
+        type="decision", tags="g385,exact", source="eval",
+    )
+    gold["g385_circuitbreaker"] = "knowledge:%d" % store(
+        db_path,
+        "Circuit breaker trips open after five consecutive downstream failures "
+        "and stays open for thirty seconds before allowing a trial request.",
+        type="decision", tags="g385,exact", source="eval",
+    )
+    gold["g385_retrybackoff"] = "knowledge:%d" % store(
+        db_path,
+        "Retry backoff uses exponential delay with full jitter, doubling the "
+        "wait time after each failed attempt up to a sixty second cap.",
+        type="decision", tags="g385,exact", source="eval",
+    )
+    gold["g385_tlsrotation"] = "knowledge:%d" % store(
+        db_path,
+        "TLS certificate rotation runs automatically every ninety days and "
+        "reloads the web server without dropping active connections.",
+        type="decision", tags="g385,exact", source="eval",
+    )
+    gold["g385_dbpool"] = "knowledge:%d" % store(
+        db_path,
+        "Database connection pooling caps the pool at twenty five connections "
+        "per service and recycles idle connections after ten minutes.",
+        type="decision", tags="g385,exact", source="eval",
+    )
+
+    # --- filter: gold + a same-text distractor in a DIFFERENT table. The
+    #     distractor is structurally unreachable when the task's table= param
+    #     is passed through, which is exactly the mechanism under test. Two
+    #     pairs per table direction (knowledge<->observations, observations
+    #     <->knowledge, threads<->knowledge).
+    gold["g385_filter_batch"] = "knowledge:%d" % store(
+        db_path,
+        "The nightly batch compaction job reclaims deleted row space in the "
+        "archive table and runs at 03:00 UTC.",
+        type="decision", tags="g385,filter", source="eval",
+    )
+    gold["g385_filter_logretention"] = "knowledge:%d" % store(
+        db_path,
+        "Log retention policy keeps application logs for fourteen days in hot "
+        "storage before rolling to cold archive storage.",
+        type="decision", tags="g385,filter", source="eval",
+    )
+    # distractors for the two knowledge-gold docs above go in observations;
+    # the two observations-gold docs + two threads-gold docs below carry
+    # their own distractors in knowledge (added after this conn block).
+    conn = connect(db_path)
+    try:
+        _batch_distractor_id = _add_observation_raw(
+            conn,
+            "Ran: nightly batch compaction job -- reclaimed deleted row space "
+            "in archive table at 03:00 UTC (dry run)",
+        )
+        _logretention_distractor_id = _add_observation_raw(
+            conn,
+            "Checked: log retention policy keeps logs fourteen days in hot "
+            "storage before rolling to cold archive (verified)",
+        )
+
+        # --- filter: gold in observations, distractor in knowledge ---
+        gold["g385_filter_slidingwindow"] = "observation:%d" % _add_observation_raw(
+            conn,
+            "Edited: ratelimit module -- added sliding window counter for "
+            "burst control",
+        )
+        gold["g385_filter_testsuite"] = "observation:%d" % _add_observation_raw(
+            conn,
+            "Ran pytest ratelimit test suite -- twelve passed, sliding window "
+            "counter verified",
+            tool_name="Bash",
+        )
+
+        # --- filter: gold in threads, distractor in knowledge ---
+        conn.execute(
+            """INSERT INTO threads (id, session_id, thread_num, label, summary,
+                                    resume_points, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+            (
+                "eval-thread-g385-flagrollout", _SESSION, 3,
+                "Feature flag rollout percentage gating",
+                "Tracking the staged rollout of feature flag percentage "
+                "gating; starting at five percent and ramping to one hundred "
+                "percent over two weeks pending error rate checks.",
+                "Last action: ramped to twenty five percent",
+            ),
+        )
+        gold["g385_filter_flagrollout"] = "thread:eval-thread-g385-flagrollout"
+
+        conn.execute(
+            """INSERT INTO threads (id, session_id, thread_num, label, summary,
+                                    resume_points, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
+            (
+                "eval-thread-g385-queuedepth", _SESSION, 4,
+                "Queue depth backpressure alerting",
+                "Tuning the queue depth backpressure alert threshold; alarms "
+                "fire when depth exceeds five hundred messages for over two "
+                "minutes.",
+                "Last action: raised threshold to five hundred",
+            ),
+        )
+        gold["g385_filter_queuedepth"] = "thread:eval-thread-g385-queuedepth"
+        conn.commit()
+    finally:
+        conn.close()
+
+    gold["g385_filter_slidingwindow_distractor"] = "knowledge:%d" % store(
+        db_path,
+        "Sliding window counter for burst control was added to the ratelimit "
+        "module, replacing the old fixed window approach.",
+        type="decision", tags="g385,filter", source="eval",
+    )
+    gold["g385_filter_testsuite_distractor"] = "knowledge:%d" % store(
+        db_path,
+        "The sliding window counter test suite has twelve passing cases "
+        "verifying burst control.",
+        type="fact", tags="g385,filter", source="eval",
+    )
+    gold["g385_filter_flagrollout_distractor"] = "knowledge:%d" % store(
+        db_path,
+        "Feature flag rollout percentage gating starts at five percent and "
+        "ramps to one hundred percent over two weeks pending error rate checks.",
+        type="decision", tags="g385,filter", source="eval",
+    )
+    gold["g385_filter_queuedepth_distractor"] = "knowledge:%d" % store(
+        db_path,
+        "Queue depth backpressure alert threshold fires when depth exceeds "
+        "five hundred messages for over two minutes.",
+        type="fact", tags="g385,filter", source="eval",
+    )
+    gold["g385_filter_batch_distractor"] = "observation:%d" % _batch_distractor_id
+    gold["g385_filter_logretention_distractor"] = (
+        "observation:%d" % _logretention_distractor_id
+    )
+
+    # --- negative (deletion): store then hard-delete. A regression that drops
+    #     the delete-filter would resurface these via pure keyword overlap.
+    gold["g385_neg_del_backup"] = "knowledge:%d" % (
+        _del_id := store(
+            db_path,
+            "Backup schedule policy runs a nightly full backup at 02:00 UTC "
+            "via pg_dump uploaded to the S3 cold bucket.",
+            type="fact", tags="g385,scratch", source="eval",
+        )
+    )
+    delete(db_path, _del_id)
+
+    gold["g385_neg_del_authmigration"] = "knowledge:%d" % (
+        _del_id := store(
+            db_path,
+            "Auth provider migration replaced Okta with WorkOS for SSO login "
+            "starting Q1 2026.",
+            type="decision", tags="g385,scratch", source="eval",
+        )
+    )
+    delete(db_path, _del_id)
+
+    gold["g385_neg_del_stagingregion"] = "knowledge:%d" % (
+        _del_id := store(
+            db_path,
+            "Staging environment region moved from AWS us-west-1 to us-east-2 "
+            "for latency improvements.",
+            type="fact", tags="g385,scratch", source="eval",
+        )
+    )
+    delete(db_path, _del_id)
+
+    # --- negative (supersession): the OLD revision is lexically closest to
+    #     the query (that's the trap) but must never surface once superseded;
+    #     the NEW revision is the live, correct answer.
+    _oncall_v1 = store(
+        db_path,
+        "On-call rotation cadence is weekly, rotating every Monday at 09:00.",
+        type="fact", tags="g385,oncall", source="eval",
+    )
+    gold["g385_neg_sup_oncall_old"] = "knowledge:%d" % _oncall_v1
+    _oncall_v2 = supersede(
+        db_path, _oncall_v1,
+        "On-call rotation cadence is now biweekly, rotating every other "
+        "Monday at 09:00.",
+        source="eval",
+    )
+    gold["g385_neg_sup_oncall_new"] = "knowledge:%d" % _oncall_v2
+
+    _redis_v1 = store(
+        db_path,
+        "Primary datastore for session state is Redis single-node.",
+        type="fact", tags="g385,redis", source="eval",
+    )
+    gold["g385_neg_sup_redis_old"] = "knowledge:%d" % _redis_v1
+    _redis_v2 = supersede(
+        db_path, _redis_v1,
+        "Primary datastore for session state is Redis Cluster with three "
+        "shards for high availability.",
+        source="eval",
+    )
+    gold["g385_neg_sup_redis_new"] = "knowledge:%d" % _redis_v2
+
+    _ci_v1 = store(
+        db_path,
+        "CI runner pool size is 10 concurrent workers.",
+        type="fact", tags="g385,ci", source="eval",
+    )
+    gold["g385_neg_sup_ci_old"] = "knowledge:%d" % _ci_v1
+    _ci_v2 = supersede(
+        db_path, _ci_v1,
+        "CI runner pool size is 25 concurrent workers after the autoscaling "
+        "upgrade.",
+        source="eval",
+    )
+    gold["g385_neg_sup_ci_new"] = "knowledge:%d" % _ci_v2
+
     return gold
