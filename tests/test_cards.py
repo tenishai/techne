@@ -99,6 +99,31 @@ def test_fill_card_summary_drops_pending(db, config):
     assert resolved["id"] == doc_id  # pointer still resolves
 
 
+def test_fill_card_summary_flags_vec_stale(db, config):
+    """techne#382: editing a card's gist in place flags the row for re-embed
+    (vec_stale=1), so backfill regenerates its vector instead of matching the
+    OLD gist. A fresh card is unflagged (its vector, if any, matches its gist)."""
+    from techne.core.database import connect
+
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db, source_url="u", doc_id=doc_id, source_version="v1", title="x"
+    )
+
+    def _vec_stale():
+        conn = connect(db)
+        try:
+            return conn.execute(
+                "SELECT vec_stale FROM knowledge WHERE id = ?", (card_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    assert _vec_stale() == 0  # freshly created — not flagged
+    assert fill_card_summary(db, card_id, "A crisp two-line gist of the session.")
+    assert _vec_stale() == 1  # gist edited in place → flagged for re-embed
+
+
 def test_resolve_card_fetches_document(db, config):
     doc_id = _doc(config, content="the full body to fetch on demand")
     card_id, _ = upsert_document_card(

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -132,7 +132,14 @@ CREATE TABLE IF NOT EXISTS knowledge (
     content_hash TEXT,
     anchor_git_sha TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Vector-index staleness flag (techne#382). Set to 1 by any path that edits
+    -- this row's `content` in place (e.g. cards.fill_card_summary) — the plain
+    -- connect() connection can't touch the vec0 table (techne#168), so it signals
+    -- drift here instead. backfill_vectors re-embeds rows where vec_stale=1 (in
+    -- addition to un-embedded rows) and clears the flag. Without this, an edited
+    -- row keeps its OLD embedding forever and semantic recall matches stale text.
+    vec_stale INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge(type);
 CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by);
@@ -1044,4 +1051,16 @@ END;
         # triple index covers its (session_id, obs_index_a) prefix.
         conn.execute("DROP INDEX IF EXISTS idx_thread_boundaries_session")
         conn.execute("INSERT INTO schema_version (version) VALUES (18)")
+    if from_version < 19 and to_version >= 19:
+        # techne#382: vector-index staleness flag. An in-place content edit left
+        # the row's OLD embedding resident (backfill only embeds MISSING rows), so
+        # semantic recall matched stale text forever. Additive column; existing
+        # rows default 0 (their current embedding matches their current content).
+        # Guard on table existence: minimal migration-test fixtures build only a
+        # subset of tables (a real techne DB always has `knowledge`).
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge'"
+        ).fetchone():
+            _add_column_if_missing(conn, "knowledge", "vec_stale", "INTEGER NOT NULL DEFAULT 0")
+        conn.execute("INSERT INTO schema_version (version) VALUES (19)")
     conn.commit()
