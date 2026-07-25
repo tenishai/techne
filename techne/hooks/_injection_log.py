@@ -77,16 +77,18 @@ def _approx_tokens(text: str) -> int:
 
 
 def _inclusion_score(r: Any) -> float | None:
-    """The signal that actually determined inclusion/order, when there is one.
+    """The FTS BM25 signal that contributed to ordering, when present.
 
     Since techne#401 the hybrid path is a vec-first union with no single fused
-    score, so report the per-channel raw signal instead: ``distance`` for a
-    vector hit (lower = nearer), else the FTS BM25 ``rank``. ``rrf_score`` is
-    still honoured first for any legacy/federation path that fuses. Budget-
-    selected session-start rows have none → None (their inclusion isn't a query
-    score, and that's honest).
+    score. We deliberately do NOT fold a vector ``distance`` (lower = nearer)
+    into the same column as BM25 ``rank`` (more-negative = better) — mixing two
+    opposite-signed scales would make this column non-comparable across rows
+    (#402 review). So report only the comparable FTS signal: ``rrf_score`` if a
+    legacy/federation path fused one, else BM25 ``rank``. Vector-only rows (no
+    ``rank``) and budget-selected session-start rows report None — their
+    inclusion isn't an FTS score, and that's honest.
     """
-    for key in ("rrf_score", "distance", "rank"):
+    for key in ("rrf_score", "rank"):
         v = _field(r, key)
         if isinstance(v, (int, float)):
             return round(v, 4)

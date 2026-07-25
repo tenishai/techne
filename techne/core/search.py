@@ -212,15 +212,26 @@ def _rerank(
     spread_by_type: dict[str, tuple[float, float]] = {}
     ranks_by_type: dict[str, list[float]] = {}
     for r in candidates:
-        ranks_by_type.setdefault(r["type"], []).append(r["rank"])
+        # A row may lack `rank`: a vector-only hit reaching the federation merge
+        # path (merge_and_rank → _rerank) carries `distance`, not BM25 `rank`.
+        # Skip it here so it neither crashes nor distorts the FTS rows' per-type
+        # min-max spread. (techne#401 / #402 review — Prudence.)
+        rank = r.get("rank")
+        if rank is not None:
+            ranks_by_type.setdefault(r["type"], []).append(rank)
     for t, ranks in ranks_by_type.items():
         mn, mx = min(ranks), max(ranks)
         spread_by_type[t] = (mx, mx - mn)  # (max_r, spread); spread >= 0
 
     for r in candidates:
+        rank = r.get("rank")
+        if rank is None or r["type"] not in spread_by_type:
+            # No BM25 signal → neutral norm; the row ranks on recency/decay only.
+            r["_norm_bm25"] = 0.0
+            continue
         max_r, spread = spread_by_type[r["type"]]
         # norm_bm25=1 for this table's best match (most-negative rank), 0 for worst.
-        r["_norm_bm25"] = (max_r - r["rank"]) / spread if spread else 1.0
+        r["_norm_bm25"] = (max_r - rank) / spread if spread else 1.0
 
     for r in candidates:
         # Preferred order: event_at (real-world subject-event time) →
@@ -792,7 +803,7 @@ def search(
     # NB: _rrf_fuse / RRF_K are intentionally retained as a library primitive —
     # the #399 ablation's RRF arm and a possible single-channel-floor fallback
     # (#401 candidate 4) reference them; they are simply no longer the default.
-    fts_keys = {(r["type"], r["id"]) for r in fts_results}
+    fts_by_key = {(r["type"], r["id"]): r for r in fts_results}
     seen: set[tuple] = set()
     out: list[dict] = []
 
@@ -802,7 +813,18 @@ def search(
             continue
         seen.add(key)
         row = dict(r)  # copy — don't mutate the caller's rows
-        row["match_source"] = "fts+vec" if key in fts_keys else "vec"
+        fts_row = fts_by_key.get(key)
+        if fts_row is not None:
+            row["match_source"] = "fts+vec"
+            # Carry the FTS BM25 `rank` onto the overlap row. Vec rows have only
+            # `distance`, but downstream FTS-aware consumers subscript `rank`
+            # (federation's merge_and_rank → _rerank). Pre-#401 the overlap row
+            # WAS the fts row, so it had `rank`; vec-first makes it a vec-row
+            # copy, so restore `rank` explicitly. (#402 review — Prudence.)
+            if "rank" in fts_row:
+                row["rank"] = fts_row["rank"]
+        else:
+            row["match_source"] = "vec"
         row["fusion"] = "vec_first"
         out.append(row)
 

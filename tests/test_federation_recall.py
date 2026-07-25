@@ -194,6 +194,43 @@ class TestMergesTeamResults:
         contents = [r.get("content") or "" for r in merged]
         assert any("asyncio" in c for c in contents), "Team row must be in merged result"
 
+    def test_merge_and_rank_handles_vec_first_rows(self):
+        """Regression (techne#401 / PR #402): merge_and_rank must not crash on the
+        rows a vec-enabled search() now emits.
+
+        The vec-first union (search.py) returns vector-channel rows: a pure
+        ``vec`` row carries ``distance`` but NO BM25 ``rank``, and an ``fts+vec``
+        overlap row carries both. _rerank subscripts ``rank`` hard, so before the
+        fix the pooled rerank raised KeyError on the federation merge path. The
+        existing federation tests missed this because their env has no embedding
+        backend → the vec channel is empty → only rank-bearing FTS rows flow.
+        Here we construct the vec-first rows directly, no backend needed.
+        """
+        from techne.core.federation import merge_and_rank
+
+        local_results = [
+            # fts+vec overlap — Layer 1 restores `rank` from the FTS row.
+            {"type": "knowledge", "id": 1, "content": "overlap hit",
+             "rank": -2.0, "distance": 0.10, "match_source": "fts+vec",
+             "fusion": "vec_first"},
+            # pure vector-only hit — NO `rank`; Layer 2 gives it a neutral norm.
+            {"type": "knowledge", "id": 2, "content": "vector-only hit",
+             "distance": 0.15, "match_source": "vec", "fusion": "vec_first"},
+            # plain FTS-only hit — has `rank`, unchanged path.
+            {"type": "knowledge", "id": 3, "content": "lexical hit",
+             "rank": -1.0, "match_source": "fts", "fusion": "vec_first"},
+        ]
+
+        # Must not raise, and must preserve every row (ranking only, no drops).
+        merged = merge_and_rank(
+            local_results, [], limit=20, recency_weight=0.3, bm25_weight=0.7,
+            half_life_days=30.0,
+        )
+        assert {r["id"] for r in merged} == {1, 2, 3}
+        # Scratch keys _rerank uses must be cleaned off the returned rows.
+        for r in merged:
+            assert "_norm_bm25" not in r and "_combined" not in r
+
     def test_team_rows_tagged_with_store_and_role(self, tmp_path):
         """Remote rows carry _store (connection name) and _role ('team')."""
         from techne.core.federation import fan_out_search
