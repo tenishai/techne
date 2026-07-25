@@ -220,10 +220,27 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
     )
     new_id = cur.lastrowid
 
-    conn.execute(
-        "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    # Atomic liveness guard (techne#390): `AND superseded_by IS NULL` so a
+    # concurrent supersede that already retired old_id — between our liveness read
+    # above and this write, which the Python check can't cover for _in_conn callers
+    # not holding BEGIN IMMEDIATE — can't ALSO succeed and leave two live 'current'
+    # rows. rowcount 0 = we lost the race: raise so the caller's transaction rolls
+    # back the revision we just inserted (no orphan) rather than silently no-op.
+    cur = conn.execute(
+        "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP "
+        "WHERE id = ? AND superseded_by IS NULL",
         (new_id, old_id),
     )
+    if cur.rowcount == 0:
+        won = conn.execute(
+            "SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)
+        ).fetchone()
+        won_by = won["superseded_by"] if won else None
+        raise ValueError(
+            f"Knowledge entry {old_id} was concurrently superseded"
+            + (f" by {won_by}" if won_by else "")
+            + "; supersede the latest revision instead"
+        )
     # Dependency cascade (techne#117): a fact that depended on the now-superseded
     # entry can no longer be trusted at face value — flip live dependents to
     # `uncertain`, atomically in this transaction. The replacement value is NOT
@@ -277,10 +294,26 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
             f"Survivor {survivor_id} is itself superseded by {survivor['superseded_by']}; "
             "retire into a live entry"
         )
-    conn.execute(
-        "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    # Atomic liveness guard (techne#390), mirroring _supersede_in_conn: the Python
+    # check above is a read→write TOCTOU for callers not under BEGIN IMMEDIATE, so
+    # gate the write on `AND superseded_by IS NULL` too. rowcount 0 = a concurrent
+    # supersede/retire already won → raise (caller rolls back) rather than
+    # double-write.
+    cur = conn.execute(
+        "UPDATE knowledge SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP "
+        "WHERE id = ? AND superseded_by IS NULL",
         (survivor_id, old_id),
     )
+    if cur.rowcount == 0:
+        won = conn.execute(
+            "SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)
+        ).fetchone()
+        won_by = won["superseded_by"] if won else None
+        raise ValueError(
+            f"Knowledge entry {old_id} was concurrently superseded"
+            + (f" by {won_by}" if won_by else "")
+            + "; retire the latest revision instead"
+        )
     # #117 cascade — identical to _supersede_in_conn: live dependents of the retired
     # entry go `uncertain` until reconfirmed. The survivor is NOT auto-propagated.
     _cascade_uncertain(conn, old_id)
