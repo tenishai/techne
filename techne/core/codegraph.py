@@ -207,7 +207,7 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
     index is stale/missing" — driving a needless cold source-read. The fallback
     returns the ranked union of per-term matches instead of a misleading 0.
     """
-    from techne.core.search import _build_or_fts_query, prepare_fts_query
+    from techne.core.search import build_or_fts_query, prepare_fts_query
 
     fts = prepare_fts_query(query)  # None when empty/all-punctuation → MATCH '' crash (#143)
     if fts is None:
@@ -228,8 +228,8 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
         if not results:
             # techne#392: the AND pass matched nothing — retry as OR-of-terms so a
             # multi-term query returns the union rather than a false empty index.
-            # _build_or_fts_query returns "" for <2 terms (AND==OR → no re-query).
-            or_query = _build_or_fts_query(query)
+            # build_or_fts_query returns "" for <2 terms (AND==OR → no re-query).
+            or_query = build_or_fts_query(query)
             if or_query:
                 results = _match(or_query)
         return results

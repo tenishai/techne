@@ -447,7 +447,7 @@ def search_fts(
         # with an OR-of-terms query; BM25 still ranks rows matching more (and
         # rarer) terms highest, so precision degrades gracefully.
         if not results:
-            or_query = _build_or_fts_query(query)
+            or_query = build_or_fts_query(query)
             if or_query:
                 results = _fts_match_rows(
                     conn, or_query, table, candidate_limit, include_archived=include_archived
@@ -515,7 +515,7 @@ def search_knowledge_conn(
 
     # #70: OR fallback when AND-pass returns nothing (same logic as search_fts)
     if not results:
-        or_query = _build_or_fts_query(query)
+        or_query = build_or_fts_query(query)
         if or_query:
             results = _fts_match_rows(
                 conn, or_query, "knowledge", candidate_limit, include_archived=False
@@ -1126,7 +1126,7 @@ def prepare_fts_query(query: str) -> str | None:
     return fts or None
 
 
-def _build_or_fts_query(query: str) -> str:
+def build_or_fts_query(query: str) -> str:
     """Build an OR-of-terms FTS5 query for the #70 empty-result fallback.
 
     Reuses :func:`_fts_terms` so the same phrase-literal escaping (quote
