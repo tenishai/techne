@@ -212,15 +212,33 @@ def _rerank(
     spread_by_type: dict[str, tuple[float, float]] = {}
     ranks_by_type: dict[str, list[float]] = {}
     for r in candidates:
-        ranks_by_type.setdefault(r["type"], []).append(r["rank"])
+        # A row may lack `rank`: a vector-only hit reaching the federation merge
+        # path (merge_and_rank → _rerank) carries `distance`, not BM25 `rank`.
+        # Skip it here so it neither crashes nor distorts the FTS rows' per-type
+        # min-max spread. (techne#401 / #402 review — Prudence.)
+        rank = r.get("rank")
+        if rank is not None:
+            ranks_by_type.setdefault(r["type"], []).append(rank)
     for t, ranks in ranks_by_type.items():
         mn, mx = min(ranks), max(ranks)
         spread_by_type[t] = (mx, mx - mn)  # (max_r, spread); spread >= 0
 
     for r in candidates:
+        rank = r.get("rank")
+        if rank is None or r["type"] not in spread_by_type:
+            # No BM25 signal (a pure vector-only hit reaching the merge path).
+            # 0.0 is the per-type FLOOR on the [0,1] norm scale, not a midpoint,
+            # so such a row leans entirely on recency/decay and can be demoted
+            # below rank-bearing peers — and, since the merge truncates to
+            # limit, possibly below the cut. Accepted: `distance` and BM25
+            # `rank` aren't foldable onto one scale, and this is the rare
+            # vec-only-on-federation case; the common fts+vec overlap keeps its
+            # FTS rank (Layer 1). (techne#401 / #402 review — Prudence.)
+            r["_norm_bm25"] = 0.0
+            continue
         max_r, spread = spread_by_type[r["type"]]
         # norm_bm25=1 for this table's best match (most-negative rank), 0 for worst.
-        r["_norm_bm25"] = (max_r - r["rank"]) / spread if spread else 1.0
+        r["_norm_bm25"] = (max_r - rank) / spread if spread else 1.0
 
     for r in candidates:
         # Preferred order: event_at (real-world subject-event time) →
@@ -737,19 +755,24 @@ def search(
     half_life_days: float = 30.0,
     include_archived: bool = True,
 ) -> list[dict]:
-    """Hybrid search: BM25 (FTS5) + vector (cosine) fused via Reciprocal
-    Rank Fusion.
+    """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
+    union (techne#401).
 
     With ``use_vectors=False``: returns BM25-only results (unchanged
     legacy behavior).
 
-    With ``use_vectors=True`` and vector deps installed: runs both
-    channels and fuses with RRF. Items present in BOTH channels are
-    boosted above items in just one (the desired property of fusion).
-    Returned rows include:
+    With ``use_vectors=True`` and vector deps installed: runs both channels
+    and returns the vector channel first (best-first by ascending distance),
+    then appends FTS-only hits. Rows present in BOTH channels keep their
+    vector-channel position; agreement is recorded as provenance, not a rank
+    boost. This replaces the earlier Reciprocal Rank Fusion: the #399 ablation
+    showed RRF's rank-sum buries a strong single-channel (vector-only) hit
+    beneath lexically-tempting FTS distractors, losing paraphrase recall@10
+    (0.667 vs 1.0) and MRR (0.144 vs 0.546) while only TYING on
+    exact/filter/negative. Returned rows include:
 
       - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
-      - ``rrf_score``: the fused score (when fusion ran)
+      - ``fusion``: ``"vec_first"`` — how order was decided
 
     When vec is requested but no vec results came back (extras not
     installed, vec tables empty, etc.), falls through to FTS-only —
@@ -777,39 +800,52 @@ def search(
     if not vec_results:
         return fts_results
 
-    # Build (type, id) → result-row map and per-channel rank lists.
-    # rank position is 1-based (1 = best); _rrf_fuse expects that shape.
-    by_key: dict[tuple, dict] = {}
-    fts_channel: list[tuple[tuple, int]] = []
-    vec_channel: list[tuple[tuple, int]] = []
-
-    for rank, r in enumerate(fts_results, start=1):
-        key = (r["type"], r["id"])
-        if key not in by_key:
-            row = dict(r)  # copy — don't mutate the caller's rows
-            row["match_source"] = "fts"
-            by_key[key] = row
-        fts_channel.append((key, rank))
-
-    for rank, r in enumerate(vec_results, start=1):
-        key = (r["type"], r["id"])
-        if key not in by_key:
-            row = dict(r)
-            row["match_source"] = "vec"
-            by_key[key] = row
-        else:
-            # Appeared in both channels — RRF will boost it; mark provenance.
-            by_key[key]["match_source"] = "fts+vec"
-        vec_channel.append((key, rank))
-
-    fused = _rrf_fuse([fts_channel, vec_channel])
-
+    # Vec-first union (techne#401). Take the vector channel first — it comes
+    # back already sorted best-first (ascending distance; search_vec sorts
+    # before truncating) — then append FTS-only hits in search_fts's own
+    # recency/BM25/decay order. Dedup on (type, id), truncate to limit.
+    # Cross-channel agreement is recorded as provenance (match_source="fts+vec")
+    # but no longer reweights order the way RRF's rank-sum did — that rank-sum
+    # was what buried strong single-channel vector hits (#399 ablation).
+    # NB: _rrf_fuse / RRF_K are intentionally retained as a library primitive —
+    # the #399 ablation's RRF arm and a possible single-channel-floor fallback
+    # (#401 candidate 4) reference them; they are simply no longer the default.
+    fts_by_key = {(r["type"], r["id"]): r for r in fts_results}
+    seen: set[tuple] = set()
     out: list[dict] = []
-    for key, score in fused[:limit]:
-        row = by_key[key]
-        row["rrf_score"] = score
+
+    for r in vec_results:
+        key = (r["type"], r["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        row = dict(r)  # copy — don't mutate the caller's rows
+        fts_row = fts_by_key.get(key)
+        if fts_row is not None:
+            row["match_source"] = "fts+vec"
+            # Carry the FTS BM25 `rank` onto the overlap row. Vec rows have only
+            # `distance`, but downstream FTS-aware consumers subscript `rank`
+            # (federation's merge_and_rank → _rerank). Pre-#401 the overlap row
+            # WAS the fts row, so it had `rank`; vec-first makes it a vec-row
+            # copy, so restore `rank` explicitly. (#402 review — Prudence.)
+            if "rank" in fts_row:
+                row["rank"] = fts_row["rank"]
+        else:
+            row["match_source"] = "vec"
+        row["fusion"] = "vec_first"
         out.append(row)
-    return out
+
+    for r in fts_results:
+        key = (r["type"], r["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        row = dict(r)  # copy — don't mutate the caller's rows
+        row["match_source"] = "fts"
+        row["fusion"] = "vec_first"
+        out.append(row)
+
+    return out[:limit]
 
 
 def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:

@@ -77,16 +77,22 @@ def _approx_tokens(text: str) -> int:
 
 
 def _inclusion_score(r: Any) -> float | None:
-    """The signal that actually determined inclusion/order, when there is one.
+    """The FTS BM25 signal that contributed to ordering, when present.
 
-    Prefer ``rrf_score`` (the fused score when search ran the hybrid vector path);
-    fall back to the raw FTS BM25 ``rank``. Budget-selected session-start rows
-    have neither → None (their inclusion isn't a query score, and that's honest).
+    Since techne#401 the hybrid path is a vec-first union with no single fused
+    score. We deliberately do NOT fold a vector ``distance`` (lower = nearer)
+    into the same column as BM25 ``rank`` (more-negative = better) — mixing two
+    opposite-signed scales would make this column non-comparable across rows
+    (#402 review). So report only the comparable FTS signal: ``rrf_score`` if a
+    legacy/federation path fused one, else BM25 ``rank``. Vector-only rows (no
+    ``rank``) and budget-selected session-start rows report None — their
+    inclusion isn't an FTS score, and that's honest.
     """
-    v = _field(r, "rrf_score")
-    if v is None:
-        v = _field(r, "rank")
-    return round(v, 4) if isinstance(v, (int, float)) else None
+    for key in ("rrf_score", "rank"):
+        v = _field(r, key)
+        if isinstance(v, (int, float)):
+            return round(v, 4)
+    return None
 
 
 def log_context_injection(
