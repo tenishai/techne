@@ -87,24 +87,26 @@ config_vec:
     recall_at_5_floor: 0.85
     recall_at_10_floor: 0.85
     mrr_floor: 0.85
-  # paraphrase is GATED on RECALL here (unlike config: above). Floors are LOOSER
-  # than exact/filter's observed−0.15: this is a 6-task class and its golds sit in
-  # the drift-fragile rank 4–10 band, where near-tie BLAS reordering across
-  # machines can push one in/out of top-k (e.g. paraphrase-tlsrotation). So floors
-  # tolerate a ±1-task boundary shift (observed r@5=0.5→floor 0.3; r@10=0.667→
-  # floor 0.5) yet still trip on a REAL regression — losing ≥2 golds, or the
-  # no-backfill catastrophe (FTS-only → paraphrase 0/0/0, which trips any positive
-  # floor). Tightening to observed−0.15 gained no teeth and risked a cross-machine
-  # false-trip (Prudence, PR #400).
+  # paraphrase is GATED here (a 6-task class whose golds sit in the drift-fragile
+  # rank 4–10 band, where near-tie BLAS reordering across machines can push one
+  # in/out of top-k — e.g. paraphrase-tlsrotation). Floors keep Prudence's PR#400
+  # rule: tolerate a ±1-task boundary shift, yet trip a REAL regression.
+  # RATCHETED for techne#401 (vec-first union replaced RRF). Post-fix observed on
+  # this class: r@5=0.667, r@10=1.0, MRR=0.546 (was RRF r@5=0.5, r@10=0.667,
+  # MRR=0.144). The floors now LOCK IN that win while staying boundary-tolerant:
+  #   - recall_at_10 0.8: trips the RRF regression (0.667 < 0.8) and the
+  #     no-backfill catastrophe (0.0), yet a single gold slipping rank 10→11
+  #     (r@10 1.0→0.833) still passes.
+  #   - mrr_floor 0.4 (NEW): MRR is the axis where vec-first wins most (0.546 vs
+  #     RRF 0.144) AND the most boundary-robust — it keys off the FIRST hit's
+  #     rank, not top-k membership at the fragile boundary. A 1-task rank-1→2
+  #     slip (mean → ~0.463) still passes; a relapse toward RRF (0.144) trips
+  #     hard. This floor is only non-vacuous BECAUSE the fix moved observed MRR
+  #     from 0.144 to 0.546 (the pre-fix -0.15 tolerance went negative → dead).
   paraphrase:
-    recall_at_5_floor: 0.3
-    recall_at_10_floor: 0.5
-    # NO mrr_floor — paraphrase is gated on RECALL only (its meaningful axis),
-    # mirroring #385's negative-gated-on-FPR-only. The absolute -0.15 tolerance
-    # goes negative on MRR 0.144 (a metric never < 0), so a floor would be a dead
-    # `mrr >= 0.0` assert; and on this 6-task sample recall@10=0.517 already binds
-    # tighter than any non-vacuous MRR floor. paraphrase MRR is still reported
-    # (and drives the RRF-vs-simple ablation), just not gated.
+    recall_at_5_floor: 0.5
+    recall_at_10_floor: 0.8
+    mrr_floor: 0.4
   negative:
     fpr_ceiling: 0.0
 

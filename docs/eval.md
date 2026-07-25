@@ -110,13 +110,14 @@ arm** (M3 / v2), which is where paraphrase retrieval will actually be gated.
 Run: `pytest -m eval_gate -s`. Excluded from the default suite via the
 `eval_gate` marker (same `addopts` exclusion pattern as `eval`/`eval_llm`).
 
-## Vector/hybrid retrieval gate + RRF-vs-simple ablation (#399)
+## Vector/hybrid retrieval gate + RRF-vs-simple ablation (#399; fusion changed in #401)
 
 The VECTOR arm the #385 section above deferred to. Reuses the SAME 24-task
 gold set and `scoring.py` rank-aware metrics, but runs `search()` with
-`use_vectors=True` (BM25 + vector, RRF-fused) instead of FTS-only, reading a
-new `config_vec:` block in `retrieval_gold.yaml` (`config:` — #385's FTS
-gate — is untouched).
+`use_vectors=True` — a **vec-first union** since #401 (the vector channel
+first by ascending distance, then FTS-only hits appended; agreement is
+provenance, not a rank boost) instead of FTS-only, reading a new `config_vec:`
+block in `retrieval_gold.yaml` (`config:` — #385's FTS gate — is untouched).
 
 **Determinism — pin model2vec.** The vector backend is normally AUTO-selected
 (model2vec on py3.14+/fastembed-absent, else fastembed — `core/embeddings.py`),
@@ -144,36 +145,38 @@ backend instead of an LLM.
 silently degrades `search(use_vectors=True)` to FTS-only and paraphrase scores
 collapse back to ~0 — the exact regression this gate exists to catch.
 
-**`paraphrase` is gated here** (unlike #385's FTS gate) — RRF-fused vector
+**`paraphrase` is gated here** (unlike #385's FTS gate) — vec-first hybrid
 recall is exactly the mechanism meant to serve the zero-literal-token-overlap
-queries FTS structurally cannot. Frozen floors, same observed-minus-0.15
-tolerance convention as #385:
+queries FTS structurally cannot. Floors keep #385's boundary-tolerance
+convention but were **ratcheted in #401** to lock in the vec-first win (full
+rationale in the `config_vec` comment):
 
 | class | recall@5 floor | recall@10 floor | mrr floor |
 |---|---|---|---|
 | exact | 0.85 | 0.85 | 0.85 |
 | filter | 0.85 | 0.85 | 0.85 |
-| paraphrase | 0.35 | 0.517 | 0.0 (clamped — see yaml comment) |
+| paraphrase | 0.5 | 0.8 | 0.4 |
 | negative | — (FPR ceiling 0.0, no slack, same as #385) | | |
 
-Measured baseline (2026-07-25, `use_vectors=True`, model2vec/potion-base-8M
-pinned, `half_life_days=30.0`): exact/filter/negative held their FTS-only
-baseline exactly (1.0/1.0/1.0 recall, 0.0 FPR — RRF keeps an already-rank-1
-FTS hit at rank 1, so no regression); paraphrase went from 0.0/0.0/0.0
-(FTS-only) to recall@5=0.5, recall@10=0.667, mrr=0.144.
+Measured baseline (2026-07-25, `use_vectors=True` = vec-first union,
+model2vec/potion-base-8M pinned, `half_life_days=30.0`): exact/filter/negative
+hold their FTS-only baseline exactly (1.0/1.0/1.0 recall, 0.0 FPR — vec-first
+keeps an already-rank-1 hit at rank 1, so no regression); paraphrase is
+recall@5=0.667, recall@10=1.0, mrr=0.546 (up from RRF's 0.5/0.667/0.144).
 
 **RRF-vs-simple ablation** (`test_ranking_ablation_vec.py`, same marker,
-report-only — asserts nothing beyond `len(results) <= limit`). Compares
-techne's actual RRF fusion (`search(..., use_vectors=True)`) against a
+report-only — asserts nothing beyond `len(results) <= limit`). Compares the
+**pre-#401 RRF fusion** — rebuilt in-test via `_rrf_fuse` over the two
+channels, since `search()` itself is no longer RRF — against the vec-first
 "simple" union baseline that calls `search_vec()`/`search_fts()` directly
 (vec-first by ascending distance, then lex-only rows appended, deduped,
-truncated to the limit — no `_rrf_fuse`/`_rerank`/`_mmr_reorder`). Measured:
-simple beats RRF on `paraphrase` (recall@5 0.667 vs 0.5, recall@10 1.0 vs
-0.667, mrr 0.546 vs 0.144); RRF ties simple on `exact`/`filter`/`negative`
-(both arms are 1.0/1.0/1.0/0.0 there — both channels already agree). This is
-the expected shape: RRF's rank-smoothing helps when channels agree and can
-mute a lone strong signal when they don't; a plain union preserves that lone
-signal.
+truncated to the limit — no `_rerank`/`_mmr_reorder`). Measured: simple beats
+RRF on `paraphrase` (recall@5 0.667 vs 0.5, recall@10 1.0 vs 0.667, mrr 0.546
+vs 0.144); RRF ties simple on `exact`/`filter`/`negative` (both arms are
+1.0/1.0/1.0/0.0 there — both channels already agree). This ablation is exactly
+what motivated #401: RRF's rank-smoothing helps when channels agree but mutes
+a lone strong signal when they don't; the vec-first union preserves that lone
+signal, and is now the default in `search()`.
 
 Run: `pytest -m eval_vec -s`. Excluded from the default suite via the
 `eval_vec` marker (same `addopts` exclusion pattern as `eval`/`eval_gate`).
