@@ -3,13 +3,13 @@
 Extends the #385 retrieval-correctness gate (test_retrieval_gate.py) with the
 SAME class-tagged 24-task gold set, scored the same rank-aware way
 (recall_at_k/mrr/false_positive_rate/aggregate_gold — scoring.py), but through
-the HYBRID path: `search(..., use_vectors=True)` (BM25 + vector, RRF-fused)
-instead of FTS-only. Reads `retrieval_gold.yaml`'s `config_vec:` block (NOT
-`config:` — that stays #385's untouched FTS gate).
+the HYBRID path: `search(..., use_vectors=True)` (BM25 + vector, vec-first
+union since techne#401) instead of FTS-only. Reads `retrieval_gold.yaml`'s
+`config_vec:` block (NOT `config:` — that stays #385's untouched FTS gate).
 
 The payoff over #385: `paraphrase` — zero literal-token-overlap queries that
 the FTS-only path structurally cannot serve — gets a real floor here, because
-RRF-fused vector recall is exactly the mechanism meant to serve them.
+vec-first hybrid recall is exactly the mechanism meant to serve them.
 
 Run explicitly (excluded from the default unit suite via addopts):
     pytest -m eval_vec -s
@@ -121,8 +121,8 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
                 f"mrr={m['mrr']}  fpr={m['fpr']}  (n={m['n']}, {gated})"
             )
 
-    # --- frozen per-class kill-gates (techne#399) ---
-    # Unlike #385, paraphrase IS gated here — RRF-fused vector recall is
+    # --- frozen per-class kill-gates (techne#399, ratcheted #401) ---
+    # Unlike #385, paraphrase IS gated here — vec-first hybrid recall is
     # exactly the mechanism meant to serve zero-token-overlap queries.
     for cls in ("exact", "filter", "paraphrase"):
         g = cfg[cls]
@@ -133,10 +133,9 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
         assert m["recall_at_10"] >= g["recall_at_10_floor"], (
             f"KILL-GATE [{cls}]: recall@10 {m['recall_at_10']} < floor {g['recall_at_10_floor']}"
         )
-        # MRR floored only where meaningful (exact/filter, floor 0.85). paraphrase
-        # carries no `mrr_floor` — gated on recall only (see config_vec comment):
-        # an absolute-tolerance floor on MRR 0.144 is negative→dead, and recall@10
-        # already binds tighter on this sample.
+        # MRR floored where meaningful: exact/filter (0.85) and — since #401 moved
+        # observed paraphrase MRR from 0.144 to 0.546 — paraphrase too (0.4). The
+        # floor stays optional so a class without a meaningful MRR axis can omit it.
         if "mrr_floor" in g:
             assert m["mrr"] >= g["mrr_floor"], (
                 f"KILL-GATE [{cls}]: MRR {m['mrr']} < floor {g['mrr_floor']}"

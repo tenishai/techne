@@ -7,9 +7,13 @@ recall@5/recall@10/MRR table. Nothing here blocks a merge — the point is the
 number, not a pass/fail line.
 
 Arm A (full, RRF):
-    search(db_path, query, table=table, limit=10, use_vectors=True) —
-    techne's actual Reciprocal Rank Fusion of the BM25 and vector channels
-    (search.py `_rrf_fuse`).
+    Reciprocal Rank Fusion of the BM25 and vector channels via search.py's
+    `_rrf_fuse` — techne's PRE-#401 hybrid. Rebuilt here directly from the two
+    channels because `search(use_vectors=True)` itself moved to the vec-first
+    union in #401 (this ablation is exactly what motivated that move); keeping
+    the RRF arm wired to `_rrf_fuse` preserves the baseline so this file stays a
+    live record of WHY RRF was retired rather than silently comparing
+    vec-first to vec-first.
 
 Arm B (simple, Agentlas-style):
     search_vec() (top-k by ascending distance) unioned with search_fts() (any
@@ -38,7 +42,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from techne.core.search import backfill_vectors, search, search_fts, search_vec
+from techne.core.search import _rrf_fuse, backfill_vectors, search_fts, search_vec
 
 _EVAL_DIR = Path(__file__).parent
 sys.path.insert(0, str(_EVAL_DIR))
@@ -89,6 +93,37 @@ def _simple_hybrid(db_path: Path, query: str, table: str, limit: int = _LIMIT) -
     return merged[:limit]
 
 
+def _rrf_hybrid(db_path: Path, query: str, table: str, limit: int = _LIMIT) -> list[dict]:
+    """Arm A: RRF fusion of the FTS + vector channels — techne's PRE-#401 hybrid.
+
+    Rebuilt from the raw channels + `_rrf_fuse` (rather than calling `search()`)
+    because `search(use_vectors=True)` moved to the vec-first union in #401. This
+    mirrors exactly what the old `search()` did: 1-based ranks per channel, fused
+    by `1/(k+rank)` summed across channels, top-`limit` by fused score.
+    """
+    fts_results = search_fts(
+        db_path, query, table=table, limit=limit, half_life_days=_HALF_LIFE_DAYS
+    )
+    vec_results = search_vec(db_path, query, table=table, limit=limit)
+    if not vec_results:
+        return fts_results
+
+    by_key: dict[tuple, dict] = {}
+    fts_channel: list[tuple[tuple, int]] = []
+    vec_channel: list[tuple[tuple, int]] = []
+    for rank, r in enumerate(fts_results, start=1):
+        key = (r["type"], r["id"])
+        by_key.setdefault(key, r)
+        fts_channel.append((key, rank))
+    for rank, r in enumerate(vec_results, start=1):
+        key = (r["type"], r["id"])
+        by_key.setdefault(key, r)
+        vec_channel.append((key, rank))
+
+    fused = _rrf_fuse([fts_channel, vec_channel])
+    return [by_key[key] for key, _ in fused[:limit]]
+
+
 def test_ranking_ablation_vec(pinned_model2vec, tmp_path, capsys):
     db_path = tmp_path / "eval_ablation_vec.db"
     gold = seed(db_path)
@@ -107,11 +142,8 @@ def test_ranking_ablation_vec(pinned_model2vec, tmp_path, capsys):
         table = task["table"]
         query = task["query"]
 
-        # Arm A: full hybrid, RRF-fused.
-        rrf_retrieved = search(
-            db_path, query, table=table, limit=_LIMIT,
-            use_vectors=True, half_life_days=_HALF_LIFE_DAYS,
-        )
+        # Arm A: full hybrid, RRF-fused (pre-#401 baseline, rebuilt via _rrf_fuse).
+        rrf_retrieved = _rrf_hybrid(db_path, query, table, limit=_LIMIT)
         rrf_ranked = [f"{r['type']}:{r['id']}" for r in rrf_retrieved]
 
         # Arm B: simple union, vec-first, no fusion.
@@ -162,6 +194,6 @@ def test_ranking_ablation_vec(pinned_model2vec, tmp_path, capsys):
             )
         print("-" * 68)
         print(
-            "(RRF = search(use_vectors=True); "
-            "simp = search_vec ∪ search_fts, vec-first, no fusion)"
+            "(RRF = _rrf_fuse over both channels — pre-#401 baseline; "
+            "simp = search_vec ∪ search_fts, vec-first, no fusion — now default)"
         )

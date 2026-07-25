@@ -1,4 +1,10 @@
-"""Tests for the RRF fusion + hybrid search() path.
+"""Tests for the `_rrf_fuse` primitive and the hybrid search() path.
+
+`_rrf_fuse` is retained as a library primitive (the #399 ablation's RRF arm
+and #401 candidate fallbacks reference it) so its unit tests below still hold.
+The search() path itself moved to a VEC-FIRST UNION in techne#401 — the
+integration tests assert that contract (vec channel first, FTS-only appended,
+`fusion="vec_first"` provenance, NO `rrf_score`).
 
 The unit RRF tests use plain tuples — no DB needed. The integration
 tests patch search_vec to return canned channel results so we can
@@ -121,8 +127,13 @@ def test_search_use_vectors_true_but_no_vec_results_falls_back(db_path, monkeypa
     assert "rrf_score" not in results[0]
 
 
-def test_search_hybrid_fuses_via_rrf(db_path, monkeypatch) -> None:
-    """Both channels populated → RRF fusion, rrf_score on every row."""
+def test_search_hybrid_vec_first_union(db_path, monkeypatch) -> None:
+    """Both channels populated → vec-first union (techne#401).
+
+    Order is the vector channel first (by ascending distance), then FTS-only
+    hits appended — NOT RRF rank-sum. Every fused row carries
+    ``fusion="vec_first"`` and NO ``rrf_score``.
+    """
     fake_fts = [
         {"type": "knowledge", "id": 1, "content": "a", "rank": -1.0},
         {"type": "knowledge", "id": 2, "content": "b", "rank": -0.5},
@@ -136,13 +147,16 @@ def test_search_hybrid_fuses_via_rrf(db_path, monkeypatch) -> None:
 
     results = search(db_path, "anything", use_vectors=True)
 
-    # id=1 is in both channels → boosted to top
-    assert results[0]["id"] == 1
-    assert results[0]["match_source"] == "fts+vec"
-    assert all("rrf_score" in r for r in results)
-    # Three distinct items total
-    ids = {r["id"] for r in results}
-    assert ids == {1, 2, 3}
+    # Vec-first: vec channel leads by distance (id 3 @0.1, then id 1 @0.2),
+    # then the FTS-only hit (id 2) is appended.
+    assert [r["id"] for r in results] == [3, 1, 2]
+    # id=1 is in BOTH channels → provenance only, not a rank boost.
+    by_id = {r["id"]: r for r in results}
+    assert by_id[1]["match_source"] == "fts+vec"
+    assert by_id[3]["match_source"] == "vec"
+    assert by_id[2]["match_source"] == "fts"
+    assert all(r["fusion"] == "vec_first" for r in results)
+    assert all("rrf_score" not in r for r in results)
 
 
 def test_search_hybrid_marks_match_source_per_channel(db_path, monkeypatch) -> None:
@@ -160,12 +174,13 @@ def test_search_hybrid_marks_match_source_per_channel(db_path, monkeypatch) -> N
     by_id = {r["id"]: r for r in results}
     assert by_id[1]["match_source"] == "fts"
     assert by_id[2]["match_source"] == "vec"
+    assert all(r["fusion"] == "vec_first" for r in results)
 
 
 def test_search_hybrid_does_not_mutate_caller_dicts(db_path, monkeypatch) -> None:
-    """RRF fusion must copy rows before stamping match_source / rrf_score
-    so the underlying search_fts / search_vec results stay clean for any
-    other caller."""
+    """Fusion must copy rows before stamping match_source / fusion so the
+    underlying search_fts / search_vec results stay clean for any other
+    caller."""
     fake_fts_row = {"type": "knowledge", "id": 1, "content": "a", "rank": -1.0}
     fake_vec_row = {"type": "knowledge", "id": 2, "content": "b", "distance": 0.1}
     fake_fts = [fake_fts_row]
@@ -175,8 +190,9 @@ def test_search_hybrid_does_not_mutate_caller_dicts(db_path, monkeypatch) -> Non
 
     search(db_path, "anything", use_vectors=True)
     assert "match_source" not in fake_fts_row
-    assert "rrf_score" not in fake_fts_row
+    assert "fusion" not in fake_fts_row
     assert "match_source" not in fake_vec_row
+    assert "fusion" not in fake_vec_row
 
 
 def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
@@ -194,5 +210,8 @@ def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
 
     results = search(db_path, "anything", limit=3, use_vectors=True)
     assert len(results) == 3
-    # Fused output should include rrf_score on every row
-    assert all("rrf_score" in r for r in results)
+    # Vec-first: the limit slices the vec channel first (ids 101, 102, 103).
+    assert [r["id"] for r in results] == [101, 102, 103]
+    # Fused output carries the fusion tag on every row, never rrf_score.
+    assert all(r["fusion"] == "vec_first" for r in results)
+    assert all("rrf_score" not in r for r in results)

@@ -737,19 +737,24 @@ def search(
     half_life_days: float = 30.0,
     include_archived: bool = True,
 ) -> list[dict]:
-    """Hybrid search: BM25 (FTS5) + vector (cosine) fused via Reciprocal
-    Rank Fusion.
+    """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
+    union (techne#401).
 
     With ``use_vectors=False``: returns BM25-only results (unchanged
     legacy behavior).
 
-    With ``use_vectors=True`` and vector deps installed: runs both
-    channels and fuses with RRF. Items present in BOTH channels are
-    boosted above items in just one (the desired property of fusion).
-    Returned rows include:
+    With ``use_vectors=True`` and vector deps installed: runs both channels
+    and returns the vector channel first (best-first by ascending distance),
+    then appends FTS-only hits. Rows present in BOTH channels keep their
+    vector-channel position; agreement is recorded as provenance, not a rank
+    boost. This replaces the earlier Reciprocal Rank Fusion: the #399 ablation
+    showed RRF's rank-sum buries a strong single-channel (vector-only) hit
+    beneath lexically-tempting FTS distractors, losing paraphrase recall@10
+    (0.667 vs 1.0) and MRR (0.144 vs 0.546) while only TYING on
+    exact/filter/negative. Returned rows include:
 
       - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
-      - ``rrf_score``: the fused score (when fusion ran)
+      - ``fusion``: ``"vec_first"`` — how order was decided
 
     When vec is requested but no vec results came back (extras not
     installed, vec tables empty, etc.), falls through to FTS-only —
@@ -777,39 +782,41 @@ def search(
     if not vec_results:
         return fts_results
 
-    # Build (type, id) → result-row map and per-channel rank lists.
-    # rank position is 1-based (1 = best); _rrf_fuse expects that shape.
-    by_key: dict[tuple, dict] = {}
-    fts_channel: list[tuple[tuple, int]] = []
-    vec_channel: list[tuple[tuple, int]] = []
-
-    for rank, r in enumerate(fts_results, start=1):
-        key = (r["type"], r["id"])
-        if key not in by_key:
-            row = dict(r)  # copy — don't mutate the caller's rows
-            row["match_source"] = "fts"
-            by_key[key] = row
-        fts_channel.append((key, rank))
-
-    for rank, r in enumerate(vec_results, start=1):
-        key = (r["type"], r["id"])
-        if key not in by_key:
-            row = dict(r)
-            row["match_source"] = "vec"
-            by_key[key] = row
-        else:
-            # Appeared in both channels — RRF will boost it; mark provenance.
-            by_key[key]["match_source"] = "fts+vec"
-        vec_channel.append((key, rank))
-
-    fused = _rrf_fuse([fts_channel, vec_channel])
-
+    # Vec-first union (techne#401). Take the vector channel first — it comes
+    # back already sorted best-first (ascending distance; search_vec sorts
+    # before truncating) — then append FTS-only hits in search_fts's own
+    # recency/BM25/decay order. Dedup on (type, id), truncate to limit.
+    # Cross-channel agreement is recorded as provenance (match_source="fts+vec")
+    # but no longer reweights order the way RRF's rank-sum did — that rank-sum
+    # was what buried strong single-channel vector hits (#399 ablation).
+    # NB: _rrf_fuse / RRF_K are intentionally retained as a library primitive —
+    # the #399 ablation's RRF arm and a possible single-channel-floor fallback
+    # (#401 candidate 4) reference them; they are simply no longer the default.
+    fts_keys = {(r["type"], r["id"]) for r in fts_results}
+    seen: set[tuple] = set()
     out: list[dict] = []
-    for key, score in fused[:limit]:
-        row = by_key[key]
-        row["rrf_score"] = score
+
+    for r in vec_results:
+        key = (r["type"], r["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        row = dict(r)  # copy — don't mutate the caller's rows
+        row["match_source"] = "fts+vec" if key in fts_keys else "vec"
+        row["fusion"] = "vec_first"
         out.append(row)
-    return out
+
+    for r in fts_results:
+        key = (r["type"], r["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        row = dict(r)  # copy — don't mutate the caller's rows
+        row["match_source"] = "fts"
+        row["fusion"] = "vec_first"
+        out.append(row)
+
+    return out[:limit]
 
 
 def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
