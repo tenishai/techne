@@ -59,4 +59,8 @@ re-freeze is the visible, reviewable, anti-goalpost-moving event.
   `cascade` additionally waits on #117 (cascade-to-uncertain).
 - No `cold`/`warm` (memory-state) split — needs a freshness/drift setup-cost feature;
   the `variant` field is reserved for it.
-- No vector-fusion arm (needs fastembed); `use_vectors=False` pins the FTS path.
+- No vector-fusion arm for *this* (#68/#118) harness — `use_vectors=False` still
+  pins the FTS path here. The retrieval-correctness gate has one instead:
+  `pytest -m eval_vec -s` (techne#399, `test_retrieval_gate_vec.py` +
+  `test_ranking_ablation_vec.py`, reusing #385's `retrieval_gold.yaml` gold
+  set) — see `docs/eval.md`'s "Vector/hybrid retrieval gate" section.
