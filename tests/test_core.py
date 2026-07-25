@@ -259,6 +259,63 @@ class TestKnowledge:
         assert row["confidence"] == "high"
         assert row["confidence_numeric"] == 0.9  # not the 0.6 default
 
+    def test_supersede_second_attempt_raises_and_stays_single_current(self, db_path):
+        """techne#390: superseding an already-superseded row fails loudly and never
+        creates a second live 'current' row (the concurrent double-supersede race)."""
+        old_id = store(db_path, "Archivist uses ClickHouse", type="fact")
+        winner = supersede(db_path, old_id, "Archivist uses AlloyDB")
+
+        with pytest.raises(ValueError, match="superseded"):
+            supersede(db_path, old_id, "Archivist uses Postgres")  # loses
+
+        # Exactly one live revision descends from old_id — the first winner; the
+        # losing attempt left no orphan and did not repoint old_id.
+        current = list_entries(db_path, include_superseded=False)
+        assert [e["id"] for e in current] == [winner]
+        assert get(db_path, old_id)["superseded_by"] == winner
+
+    def test_supersede_sql_guard_fires_when_row_retired_mid_transaction(self, db_path, monkeypatch):
+        """techne#390 white-box: exercise the SQL guard's own rowcount==0 → raise
+        path — the backstop the Python pre-check can't provide for an _in_conn
+        caller not holding BEGIN IMMEDIATE. We retire old_id in the exact window
+        between _supersede_in_conn's liveness read and its guarded UPDATE (via a
+        hook during the INSERT). The guarded UPDATE then matches 0 rows and raises
+        'concurrently superseded' instead of silently creating a second live row.
+
+        (This white-box path is what test_supersede_second_attempt... can't cover:
+        there the Python check fires first, so the SQL guard is never reached.)
+        """
+        import techne.core.knowledge as kn
+
+        old_id = store(db_path, "original fact", type="fact")
+        winner_id = store(db_path, "winner revision", type="fact")  # real FK target
+
+        real_redact = kn.redact_credentials
+        state = {"fired": False}
+
+        def hook_redact(text):
+            # Runs during the outer supersede's INSERT — after its liveness read,
+            # before its guarded UPDATE. Simulate a concurrent winner retiring
+            # old_id in that window (same conn, so no lock dance).
+            if not state["fired"]:
+                state["fired"] = True
+                conn.execute(
+                    "UPDATE knowledge SET superseded_by = ? "
+                    "WHERE id = ? AND superseded_by IS NULL",
+                    (winner_id, old_id),
+                )
+            return real_redact(text)
+
+        monkeypatch.setattr(kn, "redact_credentials", hook_redact)
+
+        conn = connect(db_path)
+        try:
+            with pytest.raises(ValueError, match="concurrently superseded"):
+                kn._supersede_in_conn(conn, old_id, "loser revision", "sessionA")
+            conn.rollback()
+        finally:
+            conn.close()
+
     def test_invalid_type(self, db_path):
         with pytest.raises(ValueError):
             store(db_path, "test", type="invalid")
