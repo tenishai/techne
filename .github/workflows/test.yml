@@ -90,8 +90,11 @@ jobs:
         # The eval_vec fixture SKIPS unless the pinned model is already cached
         # (it probes with allow_download=False). Fetch it up front so the gate
         # actually RUNS in CI instead of silently skipping.
+        # force_download=False so a restored cache is actually reused (model2vec
+        # 0.8.2 defaults it to True — see embeddings.py:271); otherwise the
+        # actions/cache step above would be dead weight. (#403 review — Prudence.)
         working-directory: techne
-        run: python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M')"
+        run: python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
