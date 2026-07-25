@@ -1,6 +1,9 @@
 """Tests for the inter-session coordination mailbox (techne#376)."""
 
 import json
+import os
+import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
@@ -375,3 +378,42 @@ def test_live_sessions_skips_non_numeric_updatedat(tmp_path, monkeypatch):
     )
     # must not raise; the malformed record is simply dropped
     assert coord.live_sessions() == []
+
+
+def test_pid_alive():
+    """techne#380: live self → True; a reaped child pid → False; an unverifiable
+    pid fails open (True) so the freshness TTL, not this probe, bounds it."""
+    assert coord._pid_alive(os.getpid()) is True
+    assert coord._pid_alive(None) is True   # non-int → fail open
+    assert coord._pid_alive(0) is True      # invalid → fail open
+    child = subprocess.Popen(["true"])
+    child.wait()  # reaped → pid is now dead
+    assert coord._pid_alive(child.pid) is False
+
+
+def test_live_sessions_reaps_dead_pid(tmp_path, monkeypatch):
+    """techne#380: a session sidecar fresh by TTL but whose PID is dead is dropped
+    (reap-on-read), so a caller never routes to a corpse."""
+    child = subprocess.Popen(["true"])
+    child.wait()  # a guaranteed-dead pid
+    dead_pid = child.pid
+
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    cfg = tmp_path / "dotclaude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    sessions = cfg / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "alive.json").write_text(
+        json.dumps(
+            {"sessionId": "uuid-alive", "name": "a", "pid": os.getpid(), "updatedAt": now_ms}
+        )
+    )
+    (sessions / "dead.json").write_text(
+        json.dumps(
+            {"sessionId": "uuid-dead", "name": "d", "pid": dead_pid, "updatedAt": now_ms}
+        )
+    )
+
+    sids = {s["session_id"] for s in coord.live_sessions()}
+    assert "uuid-alive" in sids  # our own live process survives
+    assert "uuid-dead" not in sids  # dead PID reaped despite a fresh heartbeat
