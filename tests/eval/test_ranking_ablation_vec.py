@@ -14,10 +14,12 @@ Arm A (full, RRF):
 Arm B (simple, Agentlas-style):
     search_vec() (top-k by ascending distance) unioned with search_fts() (any
     lexical hit), vec-first, lex-only rows appended, deduped on (type, id),
-    truncated to `limit`. Calls search_vec/search_fts DIRECTLY — does not
-    touch _rrf_fuse/_rerank/_mmr_reorder. This mirrors a "just concatenate the
-    two channels" baseline (no reciprocal-rank scoring) rather than techne's
-    tuned fusion.
+    truncated to `limit`. Calls search_vec/search_fts DIRECTLY and skips the
+    cross-channel FUSION (no _rrf_fuse, no _mmr_reorder). NOTE: search_fts still
+    reranks the FTS channel internally in BOTH arms (its own recency/BM25/decay
+    _rerank) — the ONLY difference between the arms is the fusion step. This
+    mirrors a "just concatenate the two channels" baseline (no reciprocal-rank
+    scoring) rather than techne's tuned RRF fusion.
 
 Expected shape (not asserted — this is what the printed table should show):
 paraphrase (zero literal-token overlap) should favor simple, since RRF's rank
@@ -59,7 +61,7 @@ def _resolve_ids(keys: list[str], gold: dict[str, str]) -> set[str]:
 
 
 def _simple_hybrid(db_path: Path, query: str, table: str, limit: int = _LIMIT) -> list[dict]:
-    """Arm B: union of search_vec + search_fts, vec-first, no RRF/_rerank/_mmr.
+    """Arm B: union of search_vec + search_fts, vec-first, no cross-channel fusion.
 
     vec_results come back already sorted ascending-by-distance (search_vec
     sorts internally before truncating to `limit`), so iterating them in
@@ -123,7 +125,10 @@ def test_ranking_ablation_vec(pinned_model2vec, tmp_path, capsys):
         common = {
             "id": task["id"],
             "class": task["class"],
-            "fpr": 0.0,  # ablation doesn't score leaks; aggregate_gold requires the key
+            # PLACEHOLDER, not a measured leak rate: the ablation does not score
+            # FPR and never prints it; this key exists solely because
+            # aggregate_gold requires it.
+            "fpr": 0.0,
         }
         rrf_rows.append({
             **common,
