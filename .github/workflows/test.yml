@@ -47,3 +47,55 @@ jobs:
       - name: Pytest (includes contract assertions)
         working-directory: techne
         run: pytest -q
+
+      # (#398) Deterministic eval gates — FTS-only, no vector/LLM deps, ~0.5s.
+      # A regression gate that nothing invokes protects nothing (Prudence, #397).
+      # CLI -m overrides the addopts exclusion. eval_llm stays out (needs a key).
+      - name: Deterministic eval gates (#68 recall, #385 retrieval-correctness)
+        working-directory: techne
+        run: pytest -m "eval or eval_gate"
+
+  # (#398) Vector/hybrid retrieval gate (#399/#401) on its own leg: it pins
+  # model2vec, which the [vectors] extra installs only on py>=3.14, so it can't
+  # run on the 3.12/3.13 matrix above. Kept separate so the deterministic gates
+  # stay fast and dep-free.
+  eval-vec:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@v4
+        with:
+          path: techne
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: techne/pyproject.toml
+
+      - name: Install (with vectors)
+        working-directory: techne
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,codex,vectors]"
+
+      - name: Cache the pinned model2vec model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-model2vec-potion-base-8M
+
+      - name: Pre-fetch potion-base-8M into the HF cache
+        # The eval_vec fixture SKIPS unless the pinned model is already cached
+        # (it probes with allow_download=False). Fetch it up front so the gate
+        # actually RUNS in CI instead of silently skipping.
+        # force_download=False so a restored cache is actually reused (model2vec
+        # 0.8.2 defaults it to True — see embeddings.py:271); otherwise the
+        # actions/cache step above would be dead weight. (#403 review — Prudence.)
+        working-directory: techne
+        run: python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
+
+      - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
+        working-directory: techne
+        run: pytest -m eval_vec -s
