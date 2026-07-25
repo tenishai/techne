@@ -306,13 +306,36 @@ def session_name(session_id: str) -> str | None:
     return None
 
 
+def _pid_alive(pid: object) -> bool:
+    """True if ``pid`` is a live process on THIS host (techne#380).
+
+    All coord sessions are same-host — the roster is ``~/.claude/sessions`` on this
+    machine — so ``os.kill(pid, 0)``, a permission-less existence probe, is valid
+    for every row. ``ProcessLookupError`` = the process is gone; ``PermissionError``
+    = it exists but is owned by another user (still alive). A missing/non-int pid
+    can't be disproven, so treat it as alive and let the freshness TTL bound it
+    (fail open — never reap on ambiguity).
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return True  # unverifiable → don't reap; the TTL still applies
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # PermissionError (alive, not ours) or anything odd → fail open
+    return True
+
+
 def live_sessions(
     *, exclude_session: str | None = None, fresh_seconds: int = _PRESENCE_FRESH_SECONDS
 ) -> list[dict]:
     """Sessions Claude Code currently considers live, newest-activity first.
 
     Reads ``~/.claude/sessions/*.json`` and keeps records whose ``updatedAt`` is
-    within ``fresh_seconds``. Returns dicts:
+    within ``fresh_seconds`` AND whose ``pid`` is a live process (techne#380 —
+    heartbeat freshness alone advertised dead PIDs as routable sessions during the
+    TTL window; a caller would route to a corpse). Returns dicts:
     ``{session_id, name, cwd, status, pid, updated_at_ms}``.
     """
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
@@ -326,6 +349,8 @@ def live_sessions(
             continue  # malformed sidecar (non-numeric updatedAt) — treat as not-live
         if now_ms - updated > fresh_seconds * 1000:
             continue
+        if not _pid_alive(rec.get("pid")):
+            continue  # reap-on-read (techne#380): dead PID inside the TTL window
         live.append(
             {
                 "session_id": sid,
