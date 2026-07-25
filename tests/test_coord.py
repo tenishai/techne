@@ -1,6 +1,9 @@
 """Tests for the inter-session coordination mailbox (techne#376)."""
 
 import json
+import os
+import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
@@ -380,9 +383,6 @@ def test_live_sessions_skips_non_numeric_updatedat(tmp_path, monkeypatch):
 def test_pid_alive():
     """techne#380: live self → True; a reaped child pid → False; an unverifiable
     pid fails open (True) so the freshness TTL, not this probe, bounds it."""
-    import os
-    import subprocess
-
     assert coord._pid_alive(os.getpid()) is True
     assert coord._pid_alive(None) is True   # non-int → fail open
     assert coord._pid_alive(0) is True      # invalid → fail open
@@ -394,10 +394,6 @@ def test_pid_alive():
 def test_live_sessions_reaps_dead_pid(tmp_path, monkeypatch):
     """techne#380: a session sidecar fresh by TTL but whose PID is dead is dropped
     (reap-on-read), so a caller never routes to a corpse."""
-    import os
-    import subprocess
-    from datetime import datetime, timezone
-
     child = subprocess.Popen(["true"])
     child.wait()  # a guaranteed-dead pid
     dead_pid = child.pid
