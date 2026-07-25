@@ -1031,6 +1031,68 @@ class TestEnsureVecBackendIdentity:
         finally:
             conn.close()
 
+    def test_backfill_reembeds_content_edited_row(self, db_path):
+        """techne#382: a knowledge row whose `content` is edited in place
+        (vec_stale=1) must be RE-embedded by backfill_vectors — not skipped as
+        'already present in vec' — else semantic recall matches the stale text
+        forever. Asserts the stored embedding actually changes."""
+        from techne.core.embeddings import backend_available
+        from techne.core.knowledge import store as store_knowledge
+        from techne.core.search import backfill_vectors
+
+        pytest.importorskip("sqlite_vec")
+        if not backend_available():
+            pytest.skip("no embedding backend (model2vec or fastembed) available")
+
+        kid = store_knowledge(db_path, "alpha alpha the original body text", type="fact")
+        assert backfill_vectors(db_path).get("knowledge", 0) >= 1
+
+        def _vec_bytes(rowid):
+            conn = connect(db_path)
+            try:
+                import sqlite_vec
+
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+                row = conn.execute(
+                    "SELECT embedding FROM knowledge_vec WHERE rowid = ?", (rowid,)
+                ).fetchone()
+                return bytes(row[0]) if row else None
+            finally:
+                conn.close()
+
+        before = _vec_bytes(kid)
+        assert before is not None  # embedded on the first backfill
+
+        # Edit content in place + flag stale (exactly what fill_card_summary does).
+        conn = connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE knowledge SET content = ?, vec_stale = 1 WHERE id = ?",
+                ("beta beta an entirely different body", kid),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Pre-#382 this returned knowledge:0 (row already in vec) and `before`
+        # would persist. The fix re-embeds the flagged row.
+        assert backfill_vectors(db_path).get("knowledge", 0) >= 1
+        after = _vec_bytes(kid)
+        assert after is not None
+        assert after != before, "embedding was not regenerated after the content edit"
+
+        # Flag cleared → the row drops out of the re-embed set (loop termination).
+        conn = connect(db_path)
+        try:
+            stale = conn.execute(
+                "SELECT vec_stale FROM knowledge WHERE id = ?", (kid,)
+            ).fetchone()[0]
+            assert stale == 0
+        finally:
+            conn.close()
+
 
 class TestSearchNoMutation:
     def test_use_vectors_does_not_mutate_fts_results(self, db_path):
