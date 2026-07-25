@@ -58,7 +58,7 @@ def test_fresh_db_is_current_version(db):
     conn = connect(db)
     try:
         v = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert v == SCHEMA_VERSION == 18
+        assert v == SCHEMA_VERSION == 19
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"

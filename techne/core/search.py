@@ -902,6 +902,14 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"
             extra_where = " AND t.superseded_by IS NULL" if tbl == "knowledge" else ""
+            # techne#382: a knowledge row edited in place carries vec_stale=1, so
+            # re-embed it alongside never-embedded rows. Knowledge is the only
+            # table edited via a plain UPDATE (stable rowid → a stale embedding
+            # lingers on a live row). observations are append-only; threads rotate
+            # the rowid via INSERT OR REPLACE (old embedding orphaned on a dead
+            # rowid, new summary re-embedded as missing), so neither needs a flag.
+            missing = f"t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl})"
+            unembedded = f"({missing} OR t.vec_stale = 1)" if tbl == "knowledge" else missing
             # Loop until no un-embedded rows remain — one call must fully re-embed a
             # table, not just the newest `batch_size` rows. This matters most right
             # after a backend swap: _ensure_vec_backend_identity has just dropped and
@@ -912,18 +920,30 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             while True:
                 rows = conn.execute(
                     f"""SELECT t.{id_col}, t.{content_col} FROM {tbl} t
-                        WHERE t.{id_col} NOT IN (SELECT rowid FROM {vec_tbl}){extra_where}
+                        WHERE {unembedded}{extra_where}
                         ORDER BY t.{id_col} DESC LIMIT ?""",
                     (batch_size,),
                 ).fetchall()
                 if not rows:
                     break
                 ids, texts = zip(*rows)
+                placeholders = ",".join("?" * len(ids))
+                # A re-embedded (vec_stale) row is already present in vec_tbl; vec0
+                # rejects a duplicate rowid, so clear any existing entry for these
+                # ids before inserting. No-op for never-embedded rows. (techne#382)
+                conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid IN ({placeholders})", ids)
                 embeddings = np.stack(list(model.embed(list(texts))))
                 for row_id, emb in zip(ids, embeddings):
                     conn.execute(
                         f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
                         (row_id, emb.astype("float32").tobytes()),
+                    )
+                if tbl == "knowledge":
+                    # Embedding now matches content — clear the staleness flag so the
+                    # row drops out of the re-embed set (loop-termination). techne#382
+                    conn.execute(
+                        f"UPDATE knowledge SET vec_stale = 0 WHERE id IN ({placeholders})",
+                        ids,
                     )
                 conn.commit()
                 counts[tbl] += len(rows)

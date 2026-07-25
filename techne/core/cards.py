@@ -142,9 +142,13 @@ def fill_card_summary(db_path: Path, card_id: int, summary: str) -> bool:
             return False
         tags = ",".join(t for t in (row["tags"] or "").split(",") if t.strip() != "pending")
         conn.execute(
+            # vec_stale=1 (techne#382): the gist `content` changed, so this row's
+            # existing embedding is now stale. This plain connection can't touch
+            # the vec0 table (techne#168); flagging here lets backfill_vectors
+            # re-embed it. ANY in-place `content` edit must set this flag.
             """UPDATE knowledge
                SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP,
-                   last_confirmed_at = CURRENT_TIMESTAMP
+                   last_confirmed_at = CURRENT_TIMESTAMP, vec_stale = 1
                WHERE id = ?""",
             (redact_credentials(summary), tags, card_id),
         )
