@@ -71,9 +71,13 @@ def test_retrieval_gate(tmp_path, capsys):
         row = {
             "id": task["id"],
             "class": task["class"],
-            # `deterministic: false` (paraphrase) → scored + printed, but NOT
-            # gated: the FTS-only path structurally cannot serve zero-token-
-            # overlap queries; those tasks are pre-authored VECTOR-arm targets.
+            # REPORT-ONLY flag: drives the printed `gated` column, NOT the gate.
+            # Gating is decided SOLELY by class membership in `config` (below);
+            # paraphrase is ungated because there is no `cfg["paraphrase"]`, not
+            # because of this flag — so flipping it can never shield a gated
+            # (exact/filter/negative) task. The FTS-only path structurally cannot
+            # serve zero-token-overlap paraphrase; those tasks are pre-authored
+            # targets for the future VECTOR arm.
             "deterministic": task.get("deterministic", True),
             "recall_at_5": round(recall_at_k(expected, ranked, 5), 3),
             "recall_at_10": round(recall_at_k(expected, ranked, 10), 3),
@@ -127,6 +131,9 @@ def test_retrieval_gate(tmp_path, capsys):
             f"KILL-GATE [{cls}]: MRR {m['mrr']} < floor {g['mrr_floor']}"
         )
 
+    # `negative` is gated on FPR ONLY. Its recall@k / mrr columns are computed
+    # and printed but DECORATIVE — leak-prevention is this class's remit; the
+    # positive recall of a surviving/new revision is the `exact` class's job.
     neg_ceiling = cfg["negative"]["fpr_ceiling"]
     assert per_class["negative"]["fpr"] <= neg_ceiling, (
         f"KILL-GATE [negative]: FPR {per_class['negative']['fpr']} > ceiling {neg_ceiling}"
