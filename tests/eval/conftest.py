@@ -55,8 +55,9 @@ def pinned_model2vec():
         model = embeddings._get_embedding_model(cfg, allow_download=False)
     except Exception as exc:
         pytest.skip(
-            f"model2vec/{embeddings._DEFAULT_MODEL2VEC_MODEL} not locally cached "
-            f"(offline probe raised {type(exc).__name__}) — eval_vec is opt-in (techne#399)"
+            f"model2vec/{embeddings._DEFAULT_MODEL2VEC_MODEL} unavailable or not "
+            f"locally cached (offline probe raised {type(exc).__name__}) — "
+            f"eval_vec is opt-in (techne#399)"
         )
 
     yield model

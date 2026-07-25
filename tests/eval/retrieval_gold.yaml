@@ -87,11 +87,18 @@ config_vec:
     recall_at_5_floor: 0.85
     recall_at_10_floor: 0.85
     mrr_floor: 0.85
-  # paraphrase is GATED here (unlike config: above) — floors at observed − 0.15,
-  # same tolerance convention as exact/filter/recall_baseline.yaml.
+  # paraphrase is GATED on RECALL here (unlike config: above). Floors are LOOSER
+  # than exact/filter's observed−0.15: this is a 6-task class and its golds sit in
+  # the drift-fragile rank 4–10 band, where near-tie BLAS reordering across
+  # machines can push one in/out of top-k (e.g. paraphrase-tlsrotation). So floors
+  # tolerate a ±1-task boundary shift (observed r@5=0.5→floor 0.3; r@10=0.667→
+  # floor 0.5) yet still trip on a REAL regression — losing ≥2 golds, or the
+  # no-backfill catastrophe (FTS-only → paraphrase 0/0/0, which trips any positive
+  # floor). Tightening to observed−0.15 gained no teeth and risked a cross-machine
+  # false-trip (Prudence, PR #400).
   paraphrase:
-    recall_at_5_floor: 0.35
-    recall_at_10_floor: 0.517
+    recall_at_5_floor: 0.3
+    recall_at_10_floor: 0.5
     # NO mrr_floor — paraphrase is gated on RECALL only (its meaningful axis),
     # mirroring #385's negative-gated-on-FPR-only. The absolute -0.15 tolerance
     # goes negative on MRR 0.144 (a metric never < 0), so a floor would be a dead
