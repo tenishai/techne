@@ -101,7 +101,13 @@ def _approx_tokens(text: str) -> int:
 
 
 def _inclusion_score(r: Any) -> float | None:
-    """The FTS BM25 signal that contributed to ordering, when present.
+    """The comparable FTS BM25 signal for this row, when present.
+
+    Deliberately NOT "the signal that contributed to ordering" (#419 review): this
+    returns ``rank`` for ``fts+vec`` overlap rows too, and those were placed by
+    distance, not by BM25. The pre-#413 wording conflated having a BM25 score with
+    having been ordered by one — the same conflation ``_retrieval_signal`` exists to
+    undo. (Wording arrived with #402/177d95d, corrected here in passing.)
 
     Since techne#401 the hybrid path is a vec-first union with no single fused
     score. We deliberately do NOT fold a vector ``distance`` (lower = nearer)
@@ -137,7 +143,11 @@ def _retrieval_signal(r: Any) -> tuple[float | None, str | None]:
       is not observable from a returned row at all. BM25 merely carries the largest
       default weight (0.7 vs 0.3 recency, 0.1 decay); all three are operator-tunable
       parameters, so even "dominant" isn't guaranteed. A second MMR stage can
-      reorder again (a no-op at today's ``mmr_lambda=0.0``, but not by contract).
+      reorder again — a no-op only because every live caller leaves ``search_fts``'s
+      ``mmr_lambda`` at its ``0.0`` default. Don't read that off the config knob:
+      ``SearchConfig.mmr_lambda`` defaults to 0.3 but is never plumbed through
+      (techne#420), so the two numbers disagree and the function default is the one
+      in force.
       ``search()`` says as much at the union: FTS-only hits are appended "in
       ``search_fts``'s own recency/BM25/decay order."
 
