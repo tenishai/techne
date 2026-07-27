@@ -439,7 +439,7 @@ def test_edit_rail_attribution_multiedit_truncation_degrades_gracefully(db):
     assert a["file_attributed"] == 0  # dropped, not crashed
 
 
-# ---- techne#413: per-hit ordering provenance --------------------------------
+# ---- techne#413: per-hit retrieval provenance -------------------------------
 
 
 _PRE_413_DDL = (
@@ -501,7 +501,9 @@ def test_vec_row_records_distance_and_its_scale(tmp_path):
 
 
 def test_fts_only_row_records_bm25_rank(tmp_path):
-    """An FTS-only hit was placed by BM25 — recorded, and tagged as such."""
+    """An FTS-only hit reports its raw BM25 rank, tagged as such. Note this is an
+    INPUT to placement, not the placement value — _rerank blends and then pops the
+    real ordering score, so it never reaches the logger (#419)."""
     p = tmp_path / "t.db"
     _log_one(p, {"id": 8, "match_source": "fts", "rank": -3.5})
     got = _provenance(p)

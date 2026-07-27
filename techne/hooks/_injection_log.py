@@ -29,9 +29,10 @@ Design:
   injected but not WHY. Each hit also carries its raw retrieval score, the scale
   that score is on, and which channel produced it, so retrieval quality is
   scorable offline and a relevance floor (techne#414) has something to threshold
-  on. That score is the row's PLACEMENT value only on the vector channel; for FTS
-  it is an input to placement, not placement itself — see ``_retrieval_signal``,
-  and do not build a floor without reading it.
+  on. That score is the row's PLACEMENT value only where ``score_kinds`` is
+  ``"vec_distance"``; where it is ``"bm25"`` the score is an input to placement,
+  not placement itself — see ``_retrieval_signal``, and do not build a floor
+  without reading it.
 """
 
 from __future__ import annotations
@@ -223,10 +224,12 @@ def log_context_injection(
     across kinds), and ``match_sources`` (which channel produced it: vec / fts /
     fts+vec).
 
-    ``native_scores`` is the row's PLACEMENT value only for vector rows. For FTS
-    rows it is an input to placement, and the actual ordering value is unobservable
-    — ``_retrieval_signal`` explains why, and why the raw score is still what we
-    store. Read that before building a floor on this column (techne#414).
+    ``native_scores`` is the row's PLACEMENT value only where ``score_kinds`` is
+    ``"vec_distance"`` — stated in terms of the column a floor actually joins on,
+    which correctly includes ``fts+vec`` overlap rows (#419 review). Where the kind
+    is ``"bm25"`` the score is an input to placement, and the real ordering value is
+    unobservable — ``_retrieval_signal`` explains why, and why the raw score is
+    still what we store. Read that before building a floor on this column (#414).
     """
     try:
         hit_ids = [_field(r, "id") for r in rows]
