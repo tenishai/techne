@@ -625,3 +625,13 @@ def test_bool_ranks_are_not_logged_as_scores(tmp_path):
     assert got["native"] == [None]
     assert got["kinds"] == [None]
     assert got["scores"] == [None]
+
+
+def test_bool_distance_is_not_logged_as_a_vec_score(tmp_path):
+    """Sibling of the rank guard, on the vec branch. #419 review found this one
+    untested — the guard could be deleted with the whole suite still green."""
+    p = tmp_path / "t.db"
+    _log_one(p, {"id": 1, "match_source": "vec", "distance": True})
+    got = _provenance(p)
+    assert got["native"] == [None]
+    assert got["kinds"] == [None], "a True distance must not become vec_distance 1.0"

@@ -25,11 +25,13 @@ Design:
   defensive for any future non-dict row type.
 - **Attribution-ready** — ``hit_ids`` recorded so a later pass can join "was the
   injected item actually used" (the counterfactual — deferred, techne#416).
-- **Ordering-signal recorded** (techne#413) — ``hit_ids`` alone said WHAT was
-  injected but not WHY. Each hit also carries the value that decided its
-  position, the scale that value is on, and which channel produced it, so
-  retrieval quality is scorable offline and a relevance floor (techne#414)
-  has something to threshold on.
+- **Retrieval signal recorded** (techne#413) — ``hit_ids`` alone said WHAT was
+  injected but not WHY. Each hit also carries its raw retrieval score, the scale
+  that score is on, and which channel produced it, so retrieval quality is
+  scorable offline and a relevance floor (techne#414) has something to threshold
+  on. That score is the row's PLACEMENT value only on the vector channel; for FTS
+  it is an input to placement, not placement itself — see ``_retrieval_signal``,
+  and do not build a floor without reading it.
 """
 
 from __future__ import annotations
@@ -127,13 +129,16 @@ def _retrieval_signal(r: Any) -> tuple[float | None, str | None]:
 
     - **vec rows**: ``distance`` IS the placement value — ``search_vec`` sorts by
       ascending distance and the union preserves that order.
-    - **FTS rows**: ``rank`` is the dominant INPUT to placement, not placement
-      itself. ``_rerank`` orders by ``_combined`` = a weighted blend of normalized
-      BM25, recency, and a confidence-decay tiebreak, then POPS ``_combined`` (and
+    - **FTS rows**: ``rank`` is an INPUT to placement, not placement itself.
+      ``_rerank`` orders by ``_combined`` = a weighted blend of normalized BM25,
+      recency, and a confidence-decay tiebreak, then POPS ``_combined`` (and
       ``_norm_bm25`` / ``_recency``) before returning — so the actual ordering value
-      is not observable from a returned row at all. ``search()`` says as much at the
-      union: FTS-only hits are appended "in ``search_fts``'s own recency/BM25/decay
-      order."
+      is not observable from a returned row at all. BM25 merely carries the largest
+      default weight (0.7 vs 0.3 recency, 0.1 decay); all three are operator-tunable
+      parameters, so even "dominant" isn't guaranteed. A second MMR stage can
+      reorder again (a no-op at today's ``mmr_lambda=0.0``, but not by contract).
+      ``search()`` says as much at the union: FTS-only hits are appended "in
+      ``search_fts``'s own recency/BM25/decay order."
 
     Storing the raw rank anyway is the deliberate choice: ``_norm_bm25`` is a
     per-type min–max over whatever candidate pool THAT query produced, so the blend
@@ -171,10 +176,12 @@ def _retrieval_signal(r: Any) -> tuple[float | None, str | None]:
         if isinstance(d, (int, float)) and not isinstance(d, bool):
             return round(d, 4), "vec_distance"
     # `rrf` has no in-tree producer today (#401 replaced RRF fusion with the
-    # vec-first union, and test_search_rrf.py asserts `rrf_score`'s absence on every
-    # path). Kept only to mirror `_inclusion_score`'s legacy/federation branch — if
-    # that one ever reports an rrf value, this must not silently disagree by
-    # returning None for the same row. Unreachable-but-consistent, on purpose.
+    # vec-first union; test_search_rrf.py asserts `rrf_score`'s absence on every
+    # path). BOTH readers of it are dead code — `_inclusion_score`'s legacy/
+    # federation branch too, not just this one (#419 review). Kept deliberately as a
+    # matched pair: if a federation path ever reintroduces `rrf_score`, one reader
+    # reporting it while the other returns None for the same row would be a silent
+    # disagreement between two columns that are supposed to describe one hit.
     for key, kind in (("rrf_score", "rrf"), ("rank", "bm25")):
         v = _field(r, key)
         if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -210,10 +217,16 @@ def log_context_injection(
     those are indistinguishable without k. ``None`` where a source doesn't retrieve
     by k (session-start selects against a token budget, not a count).
 
-    Per-hit ordering provenance (techne#413) is written as three JSON arrays
-    positionally aligned with ``hit_ids``: ``native_scores`` (the value that placed
-    the row), ``score_kinds`` (which scale that value is on — never compare across
-    kinds), and ``match_sources`` (which channel produced it: vec / fts / fts+vec).
+    Per-hit retrieval provenance (techne#413) is written as three JSON arrays
+    positionally aligned with ``hit_ids``: ``native_scores`` (the row's raw
+    retrieval score), ``score_kinds`` (which scale that score is on — never compare
+    across kinds), and ``match_sources`` (which channel produced it: vec / fts /
+    fts+vec).
+
+    ``native_scores`` is the row's PLACEMENT value only for vector rows. For FTS
+    rows it is an input to placement, and the actual ordering value is unobservable
+    — ``_retrieval_signal`` explains why, and why the raw score is still what we
+    store. Read that before building a floor on this column (techne#414).
     """
     try:
         hit_ids = [_field(r, "id") for r in rows]
