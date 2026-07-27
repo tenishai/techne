@@ -437,3 +437,179 @@ def test_edit_rail_attribution_multiedit_truncation_degrades_gracefully(db):
                body="z" * 600, file_path_first=False)
     a = edit_rail_attribution(db)  # must not raise
     assert a["file_attributed"] == 0  # dropped, not crashed
+
+
+# ---- techne#413: per-hit ordering provenance --------------------------------
+
+
+_PRE_413_DDL = (
+    "CREATE TABLE context_injections (id INTEGER PRIMARY KEY, source TEXT, "
+    "session_id TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, trigger_snippet TEXT, "
+    "hit_count INTEGER, hit_ids TEXT, scores TEXT, approx_tokens INTEGER, "
+    "total_hits INTEGER)"  # post-#343, pre-#413
+)
+
+
+def _provenance(p):
+    """Read back the #413 arrays + k for the single logged row."""
+    import json
+    import sqlite3
+
+    c = sqlite3.connect(p)
+    c.row_factory = sqlite3.Row
+    try:
+        r = c.execute(
+            "SELECT scores, native_scores, score_kinds, match_sources, k_requested "
+            "FROM context_injections"
+        ).fetchone()
+    finally:
+        c.close()
+    return {
+        "scores": json.loads(r["scores"]),
+        "native": json.loads(r["native_scores"]),
+        "kinds": json.loads(r["score_kinds"]),
+        "channels": json.loads(r["match_sources"]),
+        "k": r["k_requested"],
+    }
+
+
+def _log_one(p, row, **kw):
+    log_context_injection(
+        p,
+        source="per_turn_recall",
+        session_id="s",
+        trigger="t",
+        rows=[row],
+        injected_text="x" * 8,
+        **kw,
+    )
+
+
+def test_vec_row_records_distance_and_its_scale(tmp_path):
+    """A vector-channel hit is PLACED by distance, so that's what gets recorded —
+    tagged `vec_distance` so nothing compares it to a BM25 rank.
+
+    Fail-without-fix: pre-#413 only `scores` existed and was None here, so the
+    signal that ordered the row was lost."""
+    p = tmp_path / "t.db"
+    _log_one(p, {"id": 7, "match_source": "vec", "distance": 0.1234})
+    got = _provenance(p)
+    assert got["native"] == [0.1234]
+    assert got["kinds"] == ["vec_distance"]
+    assert got["channels"] == ["vec"]
+    assert got["scores"] == [None]  # legacy FTS-only column unchanged
+
+
+def test_fts_only_row_records_bm25_rank(tmp_path):
+    """An FTS-only hit was placed by BM25 — recorded, and tagged as such."""
+    p = tmp_path / "t.db"
+    _log_one(p, {"id": 8, "match_source": "fts", "rank": -3.5})
+    got = _provenance(p)
+    assert got["native"] == [-3.5]
+    assert got["kinds"] == ["bm25"]
+    assert got["channels"] == ["fts"]
+
+
+def test_overlap_row_is_placed_by_vector_distance_not_bm25(tmp_path):
+    """The load-bearing case. An `fts+vec` row carries BOTH signals, but search()'s
+    vec-first union placed it by DISTANCE and merely carries `rank` along as
+    provenance (#402). Recording the rank as the ordering signal would misattribute
+    why the row was there — and a floor built on it would threshold the wrong scale.
+    """
+    p = tmp_path / "t.db"
+    _log_one(p, {"id": 9, "match_source": "fts+vec", "distance": 0.42, "rank": -9.9})
+    got = _provenance(p)
+    assert got["native"] == [0.42], "ordering signal must be the vector distance"
+    assert got["kinds"] == ["vec_distance"]
+    assert got["channels"] == ["fts+vec"]
+    assert got["scores"] == [-9.9], "legacy column still reports the comparable BM25"
+
+
+def test_scoreless_row_records_nulls_not_zeros(tmp_path):
+    """Session-start rows are selected against a token budget, not a retrieval
+    score. Absence must read as None — a 0.0 would look like a perfect vec hit."""
+    p = tmp_path / "t.db"
+    log_context_injection(
+        p,
+        source="session_start",
+        session_id="s",
+        trigger=None,
+        rows=[{"id": 1}],
+        injected_text="x" * 8,
+    )
+    got = _provenance(p)
+    assert got["native"] == [None]
+    assert got["kinds"] == [None]
+    assert got["channels"] == [None]
+    assert got["k"] is None, "session_start doesn't retrieve by k"
+
+
+def test_arrays_stay_aligned_with_hit_ids_across_mixed_channels(tmp_path):
+    """Positional alignment is the whole contract — a consumer joins by index."""
+    import json
+    import sqlite3
+
+    p = tmp_path / "t.db"
+    log_context_injection(
+        p,
+        source="per_turn_recall",
+        session_id="s",
+        trigger="t",
+        rows=[
+            {"id": 1, "match_source": "vec", "distance": 0.1},
+            {"id": 2, "match_source": "fts", "rank": -2.0},
+            {"id": 3},
+        ],
+        injected_text="x" * 8,
+        k_requested=5,
+    )
+    got = _provenance(p)
+    c = sqlite3.connect(p)
+    hit_ids = json.loads(c.execute("SELECT hit_ids FROM context_injections").fetchone()[0])
+    c.close()
+    assert hit_ids == [1, 2, 3]
+    for key in ("native", "kinds", "channels"):
+        assert len(got[key]) == len(hit_ids), f"{key} misaligned with hit_ids"
+    assert got["kinds"] == ["vec_distance", "bm25", None]
+    assert got["k"] == 5
+
+
+def test_k_requested_distinguishes_a_bound_result_from_a_coincidence(tmp_path):
+    """hit_count == k is ambiguous without k. Record what was asked for."""
+    p = tmp_path / "t.db"
+    _log_one(p, {"id": 1, "match_source": "vec", "distance": 0.1}, k_requested=5)
+    assert _provenance(p)["k"] == 5
+
+
+def test_self_migrates_413_columns_onto_a_pre_413_table(tmp_path):
+    """A db written before #413 lacks the four new columns; the guarded ALTER adds
+    them so the values persist rather than the INSERT erroring (and the write is
+    best-effort, so an error would silently DROP the row — a hole in the very
+    audit data this table exists to produce)."""
+    import sqlite3
+
+    p = tmp_path / "old.db"
+    c = sqlite3.connect(p)
+    c.execute(_PRE_413_DDL)
+    c.commit()
+    c.close()
+
+    _log_one(p, {"id": 4, "match_source": "vec", "distance": 0.25}, k_requested=5)
+
+    got = _provenance(p)
+    assert got["native"] == [0.25]
+    assert got["kinds"] == ["vec_distance"]
+    assert got["k"] == 5
+
+
+def test_fts_fallback_rows_record_bm25_with_a_null_channel(tmp_path):
+    """search()'s early returns (vectors off, or requested-but-unavailable) hand
+    back FTS rows WITHOUT a match_source stamp — the shape a vectorless install
+    produces. The channel is null but the kind still says bm25, which is what lets
+    a consumer tell this apart from "no retrieval score at all"."""
+    p = tmp_path / "t.db"
+    _log_one(p, {"id": 1, "rank": -5.4884})  # no match_source key at all
+    got = _provenance(p)
+    assert got["native"] == [-5.4884]
+    assert got["kinds"] == ["bm25"]
+    assert got["channels"] == [None]

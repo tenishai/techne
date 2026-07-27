@@ -24,7 +24,12 @@ Design:
   runtime), so ``_field`` reads both via ``.get``; its ``getattr`` fallback is
   defensive for any future non-dict row type.
 - **Attribution-ready** — ``hit_ids`` recorded so a later pass can join "was the
-  injected item actually used" (the counterfactual — deferred).
+  injected item actually used" (the counterfactual — deferred, techne#416).
+- **Ordering-signal recorded** (techne#413) — ``hit_ids`` alone said WHAT was
+  injected but not WHY. Each hit also carries the value that decided its
+  position, the scale that value is on, and which channel produced it, so
+  retrieval quality is scorable offline and a relevance floor (techne#414)
+  has something to threshold on.
 """
 
 from __future__ import annotations
@@ -44,22 +49,38 @@ CREATE TABLE IF NOT EXISTS context_injections (
     hit_ids         TEXT,
     scores          TEXT,
     approx_tokens   INTEGER NOT NULL,
-    total_hits      INTEGER
+    total_hits      INTEGER,
+    native_scores   TEXT,
+    score_kinds     TEXT,
+    match_sources   TEXT,
+    k_requested     INTEGER
 )
 """
 
+# Columns added AFTER context_injections first shipped, in order. This table is
+# created lazily here (not via the core schema-reconcile path), so a db written
+# before a given column existed won't have it.
+_LATER_COLUMNS = {
+    "total_hits": "INTEGER",  # techne#343
+    "native_scores": "TEXT",  # techne#413 ↓
+    "score_kinds": "TEXT",
+    "match_sources": "TEXT",
+    "k_requested": "INTEGER",
+}
 
-def _ensure_total_hits_column(conn) -> None:
-    """Idempotent self-migration for the total_hits column (techne#343).
 
-    context_injections is created lazily here (not via the core schema-reconcile
-    path), so a table made before total_hits existed won't have the column. Add
-    it once; the PRAGMA check makes this a cheap no-op thereafter. SQLite has no
-    ADD COLUMN IF NOT EXISTS, hence the guard.
+def _ensure_columns(conn) -> None:
+    """Idempotent self-migration for every post-ship column (techne#343, #413).
+
+    One PRAGMA read, then ADD COLUMN only for what's genuinely absent — a cheap
+    no-op once a db is current. SQLite has no ADD COLUMN IF NOT EXISTS, hence the
+    guard. Generalized from the single-column #343 version because #413 made this
+    the second lazy migration of this table; the behavior per column is identical.
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(context_injections)").fetchall()}
-    if "total_hits" not in cols:
-        conn.execute("ALTER TABLE context_injections ADD COLUMN total_hits INTEGER")
+    for name, decl in _LATER_COLUMNS.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE context_injections ADD COLUMN {name} {decl}")
 
 
 def _field(r: Any, key: str) -> Any:
@@ -95,6 +116,46 @@ def _inclusion_score(r: Any) -> float | None:
     return None
 
 
+def _ordering_signal(r: Any) -> tuple[float | None, str | None]:
+    """The value that actually decided this row's POSITION, and the scale it's on.
+
+    Complement to ``_inclusion_score`` (techne#413). That function reports only the
+    comparable FTS signal and is therefore ``None`` for vector rows — honest, but
+    since #401/#402 made search a vec-first union, most hits ARE vector rows, so
+    the column that records "why was this here" is mostly empty exactly where the
+    rail does its work.
+
+    The fix is not to merge the two scales into one column — that's what the #402
+    review correctly rejected, since BM25 ``rank`` (more-negative = better) and vec
+    ``distance`` (lower = nearer) are opposite-signed and would be silently
+    incomparable. Instead: record the raw value AND a ``kind`` discriminator, so a
+    consumer must acknowledge the scale before comparing.
+
+    Which signal placed the row follows ``search()``'s union: the vec channel is
+    taken first (already sorted by ascending distance), so a ``vec`` or ``fts+vec``
+    row was positioned by its distance — an overlap row keeps its VECTOR position
+    and merely carries ``rank`` along as provenance. FTS-only rows were positioned
+    by BM25. Anything else (budget-selected session-start rows, edit-rail rows) has
+    no retrieval score at all and reports ``(None, None)``.
+
+    NB on reading ``match_sources`` back: ``search()`` stamps ``match_source`` only
+    on the union path. Its two early returns (``use_vectors=False``, and vectors
+    requested but unavailable/empty) hand back FTS rows unstamped, so the channel
+    reads ``None`` there even though the hits are genuinely FTS. ``score_kinds``
+    disambiguates — ``"bm25"`` with a null channel is the FTS-only fallback, while
+    null kind AND null channel means no retrieval score existed at all.
+    """
+    if _field(r, "match_source") in ("vec", "fts+vec"):
+        d = _field(r, "distance")
+        if isinstance(d, (int, float)) and not isinstance(d, bool):
+            return round(d, 4), "vec_distance"
+    for key, kind in (("rrf_score", "rrf"), ("rank", "bm25")):
+        v = _field(r, key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return round(v, 4), kind
+    return None, None
+
+
 def log_context_injection(
     db_path: Any,
     *,
@@ -104,6 +165,7 @@ def log_context_injection(
     rows: list,
     injected_text: str,
     total_hits: int | None = None,
+    k_requested: int | None = None,
 ) -> None:
     """Record one context-injection event. Best-effort — never raises.
 
@@ -115,10 +177,25 @@ def log_context_injection(
     techne#343) — ``None`` when the source doesn't cap. ``injected_text`` is the
     rendered block actually added to context; ``trigger`` is the recall prompt (or
     the edited symbol id), ``None`` for the untriggered session-start path.
+
+    ``k_requested`` is the limit the source ASKED for (techne#413) — recorded so a
+    full result set is distinguishable from a coincidence: ``hit_count == k`` may
+    mean "the cap bound the result" or "that's all there was", and after the fact
+    those are indistinguishable without k. ``None`` where a source doesn't retrieve
+    by k (session-start selects against a token budget, not a count).
+
+    Per-hit ordering provenance (techne#413) is written as three JSON arrays
+    positionally aligned with ``hit_ids``: ``native_scores`` (the value that placed
+    the row), ``score_kinds`` (which scale that value is on — never compare across
+    kinds), and ``match_sources`` (which channel produced it: vec / fts / fts+vec).
     """
     try:
         hit_ids = [_field(r, "id") for r in rows]
         scores = [_inclusion_score(r) for r in rows]
+        ordering = [_ordering_signal(r) for r in rows]
+        native_scores = [s for s, _ in ordering]
+        score_kinds = [k for _, k in ordering]
+        match_sources = [_field(r, "match_source") for r in rows]
         conn = sqlite3.connect(str(db_path))
         try:
             # Parity with every other writer to this db (database.py:471,
@@ -128,12 +205,13 @@ def log_context_injection(
             # data this table exists to produce.
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute(_DDL)
-            _ensure_total_hits_column(conn)  # self-migrate pre-#343 tables
+            _ensure_columns(conn)  # self-migrate pre-#343 / pre-#413 tables
             conn.execute(
                 "INSERT INTO context_injections "
                 "(source, session_id, trigger_snippet, hit_count, hit_ids, scores, "
-                "approx_tokens, total_hits) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "approx_tokens, total_hits, native_scores, score_kinds, "
+                "match_sources, k_requested) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     source,
                     session_id,
@@ -143,6 +221,10 @@ def log_context_injection(
                     json.dumps(scores),
                     _approx_tokens(injected_text),
                     total_hits,
+                    json.dumps(native_scores),
+                    json.dumps(score_kinds),
+                    json.dumps(match_sources),
+                    k_requested,
                 ),
             )
             conn.commit()
