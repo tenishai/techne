@@ -613,3 +613,15 @@ def test_fts_fallback_rows_record_bm25_with_a_null_channel(tmp_path):
     assert got["native"] == [-5.4884]
     assert got["kinds"] == ["bm25"]
     assert got["channels"] == [None]
+
+
+def test_bool_ranks_are_not_logged_as_scores(tmp_path):
+    """bool is a subclass of int, so an unguarded isinstance check would log a
+    stray True as the score 1.0 — a fabricated relevance value in the table the
+    #414 floor will be tuned from. Both score columns must reject it. (#419)"""
+    p = tmp_path / "t.db"
+    _log_one(p, {"id": 1, "rank": True})
+    got = _provenance(p)
+    assert got["native"] == [None]
+    assert got["kinds"] == [None]
+    assert got["scores"] == [None]

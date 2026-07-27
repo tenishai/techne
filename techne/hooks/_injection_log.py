@@ -111,13 +111,33 @@ def _inclusion_score(r: Any) -> float | None:
     """
     for key in ("rrf_score", "rank"):
         v = _field(r, key)
-        if isinstance(v, (int, float)):
+        # `not isinstance(v, bool)` — bool is a subclass of int, so a stray True
+        # would otherwise log as the score 1.0. Matches _retrieval_signal (#419).
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
             return round(v, 4)
     return None
 
 
-def _ordering_signal(r: Any) -> tuple[float | None, str | None]:
-    """The value that actually decided this row's POSITION, and the scale it's on.
+def _retrieval_signal(r: Any) -> tuple[float | None, str | None]:
+    """This row's raw retrieval score on its own scale, and which scale that is.
+
+    NOT "the value that placed the row" — that framing is only true for the vector
+    channel, and #419 review (Prudence) caught it. Be precise, because techne#414's
+    relevance floor gets built from this contract:
+
+    - **vec rows**: ``distance`` IS the placement value — ``search_vec`` sorts by
+      ascending distance and the union preserves that order.
+    - **FTS rows**: ``rank`` is the dominant INPUT to placement, not placement
+      itself. ``_rerank`` orders by ``_combined`` = a weighted blend of normalized
+      BM25, recency, and a confidence-decay tiebreak, then POPS ``_combined`` (and
+      ``_norm_bm25`` / ``_recency``) before returning — so the actual ordering value
+      is not observable from a returned row at all. ``search()`` says as much at the
+      union: FTS-only hits are appended "in ``search_fts``'s own recency/BM25/decay
+      order."
+
+    Storing the raw rank anyway is the deliberate choice: ``_norm_bm25`` is a
+    per-type min–max over whatever candidate pool THAT query produced, so the blend
+    is not comparable across queries — useless as a floor. Raw BM25 is stable.
 
     Complement to ``_inclusion_score`` (techne#413). That function reports only the
     comparable FTS signal and is therefore ``None`` for vector rows — honest, but
@@ -131,12 +151,13 @@ def _ordering_signal(r: Any) -> tuple[float | None, str | None]:
     incomparable. Instead: record the raw value AND a ``kind`` discriminator, so a
     consumer must acknowledge the scale before comparing.
 
-    Which signal placed the row follows ``search()``'s union: the vec channel is
-    taken first (already sorted by ascending distance), so a ``vec`` or ``fts+vec``
-    row was positioned by its distance — an overlap row keeps its VECTOR position
-    and merely carries ``rank`` along as provenance. FTS-only rows were positioned
-    by BM25. Anything else (budget-selected session-start rows, edit-rail rows) has
-    no retrieval score at all and reports ``(None, None)``.
+    Which signal to attribute follows ``search()``'s union: the vec channel is taken
+    first (already sorted by ascending distance), so a ``vec`` or ``fts+vec`` row is
+    reported on the distance scale — an overlap row keeps its VECTOR position and
+    merely carries ``rank`` along as provenance, so attributing it to BM25 would
+    misreport it. FTS-only rows report BM25, with the input-vs-placement caveat
+    above. Anything else (budget-selected session-start rows, edit-rail rows) has no
+    retrieval score at all and reports ``(None, None)``.
 
     NB on reading ``match_sources`` back: ``search()`` stamps ``match_source`` only
     on the union path. Its two early returns (``use_vectors=False``, and vectors
@@ -149,6 +170,11 @@ def _ordering_signal(r: Any) -> tuple[float | None, str | None]:
         d = _field(r, "distance")
         if isinstance(d, (int, float)) and not isinstance(d, bool):
             return round(d, 4), "vec_distance"
+    # `rrf` has no in-tree producer today (#401 replaced RRF fusion with the
+    # vec-first union, and test_search_rrf.py asserts `rrf_score`'s absence on every
+    # path). Kept only to mirror `_inclusion_score`'s legacy/federation branch — if
+    # that one ever reports an rrf value, this must not silently disagree by
+    # returning None for the same row. Unreachable-but-consistent, on purpose.
     for key, kind in (("rrf_score", "rrf"), ("rank", "bm25")):
         v = _field(r, key)
         if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -192,9 +218,9 @@ def log_context_injection(
     try:
         hit_ids = [_field(r, "id") for r in rows]
         scores = [_inclusion_score(r) for r in rows]
-        ordering = [_ordering_signal(r) for r in rows]
-        native_scores = [s for s, _ in ordering]
-        score_kinds = [k for _, k in ordering]
+        signals = [_retrieval_signal(r) for r in rows]
+        native_scores = [s for s, _ in signals]
+        score_kinds = [k for _, k in signals]
         match_sources = [_field(r, "match_source") for r in rows]
         conn = sqlite3.connect(str(db_path))
         try:
