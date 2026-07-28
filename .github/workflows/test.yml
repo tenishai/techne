@@ -25,6 +25,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Force uv to use the interpreters BAKED INTO THE RUNNER IMAGE and never fetch a
+# managed build of its own (#424 review — Prudence). Without this the matrix claims
+# to test 3.12/3.13/3.14 while potentially exercising whatever uv decided to
+# download, and `python -V` cannot tell the two apart — it prints the same string
+# either way.
+#
+# This has teeth on the eval-vec leg specifically. sqlite-vec is a loadable SQLite
+# extension, and search.py degrades GRACEFULLY when the interpreter lacks
+# loadable-extension support: search_vec returns [] and backfill_vectors returns {}
+# (the guarded except at search.py:590/868, from #84). So an interpreter without
+# that support does not crash the gate — it makes the gate quietly measure an
+# FTS-only path while still reporting green. A silent wrong-interpreter is exactly
+# the failure this pin prevents.
+env:
+  UV_PYTHON_PREFERENCE: only-system
+  UV_PYTHON_DOWNLOADS: never
+
 jobs:
   test:
     # NB: there is currently ONE runner, so these matrix legs and eval-vec run
@@ -32,6 +49,12 @@ jobs:
     # workflow, against ~2min when this ran on GitHub-hosted. Scale by starting
     # more replicas of the runner container if that becomes the bottleneck.
     runs-on: [self-hosted, linux, x64, dev02]
+    # The default is 360 MINUTES. On a hosted runner a hung job was a local
+    # nuisance; with ONE self-hosted runner it is an org-wide CI outage, because
+    # every other job queues behind it (#424 review — Prudence). A full leg is
+    # ~12min on this hardware, so 45 is generous headroom and still bounds the
+    # blast radius at under an hour.
+    timeout-minutes: 45
     strategy:
       matrix:
         python-version: ['3.12', '3.13']
@@ -80,6 +103,8 @@ jobs:
   # stay fast and dep-free.
   eval-vec:
     runs-on: [self-hosted, linux, x64, dev02]
+    # Observed at ~30s on the runner; 20 bounds a hang without being tight.
+    timeout-minutes: 20
     steps:
       - name: Checkout techne
         uses: actions/checkout@v4
