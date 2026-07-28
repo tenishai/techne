@@ -99,6 +99,17 @@ def test_inbox_oldest_first(db_path):
 
 
 def _write_sidecar(cfg_dir, pid, *, session_id, name, status="busy", age_ms=0):
+    """Write a Claude Code session sidecar. `pid` is BOTH the record's pid and the
+    filename, mirroring the real convention (docs/arch/coord.md) — so it stays a
+    caller's choice rather than defaulting to something live.
+
+    Consequence for callers: any test that expects a sidecar to appear in
+    live_sessions() must either pass a genuinely live pid or pin coord._pid_alive,
+    because the reaper (techne#380) drops dead ones. An arbitrary literal is NOT
+    portable — low pids exist as root-owned daemons on macOS (PermissionError ->
+    fails open -> alive) but not in a Linux container (ProcessLookupError -> reaped).
+    That split is what made main red for three days (#421).
+    """
     import time
 
     sessions = cfg_dir / "sessions"
@@ -176,6 +187,25 @@ def test_collision_empty_when_self_cwd_not_git(monkeypatch):
 def test_live_sessions_and_name(tmp_path, monkeypatch):
     cfg = tmp_path / "dotclaude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    # This test is about SELF-EXCLUSION and AGE staleness, not PID liveness — the
+    # reaper has its own coverage (test_pid_alive, test_live_sessions_reaps_dead_pid).
+    #
+    # Why PIN rather than just hand the sidecars a live pid: live_sessions() guards
+    # in the order exclude -> age -> pid (coord.py:345/350/352), so a real pid would
+    # make this test's correctness depend on that ORDER. Transpose the age and pid
+    # checks and `uuid-old` gets reaped for liveness instead of dropped for age —
+    # the assertion below stays green while age staleness silently stops being
+    # tested. Pinning leaves age as the only mechanism that can drop it. (#421
+    # review — Prudence, who also disproved my original claim here that all three
+    # sidecars would need live pids: a call-recorder on _pid_alive sees only [200],
+    # because the other two are dropped before the pid guard is reached.)
+    # Pin liveness so the sidecars are dropped for the reasons under test. Without
+    # this the arbitrary PIDs below decide the outcome, and they resolve
+    # DIFFERENTLY per OS: on macOS pid 200/300 are real root-owned daemons, so
+    # os.kill(pid, 0) raises PermissionError and _pid_alive fails open (alive); in a
+    # Linux container they simply don't exist -> ProcessLookupError -> reaped. That
+    # is why this passed on dev machines and failed in CI from techne#380 onward.
+    monkeypatch.setattr(coord, "_pid_alive", lambda pid: True)
     _write_sidecar(cfg, 100, session_id="uuid-1", name="claude_1")
     _write_sidecar(cfg, 200, session_id="uuid-2", name="claude_2")
     _write_sidecar(cfg, 300, session_id="uuid-old", name="stale", age_ms=999 * 60 * 1000)
@@ -192,6 +222,9 @@ def test_send_to_name_alias_resolves_to_direct(tmp_path, monkeypatch):
     its display name to its session_id."""
     cfg = tmp_path / "dotclaude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    # Name-alias resolution is the subject here, not liveness — see the note in
+    # test_live_sessions_and_name for why a bare PID is not portable.
+    monkeypatch.setattr(coord, "_pid_alive", lambda pid: True)
     _write_sidecar(cfg, 200, session_id="uuid-2", name="claude_2")
     db = tmp_path / "t.db"
     init_db(db).close()
