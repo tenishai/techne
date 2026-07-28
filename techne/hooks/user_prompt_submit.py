@@ -164,6 +164,7 @@ def main() -> None:
                     trigger=prompt,
                     rows=rows,
                     injected_text=recall_block,
+                    k_requested=config.hooks.per_turn_recall_limit,
                 )
         except Exception as e:  # noqa: BLE001  — catches HookTimeout too
             print(f"techne: per-turn recall degraded: {e}", file=sys.stderr)

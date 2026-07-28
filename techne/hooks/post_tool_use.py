@@ -496,6 +496,7 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
             rows=shown,
             injected_text=text,
             total_hits=total,
+            k_requested=config.hooks.codex_edit_rail_limit,
         )
         # Mark surfaced only after a real injection — symbols that fell below the
         # threshold are NOT recorded, so they're re-evaluated on a later edit.

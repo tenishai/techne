@@ -24,7 +24,15 @@ Design:
   runtime), so ``_field`` reads both via ``.get``; its ``getattr`` fallback is
   defensive for any future non-dict row type.
 - **Attribution-ready** — ``hit_ids`` recorded so a later pass can join "was the
-  injected item actually used" (the counterfactual — deferred).
+  injected item actually used" (the counterfactual — deferred, techne#416).
+- **Retrieval signal recorded** (techne#413) — ``hit_ids`` alone said WHAT was
+  injected but not WHY. Each hit also carries its raw retrieval score, the scale
+  that score is on, and which channel produced it, so retrieval quality is
+  scorable offline and a relevance floor (techne#414) has something to threshold
+  on. That score is the row's PLACEMENT value only where ``score_kinds`` is
+  ``"vec_distance"``; where it is ``"bm25"`` the score is an input to placement,
+  not placement itself — see ``_retrieval_signal``, and do not build a floor
+  without reading it.
 """
 
 from __future__ import annotations
@@ -44,22 +52,38 @@ CREATE TABLE IF NOT EXISTS context_injections (
     hit_ids         TEXT,
     scores          TEXT,
     approx_tokens   INTEGER NOT NULL,
-    total_hits      INTEGER
+    total_hits      INTEGER,
+    native_scores   TEXT,
+    score_kinds     TEXT,
+    match_sources   TEXT,
+    k_requested     INTEGER
 )
 """
 
+# Columns added AFTER context_injections first shipped, in order. This table is
+# created lazily here (not via the core schema-reconcile path), so a db written
+# before a given column existed won't have it.
+_LATER_COLUMNS = {
+    "total_hits": "INTEGER",  # techne#343
+    "native_scores": "TEXT",  # techne#413 ↓
+    "score_kinds": "TEXT",
+    "match_sources": "TEXT",
+    "k_requested": "INTEGER",
+}
 
-def _ensure_total_hits_column(conn) -> None:
-    """Idempotent self-migration for the total_hits column (techne#343).
 
-    context_injections is created lazily here (not via the core schema-reconcile
-    path), so a table made before total_hits existed won't have the column. Add
-    it once; the PRAGMA check makes this a cheap no-op thereafter. SQLite has no
-    ADD COLUMN IF NOT EXISTS, hence the guard.
+def _ensure_columns(conn) -> None:
+    """Idempotent self-migration for every post-ship column (techne#343, #413).
+
+    One PRAGMA read, then ADD COLUMN only for what's genuinely absent — a cheap
+    no-op once a db is current. SQLite has no ADD COLUMN IF NOT EXISTS, hence the
+    guard. Generalized from the single-column #343 version because #413 made this
+    the second lazy migration of this table; the behavior per column is identical.
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(context_injections)").fetchall()}
-    if "total_hits" not in cols:
-        conn.execute("ALTER TABLE context_injections ADD COLUMN total_hits INTEGER")
+    for name, decl in _LATER_COLUMNS.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE context_injections ADD COLUMN {name} {decl}")
 
 
 def _field(r: Any, key: str) -> Any:
@@ -77,7 +101,13 @@ def _approx_tokens(text: str) -> int:
 
 
 def _inclusion_score(r: Any) -> float | None:
-    """The FTS BM25 signal that contributed to ordering, when present.
+    """The comparable FTS BM25 signal for this row, when present.
+
+    Deliberately NOT "the signal that contributed to ordering" (#419 review): this
+    returns ``rank`` for ``fts+vec`` overlap rows too, and those were placed by
+    distance, not by BM25. The pre-#413 wording conflated having a BM25 score with
+    having been ordered by one — the same conflation ``_retrieval_signal`` exists to
+    undo. (Wording arrived with #402/177d95d, corrected here in passing.)
 
     Since techne#401 the hybrid path is a vec-first union with no single fused
     score. We deliberately do NOT fold a vector ``distance`` (lower = nearer)
@@ -90,9 +120,84 @@ def _inclusion_score(r: Any) -> float | None:
     """
     for key in ("rrf_score", "rank"):
         v = _field(r, key)
-        if isinstance(v, (int, float)):
+        # `not isinstance(v, bool)` — bool is a subclass of int, so a stray True
+        # would otherwise log as the score 1.0. Matches _retrieval_signal (#419).
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
             return round(v, 4)
     return None
+
+
+def _retrieval_signal(r: Any) -> tuple[float | None, str | None]:
+    """This row's raw retrieval score on its own scale, and which scale that is.
+
+    NOT "the value that placed the row" — that framing is only true for the vector
+    channel, and #419 review (Prudence) caught it. Be precise, because techne#414's
+    relevance floor gets built from this contract:
+
+    - **vec rows**: ``distance`` IS the placement value — ``search_vec`` sorts by
+      ascending distance and the union preserves that order.
+    - **FTS rows**: ``rank`` is an INPUT to placement, not placement itself.
+      ``_rerank`` orders by ``_combined`` = a weighted blend of normalized BM25,
+      recency, and a confidence-decay tiebreak, then POPS ``_combined`` (and
+      ``_norm_bm25`` / ``_recency``) before returning — so the actual ordering value
+      is not observable from a returned row at all. BM25 merely carries the largest
+      default weight (0.7 vs 0.3 recency, 0.1 decay); all three are operator-tunable
+      parameters, so even "dominant" isn't guaranteed. A second MMR stage can
+      reorder again — a no-op only because every live caller leaves ``search_fts``'s
+      ``mmr_lambda`` at its ``0.0`` default. Don't read that off the config knob:
+      ``SearchConfig.mmr_lambda`` defaults to 0.3 but is never plumbed through
+      (techne#420), so the two numbers disagree and the function default is the one
+      in force.
+      ``search()`` says as much at the union: FTS-only hits are appended "in
+      ``search_fts``'s own recency/BM25/decay order."
+
+    Storing the raw rank anyway is the deliberate choice: ``_norm_bm25`` is a
+    per-type min–max over whatever candidate pool THAT query produced, so the blend
+    is not comparable across queries — useless as a floor. Raw BM25 is stable.
+
+    Complement to ``_inclusion_score`` (techne#413). That function reports only the
+    comparable FTS signal and is therefore ``None`` for vector rows — honest, but
+    since #401/#402 made search a vec-first union, most hits ARE vector rows, so
+    the column that records "why was this here" is mostly empty exactly where the
+    rail does its work.
+
+    The fix is not to merge the two scales into one column — that's what the #402
+    review correctly rejected, since BM25 ``rank`` (more-negative = better) and vec
+    ``distance`` (lower = nearer) are opposite-signed and would be silently
+    incomparable. Instead: record the raw value AND a ``kind`` discriminator, so a
+    consumer must acknowledge the scale before comparing.
+
+    Which signal to attribute follows ``search()``'s union: the vec channel is taken
+    first (already sorted by ascending distance), so a ``vec`` or ``fts+vec`` row is
+    reported on the distance scale — an overlap row keeps its VECTOR position and
+    merely carries ``rank`` along as provenance, so attributing it to BM25 would
+    misreport it. FTS-only rows report BM25, with the input-vs-placement caveat
+    above. Anything else (budget-selected session-start rows, edit-rail rows) has no
+    retrieval score at all and reports ``(None, None)``.
+
+    NB on reading ``match_sources`` back: ``search()`` stamps ``match_source`` only
+    on the union path. Its two early returns (``use_vectors=False``, and vectors
+    requested but unavailable/empty) hand back FTS rows unstamped, so the channel
+    reads ``None`` there even though the hits are genuinely FTS. ``score_kinds``
+    disambiguates — ``"bm25"`` with a null channel is the FTS-only fallback, while
+    null kind AND null channel means no retrieval score existed at all.
+    """
+    if _field(r, "match_source") in ("vec", "fts+vec"):
+        d = _field(r, "distance")
+        if isinstance(d, (int, float)) and not isinstance(d, bool):
+            return round(d, 4), "vec_distance"
+    # `rrf` has no in-tree producer today (#401 replaced RRF fusion with the
+    # vec-first union; test_search_rrf.py asserts `rrf_score`'s absence on every
+    # path). BOTH readers of it are dead code — `_inclusion_score`'s legacy/
+    # federation branch too, not just this one (#419 review). Kept deliberately as a
+    # matched pair: if a federation path ever reintroduces `rrf_score`, one reader
+    # reporting it while the other returns None for the same row would be a silent
+    # disagreement between two columns that are supposed to describe one hit.
+    for key, kind in (("rrf_score", "rrf"), ("rank", "bm25")):
+        v = _field(r, key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return round(v, 4), kind
+    return None, None
 
 
 def log_context_injection(
@@ -104,6 +209,7 @@ def log_context_injection(
     rows: list,
     injected_text: str,
     total_hits: int | None = None,
+    k_requested: int | None = None,
 ) -> None:
     """Record one context-injection event. Best-effort — never raises.
 
@@ -115,10 +221,33 @@ def log_context_injection(
     techne#343) — ``None`` when the source doesn't cap. ``injected_text`` is the
     rendered block actually added to context; ``trigger`` is the recall prompt (or
     the edited symbol id), ``None`` for the untriggered session-start path.
+
+    ``k_requested`` is the limit the source ASKED for (techne#413) — recorded so a
+    full result set is distinguishable from a coincidence: ``hit_count == k`` may
+    mean "the cap bound the result" or "that's all there was", and after the fact
+    those are indistinguishable without k. ``None`` where a source doesn't retrieve
+    by k (session-start selects against a token budget, not a count).
+
+    Per-hit retrieval provenance (techne#413) is written as three JSON arrays
+    positionally aligned with ``hit_ids``: ``native_scores`` (the row's raw
+    retrieval score), ``score_kinds`` (which scale that score is on — never compare
+    across kinds), and ``match_sources`` (which channel produced it: vec / fts /
+    fts+vec).
+
+    ``native_scores`` is the row's PLACEMENT value only where ``score_kinds`` is
+    ``"vec_distance"`` — stated in terms of the column a floor actually joins on,
+    which correctly includes ``fts+vec`` overlap rows (#419 review). Where the kind
+    is ``"bm25"`` the score is an input to placement, and the real ordering value is
+    unobservable — ``_retrieval_signal`` explains why, and why the raw score is
+    still what we store. Read that before building a floor on this column (#414).
     """
     try:
         hit_ids = [_field(r, "id") for r in rows]
         scores = [_inclusion_score(r) for r in rows]
+        signals = [_retrieval_signal(r) for r in rows]
+        native_scores = [s for s, _ in signals]
+        score_kinds = [k for _, k in signals]
+        match_sources = [_field(r, "match_source") for r in rows]
         conn = sqlite3.connect(str(db_path))
         try:
             # Parity with every other writer to this db (database.py:471,
@@ -128,12 +257,13 @@ def log_context_injection(
             # data this table exists to produce.
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute(_DDL)
-            _ensure_total_hits_column(conn)  # self-migrate pre-#343 tables
+            _ensure_columns(conn)  # self-migrate pre-#343 / pre-#413 tables
             conn.execute(
                 "INSERT INTO context_injections "
                 "(source, session_id, trigger_snippet, hit_count, hit_ids, scores, "
-                "approx_tokens, total_hits) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "approx_tokens, total_hits, native_scores, score_kinds, "
+                "match_sources, k_requested) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     source,
                     session_id,
@@ -143,6 +273,10 @@ def log_context_injection(
                     json.dumps(scores),
                     _approx_tokens(injected_text),
                     total_hits,
+                    json.dumps(native_scores),
+                    json.dumps(score_kinds),
+                    json.dumps(match_sources),
+                    k_requested,
                 ),
             )
             conn.commit()
