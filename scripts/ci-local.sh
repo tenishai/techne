@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Run the CI workflow's checks locally, without spending GitHub Actions minutes.
+#
+# techne is a PRIVATE repo, so Actions minutes are metered — and as of 2026-07-25
+# the org's jobs stopped starting entirely on a billing failure. This script is the
+# stopgap AND the fast inner loop: it mirrors .github/workflows/test.yml step for
+# step, so "green here" means the same thing it means there.
+#
+#   ./scripts/ci-local.sh          # test job on the full 3.12/3.13 matrix
+#   ./scripts/ci-local.sh 3.13     # one interpreter
+#   ./scripts/ci-local.sh --vec    # add the eval-vec job (3.14 + model2vec)
+#   ./scripts/ci-local.sh --fresh  # rebuild the venvs from scratch (CI-equivalent)
+#
+# WHAT THIS DOES NOT COVER — this is a PRE-PUSH loop, not a substitute for CI.
+# It runs on YOUR machine; the workflow runs on Linux. That gap is not theoretical:
+# tests/test_coord.py passed here and failed in CI for three days because low PIDs
+# exist as root-owned daemons on macOS (os.kill -> PermissionError -> "alive") but
+# not in a Linux container (ProcessLookupError -> "dead"). This script correctly
+# reported ALL GREEN throughout. Local green is not CI green — push and let the
+# self-hosted runner have the last word.
+#
+# Interpreters come from `uv python`, which downloads a missing version rather than
+# failing — the point is to test the versions CI gates, not the one that happens to
+# be installed.
+
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+MATRIX=(3.12 3.13)   # keep in sync with test.yml's strategy.matrix.python-version
+RUN_VEC=0
+FRESH=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --vec)   RUN_VEC=1 ;;
+    --fresh) FRESH=1 ;;
+    3.*)     ARGS+=("$a") ;;
+    *)       echo "usage: $0 [3.12|3.13 ...] [--vec] [--fresh]" >&2; exit 2 ;;
+  esac
+done
+[ ${#ARGS[@]} -gt 0 ] && MATRIX=("${ARGS[@]}")
+
+command -v uv >/dev/null || { echo "FATAL: uv not found (brew install uv)" >&2; exit 1; }
+
+FAILED=()
+step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
+
+# --- job: test (matrix 3.12, 3.13) -------------------------------------------
+for PY in "${MATRIX[@]}"; do
+  step "job: test — Python $PY"
+  VENV=".venv-ci-$PY"
+  # Reuse an existing venv rather than recreating it — `uv venv` ERRORS on a
+  # populated target, which on any second run made this script bail here and skip
+  # the tests entirely (found by deliberately breaking a test and watching it
+  # report "venv" instead). The reinstall below is idempotent and fast, so a reused
+  # venv still converges on the declared deps; `--fresh` forces a clean rebuild.
+  if [ "$FRESH" = 1 ] || [ ! -x "$VENV/bin/python" ]; then
+    uv venv --python "$PY" "$VENV" --clear --quiet || { FAILED+=("$PY: venv"); continue; }
+  fi
+  # Mirrors the workflow's `pip install -e ".[dev,codex]"` — the codex extra brings
+  # the tree-sitter grammars so codex extraction tests RUN rather than skip.
+  uv pip install --python "$VENV/bin/python" -e ".[dev,codex]" --quiet \
+    || { FAILED+=("$PY: install"); continue; }
+
+  # Advisory in CI (`|| true`), so advisory here — reported, never fatal.
+  "$VENV/bin/python" -m ruff check techne tests || echo "  (ruff advisory — non-blocking, same as CI)"
+
+  "$VENV/bin/python" -m pytest -q || FAILED+=("$PY: pytest")
+
+  # CLI -m overrides pyproject's addopts exclusion. Easy to forget locally, which
+  # is exactly why it's here: these gates are excluded from a bare `pytest` run.
+  "$VENV/bin/python" -m pytest -m "eval or eval_gate" -q || FAILED+=("$PY: eval gates")
+done
+
+# --- job: eval-vec (3.14 + model2vec) ----------------------------------------
+if [ "$RUN_VEC" = 1 ]; then
+  step "job: eval-vec — Python 3.14"
+  VENV=".venv-ci-vec"
+  { [ "$FRESH" = 1 ] || [ ! -x "$VENV/bin/python" ]; } && uv venv --python 3.14 "$VENV" --clear --quiet
+  
+  uv pip install --python "$VENV/bin/python" -e ".[dev,codex,vectors]" --quiet \
+    || FAILED+=("vec: install")
+  # The eval_vec fixture SKIPS unless the pinned model is already cached (it probes
+  # with allow_download=False), so fetch it first or the gate silently no-ops.
+  "$VENV/bin/python" -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)" \
+    || FAILED+=("vec: model fetch")
+  "$VENV/bin/python" -m pytest -m eval_vec -s || FAILED+=("vec: eval_vec gate")
+fi
+
+# --- verdict ------------------------------------------------------------------
+echo
+if [ ${#FAILED[@]} -eq 0 ]; then
+  printf '\033[32mALL GREEN\033[0m — %s\n' "${MATRIX[*]}$([ "$RUN_VEC" = 1 ] && echo ' + eval-vec')"
+else
+  printf '\033[31mFAILED:\033[0m %s\n' "${FAILED[*]}"
+  exit 1
+fi
