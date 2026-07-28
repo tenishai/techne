@@ -2,6 +2,18 @@ name: test
 
 # Techne has no private sibling deps — full suite runs on every push/PR.
 # The contract job catches breaking renames before cabal/limenal CI fires.
+#
+# RUNS ON A SELF-HOSTED RUNNER (dev02), not ubuntu-latest. Why: GitHub-hosted jobs
+# on this org stopped STARTING in July 2026 — "recent account payments have failed
+# or your spending limit needs to be increased", a scheduling refusal that reports
+# as a plain `failure` with no runner assigned. Self-hosted dispatch is unaffected
+# (verified empirically; see the agora write-up). Runner setup lives at
+# /var/servers/gha-runner + /var/servers/docker-compose/ci on dev02.
+#
+# The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
+# actions/setup-python here: the runner is EPHEMERAL, and setup-python would
+# re-download every interpreter on every job rather than reusing a tool cache that
+# does not survive the container.
 on:
   push:
     branches: [main]
@@ -15,7 +27,11 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # NB: there is currently ONE runner, so these matrix legs and eval-vec run
+    # SEQUENTIALLY rather than in parallel — expect ~30min wall-clock for the full
+    # workflow, against ~2min when this ran on GitHub-hosted. Scale by starting
+    # more replicas of the runner container if that becomes the bottleneck.
+    runs-on: [self-hosted, linux, x64, dev02]
     strategy:
       matrix:
         python-version: ['3.12', '3.13']
@@ -27,58 +43,58 @@ jobs:
         with:
           path: techne
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: techne/pyproject.toml
+      # uv + the interpreters are baked into the runner image. `uv venv --python`
+      # selects the matrix version explicitly — without setup-python, a bare
+      # `python` would NOT be the matrix version, so every step below runs through
+      # the venv rather than relying on PATH.
+      - name: Create venv on Python ${{ matrix.python-version }}
+        working-directory: techne
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv-ci
+          .venv-ci/bin/python -V
 
       - name: Install
         working-directory: techne
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,codex]"   # codex extra brings the tree-sitter grammars so the codex extraction tests run (not skip) in CI
+        # codex extra brings the tree-sitter grammars so the codex extraction tests
+        # run (not skip) in CI.
+        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex]"
 
       - name: Ruff lint
         working-directory: techne
-        run: ruff check techne tests || true  # lint is advisory until strict pass is done
+        run: .venv-ci/bin/python -m ruff check techne tests || true  # advisory until strict pass is done
 
       - name: Pytest (includes contract assertions)
         working-directory: techne
-        run: pytest -q
+        run: .venv-ci/bin/python -m pytest -q
 
       # (#398) Deterministic eval gates — FTS-only, no vector/LLM deps, ~0.5s.
       # A regression gate that nothing invokes protects nothing (Prudence, #397).
       # CLI -m overrides the addopts exclusion. eval_llm stays out (needs a key).
       - name: Deterministic eval gates (#68 recall, #385 retrieval-correctness)
         working-directory: techne
-        run: pytest -m "eval or eval_gate"
+        run: .venv-ci/bin/python -m pytest -m "eval or eval_gate"
 
   # (#398) Vector/hybrid retrieval gate (#399/#401) on its own leg: it pins
   # model2vec, which the [vectors] extra installs only on py>=3.14, so it can't
   # run on the 3.12/3.13 matrix above. Kept separate so the deterministic gates
   # stay fast and dep-free.
   eval-vec:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, dev02]
     steps:
       - name: Checkout techne
         uses: actions/checkout@v4
         with:
           path: techne
 
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-          cache: pip
-          cache-dependency-path: techne/pyproject.toml
+      - name: Create venv on Python 3.14
+        working-directory: techne
+        run: |
+          uv venv --python 3.14 .venv-ci
+          .venv-ci/bin/python -V
 
       - name: Install (with vectors)
         working-directory: techne
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,codex,vectors]"
+        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex,vectors]"
 
       - name: Cache the pinned model2vec model
         uses: actions/cache@v4
@@ -93,9 +109,13 @@ jobs:
         # force_download=False so a restored cache is actually reused (model2vec
         # 0.8.2 defaults it to True — see embeddings.py:271); otherwise the
         # actions/cache step above would be dead weight. (#403 review — Prudence.)
+        #
+        # The cache matters MORE on the ephemeral runner than it did on hosted:
+        # ~/.cache/huggingface lives inside the container and dies with each job,
+        # so without a restore this re-downloads the model every single run.
         working-directory: techne
-        run: python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
+        run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
-        run: pytest -m eval_vec -s
+        run: .venv-ci/bin/python -m pytest -m eval_vec -s
