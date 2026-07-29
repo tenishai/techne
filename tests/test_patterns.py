@@ -261,9 +261,55 @@ def test_kind_change_is_reported_as_changed(db, pattern):
 
 
 def test_omitted_fields_default_only_on_insert(db, pattern):
+    """Both halves of the name. The INSERT half alone passed even with the fix
+    fully reverted — the old signature defaults produced an identical row, so it
+    characterised behaviour without protecting it (Prudence, PR#427)."""
     record_outcome(db, pattern_id=pattern, ref="o/r#1")
     row = outcomes_for_pattern(db, pattern)[0]
     assert (row["kind"], row["state"]) == ("issue", "filed")  # defaults applied at INSERT
+
+    # ...and NOT on update: with non-default values stored, omitting the args must
+    # leave them alone. Under the old `state="filed"` / `kind="issue"` signature
+    # defaults this reverts both columns, so this half has real teeth.
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", kind="pr", state="shipped")
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", note="unrelated edit")
+    row = outcomes_for_pattern(db, pattern)[0]
+    assert (row["kind"], row["state"]) == ("pr", "shipped")
+
+
+def test_cli_realized_omits_state_by_default(db, pattern, monkeypatch):
+    """The defect's ORIGIN was Click's `default="filed"`, not the data layer.
+    Reverting cli.py alone left the whole suite green, so pin the CLI contract
+    directly (Prudence, PR#427). Config injected via the house pattern in
+    tests/test_cli_audit.py."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    cfg = Config()
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
+    monkeypatch.setattr("techne.core.architect.architect_db", lambda _config: db)
+
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped")
+    res = CliRunner().invoke(main, ["architect", "realized", pattern, "--ref", "o/r#1"])
+    assert res.exit_code == 0, res.output
+    assert outcomes_for_pattern(db, pattern)[0]["state"] == "shipped"
+    assert "shipped" in res.output  # echoes the STORED state, not the argument
+
+
+def test_shipped_rate_also_excludes_superseded_patterns(db, pattern):
+    """Reverting only the `shipped` half of the realized_rate fix broke nothing —
+    both halves need their own assertion (Prudence, PR#427)."""
+    inv = upsert_investigation(
+        db, url="https://example.test/z", surveyed_at="2026-07-29", verdict="patterns-only"
+    )
+    other, _ = add_pattern(
+        db, investigation_id=inv, name="R", source_url="https://example.test/z", body="b3"
+    )
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped")
+    supersede(db, old_id=pattern, new_id=other)
+    assert outcome_stats(db)["shipped_patterns"] == 0
 
 
 def test_realized_rate_cannot_exceed_one_when_a_pattern_is_superseded(db, pattern):
@@ -284,3 +330,31 @@ def test_realized_rate_cannot_exceed_one_when_a_pattern_is_superseded(db, patter
     assert s["active_patterns"] == 1
     assert s["realized_patterns"] == 1  # the superseded one no longer counts
     assert s["realized_rate"] <= 1.0
+
+
+def test_concurrent_record_outcome_does_not_raise_integrityerror(db, pattern):
+    """Two writers racing the same (pattern_id, ref). Without BEGIN IMMEDIATE both
+    read `before is None`, both take INSERT, and the loser raises an uncaught
+    IntegrityError the CLI does not catch (it only handles ValueError).
+    Reproduced by Prudence on PR#427; pinned here."""
+    import threading
+
+    start = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def writer(state: str) -> None:
+        start.wait()
+        try:
+            record_outcome(db, pattern_id=pattern, ref="race#1", state=state)
+        except BaseException as exc:  # noqa: BLE001 — we want to see ANY failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(s,)) for s in ("filed", "shipped")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"concurrent writers raised: {errors!r}"
+    rows = outcomes_for_pattern(db, pattern)
+    assert len([r for r in rows if r["ref"] == "race#1"]) == 1
