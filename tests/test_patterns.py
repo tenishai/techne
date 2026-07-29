@@ -12,10 +12,14 @@ from techne.core.patterns import (
     investigation_exists,
     investigations_for_url,
     list_patterns,
+    outcome_stats,
+    outcomes_for_pattern,
+    record_outcome,
     search_patterns,
     set_verdict,
     stats,
     sweep_legacy_verdicts,
+    unrealized_patterns,
     upsert_investigation,
 )
 from techne.core.stores import SqliteStore
@@ -623,3 +627,82 @@ def test_demotion_to_no_lift_keeps_the_pattern_era_verdict(db):
 
     ingest_patterns_md(db, nolift)  # demoted later
     assert _verdict_for(db, url) == "patterns-only", "frozen by design — see techne#433"
+
+
+# --- outcome provenance (techne#426) ----------------------------------------
+
+
+@pytest.fixture()
+def pattern(db):
+    """One stored pattern to hang outcomes off."""
+    inv = upsert_investigation(
+        db, url="https://example.test/x", surveyed_at="2026-07-28", verdict="patterns-only"
+    )
+    pid, _ = add_pattern(
+        db, investigation_id=inv, name="P", source_url="https://example.test/x", body="b"
+    )
+    return pid
+
+
+def test_record_outcome_inserts_then_promotes_state(db, pattern):
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1") is True
+    rows = outcomes_for_pattern(db, pattern)
+    assert len(rows) == 1 and rows[0]["state"] == "filed" and rows[0]["kind"] == "issue"
+
+    # same ref, new state → upsert promotes rather than duplicating
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped") is True
+    rows = outcomes_for_pattern(db, pattern)
+    assert len(rows) == 1 and rows[0]["state"] == "shipped"
+
+    # identical re-record is a no-op
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped") is False
+
+
+def test_record_outcome_is_many_to_many(db, pattern):
+    """One pattern can become several things — that's why it's a junction."""
+    record_outcome(db, pattern_id=pattern, ref="o/techne#1")
+    record_outcome(db, pattern_id=pattern, ref="o/limenal#2", state="shipped")
+    refs = {r["ref"] for r in outcomes_for_pattern(db, pattern)}
+    assert refs == {"o/techne#1", "o/limenal#2"}
+
+
+def test_record_outcome_note_is_preserved_when_omitted(db, pattern):
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", note="why it mattered")
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped")  # no note passed
+    assert outcomes_for_pattern(db, pattern)[0]["note"] == "why it mattered"
+
+
+def test_record_outcome_rejects_unknown_pattern_and_state(db, pattern):
+    with pytest.raises(ValueError, match="unknown pattern id"):
+        record_outcome(db, pattern_id="deadbeefdeadbeef", ref="o/r#1")
+    with pytest.raises(ValueError, match="unknown outcome state"):
+        record_outcome(db, pattern_id=pattern, ref="o/r#2", state="bogus")
+
+
+def test_outcome_stats_counts_distinct_patterns_not_rows(db, pattern):
+    """A pattern that spawned three issues is ONE realized pattern, not three."""
+    for i in range(3):
+        record_outcome(db, pattern_id=pattern, ref=f"o/r#{i}")
+    s = outcome_stats(db)
+    assert s["realized_patterns"] == 1
+    assert s["shipped_patterns"] == 0
+    assert s["outcome_rows_by_state"] == {"filed": 3}
+
+    record_outcome(db, pattern_id=pattern, ref="o/r#0", state="shipped")
+    assert outcome_stats(db)["shipped_patterns"] == 1
+
+
+def test_unrealized_excludes_patterns_with_outcomes(db, pattern):
+    inv = upsert_investigation(
+        db, url="https://example.test/y", surveyed_at="2026-07-28", verdict="patterns-only"
+    )
+    other, _ = add_pattern(
+        db, investigation_id=inv, name="Q", source_url="https://example.test/y", body="b2"
+    )
+
+    ids = {p["id"] for p in unrealized_patterns(db)}
+    assert {pattern, other} <= ids
+
+    record_outcome(db, pattern_id=pattern, ref="o/r#1")
+    ids = {p["id"] for p in unrealized_patterns(db)}
+    assert pattern not in ids and other in ids
