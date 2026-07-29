@@ -208,8 +208,8 @@ def record_outcome(
     *,
     pattern_id: str,
     ref: str,
-    kind: str = "issue",
-    state: str = "filed",
+    kind: str | None = None,
+    state: str | None = None,
     note: str | None = None,
 ) -> bool:
     """Record what a pattern BECAME — the return path of provenance (techne#426).
@@ -218,36 +218,65 @@ def record_outcome(
     This carries the other direction: the issue/PR/commit it turned into and whether
     that shipped. *ref* is free-form but conventionally `owner/repo#123` for issues.
 
-    Upserts on (pattern_id, ref) so re-recording promotes state — the normal
-    lifecycle is 'filed' at file-time, then 'shipped' when the issue closes as
-    completed. Returns True if a row was inserted or its state/note changed.
-    Raises ValueError on unknown pattern id."""
-    if state not in _OUTCOME_STATES:
+    Upserts on (pattern_id, ref). `state`/`kind`/`note` are all None-means-leave-alone
+    on an existing row, so a caller that only knows the ref cannot clobber what a
+    better-informed caller already recorded. This is why the defaults live at INSERT
+    and not in the signature: a bare re-record carrying a signature default would
+    otherwise silently demote 'shipped' back to 'filed' — the exact hazard the #426
+    backfill would hit across the whole corpus (Prudence, PR#427).
+
+    Returns True if a row was inserted or any field actually changed. Raises
+    ValueError on unknown pattern id or unknown state."""
+    if state is not None and state not in _OUTCOME_STATES:
         raise ValueError(
             f"unknown outcome state: {state} (expected one of {sorted(_OUTCOME_STATES)})"
         )
     conn = plain_connect(db_path)
     try:
-        if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone() is None:
-            raise ValueError(f"unknown pattern id: {pattern_id}")
-        before = conn.execute(
-            "SELECT state, note FROM pattern_outcomes WHERE pattern_id = ? AND ref = ?",
-            (pattern_id, ref),
-        ).fetchone()
-        now = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
-        conn.execute(
-            "INSERT INTO pattern_outcomes (pattern_id, ref, kind, state, recorded_at, note)"
-            " VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(pattern_id, ref) DO UPDATE SET"
-            "   state = excluded.state,"
-            "   kind = excluded.kind,"
-            "   note = COALESCE(excluded.note, pattern_outcomes.note)",
-            (pattern_id, ref, kind, state, now, note),
-        )
-        conn.commit()
+        # Single transaction: the read that decides `changed` must not race the
+        # write it describes (the house pattern — cf. supersede()).
+        with conn:
+            if (
+                conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone()
+                is None
+            ):
+                raise ValueError(f"unknown pattern id: {pattern_id}")
+            before = conn.execute(
+                "SELECT kind, state, note FROM pattern_outcomes WHERE pattern_id = ? AND ref = ?",
+                (pattern_id, ref),
+            ).fetchone()
+            now = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+            # INSERT and UPDATE are separate on purpose. An upsert cannot express
+            # "default on insert, leave alone on update" in one statement: passing
+            # `state or 'filed'` into VALUES makes excluded.state always non-NULL,
+            # so COALESCE(excluded.state, …) never falls through and the update
+            # demotes anyway. `before` already tells us which path we are on.
+            if before is None:
+                conn.execute(
+                    "INSERT INTO pattern_outcomes"
+                    " (pattern_id, ref, kind, state, recorded_at, note)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (pattern_id, ref, kind or "issue", state or "filed", now, note),
+                )
+            else:
+                conn.execute(
+                    "UPDATE pattern_outcomes SET"
+                    "   kind = COALESCE(?, kind),"
+                    "   state = COALESCE(?, state),"
+                    "   note = COALESCE(?, note),"
+                    "   recorded_at = ?"
+                    " WHERE pattern_id = ? AND ref = ?",
+                    (kind, state, note, now, pattern_id, ref),
+                )
         if before is None:
             return True
-        return before[0] != state or (note is not None and before[1] != note)
+        # Only an explicitly-supplied value can count as a change — a None argument
+        # left the column alone, so it cannot have.
+        return (
+            (kind is not None and before[0] != kind)
+            or (state is not None and before[1] != state)
+            or (note is not None and before[2] != note)
+        )
     finally:
         conn.close()
 
@@ -275,15 +304,24 @@ def outcome_stats(db_path: Path) -> dict:
     `realized` counts DISTINCT patterns with at least one outcome — not outcome
     rows — so a pattern that spawned three issues counts once. `shipped` is the
     subset with at least one outcome in state 'shipped'. The rate is the number
-    that matters: what fraction of the corpus produced downstream work."""
+    that matters: what fraction of the corpus produced downstream work.
+
+    Numerator and denominator are both scoped to ACTIVE patterns. Superseded
+    patterns keep their outcomes, so counting them in the numerator against an
+    active-only denominator let `realized_rate` exceed 1.0 — on the headline
+    metric, and disagreeing with `unrealized_patterns()`, which always filtered
+    correctly (Prudence, PR#427)."""
     conn = plain_connect(db_path)
     try:
         active = conn.execute("SELECT COUNT(*) FROM patterns WHERE status = 'active'").fetchone()[0]
         realized = conn.execute(
-            "SELECT COUNT(DISTINCT pattern_id) FROM pattern_outcomes"
+            "SELECT COUNT(DISTINCT o.pattern_id) FROM pattern_outcomes o"
+            " JOIN patterns p ON p.id = o.pattern_id WHERE p.status = 'active'"
         ).fetchone()[0]
         shipped = conn.execute(
-            "SELECT COUNT(DISTINCT pattern_id) FROM pattern_outcomes WHERE state = 'shipped'"
+            "SELECT COUNT(DISTINCT o.pattern_id) FROM pattern_outcomes o"
+            " JOIN patterns p ON p.id = o.pattern_id"
+            " WHERE p.status = 'active' AND o.state = 'shipped'"
         ).fetchone()[0]
         by_state = dict(
             conn.execute("SELECT state, COUNT(*) FROM pattern_outcomes GROUP BY state").fetchall()

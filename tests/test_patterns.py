@@ -17,6 +17,7 @@ from techne.core.patterns import (
     record_outcome,
     search_patterns,
     stats,
+    supersede,
     unrealized_patterns,
     upsert_investigation,
 )
@@ -238,3 +239,48 @@ def test_unrealized_excludes_patterns_with_outcomes(db, pattern):
     record_outcome(db, pattern_id=pattern, ref="o/r#1")
     ids = {p["id"] for p in unrealized_patterns(db)}
     assert pattern not in ids and other in ids
+
+
+# --- Prudence PR#427 regressions -------------------------------------------
+
+
+def test_bare_re_record_cannot_demote_a_shipped_outcome(db, pattern):
+    """The #426 backfill re-records every ref it finds; if an omitted --state
+    carried a 'filed' default it would silently undo every 'shipped' in the corpus."""
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped")
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1") is False
+    assert outcomes_for_pattern(db, pattern)[0]["state"] == "shipped"
+
+
+def test_kind_change_is_reported_as_changed(db, pattern):
+    """kind was written on conflict but excluded from the comparison, so the CLI
+    printed 'unchanged' while mutating the row."""
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", kind="issue", state="filed")
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1", kind="pr") is True
+    assert outcomes_for_pattern(db, pattern)[0]["kind"] == "pr"
+
+
+def test_omitted_fields_default_only_on_insert(db, pattern):
+    record_outcome(db, pattern_id=pattern, ref="o/r#1")
+    row = outcomes_for_pattern(db, pattern)[0]
+    assert (row["kind"], row["state"]) == ("issue", "filed")  # defaults applied at INSERT
+
+
+def test_realized_rate_cannot_exceed_one_when_a_pattern_is_superseded(db, pattern):
+    """Superseded patterns keep their outcomes; counting them against an
+    active-only denominator pushed the headline metric above 1.0."""
+    inv = upsert_investigation(
+        db, url="https://example.test/y", surveyed_at="2026-07-28", verdict="patterns-only"
+    )
+    other, _ = add_pattern(
+        db, investigation_id=inv, name="Q", source_url="https://example.test/y", body="b2"
+    )
+    record_outcome(db, pattern_id=pattern, ref="o/r#1")
+    record_outcome(db, pattern_id=other, ref="o/r#2")
+
+    supersede(db, old_id=pattern, new_id=other)
+
+    s = outcome_stats(db)
+    assert s["active_patterns"] == 1
+    assert s["realized_patterns"] == 1  # the superseded one no longer counts
+    assert s["realized_rate"] <= 1.0
