@@ -2555,39 +2555,41 @@ def architect_applies(ctx, target, limit):
 )
 @click.option(
     "--kind",
-    default="issue",
+    default=None,
     type=click.Choice(["issue", "pr", "commit", "decision"]),
-    help="What kind of artifact the ref points at.",
+    help="What kind of artifact the ref points at. Omitted: 'issue' on insert, unchanged on update.",
 )
 @click.option(
     "--state",
-    default="filed",
+    default=None,
     type=click.Choice(["filed", "shipped", "rejected"]),
-    help="filed = work exists; shipped = it landed; rejected = considered and declined.",
+    help="filed = work exists; shipped = it landed; rejected = considered and declined. "
+    "Omitted: 'filed' on insert, unchanged on update — so a bare re-record can never demote.",
 )
 @click.option("--note", default=None, help="Free-text context (e.g. what closed it, and when).")
 @click.pass_context
 def architect_realized(ctx, pattern_id, ref, kind, state, note):
     """Record what a pattern BECAME — the return path of provenance (techne#426).
 
-    Upserts on (pattern, ref), so re-running promotes state: mark 'filed' when the
-    issue is opened, 'shipped' when it closes as completed."""
+    Upserts on (pattern, ref): mark 'filed' when the issue is opened, 'shipped'
+    when it closes as completed. Options left off leave the existing value alone,
+    so re-recording a ref you know nothing new about cannot undo what a
+    better-informed caller already set."""
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
-    from techne.core.patterns import record_outcome
+    from techne.core.patterns import outcomes_for_pattern, record_outcome
 
+    db = architect_db(config)
     try:
         changed = record_outcome(
-            architect_db(config),
-            pattern_id=pattern_id,
-            ref=ref,
-            kind=kind,
-            state=state,
-            note=note,
+            db, pattern_id=pattern_id, ref=ref, kind=kind, state=state, note=note
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"{'recorded' if changed else 'unchanged'}  {pattern_id}  →  {ref} [{state}]")
+    # Report the state actually stored, not the argument — with None-means-leave-alone
+    # those differ, and echoing the argument would misreport a no-op update.
+    stored = next((o["state"] for o in outcomes_for_pattern(db, pattern_id) if o["ref"] == ref), "?")
+    click.echo(f"{'recorded' if changed else 'unchanged'}  {pattern_id}  →  {ref} [{stored}]")
 
 
 @architect.command("outcomes")

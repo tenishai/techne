@@ -195,7 +195,15 @@ def _step_v3_to_v4_pattern_outcomes(conn) -> None:
     patterns. Mirrors the existing `pattern_applies` shape.
 
     Structurally idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so it is safe on
-    a retrofit-versioned db and on re-run, per the ladder's contract."""
+    a retrofit-versioned db and on re-run, per the ladder's contract.
+
+    NOTE this step is NOT what stamps the version — `_architect_run_steps` writes
+    `user_version` unconditionally, outside every guard, so deleting this step
+    would still leave a v3 db stamped 4. It earns its place because
+    `_reconcile_relations` is called directly on databases that never had
+    ARCHITECT_SCHEMA applied (see tests/test_patterns_graph.py), and this keeps
+    that path independently sufficient rather than relying on the schema string
+    having run first (Prudence, PR#427 — correcting the original rationale)."""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pattern_outcomes ("
         " pattern_id  TEXT REFERENCES patterns(id),"
