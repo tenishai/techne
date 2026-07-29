@@ -233,9 +233,18 @@ def record_outcome(
         )
     conn = plain_connect(db_path)
     try:
-        # Single transaction: the read that decides `changed` must not race the
-        # write it describes (the house pattern — cf. supersede()).
+        # The read that decides `changed` — and that selects INSERT vs UPDATE —
+        # must not race the write it describes. `with conn:` is NOT sufficient on
+        # its own: plain_connect uses isolation_level='', so sqlite3 emits its
+        # implicit BEGIN only before DML. A bare SELECT opens no transaction, and
+        # the context manager merely commits/rolls back at exit — so both readers
+        # of a concurrent pair saw `before is None`, both took INSERT, and the
+        # loser raised an uncaught IntegrityError. An explicit BEGIN IMMEDIATE
+        # takes the write lock up front, putting the reads inside the transaction
+        # and serialising the read-decide-write sequence (Prudence, PR#427 —
+        # verified by instrumenting in_transaction and racing two threads).
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             if (
                 conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone()
                 is None
