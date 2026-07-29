@@ -2546,6 +2546,91 @@ def architect_applies(ctx, target, limit):
         click.echo(f"  {h['id']}  {h['name']}")
 
 
+@architect.command("realized")
+@click.argument("pattern_id")
+@click.option(
+    "--ref",
+    required=True,
+    help="What it became: 'tenishai/techne#385', a commit sha, a doc path.",
+)
+@click.option(
+    "--kind",
+    default="issue",
+    type=click.Choice(["issue", "pr", "commit", "decision"]),
+    help="What kind of artifact the ref points at.",
+)
+@click.option(
+    "--state",
+    default="filed",
+    type=click.Choice(["filed", "shipped", "rejected"]),
+    help="filed = work exists; shipped = it landed; rejected = considered and declined.",
+)
+@click.option("--note", default=None, help="Free-text context (e.g. what closed it, and when).")
+@click.pass_context
+def architect_realized(ctx, pattern_id, ref, kind, state, note):
+    """Record what a pattern BECAME — the return path of provenance (techne#426).
+
+    Upserts on (pattern, ref), so re-running promotes state: mark 'filed' when the
+    issue is opened, 'shipped' when it closes as completed."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import record_outcome
+
+    try:
+        changed = record_outcome(
+            architect_db(config),
+            pattern_id=pattern_id,
+            ref=ref,
+            kind=kind,
+            state=state,
+            note=note,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"{'recorded' if changed else 'unchanged'}  {pattern_id}  →  {ref} [{state}]")
+
+
+@architect.command("outcomes")
+@click.argument("pattern_id", required=False)
+@click.pass_context
+def architect_outcomes(ctx, pattern_id):
+    """Show what patterns became. With PATTERN_ID, that pattern's outcomes; bare,
+    the corpus-level conversion rate — did this investigation programme pay?"""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import outcome_stats, outcomes_for_pattern
+
+    db = architect_db(config)
+    if pattern_id:
+        rows = outcomes_for_pattern(db, pattern_id)
+        if not rows:
+            click.echo(f"No recorded outcomes for {pattern_id}.")
+            return
+        for r in rows:
+            note = f"  — {r['note']}" if r["note"] else ""
+            click.echo(f"  [{r['state']:<8}] {r['kind']:<8} {r['ref']}  ({r['recorded_at']}){note}")
+        return
+    click.echo(json.dumps(outcome_stats(db), indent=2))
+
+
+@architect.command("unrealized")
+@click.option("--topic", default=None, help="Restrict to one topic slug.")
+@click.option("--limit", default=40, show_default=True)
+@click.pass_context
+def architect_unrealized(ctx, topic, limit):
+    """Active patterns with no recorded outcome — what we lifted and never acted on."""
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import unrealized_patterns
+
+    hits = unrealized_patterns(architect_db(config), topic=topic, limit=limit)
+    if not hits:
+        click.echo("Every active pattern has a recorded outcome.")
+        return
+    for h in hits:
+        click.echo(f"  {h['id']}  [{h['topic'] or '(untopiced)'}]  {h['name']}")
+
+
 @architect.command("backfill")
 @click.pass_context
 def architect_backfill(ctx):
