@@ -203,6 +203,24 @@ def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
         conn.close()
 
 
+def _outcome_differs(
+    before: "tuple | None", *, kind: str | None, state: str | None, note: str | None
+) -> bool:
+    """Would these args actually change the stored (kind, state, note) row?
+
+    Only an EXPLICITLY-supplied value can count: a None argument leaves its column
+    alone, so it cannot differ. Single source of truth for both the write decision
+    and the return value — when those two disagreed, `record_outcome` reported
+    'unchanged' while mutating the row (Prudence, PR#427)."""
+    if before is None:
+        return True
+    return (
+        (kind is not None and before[0] != kind)
+        or (state is not None and before[1] != state)
+        or (note is not None and before[2] != note)
+    )
+
+
 def record_outcome(
     db_path: Path,
     *,
@@ -267,7 +285,7 @@ def record_outcome(
                     " VALUES (?, ?, ?, ?, ?, ?)",
                     (pattern_id, ref, kind or "issue", state or "filed", now, note),
                 )
-            else:
+            elif _outcome_differs(before, kind=kind, state=state, note=note):
                 conn.execute(
                     "UPDATE pattern_outcomes SET"
                     "   kind = COALESCE(?, kind),"
@@ -277,15 +295,12 @@ def record_outcome(
                     " WHERE pattern_id = ? AND ref = ?",
                     (kind, state, note, now, pattern_id, ref),
                 )
+            # else: nothing to change — skip the write entirely. Bumping
+            # recorded_at on a no-op made "unchanged" a lie AND silently reordered
+            # outcomes_for_pattern, which sorts by recorded_at DESC (Prudence, PR#427).
         if before is None:
             return True
-        # Only an explicitly-supplied value can count as a change — a None argument
-        # left the column alone, so it cannot have.
-        return (
-            (kind is not None and before[0] != kind)
-            or (state is not None and before[1] != state)
-            or (note is not None and before[2] != note)
-        )
+        return _outcome_differs(before, kind=kind, state=state, note=note)
     finally:
         conn.close()
 

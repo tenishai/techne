@@ -336,25 +336,91 @@ def test_concurrent_record_outcome_does_not_raise_integrityerror(db, pattern):
     """Two writers racing the same (pattern_id, ref). Without BEGIN IMMEDIATE both
     read `before is None`, both take INSERT, and the loser raises an uncaught
     IntegrityError the CLI does not catch (it only handles ValueError).
-    Reproduced by Prudence on PR#427; pinned here."""
+    Reproduced by Prudence on PR#427.
+
+    A SINGLE round is only a ~62% detector — Prudence replayed one round 40x
+    against reverted code and saw red just 25 times, and on one full revert it
+    passed with the bug entirely restored. Ten rounds of three writers makes
+    missing it effectively impossible while staying <1s. Three writers rather
+    than two because the losing pair is what collides.
+    """
     import threading
 
-    start = threading.Barrier(2)
     errors: list[BaseException] = []
 
-    def writer(state: str) -> None:
-        start.wait()
-        try:
-            record_outcome(db, pattern_id=pattern, ref="race#1", state=state)
-        except BaseException as exc:  # noqa: BLE001 — we want to see ANY failure
-            errors.append(exc)
+    for round_no in range(10):
+        ref = f"race#{round_no}"
+        start = threading.Barrier(3)
 
-    threads = [threading.Thread(target=writer, args=(s,)) for s in ("filed", "shipped")]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
+        def writer(state: str, ref: str = ref) -> None:
+            start.wait()
+            try:
+                record_outcome(db, pattern_id=pattern, ref=ref, state=state)
+            except BaseException as exc:  # noqa: BLE001 — we want to see ANY failure
+                errors.append(exc)
 
-    assert not errors, f"concurrent writers raised: {errors!r}"
-    rows = outcomes_for_pattern(db, pattern)
-    assert len([r for r in rows if r["ref"] == "race#1"]) == 1
+        threads = [
+            threading.Thread(target=writer, args=(s,))
+            for s in ("filed", "shipped", "rejected")
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            # A hung writer must fail loudly: join() returns on timeout either way,
+            # so without this a deadlock passes green (Prudence, PR#427).
+            assert not t.is_alive(), f"writer hung in round {round_no}"
+
+        assert not errors, f"round {round_no}: concurrent writers raised: {errors!r}"
+        rows = [r for r in outcomes_for_pattern(db, pattern) if r["ref"] == ref]
+        assert len(rows) == 1, f"round {round_no}: expected 1 row, got {len(rows)}"
+
+
+def test_cli_realized_omits_kind_by_default(db, pattern, monkeypatch):
+    """`--kind` got the same default=None treatment as `--state` but no test —
+    reverting that one line left all 19 tests green while genuinely demoting data
+    ('pr' back to 'issue'). Same gap class as the shipped_rate half (Prudence,
+    PR#427)."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    cfg = Config()
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
+    monkeypatch.setattr("techne.core.architect.architect_db", lambda _config: db)
+
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", kind="pr", state="shipped")
+    res = CliRunner().invoke(main, ["architect", "realized", pattern, "--ref", "o/r#1"])
+    assert res.exit_code == 0, res.output
+    assert outcomes_for_pattern(db, pattern)[0]["kind"] == "pr"
+
+
+def test_noop_re_record_does_not_bump_recorded_at(db, pattern):
+    """`unchanged` must mean no write happened. Bumping recorded_at on a no-op
+    silently reordered outcomes_for_pattern, which sorts by recorded_at DESC —
+    so a re-record could reshuffle history without reporting a change
+    (Prudence, PR#427)."""
+    from techne.core.stores import plain_connect
+
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped")
+
+    # Backdate the row. CURRENT_TIMESTAMP has ONE-SECOND resolution, so simply
+    # re-recording and comparing timestamps is not a detector — both calls land in
+    # the same second and match whether or not the write happened. (My first
+    # version of this test passed with the guard fully reverted.) An obviously-old
+    # stamp makes any write visible immediately and deterministically.
+    old = "2001-01-01 00:00:00"
+    conn = plain_connect(db)
+    try:
+        conn.execute("UPDATE pattern_outcomes SET recorded_at = ?", (old,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped") is False
+    assert outcomes_for_pattern(db, pattern)[0]["recorded_at"] == old
+
+    # ...and a real change still stamps it.
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", note="now with a reason")
+    assert outcomes_for_pattern(db, pattern)[0]["note"] == "now with a reason"
