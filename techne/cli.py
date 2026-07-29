@@ -2557,7 +2557,8 @@ def architect_applies(ctx, target, limit):
     "--kind",
     default=None,
     type=click.Choice(["issue", "pr", "commit", "decision"]),
-    help="What kind of artifact the ref points at. Omitted: 'issue' on insert, unchanged on update.",
+    help="What kind of artifact the ref points at. "
+    "Omitted: 'issue' on insert, unchanged on update.",
 )
 @click.option(
     "--state",
@@ -2588,7 +2589,9 @@ def architect_realized(ctx, pattern_id, ref, kind, state, note):
         raise click.ClickException(str(exc)) from exc
     # Report the state actually stored, not the argument — with None-means-leave-alone
     # those differ, and echoing the argument would misreport a no-op update.
-    stored = next((o["state"] for o in outcomes_for_pattern(db, pattern_id) if o["ref"] == ref), "?")
+    stored = next(
+        (o["state"] for o in outcomes_for_pattern(db, pattern_id) if o["ref"] == ref), "?"
+    )
     click.echo(f"{'recorded' if changed else 'unchanged'}  {pattern_id}  →  {ref} [{stored}]")
 
 
