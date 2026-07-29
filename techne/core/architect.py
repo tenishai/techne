@@ -23,7 +23,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 3  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 4  # PRAGMA user_version on architect.db
 
 ARCHITECT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS investigations (
@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS pattern_applies (
     target     TEXT NOT NULL,                 -- cabal | techne | limenal | agent-infra | …
     PRIMARY KEY (pattern_id, target)
 );
+
+CREATE TABLE IF NOT EXISTS pattern_outcomes (
+    pattern_id  TEXT REFERENCES patterns(id),
+    ref         TEXT NOT NULL,                -- 'tenishai/techne#385' | commit sha | doc path
+    kind        TEXT NOT NULL DEFAULT 'issue',-- issue | pr | commit | decision
+    state       TEXT NOT NULL DEFAULT 'filed',-- filed | shipped | rejected
+    recorded_at TEXT NOT NULL,
+    note        TEXT,
+    PRIMARY KEY (pattern_id, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_pattern_outcomes_state ON pattern_outcomes(state);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS patterns_fts USING fts5(
     name, body, content=patterns, content_rowid=rowid,
@@ -169,6 +180,35 @@ def _step_v2_to_v3_validity_window(conn) -> None:
         conn.execute("ALTER TABLE patterns ADD COLUMN invalid_at TEXT")
 
 
+def _step_v3_to_v4_pattern_outcomes(conn) -> None:
+    """v3 → v4 step (techne#426; bidirectional pattern provenance).
+
+    Adds `pattern_outcomes` — the return path the corpus never had. A pattern
+    already records where it came FROM (`source_url`, `investigation_id`); this
+    records what it BECAME: the issue/PR/commit it turned into and whether that
+    shipped. Without it the loop is one-way — downstream work cites its pattern,
+    the pattern learns nothing back — so dedup cannot ask "has this already been
+    filed or built?" and "which investigations actually paid?" is unanswerable.
+
+    A junction, not columns on `patterns`, because the relation is many-to-many:
+    one pattern can spawn issues in several repos, and one issue can cite several
+    patterns. Mirrors the existing `pattern_applies` shape.
+
+    Structurally idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so it is safe on
+    a retrofit-versioned db and on re-run, per the ladder's contract."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pattern_outcomes ("
+        " pattern_id  TEXT REFERENCES patterns(id),"
+        " ref         TEXT NOT NULL,"
+        " kind        TEXT NOT NULL DEFAULT 'issue',"
+        " state       TEXT NOT NULL DEFAULT 'filed',"
+        " recorded_at TEXT NOT NULL,"
+        " note        TEXT,"
+        " PRIMARY KEY (pattern_id, ref))"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pattern_outcomes_state ON pattern_outcomes(state)")
+
+
 def _architect_run_steps(conn, current: int, target: int) -> None:
     """Apply architect.db migration steps from *current* up to *target*.
 
@@ -183,6 +223,8 @@ def _architect_run_steps(conn, current: int, target: int) -> None:
         _step_v1_to_v2_topic_absorbed(conn)
     if current < 3:
         _step_v2_to_v3_validity_window(conn)
+    if current < 4:
+        _step_v3_to_v4_pattern_outcomes(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 

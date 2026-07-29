@@ -486,7 +486,10 @@ def test_migrate_v2_to_v3_adds_validity_window(tmp_path):
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(patterns)")}
         assert {"valid_at", "invalid_at"} <= cols
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        # Tracks the constant, not a literal: a v2 db migrates all the way to the
+        # current head, so hardcoding the version breaks on every future step.
+        # What this test owns is the v2→v3 COLUMNS above, not the ladder's length.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == architect.ARCHITECT_VERSION
         row = conn.execute("SELECT topic, valid_at, invalid_at FROM patterns WHERE id='p1'").fetchone()
         assert (row["topic"], row["valid_at"], row["invalid_at"]) == ("t", None, None)
     finally:
