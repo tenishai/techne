@@ -129,14 +129,32 @@ def _under_worktree(p: Path) -> Path | None:
     in site-packages — no `.git`, guard passes — while `sys.executable` is still
     `<worktree>/.venv/bin/python`, so a prunable path lands in machine-global
     config anyway. Walking ancestors closes that.
+
+    Checks the LITERAL path AND its resolved form, and this is load-bearing in both
+    directions:
+
+    * Resolving FIRST is wrong, which is what the first version did. A venv's
+      ``bin/python`` is a symlink to the base interpreter, so ``resolve()`` walks
+      straight OUT of the worktree and the check goes inert for the mainstream
+      install shape. Measured on this machine: ``<worktree>/.venv/bin/python`` →
+      ``~/.local/share/uv/python/.../bin/python3.13``, no worktree ancestor. And
+      the literal — not the resolved — path is what ``_write_launcher`` bakes into
+      ``PY=`` and ``register_mcp`` writes to ``~/.claude.json``.
+    * The resolved form still matters: a system interpreter symlinked INTO a
+      worktree venv dangles just the same when the worktree is pruned.
     """
+    candidates = [p]
     try:
-        p = p.resolve()
+        r = p.resolve()
+        if r != p:
+            candidates.append(r)
     except OSError:
-        return None
-    for d in (p, *p.parents):
-        if _is_worktree_path(d):
-            return d
+        pass  # unresolvable (dangling symlink): the literal form still counts
+
+    for cand in candidates:
+        for d in (cand, *cand.parents):
+            if _is_worktree_path(d):
+                return d
     return None
 
 

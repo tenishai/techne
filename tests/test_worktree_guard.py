@@ -393,7 +393,23 @@ class TestAllBakedPathsAreGuarded:
         clean = tmp_path / "site-packages" / "techne"
         clean.mkdir(parents=True)
         monkeypatch.setattr(hooks_mod, "_install_root", lambda: clean)  # looks fine
-        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: wt / ".venv" / "bin" / "python")
+
+        # Build the REAL venv shape: bin/python is a SYMLINK out to a base
+        # interpreter. The earlier version of this test only named a path that was
+        # never created, so `resolve()` appended the non-existent tail verbatim and
+        # there was no symlink to follow — it passed against code where the check
+        # was inert (Prudence, PR #435). Measured on the dev machine:
+        #   <worktree>/.venv/bin/python -> ~/.local/share/uv/python/.../bin/python3.13
+        base = tmp_path / "base-python" / "bin"
+        base.mkdir(parents=True)
+        real_py = base / "python3"
+        real_py.write_text("#!/bin/sh\n")
+        venv_bin = wt / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        venv_py = venv_bin / "python"
+        os.symlink(real_py, venv_py)
+        assert venv_py.resolve() == real_py.resolve()  # resolves OUT of the worktree
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: venv_py)
 
         with pytest.raises(RuntimeError, match="interpreter"):
             hooks_mod.register_hooks(cfg)
