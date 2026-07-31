@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS investigations (
     surveyed_by  TEXT NOT NULL,               -- raven | rook | architect | …
     lens         TEXT NOT NULL,               -- infra | sre | product | …
     surveyed_at  TEXT NOT NULL,
-    verdict      TEXT NOT NULL,               -- skip | skip-with-flag | patterns-only | full-eval
+    -- Operator's judgment. Vocabulary is enforced in patterns.VERDICTS, not by a
+    -- CHECK here (adding one to an existing table needs a full rebuild), and
+    -- `unknown` marks rows auto-assigned before techne#428 made this settable.
+    verdict      TEXT NOT NULL,               -- skip | skip-with-flag | patterns-only
+                                              -- | full-eval | unknown
     summary      TEXT,
     skip_reason  TEXT,
     maturity     TEXT,

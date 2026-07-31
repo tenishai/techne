@@ -29,7 +29,21 @@ cat > /tmp/p.md <<'EOF'
 
 ---
 EOF
-techne architect ingest /tmp/p.md      # idempotent (content-hash dedup)
+techne architect ingest /tmp/p.md --verdict patterns-only   # idempotent (content-hash dedup)
+```
+
+`--verdict` records *your judgment* about the URL — `skip` / `skip-with-flag` /
+`patterns-only` / `full-eval`. Omit it and the ingest records `patterns-only`, the
+modal outcome. State it when the answer is anything else, particularly `full-eval`,
+which means the source forces a decision (adopt / fork / build-on-top / block) and
+should be accompanied by an eval doc.
+
+Before #428 this column was hardcoded to `full-eval` on every ingest carrying
+patterns, so pre-#428 rows carry no real judgment. To correct one without
+re-ingesting its pattern block:
+
+```sh
+techne architect reverdict <https-url> --verdict full-eval
 ```
 
 A URL investigated with nothing to lift → a `## Surveyed (no patterns worth saving)` bullet

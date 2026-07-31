@@ -21,6 +21,39 @@ def _hash(*parts: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+# --- investigation verdicts (techne#428) -------------------------------------
+#
+# The verdict is meant to record the OPERATOR'S judgment about a surveyed URL.
+# It did not. `ingest_patterns_md` hardcoded "full-eval" for any URL group that
+# carried patterns and "skip-with-flag" for a no-lift bullet, and the CLI had no
+# way to pass one — so the column recorded *whether the markdown contained
+# patterns*, which the patterns table already says, and `patterns-only` was
+# literally unreachable. Live corpus when this was found: 202 full-eval,
+# 70 skip-with-flag, 0 patterns-only, against 19 eval docs on disk.
+#
+# That made the field worse than empty: reading `verdict=full-eval` on a
+# re-investigated URL invited the inference "a prior pass judged this
+# decision-forcing but never wrote its eval doc", which was an artifact of the
+# default.
+VERDICTS = ("skip", "skip-with-flag", "patterns-only", "full-eval", "unknown")
+
+# What an ingest records when the caller does not say. `patterns-only` is the
+# documented modal outcome and `full-eval` is documented as ~5-10%, so defaulting
+# here is right most of the time where the old hardcode was right rarely. It is
+# still a default, not a judgment — pass --verdict to state one.
+DEFAULT_INGEST_VERDICT = "patterns-only"
+
+# Reserved for rows whose verdict was auto-assigned before this existed and so
+# never meant anything. Honest about not knowing rather than guessing.
+UNKNOWN_VERDICT = "unknown"
+
+# surveyed_at is TEXT holding a zero-padded ISO date (import_md enforces
+# \d{4}-\d{2}-\d{2} at parse time), so `surveyed_at < ?` is a sound string
+# comparison — but ONLY if the bound value is the same shape. Validated where it
+# enters, because the date scoping is the sweep's only safety property.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 # --- graph extraction (techne#87 P2) ----------------------------------------
 #
 # The relationship signals are already embedded in pattern *bodies* — lifted by
@@ -95,24 +128,161 @@ def upsert_investigation(
     summary: str | None = None,
     skip_reason: str | None = None,
     maturity: str | None = None,
+    overwrite_verdict: bool = True,
+    clears_skip: bool = False,
 ) -> str:
-    """Insert/update one investigation (the dedup unit). Returns its id."""
+    """Insert/update one investigation (the dedup unit). Returns its id.
+
+    `verdict` must be one of VERDICTS. It is validated here rather than by a
+    schema CHECK because the constraint would need a full SQLite table rebuild to
+    add to an existing db, and this is the only write path — a bad value should
+    fail loudly at the call site, not land as a silent out-of-vocabulary string
+    that every downstream query then has to tolerate (techne#428).
+
+    `overwrite_verdict=False` makes the verdict INSERT-ONLY: a new row gets it, an
+    existing row keeps whatever it already has. Callers pass False when the value
+    is a fallback rather than a stated judgment. Without this, a default that
+    overwrites on every re-ingest is techne#428 again with a nicer constant — and
+    concretely it undid `set_verdict`: state a judgment with `reverdict`, re-ingest
+    the same markdown, and a routine ingest silently reverts it (Prudence, PR #432).
+
+    `clears_skip=True` additionally displaces an existing `skip*` verdict even when
+    the write is insert-only. Callers pass it when the write itself proves the URL
+    DID yield patterns, which contradicts any skip verdict — "no patterns worth
+    saving" cannot survive a pattern being saved. Without it, insert-only stranded
+    a URL first seen as a no-lift bullet and later carrying patterns: the row kept
+    `skip-with-flag` while owning a pattern, so `stats()` reported it under both
+    `patterns` and `skips` at once.
+    """
+    if verdict not in VERDICTS:
+        raise ValueError(
+            f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}. "
+            "The verdict is the operator's judgment about the URL — see techne#428."
+        )
     inv_id = _hash(url, surveyed_by, lens)
     conn = plain_connect(db_path)
     try:
+        # Named parameters, not positional: the overwrite flag governs a clause ten
+        # `?` slots away from where it would have been bound, and a future edit that
+        # inserts a column would silently misbind it (Prudence, PR #432).
         conn.execute(
             """INSERT INTO investigations
                  (id, url, surveyed_by, lens, surveyed_at, verdict, summary, skip_reason, maturity)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (:id, :url, :surveyed_by, :lens, :surveyed_at, :verdict,
+                       :summary, :skip_reason, :maturity)
                ON CONFLICT(url, surveyed_by, lens) DO UPDATE SET
-                 surveyed_at = excluded.surveyed_at, verdict = excluded.verdict,
+                 surveyed_at = excluded.surveyed_at,
+                 verdict = CASE
+                             WHEN :overwrite THEN excluded.verdict
+                             WHEN :clears_skip AND investigations.verdict LIKE 'skip%'
+                                  THEN excluded.verdict
+                             ELSE investigations.verdict END,
                  summary = COALESCE(excluded.summary, investigations.summary),
                  skip_reason = COALESCE(excluded.skip_reason, investigations.skip_reason),
                  maturity = COALESCE(excluded.maturity, investigations.maturity)""",
-            (inv_id, url, surveyed_by, lens, surveyed_at, verdict, summary, skip_reason, maturity),
+            {
+                "id": inv_id,
+                "url": url,
+                "surveyed_by": surveyed_by,
+                "lens": lens,
+                "surveyed_at": surveyed_at,
+                "verdict": verdict,
+                "summary": summary,
+                "skip_reason": skip_reason,
+                "maturity": maturity,
+                "overwrite": 1 if overwrite_verdict else 0,
+                "clears_skip": 1 if clears_skip else 0,
+            },
         )
         conn.commit()
         return inv_id
+    finally:
+        conn.close()
+
+
+def set_verdict(
+    db_path: Path,
+    *,
+    url: str,
+    verdict: str,
+    surveyed_by: str = "raven",
+    lens: str = "infra",
+) -> bool:
+    """Correct one investigation's verdict in place. True if a row was updated.
+
+    Deliberately does NOT touch surveyed_at — correcting a judgment is not a
+    re-survey, and conflating the two is the adjacent bug in techne#429.
+    """
+    if verdict not in VERDICTS:
+        raise ValueError(f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}")
+    conn = plain_connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE investigations SET verdict = ? WHERE id = ?",
+            (verdict, _hash(url, surveyed_by, lens)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -> dict:
+    """Retire pre-techne#428 auto-assigned verdicts to 'unknown'.
+
+    Every `full-eval` written before the fix was assigned by the ingester purely
+    because the markdown carried patterns, so none of those values is a judgment.
+    Leaving them reads as 202 deliberate full-evals; 'unknown' is the honest state.
+
+    Scoped by `before` (a surveyed_at date) rather than sweeping the whole table,
+    so a genuine operator-supplied full-eval recorded after the fix is never
+    clobbered. Caveat: because re-ingest currently overwrites surveyed_at
+    (techne#429), a legacy row that has since been re-investigated carries the
+    newer date and will fall outside the sweep — it will need `set_verdict`.
+
+    dry_run=True by default: this rewrites the operator's corpus, so the caller
+    has to ask for it twice.
+    """
+    if not _ISO_DATE_RE.match(before):
+        raise ValueError(
+            f"--before must be an ISO date (YYYY-MM-DD); got {before!r}. "
+            "It is this function's only safety property — an unparseable value would "
+            "compare as a plain string and could select every row in the table."
+        )
+
+    conn = plain_connect(db_path)
+    try:
+        # Take the write lock BEFORE the read (BEGIN IMMEDIATE): with the default
+        # isolation a bare SELECT opens no transaction, so a concurrent writer can
+        # land between the SELECT that builds the preview/audit list and the UPDATE
+        # that rewrites those rows — reporting rows as swept that were changed by
+        # someone else. Same read→write TOCTOU the rest of this codebase already
+        # guards (curated.py:105, cards.py:106, documents.py:71); reproducing it in
+        # a *destructive* path is worse than in an idempotent one.
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT url, surveyed_at FROM investigations "
+            "WHERE verdict = 'full-eval' AND surveyed_at < ? ORDER BY surveyed_at",
+            (before,),
+        ).fetchall()
+        applied = 0
+        if not dry_run and rows:
+            cur = conn.execute(
+                "UPDATE investigations SET verdict = ? "
+                "WHERE verdict = 'full-eval' AND surveyed_at < ?",
+                (UNKNOWN_VERDICT, before),
+            )
+            # rowcount from the UPDATE, not len(rows) from the SELECT: the audit
+            # number for a destructive rewrite must be measured against the write
+            # that happened, not the read that predicted it.
+            applied = cur.rowcount
+        conn.commit()
+        return {
+            "matched": len(rows),
+            "applied": applied,
+            "before": before,
+            "urls": [r[0] for r in rows],
+        }
     finally:
         conn.close()
 
@@ -727,17 +897,62 @@ def export_patterns_md(db_path: Path) -> str:
     return "\n".join(out)
 
 
-def ingest_patterns_md(db_path: Path, md_text: str) -> dict:
+def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) -> dict:
     """Seed architect.db from architectural-patterns.md (reuses import_md.parse):
-    patterns → grouped by url into investigations(verdict=full-eval) + patterns;
-    no-lift bullets → investigations(verdict=skip-with-flag). Idempotent."""
+    patterns → grouped by url into investigations + patterns;
+    no-lift bullets → investigations(verdict=skip-with-flag). Idempotent.
+
+    `verdict` is the operator's judgment for the URLs carrying patterns. When
+    omitted it falls back to DEFAULT_INGEST_VERDICT ("patterns-only"), NOT the old
+    hardcoded "full-eval" — see techne#428 and the VERDICTS comment above.
+
+    No-lift bullets ignore the caller's `verdict` and write "skip-with-flag", but
+    they do NOT write it unconditionally — that write is insert-only, so an
+    operator who narrowed the judgment to "skip" via `reverdict` keeps it. The
+    document's structure establishes that the URL was surveyed and nothing was
+    lifted; it does not establish which of the two skip verdicts the operator
+    means. (This paragraph previously claimed "unconditionally" and "correct by
+    construction", contradicting the call-site comment 30 lines below in the very
+    commit that made it insert-only — Prudence, PR #432.)
+
+    KNOWN LIMITATION — verdicts have no provenance, so the earliest fallback wins
+    forever, and two transitions are frozen (tracked in techne#433):
+      * patterns → later demoted to a no-lift bullet: the row keeps its
+        pattern-era verdict, because the no-lift write is insert-only. Pinned by
+        test_demotion_to_no_lift_keeps_the_pattern_era_verdict so it changes
+        deliberately rather than silently.
+      * `--verdict` is per-INGEST, not per-URL, so passing one to correct a single
+        URL also overwrites every other pattern-carrying URL in the same document,
+        including ones whose judgment was set by `reverdict`. Use `reverdict` for
+        single-row corrections.
+    The opposite transition — a no-lift URL that later DOES yield a pattern — is
+    handled, via `clears_skip`: a skip cannot survive a pattern being saved.
+    """
     from techne.import_md import parse
+
+    # `is None`, not falsy: `verdict or DEFAULT` silently coerced "" to the
+    # default, so the empty string that upsert_investigation explicitly rejects
+    # was quietly accepted on this path (Prudence, PR #432).
+    stated = verdict is not None
+    verdict = DEFAULT_INGEST_VERDICT if verdict is None else verdict
+    if verdict not in VERDICTS:  # fail before any write, not partway through
+        raise ValueError(f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}")
 
     parsed = parse(md_text)
     patterns_added = 0
     for p in parsed.patterns:
         inv_id = upsert_investigation(
-            db_path, url=p.source_url, surveyed_at=p.surveyed_date, verdict="full-eval"
+            db_path,
+            url=p.source_url,
+            surveyed_at=p.surveyed_date,
+            verdict=verdict,
+            # A stated --verdict overwrites; the fallback is insert-only, so a
+            # judgment recorded via `reverdict` survives a later plain re-ingest.
+            overwrite_verdict=stated,
+            # …but this write proves the URL DID yield a pattern, so a stale skip
+            # verdict must not survive it, or the row is counted as a skip while
+            # owning a pattern.
+            clears_skip=True,
         )
         _pid, stored = add_pattern(
             db_path, investigation_id=inv_id, name=p.name, source_url=p.source_url, body=p.body
@@ -755,6 +970,13 @@ def ingest_patterns_md(db_path: Path, md_text: str) -> dict:
             surveyed_at=nl.surveyed_date,
             verdict="skip-with-flag",
             skip_reason=nl.reason,
+            # Insert-only here too. "Correct by construction" is only half true: the
+            # section header proves the URL was surveyed and nothing was lifted, but
+            # NOT whether the operator's judgment is `skip` or `skip-with-flag` —
+            # and `skip` is offered in reverdict's choices. Left overwriting, this
+            # was Important #2 surviving on the second call site: `reverdict
+            # --verdict skip` then a plain re-ingest reverted it (Prudence, PR #432).
+            overwrite_verdict=False,
         )
     # Materialize the relation/applies graph from the bodies we just stored, and
     # re-resolve any edges that earlier ingests left dangling (P2 write-path).

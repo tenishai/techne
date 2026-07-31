@@ -2430,15 +2430,103 @@ def architect(ctx):
 
 @architect.command("ingest")
 @click.argument("markdown_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--verdict",
+    type=click.Choice(["skip", "skip-with-flag", "patterns-only", "full-eval"]),
+    default=None,
+    help="Your judgment for the URLs carrying patterns. Omit to record "
+    "'patterns-only' (the modal outcome). Before techne#428 this was hardcoded to "
+    "'full-eval' and could not be set at all.",
+)
 @click.pass_context
-def architect_ingest(ctx, markdown_file):
+def architect_ingest(ctx, markdown_file, verdict):
     """Seed architect.db from an architectural-patterns.md corpus."""
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
     from techne.core.patterns import ingest_patterns_md
 
-    counts = ingest_patterns_md(architect_db(config), markdown_file.read_text(encoding="utf-8"))
+    counts = ingest_patterns_md(
+        architect_db(config), markdown_file.read_text(encoding="utf-8"), verdict=verdict
+    )
     click.echo(json.dumps(counts, indent=2))
+
+
+@architect.command("reverdict")
+@click.argument("url")
+@click.option(
+    "--verdict",
+    type=click.Choice(["skip", "skip-with-flag", "patterns-only", "full-eval", "unknown"]),
+    required=True,
+    help="The corrected judgment for this URL.",
+)
+@click.option("--surveyed-by", default="raven", show_default=True)
+@click.option("--lens", default="infra", show_default=True)
+@click.pass_context
+def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
+    """Correct one investigation's verdict (techne#428).
+
+    Does not touch surveyed_at — correcting a judgment is not a re-survey.
+    """
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import set_verdict
+
+    updated = set_verdict(
+        architect_db(config), url=url, verdict=verdict, surveyed_by=surveyed_by, lens=lens
+    )
+    if updated:
+        click.echo(f"{url} -> {verdict}")
+    else:
+        click.echo(f"No investigation found for {url} (surveyed_by={surveyed_by}, lens={lens}).")
+        raise SystemExit(1)
+
+
+@architect.command("sweep-legacy-verdicts")
+@click.option(
+    "--before",
+    required=True,
+    help="Only touch rows with surveyed_at earlier than this date (YYYY-MM-DD). "
+    "Scopes the sweep to the pre-fix corpus so a real full-eval is never clobbered.",
+)
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    default=False,
+    help="Actually write. Without this it only reports what it would change.",
+)
+@click.pass_context
+def architect_sweep_legacy_verdicts(ctx, before, apply_):
+    """Retire pre-techne#428 auto-assigned 'full-eval' verdicts to 'unknown'.
+
+    Every full-eval written before techne#428 was assigned by the ingester purely
+    because the markdown carried patterns, so none of them is an operator
+    judgment. This rewrites your corpus — it is dry-run unless you pass --apply.
+    """
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import sweep_legacy_verdicts
+
+    try:
+        res = sweep_legacy_verdicts(architect_db(config), before=before, dry_run=not apply_)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--before") from e
+
+    click.echo(json.dumps({k: v for k, v in res.items() if k != "urls"}, indent=2))
+
+    # PRINT THE URLS. A bare `matched: 202` looks equally correct whether the
+    # scope is right or has swallowed every post-fix judgment, so a count-only
+    # preview is not protection — it hides exactly the evidence you would need to
+    # catch a wrong --before before --apply makes it permanent (Prudence, PR #432).
+    if res["urls"]:
+        click.echo("\nWould set to 'unknown':" if not apply_ else "\nSet to 'unknown':")
+        for u in res["urls"]:
+            click.echo(f"  {u}")
+    if not apply_ and res["matched"]:
+        click.echo(
+            f"\nDry run — {res['matched']} row(s) above would be rewritten. "
+            "Check the list, then re-run with --apply."
+        )
 
 
 @architect.command("export")
