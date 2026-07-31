@@ -16,3 +16,4 @@ htmlcov/
 
 # Runtime logs (e.g. MCP server logs swept in by accident)
 *.log
+uv.lock
