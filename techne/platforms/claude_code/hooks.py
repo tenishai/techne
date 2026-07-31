@@ -30,8 +30,72 @@ def _install_root() -> Path:
 
 
 def _is_worktree_path(p: Path) -> bool:
-    """True if ``p`` sits under a ``.claude/worktrees/`` directory."""
-    parts = p.resolve().parts
+    """True if ``p`` is a git worktree — ASK GIT, don't guess from the path.
+
+    KEEP IN SYNC with the identical copy in ``preflight_guard._is_worktree_path``.
+    The duplication is deliberate: preflight_guard runs as a bare script *before*
+    techne is known to be importable, so it cannot import this module.
+    ``tests/test_worktree_guard.py`` fails if the two drift.
+
+    A linked worktree writes ``.git`` as a FILE containing ``gitdir: <path>``, where
+    a normal clone has a ``.git`` DIRECTORY. The test is then whether that git-dir
+    contains a ``commondir`` file — git's own marker for "this git-dir is not the
+    common one", i.e. exactly the ``git_dir != common_dir`` invariant already used
+    in ``coord.py:397``, which reads it via ``git rev-parse`` and whose comment
+    likewise warns that string-matching the path is fragile.
+
+    Do NOT match ``/.git/worktrees/`` in the marker text: that silently assumes the
+    git-dir is named ``.git``. A worktree of a BARE repo — the mainstream workflow —
+    has ``gitdir: /srv/proj.git/worktrees/<id>`` and would be missed, as would
+    worktrees of a ``--separate-git-dir`` clone or of a submodule. Verified against
+    real git: the string form returned False for a bare-repo worktree
+    (Prudence, PR #435).
+
+    This previously matched only paths under ``.claude/worktrees/`` — the harness's
+    own convention — so a worktree created anywhere else sailed straight through the
+    guard in ``register_hooks``. That is not hypothetical: on 2026-07-31 a manual
+    ``git worktree add ~/working/tenishai/techne-wt-428`` was registered, baked into
+    ``~/.claude/settings.json`` and the launcher, and took every hook on the machine
+    down when the worktree was pruned (techne#434, third occurrence of #578's class).
+
+    A git SUBMODULE also uses a ``.git`` file, but points at ``.git/modules/<name>``.
+    The ``worktrees`` path segment is what distinguishes them, and a submodule
+    checkout is stable — it must NOT be refused.
+
+    No subprocess: this runs on the preflight hot path and must still answer when
+    git is absent, or the marker is unreadable.
+    """
+    p = p.resolve()
+    marker = p / ".git"
+    try:
+        if marker.is_file():
+            head = marker.read_text(encoding="utf-8", errors="replace")[:4096]
+            for line in head.splitlines():
+                line = line.strip()
+                if not line.startswith("gitdir:"):
+                    continue
+                gitdir = Path(line.split(":", 1)[1].strip())
+                if not gitdir.is_absolute():
+                    gitdir = (p / gitdir).resolve()
+                # `commondir` exists ONLY inside a linked worktree's admin dir —
+                # git's own marker for "this git-dir is not the common one". A
+                # primary checkout's `.git/` never has one, so walking UP is safe.
+                #
+                # The walk (rather than a single check) covers a SUBMODULE inside a
+                # worktree: its git-dir is `<admin>/worktrees/<id>/modules/<name>`,
+                # which has no `commondir` of its own but lives under one. That
+                # nesting must still count — pruning the worktree takes the
+                # submodule's git-dir with it.
+                for d in (gitdir, *gitdir.parents):
+                    if (d / "commondir").exists():
+                        return True
+                return False
+    except OSError:
+        pass  # unreadable marker: fall through to the path heuristic below
+
+    # Retained as a belt-and-braces fallback: catches the harness's worktree dir
+    # even if the marker is missing or unreadable.
+    parts = p.parts
     return any(
         parts[i] == ".claude" and parts[i + 1] == "worktrees"
         for i in range(len(parts) - 1)
@@ -45,6 +109,53 @@ def _launcher_path() -> Path:
     automatically redirects the launcher to the fake home too.
     """
     return SETTINGS_PATH.parent / "techne-hook.sh"
+
+
+def _interpreter() -> Path:
+    """The interpreter register_hooks is about to bake in (launcher `PY=`, MCP
+    command, heal). A seam, not indirection for its own sake: tests must be able
+    to pin it without monkeypatching the global ``sys.executable``, which would
+    break every test that spawns a subprocess.
+    """
+    return Path(sys.executable)
+
+
+def _under_worktree(p: Path) -> Path | None:
+    """The worktree ancestor of *p*, or None. Checks *p* and every parent.
+
+    `_is_worktree_path` answers "is this dir a worktree root"; register_hooks bakes
+    in paths that merely LIVE inside one. The gap that matters (Prudence, PR #435):
+    a plain (non-editable) install into `<worktree>/.venv` puts `_install_root()`
+    in site-packages — no `.git`, guard passes — while `sys.executable` is still
+    `<worktree>/.venv/bin/python`, so a prunable path lands in machine-global
+    config anyway. Walking ancestors closes that.
+
+    Checks the LITERAL path AND its resolved form, and this is load-bearing in both
+    directions:
+
+    * Resolving FIRST is wrong, which is what the first version did. A venv's
+      ``bin/python`` is a symlink to the base interpreter, so ``resolve()`` walks
+      straight OUT of the worktree and the check goes inert for the mainstream
+      install shape. Measured on this machine: ``<worktree>/.venv/bin/python`` →
+      ``~/.local/share/uv/python/.../bin/python3.13``, no worktree ancestor. And
+      the literal — not the resolved — path is what ``_write_launcher`` bakes into
+      ``PY=`` and ``register_mcp`` writes to ``~/.claude.json``.
+    * The resolved form still matters: a system interpreter symlinked INTO a
+      worktree venv dangles just the same when the worktree is pruned.
+    """
+    candidates = [p]
+    try:
+        r = p.resolve()
+        if r != p:
+            candidates.append(r)
+    except OSError:
+        pass  # unresolvable (dangling symlink): the literal form still counts
+
+    for cand in candidates:
+        for d in (cand, *cand.parents):
+            if _is_worktree_path(d):
+                return d
+    return None
 
 
 def _heal_command() -> str:
@@ -188,15 +299,35 @@ def register_hooks(config: Config):
     # a git worktree, its editable pointer — and everything we're about to wire —
     # will break the moment that worktree is pruned (the -32000 footgun). Fail
     # loud with the remediation rather than register a self-destructing install.
-    root = _install_root()
-    if _is_worktree_path(root):
-        raise RuntimeError(
-            f"techne is installed from a git worktree ({root}). That editable "
-            "pointer will break when the worktree is pruned, taking the MCP server "
-            "and all techne hooks down with it. Reinstall from your canonical "
-            "checkout, then re-run `techne init`:\n"
-            f"  {sys.executable} -m pip install -e <canonical-techne-checkout>"
-        )
+    #
+    # The guard is deliberately STRICT — no sandbox carve-out. Tests are isolated
+    # from the host repo layout by conftest's autouse `_isolate_install_root`,
+    # mirroring how `_isolate_host_config` (techne#288) already pins SETTINGS_PATH.
+    # An earlier attempt at this change instead let the guard stand down whenever
+    # SETTINGS_PATH was redirected; that made the suite pass but silently weakened
+    # the guard in every sandboxed context, and broke the existing
+    # `test_refuses_worktree_install`. Isolating the input is right; loosening the
+    # invariant to fit the test harness is not.
+    # Check EVERY prunable path this function is about to bake into machine-global
+    # config, not just the install root: the launcher's `PY=`, the MCP server
+    # command and the heal all carry `sys.executable`, and SessionStart carries the
+    # preflight guard's absolute path. A non-editable install into `<worktree>/.venv`
+    # leaves _install_root() in site-packages — clean — while sys.executable is
+    # still inside the worktree (Prudence, PR #435).
+    for label, candidate in (
+        ("install root", _install_root()),
+        ("interpreter", _interpreter()),
+        ("preflight guard", PREFLIGHT_GUARD),
+    ):
+        wt = _under_worktree(candidate)
+        if wt is not None:
+            raise RuntimeError(
+                f"techne's {label} ({candidate}) is inside a git worktree ({wt}). "
+                "Wiring that into ~/.claude would break the MCP server and every "
+                "techne hook the moment the worktree is pruned. Reinstall from your "
+                "canonical checkout, then re-run `techne init`:\n"
+                f"  {sys.executable} -m pip install -e <canonical-techne-checkout>"
+            )
 
     # Generate the interpreter launcher before baking paths into settings.json
     # (techne#276): hooks route through the launcher so a Homebrew upgrade/removal
