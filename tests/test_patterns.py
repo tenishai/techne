@@ -526,3 +526,30 @@ def test_clears_skip_does_not_clobber_a_stated_non_skip_judgment(db):
     set_verdict(db, url=url, verdict="full-eval")
     ingest_patterns_md(db, withpat)  # plain re-ingest
     assert _verdict_for(db, url) == "full-eval"
+
+
+def test_demotion_to_no_lift_keeps_the_pattern_era_verdict(db):
+    """PINS a known limitation rather than asserting it is correct (techne#433).
+
+    The reverse of the trap `clears_skip` fixes: a URL that once carried patterns,
+    later demoted to a no-lift bullet, KEEPS its pattern-era verdict because the
+    no-lift write is insert-only. Prudence found this direction untested in either
+    direction and explicitly did not ask for a behaviour change — the insert-only
+    trade is the right one, and the root cause is that verdicts carry no
+    provenance, so the earliest fallback wins forever.
+
+    This test exists so the frozen behaviour is deliberate and visible. If a future
+    change makes demotion move the verdict, this test SHOULD fail and be updated —
+    that is the point of pinning it.
+    """
+    url = "https://github.com/x/repo"
+    withpat = (
+        f"## Real pattern\n\n- **Source**: {url}\n- **Surveyed**: 2026-06-01\n\nBody.\n\n---\n"
+    )
+    nolift = f"## Surveyed (no patterns worth saving)\n\n- {url} — surveyed 2026-07-01 — thin\n"
+
+    ingest_patterns_md(db, withpat)
+    assert _verdict_for(db, url) == "patterns-only"
+
+    ingest_patterns_md(db, nolift)  # demoted later
+    assert _verdict_for(db, url) == "patterns-only", "frozen by design — see techne#433"

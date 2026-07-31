@@ -906,10 +906,27 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
     omitted it falls back to DEFAULT_INGEST_VERDICT ("patterns-only"), NOT the old
     hardcoded "full-eval" — see techne#428 and the VERDICTS comment above.
 
-    No-lift bullets keep "skip-with-flag" unconditionally, and that one is correct
-    by construction: a bullet under "Surveyed (no patterns worth saving)" IS the
-    surveyed-but-not-lifted case, so it is derived from the document's structure
-    rather than guessed at.
+    No-lift bullets ignore the caller's `verdict` and write "skip-with-flag", but
+    they do NOT write it unconditionally — that write is insert-only, so an
+    operator who narrowed the judgment to "skip" via `reverdict` keeps it. The
+    document's structure establishes that the URL was surveyed and nothing was
+    lifted; it does not establish which of the two skip verdicts the operator
+    means. (This paragraph previously claimed "unconditionally" and "correct by
+    construction", contradicting the call-site comment 30 lines below in the very
+    commit that made it insert-only — Prudence, PR #432.)
+
+    KNOWN LIMITATION — verdicts have no provenance, so the earliest fallback wins
+    forever, and two transitions are frozen (tracked in techne#433):
+      * patterns → later demoted to a no-lift bullet: the row keeps its
+        pattern-era verdict, because the no-lift write is insert-only. Pinned by
+        test_demotion_to_no_lift_keeps_the_pattern_era_verdict so it changes
+        deliberately rather than silently.
+      * `--verdict` is per-INGEST, not per-URL, so passing one to correct a single
+        URL also overwrites every other pattern-carrying URL in the same document,
+        including ones whose judgment was set by `reverdict`. Use `reverdict` for
+        single-row corrections.
+    The opposite transition — a no-lift URL that later DOES yield a pattern — is
+    handled, via `clears_skip`: a skip cannot survive a pattern being saved.
     """
     from techne.import_md import parse
 
