@@ -13,7 +13,9 @@ from techne.core.patterns import (
     investigations_for_url,
     list_patterns,
     search_patterns,
+    set_verdict,
     stats,
+    sweep_legacy_verdicts,
     upsert_investigation,
 )
 from techne.core.stores import SqliteStore
@@ -155,3 +157,115 @@ def test_export_roundtrips_with_ingest(db, tmp_path):
     assert stats(db2)["patterns"] == 1
     assert stats(db2)["skips"] == 1
     assert search_patterns(db2, "sqlite-vec")
+
+
+# --- verdict is the operator's judgment, not a side effect (techne#428) -------
+#
+# Regression cover for the bug where `ingest_patterns_md` hardcoded
+# verdict="full-eval" for any URL carrying patterns and the CLI had no way to
+# pass one — so the column recorded *whether the markdown had patterns*, which
+# the patterns table already says, and `patterns-only` was unreachable. Live
+# corpus when found: 202 full-eval / 70 skip-with-flag / 0 patterns-only.
+
+_MD_ONE = (
+    "## Capability probing\n\n"
+    "- **Source**: https://github.com/x/repo\n"
+    "- **Surveyed**: 2026-06-09\n\n"
+    "Probe for sqlite-vec; branch on availability.\n\n"
+    "---\n"
+)
+
+
+def _verdict_for(db, url):
+    return investigations_for_url(db, url)[0]["verdict"]
+
+
+def test_ingest_defaults_to_patterns_only_not_full_eval(db):
+    """THE regression: the old code wrote full-eval here."""
+    ingest_patterns_md(db, _MD_ONE)
+    assert _verdict_for(db, "https://github.com/x/repo") == "patterns-only"
+
+
+def test_ingest_records_the_verdict_it_is_given(db):
+    ingest_patterns_md(db, _MD_ONE, verdict="full-eval")
+    assert _verdict_for(db, "https://github.com/x/repo") == "full-eval"
+
+
+def test_patterns_only_is_reachable(db):
+    """It was not, before #428 — no code path could produce this value."""
+    ingest_patterns_md(db, _MD_ONE, verdict="patterns-only")
+    assert _verdict_for(db, "https://github.com/x/repo") == "patterns-only"
+
+
+def test_no_lift_bullets_stay_skip_with_flag(db):
+    """Derived from document structure, so it is correct by construction and the
+    caller's --verdict must NOT override it."""
+    md = (
+        "## Surveyed (no patterns worth saving)\n\n"
+        "- https://github.com/z/nope — surveyed 2026-06-10 — generic CRUD\n"
+    )
+    ingest_patterns_md(db, md, verdict="full-eval")
+    assert _verdict_for(db, "https://github.com/z/nope") == "skip-with-flag"
+
+
+@pytest.mark.parametrize("bad", ["", "FULL-EVAL", "maybe", "patterns_only", None])
+def test_out_of_vocabulary_verdict_is_rejected(db, bad):
+    with pytest.raises(ValueError, match="verdict must be one of"):
+        upsert_investigation(db, url="u", surveyed_at="2026-06-01", verdict=bad)
+
+
+def test_ingest_rejects_bad_verdict_before_writing_anything(db):
+    """Fail closed: a bad verdict must not leave a half-ingested corpus."""
+    with pytest.raises(ValueError, match="verdict must be one of"):
+        ingest_patterns_md(db, _MD_ONE, verdict="nonsense")
+    assert stats(db)["patterns"] == 0
+    assert stats(db)["investigations"] == 0
+
+
+def test_set_verdict_corrects_without_touching_surveyed_at(db):
+    """Correcting a judgment is not a re-survey (cf. techne#429).
+
+    surveyed_at is read straight from the table because investigations_for_url
+    projects only (surveyed_by, lens, verdict, summary).
+    """
+    import sqlite3
+
+    upsert_investigation(db, url="u", surveyed_at="2026-06-01", verdict="full-eval")
+    assert set_verdict(db, url="u", verdict="patterns-only") is True
+    assert investigations_for_url(db, "u")[0]["verdict"] == "patterns-only"
+
+    conn = sqlite3.connect(db)
+    try:
+        got = conn.execute(
+            "SELECT surveyed_at FROM investigations WHERE url = ?", ("u",)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert got[0] == "2026-06-01"
+
+
+def test_set_verdict_reports_miss(db):
+    assert set_verdict(db, url="never-surveyed", verdict="skip") is False
+
+
+def test_sweep_legacy_is_dry_by_default_and_scoped_by_date(db):
+    upsert_investigation(db, url="old", surveyed_at="2026-06-01", verdict="full-eval")
+    upsert_investigation(db, url="new", surveyed_at="2026-07-30", verdict="full-eval")
+
+    dry = sweep_legacy_verdicts(db, before="2026-07-01")
+    assert dry["matched"] == 1 and dry["applied"] == 0
+    assert _verdict_for(db, "old") == "full-eval"  # unchanged by a dry run
+
+    applied = sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
+    assert applied["matched"] == 1 and applied["applied"] == 1
+    assert _verdict_for(db, "old") == "unknown"
+    # A post-fix full-eval is a real judgment and must survive the sweep.
+    assert _verdict_for(db, "new") == "full-eval"
+
+
+def test_sweep_legacy_is_idempotent(db):
+    upsert_investigation(db, url="old", surveyed_at="2026-06-01", verdict="full-eval")
+    sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
+    again = sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
+    assert again["matched"] == 0
+    assert _verdict_for(db, "old") == "unknown"

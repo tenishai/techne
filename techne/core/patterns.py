@@ -21,6 +21,33 @@ def _hash(*parts: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+# --- investigation verdicts (techne#428) -------------------------------------
+#
+# The verdict is meant to record the OPERATOR'S judgment about a surveyed URL.
+# It did not. `ingest_patterns_md` hardcoded "full-eval" for any URL group that
+# carried patterns and "skip-with-flag" for a no-lift bullet, and the CLI had no
+# way to pass one — so the column recorded *whether the markdown contained
+# patterns*, which the patterns table already says, and `patterns-only` was
+# literally unreachable. Live corpus when this was found: 202 full-eval,
+# 70 skip-with-flag, 0 patterns-only, against 19 eval docs on disk.
+#
+# That made the field worse than empty: reading `verdict=full-eval` on a
+# re-investigated URL invited the inference "a prior pass judged this
+# decision-forcing but never wrote its eval doc", which was an artifact of the
+# default.
+VERDICTS = ("skip", "skip-with-flag", "patterns-only", "full-eval", "unknown")
+
+# What an ingest records when the caller does not say. `patterns-only` is the
+# documented modal outcome and `full-eval` is documented as ~5-10%, so defaulting
+# here is right most of the time where the old hardcode was right rarely. It is
+# still a default, not a judgment — pass --verdict to state one.
+DEFAULT_INGEST_VERDICT = "patterns-only"
+
+# Reserved for rows whose verdict was auto-assigned before this existed and so
+# never meant anything. Honest about not knowing rather than guessing.
+UNKNOWN_VERDICT = "unknown"
+
+
 # --- graph extraction (techne#87 P2) ----------------------------------------
 #
 # The relationship signals are already embedded in pattern *bodies* — lifted by
@@ -96,7 +123,19 @@ def upsert_investigation(
     skip_reason: str | None = None,
     maturity: str | None = None,
 ) -> str:
-    """Insert/update one investigation (the dedup unit). Returns its id."""
+    """Insert/update one investigation (the dedup unit). Returns its id.
+
+    `verdict` must be one of VERDICTS. It is validated here rather than by a
+    schema CHECK because the constraint would need a full SQLite table rebuild to
+    add to an existing db, and this is the only write path — a bad value should
+    fail loudly at the call site, not land as a silent out-of-vocabulary string
+    that every downstream query then has to tolerate (techne#428).
+    """
+    if verdict not in VERDICTS:
+        raise ValueError(
+            f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}. "
+            "The verdict is the operator's judgment about the URL — see techne#428."
+        )
     inv_id = _hash(url, surveyed_by, lens)
     conn = plain_connect(db_path)
     try:
@@ -113,6 +152,73 @@ def upsert_investigation(
         )
         conn.commit()
         return inv_id
+    finally:
+        conn.close()
+
+
+def set_verdict(
+    db_path: Path,
+    *,
+    url: str,
+    verdict: str,
+    surveyed_by: str = "raven",
+    lens: str = "infra",
+) -> bool:
+    """Correct one investigation's verdict in place. True if a row was updated.
+
+    Deliberately does NOT touch surveyed_at — correcting a judgment is not a
+    re-survey, and conflating the two is the adjacent bug in techne#429.
+    """
+    if verdict not in VERDICTS:
+        raise ValueError(f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}")
+    conn = plain_connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE investigations SET verdict = ? WHERE id = ?",
+            (verdict, _hash(url, surveyed_by, lens)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -> dict:
+    """Retire pre-techne#428 auto-assigned verdicts to 'unknown'.
+
+    Every `full-eval` written before the fix was assigned by the ingester purely
+    because the markdown carried patterns, so none of those values is a judgment.
+    Leaving them reads as 202 deliberate full-evals; 'unknown' is the honest state.
+
+    Scoped by `before` (a surveyed_at date) rather than sweeping the whole table,
+    so a genuine operator-supplied full-eval recorded after the fix is never
+    clobbered. Caveat: because re-ingest currently overwrites surveyed_at
+    (techne#429), a legacy row that has since been re-investigated carries the
+    newer date and will fall outside the sweep — it will need `set_verdict`.
+
+    dry_run=True by default: this rewrites the operator's corpus, so the caller
+    has to ask for it twice.
+    """
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT url, surveyed_at FROM investigations "
+            "WHERE verdict = 'full-eval' AND surveyed_at < ? ORDER BY surveyed_at",
+            (before,),
+        ).fetchall()
+        if not dry_run and rows:
+            conn.execute(
+                "UPDATE investigations SET verdict = ? "
+                "WHERE verdict = 'full-eval' AND surveyed_at < ?",
+                (UNKNOWN_VERDICT, before),
+            )
+            conn.commit()
+        return {
+            "matched": len(rows),
+            "applied": 0 if dry_run else len(rows),
+            "before": before,
+            "urls": [r[0] for r in rows],
+        }
     finally:
         conn.close()
 
@@ -727,17 +833,31 @@ def export_patterns_md(db_path: Path) -> str:
     return "\n".join(out)
 
 
-def ingest_patterns_md(db_path: Path, md_text: str) -> dict:
+def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) -> dict:
     """Seed architect.db from architectural-patterns.md (reuses import_md.parse):
-    patterns → grouped by url into investigations(verdict=full-eval) + patterns;
-    no-lift bullets → investigations(verdict=skip-with-flag). Idempotent."""
+    patterns → grouped by url into investigations + patterns;
+    no-lift bullets → investigations(verdict=skip-with-flag). Idempotent.
+
+    `verdict` is the operator's judgment for the URLs carrying patterns. When
+    omitted it falls back to DEFAULT_INGEST_VERDICT ("patterns-only"), NOT the old
+    hardcoded "full-eval" — see techne#428 and the VERDICTS comment above.
+
+    No-lift bullets keep "skip-with-flag" unconditionally, and that one is correct
+    by construction: a bullet under "Surveyed (no patterns worth saving)" IS the
+    surveyed-but-not-lifted case, so it is derived from the document's structure
+    rather than guessed at.
+    """
     from techne.import_md import parse
+
+    verdict = verdict or DEFAULT_INGEST_VERDICT
+    if verdict not in VERDICTS:  # fail before any write, not partway through
+        raise ValueError(f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}")
 
     parsed = parse(md_text)
     patterns_added = 0
     for p in parsed.patterns:
         inv_id = upsert_investigation(
-            db_path, url=p.source_url, surveyed_at=p.surveyed_date, verdict="full-eval"
+            db_path, url=p.source_url, surveyed_at=p.surveyed_date, verdict=verdict
         )
         _pid, stored = add_pattern(
             db_path, investigation_id=inv_id, name=p.name, source_url=p.source_url, body=p.body
