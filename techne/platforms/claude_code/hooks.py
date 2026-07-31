@@ -30,8 +30,45 @@ def _install_root() -> Path:
 
 
 def _is_worktree_path(p: Path) -> bool:
-    """True if ``p`` sits under a ``.claude/worktrees/`` directory."""
-    parts = p.resolve().parts
+    """True if ``p`` is a git worktree — ASK GIT, don't guess from the path.
+
+    KEEP IN SYNC with the identical copy in ``preflight_guard._is_worktree_path``.
+    The duplication is deliberate: preflight_guard runs as a bare script *before*
+    techne is known to be importable, so it cannot import this module.
+    ``tests/test_worktree_guard.py`` fails if the two drift.
+
+    A linked worktree is identified by its marker: ``git worktree add`` writes
+    ``.git`` as a FILE containing ``gitdir: <main>/.git/worktrees/<name>``, where a
+    normal clone has a ``.git`` DIRECTORY.
+
+    This previously matched only paths under ``.claude/worktrees/`` — the harness's
+    own convention — so a worktree created anywhere else sailed straight through the
+    guard in ``register_hooks``. That is not hypothetical: on 2026-07-31 a manual
+    ``git worktree add ~/working/tenishai/techne-wt-428`` was registered, baked into
+    ``~/.claude/settings.json`` and the launcher, and took every hook on the machine
+    down when the worktree was pruned (techne#434, third occurrence of #578's class).
+
+    A git SUBMODULE also uses a ``.git`` file, but points at ``.git/modules/<name>``.
+    The ``worktrees`` path segment is what distinguishes them, and a submodule
+    checkout is stable — it must NOT be refused.
+
+    No subprocess: this runs on the preflight hot path and must still answer when
+    git is absent, or the marker is unreadable.
+    """
+    p = p.resolve()
+    marker = p / ".git"
+    try:
+        if marker.is_file():
+            head = marker.read_text(encoding="utf-8", errors="replace")[:4096]
+            norm = head.replace("\\", "/")
+            if "gitdir:" in norm and "/.git/worktrees/" in norm:
+                return True
+    except OSError:
+        pass  # unreadable marker: fall through to the path heuristic below
+
+    # Retained as a belt-and-braces fallback: catches the harness's worktree dir
+    # even if the marker is missing or unreadable.
+    parts = p.parts
     return any(
         parts[i] == ".claude" and parts[i + 1] == "worktrees"
         for i in range(len(parts) - 1)
@@ -188,6 +225,15 @@ def register_hooks(config: Config):
     # a git worktree, its editable pointer — and everything we're about to wire —
     # will break the moment that worktree is pruned (the -32000 footgun). Fail
     # loud with the remediation rather than register a self-destructing install.
+    #
+    # The guard is deliberately STRICT — no sandbox carve-out. Tests are isolated
+    # from the host repo layout by conftest's autouse `_isolate_install_root`,
+    # mirroring how `_isolate_host_config` (techne#288) already pins SETTINGS_PATH.
+    # An earlier attempt at this change instead let the guard stand down whenever
+    # SETTINGS_PATH was redirected; that made the suite pass but silently weakened
+    # the guard in every sandboxed context, and broke the existing
+    # `test_refuses_worktree_install`. Isolating the input is right; loosening the
+    # invariant to fit the test harness is not.
     root = _install_root()
     if _is_worktree_path(root):
         raise RuntimeError(

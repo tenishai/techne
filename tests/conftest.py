@@ -40,3 +40,26 @@ def _isolate_host_config(tmp_path_factory, monkeypatch):
     for target in (hooks_mod, claude_code):
         monkeypatch.setattr(target, "SETTINGS_PATH", settings_path, raising=False)
         monkeypatch.setattr(target, "MCP_CONFIG_PATH", mcp_path, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_install_root(tmp_path_factory, monkeypatch):
+    """Pin ``_install_root`` so tests never inherit the checkout's real layout.
+
+    Same principle as ``_isolate_host_config`` above, for the other host-dependent
+    input into ``register_hooks``. Without it, running the suite from a git
+    worktree makes ``_install_root()`` return that worktree — and once the worktree
+    guard could actually SEE worktrees (techne#434), the guard correctly refused
+    and 35 hook tests failed. The tests were not wrong and the guard was not wrong;
+    the test harness was reading a host detail it never meant to depend on.
+
+    Pinned to a plain temp dir, which is not a worktree, so registration-shaped
+    tests behave identically whether the developer works in a clone or a worktree.
+    Tests that care about the guard override this with their own ``_install_root``
+    (see ``tests/test_worktree_guard.py``), exactly as ``fake_home`` overrides the
+    fixture above.
+    """
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    canonical = tmp_path_factory.mktemp("install_root")
+    monkeypatch.setattr(hooks_mod, "_install_root", lambda: canonical, raising=False)

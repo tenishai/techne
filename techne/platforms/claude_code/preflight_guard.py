@@ -35,7 +35,40 @@ CANONICAL = Path(__file__).resolve().parents[3]
 
 
 def _is_worktree_path(p: Path) -> bool:
-    """True if ``p`` sits under a ``.claude/worktrees/`` directory."""
+    """True if ``p`` is a git worktree — ASK GIT, don't guess from the path.
+
+    KEEP IN SYNC with the identical copy in ``hooks._is_worktree_path``. The
+    duplication is deliberate: this module runs as a bare script *before* techne is
+    known to be importable — importing from techne would defeat the guard's whole
+    purpose — so it cannot share the helper. ``tests/test_worktree_guard.py`` fails
+    if the two drift.
+
+    A linked worktree is identified by its marker: ``git worktree add`` writes
+    ``.git`` as a FILE containing ``gitdir: <main>/.git/worktrees/<name>``, where a
+    normal clone has a ``.git`` DIRECTORY.
+
+    This previously matched only paths under ``.claude/worktrees/``, so a worktree
+    created anywhere else was invisible to it (techne#434). Note the copies had
+    ALREADY drifted — this one omitted the ``.resolve()`` the hooks copy had, so a
+    relative path could evade even the old check. That drift is exactly what the
+    sync test now prevents.
+
+    A git SUBMODULE also uses a ``.git`` file, but points at ``.git/modules/<name>``;
+    the ``worktrees`` segment distinguishes them, and a submodule must NOT be refused.
+
+    No subprocess: this is the preflight hot path and must answer when git is absent.
+    """
+    p = p.resolve()
+    marker = p / ".git"
+    try:
+        if marker.is_file():
+            head = marker.read_text(encoding="utf-8", errors="replace")[:4096]
+            norm = head.replace("\\", "/")
+            if "gitdir:" in norm and "/.git/worktrees/" in norm:
+                return True
+    except OSError:
+        pass  # unreadable marker: fall through to the path heuristic below
+
     parts = p.parts
     return any(
         parts[i] == ".claude" and parts[i + 1] == "worktrees"
