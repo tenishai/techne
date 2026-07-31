@@ -215,11 +215,29 @@ def test_out_of_vocabulary_verdict_is_rejected(db, bad):
 
 
 def test_ingest_rejects_bad_verdict_before_writing_anything(db):
-    """Fail closed: a bad verdict must not leave a half-ingested corpus."""
+    """Fail closed: a bad verdict must not leave a half-ingested corpus.
+
+    The fixture is deliberately a NO-LIFT-ONLY document, and that is the whole
+    point of the test. With a document containing patterns, the first
+    upsert_investigation would reject the bad verdict anyway, so the assertion
+    passes with or without the pre-flight and proves nothing — verified by
+    deleting the pre-flight and watching all 20 tests still pass (Prudence,
+    PR #432).
+
+    A no-lift-only document is the case the pre-flight actually exists for:
+    `parsed.patterns` is empty, the no-lift loop writes its own hardcoded
+    "skip-with-flag", and nothing downstream ever looks at the caller's verdict —
+    so without the pre-flight a bogus verdict is silently accepted.
+    """
+    md = (
+        "## Surveyed (no patterns worth saving)\n\n"
+        "- https://github.com/z/nope — surveyed 2026-06-10 — generic CRUD\n"
+    )
     with pytest.raises(ValueError, match="verdict must be one of"):
-        ingest_patterns_md(db, _MD_ONE, verdict="nonsense")
+        ingest_patterns_md(db, md, verdict="nonsense")
     assert stats(db)["patterns"] == 0
     assert stats(db)["investigations"] == 0
+    assert stats(db)["skips"] == 0
 
 
 def test_set_verdict_corrects_without_touching_surveyed_at(db):
@@ -269,3 +287,76 @@ def test_sweep_legacy_is_idempotent(db):
     again = sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
     assert again["matched"] == 0
     assert _verdict_for(db, "old") == "unknown"
+
+
+# --- PR #432 review findings (Prudence) --------------------------------------
+
+
+def test_reverdict_survives_a_plain_reingest(db):
+    """Important #2: the default must be INSERT-ONLY.
+
+    The sharp case she named: `reverdict` records a judgment, then a routine
+    re-ingest of the same markdown silently reverts it — the command this change
+    adds for stating a judgment, undone by the command that prompted it. A default
+    that overwrites on every re-ingest is techne#428 again with a nicer constant.
+    """
+    ingest_patterns_md(db, _MD_ONE)  # fresh row -> default
+    url = "https://github.com/x/repo"
+    assert _verdict_for(db, url) == "patterns-only"
+
+    set_verdict(db, url=url, verdict="full-eval")  # operator states a judgment
+    ingest_patterns_md(db, _MD_ONE)  # plain re-ingest, no --verdict
+    assert _verdict_for(db, url) == "full-eval"  # judgment survives
+
+
+def test_stated_verdict_still_overwrites_on_reingest(db):
+    """Insert-only applies to the FALLBACK only — an explicit --verdict must win,
+    or you could never correct a row by re-ingesting."""
+    ingest_patterns_md(db, _MD_ONE, verdict="patterns-only")
+    ingest_patterns_md(db, _MD_ONE, verdict="full-eval")
+    assert _verdict_for(db, "https://github.com/x/repo") == "full-eval"
+
+
+@pytest.mark.parametrize("bad", ["2026-7-1", "20260701", "yesterday", "", "2026-07-01T00:00"])
+def test_sweep_rejects_a_malformed_before(db, bad):
+    """Critical #1: --before is the sweep's only safety property. An unparseable
+    value would compare as a plain string and could select the whole table."""
+    with pytest.raises(ValueError, match="ISO date"):
+        sweep_legacy_verdicts(db, before=bad, dry_run=False)
+
+
+def test_sweep_dry_run_exposes_the_urls(db):
+    """Critical #1: a count-only preview looks equally correct whether the scope
+    is right or has swallowed everything, so the URLs are the actual protection."""
+    upsert_investigation(db, url="old-a", surveyed_at="2026-06-01", verdict="full-eval")
+    upsert_investigation(db, url="old-b", surveyed_at="2026-06-02", verdict="full-eval")
+    upsert_investigation(db, url="new", surveyed_at="2026-07-30", verdict="full-eval")
+
+    res = sweep_legacy_verdicts(db, before="2026-07-01")
+    assert sorted(res["urls"]) == ["old-a", "old-b"]
+    assert "new" not in res["urls"]
+
+
+def test_sweep_applies_and_is_idempotent(db):
+    """Important #3, partial cover — and an honest note about what this does NOT prove.
+
+    The fix swapped `applied` from the SELECT's len(rows) to the UPDATE's
+    cur.rowcount, so the audit number for a destructive rewrite is measured
+    against the write rather than the read that predicted it.
+
+    This test canNOT detect that swap: mutation-checked, reverting to len(rows)
+    leaves the whole file green. Nor can any test, now — BEGIN IMMEDIATE holds the
+    write lock across both statements, so no writer can interleave and the two
+    values are equal by construction. The rowcount change is correctness of
+    measurement, not an observable behaviour change; the BEGIN IMMEDIATE that
+    makes it unobservable is the part carrying the safety weight, and it is
+    covered by the fact that this file's sweeps commit atomically at all.
+
+    What this test does cover: the sweep writes, and re-running is a no-op.
+    """
+    upsert_investigation(db, url="old", surveyed_at="2026-06-01", verdict="full-eval")
+    res = sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
+    assert res["applied"] == 1
+    assert _verdict_for(db, "old") == "unknown"
+    again = sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
+    assert again["matched"] == 0 and again["applied"] == 0

@@ -2507,10 +2507,26 @@ def architect_sweep_legacy_verdicts(ctx, before, apply_):
     from techne.core.architect import architect_db
     from techne.core.patterns import sweep_legacy_verdicts
 
-    res = sweep_legacy_verdicts(architect_db(config), before=before, dry_run=not apply_)
+    try:
+        res = sweep_legacy_verdicts(architect_db(config), before=before, dry_run=not apply_)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--before") from e
+
     click.echo(json.dumps({k: v for k, v in res.items() if k != "urls"}, indent=2))
+
+    # PRINT THE URLS. A bare `matched: 202` looks equally correct whether the
+    # scope is right or has swallowed every post-fix judgment, so a count-only
+    # preview is not protection — it hides exactly the evidence you would need to
+    # catch a wrong --before before --apply makes it permanent (Prudence, PR #432).
+    if res["urls"]:
+        click.echo("\nWould set to 'unknown':" if not apply_ else "\nSet to 'unknown':")
+        for u in res["urls"]:
+            click.echo(f"  {u}")
     if not apply_ and res["matched"]:
-        click.echo(f"\nDry run — re-run with --apply to rewrite {res['matched']} row(s).")
+        click.echo(
+            f"\nDry run — {res['matched']} row(s) above would be rewritten. "
+            "Check the list, then re-run with --apply."
+        )
 
 
 @architect.command("export")

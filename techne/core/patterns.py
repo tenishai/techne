@@ -47,6 +47,12 @@ DEFAULT_INGEST_VERDICT = "patterns-only"
 # never meant anything. Honest about not knowing rather than guessing.
 UNKNOWN_VERDICT = "unknown"
 
+# surveyed_at is TEXT holding a zero-padded ISO date (import_md enforces
+# \d{4}-\d{2}-\d{2} at parse time), so `surveyed_at < ?` is a sound string
+# comparison — but ONLY if the bound value is the same shape. Validated where it
+# enters, because the date scoping is the sweep's only safety property.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 # --- graph extraction (techne#87 P2) ----------------------------------------
 #
@@ -122,6 +128,7 @@ def upsert_investigation(
     summary: str | None = None,
     skip_reason: str | None = None,
     maturity: str | None = None,
+    overwrite_verdict: bool = True,
 ) -> str:
     """Insert/update one investigation (the dedup unit). Returns its id.
 
@@ -130,6 +137,13 @@ def upsert_investigation(
     add to an existing db, and this is the only write path — a bad value should
     fail loudly at the call site, not land as a silent out-of-vocabulary string
     that every downstream query then has to tolerate (techne#428).
+
+    `overwrite_verdict=False` makes the verdict INSERT-ONLY: a new row gets it, an
+    existing row keeps whatever it already has. Callers pass False when the value
+    is a fallback rather than a stated judgment. Without this, a default that
+    overwrites on every re-ingest is techne#428 again with a nicer constant — and
+    concretely it undid `set_verdict`: state a judgment with `reverdict`, re-ingest
+    the same markdown, and a routine ingest silently reverts it (Prudence, PR #432).
     """
     if verdict not in VERDICTS:
         raise ValueError(
@@ -144,11 +158,23 @@ def upsert_investigation(
                  (id, url, surveyed_by, lens, surveyed_at, verdict, summary, skip_reason, maturity)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(url, surveyed_by, lens) DO UPDATE SET
-                 surveyed_at = excluded.surveyed_at, verdict = excluded.verdict,
+                 surveyed_at = excluded.surveyed_at,
+                 verdict = CASE WHEN ? THEN excluded.verdict ELSE investigations.verdict END,
                  summary = COALESCE(excluded.summary, investigations.summary),
                  skip_reason = COALESCE(excluded.skip_reason, investigations.skip_reason),
                  maturity = COALESCE(excluded.maturity, investigations.maturity)""",
-            (inv_id, url, surveyed_by, lens, surveyed_at, verdict, summary, skip_reason, maturity),
+            (
+                inv_id,
+                url,
+                surveyed_by,
+                lens,
+                surveyed_at,
+                verdict,
+                summary,
+                skip_reason,
+                maturity,
+                1 if overwrite_verdict else 0,
+            ),
         )
         conn.commit()
         return inv_id
@@ -199,23 +225,43 @@ def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -
     dry_run=True by default: this rewrites the operator's corpus, so the caller
     has to ask for it twice.
     """
+    if not _ISO_DATE_RE.match(before):
+        raise ValueError(
+            f"--before must be an ISO date (YYYY-MM-DD); got {before!r}. "
+            "It is this function's only safety property — an unparseable value would "
+            "compare as a plain string and could select every row in the table."
+        )
+
     conn = plain_connect(db_path)
     try:
+        # Take the write lock BEFORE the read (BEGIN IMMEDIATE): with the default
+        # isolation a bare SELECT opens no transaction, so a concurrent writer can
+        # land between the SELECT that builds the preview/audit list and the UPDATE
+        # that rewrites those rows — reporting rows as swept that were changed by
+        # someone else. Same read→write TOCTOU the rest of this codebase already
+        # guards (curated.py:105, cards.py:106, documents.py:71); reproducing it in
+        # a *destructive* path is worse than in an idempotent one.
+        conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT url, surveyed_at FROM investigations "
             "WHERE verdict = 'full-eval' AND surveyed_at < ? ORDER BY surveyed_at",
             (before,),
         ).fetchall()
+        applied = 0
         if not dry_run and rows:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE investigations SET verdict = ? "
                 "WHERE verdict = 'full-eval' AND surveyed_at < ?",
                 (UNKNOWN_VERDICT, before),
             )
-            conn.commit()
+            # rowcount from the UPDATE, not len(rows) from the SELECT: the audit
+            # number for a destructive rewrite must be measured against the write
+            # that happened, not the read that predicted it.
+            applied = cur.rowcount
+        conn.commit()
         return {
             "matched": len(rows),
-            "applied": 0 if dry_run else len(rows),
+            "applied": applied,
             "before": before,
             "urls": [r[0] for r in rows],
         }
@@ -849,7 +895,11 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
     """
     from techne.import_md import parse
 
-    verdict = verdict or DEFAULT_INGEST_VERDICT
+    # `is None`, not falsy: `verdict or DEFAULT` silently coerced "" to the
+    # default, so the empty string that upsert_investigation explicitly rejects
+    # was quietly accepted on this path (Prudence, PR #432).
+    stated = verdict is not None
+    verdict = DEFAULT_INGEST_VERDICT if verdict is None else verdict
     if verdict not in VERDICTS:  # fail before any write, not partway through
         raise ValueError(f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}")
 
@@ -857,7 +907,13 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
     patterns_added = 0
     for p in parsed.patterns:
         inv_id = upsert_investigation(
-            db_path, url=p.source_url, surveyed_at=p.surveyed_date, verdict=verdict
+            db_path,
+            url=p.source_url,
+            surveyed_at=p.surveyed_date,
+            verdict=verdict,
+            # A stated --verdict overwrites; the fallback is insert-only, so a
+            # judgment recorded via `reverdict` survives a later plain re-ingest.
+            overwrite_verdict=stated,
         )
         _pid, stored = add_pattern(
             db_path, investigation_id=inv_id, name=p.name, source_url=p.source_url, body=p.body
