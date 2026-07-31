@@ -400,29 +400,45 @@ def test_sweep_holds_the_write_lock_across_select_and_update(db, monkeypatch):
 
     upsert_investigation(db, url="old", surveyed_at="2026-06-01", verdict="full-eval")
 
+    # Generous caps. Both waits are released by an Event the moment the other side
+    # is ready, so a large cap costs a passing run nothing — it only exists to stop
+    # a hang. Small caps were the one way this could invert on a loaded box: if the
+    # contender were not scheduled inside the stall window, the sweep would release
+    # the lock and the contender would write, reporting the guard as broken when the
+    # only thing that failed was scheduling. Measured 0/40 idle and 0/15 under 8
+    # spinning CPU hogs before widening these anyway.
+    STALL_S = 15.0
     at_select = threading.Event()
     resume = threading.Event()
     contender: dict[str, bool] = {}
     real_connect = P.plain_connect
 
     class _Stalling:
+        """Delegates everything to the real connection; stalls once, after the
+        sweep's SELECT, so a competing writer has a window to try. Only the FIRST
+        SELECT stalls — a future edit adding a SELECT to the write path must not
+        re-enter and deadlock against the contender."""
+
         def __init__(self, inner):
             self._inner = inner
+            self._stalled = False
 
         def execute(self, sql, *a, **kw):
             cur = self._inner.execute(sql, *a, **kw)
-            if sql.lstrip().upper().startswith("SELECT"):
+            if not self._stalled and sql.lstrip().upper().startswith("SELECT"):
+                self._stalled = True
                 at_select.set()
-                resume.wait(3)  # hold the transaction open across the race
+                resume.wait(STALL_S)  # hold the transaction open across the race
             return cur
 
         def __getattr__(self, name):
-            return getattr(self._inner, name)
+            return getattr(self._inner, name)  # commit/close/etc. hit the real conn
 
     monkeypatch.setattr(P, "plain_connect", lambda p: _Stalling(real_connect(p)))
 
     def contend():
-        at_select.wait(3)
+        if not at_select.wait(STALL_S):
+            return  # sweep never reached its SELECT; reported as setup failure below
         conn = sqlite3.connect(db, timeout=0.25)
         try:
             conn.execute("UPDATE investigations SET verdict = 'skip' WHERE url = 'old'")
@@ -440,7 +456,11 @@ def test_sweep_holds_the_write_lock_across_select_and_update(db, monkeypatch):
         P.sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
     finally:
         resume.set()
-        t.join(5)
+        t.join(STALL_S + 5)
+
+    # Distinguish "the race never happened" from "the lock failed to hold", so a
+    # scheduling stall can never masquerade as a broken guard.
+    assert "wrote" in contender, "test setup failed: the contender never attempted a write"
 
     assert contender.get("wrote") is False, "a writer got in between the SELECT and the UPDATE"
 
@@ -465,3 +485,44 @@ def test_no_lift_reverdict_also_survives_a_reingest(db):
     set_verdict(db, url=url, verdict="skip")  # operator narrows the judgment
     ingest_patterns_md(db, md)  # plain re-ingest
     assert _verdict_for(db, url) == "skip"
+
+
+def test_a_skip_verdict_does_not_survive_the_url_yielding_patterns(db):
+    """A trap I introduced with the insert-only fix, caught by probing my own
+    answer to a review question rather than waiting to be told.
+
+    A URL first seen as a no-lift bullet gets `skip-with-flag`. If a later ingest
+    shows it DID yield a pattern, insert-only left the skip in place — so
+    `stats()` counted the same row under BOTH `patterns` and `skips`, and the
+    corpus asserted "no patterns worth saving" about a row owning a pattern.
+
+    `clears_skip` displaces a skip verdict when the write itself contradicts it.
+    A stated judgment is still never clobbered — see the assertion at the end.
+    """
+    url = "https://github.com/x/repo"
+    nolift = f"## Surveyed (no patterns worth saving)\n\n- {url} — surveyed 2026-06-01 — nope\n"
+    withpat = (
+        f"## Real pattern\n\n- **Source**: {url}\n- **Surveyed**: 2026-07-01\n\nBody.\n\n---\n"
+    )
+
+    ingest_patterns_md(db, nolift)
+    assert _verdict_for(db, url) == "skip-with-flag"
+    assert stats(db)["skips"] == 1
+
+    ingest_patterns_md(db, withpat)  # same URL now yields a pattern, no --verdict
+    assert _verdict_for(db, url) == "patterns-only"
+    s = stats(db)
+    assert s["patterns"] == 1 and s["skips"] == 0, "a row was both a pattern and a skip"
+
+
+def test_clears_skip_does_not_clobber_a_stated_non_skip_judgment(db):
+    """clears_skip must only displace skip* — insert-only still protects a real
+    judgment, or the fix for the trap would undo Important #2."""
+    url = "https://github.com/x/repo"
+    withpat = (
+        f"## Real pattern\n\n- **Source**: {url}\n- **Surveyed**: 2026-07-01\n\nBody.\n\n---\n"
+    )
+    ingest_patterns_md(db, withpat)
+    set_verdict(db, url=url, verdict="full-eval")
+    ingest_patterns_md(db, withpat)  # plain re-ingest
+    assert _verdict_for(db, url) == "full-eval"

@@ -129,6 +129,7 @@ def upsert_investigation(
     skip_reason: str | None = None,
     maturity: str | None = None,
     overwrite_verdict: bool = True,
+    clears_skip: bool = False,
 ) -> str:
     """Insert/update one investigation (the dedup unit). Returns its id.
 
@@ -144,6 +145,14 @@ def upsert_investigation(
     overwrites on every re-ingest is techne#428 again with a nicer constant — and
     concretely it undid `set_verdict`: state a judgment with `reverdict`, re-ingest
     the same markdown, and a routine ingest silently reverts it (Prudence, PR #432).
+
+    `clears_skip=True` additionally displaces an existing `skip*` verdict even when
+    the write is insert-only. Callers pass it when the write itself proves the URL
+    DID yield patterns, which contradicts any skip verdict — "no patterns worth
+    saving" cannot survive a pattern being saved. Without it, insert-only stranded
+    a URL first seen as a no-lift bullet and later carrying patterns: the row kept
+    `skip-with-flag` while owning a pattern, so `stats()` reported it under both
+    `patterns` and `skips` at once.
     """
     if verdict not in VERDICTS:
         raise ValueError(
@@ -163,9 +172,11 @@ def upsert_investigation(
                        :summary, :skip_reason, :maturity)
                ON CONFLICT(url, surveyed_by, lens) DO UPDATE SET
                  surveyed_at = excluded.surveyed_at,
-                 verdict = CASE WHEN :overwrite
-                                THEN excluded.verdict
-                                ELSE investigations.verdict END,
+                 verdict = CASE
+                             WHEN :overwrite THEN excluded.verdict
+                             WHEN :clears_skip AND investigations.verdict LIKE 'skip%'
+                                  THEN excluded.verdict
+                             ELSE investigations.verdict END,
                  summary = COALESCE(excluded.summary, investigations.summary),
                  skip_reason = COALESCE(excluded.skip_reason, investigations.skip_reason),
                  maturity = COALESCE(excluded.maturity, investigations.maturity)""",
@@ -180,6 +191,7 @@ def upsert_investigation(
                 "skip_reason": skip_reason,
                 "maturity": maturity,
                 "overwrite": 1 if overwrite_verdict else 0,
+                "clears_skip": 1 if clears_skip else 0,
             },
         )
         conn.commit()
@@ -920,6 +932,10 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
             # A stated --verdict overwrites; the fallback is insert-only, so a
             # judgment recorded via `reverdict` survives a later plain re-ingest.
             overwrite_verdict=stated,
+            # …but this write proves the URL DID yield a pattern, so a stale skip
+            # verdict must not survive it, or the row is counted as a skip while
+            # owning a pattern.
+            clears_skip=True,
         )
         _pid, stored = add_pattern(
             db_path, investigation_id=inv_id, name=p.name, source_url=p.source_url, body=p.body
