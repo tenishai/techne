@@ -63,9 +63,26 @@ def _is_worktree_path(p: Path) -> bool:
     try:
         if marker.is_file():
             head = marker.read_text(encoding="utf-8", errors="replace")[:4096]
-            norm = head.replace("\\", "/")
-            if "gitdir:" in norm and "/.git/worktrees/" in norm:
-                return True
+            for line in head.splitlines():
+                line = line.strip()
+                if not line.startswith("gitdir:"):
+                    continue
+                gitdir = Path(line.split(":", 1)[1].strip())
+                if not gitdir.is_absolute():
+                    gitdir = (p / gitdir).resolve()
+                # `commondir` exists ONLY inside a linked worktree's admin dir —
+                # git's own marker for "this git-dir is not the common one". A
+                # primary checkout's `.git/` never has one, so walking UP is safe.
+                #
+                # The walk (rather than a single check) covers a SUBMODULE inside a
+                # worktree: its git-dir is `<admin>/worktrees/<id>/modules/<name>`,
+                # which has no `commondir` of its own but lives under one. That
+                # nesting must still count — pruning the worktree takes the
+                # submodule's git-dir with it.
+                for d in (gitdir, *gitdir.parents):
+                    if (d / "commondir").exists():
+                        return True
+                return False
     except OSError:
         pass  # unreadable marker: fall through to the path heuristic below
 

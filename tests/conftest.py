@@ -63,3 +63,17 @@ def _isolate_install_root(tmp_path_factory, monkeypatch):
 
     canonical = tmp_path_factory.mktemp("install_root")
     monkeypatch.setattr(hooks_mod, "_install_root", lambda: canonical, raising=False)
+    # register_hooks guards THREE prunable inputs, not just the install root: the
+    # interpreter (baked into the launcher's `PY=`, the MCP command and the heal)
+    # and the preflight guard's absolute path. Both derive from the host —
+    # sys.executable and `__file__` — so a suite run from a worktree trips the guard
+    # on them too. Pinned for the same reason SETTINGS_PATH is.
+    #
+    # Note `_interpreter` exists as a seam precisely so this does NOT monkeypatch
+    # the global `sys.executable`, which would break every subprocess-spawning test.
+    monkeypatch.setattr(
+        hooks_mod, "_interpreter", lambda: canonical / "bin" / "python", raising=False
+    )
+    monkeypatch.setattr(
+        hooks_mod, "PREFLIGHT_GUARD", canonical / "preflight_guard.py", raising=False
+    )

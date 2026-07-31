@@ -11,6 +11,7 @@ occurrence of techne#578's class; the first two were fixed in memory, never in c
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 from pathlib import Path
 
@@ -109,12 +110,33 @@ class TestDetection:
     def test_plain_directory_is_not_a_worktree(self, tmp_path):
         assert _is_worktree_path(tmp_path) is False
 
-    def test_unreadable_marker_does_not_raise(self, tmp_path):
-        """The guard runs on the preflight hot path; it must degrade, never crash."""
+    def test_git_as_a_directory_is_not_a_worktree(self, tmp_path):
+        """A `.git` DIRECTORY is a primary checkout, whatever else is true."""
         p = tmp_path / "weird"
         p.mkdir()
-        (p / ".git").mkdir()  # a directory where a file might be expected
+        (p / ".git").mkdir()
         assert _is_worktree_path(p) is False
+
+    def test_unreadable_marker_degrades_instead_of_raising(self, tmp_path):
+        """Exercises the `except OSError` branch FOR REAL.
+
+        The previous version of this test used a `.git` DIRECTORY, so `is_file()`
+        was False and `read_text` was never reached — the except branch it claimed
+        to cover was untested in both copies while the PR body asserted otherwise
+        (Prudence, PR #435). Fourth time in two days I have written a test that
+        asserts more than it proves; the fix is to make it actually reach the line.
+        """
+        p = tmp_path / "locked"
+        p.mkdir()
+        marker = p / ".git"
+        marker.write_text("gitdir: /wherever/.git/worktrees/x\n")
+        marker.chmod(0o000)
+        try:
+            if os.access(marker, os.R_OK):  # root, or a permissive filesystem
+                pytest.skip("cannot make the marker unreadable in this environment")
+            assert _is_worktree_path(p) is False  # degrades, does not raise
+        finally:
+            marker.chmod(0o644)
 
 
 class TestRegisterHooksRefuses:
@@ -278,3 +300,115 @@ class TestDetectionEdgeCases:
         p = tmp_path / "worktrees" / "inner"
         p.mkdir(parents=True)
         assert _is_worktree_path(p) is False
+
+
+@pytest.fixture
+def bare_repo_worktree(tmp_path):
+    """A worktree of a BARE repo — the mainstream worktree workflow.
+
+    Its marker reads `gitdir: /srv/proj.git/worktrees/<id>`: no `/.git/` segment
+    anywhere. Any predicate that string-matches `/.git/worktrees/` misses it.
+    """
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git("init", "-q", cwd=seed)
+    _git("config", "user.email", "t@t", cwd=seed)
+    _git("config", "user.name", "t", cwd=seed)
+    (seed / "f").write_text("x")
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "i", cwd=seed)
+
+    bare = tmp_path / "srv.git"
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(seed), str(bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wt = tmp_path / "barewt"
+    _git("worktree", "add", "-q", str(wt), cwd=bare)
+    return bare, wt
+
+
+class TestBareRepoAndNesting:
+    def test_bare_repo_worktree_is_detected(self, bare_repo_worktree):
+        """Prudence's finding #1, confirmed against real git before fixing.
+
+        The first predicate matched `/.git/worktrees/` in the marker text, which
+        silently assumes the git-dir is named `.git`. A bare repo's is not, so this
+        returned False — missing the most common worktree setup there is.
+        """
+        _bare, wt = bare_repo_worktree
+        assert "/.git/" not in (wt / ".git").read_text()  # the shape that fooled it
+        assert _is_worktree_path(wt) is True
+
+    def test_bare_repo_itself_is_not_a_worktree(self, bare_repo_worktree):
+        bare, _wt = bare_repo_worktree
+        assert _is_worktree_path(bare) is False
+
+    def test_submodule_in_a_primary_checkout_is_not_refused(self, tmp_path):
+        """The counterpart to the submodule-in-a-worktree case: a submodule of a
+        NORMAL checkout is stable and must not be refused."""
+        main = tmp_path / "main"
+        main.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            _git(*a, cwd=main)
+        (main / "f").write_text("x")
+        _git("add", "-A", cwd=main)
+        _git("commit", "-qm", "i", cwd=main)
+
+        src = tmp_path / "src"
+        src.mkdir()
+        for a in (("init", "-q"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            _git(*a, cwd=src)
+        (src / "s").write_text("y")
+        _git("add", "-A", cwd=src)
+        _git("commit", "-qm", "i", cwd=src)
+
+        r = subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(src), "sub"],
+            cwd=main,
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            pytest.skip(f"submodule add unsupported here: {r.stderr.strip()[:80]}")
+        assert _is_worktree_path(main / "sub") is False
+
+
+class TestAllBakedPathsAreGuarded:
+    """Prudence's finding #2: the guard checked ONE directory while register_hooks
+    bakes THREE prunable paths into machine-global config."""
+
+    def test_interpreter_inside_a_worktree_is_refused(
+        self, real_repo_and_worktree, fake_home, cfg, monkeypatch, tmp_path
+    ):
+        """The concrete gap: a NON-editable install into `<worktree>/.venv`.
+
+        `_install_root()` then lands in site-packages — no `.git`, so the old guard
+        passed — while `sys.executable` is still `<worktree>/.venv/bin/python`, and
+        that path gets written into the launcher, the MCP command and the heal.
+        """
+        _repo, wt = real_repo_and_worktree
+        clean = tmp_path / "site-packages" / "techne"
+        clean.mkdir(parents=True)
+        monkeypatch.setattr(hooks_mod, "_install_root", lambda: clean)  # looks fine
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: wt / ".venv" / "bin" / "python")
+
+        with pytest.raises(RuntimeError, match="interpreter"):
+            hooks_mod.register_hooks(cfg)
+        assert not hooks_mod.SETTINGS_PATH.exists()
+
+    def test_preflight_guard_inside_a_worktree_is_refused(
+        self, real_repo_and_worktree, fake_home, cfg, monkeypatch, tmp_path
+    ):
+        """SessionStart bakes the guard's ABSOLUTE path, which is `__file__`-derived."""
+        _repo, wt = real_repo_and_worktree
+        clean = tmp_path / "sp" / "techne"
+        clean.mkdir(parents=True)
+        monkeypatch.setattr(hooks_mod, "_install_root", lambda: clean)
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: clean / "bin" / "python")
+        monkeypatch.setattr(hooks_mod, "PREFLIGHT_GUARD", wt / "techne" / "preflight_guard.py")
+
+        with pytest.raises(RuntimeError, match="preflight guard"):
+            hooks_mod.register_hooks(cfg)
