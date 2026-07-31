@@ -191,3 +191,90 @@ def test_the_two_copies_have_not_drifted():
     even the old check in one of them.
     """
     assert _logic_of(hooks_mod._is_worktree_path) == _logic_of(guard_mod._is_worktree_path)
+
+
+class TestDetectionEdgeCases:
+    """Cases I could not reason my way to confidently, so I built them with real git.
+
+    Each was a live question on the PR: could a legitimate non-worktree checkout
+    match the predicate, and does the submodule discriminator actually hold?
+    """
+
+    def test_separate_git_dir_clone_is_not_a_worktree(self, tmp_path):
+        """`git clone --separate-git-dir` also produces a `.git` FILE.
+
+        The predicate must key on the `/worktrees/` segment, not merely on "`.git`
+        is a file", or every detached-gitdir clone would be refused.
+        """
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        _git("init", "-q", cwd=origin)
+        _git("config", "user.email", "t@t", cwd=origin)
+        _git("config", "user.name", "t", cwd=origin)
+        (origin / "f").write_text("x")
+        _git("add", "-A", cwd=origin)
+        _git("commit", "-qm", "i", cwd=origin)
+
+        clone = tmp_path / "clone"
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "-q",
+                f"--separate-git-dir={tmp_path / 'gd'}",
+                str(origin),
+                str(clone),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert (clone / ".git").is_file()  # the shape that could false-positive
+        assert _is_worktree_path(clone) is False
+
+    def test_submodule_inside_a_worktree_IS_flagged(self, real_repo_and_worktree, tmp_path):
+        """True here is CORRECT, not a false positive.
+
+        A submodule checked out inside a linked worktree has a gitdir under
+        `<main>/.git/worktrees/<wt>/modules/<name>` — so pruning the worktree takes
+        the submodule's git dir with it. Installing from there is exactly as
+        fragile as installing from the worktree itself.
+        """
+        _repo, wt = real_repo_and_worktree
+        sub_src = tmp_path / "subsrc"
+        sub_src.mkdir()
+        _git("init", "-q", cwd=sub_src)
+        _git("config", "user.email", "t@t", cwd=sub_src)
+        _git("config", "user.name", "t", cwd=sub_src)
+        (sub_src / "s").write_text("y")
+        _git("add", "-A", cwd=sub_src)
+        _git("commit", "-qm", "i", cwd=sub_src)
+
+        r = subprocess.run(
+            [
+                "git",
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                str(sub_src),
+                "sub",
+            ],
+            cwd=wt,
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:  # some git builds refuse file:// submodules outright
+            pytest.skip(f"submodule add unsupported here: {r.stderr.strip()[:80]}")
+
+        marker = (wt / "sub" / ".git").read_text()
+        assert "worktrees" in marker  # the shape under test
+        assert _is_worktree_path(wt / "sub") is True
+
+    def test_a_directory_named_worktrees_is_not_enough(self, tmp_path):
+        """The path heuristic requires `.claude/worktrees/`, so an unrelated
+        directory called `worktrees` must not trip the guard."""
+        p = tmp_path / "worktrees" / "inner"
+        p.mkdir(parents=True)
+        assert _is_worktree_path(p) is False
