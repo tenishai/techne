@@ -197,9 +197,16 @@ def test_patterns_only_is_reachable(db):
     assert _verdict_for(db, "https://github.com/x/repo") == "patterns-only"
 
 
-def test_no_lift_bullets_stay_skip_with_flag(db):
-    """Derived from document structure, so it is correct by construction and the
-    caller's --verdict must NOT override it."""
+def test_no_lift_bullets_ignore_the_callers_verdict(db):
+    """A --verdict meant for the pattern-carrying URLs must not leak onto a
+    no-lift bullet: the section header already establishes that this URL was
+    surveyed and nothing was lifted.
+
+    That is as far as "correct by construction" goes, and no further — it does not
+    establish whether the judgment is `skip` or `skip-with-flag`, which is why the
+    no-lift write is insert-only rather than authoritative. See
+    test_no_lift_reverdict_also_survives_a_reingest.
+    """
     md = (
         "## Surveyed (no patterns worth saving)\n\n"
         "- https://github.com/z/nope — surveyed 2026-06-10 — generic CRUD\n"
@@ -345,14 +352,25 @@ def test_sweep_applies_and_is_idempotent(db):
     against the write rather than the read that predicted it.
 
     This test canNOT detect that swap: mutation-checked, reverting to len(rows)
-    leaves the whole file green. Nor can any test, now — BEGIN IMMEDIATE holds the
-    write lock across both statements, so no writer can interleave and the two
-    values are equal by construction. The rowcount change is correctness of
-    measurement, not an observable behaviour change; the BEGIN IMMEDIATE that
-    makes it unobservable is the part carrying the safety weight, and it is
-    covered by the fact that this file's sweeps commit atomically at all.
+    leaves the whole file green.
 
-    What this test does cover: the sweep writes, and re-running is a no-op.
+    I previously wrote here that it was untestable and that BEGIN IMMEDIATE was
+    "covered by the fact that this file's sweeps commit atomically at all". Both
+    claims were wrong, and the second was the same overclaim shape as the toothless
+    test this replaced. Prudence showed (a) a BEFORE UPDATE … RAISE(IGNORE) trigger
+    diverges the two single-threaded — so "equal by construction" is really "equal
+    unless something suppresses the write" — and (b) removing BEGIN IMMEDIATE and
+    racing a writer yields matched=1, applied=0, which is correct ONLY because
+    `applied` comes from the UPDATE; len(rows) would have claimed a rewrite that
+    never happened. The lock and the rowcount are one guard, not two: the lock
+    prevents the race, the rowcount keeps the report honest if prevention lapses.
+
+    Deliberately NOT adding the trigger-based test: no triggers exist in this
+    schema, so it would trade an honest gap for a dishonest green. The lock itself
+    IS covered, properly, by
+    test_sweep_holds_the_write_lock_across_select_and_update.
+
+    What this test covers: the sweep writes, and re-running is a no-op.
     """
     upsert_investigation(db, url="old", surveyed_at="2026-06-01", verdict="full-eval")
     res = sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
@@ -360,3 +378,90 @@ def test_sweep_applies_and_is_idempotent(db):
     assert _verdict_for(db, "old") == "unknown"
     again = sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
     assert again["matched"] == 0 and again["applied"] == 0
+
+
+def test_sweep_holds_the_write_lock_across_select_and_update(db, monkeypatch):
+    """Important #3, the guard that actually carries the weight.
+
+    `sweep_legacy_verdicts` takes BEGIN IMMEDIATE before its SELECT so a writer
+    cannot land between the read that builds the audit list and the UPDATE that
+    rewrites those rows. Deleting that one line previously left the whole file
+    green — the guard I called load-bearing had zero cover, which is the same
+    overclaim shape as the toothless test it replaced (Prudence, PR #432).
+
+    Mechanism: stall the sweep's connection just after its SELECT, then race a
+    second connection at the same row. With the lock held the contender is blocked
+    (OperationalError); without it, the contender writes.
+    """
+    import sqlite3
+    import threading
+
+    from techne.core import patterns as P
+
+    upsert_investigation(db, url="old", surveyed_at="2026-06-01", verdict="full-eval")
+
+    at_select = threading.Event()
+    resume = threading.Event()
+    contender: dict[str, bool] = {}
+    real_connect = P.plain_connect
+
+    class _Stalling:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *a, **kw):
+            cur = self._inner.execute(sql, *a, **kw)
+            if sql.lstrip().upper().startswith("SELECT"):
+                at_select.set()
+                resume.wait(3)  # hold the transaction open across the race
+            return cur
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(P, "plain_connect", lambda p: _Stalling(real_connect(p)))
+
+    def contend():
+        at_select.wait(3)
+        conn = sqlite3.connect(db, timeout=0.25)
+        try:
+            conn.execute("UPDATE investigations SET verdict = 'skip' WHERE url = 'old'")
+            conn.commit()
+            contender["wrote"] = True
+        except sqlite3.OperationalError:
+            contender["wrote"] = False
+        finally:
+            conn.close()
+            resume.set()
+
+    t = threading.Thread(target=contend)
+    t.start()
+    try:
+        P.sweep_legacy_verdicts(db, before="2026-07-01", dry_run=False)
+    finally:
+        resume.set()
+        t.join(5)
+
+    assert contender.get("wrote") is False, "a writer got in between the SELECT and the UPDATE"
+
+
+def test_no_lift_reverdict_also_survives_a_reingest(db):
+    """Important #2 was still alive on the SECOND call site.
+
+    The no-lift loop hardcodes "skip-with-flag", and I defended that as "correct
+    by construction". Half true: the section header proves the URL was surveyed
+    and nothing was lifted, but not whether the operator's judgment is `skip` or
+    `skip-with-flag` — and `skip` is one of reverdict's choices. Left overwriting,
+    `reverdict --verdict skip` was reverted by a plain re-ingest (Prudence, PR #432).
+    """
+    md = (
+        "## Surveyed (no patterns worth saving)\n\n"
+        "- https://github.com/z/nope — surveyed 2026-06-10 — generic CRUD\n"
+    )
+    ingest_patterns_md(db, md)
+    url = "https://github.com/z/nope"
+    assert _verdict_for(db, url) == "skip-with-flag"
+
+    set_verdict(db, url=url, verdict="skip")  # operator narrows the judgment
+    ingest_patterns_md(db, md)  # plain re-ingest
+    assert _verdict_for(db, url) == "skip"

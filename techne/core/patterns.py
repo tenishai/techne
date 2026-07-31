@@ -153,28 +153,34 @@ def upsert_investigation(
     inv_id = _hash(url, surveyed_by, lens)
     conn = plain_connect(db_path)
     try:
+        # Named parameters, not positional: the overwrite flag governs a clause ten
+        # `?` slots away from where it would have been bound, and a future edit that
+        # inserts a column would silently misbind it (Prudence, PR #432).
         conn.execute(
             """INSERT INTO investigations
                  (id, url, surveyed_by, lens, surveyed_at, verdict, summary, skip_reason, maturity)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (:id, :url, :surveyed_by, :lens, :surveyed_at, :verdict,
+                       :summary, :skip_reason, :maturity)
                ON CONFLICT(url, surveyed_by, lens) DO UPDATE SET
                  surveyed_at = excluded.surveyed_at,
-                 verdict = CASE WHEN ? THEN excluded.verdict ELSE investigations.verdict END,
+                 verdict = CASE WHEN :overwrite
+                                THEN excluded.verdict
+                                ELSE investigations.verdict END,
                  summary = COALESCE(excluded.summary, investigations.summary),
                  skip_reason = COALESCE(excluded.skip_reason, investigations.skip_reason),
                  maturity = COALESCE(excluded.maturity, investigations.maturity)""",
-            (
-                inv_id,
-                url,
-                surveyed_by,
-                lens,
-                surveyed_at,
-                verdict,
-                summary,
-                skip_reason,
-                maturity,
-                1 if overwrite_verdict else 0,
-            ),
+            {
+                "id": inv_id,
+                "url": url,
+                "surveyed_by": surveyed_by,
+                "lens": lens,
+                "surveyed_at": surveyed_at,
+                "verdict": verdict,
+                "summary": summary,
+                "skip_reason": skip_reason,
+                "maturity": maturity,
+                "overwrite": 1 if overwrite_verdict else 0,
+            },
         )
         conn.commit()
         return inv_id
@@ -931,6 +937,13 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
             surveyed_at=nl.surveyed_date,
             verdict="skip-with-flag",
             skip_reason=nl.reason,
+            # Insert-only here too. "Correct by construction" is only half true: the
+            # section header proves the URL was surveyed and nothing was lifted, but
+            # NOT whether the operator's judgment is `skip` or `skip-with-flag` —
+            # and `skip` is offered in reverdict's choices. Left overwriting, this
+            # was Important #2 surviving on the second call site: `reverdict
+            # --verdict skip` then a plain re-ingest reverted it (Prudence, PR #432).
+            overwrite_verdict=False,
         )
     # Materialize the relation/applies graph from the bodies we just stored, and
     # re-resolve any edges that earlier ingests left dangling (P2 write-path).
