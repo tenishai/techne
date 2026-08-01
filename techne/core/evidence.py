@@ -80,9 +80,12 @@ _BASH_OFF_DETAIL = (
 class SuiteEvidence:
     """Best-effort parse of test runner output from Bash observations.
 
-    CAVEAT: Bash output is truncated at 2000 chars in the ledger (see
-    post_tool_use.summarize).  Counts may be partial for large test suites,
-    and the heuristic only handles pytest/jest/vitest-style result lines.
+    CAVEAT: Bash output is bounded at 2000 chars in the ledger (see
+    post_tool_use.summarize).  The preview keeps the head AND the tail, so a
+    runner's trailing result line survives; only the middle of a long run is
+    elided, and the preview says so.  The heuristic still only handles
+    pytest/jest/vitest-style result lines, and a runner that reports its totals
+    from the *middle* of its output can still be missed.
     ``None`` means "couldn't parse" — report honestly, not optimistically.
 
     Aggregation: when multiple Bash rows contain test output (e.g. re-runs),
@@ -179,12 +182,13 @@ def query_turn_evidence(
 
     * Write  → ``"Wrote: <file_path>\\nContent: ..."``
     * Edit   → ``"Edited: <file_path>\\nChange: ..."``
-    * Bash   → ``"Ran: <command>\\nOutput: <output[:2000]>"``
+    * Bash   → ``"Ran: <command>\\nOutput: <head+tail preview, ≤2000 chars>"``
     * other  → ``"Tool: <name>\\nInput: ...\\nOutput: ..."``
 
-    CAVEAT: Bash output is truncated at 2000 chars in the ledger.  Commit SHA
-    and test-result extraction are therefore heuristic — they may miss events
-    whose output was cut off.
+    CAVEAT: Bash output is bounded at 2000 chars in the ledger, keeping the head
+    and the tail with the middle elided.  Commit SHA and test-result extraction
+    are therefore heuristic — they see the ends of a long run (where commit
+    output and runner verdicts appear) but not its middle.
 
     Args:
         db_path:   Path to techne.db.
@@ -447,7 +451,8 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
                 status = "unverifiable"
                 detail = (
                     "No parseable test output in Bash observations. "
-                    "Output may be truncated at 2000 chars or tests were not run."
+                    "Tests were not run, the runner's format is unrecognized, or "
+                    "its totals fell in the elided middle of a long output."
                 )
 
         elif claim_type == "ran_action":
