@@ -204,9 +204,11 @@ def _preview(text: str) -> str:
     tail_chars = _PREVIEW_MAX_CHARS - _PREVIEW_HEAD_CHARS - _PREVIEW_MARKER_BUDGET
     head = text[:_PREVIEW_HEAD_CHARS]
     # Discard through the first newline so no fragment of a cut line survives.
-    _, newline, tail = text[-tail_chars:].partition("\n")
-    if not newline:
-        tail = ""
+    # The no-newline case needs no guard: partition returns (whole, "", "") when
+    # the separator is absent, so `tail` is already "" and the preview degrades
+    # to head-only — the safe direction, tested by
+    # test_preview_drops_an_unaligned_tail_entirely.
+    _, _, tail = text[-tail_chars:].partition("\n")
     # Computed from the real retained lengths, never from the nominal budget —
     # line-alignment makes the dropped span longer than tail_chars implies.
     elided = len(text) - len(head) - len(tail)
