@@ -270,6 +270,77 @@ class TestSuiteEvidence:
         assert ev.tests.failed == 1
         assert ev.tests.suite_green is False
 
+    def test_green_suite_still_green_when_output_is_intact(self, db_path):
+        """A green run prints NO failure line at all, and that must stay green.
+
+        This is the load-bearing case, not an edge case: pytest, jest and vitest
+        all omit "N failed" entirely when nothing fails, so `failed is None` is
+        what a passing suite normally looks like. The techne#438 fix must not
+        reach it — treating a missing failure count as unverifiable here would
+        make every ordinary green run unverifiable and undo PR #437.
+        """
+        _insert_session(db_path, "sess-intact")
+        _insert_obs(
+            db_path, "sess-intact", "Bash",
+            "Ran: pytest -q\nOutput: 2189 passed, 17 skipped in 68.60s",
+        )
+        ev = query_turn_evidence(db_path, "sess-intact")
+        assert ev.tests.elided is False
+        assert ev.tests.suite_green is True
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "backed"
+
+    def test_elided_output_without_failure_count_is_not_green(self, db_path):
+        """passed survived, failure count did not, and we KNOW output was cut.
+
+        techne#438: `(failed or 0)` read the missing count as zero failures and
+        certified the suite green. A green run and a run whose failure line was
+        dropped are indistinguishable here, so the only honest answer is
+        unverifiable.
+        """
+        _insert_session(db_path, "sess-elided")
+        _insert_obs(
+            db_path, "sess-elided", "Bash",
+            "Ran: pytest -q\nOutput: 5 passed"
+            "\n… [4000 chars elided] …\n"
+            "  coverage: 82% of statements",
+        )
+        ev = query_turn_evidence(db_path, "sess-elided")
+        assert ev.tests.elided is True
+        assert ev.tests.passed == 5
+        assert ev.tests.suite_green is None
+        verdict = check_claims([{"type": "tests_green"}], ev)[0]
+        assert verdict["status"] == "unverifiable"
+        assert "elided" in verdict["detail"]
+
+    def test_elided_output_with_explicit_zero_is_still_green(self, db_path):
+        """An explicitly parsed "0 failed" is evidence, elision notwithstanding.
+
+        The gap is only about a MISSING count. When the runner's failure count
+        survived the cut, it is as trustworthy as in intact output.
+        """
+        _insert_session(db_path, "sess-elided-zero")
+        _insert_obs(
+            db_path, "sess-elided-zero", "Bash",
+            "Ran: jest\nOutput: Tests: 0 failed, 5 passed"
+            "\n… [4000 chars elided] …\n"
+            "  coverage table",
+        )
+        ev = query_turn_evidence(db_path, "sess-elided-zero")
+        assert ev.tests.elided is True
+        assert ev.tests.suite_green is True
+
+    def test_elided_output_with_failures_is_still_red(self, db_path):
+        """A surviving failure count keeps the suite red — elision never rescues it."""
+        _insert_session(db_path, "sess-elided-red")
+        _insert_obs(
+            db_path, "sess-elided-red", "Bash",
+            "Ran: jest\nOutput: Tests: 3 failed, 5 passed"
+            "\n… [4000 chars elided] …\n"
+            "  coverage table",
+        )
+        ev = query_turn_evidence(db_path, "sess-elided-red")
+        assert ev.tests.suite_green is False
+
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
         _insert_obs(db_path, "sess-nt", "Bash", "Ran: ls\nOutput: foo.py  bar.py")
@@ -309,6 +380,7 @@ class TestCheckClaims:
             failed=kwargs.pop("failed", None),
             errors=kwargs.pop("errors", None),
             suite_green=kwargs.pop("suite_green", None),
+            elided=kwargs.pop("elided", False),
         )
         return Evidence(tests=t, **kwargs)
 

@@ -18,6 +18,7 @@ from techne.hooks.post_tool_use import (
     _preview,
     should_capture,
     summarize,
+    was_elided,
 )
 from techne.hooks.pre_compact import _find_last_task, _parse_transcript
 
@@ -362,6 +363,17 @@ class TestSummarize:
         """
         tail = _preview("a\n" * 5000).split(" …\n", 1)[1]
         assert len(tail) >= 400
+
+    def test_was_elided_tracks_the_marker_preview_writes(self):
+        """was_elided must agree with _preview — they are a writer/reader pair.
+
+        The evidence gate uses this to tell "no failure line was printed" from
+        "a failure line may have been dropped" (techne#438), so drift between the
+        two silently reintroduces the false-green bug rather than erroring.
+        """
+        assert was_elided(_preview("a\n" * 5000)) is True
+        assert was_elided(_preview("short output")) is False
+        assert was_elided("Ran: pytest\nOutput: 5 passed in 1.2s") is False
 
     def test_elision_marker_is_not_parsed_as_evidence(self):
         """The marker itself must not read as a commit or a test result.

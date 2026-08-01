@@ -174,6 +174,22 @@ _PREVIEW_HEAD_CHARS = 1200
 # Reserved for the elision marker so the head+marker+tail total can never exceed
 # _PREVIEW_MAX_CHARS. The marker is ~21 chars plus the elided-count digits.
 _PREVIEW_MARKER_BUDGET = 40
+# Tail of the elision marker. Kept as a constant because the marker is not merely
+# cosmetic: `was_elided` is how downstream readers tell "this output had no
+# failure line" from "a failure line may have been dropped", so the writer and
+# the reader must never drift apart.
+_PREVIEW_ELISION_MARK = " chars elided] …\n"
+
+
+def was_elided(preview: str) -> bool:
+    """True when `preview` carries the marker written by `_preview`.
+
+    Lets a consumer distinguish a complete record from a bounded projection of
+    one. The evidence gate needs exactly this: absence of a "N failed" line means
+    zero failures in intact output, but means nothing at all when the middle was
+    dropped (techne#438).
+    """
+    return _PREVIEW_ELISION_MARK in preview
 
 
 def _preview(text: str) -> str:
@@ -212,7 +228,7 @@ def _preview(text: str) -> str:
     # Computed from the real retained lengths, never from the nominal budget —
     # line-alignment makes the dropped span longer than tail_chars implies.
     elided = len(text) - len(head) - len(tail)
-    marker = f"\n… [{elided} chars elided] …\n"
+    marker = f"\n… [{elided}{_PREVIEW_ELISION_MARK}"
     return head + marker + tail
 
 

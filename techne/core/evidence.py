@@ -70,9 +70,12 @@ _ERRORS_RE = re.compile(r"(\d+)\s+error")
 # Returned for Bash-derived claims (commit / tests_green / ran_action) when Bash
 # capture is off — the deeds simply aren't recorded, so absence is not disproof.
 _BASH_OFF_DETAIL = (
-    "Bash capture is off (config.hooks.capture_bash=False), so commits, test "
-    "results, and shell actions are not recorded — this claim cannot be verified "
-    "from the ledger (absent, not disproven). Enable capture_bash to check it."
+    "Live Bash capture is off (config.hooks.capture_bash=False), so this session's "
+    "commits, test results, and shell actions are not in the ledger YET — absent, "
+    "not disproven. They are not lost: transcript backfill records Bash regardless "
+    "of this flag (sync/jsonl_records.should_import ignores it), but it runs after "
+    "the session, too late to verify a claim in the turn that makes it. Enable "
+    "capture_bash for in-turn verification."
 )
 
 
@@ -97,6 +100,9 @@ class SuiteEvidence:
     failed: int | None = None
     errors: int | None = None
     suite_green: bool | None = None
+    # True when at least one row carrying test output was an elided preview, so a
+    # failure line may have been dropped rather than never printed (techne#438).
+    elided: bool = False
 
 
 @dataclass
@@ -201,6 +207,7 @@ def query_turn_evidence(
         Populated Evidence dataclass.
     """
     from techne.core.database import connect
+    from techne.hooks.post_tool_use import was_elided
 
     conn = connect(db_path)
     try:
@@ -235,6 +242,7 @@ def query_turn_evidence(
     all_failed: list[int] = []
     all_errors: list[int] = []
     saw_test_output = False
+    elided_test_output = False
 
     for row in rows:
         tool_name: str = row[0] or ""
@@ -287,6 +295,8 @@ def query_turn_evidence(
             p, f, e = _parse_test_output(output_text)
             if p is not None or f is not None or e is not None:
                 saw_test_output = True
+                if was_elided(output_text):
+                    elided_test_output = True
                 if p is not None:
                     all_passed.append(p)
                 if f is not None:
@@ -299,12 +309,19 @@ def query_turn_evidence(
     failed = max(all_failed) if all_failed else None
     errors = max(all_errors) if all_errors else None
 
-    if saw_test_output:
+    if not saw_test_output:
+        suite_green = None
+    elif failed is None and errors is None and elided_test_output:
+        # A passed count survived but no failure count did, out of output we KNOW
+        # was cut. `(failed or 0)` would read that as zero failures and certify a
+        # possibly-red suite green (techne#438). Intact output is different: every
+        # supported runner omits the failure line entirely when nothing failed, so
+        # absence there is real evidence of zero. Absence here is just absence.
+        suite_green = None
+    else:
         eff_failed = (failed or 0) + (errors or 0)
         eff_passed = passed or 0
-        suite_green: bool | None = eff_failed == 0 and eff_passed > 0
-    else:
-        suite_green = None
+        suite_green = eff_failed == 0 and eff_passed > 0
 
     return Evidence(
         any_tool_call=any_tool_call,
@@ -317,6 +334,7 @@ def query_turn_evidence(
             failed=failed,
             errors=errors,
             suite_green=suite_green,
+            elided=elided_test_output,
         ),
         observation_count=observation_count,
         bash_captured=bash_captured,
@@ -447,12 +465,18 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             elif not evidence.bash_captured:
                 status = "unverifiable"
                 detail = _BASH_OFF_DETAIL
+            elif t.elided and t.passed is not None:
+                status = "unverifiable"
+                detail = (
+                    f"Parsed passed={t.passed} but no failure count, from output that was "
+                    "elided in the ledger. A green run and a run whose failure line was "
+                    "dropped look identical here, so this cannot be called green."
+                )
             else:
                 status = "unverifiable"
                 detail = (
                     "No parseable test output in Bash observations. "
-                    "Tests were not run, the runner's format is unrecognized, or "
-                    "its totals fell in the elided middle of a long output."
+                    "Tests were not run, or the runner's format is unrecognized."
                 )
 
         elif claim_type == "ran_action":
