@@ -102,6 +102,12 @@ class SuiteEvidence:
     Aggregation: when multiple Bash rows contain test output (e.g. re-runs),
     we take the *maximum* count seen, not the sum.  Max is less wrong for
     re-run scenarios; sum would double-count.  Document this in callers.
+
+    Max carries a sharp caveat: it is only sound over a COMPLETE sample.  Over
+    bounded output it runs on the surviving subset, so a zero that survived beats
+    a positive that was elided.  ``_row_totals_unreliable`` is what stops that
+    from becoming a green verdict, which is why only POSITIVE counts are treated
+    as decisive anywhere in this module.
     """
 
     passed: int | None = None
@@ -192,13 +198,48 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
     They are different categories, so a parsed ``0 errors`` says nothing about
     failures.
     """
-    if p is None:
-        return False  # no passed count -> nothing here can certify green
+    if p is None and f is None and e is None:
+        return False  # no counts at all -> this row says nothing about any suite
+    # A row with NO passed count still matters. `make check` can print mypy's
+    # "Found 0 errors" while both pytest totals sit in the dropped middle, giving
+    # p=None, f=None, e=0. Returning early on `p is None` let that row stay silent,
+    # so one small green run elsewhere in the window certified the whole thing.
     if f is not None and f > 0:
         return False  # a real failure count makes the suite red on its own
     if e is not None and e > 0:
         return False  # errors likewise
     return _output_was_bounded(output_text)
+
+
+_BASH_OUTPUT_MARKER = "\nOutput: "
+
+
+def _bash_output(content: str) -> str | None:
+    """Locate the output half of a ``summarize()``-shaped Bash observation.
+
+    Returns None when the boundary cannot be located with certainty, and the
+    caller then parses no test totals from the row.
+
+    ``summarize`` writes ``"Ran: <command>\\nOutput: <preview>"`` into a single
+    flat string with no escaping, so a command containing the marker is
+    indistinguishable from the real boundary. That is reachable by ordinary
+    habit, not just adversarially: a commit message with a line reading
+    ``Output: 2206 passed, 17 skipped`` made the gate report a green suite for a
+    ``git commit`` that ran no tests.
+
+    Neither split direction is safe. Taking the FIRST occurrence pulls trailing
+    command text into the output and invents counts; taking the LAST discards the
+    head of a real output, elision marker included, promoting a bounded row to
+    authoritative. So when the marker appears more than once we decline instead,
+    which costs a verdict rather than fabricating one.
+
+    Resolving this properly needs the command and output stored as separate
+    fields rather than recovered from one string — see the artifact-store
+    follow-up on techne#438.
+    """
+    if content.count(_BASH_OUTPUT_MARKER) != 1:
+        return None
+    return content.partition(_BASH_OUTPUT_MARKER)[2]
 
 
 def _output_was_bounded(output_text: str) -> bool:
@@ -342,25 +383,24 @@ def query_turn_evidence(
                 cmd = first_line[len("Ran: ") :].strip()
                 actions.append(cmd)
 
-            # Locate the output by its MARKER, not by position. Splitting on the
-            # first newline left a multi-line command's remaining lines inside
-            # output_text, which does two kinds of damage: it inflates the length
-            # _output_was_bounded measures (heredocs read as 3-6k chars against a
-            # true output of tens), and it feeds command text to the result
-            # parsers — a shell comment reading "# expect 0 failed" supplies a
-            # failure count with no test run and no elision anywhere.
-            #
-            # A row with no marker is not summarize()-shaped, so partition leaves
-            # output_text empty and nothing is parsed. Guessing at the boundary
-            # would be the same class of mistake this gate exists to avoid.
-            _, _, output_text = content.partition("\nOutput: ")
-
-            # Extract git commit SHAs.
-            for m in _GIT_SHA_RE.finditer(output_text):
+            # SHAs are scanned across the WHOLE row, not just the output half.
+            # _GIT_SHA_RE requires brackets, so it cannot be tripped by ordinary
+            # command text, and scanning everything keeps rows that carry no
+            # "Output: " prefix at all — techne_observe writes free-form content
+            # under tool_name="Bash", and narrowing this to the output half turned
+            # a real commit from `backed` into `unbacked`. A false accusation is
+            # the one direction this gate must never take (techne#105).
+            for m in _GIT_SHA_RE.finditer(content):
                 sha = m.group(1)
                 if sha not in commits_seen:
                     commits.append(sha)
                     commits_seen.add(sha)
+
+            # Test totals need the boundary located exactly, so they use the
+            # stricter reader, which declines rather than guess.
+            output_text = _bash_output(content)
+            if output_text is None:
+                continue
 
             # Parse test result lines.
             p, f, e = _parse_test_output(output_text)
@@ -561,8 +601,10 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             else:
                 status = "unverifiable"
                 detail = (
-                    "No parseable test output in Bash observations. "
-                    "Tests were not run, or the runner's format is unrecognized."
+                    "No parseable test output in Bash observations. Tests were not "
+                    "run, the runner's format is unrecognized, its totals fell in "
+                    "the elided middle of a long output, or the row's command/output "
+                    "boundary was ambiguous."
                 )
 
         elif claim_type == "ran_action":

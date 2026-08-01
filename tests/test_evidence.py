@@ -441,8 +441,8 @@ class TestSuiteEvidence:
         _insert_session(db_path, "sess-cargo")
         _insert_obs(db_path, "sess-cargo", "Bash", content)
         ev = query_turn_evidence(db_path, "sess-cargo")
-        assert ev.tests.suite_green is not True
-        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] != "backed"
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
 
     def test_bounded_row_does_not_suppress_a_definitive_red(self, db_path):
         """A real failure count outranks doubt about what was cut.
@@ -484,7 +484,72 @@ class TestSuiteEvidence:
         ev = query_turn_evidence(db_path, "sess-heredoc")
         assert ev.tests.failed is None, "a shell comment must not supply a failure count"
         assert ev.tests.suite_green is None
-        assert ev.tests.totals_unreliable is False, "short output must not read as bounded"
+        # Pin the boundary directly. Asserting `totals_unreliable is False` here
+        # would pass trivially, since no test-output row exists to evaluate.
+        from techne.core.evidence import _bash_output
+
+        assert _bash_output(content) == "done"
+
+    def test_row_without_a_passed_count_still_raises_the_flag(self, db_path):
+        """A bounded row with only "0 errors" must not stay silent.
+
+        `make check` prints mypy's "Found 0 errors" before running pytest, so when
+        both pytest totals land in the dropped middle the row parses as
+        p=None, f=None, e=0. Returning early on `p is None` let that row say
+        nothing, and a small green run elsewhere in the window then certified the
+        whole thing green.
+        """
+        _insert_session(db_path, "sess-mypy")
+        _insert_obs(
+            db_path, "sess-mypy", "Bash",
+            "Ran: make check\nOutput: mypy: Found 0 errors in 42 files"
+            "\n… [6000 chars elided] …\ndone",
+        )
+        _insert_obs(
+            db_path, "sess-mypy", "Bash",
+            "Ran: pytest tests/unit -q\nOutput: 8 passed in 1.1s",
+        )
+        ev = query_turn_evidence(db_path, "sess-mypy")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_ambiguous_output_boundary_parses_no_totals(self, db_path):
+        """A command containing the output marker makes the boundary unknowable.
+
+        Reachable by ordinary habit, not just adversarially: a commit message
+        with a line reading "Output: 2206 passed, 17 skipped" made the gate report
+        a green suite for a `git commit` that ran no tests. Neither split
+        direction is safe, so the gate declines rather than picks one.
+        """
+        _insert_session(db_path, "sess-ambig")
+        message = (
+            "git commit -F - <<EOF\nfix: thing\n\n"
+            "Output: 2206 passed, 17 skipped\nEOF"
+        )
+        _insert_obs(
+            db_path, "sess-ambig", "Bash",
+            f"Ran: {message}\nOutput: [main deadbee] fix: thing",
+        )
+        ev = query_turn_evidence(db_path, "sess-ambig")
+        assert ev.tests.passed is None, "a commit message must not supply a test count"
+        assert ev.tests.suite_green is None
+        # The commit itself is still evidence — only the test totals are refused.
+        assert "deadbee" in ev.commits
+
+    def test_row_without_output_prefix_keeps_its_commit(self, db_path):
+        """Free-form Bash rows must not lose their SHA.
+
+        techne_observe writes free-form content under tool_name="Bash", so
+        narrowing SHA extraction to the output half turned a real commit from
+        `backed` into `unbacked`. A false accusation is the one direction this
+        gate must never take (techne#105).
+        """
+        _insert_session(db_path, "sess-noprefix")
+        _insert_obs(db_path, "sess-noprefix", "Bash", "Bash: git commit\n[main abc1234] some commit")
+        ev = query_turn_evidence(db_path, "sess-noprefix")
+        assert "abc1234" in ev.commits
+        assert check_claims([{"type": "commit"}], ev)[0]["status"] == "backed"
 
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
