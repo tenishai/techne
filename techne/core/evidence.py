@@ -179,17 +179,25 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
     failure line entirely when nothing fails, so absence there is real evidence
     of zero.
 
-    An `errors` count does NOT substitute for a missing `failed` count. They are
-    different categories, so a parsed ``0 errors`` says nothing about failures and
-    must not disarm this. A positive `errors` makes the suite red on its own, so
-    such a row cannot produce a false green and is not flagged.
+    Only a POSITIVE count disarms this, never a zero. ``_parse_test_output``
+    takes the ``max()`` of every count it sees, and max is only sound over a
+    complete sample: in bounded output it runs over the SURVIVING subset, so a
+    zero that survived beats a positive that was elided. A cargo workspace shows
+    it — a small green crate reports ``0 failed`` in the head while
+    ``900 passed; 12 failed`` sits in the dropped middle, and the surviving zero
+    wins. A positive count needs no such care: it makes the suite red on its own,
+    and nothing hiding in the elided middle can make it green again.
+
+    An `errors` count does NOT substitute for a missing `failed` count either.
+    They are different categories, so a parsed ``0 errors`` says nothing about
+    failures.
     """
     if p is None:
         return False  # no passed count -> nothing here can certify green
-    if f is not None:
-        return False  # an explicit failure count survived, elided or not
+    if f is not None and f > 0:
+        return False  # a real failure count makes the suite red on its own
     if e is not None and e > 0:
-        return False  # errors already make the suite red
+        return False  # errors likewise
     return _output_was_bounded(output_text)
 
 
@@ -329,16 +337,23 @@ def query_turn_evidence(
 
         elif tool_name == "Bash":
             # "Ran: <command>\nOutput: <output>"
-            parts = content.split("\n", 1)
-            first_line = parts[0]
-            rest = parts[1] if len(parts) > 1 else ""
-
+            first_line = content.split("\n", 1)[0]
             if first_line.startswith("Ran: "):
                 cmd = first_line[len("Ran: ") :].strip()
                 actions.append(cmd)
 
-            # Strip the "Output: " prefix to get the raw bash output.
-            output_text = rest[len("Output: ") :] if rest.startswith("Output: ") else rest
+            # Locate the output by its MARKER, not by position. Splitting on the
+            # first newline left a multi-line command's remaining lines inside
+            # output_text, which does two kinds of damage: it inflates the length
+            # _output_was_bounded measures (heredocs read as 3-6k chars against a
+            # true output of tens), and it feeds command text to the result
+            # parsers — a shell comment reading "# expect 0 failed" supplies a
+            # failure count with no test run and no elision anywhere.
+            #
+            # A row with no marker is not summarize()-shaped, so partition leaves
+            # output_text empty and nothing is parsed. Guessing at the boundary
+            # would be the same class of mistake this gate exists to avoid.
+            _, _, output_text = content.partition("\nOutput: ")
 
             # Extract git commit SHAs.
             for m in _GIT_SHA_RE.finditer(output_text):
@@ -373,18 +388,26 @@ def query_turn_evidence(
 
     if not saw_test_output:
         suite_green = None
-    elif totals_unreliable:
-        # Some row could certify green without evidence of zero failures, so the
-        # aggregate cannot be trusted either. `(failed or 0)` used to read a
-        # missing count as zero and return green (techne#438). Decided per row by
-        # _row_totals_unreliable; the aggregate is deliberately not consulted,
-        # because max()-ing counts across rows lets an intact row supply the
-        # number a bounded row lost.
-        suite_green = None
     else:
         eff_failed = (failed or 0) + (errors or 0)
         eff_passed = passed or 0
-        suite_green = eff_failed == 0 and eff_passed > 0
+        if eff_failed > 0:
+            # A surviving positive failure count is DEFINITIVE and outranks any
+            # doubt about what was cut: nothing hiding in an elided middle can
+            # turn a red suite green. Checked first because putting the
+            # reliability gate ahead of it downgraded a real `unbacked` to
+            # `unverifiable` — suppressing a verdict we actually had.
+            suite_green = False
+        elif totals_unreliable:
+            # Some row could certify green without evidence of zero failures, so
+            # the aggregate cannot be trusted either. `(failed or 0)` used to read
+            # a missing count as zero and return green (techne#438). Decided per
+            # row by _row_totals_unreliable; the aggregate is deliberately not
+            # consulted, because max()-ing counts across rows lets an intact row
+            # supply the number a bounded row lost.
+            suite_green = None
+        else:
+            suite_green = eff_passed > 0
 
     return Evidence(
         any_tool_call=any_tool_call,

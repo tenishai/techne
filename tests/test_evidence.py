@@ -312,11 +312,18 @@ class TestSuiteEvidence:
         assert verdict["status"] == "unverifiable"
         assert "elided" in verdict["detail"]
 
-    def test_elided_output_with_explicit_zero_is_still_green(self, db_path):
-        """An explicitly parsed "0 failed" is evidence, elision notwithstanding.
+    def test_surviving_zero_failures_in_bounded_output_is_not_green(self, db_path):
+        """A surviving "0 failed" is NOT evidence when the output was cut.
 
-        The gap is only about a MISSING count. When the runner's failure count
-        survived the cut, it is as trustworthy as in intact output.
+        This test asserted the opposite until Prudence disproved it.
+        ``_parse_test_output`` takes the ``max()`` of every count it finds, and
+        max is only sound over a COMPLETE sample. In bounded output it runs over
+        the surviving subset, so a zero that survived beats a positive that was
+        elided — see test_max_over_a_bounded_sample_is_not_evidence for the real
+        cargo-workspace shape that does this.
+
+        A POSITIVE count is different and still decides the suite: nothing in the
+        dropped middle can make a red run green.
         """
         _insert_session(db_path, "sess-elided-zero")
         _insert_obs(
@@ -326,8 +333,8 @@ class TestSuiteEvidence:
             "  coverage table",
         )
         ev = query_turn_evidence(db_path, "sess-elided-zero")
-        assert ev.tests.totals_unreliable is False
-        assert ev.tests.suite_green is True
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
 
     def test_elided_output_with_failures_is_still_red(self, db_path):
         """A surviving failure count keeps the suite red — elision never rescues it."""
@@ -408,6 +415,76 @@ class TestSuiteEvidence:
         ev = query_turn_evidence(db_path, "sess-legacy")
         assert ev.tests.totals_unreliable is True
         assert ev.tests.suite_green is None
+
+    def test_max_over_a_bounded_sample_is_not_evidence(self, db_path):
+        """Built through the REAL summarize()/_preview(), not hand-written content.
+
+        Every other test here writes `content` directly, in the ideal shape — the
+        one shape that cannot exhibit this bug. A cargo workspace prints per-crate
+        results, so a small green crate's "0 failed" lands in the head while the
+        real "900 passed; 12 failed" sits in the middle that gets dropped. The
+        surviving zero then wins the max() and the gate certified green with 12
+        tests failing.
+        """
+        from techne.hooks.post_tool_use import summarize
+
+        raw = (
+            "test result: ok. 3 passed; 0 failed\n"
+            + ("compiling some-crate v0.1.0\n" * 120)
+            + "test result: FAILED. 900 passed; 12 failed\n"
+            + ("warning: unused import\n" * 40)
+        )
+        content = summarize("Bash", {"command": "cargo test --workspace"}, raw)
+        assert "12 failed" not in content, "fixture must drop the real failure count"
+        assert "0 failed" in content, "fixture must keep the misleading zero"
+
+        _insert_session(db_path, "sess-cargo")
+        _insert_obs(db_path, "sess-cargo", "Bash", content)
+        ev = query_turn_evidence(db_path, "sess-cargo")
+        assert ev.tests.suite_green is not True
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] != "backed"
+
+    def test_bounded_row_does_not_suppress_a_definitive_red(self, db_path):
+        """A real failure count outranks doubt about what was cut.
+
+        Regression: putting the reliability gate ahead of the red computation
+        downgraded `unbacked` to `unverifiable` and emitted a detail claiming "no
+        failure count" while failed=12 was parsed. Nothing in an elided middle can
+        turn a red suite green, so the red must win.
+        """
+        _insert_session(db_path, "sess-red-wins")
+        _insert_obs(
+            db_path, "sess-red-wins", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed\n… [5000 chars elided] …\ntail",
+        )
+        _insert_obs(
+            db_path, "sess-red-wins", "Bash",
+            "Ran: pytest -q\nOutput: 12 failed, 30 passed in 3s",
+        )
+        ev = query_turn_evidence(db_path, "sess-red-wins")
+        assert ev.tests.failed == 12
+        assert ev.tests.suite_green is False
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unbacked"
+
+    def test_multiline_command_does_not_leak_into_output(self, db_path):
+        """A heredoc command must not be parsed as if it were tool output.
+
+        Splitting on the first newline left the command's remaining lines inside
+        output_text, which inflated the length used to detect legacy truncation
+        (measured thousands of chars against a true output of tens) and let a
+        shell comment supply a test result with no test run at all.
+        """
+        from techne.hooks.post_tool_use import summarize
+
+        command = 'gh pr comment 1 --body "$(cat <<EOF\nreview notes\n# expect 0 failed\nEOF\n)"'
+        content = summarize("Bash", {"command": command}, "done")
+
+        _insert_session(db_path, "sess-heredoc")
+        _insert_obs(db_path, "sess-heredoc", "Bash", content)
+        ev = query_turn_evidence(db_path, "sess-heredoc")
+        assert ev.tests.failed is None, "a shell comment must not supply a failure count"
+        assert ev.tests.suite_green is None
+        assert ev.tests.totals_unreliable is False, "short output must not read as bounded"
 
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
