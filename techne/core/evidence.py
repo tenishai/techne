@@ -8,9 +8,11 @@ Free-text claim extraction is explicitly OUT of scope for this slice; callers
 must pass structured claim dicts.  See check_claims() for the supported types.
 
 IMPORTANT — Bash capture dependency: commits, shell actions, and test results are
-all parsed from Bash observations, but Bash capture is OFF by default in techne
-(config.hooks.capture_bash=False). When it's off, those deeds aren't in the ledger
-at all, so a real commit/test-run is *absent*, not *disproven*. Callers pass
+all parsed from Bash observations, and live Bash capture is a config flag
+(config.hooks.capture_bash). When it's off, those deeds aren't in the ledger *for
+the current turn*, so a real commit/test-run is *absent*, not *disproven*. They
+are not lost — transcript backfill records Bash regardless of the flag — but it
+runs after the session, too late to serve an in-turn claim. Callers pass
 ``bash_captured`` (from config) so check_claims() returns ``unverifiable`` rather
 than falsely flagging an honest agent as ``unbacked``. Artifacts (Write/Edit) and
 any_tool_call work regardless, since those tools are captured by default.
@@ -21,6 +23,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# The gate reads bounded projections of tool output, so it needs the writer's
+# budget and marker to tell a complete record from a cut one (techne#438).
+from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, was_elided
 
 # Tool names that are NOT agent deeds — meta-records or user-side events.
 #
@@ -86,9 +92,11 @@ class SuiteEvidence:
     CAVEAT: Bash output is bounded at 2000 chars in the ledger (see
     post_tool_use.summarize).  The preview keeps the head AND the tail, so a
     runner's trailing result line survives; only the middle of a long run is
-    elided, and the preview says so.  The heuristic still only handles
-    pytest/jest/vitest-style result lines, and a runner that reports its totals
-    from the *middle* of its output can still be missed.
+    elided, and the preview says so.  Rows written before PR #437 were cut
+    head-only and carry no marker — ``_output_was_bounded`` recognises those by
+    length.  The heuristic still only handles pytest/jest/vitest-style result
+    lines, and a runner that reports its totals from the *middle* of its output
+    can still be missed.
     ``None`` means "couldn't parse" — report honestly, not optimistically.
 
     Aggregation: when multiple Bash rows contain test output (e.g. re-runs),
@@ -100,9 +108,11 @@ class SuiteEvidence:
     failed: int | None = None
     errors: int | None = None
     suite_green: bool | None = None
-    # True when at least one row carrying test output was an elided preview, so a
-    # failure line may have been dropped rather than never printed (techne#438).
-    elided: bool = False
+    # True when at least one row could certify green without evidence of zero
+    # failures: a passed count survived, no failure count did, and that row's
+    # output was bounded so the failure line may have been dropped rather than
+    # never printed. Set per row — see _row_totals_unreliable (techne#438).
+    totals_unreliable: bool = False
 
 
 @dataclass
@@ -157,6 +167,53 @@ class Evidence:
     """
 
 
+def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: int | None) -> bool:
+    """True when this row could certify green without evidence of zero failures.
+
+    Called per row, never on the aggregate — see the caller for why cross-row
+    aggregation is unsafe here (techne#438 re-review).
+
+    A row is unreliable when a passed count survived, no failure count did, and
+    the output was bounded so the failure line may simply have been dropped.
+    Intact output is different in kind: pytest, jest and vitest all omit the
+    failure line entirely when nothing fails, so absence there is real evidence
+    of zero.
+
+    An `errors` count does NOT substitute for a missing `failed` count. They are
+    different categories, so a parsed ``0 errors`` says nothing about failures and
+    must not disarm this. A positive `errors` makes the suite red on its own, so
+    such a row cannot produce a false green and is not flagged.
+    """
+    if p is None:
+        return False  # no passed count -> nothing here can certify green
+    if f is not None:
+        return False  # an explicit failure count survived, elided or not
+    if e is not None and e > 0:
+        return False  # errors already make the suite red
+    return _output_was_bounded(output_text)
+
+
+def _output_was_bounded(output_text: str) -> bool:
+    """True when this output is a bounded projection rather than a full record.
+
+    Two shapes, because the ledger predates the marker:
+
+    * Current rows carry the explicit elision marker written by ``_preview``.
+    * Rows written before PR #437 were cut with a bare ``tool_output[:2000]`` and
+      carry NO marker, so ``was_elided`` alone reads a genuinely truncated legacy
+      row as authoritative. They are recognisable by length: ``_preview`` returns
+      text verbatim only when it is within budget, so an unmarked output at or
+      over the budget could not have come from the current writer.
+
+    Backfill re-summarises with current code at import time, so legacy rows shrink
+    as a share of the ledger, but the ones already stored keep the old shape. An
+    output that is genuinely complete at exactly the budget is misread as bounded;
+    that costs a verdict of ``unverifiable`` instead of ``backed``, which is the
+    direction this whole class of bug should fail in.
+    """
+    return was_elided(output_text) or len(output_text) >= _PREVIEW_MAX_CHARS
+
+
 def _parse_test_output(text: str) -> tuple[int | None, int | None, int | None]:
     """Parse pytest/jest/vitest result lines from a single output blob.
 
@@ -207,7 +264,6 @@ def query_turn_evidence(
         Populated Evidence dataclass.
     """
     from techne.core.database import connect
-    from techne.hooks.post_tool_use import was_elided
 
     conn = connect(db_path)
     try:
@@ -242,7 +298,7 @@ def query_turn_evidence(
     all_failed: list[int] = []
     all_errors: list[int] = []
     saw_test_output = False
-    elided_test_output = False
+    totals_unreliable = False
 
     for row in rows:
         tool_name: str = row[0] or ""
@@ -295,8 +351,14 @@ def query_turn_evidence(
             p, f, e = _parse_test_output(output_text)
             if p is not None or f is not None or e is not None:
                 saw_test_output = True
-                if was_elided(output_text):
-                    elided_test_output = True
+                # Judged PER ROW, never across the window. `passed`/`failed` are
+                # max()'d over all rows, so asking "was anything cut?" of the union
+                # lets an intact row vouch for a bounded one: a 3-test `cargo test`
+                # printing "0 failed" would supply the missing count for a separate
+                # 900-test run whose own failure line was dropped, and the pair
+                # would certify green.
+                if _row_totals_unreliable(output_text, p, f, e):
+                    totals_unreliable = True
                 if p is not None:
                     all_passed.append(p)
                 if f is not None:
@@ -311,12 +373,13 @@ def query_turn_evidence(
 
     if not saw_test_output:
         suite_green = None
-    elif failed is None and errors is None and elided_test_output:
-        # A passed count survived but no failure count did, out of output we KNOW
-        # was cut. `(failed or 0)` would read that as zero failures and certify a
-        # possibly-red suite green (techne#438). Intact output is different: every
-        # supported runner omits the failure line entirely when nothing failed, so
-        # absence there is real evidence of zero. Absence here is just absence.
+    elif totals_unreliable:
+        # Some row could certify green without evidence of zero failures, so the
+        # aggregate cannot be trusted either. `(failed or 0)` used to read a
+        # missing count as zero and return green (techne#438). Decided per row by
+        # _row_totals_unreliable; the aggregate is deliberately not consulted,
+        # because max()-ing counts across rows lets an intact row supply the
+        # number a bounded row lost.
         suite_green = None
     else:
         eff_failed = (failed or 0) + (errors or 0)
@@ -334,7 +397,7 @@ def query_turn_evidence(
             failed=failed,
             errors=errors,
             suite_green=suite_green,
-            elided=elided_test_output,
+            totals_unreliable=totals_unreliable,
         ),
         observation_count=observation_count,
         bash_captured=bash_captured,
@@ -465,7 +528,7 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             elif not evidence.bash_captured:
                 status = "unverifiable"
                 detail = _BASH_OFF_DETAIL
-            elif t.elided and t.passed is not None:
+            elif t.totals_unreliable:
                 status = "unverifiable"
                 detail = (
                     f"Parsed passed={t.passed} but no failure count, from output that was "

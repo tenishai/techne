@@ -285,7 +285,7 @@ class TestSuiteEvidence:
             "Ran: pytest -q\nOutput: 2189 passed, 17 skipped in 68.60s",
         )
         ev = query_turn_evidence(db_path, "sess-intact")
-        assert ev.tests.elided is False
+        assert ev.tests.totals_unreliable is False
         assert ev.tests.suite_green is True
         assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "backed"
 
@@ -305,7 +305,7 @@ class TestSuiteEvidence:
             "  coverage: 82% of statements",
         )
         ev = query_turn_evidence(db_path, "sess-elided")
-        assert ev.tests.elided is True
+        assert ev.tests.totals_unreliable is True
         assert ev.tests.passed == 5
         assert ev.tests.suite_green is None
         verdict = check_claims([{"type": "tests_green"}], ev)[0]
@@ -326,7 +326,7 @@ class TestSuiteEvidence:
             "  coverage table",
         )
         ev = query_turn_evidence(db_path, "sess-elided-zero")
-        assert ev.tests.elided is True
+        assert ev.tests.totals_unreliable is False
         assert ev.tests.suite_green is True
 
     def test_elided_output_with_failures_is_still_red(self, db_path):
@@ -340,6 +340,74 @@ class TestSuiteEvidence:
         )
         ev = query_turn_evidence(db_path, "sess-elided-red")
         assert ev.tests.suite_green is False
+
+    def test_intact_row_cannot_vouch_for_a_bounded_row(self, db_path):
+        """A small intact run must not supply the failure count a big cut run lost.
+
+        `passed`/`failed` are max()'d across rows. Asking "was output cut?" of the
+        union instead of per row let a 3-test `cargo test` printing "0 failed"
+        disarm the guard for a separate 900-test run whose own failure line was
+        dropped — the pair certified `backed`. Found by Prudence re-reviewing the
+        techne#438 fix; the aggregate must never be consulted for this question.
+        """
+        _insert_session(db_path, "sess-vouch")
+        _insert_obs(
+            db_path, "sess-vouch", "Bash",
+            "Ran: cargo test -p small\nOutput: test result: ok. 3 passed; 0 failed",
+        )
+        _insert_obs(
+            db_path, "sess-vouch", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed"
+            "\n… [5000 chars elided] …\ncoverage 82%",
+        )
+        ev = query_turn_evidence(db_path, "sess-vouch")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_zero_errors_does_not_substitute_for_a_missing_failure_count(self, db_path):
+        """"0 errors" says nothing about failures — different categories.
+
+        The guard originally required `errors is None`, so any parsed zero-errors
+        anywhere disarmed it and returned green. `_ERRORS_RE` is loose enough to
+        match prose, which widens the exposure.
+        """
+        _insert_session(db_path, "sess-zeroerr")
+        _insert_obs(
+            db_path, "sess-zeroerr", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed, 0 errors"
+            "\n… [5000 chars elided] …\ntail",
+        )
+        ev = query_turn_evidence(db_path, "sess-zeroerr")
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_positive_errors_still_makes_the_suite_red(self, db_path):
+        """A row with real errors is red, not unverifiable — it can't false-green."""
+        _insert_session(db_path, "sess-poserr")
+        _insert_obs(
+            db_path, "sess-poserr", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed, 4 errors"
+            "\n… [5000 chars elided] …\ntail",
+        )
+        ev = query_turn_evidence(db_path, "sess-poserr")
+        assert ev.tests.suite_green is False
+
+    def test_legacy_unmarked_truncation_is_not_read_as_intact(self, db_path):
+        """Pre-#437 rows were cut head-only and carry NO elision marker.
+
+        `was_elided` alone returns False for them, so the gate read exactly the
+        rows the marker was invented to describe as authoritative and returned
+        `backed`. Recognised by length instead: the current writer never emits an
+        unmarked output at or over budget.
+        """
+        _insert_session(db_path, "sess-legacy")
+        legacy_output = ("900 passed" + "\n" + "." * 4000)[:2000]
+        assert "elided" not in legacy_output
+        _insert_obs(db_path, "sess-legacy", "Bash", f"Ran: pytest -q\nOutput: {legacy_output}")
+        ev = query_turn_evidence(db_path, "sess-legacy")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
 
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
@@ -380,7 +448,7 @@ class TestCheckClaims:
             failed=kwargs.pop("failed", None),
             errors=kwargs.pop("errors", None),
             suite_green=kwargs.pop("suite_green", None),
-            elided=kwargs.pop("elided", False),
+            totals_unreliable=kwargs.pop("totals_unreliable", False),
         )
         return Evidence(tests=t, **kwargs)
 

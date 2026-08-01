@@ -370,7 +370,14 @@ class TestSummarize:
         The evidence gate uses this to tell "no failure line was printed" from
         "a failure line may have been dropped" (techne#438), so drift between the
         two silently reintroduces the false-green bug rather than erroring.
+
+        The round-trip assertions below are necessary but NOT sufficient: both
+        sides read _PREVIEW_ELISION_MARK, so renaming the constant keeps them
+        agreeing and they pass tautologically. The literal below is what actually
+        pins the on-disk format — observations already written carry it, so it is
+        a compatibility constraint, not a style choice.
         """
+        assert " chars elided] …\n" in _preview("a\n" * 5000)
         assert was_elided(_preview("a\n" * 5000)) is True
         assert was_elided(_preview("short output")) is False
         assert was_elided("Ran: pytest\nOutput: 5 passed in 1.2s") is False
