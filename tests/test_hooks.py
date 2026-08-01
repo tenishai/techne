@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from techne.config import Config
-from techne.hooks.post_tool_use import SKIP_TOOLS, should_capture, summarize
+from techne.hooks.post_tool_use import SKIP_TOOLS, _preview, should_capture, summarize
 from techne.hooks.pre_compact import _find_last_task, _parse_transcript
 
 # ---------------------------------------------------------------------------
@@ -251,12 +251,53 @@ class TestSummarize:
         result = summarize("Bash", {"command": "test"}, None)
         assert isinstance(result, str)
 
-    def test_summarize_output_truncated_at_2000_chars(self):
-        """Long output is truncated to 2000 characters in the preview."""
+    def test_summarize_output_bounded_at_2000_chars(self):
+        """The output preview stays within the 2000-char budget."""
         long_output = "x" * 5000
         result = summarize("Bash", {"command": "test"}, long_output)
-        # The result must contain at most 2000 'x's
         assert result.count("x") <= 2000
+
+    def test_summarize_short_output_is_verbatim(self):
+        """Output within budget is not elided at all."""
+        result = summarize("Bash", {"command": "test"}, "short output")
+        assert result == "Ran: test\nOutput: short output"
+        assert "elided" not in result
+
+    def test_summarize_keeps_tail_of_long_output(self):
+        """The END of long output survives, not just the head.
+
+        Regression guard for the evidence gate: test runners print their verdict
+        last, so a head-only preview dropped it and left `tests_green` claims
+        unverifiable. Shaped like real pytest output — progress dots, then the
+        result line — sized past the 2000-char budget.
+        """
+        pytest_output = ("." * 4000) + "\n2152 passed, 17 skipped in 68.60s"
+        result = summarize("Bash", {"command": "pytest -q"}, pytest_output)
+        assert "2152 passed" in result
+        assert result.startswith("Ran: pytest -q")
+
+    def test_summarize_marks_the_elision(self):
+        """An elided preview says so, and reports how much was dropped."""
+        result = summarize("Bash", {"command": "test"}, "A" * 3000 + "TAIL")
+        assert "chars elided" in result
+        assert result.endswith("TAIL")
+
+    def test_preview_elided_count_is_accurate(self):
+        """head + elided + tail reconstructs the original length.
+
+        Keeps the marker honest: a wrong count is worse than no count, because a
+        reader uses it to decide whether the missing middle mattered.
+        """
+        original = "z" * 9000
+        preview = _preview(original)
+        head, rest = preview.split("\n… [", 1)
+        count_str, tail = rest.split(" chars elided] …\n", 1)
+        assert len(head) + int(count_str) + len(tail) == len(original)
+
+    def test_preview_never_exceeds_budget(self):
+        """No input length can push the preview over the 2000-char budget."""
+        for size in (2001, 3000, 50_000, 5_000_000):
+            assert len(_preview("q" * size)) <= 2000
 
     def test_summarize_missing_input_fields(self):
         """Missing fields in tool_input don't crash; they default to empty string."""

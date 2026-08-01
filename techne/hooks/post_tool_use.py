@@ -158,12 +158,49 @@ def should_capture(config: Config, tool_name: str, tool_input: dict | None = Non
     return True
 
 
+# Tool-output preview budget. The total stays at 2000 chars (unchanged context
+# cost), but the sample is head+tail rather than head-only.
+#
+# Why the tail matters: the observation `content` column is the ONLY record of a
+# tool's output, and the evidence gate (techne/core/evidence.py) regex-parses it
+# for git SHAs and test-runner result lines. Test runners print their verdict
+# LAST — techne's own full suite clears 2000 chars of progress dots before it
+# prints "N passed" — so a head-only cut kept the dots and discarded the
+# answer, making `tests_green` unverifiable even with capture_bash ON. Git commit
+# output (`[main abc1234]`) prints first and was never affected, which is why the
+# gap showed up as "commits verify, tests don't".
+_PREVIEW_MAX_CHARS = 2000
+_PREVIEW_HEAD_CHARS = 1200
+# Reserved for the elision marker so the head+marker+tail total can never exceed
+# _PREVIEW_MAX_CHARS. The marker is ~21 chars plus the elided-count digits.
+_PREVIEW_MARKER_BUDGET = 40
+
+
+def _preview(text: str) -> str:
+    """Bound `text` to _PREVIEW_MAX_CHARS, keeping both the head and the tail.
+
+    Short output is returned verbatim. Longer output keeps the leading
+    _PREVIEW_HEAD_CHARS and as much of the trailing text as the remaining budget
+    allows, joined by a marker naming how many characters were dropped.
+
+    The elision is explicit on purpose: a silently-cut preview reads downstream as
+    complete output, which is how a truncated test summary became an
+    "unverifiable" verdict instead of a visible gap.
+    """
+    if len(text) <= _PREVIEW_MAX_CHARS:
+        return text
+    tail_chars = _PREVIEW_MAX_CHARS - _PREVIEW_HEAD_CHARS - _PREVIEW_MARKER_BUDGET
+    elided = len(text) - _PREVIEW_HEAD_CHARS - tail_chars
+    marker = f"\n… [{elided} chars elided] …\n"
+    return text[:_PREVIEW_HEAD_CHARS] + marker + text[-tail_chars:]
+
+
 def summarize(tool_name: str, tool_input: dict, tool_output) -> str:
     if isinstance(tool_output, dict):
         tool_output = json.dumps(tool_output, default=str)
     elif not isinstance(tool_output, str):
         tool_output = str(tool_output) if tool_output else ""
-    output_preview = tool_output[:2000]
+    output_preview = _preview(tool_output)
 
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
