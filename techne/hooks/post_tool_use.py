@@ -186,13 +186,32 @@ def _preview(text: str) -> str:
     The elision is explicit on purpose: a silently-cut preview reads downstream as
     complete output, which is how a truncated test summary became an
     "unverifiable" verdict instead of a visible gap.
+
+    The tail is LINE-ALIGNED — a partial first line is dropped rather than kept.
+    This is a correctness requirement, not tidiness. A head cut is loss-only: it
+    destroys the trailing keyword (``"10 failed"`` → ``"10 fai"``), so a mangled
+    line can only fail to match and the gate honestly answers "unverifiable". A
+    raw tail cut is different in kind — it preserves the keyword and shaves the
+    digits (``"10 failed"`` → ``"0 failed"``), which matches the evidence gate's
+    pattern and reports ZERO failures. That turns a red suite green: a false
+    "backed" verdict, strictly worse than declining to answer. Dropping the
+    partial line restores the loss-only property. When the tail contains no
+    newline at all, every retained character is mid-line by definition, so the
+    tail is dropped entirely and the preview degrades to head-only.
     """
     if len(text) <= _PREVIEW_MAX_CHARS:
         return text
     tail_chars = _PREVIEW_MAX_CHARS - _PREVIEW_HEAD_CHARS - _PREVIEW_MARKER_BUDGET
-    elided = len(text) - _PREVIEW_HEAD_CHARS - tail_chars
+    head = text[:_PREVIEW_HEAD_CHARS]
+    # Discard through the first newline so no fragment of a cut line survives.
+    _, newline, tail = text[-tail_chars:].partition("\n")
+    if not newline:
+        tail = ""
+    # Computed from the real retained lengths, never from the nominal budget —
+    # line-alignment makes the dropped span longer than tail_chars implies.
+    elided = len(text) - len(head) - len(tail)
     marker = f"\n… [{elided} chars elided] …\n"
-    return text[:_PREVIEW_HEAD_CHARS] + marker + text[-tail_chars:]
+    return head + marker + tail
 
 
 def summarize(tool_name: str, tool_input: dict, tool_output) -> str:

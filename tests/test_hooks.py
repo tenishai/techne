@@ -10,7 +10,15 @@ from pathlib import Path
 import pytest
 
 from techne.config import Config
-from techne.hooks.post_tool_use import SKIP_TOOLS, _preview, should_capture, summarize
+from techne.hooks.post_tool_use import (
+    _PREVIEW_HEAD_CHARS,
+    _PREVIEW_MARKER_BUDGET,
+    _PREVIEW_MAX_CHARS,
+    SKIP_TOOLS,
+    _preview,
+    should_capture,
+    summarize,
+)
 from techne.hooks.pre_compact import _find_last_task, _parse_transcript
 
 # ---------------------------------------------------------------------------
@@ -278,9 +286,20 @@ class TestSummarize:
 
     def test_summarize_marks_the_elision(self):
         """An elided preview says so, and reports how much was dropped."""
-        result = summarize("Bash", {"command": "test"}, "A" * 3000 + "TAIL")
+        result = summarize("Bash", {"command": "test"}, ("A" * 3000) + "\nTAIL")
         assert "chars elided" in result
         assert result.endswith("TAIL")
+
+    def test_preview_drops_an_unaligned_tail_entirely(self):
+        """Output with no newline in the tail degrades to head-only.
+
+        Every character of such a tail is mid-line by definition, so there is no
+        safe fragment to keep. Losing it is the correct direction: head-only is
+        loss-only, while a retained fragment can fabricate a value.
+        """
+        result = _preview("A" * 3000)
+        assert "chars elided" in result
+        assert result.endswith(" …\n")
 
     def test_preview_elided_count_is_accurate(self):
         """head + elided + tail reconstructs the original length.
@@ -298,6 +317,67 @@ class TestSummarize:
         """No input length can push the preview over the 2000-char budget."""
         for size in (2001, 3000, 50_000, 5_000_000):
             assert len(_preview("q" * size)) <= 2000
+
+    def test_preview_never_fabricates_a_smaller_count(self):
+        """A mid-line tail cut must not turn "10 failed" into "0 failed".
+
+        The two cut directions fail differently in KIND, which is why the tail is
+        line-aligned. A head cut destroys the trailing keyword ("10 failed" ->
+        "10 fai"), so it can only fail to match and the gate honestly answers
+        "unverifiable" — loss-only. A raw tail cut keeps the keyword and shaves
+        the digits ("10 failed" -> "0 failed"), which matches and reports ZERO
+        failures, certifying a red suite as green. A false "backed" is strictly
+        worse than declining to answer, so this must never regress.
+
+        Input is jest-shaped and positioned so the tail boundary lands inside the
+        failure count: summary line, then a coverage table long enough to push it
+        exactly to the cut.
+        """
+        from techne.core.evidence import _parse_test_output
+
+        tail_budget = _PREVIEW_MAX_CHARS - _PREVIEW_HEAD_CHARS - _PREVIEW_MARKER_BUDGET
+        after_the_leading_digit = "0 failed, 5 passed, 15 total\n"
+        coverage = "  src/mod.ts  |  82.1 |  71.4 |  90.0 |  82.1\n" * 40
+        after = (after_the_leading_digit + coverage)[:tail_budget]
+        assert len(after) == tail_budget, "input must place the cut inside the count"
+        text = ("x" * 3000) + "\nTests:       1" + after
+
+        _passed, failed, _errors = _parse_test_output(_preview(text))
+        assert failed != 0, "a cut count was reported as zero failures"
+
+    def test_preview_head_budget_is_pinned(self):
+        """The head keeps a substantial prefix, not a token one.
+
+        Guards the head constant itself: git commit output prints its SHA first,
+        so shrinking the head silently costs `commit` claims their evidence.
+        """
+        head = _preview("a\n" * 5000).split("\n… [", 1)[0]
+        assert len(head) >= 1000
+
+    def test_preview_tail_budget_is_pinned(self):
+        """The tail keeps a substantial suffix, not a token one.
+
+        Guards the tail size independently of tail *survival*: a runner's result
+        line can be far longer than the short one used in the other tests.
+        """
+        tail = _preview("a\n" * 5000).split(" …\n", 1)[1]
+        assert len(tail) >= 400
+
+    def test_elision_marker_is_not_parsed_as_evidence(self):
+        """The marker itself must not read as a commit or a test result.
+
+        The preview injects synthetic text into observations.content, which the
+        evidence gate parses. Today the marker is inert only because "elided" is
+        not a hex run — that is a coincidence worth pinning, since a large enough
+        elided count puts a long digit run inside brackets.
+        """
+        from techne.core.evidence import _GIT_SHA_RE, _parse_test_output
+
+        preview = _preview("x\n" * 5_000_000)
+        marker = "\n… [" + preview.split("\n… [", 1)[1].split(" …\n", 1)[0] + " …\n"
+        assert "chars elided" in marker
+        assert not _GIT_SHA_RE.search(marker)
+        assert _parse_test_output(marker) == (None, None, None)
 
     def test_summarize_missing_input_fields(self):
         """Missing fields in tool_input don't crash; they default to empty string."""
