@@ -8,9 +8,11 @@ Free-text claim extraction is explicitly OUT of scope for this slice; callers
 must pass structured claim dicts.  See check_claims() for the supported types.
 
 IMPORTANT — Bash capture dependency: commits, shell actions, and test results are
-all parsed from Bash observations, but Bash capture is OFF by default in techne
-(config.hooks.capture_bash=False). When it's off, those deeds aren't in the ledger
-at all, so a real commit/test-run is *absent*, not *disproven*. Callers pass
+all parsed from Bash observations, and live Bash capture is a config flag
+(config.hooks.capture_bash). When it's off, those deeds aren't in the ledger *for
+the current turn*, so a real commit/test-run is *absent*, not *disproven*. They
+are not lost — transcript backfill records Bash regardless of the flag — but it
+runs after the session, too late to serve an in-turn claim. Callers pass
 ``bash_captured`` (from config) so check_claims() returns ``unverifiable`` rather
 than falsely flagging an honest agent as ``unbacked``. Artifacts (Write/Edit) and
 any_tool_call work regardless, since those tools are captured by default.
@@ -21,6 +23,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# The gate reads bounded projections of tool output, so it needs the writer's
+# budget and marker to tell a complete record from a cut one (techne#438).
+from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, was_elided
 
 # Tool names that are NOT agent deeds — meta-records or user-side events.
 #
@@ -70,9 +76,12 @@ _ERRORS_RE = re.compile(r"(\d+)\s+error")
 # Returned for Bash-derived claims (commit / tests_green / ran_action) when Bash
 # capture is off — the deeds simply aren't recorded, so absence is not disproof.
 _BASH_OFF_DETAIL = (
-    "Bash capture is off (config.hooks.capture_bash=False), so commits, test "
-    "results, and shell actions are not recorded — this claim cannot be verified "
-    "from the ledger (absent, not disproven). Enable capture_bash to check it."
+    "Live Bash capture is off (config.hooks.capture_bash=False), so this session's "
+    "commits, test results, and shell actions are not in the ledger YET — absent, "
+    "not disproven. They are not lost: transcript backfill records Bash regardless "
+    "of this flag (sync/jsonl_records.should_import ignores it), but it runs after "
+    "the session, too late to verify a claim in the turn that makes it. Enable "
+    "capture_bash for in-turn verification."
 )
 
 
@@ -83,20 +92,33 @@ class SuiteEvidence:
     CAVEAT: Bash output is bounded at 2000 chars in the ledger (see
     post_tool_use.summarize).  The preview keeps the head AND the tail, so a
     runner's trailing result line survives; only the middle of a long run is
-    elided, and the preview says so.  The heuristic still only handles
-    pytest/jest/vitest-style result lines, and a runner that reports its totals
-    from the *middle* of its output can still be missed.
+    elided, and the preview says so.  Rows written before PR #437 were cut
+    head-only and carry no marker — ``_output_was_bounded`` recognises those by
+    length.  The heuristic still only handles pytest/jest/vitest-style result
+    lines, and a runner that reports its totals from the *middle* of its output
+    can still be missed.
     ``None`` means "couldn't parse" — report honestly, not optimistically.
 
     Aggregation: when multiple Bash rows contain test output (e.g. re-runs),
     we take the *maximum* count seen, not the sum.  Max is less wrong for
     re-run scenarios; sum would double-count.  Document this in callers.
+
+    Max carries a sharp caveat: it is only sound over a COMPLETE sample.  Over
+    bounded output it runs on the surviving subset, so a zero that survived beats
+    a positive that was elided.  ``_row_totals_unreliable`` is what stops that
+    from becoming a green verdict, which is why only POSITIVE counts are treated
+    as decisive anywhere in this module.
     """
 
     passed: int | None = None
     failed: int | None = None
     errors: int | None = None
     suite_green: bool | None = None
+    # True when at least one row could certify green without evidence of zero
+    # failures: a passed count survived, no failure count did, and that row's
+    # output was bounded so the failure line may have been dropped rather than
+    # never printed. Set per row — see _row_totals_unreliable (techne#438).
+    totals_unreliable: bool = False
 
 
 @dataclass
@@ -149,6 +171,96 @@ class Evidence:
     ``unbacked``) for Bash-derived claims when this is False, or the gate would
     falsely flag honest agents. The caller (MCP tool / CLI) sets this from config.
     """
+
+
+def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: int | None) -> bool:
+    """True when this row could certify green without evidence of zero failures.
+
+    Called per row, never on the aggregate — see the caller for why cross-row
+    aggregation is unsafe here (techne#438 re-review).
+
+    A row is unreliable when a passed count survived, no failure count did, and
+    the output was bounded so the failure line may simply have been dropped.
+    Intact output is different in kind: pytest, jest and vitest all omit the
+    failure line entirely when nothing fails, so absence there is real evidence
+    of zero.
+
+    Only a POSITIVE count disarms this, never a zero. ``_parse_test_output``
+    takes the ``max()`` of every count it sees, and max is only sound over a
+    complete sample: in bounded output it runs over the SURVIVING subset, so a
+    zero that survived beats a positive that was elided. A cargo workspace shows
+    it — a small green crate reports ``0 failed`` in the head while
+    ``900 passed; 12 failed`` sits in the dropped middle, and the surviving zero
+    wins. A positive count needs no such care: it makes the suite red on its own,
+    and nothing hiding in the elided middle can make it green again.
+
+    An `errors` count does NOT substitute for a missing `failed` count either.
+    They are different categories, so a parsed ``0 errors`` says nothing about
+    failures.
+    """
+    if p is None and f is None and e is None:
+        return False  # no counts at all -> this row says nothing about any suite
+    # A row with NO passed count still matters. `make check` can print mypy's
+    # "Found 0 errors" while both pytest totals sit in the dropped middle, giving
+    # p=None, f=None, e=0. Returning early on `p is None` let that row stay silent,
+    # so one small green run elsewhere in the window certified the whole thing.
+    if f is not None and f > 0:
+        return False  # a real failure count makes the suite red on its own
+    if e is not None and e > 0:
+        return False  # errors likewise
+    return _output_was_bounded(output_text)
+
+
+_BASH_OUTPUT_MARKER = "\nOutput: "
+
+
+def _bash_output(content: str) -> str | None:
+    """Locate the output half of a ``summarize()``-shaped Bash observation.
+
+    Returns None when the boundary cannot be located with certainty, and the
+    caller then parses no test totals from the row.
+
+    ``summarize`` writes ``"Ran: <command>\\nOutput: <preview>"`` into a single
+    flat string with no escaping, so a command containing the marker is
+    indistinguishable from the real boundary. That is reachable by ordinary
+    habit, not just adversarially: a commit message with a line reading
+    ``Output: 2206 passed, 17 skipped`` made the gate report a green suite for a
+    ``git commit`` that ran no tests.
+
+    Neither split direction is safe. Taking the FIRST occurrence pulls trailing
+    command text into the output and invents counts; taking the LAST discards the
+    head of a real output, elision marker included, promoting a bounded row to
+    authoritative. So when the marker appears more than once we decline instead,
+    which costs a verdict rather than fabricating one.
+
+    Resolving this properly needs the command and output stored as separate
+    fields rather than recovered from one string — see the artifact-store
+    follow-up on techne#438.
+    """
+    if content.count(_BASH_OUTPUT_MARKER) != 1:
+        return None
+    return content.partition(_BASH_OUTPUT_MARKER)[2]
+
+
+def _output_was_bounded(output_text: str) -> bool:
+    """True when this output is a bounded projection rather than a full record.
+
+    Two shapes, because the ledger predates the marker:
+
+    * Current rows carry the explicit elision marker written by ``_preview``.
+    * Rows written before PR #437 were cut with a bare ``tool_output[:2000]`` and
+      carry NO marker, so ``was_elided`` alone reads a genuinely truncated legacy
+      row as authoritative. They are recognisable by length: ``_preview`` returns
+      text verbatim only when it is within budget, so an unmarked output at or
+      over the budget could not have come from the current writer.
+
+    Backfill re-summarises with current code at import time, so legacy rows shrink
+    as a share of the ledger, but the ones already stored keep the old shape. An
+    output that is genuinely complete at exactly the budget is misread as bounded;
+    that costs a verdict of ``unverifiable`` instead of ``backed``, which is the
+    direction this whole class of bug should fail in.
+    """
+    return was_elided(output_text) or len(output_text) >= _PREVIEW_MAX_CHARS
 
 
 def _parse_test_output(text: str) -> tuple[int | None, int | None, int | None]:
@@ -235,6 +347,7 @@ def query_turn_evidence(
     all_failed: list[int] = []
     all_errors: list[int] = []
     saw_test_output = False
+    totals_unreliable = False
 
     for row in rows:
         tool_name: str = row[0] or ""
@@ -265,28 +378,42 @@ def query_turn_evidence(
 
         elif tool_name == "Bash":
             # "Ran: <command>\nOutput: <output>"
-            parts = content.split("\n", 1)
-            first_line = parts[0]
-            rest = parts[1] if len(parts) > 1 else ""
-
+            first_line = content.split("\n", 1)[0]
             if first_line.startswith("Ran: "):
                 cmd = first_line[len("Ran: ") :].strip()
                 actions.append(cmd)
 
-            # Strip the "Output: " prefix to get the raw bash output.
-            output_text = rest[len("Output: ") :] if rest.startswith("Output: ") else rest
-
-            # Extract git commit SHAs.
-            for m in _GIT_SHA_RE.finditer(output_text):
+            # SHAs are scanned across the WHOLE row, not just the output half.
+            # _GIT_SHA_RE requires brackets, so it cannot be tripped by ordinary
+            # command text, and scanning everything keeps rows that carry no
+            # "Output: " prefix at all — techne_observe writes free-form content
+            # under tool_name="Bash", and narrowing this to the output half turned
+            # a real commit from `backed` into `unbacked`. A false accusation is
+            # the one direction this gate must never take (techne#105).
+            for m in _GIT_SHA_RE.finditer(content):
                 sha = m.group(1)
                 if sha not in commits_seen:
                     commits.append(sha)
                     commits_seen.add(sha)
 
+            # Test totals need the boundary located exactly, so they use the
+            # stricter reader, which declines rather than guess.
+            output_text = _bash_output(content)
+            if output_text is None:
+                continue
+
             # Parse test result lines.
             p, f, e = _parse_test_output(output_text)
             if p is not None or f is not None or e is not None:
                 saw_test_output = True
+                # Judged PER ROW, never across the window. `passed`/`failed` are
+                # max()'d over all rows, so asking "was anything cut?" of the union
+                # lets an intact row vouch for a bounded one: a 3-test `cargo test`
+                # printing "0 failed" would supply the missing count for a separate
+                # 900-test run whose own failure line was dropped, and the pair
+                # would certify green.
+                if _row_totals_unreliable(output_text, p, f, e):
+                    totals_unreliable = True
                 if p is not None:
                     all_passed.append(p)
                 if f is not None:
@@ -299,12 +426,28 @@ def query_turn_evidence(
     failed = max(all_failed) if all_failed else None
     errors = max(all_errors) if all_errors else None
 
-    if saw_test_output:
+    if not saw_test_output:
+        suite_green = None
+    else:
         eff_failed = (failed or 0) + (errors or 0)
         eff_passed = passed or 0
-        suite_green: bool | None = eff_failed == 0 and eff_passed > 0
-    else:
-        suite_green = None
+        if eff_failed > 0:
+            # A surviving positive failure count is DEFINITIVE and outranks any
+            # doubt about what was cut: nothing hiding in an elided middle can
+            # turn a red suite green. Checked first because putting the
+            # reliability gate ahead of it downgraded a real `unbacked` to
+            # `unverifiable` — suppressing a verdict we actually had.
+            suite_green = False
+        elif totals_unreliable:
+            # Some row could certify green without evidence of zero failures, so
+            # the aggregate cannot be trusted either. `(failed or 0)` used to read
+            # a missing count as zero and return green (techne#438). Decided per
+            # row by _row_totals_unreliable; the aggregate is deliberately not
+            # consulted, because max()-ing counts across rows lets an intact row
+            # supply the number a bounded row lost.
+            suite_green = None
+        else:
+            suite_green = eff_passed > 0
 
     return Evidence(
         any_tool_call=any_tool_call,
@@ -317,6 +460,7 @@ def query_turn_evidence(
             failed=failed,
             errors=errors,
             suite_green=suite_green,
+            totals_unreliable=totals_unreliable,
         ),
         observation_count=observation_count,
         bash_captured=bash_captured,
@@ -447,12 +591,20 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
             elif not evidence.bash_captured:
                 status = "unverifiable"
                 detail = _BASH_OFF_DETAIL
+            elif t.totals_unreliable:
+                status = "unverifiable"
+                detail = (
+                    f"Parsed passed={t.passed} but no failure count, from output that was "
+                    "elided in the ledger. A green run and a run whose failure line was "
+                    "dropped look identical here, so this cannot be called green."
+                )
             else:
                 status = "unverifiable"
                 detail = (
-                    "No parseable test output in Bash observations. "
-                    "Tests were not run, the runner's format is unrecognized, or "
-                    "its totals fell in the elided middle of a long output."
+                    "No parseable test output in Bash observations. Tests were not "
+                    "run, the runner's format is unrecognized, its totals fell in "
+                    "the elided middle of a long output, or the row's command/output "
+                    "boundary was ambiguous."
                 )
 
         elif claim_type == "ran_action":

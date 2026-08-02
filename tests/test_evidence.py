@@ -270,6 +270,287 @@ class TestSuiteEvidence:
         assert ev.tests.failed == 1
         assert ev.tests.suite_green is False
 
+    def test_green_suite_still_green_when_output_is_intact(self, db_path):
+        """A green run prints NO failure line at all, and that must stay green.
+
+        This is the load-bearing case, not an edge case: pytest, jest and vitest
+        all omit "N failed" entirely when nothing fails, so `failed is None` is
+        what a passing suite normally looks like. The techne#438 fix must not
+        reach it — treating a missing failure count as unverifiable here would
+        make every ordinary green run unverifiable and undo PR #437.
+        """
+        _insert_session(db_path, "sess-intact")
+        _insert_obs(
+            db_path, "sess-intact", "Bash",
+            "Ran: pytest -q\nOutput: 2189 passed, 17 skipped in 68.60s",
+        )
+        ev = query_turn_evidence(db_path, "sess-intact")
+        assert ev.tests.totals_unreliable is False
+        assert ev.tests.suite_green is True
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "backed"
+
+    def test_elided_output_without_failure_count_is_not_green(self, db_path):
+        """passed survived, failure count did not, and we KNOW output was cut.
+
+        techne#438: `(failed or 0)` read the missing count as zero failures and
+        certified the suite green. A green run and a run whose failure line was
+        dropped are indistinguishable here, so the only honest answer is
+        unverifiable.
+        """
+        _insert_session(db_path, "sess-elided")
+        _insert_obs(
+            db_path, "sess-elided", "Bash",
+            "Ran: pytest -q\nOutput: 5 passed"
+            "\n… [4000 chars elided] …\n"
+            "  coverage: 82% of statements",
+        )
+        ev = query_turn_evidence(db_path, "sess-elided")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.passed == 5
+        assert ev.tests.suite_green is None
+        verdict = check_claims([{"type": "tests_green"}], ev)[0]
+        assert verdict["status"] == "unverifiable"
+        assert "elided" in verdict["detail"]
+
+    def test_surviving_zero_failures_in_bounded_output_is_not_green(self, db_path):
+        """A surviving "0 failed" is NOT evidence when the output was cut.
+
+        This test asserted the opposite until Prudence disproved it.
+        ``_parse_test_output`` takes the ``max()`` of every count it finds, and
+        max is only sound over a COMPLETE sample. In bounded output it runs over
+        the surviving subset, so a zero that survived beats a positive that was
+        elided — see test_max_over_a_bounded_sample_is_not_evidence for the real
+        cargo-workspace shape that does this.
+
+        A POSITIVE count is different and still decides the suite: nothing in the
+        dropped middle can make a red run green.
+        """
+        _insert_session(db_path, "sess-elided-zero")
+        _insert_obs(
+            db_path, "sess-elided-zero", "Bash",
+            "Ran: jest\nOutput: Tests: 0 failed, 5 passed"
+            "\n… [4000 chars elided] …\n"
+            "  coverage table",
+        )
+        ev = query_turn_evidence(db_path, "sess-elided-zero")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+
+    def test_elided_output_with_failures_is_still_red(self, db_path):
+        """A surviving failure count keeps the suite red — elision never rescues it."""
+        _insert_session(db_path, "sess-elided-red")
+        _insert_obs(
+            db_path, "sess-elided-red", "Bash",
+            "Ran: jest\nOutput: Tests: 3 failed, 5 passed"
+            "\n… [4000 chars elided] …\n"
+            "  coverage table",
+        )
+        ev = query_turn_evidence(db_path, "sess-elided-red")
+        assert ev.tests.suite_green is False
+
+    def test_intact_row_cannot_vouch_for_a_bounded_row(self, db_path):
+        """A small intact run must not supply the failure count a big cut run lost.
+
+        `passed`/`failed` are max()'d across rows. Asking "was output cut?" of the
+        union instead of per row let a 3-test `cargo test` printing "0 failed"
+        disarm the guard for a separate 900-test run whose own failure line was
+        dropped — the pair certified `backed`. Found by Prudence re-reviewing the
+        techne#438 fix; the aggregate must never be consulted for this question.
+        """
+        _insert_session(db_path, "sess-vouch")
+        _insert_obs(
+            db_path, "sess-vouch", "Bash",
+            "Ran: cargo test -p small\nOutput: test result: ok. 3 passed; 0 failed",
+        )
+        _insert_obs(
+            db_path, "sess-vouch", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed"
+            "\n… [5000 chars elided] …\ncoverage 82%",
+        )
+        ev = query_turn_evidence(db_path, "sess-vouch")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_zero_errors_does_not_substitute_for_a_missing_failure_count(self, db_path):
+        """"0 errors" says nothing about failures — different categories.
+
+        The guard originally required `errors is None`, so any parsed zero-errors
+        anywhere disarmed it and returned green. `_ERRORS_RE` is loose enough to
+        match prose, which widens the exposure.
+        """
+        _insert_session(db_path, "sess-zeroerr")
+        _insert_obs(
+            db_path, "sess-zeroerr", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed, 0 errors"
+            "\n… [5000 chars elided] …\ntail",
+        )
+        ev = query_turn_evidence(db_path, "sess-zeroerr")
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_positive_errors_still_makes_the_suite_red(self, db_path):
+        """A row with real errors is red, not unverifiable — it can't false-green."""
+        _insert_session(db_path, "sess-poserr")
+        _insert_obs(
+            db_path, "sess-poserr", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed, 4 errors"
+            "\n… [5000 chars elided] …\ntail",
+        )
+        ev = query_turn_evidence(db_path, "sess-poserr")
+        assert ev.tests.suite_green is False
+
+    def test_legacy_unmarked_truncation_is_not_read_as_intact(self, db_path):
+        """Pre-#437 rows were cut head-only and carry NO elision marker.
+
+        `was_elided` alone returns False for them, so the gate read exactly the
+        rows the marker was invented to describe as authoritative and returned
+        `backed`. Recognised by length instead: the current writer never emits an
+        unmarked output at or over budget.
+        """
+        _insert_session(db_path, "sess-legacy")
+        legacy_output = ("900 passed" + "\n" + "." * 4000)[:2000]
+        assert "elided" not in legacy_output
+        _insert_obs(db_path, "sess-legacy", "Bash", f"Ran: pytest -q\nOutput: {legacy_output}")
+        ev = query_turn_evidence(db_path, "sess-legacy")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+
+    def test_max_over_a_bounded_sample_is_not_evidence(self, db_path):
+        """Built through the REAL summarize()/_preview(), not hand-written content.
+
+        Every other test here writes `content` directly, in the ideal shape — the
+        one shape that cannot exhibit this bug. A cargo workspace prints per-crate
+        results, so a small green crate's "0 failed" lands in the head while the
+        real "900 passed; 12 failed" sits in the middle that gets dropped. The
+        surviving zero then wins the max() and the gate certified green with 12
+        tests failing.
+        """
+        from techne.hooks.post_tool_use import summarize
+
+        raw = (
+            "test result: ok. 3 passed; 0 failed\n"
+            + ("compiling some-crate v0.1.0\n" * 120)
+            + "test result: FAILED. 900 passed; 12 failed\n"
+            + ("warning: unused import\n" * 40)
+        )
+        content = summarize("Bash", {"command": "cargo test --workspace"}, raw)
+        assert "12 failed" not in content, "fixture must drop the real failure count"
+        assert "0 failed" in content, "fixture must keep the misleading zero"
+
+        _insert_session(db_path, "sess-cargo")
+        _insert_obs(db_path, "sess-cargo", "Bash", content)
+        ev = query_turn_evidence(db_path, "sess-cargo")
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_bounded_row_does_not_suppress_a_definitive_red(self, db_path):
+        """A real failure count outranks doubt about what was cut.
+
+        Regression: putting the reliability gate ahead of the red computation
+        downgraded `unbacked` to `unverifiable` and emitted a detail claiming "no
+        failure count" while failed=12 was parsed. Nothing in an elided middle can
+        turn a red suite green, so the red must win.
+        """
+        _insert_session(db_path, "sess-red-wins")
+        _insert_obs(
+            db_path, "sess-red-wins", "Bash",
+            "Ran: pytest -q\nOutput: 900 passed\n… [5000 chars elided] …\ntail",
+        )
+        _insert_obs(
+            db_path, "sess-red-wins", "Bash",
+            "Ran: pytest -q\nOutput: 12 failed, 30 passed in 3s",
+        )
+        ev = query_turn_evidence(db_path, "sess-red-wins")
+        assert ev.tests.failed == 12
+        assert ev.tests.suite_green is False
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unbacked"
+
+    def test_multiline_command_does_not_leak_into_output(self, db_path):
+        """A heredoc command must not be parsed as if it were tool output.
+
+        Splitting on the first newline left the command's remaining lines inside
+        output_text, which inflated the length used to detect legacy truncation
+        (measured thousands of chars against a true output of tens) and let a
+        shell comment supply a test result with no test run at all.
+        """
+        from techne.hooks.post_tool_use import summarize
+
+        command = 'gh pr comment 1 --body "$(cat <<EOF\nreview notes\n# expect 0 failed\nEOF\n)"'
+        content = summarize("Bash", {"command": command}, "done")
+
+        _insert_session(db_path, "sess-heredoc")
+        _insert_obs(db_path, "sess-heredoc", "Bash", content)
+        ev = query_turn_evidence(db_path, "sess-heredoc")
+        assert ev.tests.failed is None, "a shell comment must not supply a failure count"
+        assert ev.tests.suite_green is None
+        # Pin the boundary directly. Asserting `totals_unreliable is False` here
+        # would pass trivially, since no test-output row exists to evaluate.
+        from techne.core.evidence import _bash_output
+
+        assert _bash_output(content) == "done"
+
+    def test_row_without_a_passed_count_still_raises_the_flag(self, db_path):
+        """A bounded row with only "0 errors" must not stay silent.
+
+        `make check` prints mypy's "Found 0 errors" before running pytest, so when
+        both pytest totals land in the dropped middle the row parses as
+        p=None, f=None, e=0. Returning early on `p is None` let that row say
+        nothing, and a small green run elsewhere in the window then certified the
+        whole thing green.
+        """
+        _insert_session(db_path, "sess-mypy")
+        _insert_obs(
+            db_path, "sess-mypy", "Bash",
+            "Ran: make check\nOutput: mypy: Found 0 errors in 42 files"
+            "\n… [6000 chars elided] …\ndone",
+        )
+        _insert_obs(
+            db_path, "sess-mypy", "Bash",
+            "Ran: pytest tests/unit -q\nOutput: 8 passed in 1.1s",
+        )
+        ev = query_turn_evidence(db_path, "sess-mypy")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_ambiguous_output_boundary_parses_no_totals(self, db_path):
+        """A command containing the output marker makes the boundary unknowable.
+
+        Reachable by ordinary habit, not just adversarially: a commit message
+        with a line reading "Output: 2206 passed, 17 skipped" made the gate report
+        a green suite for a `git commit` that ran no tests. Neither split
+        direction is safe, so the gate declines rather than picks one.
+        """
+        _insert_session(db_path, "sess-ambig")
+        message = (
+            "git commit -F - <<EOF\nfix: thing\n\n"
+            "Output: 2206 passed, 17 skipped\nEOF"
+        )
+        _insert_obs(
+            db_path, "sess-ambig", "Bash",
+            f"Ran: {message}\nOutput: [main deadbee] fix: thing",
+        )
+        ev = query_turn_evidence(db_path, "sess-ambig")
+        assert ev.tests.passed is None, "a commit message must not supply a test count"
+        assert ev.tests.suite_green is None
+        # The commit itself is still evidence — only the test totals are refused.
+        assert "deadbee" in ev.commits
+
+    def test_row_without_output_prefix_keeps_its_commit(self, db_path):
+        """Free-form Bash rows must not lose their SHA.
+
+        techne_observe writes free-form content under tool_name="Bash", so
+        narrowing SHA extraction to the output half turned a real commit from
+        `backed` into `unbacked`. A false accusation is the one direction this
+        gate must never take (techne#105).
+        """
+        _insert_session(db_path, "sess-noprefix")
+        _insert_obs(db_path, "sess-noprefix", "Bash", "Bash: git commit\n[main abc1234] some commit")
+        ev = query_turn_evidence(db_path, "sess-noprefix")
+        assert "abc1234" in ev.commits
+        assert check_claims([{"type": "commit"}], ev)[0]["status"] == "backed"
+
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
         _insert_obs(db_path, "sess-nt", "Bash", "Ran: ls\nOutput: foo.py  bar.py")
@@ -309,6 +590,7 @@ class TestCheckClaims:
             failed=kwargs.pop("failed", None),
             errors=kwargs.pop("errors", None),
             suite_green=kwargs.pop("suite_green", None),
+            totals_unreliable=kwargs.pop("totals_unreliable", False),
         )
         return Evidence(tests=t, **kwargs)
 
