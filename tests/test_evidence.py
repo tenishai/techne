@@ -583,12 +583,14 @@ class TestSuiteEvidence:
         assert ev.tests.suite_green is True
         assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "backed"
 
-    def test_runner_name_in_a_quoted_message_is_not_a_test_run(self, db_path):
-        """`git commit -m "fix the pytest flake"` names a runner but runs none.
+    def test_commit_naming_a_runner_still_yields_its_sha(self, db_path):
+        """A commit whose message names a runner is still commit evidence.
 
-        Guards the adjacent-pair rule: a loose token scan for "pytest" would read
-        the commit message as a test run, which is the same mistake as reading a
-        command's own text as its output. The commit itself is still evidence.
+        Renamed from `..._is_not_a_test_run`, which claimed to guard the
+        adjacent-pair rule and did not: `-m "fix the pytest flake"` splits to the
+        token `"fix` (quote included), which can never equal `pytest`, so it
+        passed under a loose scan AND under deletion of the VCS exclusion. What it
+        genuinely covers is that refusing test totals does not cost the SHA.
         """
         _insert_session(db_path, "sess-quoted")
         _insert_obs(
@@ -615,6 +617,78 @@ class TestSuiteEvidence:
         ev = query_turn_evidence(db_path, "sess-loose")
         assert ev.tests.passed is None
         assert ev.tests.suite_green is None
+
+    def test_bare_dash_m_message_naming_a_runner_is_not_a_test_run(self):
+        """`git commit -m pytest` — the case the quoted test could never reach.
+
+        Pins `_DASH_M_IS_A_MESSAGE`, which was load-bearing but asserted by
+        nothing: emptying the set flips each of these from False to True.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("git commit -m pytest") is False
+        assert _command_runs_tests("git commit -m tox") is False
+        assert _command_runs_tests("jj describe -m nox") is False
+        assert _command_runs_tests("hub commit -m pytest") is False
+
+    def test_heredoc_body_is_not_a_command(self):
+        """A runner name at the start of a heredoc BODY line is not an invocation.
+
+        Quote-awareness does not cover this: the splitter breaks on newlines and a
+        heredoc body is unquoted, so each body line became a segment and its first
+        word became a command head. Writing a script that contains a `pytest` line
+        would have read as running one.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        writes_a_script = "cat > /tmp/probe.py <<'PY'\npytest tests/ -q\nPY"
+        assert _command_runs_tests(writes_a_script) is False
+        # The same command really running the suite afterwards still counts.
+        assert _command_runs_tests(writes_a_script + "\npytest -q") is True
+
+    def test_non_python_runners_are_recognised(self):
+        """The non-Python half of the allowlist, which no test asserted.
+
+        A mutation harness showed that dropping every subcommand runner except
+        `make`, or every plain head except `pytest`, passed the whole suite — so
+        the Go/Rust/JS/JVM/Ruby paths were unpinned.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        for command in (
+            "go test ./...", "cargo test --workspace", "npm test", "npm run test",
+            "yarn test", "pnpm test", "bun test", "mvn -q test", "gradle test",
+            "dotnet test", "bundle exec rspec", "rake spec", "vitest run", "jest --ci",
+        ):
+            assert _command_runs_tests(command) is True, command
+
+    def test_wrappers_and_modules_beyond_pytest_are_recognised(self):
+        """Wrapper heads and non-pytest `-m` modules, also unpinned.
+
+        Emptying `_TEST_RUNNER_WRAPPERS`, or reducing `_TEST_MODULES` to just
+        `pytest`, passed the whole suite — so `uv run pytest` and `python -m tox`
+        were carried by no assertion.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        for command in (
+            "uv run pytest -q", "poetry run pytest", "npx jest", "pipx run pytest",
+            "python -m unittest discover", "python -m tox", '"$VENV" -m nox -s tests',
+        ):
+            assert _command_runs_tests(command) is True, command
+
+    def test_subcommand_must_be_in_subcommand_position(self):
+        """`test` as a flag VALUE is not a `test` subcommand.
+
+        The subcommand check scanned every remaining token, which is the same
+        loose match deliberately avoided for `-m`. One pass-through verb is
+        allowed so `npm run test` resolves, but no more.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("go build --tags test") is False
+        assert _command_runs_tests("npm run build -- test") is False
+        assert _command_runs_tests("npm run test") is True
 
     def test_interpreter_behind_a_variable_still_counts_as_a_runner(self, db_path):
         """`"$VENV" -m pytest` is the dominant real-world shape and must match.

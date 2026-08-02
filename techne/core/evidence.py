@@ -251,12 +251,14 @@ _TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
     # target reporting its own error count; that yields `unbacked` (over-
     # cautious) rather than a false green.
     "make": frozenset({"test", "tests", "check"}),
+    "rake": frozenset({"test", "spec"}),
 }
 
 # Interpreters and task runners that invoke a real runner as an argument:
 # `python -m pytest`, `uv run pytest`, `poetry run pytest`.
 _TEST_RUNNER_WRAPPERS = frozenset({
     "python", "python3", "py", "uv", "poetry", "pdm", "hatch", "pipenv", "rye", "npx",
+    "bundle", "pipx", "pdm", "just",
 })
 
 # Modules a `-m` flag can name to mean "run the suite".
@@ -264,7 +266,36 @@ _TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
 
 # Heads where `-m` means "commit message", not "module". Without this, a message
 # reading `-m pytest` would register as a test run.
-_DASH_M_IS_A_MESSAGE = frozenset({"git", "hg", "svn", "jj", "bzr"})
+_DASH_M_IS_A_MESSAGE = frozenset({"git", "hg", "svn", "jj", "bzr", "hub", "gh"})
+
+
+_HEREDOC_OPEN = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Drop heredoc bodies, keeping the lines that are actually commands.
+
+    Quote-awareness is not enough here. ``_split_bash_segments`` splits on ``\\n``,
+    and a heredoc body is not quoted, so every line of it becomes a segment and a
+    body line beginning with a runner name becomes a command head. A script
+    written to disk with ``cat > probe.py <<'PY'`` whose text contains a
+    ``pytest`` line would then read as a test run, and whatever count-shaped text
+    that script printed would be admitted as test evidence — the eighth instance
+    of the same class this whole gate exists to close.
+    """
+    lines = command.split("\n")
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        tags = [m.group(2) for m in _HEREDOC_OPEN.finditer(line)]
+        i += 1
+        for tag in tags:
+            while i < len(lines) and lines[i].strip() != tag:
+                i += 1
+            i += 1  # skip the terminator itself
+    return "\n".join(kept)
 
 
 def _command_runs_tests(command: str) -> bool:
@@ -280,7 +311,7 @@ def _command_runs_tests(command: str) -> bool:
     """
     from techne.hooks.post_tool_use import _split_bash_segments
 
-    for segment in _split_bash_segments(command):
+    for segment in _split_bash_segments(_strip_heredoc_bodies(command)):
         tokens = segment.split()
         i = 0
         # Skip leading `VAR=val` env assignments to find the real head.
@@ -294,8 +325,17 @@ def _command_runs_tests(command: str) -> bool:
         if head in _TEST_RUNNER_HEADS:
             return True
         subcommands = _TEST_RUNNER_SUBCOMMANDS.get(head)
-        if subcommands and any(t in subcommands for t in rest):
-            return True
+        if subcommands:
+            # Position matters, exactly as it does for `-m`. Scanning every token
+            # would be the same loose match this gate avoids elsewhere:
+            # `go build --tags test` names `test` as a build tag, not a
+            # subcommand, and would otherwise read as a test run. Flags are
+            # skipped, and one pass-through verb is allowed so `npm run test`
+            # still resolves while `npm run build -- test` does not.
+            non_flags = [t for t in rest if not t.startswith("-")]
+            index = 1 if non_flags[:1] in (["run"], ["exec"]) else 0
+            if len(non_flags) > index and non_flags[index] in subcommands:
+                return True
         if head in _TEST_RUNNER_WRAPPERS and any(
             t.rsplit("/", 1)[-1] in _TEST_RUNNER_HEADS for t in rest
         ):
