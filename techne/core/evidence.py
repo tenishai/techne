@@ -211,6 +211,109 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
     return _output_was_bounded(output_text)
 
 
+# Commands whose output may be read for test totals. Deliberately a denylist-free
+# ALLOWLIST: anything not named here contributes no test evidence at all.
+#
+# Without this gate, any command whose output happens to contain a count is read
+# as a test result. Both directions fired on the live ledger: `git log` echoing a
+# commit message that says "2209 passed" certified a green suite with no test run
+# (8 rows), and `ruff check` printing "Found 181 errors" turned a green window red
+# (29 rows) — the false-accusation direction techne#105 exists to prevent.
+_TEST_RUNNER_HEADS = frozenset({
+    "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "jasmine",
+    "ava", "karma", "rspec", "minitest", "phpunit", "behat", "ctest", "bats",
+    "gotestsum", "nextest", "unittest",
+})
+
+# Heads that run tests only under a specific subcommand — `go test`, not `go build`.
+_TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "go": frozenset({"test"}),
+    "cargo": frozenset({"test", "nextest"}),
+    "dotnet": frozenset({"test"}),
+    "swift": frozenset({"test"}),
+    "mix": frozenset({"test"}),
+    "npm": frozenset({"test", "t"}),
+    "yarn": frozenset({"test"}),
+    "pnpm": frozenset({"test"}),
+    "bun": frozenset({"test"}),
+    "deno": frozenset({"test"}),
+    "mvn": frozenset({"test", "verify"}),
+    "gradle": frozenset({"test"}),
+    "gradlew": frozenset({"test"}),
+    # `check` is included alongside `test` after measuring the alternative.
+    # Excluding it looked safer — a lint-only `make check` printing "Found N
+    # errors" is a false red — but it silently reintroduced techne#438's
+    # cross-row false green: a `make check` that runs the suite stops being
+    # recognised as a test run, so its bounded output no longer raises the
+    # unreliable flag, and a small intact `pytest` elsewhere in the window
+    # certifies the whole thing green. Losing a warning is worse than gaining a
+    # too-cautious red, so `check` stays. The residual is a lint-only check
+    # target reporting its own error count; that yields `unbacked` (over-
+    # cautious) rather than a false green.
+    "make": frozenset({"test", "tests", "check"}),
+}
+
+# Interpreters and task runners that invoke a real runner as an argument:
+# `python -m pytest`, `uv run pytest`, `poetry run pytest`.
+_TEST_RUNNER_WRAPPERS = frozenset({
+    "python", "python3", "py", "uv", "poetry", "pdm", "hatch", "pipenv", "rye", "npx",
+})
+
+# Modules a `-m` flag can name to mean "run the suite".
+_TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
+
+# Heads where `-m` means "commit message", not "module". Without this, a message
+# reading `-m pytest` would register as a test run.
+_DASH_M_IS_A_MESSAGE = frozenset({"git", "hg", "svn", "jj", "bzr"})
+
+
+def _command_runs_tests(command: str) -> bool:
+    """True when some segment of `command` actually invokes a test runner.
+
+    Matched on the segment's COMMAND HEAD, never as a substring of the whole
+    command. That distinction is the point: `git commit -m "fix the pytest flake"`
+    contains a runner name but does not run one, and substring matching would read
+    the commit message as a test result — the same class of bug as reading a
+    command's own text as its output. The shell splitter is quote-aware, so a
+    runner named inside a quoted argument stays inside its segment and is never a
+    head.
+    """
+    from techne.hooks.post_tool_use import _split_bash_segments
+
+    for segment in _split_bash_segments(command):
+        tokens = segment.split()
+        i = 0
+        # Skip leading `VAR=val` env assignments to find the real head.
+        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+            i += 1
+        if i >= len(tokens):
+            continue
+        head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. .venv/bin/pytest
+        rest = tokens[i + 1 :]
+
+        if head in _TEST_RUNNER_HEADS:
+            return True
+        subcommands = _TEST_RUNNER_SUBCOMMANDS.get(head)
+        if subcommands and any(t in subcommands for t in rest):
+            return True
+        if head in _TEST_RUNNER_WRAPPERS and any(
+            t.rsplit("/", 1)[-1] in _TEST_RUNNER_HEADS for t in rest
+        ):
+            return True
+        # `-m pytest` where the interpreter is behind a variable — `"$VENV" -m
+        # pytest`, `$PY -m pytest`. The head is unrecognisable there, but the
+        # module flag is not, and this is the dominant shape in real commands.
+        # Matched as an ADJACENT PAIR, never as a loose token scan: `git commit
+        # -m "fix the pytest flake"` puts the runner name in a quoted argument,
+        # and only the pair rule keeps that from reading as a test run. VCS heads
+        # are excluded outright because there `-m` means "message".
+        if head not in _DASH_M_IS_A_MESSAGE:
+            for flag, following in zip(rest, rest[1:]):
+                if flag == "-m" and following.rsplit("/", 1)[-1] in _TEST_MODULES:
+                    return True
+    return False
+
+
 _BASH_OUTPUT_MARKER = "\nOutput: "
 
 
@@ -400,6 +503,16 @@ def query_turn_evidence(
             # stricter reader, which declines rather than guess.
             output_text = _bash_output(content)
             if output_text is None:
+                continue
+
+            # ...and they are read ONLY from a command that actually runs tests.
+            # Output alone cannot establish that a test ran: `git log` echoing a
+            # commit message, or a linter reporting its own error count, both look
+            # identical to a runner's summary once you are only looking at text
+            # (techne#440). The command is the evidence that a suite executed.
+            ran = content.partition(_BASH_OUTPUT_MARKER)[0]
+            command = ran[len("Ran: ") :] if ran.startswith("Ran: ") else ran
+            if not _command_runs_tests(command):
                 continue
 
             # Parse test result lines.

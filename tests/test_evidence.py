@@ -551,6 +551,111 @@ class TestSuiteEvidence:
         assert "abc1234" in ev.commits
         assert check_claims([{"type": "commit"}], ev)[0]["status"] == "backed"
 
+    def test_non_runner_output_does_not_certify_green(self, db_path):
+        """Count-shaped text from a non-test command is not test evidence.
+
+        techne#440. Our commit convention puts a suite count in nearly every
+        message, so any `git log`/`git show` in a session echoes "N passed" and
+        certified a green suite with no test run. 8 live ledger rows did this.
+        """
+        _insert_session(db_path, "sess-gitlog")
+        _insert_obs(
+            db_path, "sess-gitlog", "Bash",
+            "Ran: git log -1\nOutput: commit 93db80e\n\n"
+            "    Full suite: 2209 passed, 17 skipped.\n",
+        )
+        ev = query_turn_evidence(db_path, "sess-gitlog")
+        assert ev.tests.passed is None
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_linter_error_count_does_not_make_the_suite_red(self, db_path):
+        """A linter's "Found N errors" must not turn a green window red.
+
+        The false-ACCUSATION half of techne#440 — 29 live rows would do this, and
+        per techne#105 that is the direction that matters most.
+        """
+        _insert_session(db_path, "sess-ruff")
+        _insert_obs(db_path, "sess-ruff", "Bash", "Ran: pytest -q\nOutput: 50 passed in 2s")
+        _insert_obs(db_path, "sess-ruff", "Bash", "Ran: ruff check .\nOutput: Found 181 errors.")
+        ev = query_turn_evidence(db_path, "sess-ruff")
+        assert ev.tests.errors is None, "a linter must not contribute an error count"
+        assert ev.tests.suite_green is True
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "backed"
+
+    def test_runner_name_in_a_quoted_message_is_not_a_test_run(self, db_path):
+        """`git commit -m "fix the pytest flake"` names a runner but runs none.
+
+        Guards the adjacent-pair rule: a loose token scan for "pytest" would read
+        the commit message as a test run, which is the same mistake as reading a
+        command's own text as its output. The commit itself is still evidence.
+        """
+        _insert_session(db_path, "sess-quoted")
+        _insert_obs(
+            db_path, "sess-quoted", "Bash",
+            'Ran: git commit -m "fix the pytest flake"\nOutput: [main abc1234] 3 passed',
+        )
+        ev = query_turn_evidence(db_path, "sess-quoted")
+        assert ev.tests.passed is None
+        assert "abc1234" in ev.commits, "the commit must still be evidence"
+
+    def test_loose_runner_token_outside_a_dash_m_pair_is_not_a_test_run(self, db_path):
+        """A runner NAME anywhere in a non-VCS command is not a test run.
+
+        Isolates the adjacent-pair rule specifically. The `git commit -m "...
+        pytest ..."` case is caught by the VCS-head exclusion even under a loose
+        token scan, so it does not pin this; a bare `echo` naming a runner does.
+        Realistic because our probe commands routinely echo their own intent.
+        """
+        _insert_session(db_path, "sess-loose")
+        _insert_obs(
+            db_path, "sess-loose", "Bash",
+            'Ran: echo "about to run pytest against the worktree"\nOutput: 5 passed',
+        )
+        ev = query_turn_evidence(db_path, "sess-loose")
+        assert ev.tests.passed is None
+        assert ev.tests.suite_green is None
+
+    def test_interpreter_behind_a_variable_still_counts_as_a_runner(self, db_path):
+        """`"$VENV" -m pytest` is the dominant real-world shape and must match.
+
+        Head-only matching missed it — the head is a variable reference, not a
+        recognisable interpreter. Measured against the live ledger, requiring a
+        literal head refused 103 rows; the `-m <module>` pair rule cut that to 48,
+        and the remainder are genuinely non-runner commands.
+        """
+        _insert_session(db_path, "sess-var")
+        _insert_obs(
+            db_path, "sess-var", "Bash",
+            'Ran: cd "$WT" && PYTHONPATH="$WT" "$VENV" -m pytest tests/ -q\n'
+            "Output: 25 passed in 1.2s",
+        )
+        ev = query_turn_evidence(db_path, "sess-var")
+        assert ev.tests.passed == 25
+        assert ev.tests.suite_green is True
+
+    def test_make_check_counts_as_a_test_run(self, db_path):
+        """`make check` stays on the allowlist, and the reason is a regression.
+
+        Excluding it looked safer, but it silently reintroduced techne#438's
+        cross-row false green: a `make check` that runs the suite stopped being
+        recognised, so its bounded output raised no flag and a small intact run
+        elsewhere certified the window green.
+        """
+        _insert_session(db_path, "sess-make")
+        _insert_obs(
+            db_path, "sess-make", "Bash",
+            "Ran: make check\nOutput: mypy: Found 0 errors in 42 files"
+            "\n… [6000 chars elided] …\ndone",
+        )
+        _insert_obs(
+            db_path, "sess-make", "Bash",
+            "Ran: pytest tests/unit -q\nOutput: 8 passed in 1.1s",
+        )
+        ev = query_turn_evidence(db_path, "sess-make")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
         _insert_obs(db_path, "sess-nt", "Bash", "Ran: ls\nOutput: foo.py  bar.py")
