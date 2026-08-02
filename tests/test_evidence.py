@@ -551,6 +551,304 @@ class TestSuiteEvidence:
         assert "abc1234" in ev.commits
         assert check_claims([{"type": "commit"}], ev)[0]["status"] == "backed"
 
+    def test_non_runner_output_does_not_certify_green(self, db_path):
+        """Count-shaped text from a non-test command is not test evidence.
+
+        techne#440. Our commit convention puts a suite count in nearly every
+        message, so any `git log`/`git show` in a session echoes "N passed" and
+        certified a green suite with no test run. 8 live ledger rows did this.
+        """
+        _insert_session(db_path, "sess-gitlog")
+        _insert_obs(
+            db_path, "sess-gitlog", "Bash",
+            "Ran: git log -1\nOutput: commit 93db80e\n\n"
+            "    Full suite: 2209 passed, 17 skipped.\n",
+        )
+        ev = query_turn_evidence(db_path, "sess-gitlog")
+        assert ev.tests.passed is None
+        assert ev.tests.suite_green is None
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
+
+    def test_linter_error_count_does_not_make_the_suite_red(self, db_path):
+        """A linter's "Found N errors" must not turn a green window red.
+
+        The false-ACCUSATION half of techne#440 — 29 live rows would do this, and
+        per techne#105 that is the direction that matters most.
+        """
+        _insert_session(db_path, "sess-ruff")
+        _insert_obs(db_path, "sess-ruff", "Bash", "Ran: pytest -q\nOutput: 50 passed in 2s")
+        _insert_obs(db_path, "sess-ruff", "Bash", "Ran: ruff check .\nOutput: Found 181 errors.")
+        ev = query_turn_evidence(db_path, "sess-ruff")
+        assert ev.tests.errors is None, "a linter must not contribute an error count"
+        assert ev.tests.suite_green is True
+        assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "backed"
+
+    def test_commit_naming_a_runner_still_yields_its_sha(self, db_path):
+        """A commit whose message names a runner is still commit evidence.
+
+        Renamed from `..._is_not_a_test_run`, which claimed to guard the
+        adjacent-pair rule and did not: `-m "fix the pytest flake"` splits to the
+        token `"fix` (quote included), which can never equal `pytest`, so it
+        passed under a loose scan AND under deletion of the VCS exclusion. What it
+        genuinely covers is that refusing test totals does not cost the SHA.
+        """
+        _insert_session(db_path, "sess-quoted")
+        _insert_obs(
+            db_path, "sess-quoted", "Bash",
+            'Ran: git commit -m "fix the pytest flake"\nOutput: [main abc1234] 3 passed',
+        )
+        ev = query_turn_evidence(db_path, "sess-quoted")
+        assert ev.tests.passed is None
+        assert "abc1234" in ev.commits, "the commit must still be evidence"
+
+    def test_loose_runner_token_outside_a_dash_m_pair_is_not_a_test_run(self, db_path):
+        """A runner NAME anywhere in a non-VCS command is not a test run.
+
+        Isolates the adjacent-pair rule specifically. The `git commit -m "...
+        pytest ..."` case is caught by the VCS-head exclusion even under a loose
+        token scan, so it does not pin this; a bare `echo` naming a runner does.
+        Realistic because our probe commands routinely echo their own intent.
+        """
+        _insert_session(db_path, "sess-loose")
+        _insert_obs(
+            db_path, "sess-loose", "Bash",
+            'Ran: echo "about to run pytest against the worktree"\nOutput: 5 passed',
+        )
+        ev = query_turn_evidence(db_path, "sess-loose")
+        assert ev.tests.passed is None
+        assert ev.tests.suite_green is None
+
+    def test_bare_dash_m_message_naming_a_runner_is_not_a_test_run(self):
+        """`git commit -m pytest` — the case the quoted test could never reach.
+
+        Pins `_DASH_M_IS_A_MESSAGE`, which was load-bearing but asserted by
+        nothing: emptying the set flips each of these from False to True.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("git commit -m pytest") is False
+        assert _command_runs_tests("git commit -m tox") is False
+        assert _command_runs_tests("jj describe -m nox") is False
+        assert _command_runs_tests("hub commit -m pytest") is False
+
+    def test_heredoc_body_is_not_a_command(self):
+        """A runner name at the start of a heredoc BODY line is not an invocation.
+
+        Quote-awareness does not cover this: the splitter breaks on newlines and a
+        heredoc body is unquoted, so each body line became a segment and its first
+        word became a command head. Writing a script that contains a `pytest` line
+        would have read as running one.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        writes_a_script = "cat > /tmp/probe.py <<'PY'\npytest tests/ -q\nPY"
+        assert _command_runs_tests(writes_a_script) is False
+        # The same command really running the suite afterwards still counts.
+        assert _command_runs_tests(writes_a_script + "\npytest -q") is True
+
+    def test_non_python_runners_are_recognised(self):
+        """The non-Python half of the allowlist, which no test asserted.
+
+        A mutation harness showed that dropping every subcommand runner except
+        `make`, or every plain head except `pytest`, passed the whole suite — so
+        the Go/Rust/JS/JVM/Ruby paths were unpinned.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        for command in (
+            "go test ./...", "cargo test --workspace", "npm test", "npm run test",
+            "yarn test", "pnpm test", "bun test", "mvn -q test", "gradle test",
+            "dotnet test", "bundle exec rspec", "rake spec", "vitest run", "jest --ci",
+        ):
+            assert _command_runs_tests(command) is True, command
+
+    def test_wrappers_and_modules_beyond_pytest_are_recognised(self):
+        """Wrapper heads and non-pytest `-m` modules, also unpinned.
+
+        Emptying `_TEST_RUNNER_WRAPPERS`, or reducing `_TEST_MODULES` to just
+        `pytest`, passed the whole suite — so `uv run pytest` and `python -m tox`
+        were carried by no assertion.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        for command in (
+            "uv run pytest -q", "poetry run pytest", "npx jest", "pipx run pytest",
+            "python -m unittest discover", "python -m tox", '"$VENV" -m nox -s tests',
+        ):
+            assert _command_runs_tests(command) is True, command
+
+    def test_decorated_runner_spellings_are_recognised(self):
+        """Flags, goals, directories and toolchains must not hide the subcommand.
+
+        A stricter position rule was tried and reverted. Filtering flags keeps
+        their VALUES, so every one of these stopped being recognised — and in this
+        gate an unrecognised row raises no unreliable flag, letting a small intact
+        run elsewhere certify green. Starvation here IS a false green (techne#438),
+        which is why the scan is deliberately loose up to a `--`.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        for command in (
+            "make -C build test", "make -j 4 test", "make V=1 test",
+            "mvn clean test", "gradle clean test", "cargo +nightly test",
+            "npm --prefix web test", "yarn --cwd web test", "dotnet test -v n",
+        ):
+            assert _command_runs_tests(command) is True, command
+
+    def test_arguments_after_a_separator_are_not_subcommands(self):
+        """`--` ends the scan: `npm run build -- test` passes `test` onward."""
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("npm run build -- test") is False
+        assert _command_runs_tests("npm run test") is True
+
+    def test_heredoc_edge_cases(self):
+        """Delimiter spellings and terminator rules, each a real leak or over-strip.
+
+        The first two produced `backed` on a command that runs nothing; the last
+        three over-stripped and swallowed a real run below the body.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        # Body stripped -> the runner line inside it is not an invocation.
+        assert _command_runs_tests("cat > f <<\\PY\npytest x\nPY") is False
+        assert _command_runs_tests("cat > f <<'PY-1'\npytest x\nPY-1") is False
+        assert _command_runs_tests("cat f <<'A' g <<'B'\npytest x\nA\npytest y\nB") is False
+        assert _command_runs_tests("cat > f <<'PY'\npytest x") is False, "unterminated"
+        # NOT stripped -> a real run below the construct still counts.
+        assert _command_runs_tests("grep x <<<word\npytest -q") is True, "herestring"
+        assert _command_runs_tests('echo "a << b"\npytest -q') is True, "quoted <<"
+        # `<<-` must be recognised as an opener at all: without it the tag `-PY`
+        # never matches, nothing is stripped, and the body's `pytest` line escapes.
+        # Asserted WITHOUT a trailing run, because with one both versions return
+        # True and the assertion would pin nothing.
+        assert _command_runs_tests("cat > f <<-PY\npytest x\n\tPY") is False
+        # Quote state must carry ACROSS newlines. A multi-line quoted message
+        # followed by a heredoc: with a per-line mask the second line starts
+        # clean, reads the message's CLOSING quote as an opening one, hides the
+        # real `<<'SH'` opener, and the body's runner line escapes.
+        assert _command_runs_tests(
+            'git commit -m "fix: a message\n\nspanning lines." '
+            "&& cat > /tmp/probe.sh <<'SH'\npytest -q\nSH"
+        ) is False
+        assert _command_runs_tests("cat > f <<-PY\npytest x\n\tPY\npytest -q") is True
+        # An indented tag inside a PLAIN `<<` body is body text, not the end. A
+        # lenient `.strip()` terminator ends the body here and lets the `pytest`
+        # line below escape as a command — this asserts False specifically because
+        # True is what the lenient version returns.
+        assert _command_runs_tests("cat > f <<PY\n  PY\npytest x\nPY") is False
+        # ...and a genuine run after the body still counts.
+        assert _command_runs_tests("cat > f <<PY\n  PY\npytest x\nPY\npytest -q") is True
+
+    def test_interpreter_behind_a_variable_still_counts_as_a_runner(self, db_path):
+        """`"$VENV" -m pytest` is the dominant real-world shape and must match.
+
+        Head-only matching missed it — the head is a variable reference, not a
+        recognisable interpreter. Measured against the live ledger, requiring a
+        literal head refused 103 rows; the `-m <module>` pair rule cut that to 48,
+        and the remainder are genuinely non-runner commands.
+        """
+        _insert_session(db_path, "sess-var")
+        _insert_obs(
+            db_path, "sess-var", "Bash",
+            'Ran: cd "$WT" && PYTHONPATH="$WT" "$VENV" -m pytest tests/ -q\n'
+            "Output: 25 passed in 1.2s",
+        )
+        ev = query_turn_evidence(db_path, "sess-var")
+        assert ev.tests.passed == 25
+        assert ev.tests.suite_green is True
+
+    def test_make_check_counts_as_a_test_run(self, db_path):
+        """`make check` stays on the allowlist, and the reason is a regression.
+
+        Excluding it looked safer, but it silently reintroduced techne#438's
+        cross-row false green: a `make check` that runs the suite stopped being
+        recognised, so its bounded output raised no flag and a small intact run
+        elsewhere certified the window green.
+        """
+        _insert_session(db_path, "sess-make")
+        _insert_obs(
+            db_path, "sess-make", "Bash",
+            "Ran: make check\nOutput: mypy: Found 0 errors in 42 files"
+            "\n… [6000 chars elided] …\ndone",
+        )
+        _insert_obs(
+            db_path, "sess-make", "Bash",
+            "Ran: pytest tests/unit -q\nOutput: 8 passed in 1.1s",
+        )
+        ev = query_turn_evidence(db_path, "sess-make")
+        assert ev.tests.totals_unreliable is True
+        assert ev.tests.suite_green is None
+
+    def test_quotes_in_a_heredoc_body_do_not_leak_into_later_commands(self):
+        """A stray apostrophe in a script being written is not shell quoting.
+
+        Heredoc body text is not subject to shell quoting at all. Masking the
+        whole command up front could not express that — the mask ran over text the
+        segment splitter never sees — so `# don't remove this` opened a quote that
+        never closed, hid the NEXT heredoc's opener, and let its body's `pytest`
+        line escape as a command head. Real bash runs nothing here; both heredocs
+        write files.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests(
+            "cat > probe.py <<'PY'\n# don't remove this\nPY\n"
+            "cat > run.sh <<'SH'\npytest -q\nSH"
+        ) is False
+
+    def test_property_no_heredoc_body_line_is_ever_a_command(self):
+        """Generated commands: a runner inside a body must never be an invocation.
+
+        This is the invariant `_strip_heredoc_bodies` exists to guarantee, asserted
+        over a generated product rather than over shapes someone thought of. Four
+        rounds of review found four defects in this code and each was a shape
+        nobody had enumerated — including two introduced by the fix for the
+        previous one. The grammar is deliberately built from what actually breaks
+        it: delimiter spellings, and body text containing unbalanced quotes.
+
+        Deterministic (itertools product, no RNG, no new dependency) so a failure
+        reproduces exactly.
+        """
+        import itertools
+
+        from techne.core.evidence import _command_runs_tests
+
+        openers = ["<<'PY'", '<<"PY"', "<<PY", "<<-PY", "<<\\PY", "<<'PY-1'"]
+        terminators = {"<<'PY'": "PY", '<<"PY"': "PY", "<<PY": "PY",
+                       "<<-PY": "\tPY", "<<\\PY": "PY", "<<'PY-1'": "PY-1"}
+        bodies = [
+            "# don't remove this",      # unbalanced single quote
+            'x = "oops',                # unbalanced double quote
+            "it's fine",
+            "echo 'balanced'",
+            "plain text",
+        ]
+        runner_lines = ["pytest -q", "go test ./...", "npm test"]
+
+        # A multi-line quoted argument before the heredocs. Without this the
+        # grammar misses the round-3 regression entirely: verified by emulating
+        # each prior implementation, the body-quote shapes alone catch round 4's
+        # but not round 3's.
+        prefixes = ["", 'git commit -m "fix: a message\n\nspanning lines." && ']
+
+        for prefix, opener, body, runner in itertools.product(
+            prefixes, openers, bodies, runner_lines
+        ):
+            end = terminators[opener]
+            # BOTH orderings, because each catches a different regression and
+            # neither catches both. With the runner in the SECOND body, a body
+            # quote leaking forward exposes it (round 4). With the runner in the
+            # FIRST body, a prefix that hides that opener exposes it (round 3) —
+            # verified by emulating each prior implementation.
+            for command in (
+                f"{prefix}cat > a.py {opener}\n{body}\n{end}\n"
+                f"cat > b.sh {opener}\n{runner}\n{end}",
+                f"{prefix}cat > a.sh {opener}\n{runner}\n{end}\n"
+                f"cat > b.py {opener}\n{body}\n{end}",
+            ):
+                assert _command_runs_tests(command) is False, command
+
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
         _insert_obs(db_path, "sess-nt", "Bash", "Ran: ls\nOutput: foo.py  bar.py")

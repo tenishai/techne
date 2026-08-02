@@ -211,6 +211,218 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
     return _output_was_bounded(output_text)
 
 
+# Commands whose output may be read for test totals. Deliberately a denylist-free
+# ALLOWLIST: anything not named here contributes no test evidence at all.
+#
+# Without this gate, any command whose output happens to contain a count is read
+# as a test result. Both directions fired on the live ledger: `git log` echoing a
+# commit message that says "2209 passed" certified a green suite with no test run
+# (8 rows), and `ruff check` printing "Found 181 errors" turned a green window red
+# (29 rows) — the false-accusation direction techne#105 exists to prevent.
+_TEST_RUNNER_HEADS = frozenset({
+    "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "jasmine",
+    "ava", "karma", "rspec", "minitest", "phpunit", "behat", "ctest", "bats",
+    "gotestsum", "nextest", "unittest",
+})
+
+# Heads that run tests only under a specific subcommand — `go test`, not `go build`.
+_TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "go": frozenset({"test"}),
+    "cargo": frozenset({"test", "nextest"}),
+    "dotnet": frozenset({"test"}),
+    "swift": frozenset({"test"}),
+    "mix": frozenset({"test"}),
+    "npm": frozenset({"test", "t"}),
+    "yarn": frozenset({"test"}),
+    "pnpm": frozenset({"test"}),
+    "bun": frozenset({"test"}),
+    "deno": frozenset({"test"}),
+    "mvn": frozenset({"test", "verify"}),
+    "gradle": frozenset({"test"}),
+    "gradlew": frozenset({"test"}),
+    # `check` is included alongside `test` after measuring the alternative.
+    # Excluding it looked safer — a lint-only `make check` printing "Found N
+    # errors" is a false red — but it silently reintroduced techne#438's
+    # cross-row false green: a `make check` that runs the suite stops being
+    # recognised as a test run, so its bounded output no longer raises the
+    # unreliable flag, and a small intact `pytest` elsewhere in the window
+    # certifies the whole thing green. Losing a warning is worse than gaining a
+    # too-cautious red, so `check` stays. The residual is a lint-only check
+    # target reporting its own error count; that yields `unbacked` (over-
+    # cautious) rather than a false green.
+    "make": frozenset({"test", "tests", "check"}),
+    "rake": frozenset({"test", "spec"}),
+}
+
+# Interpreters and task runners that invoke a real runner as an argument:
+# `python -m pytest`, `uv run pytest`, `poetry run pytest`.
+_TEST_RUNNER_WRAPPERS = frozenset({
+    "python", "python3", "py", "uv", "poetry", "pdm", "hatch", "pipenv", "rye", "npx",
+    "bundle", "pipx", "pdm", "just",
+})
+
+# Modules a `-m` flag can name to mean "run the suite".
+_TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
+
+# Heads where `-m` means "commit message", not "module". Without this, a message
+# reading `-m pytest` would register as a test run.
+_DASH_M_IS_A_MESSAGE = frozenset({"git", "hg", "svn", "jj", "bzr", "hub", "gh"})
+
+
+# `<<` or `<<-`, an optionally quoted or backslash-escaped tag, and a tag charset
+# wide enough for real delimiters (`PY-1`, `EOF.2`). The lookarounds keep a
+# herestring (`<<<word`) from matching: without them the scan finds the `<<` at
+# offset 1 of `<<<` and strips to end of command, swallowing a real run below.
+_HEREDOC_OPEN = re.compile(
+    r"(?<!<)<<(-?)(?!<)\s*(?:\\|(['\"]))?([A-Za-z_][A-Za-z0-9_.\-]*)(?(2)\2|)"
+)
+
+
+def _mask_quoted_line(line: str, quote: str | None) -> tuple[str, str | None]:
+    """Mask one line's quoted spans, carrying quote state in and out.
+
+    `echo "a << b"` contains no heredoc, but an unmasked scan reads `b` as a
+    delimiter and strips every following line hunting a terminator that never
+    comes — swallowing a real test run below.
+
+    State carries across newlines, because a quoted argument may span them and
+    ``_split_bash_segments`` models it that way. A per-line mask that restarts
+    clean disagrees: after a multi-line quoted commit message, the next line reads
+    the message's CLOSING quote as an opening one and hides a real heredoc opener.
+
+    But state must NOT carry across a heredoc body, which is why this is threaded
+    by the caller rather than run over the whole command. Body text is not subject
+    to shell quoting at all, so a stray apostrophe in a script being written —
+    ``# don't remove this`` — would otherwise open a quote that never closes and
+    poison every command line after it. Masking the whole command up front cannot
+    express that distinction, because the mask would run over text the segment
+    splitter never sees.
+    """
+    out: list[str] = []
+    for char in line:
+        if quote:
+            out.append("\x00" if char != quote else char)
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+            out.append(char)
+        else:
+            out.append(char)
+    return "".join(out), quote
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Drop heredoc bodies, keeping the lines that are actually commands.
+
+    Quote-awareness is not enough here. ``_split_bash_segments`` splits on ``\\n``,
+    and a heredoc body is not quoted, so every line of it becomes a segment and a
+    body line beginning with a runner name becomes a command head. A script
+    written to disk with ``cat > probe.py <<'PY'`` whose text contains a
+    ``pytest`` line would then read as a test run, and whatever count-shaped text
+    that script printed would be admitted as test evidence — the eighth instance
+    of the same class this whole gate exists to close.
+    """
+    lines = command.split("\n")
+    kept: list[str] = []
+    i = 0
+    # Threaded across KEPT lines only. The body-skipping loop below advances `i`
+    # without touching `quote`, so a heredoc body cannot leak quote state into the
+    # commands that follow it.
+    quote: str | None = None
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        # Match on the RAW line — a heredoc tag is usually quoted (`<<'PY'`), so
+        # scanning a masked line would blank out the tag itself. The mask is used
+        # only to LOCATE: a `<<` whose own position is inside a quoted span (as in
+        # `echo "a << b"`) opens nothing.
+        masked, quote = _mask_quoted_line(line, quote)
+        opens = [
+            (m.group(1) == "-", m.group(3))
+            for m in _HEREDOC_OPEN.finditer(line)
+            if masked[m.start()] != "\x00"
+        ]
+        i += 1
+        # A line may open several heredocs; their bodies follow in order.
+        for dash, tag in opens:
+            # Terminator rules differ, and being lenient ends a body EARLY: for
+            # plain `<<TAG` the terminator must be the whole line, so a tag that
+            # appears indented inside the body is body text, not the end. Only
+            # `<<-TAG` permits leading tabs.
+            while i < len(lines) and (lines[i].lstrip("\t") if dash else lines[i]) != tag:
+                i += 1
+            i += 1  # skip the terminator itself
+    return "\n".join(kept)
+
+
+def _command_runs_tests(command: str) -> bool:
+    """True when some segment of `command` actually invokes a test runner.
+
+    Matched on the segment's COMMAND HEAD, never as a substring of the whole
+    command. That distinction is the point: `git commit -m "fix the pytest flake"`
+    contains a runner name but does not run one, and substring matching would read
+    the commit message as a test result — the same class of bug as reading a
+    command's own text as its output. The shell splitter is quote-aware, so a
+    runner named inside a quoted argument stays inside its segment and is never a
+    head.
+    """
+    from techne.hooks.post_tool_use import _split_bash_segments
+
+    for segment in _split_bash_segments(_strip_heredoc_bodies(command)):
+        tokens = segment.split()
+        i = 0
+        # Skip leading `VAR=val` env assignments to find the real head.
+        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+            i += 1
+        if i >= len(tokens):
+            continue
+        head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. .venv/bin/pytest
+        rest = tokens[i + 1 :]
+
+        if head in _TEST_RUNNER_HEADS:
+            return True
+        subcommands = _TEST_RUNNER_SUBCOMMANDS.get(head)
+        if subcommands:
+            # Scan the tokens BEFORE a `--` separator. Everything after `--` is an
+            # argument to something else, which is what distinguishes
+            # `npm run test` from `npm run build -- test`.
+            #
+            # A stricter position rule was tried and reverted: filtering flags
+            # keeps their VALUES, so `make -C build test`, `make -j 4 test`,
+            # `mvn clean test`, `cargo +nightly test` and `npm --prefix web test`
+            # all pushed the subcommand out of position and stopped being
+            # recognised. In THIS gate that is not a harmless miss — an
+            # unrecognised row raises no unreliable flag, so a small intact run
+            # elsewhere in the window certifies green. Starvation here IS a false
+            # green, the same shape as techne#438.
+            #
+            # The cost of the looser scan is `go build --tags test`, which names
+            # `test` as a build tag. That match is inert: `go build` emits no
+            # count-shaped output in either direction, so it can neither certify
+            # nor accuse. An inert false match is the right trade for a live class
+            # of false greens.
+            before_separator = rest[: rest.index("--")] if "--" in rest else rest
+            if any(t in subcommands for t in before_separator):
+                return True
+        if head in _TEST_RUNNER_WRAPPERS and any(
+            t.rsplit("/", 1)[-1] in _TEST_RUNNER_HEADS for t in rest
+        ):
+            return True
+        # `-m pytest` where the interpreter is behind a variable — `"$VENV" -m
+        # pytest`, `$PY -m pytest`. The head is unrecognisable there, but the
+        # module flag is not, and this is the dominant shape in real commands.
+        # Matched as an ADJACENT PAIR, never as a loose token scan: `git commit
+        # -m "fix the pytest flake"` puts the runner name in a quoted argument,
+        # and only the pair rule keeps that from reading as a test run. VCS heads
+        # are excluded outright because there `-m` means "message".
+        if head not in _DASH_M_IS_A_MESSAGE:
+            for flag, following in zip(rest, rest[1:]):
+                if flag == "-m" and following.rsplit("/", 1)[-1] in _TEST_MODULES:
+                    return True
+    return False
+
+
 _BASH_OUTPUT_MARKER = "\nOutput: "
 
 
@@ -400,6 +612,16 @@ def query_turn_evidence(
             # stricter reader, which declines rather than guess.
             output_text = _bash_output(content)
             if output_text is None:
+                continue
+
+            # ...and they are read ONLY from a command that actually runs tests.
+            # Output alone cannot establish that a test ran: `git log` echoing a
+            # commit message, or a linter reporting its own error count, both look
+            # identical to a runner's summary once you are only looking at text
+            # (techne#440). The command is the evidence that a suite executed.
+            ran = content.partition(_BASH_OUTPUT_MARKER)[0]
+            command = ran[len("Ran: ") :] if ran.startswith("Ran: ") else ran
+            if not _command_runs_tests(command):
                 continue
 
             # Parse test result lines.
