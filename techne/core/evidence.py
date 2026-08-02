@@ -269,7 +269,34 @@ _TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
 _DASH_M_IS_A_MESSAGE = frozenset({"git", "hg", "svn", "jj", "bzr", "hub", "gh"})
 
 
-_HEREDOC_OPEN = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# `<<` or `<<-`, an optionally quoted or backslash-escaped tag, and a tag charset
+# wide enough for real delimiters (`PY-1`, `EOF.2`). The lookarounds keep a
+# herestring (`<<<word`) from matching: without them the scan finds the `<<` at
+# offset 1 of `<<<` and strips to end of command, swallowing a real run below.
+_HEREDOC_OPEN = re.compile(
+    r"(?<!<)<<(-?)(?!<)\s*(?:\\|(['\"]))?([A-Za-z_][A-Za-z0-9_.\-]*)(?(2)\2|)"
+)
+
+
+def _mask_quoted(line: str) -> str:
+    """Blank out quoted spans, preserving length so offsets still line up.
+
+    `echo "a << b"` contains no heredoc, but an unmasked scan reads `b` as a
+    delimiter and strips every following line looking for a terminator that never
+    comes — swallowing a real test run further down the command.
+    """
+    out, quote = [], None
+    for char in line:
+        if quote:
+            out.append("\x00" if char != quote else char)
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+            out.append(char)
+        else:
+            out.append(char)
+    return "".join(out)
 
 
 def _strip_heredoc_bodies(command: str) -> str:
@@ -289,10 +316,24 @@ def _strip_heredoc_bodies(command: str) -> str:
     while i < len(lines):
         line = lines[i]
         kept.append(line)
-        tags = [m.group(2) for m in _HEREDOC_OPEN.finditer(line)]
+        # Match on the RAW line — a heredoc tag is usually quoted (`<<'PY'`), so
+        # scanning a masked line would blank out the tag itself. The mask is used
+        # only to LOCATE: a `<<` whose own position is inside a quoted span (as in
+        # `echo "a << b"`) opens nothing.
+        masked = _mask_quoted(line)
+        opens = [
+            (m.group(1) == "-", m.group(3))
+            for m in _HEREDOC_OPEN.finditer(line)
+            if masked[m.start()] != "\x00"
+        ]
         i += 1
-        for tag in tags:
-            while i < len(lines) and lines[i].strip() != tag:
+        # A line may open several heredocs; their bodies follow in order.
+        for dash, tag in opens:
+            # Terminator rules differ, and being lenient ends a body EARLY: for
+            # plain `<<TAG` the terminator must be the whole line, so a tag that
+            # appears indented inside the body is body text, not the end. Only
+            # `<<-TAG` permits leading tabs.
+            while i < len(lines) and (lines[i].lstrip("\t") if dash else lines[i]) != tag:
                 i += 1
             i += 1  # skip the terminator itself
     return "\n".join(kept)
@@ -326,15 +367,26 @@ def _command_runs_tests(command: str) -> bool:
             return True
         subcommands = _TEST_RUNNER_SUBCOMMANDS.get(head)
         if subcommands:
-            # Position matters, exactly as it does for `-m`. Scanning every token
-            # would be the same loose match this gate avoids elsewhere:
-            # `go build --tags test` names `test` as a build tag, not a
-            # subcommand, and would otherwise read as a test run. Flags are
-            # skipped, and one pass-through verb is allowed so `npm run test`
-            # still resolves while `npm run build -- test` does not.
-            non_flags = [t for t in rest if not t.startswith("-")]
-            index = 1 if non_flags[:1] in (["run"], ["exec"]) else 0
-            if len(non_flags) > index and non_flags[index] in subcommands:
+            # Scan the tokens BEFORE a `--` separator. Everything after `--` is an
+            # argument to something else, which is what distinguishes
+            # `npm run test` from `npm run build -- test`.
+            #
+            # A stricter position rule was tried and reverted: filtering flags
+            # keeps their VALUES, so `make -C build test`, `make -j 4 test`,
+            # `mvn clean test`, `cargo +nightly test` and `npm --prefix web test`
+            # all pushed the subcommand out of position and stopped being
+            # recognised. In THIS gate that is not a harmless miss — an
+            # unrecognised row raises no unreliable flag, so a small intact run
+            # elsewhere in the window certifies green. Starvation here IS a false
+            # green, the same shape as techne#438.
+            #
+            # The cost of the looser scan is `go build --tags test`, which names
+            # `test` as a build tag. That match is inert: `go build` emits no
+            # count-shaped output in either direction, so it can neither certify
+            # nor accuse. An inert false match is the right trade for a live class
+            # of false greens.
+            before_separator = rest[: rest.index("--")] if "--" in rest else rest
+            if any(t in subcommands for t in before_separator):
                 return True
         if head in _TEST_RUNNER_WRAPPERS and any(
             t.rsplit("/", 1)[-1] in _TEST_RUNNER_HEADS for t in rest

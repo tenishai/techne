@@ -677,18 +677,60 @@ class TestSuiteEvidence:
         ):
             assert _command_runs_tests(command) is True, command
 
-    def test_subcommand_must_be_in_subcommand_position(self):
-        """`test` as a flag VALUE is not a `test` subcommand.
+    def test_decorated_runner_spellings_are_recognised(self):
+        """Flags, goals, directories and toolchains must not hide the subcommand.
 
-        The subcommand check scanned every remaining token, which is the same
-        loose match deliberately avoided for `-m`. One pass-through verb is
-        allowed so `npm run test` resolves, but no more.
+        A stricter position rule was tried and reverted. Filtering flags keeps
+        their VALUES, so every one of these stopped being recognised — and in this
+        gate an unrecognised row raises no unreliable flag, letting a small intact
+        run elsewhere certify green. Starvation here IS a false green (techne#438),
+        which is why the scan is deliberately loose up to a `--`.
         """
         from techne.core.evidence import _command_runs_tests
 
-        assert _command_runs_tests("go build --tags test") is False
+        for command in (
+            "make -C build test", "make -j 4 test", "make V=1 test",
+            "mvn clean test", "gradle clean test", "cargo +nightly test",
+            "npm --prefix web test", "yarn --cwd web test", "dotnet test -v n",
+        ):
+            assert _command_runs_tests(command) is True, command
+
+    def test_arguments_after_a_separator_are_not_subcommands(self):
+        """`--` ends the scan: `npm run build -- test` passes `test` onward."""
+        from techne.core.evidence import _command_runs_tests
+
         assert _command_runs_tests("npm run build -- test") is False
         assert _command_runs_tests("npm run test") is True
+
+    def test_heredoc_edge_cases(self):
+        """Delimiter spellings and terminator rules, each a real leak or over-strip.
+
+        The first two produced `backed` on a command that runs nothing; the last
+        three over-stripped and swallowed a real run below the body.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        # Body stripped -> the runner line inside it is not an invocation.
+        assert _command_runs_tests("cat > f <<\\PY\npytest x\nPY") is False
+        assert _command_runs_tests("cat > f <<'PY-1'\npytest x\nPY-1") is False
+        assert _command_runs_tests("cat f <<'A' g <<'B'\npytest x\nA\npytest y\nB") is False
+        assert _command_runs_tests("cat > f <<'PY'\npytest x") is False, "unterminated"
+        # NOT stripped -> a real run below the construct still counts.
+        assert _command_runs_tests("grep x <<<word\npytest -q") is True, "herestring"
+        assert _command_runs_tests('echo "a << b"\npytest -q') is True, "quoted <<"
+        # `<<-` must be recognised as an opener at all: without it the tag `-PY`
+        # never matches, nothing is stripped, and the body's `pytest` line escapes.
+        # Asserted WITHOUT a trailing run, because with one both versions return
+        # True and the assertion would pin nothing.
+        assert _command_runs_tests("cat > f <<-PY\npytest x\n\tPY") is False
+        assert _command_runs_tests("cat > f <<-PY\npytest x\n\tPY\npytest -q") is True
+        # An indented tag inside a PLAIN `<<` body is body text, not the end. A
+        # lenient `.strip()` terminator ends the body here and lets the `pytest`
+        # line below escape as a command — this asserts False specifically because
+        # True is what the lenient version returns.
+        assert _command_runs_tests("cat > f <<PY\n  PY\npytest x\nPY") is False
+        # ...and a genuine run after the body still counts.
+        assert _command_runs_tests("cat > f <<PY\n  PY\npytest x\nPY\npytest -q") is True
 
     def test_interpreter_behind_a_variable_still_counts_as_a_runner(self, db_path):
         """`"$VENV" -m pytest` is the dominant real-world shape and must match.
