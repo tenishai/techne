@@ -278,26 +278,28 @@ _HEREDOC_OPEN = re.compile(
 )
 
 
-def _mask_quoted(text: str) -> str:
-    """Blank out quoted spans, preserving length and newlines so offsets line up.
+def _mask_quoted_line(line: str, quote: str | None) -> tuple[str, str | None]:
+    """Mask one line's quoted spans, carrying quote state in and out.
 
     `echo "a << b"` contains no heredoc, but an unmasked scan reads `b` as a
-    delimiter and strips every following line looking for a terminator that never
-    comes — swallowing a real test run further down the command.
+    delimiter and strips every following line hunting a terminator that never
+    comes — swallowing a real test run below.
 
-    Applied to the WHOLE command, never line by line. Quote state carries across
-    newlines in a shell, and `_split_bash_segments` models it that way; a
-    per-line mask restarts clean and disagrees. A multi-line quoted commit
-    message followed by `&& cat > probe.sh <<'SH'` is enough — on the second line
-    the fresh mask reads the message's CLOSING quote as an opening one, hides the
-    real heredoc opener, and the body's `pytest` line escapes as a command.
-    Newlines are never masked so a caller can still slice this per line.
+    State carries across newlines, because a quoted argument may span them and
+    ``_split_bash_segments`` models it that way. A per-line mask that restarts
+    clean disagrees: after a multi-line quoted commit message, the next line reads
+    the message's CLOSING quote as an opening one and hides a real heredoc opener.
+
+    But state must NOT carry across a heredoc body, which is why this is threaded
+    by the caller rather than run over the whole command. Body text is not subject
+    to shell quoting at all, so a stray apostrophe in a script being written —
+    ``# don't remove this`` — would otherwise open a quote that never closes and
+    poison every command line after it. Masking the whole command up front cannot
+    express that distinction, because the mask would run over text the segment
+    splitter never sees.
     """
-    out, quote = [], None
-    for char in text:
-        if char == "\n":  # keep line structure intact for positional slicing
-            out.append(char)
-            continue
+    out: list[str] = []
+    for char in line:
         if quote:
             out.append("\x00" if char != quote else char)
             if char == quote:
@@ -307,7 +309,7 @@ def _mask_quoted(text: str) -> str:
             out.append(char)
         else:
             out.append(char)
-    return "".join(out)
+    return "".join(out), quote
 
 
 def _strip_heredoc_bodies(command: str) -> str:
@@ -322,11 +324,12 @@ def _strip_heredoc_bodies(command: str) -> str:
     of the same class this whole gate exists to close.
     """
     lines = command.split("\n")
-    # Masked ONCE over the whole command, then sliced per line — quote state has
-    # to carry across newlines to agree with _split_bash_segments.
-    masked_lines = _mask_quoted(command).split("\n")
     kept: list[str] = []
     i = 0
+    # Threaded across KEPT lines only. The body-skipping loop below advances `i`
+    # without touching `quote`, so a heredoc body cannot leak quote state into the
+    # commands that follow it.
+    quote: str | None = None
     while i < len(lines):
         line = lines[i]
         kept.append(line)
@@ -334,7 +337,7 @@ def _strip_heredoc_bodies(command: str) -> str:
         # scanning a masked line would blank out the tag itself. The mask is used
         # only to LOCATE: a `<<` whose own position is inside a quoted span (as in
         # `echo "a << b"`) opens nothing.
-        masked = masked_lines[i]
+        masked, quote = _mask_quoted_line(line, quote)
         opens = [
             (m.group(1) == "-", m.group(3))
             for m in _HEREDOC_OPEN.finditer(line)

@@ -780,6 +780,75 @@ class TestSuiteEvidence:
         assert ev.tests.totals_unreliable is True
         assert ev.tests.suite_green is None
 
+    def test_quotes_in_a_heredoc_body_do_not_leak_into_later_commands(self):
+        """A stray apostrophe in a script being written is not shell quoting.
+
+        Heredoc body text is not subject to shell quoting at all. Masking the
+        whole command up front could not express that — the mask ran over text the
+        segment splitter never sees — so `# don't remove this` opened a quote that
+        never closed, hid the NEXT heredoc's opener, and let its body's `pytest`
+        line escape as a command head. Real bash runs nothing here; both heredocs
+        write files.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests(
+            "cat > probe.py <<'PY'\n# don't remove this\nPY\n"
+            "cat > run.sh <<'SH'\npytest -q\nSH"
+        ) is False
+
+    def test_property_no_heredoc_body_line_is_ever_a_command(self):
+        """Generated commands: a runner inside a body must never be an invocation.
+
+        This is the invariant `_strip_heredoc_bodies` exists to guarantee, asserted
+        over a generated product rather than over shapes someone thought of. Four
+        rounds of review found four defects in this code and each was a shape
+        nobody had enumerated — including two introduced by the fix for the
+        previous one. The grammar is deliberately built from what actually breaks
+        it: delimiter spellings, and body text containing unbalanced quotes.
+
+        Deterministic (itertools product, no RNG, no new dependency) so a failure
+        reproduces exactly.
+        """
+        import itertools
+
+        from techne.core.evidence import _command_runs_tests
+
+        openers = ["<<'PY'", '<<"PY"', "<<PY", "<<-PY", "<<\\PY", "<<'PY-1'"]
+        terminators = {"<<'PY'": "PY", '<<"PY"': "PY", "<<PY": "PY",
+                       "<<-PY": "\tPY", "<<\\PY": "PY", "<<'PY-1'": "PY-1"}
+        bodies = [
+            "# don't remove this",      # unbalanced single quote
+            'x = "oops',                # unbalanced double quote
+            "it's fine",
+            "echo 'balanced'",
+            "plain text",
+        ]
+        runner_lines = ["pytest -q", "go test ./...", "npm test"]
+
+        # A multi-line quoted argument before the heredocs. Without this the
+        # grammar misses the round-3 regression entirely: verified by emulating
+        # each prior implementation, the body-quote shapes alone catch round 4's
+        # but not round 3's.
+        prefixes = ["", 'git commit -m "fix: a message\n\nspanning lines." && ']
+
+        for prefix, opener, body, runner in itertools.product(
+            prefixes, openers, bodies, runner_lines
+        ):
+            end = terminators[opener]
+            # BOTH orderings, because each catches a different regression and
+            # neither catches both. With the runner in the SECOND body, a body
+            # quote leaking forward exposes it (round 4). With the runner in the
+            # FIRST body, a prefix that hides that opener exposes it (round 3) —
+            # verified by emulating each prior implementation.
+            for command in (
+                f"{prefix}cat > a.py {opener}\n{body}\n{end}\n"
+                f"cat > b.sh {opener}\n{runner}\n{end}",
+                f"{prefix}cat > a.sh {opener}\n{runner}\n{end}\n"
+                f"cat > b.py {opener}\n{body}\n{end}",
+            ):
+                assert _command_runs_tests(command) is False, command
+
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
         _insert_obs(db_path, "sess-nt", "Bash", "Ran: ls\nOutput: foo.py  bar.py")
