@@ -278,15 +278,26 @@ _HEREDOC_OPEN = re.compile(
 )
 
 
-def _mask_quoted(line: str) -> str:
-    """Blank out quoted spans, preserving length so offsets still line up.
+def _mask_quoted(text: str) -> str:
+    """Blank out quoted spans, preserving length and newlines so offsets line up.
 
     `echo "a << b"` contains no heredoc, but an unmasked scan reads `b` as a
     delimiter and strips every following line looking for a terminator that never
     comes — swallowing a real test run further down the command.
+
+    Applied to the WHOLE command, never line by line. Quote state carries across
+    newlines in a shell, and `_split_bash_segments` models it that way; a
+    per-line mask restarts clean and disagrees. A multi-line quoted commit
+    message followed by `&& cat > probe.sh <<'SH'` is enough — on the second line
+    the fresh mask reads the message's CLOSING quote as an opening one, hides the
+    real heredoc opener, and the body's `pytest` line escapes as a command.
+    Newlines are never masked so a caller can still slice this per line.
     """
     out, quote = [], None
-    for char in line:
+    for char in text:
+        if char == "\n":  # keep line structure intact for positional slicing
+            out.append(char)
+            continue
         if quote:
             out.append("\x00" if char != quote else char)
             if char == quote:
@@ -311,6 +322,9 @@ def _strip_heredoc_bodies(command: str) -> str:
     of the same class this whole gate exists to close.
     """
     lines = command.split("\n")
+    # Masked ONCE over the whole command, then sliced per line — quote state has
+    # to carry across newlines to agree with _split_bash_segments.
+    masked_lines = _mask_quoted(command).split("\n")
     kept: list[str] = []
     i = 0
     while i < len(lines):
@@ -320,7 +334,7 @@ def _strip_heredoc_bodies(command: str) -> str:
         # scanning a masked line would blank out the tag itself. The mask is used
         # only to LOCATE: a `<<` whose own position is inside a quoted span (as in
         # `echo "a << b"`) opens nothing.
-        masked = _mask_quoted(line)
+        masked = masked_lines[i]
         opens = [
             (m.group(1) == "-", m.group(3))
             for m in _HEREDOC_OPEN.finditer(line)

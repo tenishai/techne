@@ -723,6 +723,14 @@ class TestSuiteEvidence:
         # Asserted WITHOUT a trailing run, because with one both versions return
         # True and the assertion would pin nothing.
         assert _command_runs_tests("cat > f <<-PY\npytest x\n\tPY") is False
+        # Quote state must carry ACROSS newlines. A multi-line quoted message
+        # followed by a heredoc: with a per-line mask the second line starts
+        # clean, reads the message's CLOSING quote as an opening one, hides the
+        # real `<<'SH'` opener, and the body's runner line escapes.
+        assert _command_runs_tests(
+            'git commit -m "fix: a message\n\nspanning lines." '
+            "&& cat > /tmp/probe.sh <<'SH'\npytest -q\nSH"
+        ) is False
         assert _command_runs_tests("cat > f <<-PY\npytest x\n\tPY\npytest -q") is True
         # An indented tag inside a PLAIN `<<` body is body text, not the end. A
         # lenient `.strip()` terminator ends the body here and lets the `pytest`
