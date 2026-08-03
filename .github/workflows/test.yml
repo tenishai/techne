@@ -103,7 +103,9 @@ jobs:
   # (#383) Architecture-card freshness. Each card in ARCHITECTURE.md / docs/arch/*.md
   # pins the git blob sha of the seam file(s) it describes; this recomputes them and
   # fails when code drifted from its card — turning "detected staleness" into
-  # "blocked-at-PR staleness", which was the point of the gate.
+  # visible-at-PR staleness. NOTE it cannot BLOCK: branch protection is unavailable
+  # on this repo's plan (`gh api .../branches/main/protection` → 403), so no check
+  # here is required. Red means "stop" by convention, not by enforcement.
   #
   # Same reasoning as the eval gates above: a regression gate that nothing invokes
   # protects nothing (Prudence, #397). This one was written 2026-07-20 and went

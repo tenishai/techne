@@ -48,10 +48,23 @@ def _card(repo: Path, name: str, *anchors: str, card_id: str = "arch-card:test")
     )
 
 
+def _repo_card(repo: Path, *indexed: str, anchor: str) -> None:
+    """Write ARCHITECTURE.md carrying a `SEAMS → card:` index — the manifest."""
+    rows = "\n".join(f"- name  pkg/x.py  (desc)  → {rel}" for rel in indexed)
+    (repo / "ARCHITECTURE.md").write_text(
+        f"---\ncard: repo-card:test\nanchor: {anchor}\n---\n"
+        f"# repo\n\nSEAMS → card:\n{rows}\n"
+    )
+
+
 def test_fresh_passes(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     sha = _seam(repo, "pkg/seam.py")
     _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    # Every seam card must be indexed in the manifest — a card absent from it is
+    # unprotected, since deleting it later would pass silently (Prudence, PR #451).
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
     r = _run(repo)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "fresh" in r.stdout
@@ -91,19 +104,12 @@ def test_stray_non_card_md_is_skipped_not_failed(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     sha = _seam(repo, "pkg/seam.py")
     _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
     (repo / "docs" / "arch" / "NOTES.md").write_text("# just notes, no frontmatter\n")
     r = _run(repo)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "skipped 1" in r.stdout
-
-
-def _repo_card(repo: Path, *indexed: str, anchor: str) -> None:
-    """Write ARCHITECTURE.md carrying a `SEAMS → card:` index — the manifest."""
-    rows = "\n".join(f"- name  pkg/x.py  (desc)  → {rel}" for rel in indexed)
-    (repo / "ARCHITECTURE.md").write_text(
-        f"---\ncard: repo-card:test\nanchor: {anchor}\n---\n"
-        f"# repo\n\nSEAMS → card:\n{rows}\n"
-    )
 
 
 def test_deleted_card_still_indexed_fails(tmp_path: Path) -> None:
@@ -150,3 +156,38 @@ def test_no_cards_fails(tmp_path: Path) -> None:
     r = _run(repo)
     assert r.returncode == 1
     assert "no architecture cards" in r.stdout
+
+
+def test_card_absent_from_the_index_fails(tmp_path: Path) -> None:
+    """The check must run BOTH directions. Forward-only left a hole exactly where it
+    hurts most: a card that was never indexed can be deleted for exit 0 — and new
+    cards are the ones least likely to have been wired into the index carefully.
+    (Prudence, PR #451.)"""
+    repo = _repo(tmp_path)
+    sha = _seam(repo, "pkg/seam.py")
+    _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    orphan_sha = _seam(repo, "pkg/orphan.py", body="o = 1\n")
+    _card(repo, "orphan.md", f"pkg/orphan.py sha={orphan_sha}")  # never indexed
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "not indexed" in r.stdout
+    assert "orphan.md" in r.stdout
+
+
+def test_deleting_the_manifest_itself_fails(tmp_path: Path) -> None:
+    """ARCHITECTURE.md IS the coverage check; without it every seam card is
+    unverifiable, so its absence must not read as 'nothing to check'."""
+    repo = _repo(tmp_path)
+    sha = _seam(repo, "pkg/seam.py")
+    _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+    assert _run(repo).returncode == 0, "baseline must be green"
+
+    (repo / "ARCHITECTURE.md").unlink()
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ARCHITECTURE.md is missing" in r.stdout

@@ -40,7 +40,10 @@ CARD_GLOBS = ("ARCHITECTURE.md", "docs/arch/*.md")
 # that: removing a card AND its index line is a deliberate, passing change; deleting
 # just the file is caught. Self-maintaining — no hardcoded card count to keep bumping.
 MANIFEST_FILE = "ARCHITECTURE.md"
-MANIFEST_RE = re.compile(r"→\s*(docs/arch/[^\s)]+\.md)")
+# Only non-nested paths: the card glob is `docs/arch/*.md`, so a nested path could
+# never be found as a card and would be reported as deleted forever. Matching the
+# glob's shape keeps the two halves consistent (Prudence, PR #451).
+MANIFEST_RE = re.compile(r"→\s*(docs/arch/[^/\s)]+\.md)")
 # Tolerate an optional BOM and CRLF line endings around the frontmatter fence.
 FRONTMATTER_RE = re.compile(r"\A﻿?---[ \t]*\r?\n(.*?)\r?\n---", re.S)
 CARD_KEY_RE = re.compile(r"^card:\s*\S", re.M)
@@ -122,15 +125,35 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
     # indexes must still parse as a card. Catches deletion/rename/frontmatter-removal,
     # none of which the glob can see.
     manifest = repo / MANIFEST_FILE
-    if manifest.exists():
-        indexed = sorted(set(MANIFEST_RE.findall(manifest.read_text(encoding="utf-8"))))
-        for rel in indexed:
+    if not manifest.exists():
+        # The manifest IS the coverage check; without it every card below is
+        # unverifiable and deleting it would otherwise exit 0 (Prudence, PR #451).
+        problems.append((repo, f"{MANIFEST_FILE} is missing — seam-card coverage cannot be checked"))
+    else:
+        indexed = set(MANIFEST_RE.findall(manifest.read_text(encoding="utf-8")))
+        # Forward: everything the index claims must still parse as a card.
+        for rel in sorted(indexed):
             if rel not in found:
                 problems.append((
                     manifest,
                     f"card indexed in {MANIFEST_FILE} but not found as a card: {rel}\n"
                     "        (deleted, renamed, or its `card:` frontmatter was removed)\n"
                     "        If the removal is deliberate, drop its line from the SEAMS index too.",
+                ))
+        # Reverse: every card on disk must appear in the index. Without this the
+        # check is one-directional, and a card that was NEVER indexed can be deleted
+        # for exit 0 — regenerating the false-green precisely for new cards, which
+        # are the ones least likely to have been wired in carefully. It also catches
+        # an index that drifted out of the matched shape. (Prudence, PR #451.)
+        for rel in sorted(found):
+            if rel == MANIFEST_FILE:
+                continue  # the manifest indexes the seam cards, not itself
+            if rel not in indexed:
+                problems.append((
+                    repo / rel,
+                    f"card is not indexed in {MANIFEST_FILE}'s `SEAMS → card:` block\n"
+                    "        (a card absent from the index is unprotected — deleting it\n"
+                    "         later would pass silently). Add a line pointing at it.",
                 ))
 
     if n_cards == 0:
