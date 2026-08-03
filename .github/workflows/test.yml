@@ -86,19 +86,40 @@ jobs:
         working-directory: techne
         run: .venv-ci/bin/python -m ruff check techne tests || true  # advisory until strict pass is done
 
-      # `-n auto` (#463). This step was 97.5% of the job — 654s of a 671s run,
-      # against ~5s for checkout+venv+install+ruff combined. The suite is
-      # SYSCALL-bound (sys > user), so it suffers badly on this runner: dev02 is
-      # only 1.45x slower than a dev laptop on CPU but 6.5x slower on this suite,
-      # because it sits at 81% disk with 33 containers competing for I/O.
-      # Parallel workers overlap that waiting instead of serializing it.
+      # Parallel test execution (#463). This step was 97.5% of the job — 654s of
+      # a 671s run, against ~5s for checkout+venv+install+ruff combined (the
+      # balance is GitHub Actions job setup/teardown).
       #
-      # NOT applied to the eval gates below or to eval-vec: both select a handful
-      # of tests where worker startup would cost more than it saves, and eval-vec
-      # additionally runs with `-s`, which xdist does not support.
+      # WHY IT IS SLOW, stated precisely — an earlier draft of this comment got
+      # it wrong and mispredicted this runner by 2x, so read the numbers before
+      # tuning. A local run measures real 102.05 / user 39.60 / sys 45.45:
+      # user+sys is 85s against 102s wall, i.e. ~83% CPU-BUSY with only ~17s of
+      # genuine waiting. The suite is syscall-heavy (per-test filesystem setup
+      # dominates), but kernel CPU time in getdents/mkdir/stat is CPU work — it
+      # COMPETES for cores, it does not overlap with itself. So this is not
+      # I/O-wait that parallelism hides; the speedup ceiling is CORE COUNT.
+      #
+      # That model predicts the runner correctly: 654s / 2 physical cores ~= 327s
+      # against 317s actual. The discarded "overlap the I/O" model predicted
+      # ~165s. Expect ~2x here, against ~4x on a 6-core dev laptop.
+      #
+      # WORKER COUNT IS PINNED, not `auto`, for the same reason this workflow
+      # pins UV_PYTHON_PREFERENCE above: CI must not silently run something
+      # other than what it claims. `auto` resolves from the host at runtime and
+      # moves without anyone editing this file — inside a container it follows
+      # CPU AFFINITY, which `--cpus` does not constrain (only `--cpuset-cpus`
+      # does), and it drops to PHYSICAL cores if `psutil` ever arrives as a
+      # transitive dep. It also does not compose with the documented scaling
+      # path above: 2 runner replicas x `auto` would be 8 workers on 2 physical
+      # cores. 4 matches what was measured here; change it deliberately.
+      #
+      # NOT applied to the eval gates below or to eval-vec: both select exactly
+      # 2 tests (verified via --collect-only), where worker startup costs more
+      # than it saves, and eval-vec additionally runs with `-s`, which xdist
+      # does not support.
       - name: Pytest (includes contract assertions)
         working-directory: techne
-        run: .venv-ci/bin/python -m pytest -q -n auto
+        run: .venv-ci/bin/python -m pytest -q -n 4
 
       # (#398) Deterministic eval gates — FTS-only, no vector/LLM deps, ~0.5s.
       # A regression gate that nothing invokes protects nothing (Prudence, #397).

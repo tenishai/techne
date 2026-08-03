@@ -65,9 +65,16 @@ for PY in "${MATRIX[@]}"; do
   # Advisory in CI (`|| true`), so advisory here — reported, never fatal.
   "$VENV/bin/python" -m ruff check techne tests || echo "  (ruff advisory — non-blocking, same as CI)"
 
-  # `-n auto` mirrors the workflow (#463). Keep the flag in sync with test.yml:
-  # the point of this script is that green here means green there, and a serial
-  # local run would not exercise the parallel execution CI now uses.
+  # Parallel, mirroring the workflow (#463) — a serial local run would not
+  # exercise the execution model CI now uses.
+  #
+  # The WORKER COUNT deliberately differs: CI pins `-n 4` because it must be
+  # deterministic and must compose with runner replicas; a dev box should use
+  # what it has. That is safe to diverge on because worker count provably does
+  # not change OUTCOMES — the #424/#463 review sharded all 2312 node ids four
+  # ways, ran the shards serially and then concurrently, and got byte-identical
+  # pass/fail/skip counts. Keep the FLAG in sync with test.yml; the number is
+  # free.
   "$VENV/bin/python" -m pytest -q -n auto || FAILED+=("$PY: pytest")
 
   # CLI -m overrides pyproject's addopts exclusion. Easy to forget locally, which
