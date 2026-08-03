@@ -202,9 +202,10 @@ def test_manifest_with_frontmatter_stripped_fails(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     sha = _seam(repo, "pkg/seam.py")
     _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    orphan_sha = _seam(repo, "pkg/orphan.py", body="o = 1\n")
+    _card(repo, "orphan.md", f"pkg/orphan.py sha={orphan_sha}")  # deliberately unindexed
     root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
     _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
-    assert _run(repo).returncode == 0, "baseline must be green"
 
     # Same file, same SEAMS index — frontmatter removed, so it no longer parses.
     body = (repo / "ARCHITECTURE.md").read_text().split("---\n")[-1]
@@ -213,8 +214,14 @@ def test_manifest_with_frontmatter_stripped_fails(tmp_path: Path) -> None:
     r = _run(repo)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "no longer parses as a card" in r.stdout
-    # The index is still readable, so the cross-check must keep running against it.
-    assert "not indexed" not in r.stdout
+    # THE POINT OF THE SECOND `if`: the SEAMS block is still readable, so the index
+    # cross-check must KEEP RUNNING. Asserting absence proved nothing — the previous
+    # version of this test passed unchanged when the structure was mutated to `elif`
+    # (0 tests failed), i.e. it documented a guarantee it could not enforce. Assert
+    # PRESENCE of something only the still-running cross-check can say.
+    # (Prudence, PR #451.)
+    assert "not indexed" in r.stdout, "index cross-check must still run"
+    assert "orphan.md" in r.stdout
 
 
 def test_reformatted_index_blames_the_index_not_every_card(tmp_path: Path) -> None:
@@ -236,3 +243,38 @@ def test_reformatted_index_blames_the_index_not_every_card(tmp_path: Path) -> No
     assert "matched NO cards" in r.stdout
     assert r.stdout.count("not indexed") == 0, "must not blame the individual cards"
     assert "FAILED (1)" in r.stdout, "one index failure, not three card failures"
+
+
+def test_anchor_trailer_only_prints_for_anchor_problems(tmp_path: Path) -> None:
+    """The footer told the reader to bump an `anchor:` sha — printed underneath
+    coverage failures that have nothing to do with anchors, contradicting the correct
+    inline remediation directly above it. (Prudence, PR #451.)"""
+    repo = _repo(tmp_path)
+    sha = _seam(repo, "pkg/seam.py")
+    _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    orphan_sha = _seam(repo, "pkg/orphan.py", body="o = 1\n")
+    _card(repo, "orphan.md", f"pkg/orphan.py sha={orphan_sha}")  # unindexed
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout
+    assert "not indexed" in r.stdout
+    assert "bump its recorded `anchor:` sha" not in r.stdout, (
+        "anchor remediation must not follow a coverage-only failure"
+    )
+
+
+def test_anchor_trailer_still_prints_for_real_drift(tmp_path: Path) -> None:
+    """Guard against over-gating: the trailer must survive for its actual case."""
+    repo = _repo(tmp_path)
+    sha = _seam(repo, "pkg/seam.py")
+    _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+    (repo / "pkg" / "seam.py").write_text("x = 2  # drifted\n")
+
+    r = _run(repo)
+    assert r.returncode == 1
+    assert "drifted" in r.stdout
+    assert "bump its recorded `anchor:` sha" in r.stdout

@@ -188,8 +188,9 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
                 manifest,
                 f"the `SEAMS → card:` index matched NO cards, but {len(seam_cards)} "
                 "exist on disk\n"
-                "        This is almost certainly a formatting change in the index,\n"
-                "        not a problem with the cards. Each entry must contain:\n"
+                "        Usually a formatting change in the index — or the entries\n"
+                "        were removed. Either way the cards are not at fault.\n"
+                "        Each entry must contain:\n"
                 "          → docs/arch/<name>.md      (a literal → then the bare path)",
             ))
             seam_cards = []  # don't also blame each card individually
@@ -199,7 +200,11 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
                     repo / rel,
                     f"card is not indexed in {MANIFEST_FILE}'s `SEAMS → card:` block\n"
                     "        (a card absent from the index is unprotected — deleting it\n"
-                    "         later would pass silently). Add a line pointing at it.",
+                    "         later would pass silently). Add a line containing:\n"
+                    f"          → {rel}\n"
+                    "        If a line for it already exists, check its SHAPE — only a\n"
+                    "        literal → followed by the bare path is matched, so a\n"
+                    "        markdown link or backticks reads as absent.",
                 ))
 
     if n_cards == 0:
@@ -226,7 +231,17 @@ def main() -> int:
             except ValueError:
                 shown = where
             print(f"  ✗ {shown}: {why}")
-        if code == 1:
+        # Print the anchor-drift trailer ONLY when an anchor problem is actually
+        # among the failures. The coverage classes added in PR #451 (unindexed card,
+        # index matched nothing, manifest missing/unparsed) each carry their own
+        # correct inline remediation, and this footer CONTRADICTED the advice printed
+        # directly above them — telling the reader to bump an `anchor:` sha that has
+        # nothing to do with the failure. (Prudence, PR #451.)
+        anchor_problem = any(
+            ("drifted" in why or "malformed" in why or "seam file missing" in why)
+            for _where, why in problems
+        )
+        if code == 1 and anchor_problem:
             print(
                 "\nA seam changed (or an anchor is malformed) without its card being "
                 "updated.\nFix the card body and bump its recorded `anchor:` sha in the "
