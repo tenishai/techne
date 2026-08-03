@@ -1052,3 +1052,110 @@ class TestVenvStateFollowsTheChosenInterpreter:
         cmd = hooks_mod._heal_command()
         assert str(chosen) in cmd
         assert "/our/unrelated/venv" not in cmd
+
+
+class TestNamespacePackageChannel:
+    """PR #460 round 2: `import techne` and `-m techne.hooks.session_start` are not
+    the same claim under PEP 420. Prudence measured three routes where the probe
+    returned True while the actual hook command returned rc=1 — including one with
+    no env trickery at all (an empty `techne/` left in site-packages by a partial
+    uninstall). _probe_env had closed the incident SHAPE, not the CHANNEL.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_interpreter_and_clean_cache(self, monkeypatch):
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
+        hooks_mod._IMPORT_PROBE.clear()
+        yield
+        hooks_mod._IMPORT_PROBE.clear()
+
+    def test_probe_asserts_the_module_the_hooks_actually_run(self, tmp_path, monkeypatch):
+        """An interpreter that can satisfy `import techne` but NOT the hook module
+        must be rejected — that is the empty-namespace-dir shape."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        py = tmp_path / "namespace-only-python"
+        # Succeeds for the weak claim, fails for the real one.
+        # NOTE $2, not $3: argv is (-c, <stmt>), so the statement is $2. An earlier
+        # cut read $3, which is always empty — so it exited 1 for BOTH the weak and
+        # the real claim and the test passed under mutation without testing anything.
+        py.write_text(
+            '#!/bin/sh\n'
+            'case "$2" in\n'
+            '  "import techne") exit 0 ;;\n'
+            '  *) exit 1 ;;\n'
+            'esac\n'
+        )
+        py.chmod(0o755)
+        assert hooks_mod._can_import_techne(py) is False, (
+            "probing only `import techne` lets a namespace-package shell through"
+        )
+
+    def test_pythonpath_parent_of_the_install_root_is_stripped(self, monkeypatch, tmp_path):
+        """The real install root is literally named `techne`, so PYTHONPATH=<parent>
+        makes that directory importable as a PEP 420 namespace package. Stripping
+        only entries UNDER the root kept it. Modelled explicitly here — conftest pins
+        _install_root to a temp dir NOT named techne, which hides the mechanism."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        parent = tmp_path / "tenishai"
+        root = parent / "techne"        # repo root, literally named `techne`
+        root.mkdir(parents=True)
+        monkeypatch.setattr(hooks_mod, "_install_root", lambda: root)
+        monkeypatch.setenv("PYTHONPATH", str(parent))
+
+        assert "PYTHONPATH" not in hooks_mod._probe_env(), (
+            "the parent of a root named `techne` supplies a namespace package"
+        )
+
+    def test_a_second_checkout_on_pythonpath_is_stripped(self, monkeypatch, tmp_path):
+        """Nowhere near this root, but it still supplies techne."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        other = tmp_path / "other-checkout"
+        (other / "techne").mkdir(parents=True)
+        (other / "techne" / "__init__.py").write_text("")
+        monkeypatch.setenv("PYTHONPATH", str(other))
+        assert "PYTHONPATH" not in hooks_mod._probe_env()
+
+    def test_an_unrelated_entry_is_still_kept(self, monkeypatch, tmp_path):
+        """Guard against over-stripping — the whole reason for not using -E."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        innocent = tmp_path / "unrelated-lib"
+        innocent.mkdir()
+        monkeypatch.setenv("PYTHONPATH", str(innocent))
+        assert hooks_mod._probe_env()["PYTHONPATH"] == str(innocent)
+
+
+class TestVenvStateSubprocessPath:
+    """PR #460 round 2: `if key == sys.executable:` -> `if True:` left all 57 tests
+    green. Every existing test either hit the short-circuit or monkeypatched
+    _venv_state away, so the subprocess branch — the one that exists BECAUSE the
+    chosen interpreter can differ from ours — was never exercised."""
+
+    def test_queries_the_other_interpreter_rather_than_assuming_ours(self, tmp_path):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        hooks_mod._VENV_PROBE.clear()
+        fake = tmp_path / "other-python"
+        # Reports a venv whose prefix is deliberately unlike ours.
+        fake.write_text('#!/bin/sh\necho 1\necho /somewhere/else/venv\n')
+        fake.chmod(0o755)
+
+        in_venv, prefix = hooks_mod._venv_state(fake)
+        assert in_venv is True
+        assert prefix == "/somewhere/else/venv"
+        assert prefix != sys.prefix, "must not have answered from OUR interpreter"
+        hooks_mod._VENV_PROBE.clear()
+
+    def test_a_failing_interpreter_degrades_to_not_a_venv(self, tmp_path):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        hooks_mod._VENV_PROBE.clear()
+        broken = tmp_path / "broken-python"
+        broken.write_text("#!/bin/sh\nexit 1\n")
+        broken.chmod(0o755)
+        assert hooks_mod._venv_state(broken) == (False, "")
+        hooks_mod._VENV_PROBE.clear()

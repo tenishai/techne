@@ -162,6 +162,13 @@ def _probe_env() -> dict[str, str]:
             continue
         if resolved == root or root in resolved.parents:
             continue
+        # Strip anything that SUPPLIES techne, not merely anything under our root.
+        # The root is literally named `techne`, so its PARENT is a namespace-package
+        # source; a second checkout or worktree is another. Both were measured
+        # masking a broken interpreter while sitting nowhere near this root.
+        # (Prudence, PR #460.)
+        if (resolved / "techne" / "__init__.py").exists() or (resolved / "techne").is_dir():
+            continue
         kept.append(entry)
     if kept:
         env["PYTHONPATH"] = os.pathsep.join(kept)
@@ -222,7 +229,13 @@ def _can_import_techne(candidate: Path) -> bool:
     try:
         with tempfile.TemporaryDirectory() as neutral:
             proc = subprocess.run(
-                [key, "-c", "import techne"],
+                # Probe what the HOOKS ACTUALLY RUN, not a weaker claim. Under
+                # PEP 420 `import techne` can succeed from a namespace package that
+                # supplies no submodules — measured True while
+                # `-m techne.hooks.session_start` returned rc=1, via an empty
+                # `techne/` dir left in site-packages by a partial uninstall (no env
+                # trickery at all). (Prudence, PR #460.)
+                [key, "-c", "import techne.hooks.session_start"],
                 cwd=neutral,
                 env=_probe_env(),  # cwd alone is not enough — see _probe_env
                 capture_output=True,
