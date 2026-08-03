@@ -162,6 +162,9 @@ def test_no_cards_fails(tmp_path: Path) -> None:
     assert "no architecture cards" in r.stdout
     # kind@no-cards-found must stay "coverage".
     assert "bump its recorded `anchor:` sha" not in r.stdout
+    # The early return APPENDS rather than replaces: manifest problems collected
+    # before it must survive. Mutating it back to a fresh list killed zero tests.
+    assert "ARCHITECTURE.md is missing" in r.stdout, "manifest problems must not be discarded"
 
 
 def test_card_absent_from_the_index_fails(tmp_path: Path) -> None:
@@ -398,3 +401,28 @@ def test_env_failure_carries_the_env_kind(tmp_path: Path) -> None:
         "is read, so it cannot legitimately mix with anchor problems"
     )
     assert (n_cards, n_anchors) == (0, 0)
+
+
+def test_env_failure_prints_no_anchor_trailer_even_if_kind_is_lost(monkeypatch, capsys) -> None:
+    """The `code == 1 and` belt IS individually observable — I claimed it wasn't.
+
+    My reasoning was that the kind tag suppresses the trailer on its own, so no
+    stdout test could isolate this guard. True end-to-end, false in general: inject a
+    fake `check()` returning an exit-2 problem ALREADY MIS-TAGGED as "anchor", and
+    the only thing left standing between that and the trailer is `code == 1`.
+
+    Prudence wrote this test to disprove the comment I'd left saying it couldn't be
+    written — in a PR whose thesis is that an unpinned fix walks back. A durable note
+    asserting something is untestable will talk the next maintainer out of testing
+    it, which is worse than the missing test. (PR #451.)
+    """
+    mod = _load_checker()
+    fake = (2, [(Path("/nowhere"), "git executable not found on PATH", "anchor")], 0, 0, 0)
+    monkeypatch.setattr(mod, "check", lambda repo: fake)
+    monkeypatch.setattr(mod, "repo_root", lambda: Path("/nowhere"))
+
+    rc = mod.main()
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "ERROR" in out
+    assert "bump its recorded `anchor:` sha" not in out

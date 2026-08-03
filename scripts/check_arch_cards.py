@@ -263,9 +263,12 @@ def main() -> int:
         # `code == 1` is redundant-by-construction now that problems carry a kind:
         # exit 2 returns before any card is read, so no anchor-kind problem can
         # coexist with it. Kept as defence in depth if the kind tag is ever lost —
-        # and NOT individually mutation-observable for exactly that reason (whichever
-        # belt survives suppresses the trailer alone). The kind side is pinned
-        # directly on check()'s return shape instead. (Prudence, PR #451.)
+        # Not observable through the END-TO-END surface (whichever belt survives
+        # suppresses the trailer alone) — but it IS observable by injecting a
+        # mis-tagged exit-2 problem at the check()/main() seam, which the tests do.
+        # An earlier comment here claimed it was untestable; that was wrong, and a
+        # durable note saying "can't be tested" talks the next maintainer out of
+        # testing it. (Prudence, PR #451.)
         if code == 1 and anchor_problem:
             print(
                 "\nA seam changed (or an anchor is malformed) without its card being "
