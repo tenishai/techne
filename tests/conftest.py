@@ -26,25 +26,37 @@ are independent of this pin. Tests with their own redirection (``fake_home``,
 ``isolated_config``) run after this fixture and override the same attrs.
 
 PERFORMANCE — why these carve subdirs out of ``tmp_path`` instead of calling
-``tmp_path_factory.mktemp()`` (techne#466). ``mktemp(numbered=True)`` scans the
+``tmp_path_factory.mktemp()`` (techne#466). ``mktemp(numbered=True)`` scans its
 base temp directory to find the next free number, so its cost grows with how
 many entries are already there: measured 411us/call over the first 200 dirs
 against 5555us/call once ~3800 exist — a 13.5x climb within a single run. These
-fixtures are AUTOUSE, so every test paid it TWICE, and the suite generates
-~3.3 numbered dirs per test (~7,600 in one flat directory at 2312 tests). That
-is quadratic cost which *looks* uniform once averaged, and it is ``getdents``
-time — the bulk of the ``sys > user`` profile behind techne#463.
+fixtures are AUTOUSE, so every test paid it twice. Serially that is ~7,600
+entries in one directory at 2312 tests: quadratic cost that *looks* uniform once
+averaged, and it is ``getdents`` time. It accounts for ~90% of the EXCESS of
+``sys`` over ``user`` (4.9s -> 0.4s), though only ~28% of ``sys`` outright.
 
-Carving out of the per-test ``tmp_path`` costs ONE numbered scan (pytest mints
-``tmp_path`` anyway) plus two O(1) mkdirs into a fresh directory, instead of
-three numbered scans. Isolation is unchanged: each test still gets a private,
-non-worktree directory, so techne#288 and techne#434 stay closed.
+WHAT THIS DOES AND DOES NOT FIX. It reduces numbered-dir creations from ~3.30 to
+~1.92 per test — not 3 to 1, because ~0.9/test come from tests minting their own
+via ``tmp_path_factory``, which this does not touch. Growth remains Theta(N^2)
+with the constant down ~2.9x; ~8.7s of an ~81s serial run is still numbered-dir
+scanning. Note the tradeoff: pre-change ``tmp_path`` was minted only for tests
+that asked for it, and now every test mints one.
 
-Do NOT "simplify" these back to a shared session-scoped root with a counter —
-an earlier attempt did exactly that and broke
-``test_probe_env_strips_a_relative_entry_resolving_into_the_root``, because the
-install root must genuinely exist for a relative PYTHONPATH entry to resolve
-against it.
+UNDER xdist THIS MATTERS MUCH LESS, and the reason is worth recording because an
+earlier draft of this note got it exactly backwards. ``getbasetemp()`` is
+PER-WORKER (``pytest-N/popen-gwK``), and that per-worker directory is what
+``make_numbered_dir`` scans — so the quadratic term is already divided by
+parallelism (~1/W^2 per worker) before this change lands. Measured deltas:
+-24.5% serial, -7.7% at ``-n 4`` locally, ~-1% on the 2-core CI runner. Do not
+probe this with ``tmp_path.parent.parent`` — that resolves to the SHARED
+``pytest-N`` root and makes every worker look identical.
+
+Isolation is unchanged: each test still gets a private, non-worktree directory,
+so techne#288 and techne#434 stay closed. But note the invariant changed shape —
+the carve-outs are now SIBLINGS of the test's own ``tmp_path`` contents rather
+than disjoint roots. The suite is insensitive to sibling *directories*, but
+sensitive to *files* beneath ``tmp_path``: a test that walks ``tmp_path``
+recursively would see anything created here. Keep these carve-outs empty.
 """
 
 import pytest
@@ -57,8 +69,11 @@ def _isolate_host_config(tmp_path, monkeypatch):
 
     # Carved out of the per-test `tmp_path`, NOT minted with
     # `tmp_path_factory.mktemp()` — see the module docstring's PERFORMANCE note.
+    # No `exist_ok`: a collision would mean pytest handed back a REUSED tmp_path,
+    # which is precisely the isolation failure this fixture exists to prevent, so
+    # it must be loud rather than silently absorbed.
     root = tmp_path / "_host"
-    root.mkdir(exist_ok=True)
+    root.mkdir()
     settings_path = root / ".claude" / "settings.json"
     mcp_path = root / ".claude.json"
     for target in (hooks_mod, claude_code):
@@ -82,13 +97,22 @@ def _isolate_install_root(tmp_path, monkeypatch):
     Tests that care about the guard override this with their own ``_install_root``
     (see ``tests/test_worktree_guard.py``), exactly as ``fake_home`` overrides the
     fixture above.
+
+    Do NOT "simplify" this to a shared session-scoped root with a counter and no
+    ``mkdir`` — an earlier attempt did exactly that and broke
+    ``test_probe_env_strips_a_relative_entry_resolving_into_the_root``, because a
+    relative PYTHONPATH entry must resolve against a root that EXISTS. That is
+    the only test that depends on it, and no other property of a mktemp-created
+    directory matters here: mktemp yields mode 0o700 and this ``mkdir`` yields
+    0o755, but the parent ``tmp_path`` is itself 0o700, so traversal stays
+    owner-only and nothing in the suite asserts on a directory mode.
     """
     from techne.platforms.claude_code import hooks as hooks_mod
 
-    # Same carve-out as above; must genuinely EXIST, because the probe tests
-    # resolve relative PYTHONPATH entries against it.
+    # Same carve-out as above; must genuinely EXIST (see the docstring), and no
+    # `exist_ok` for the same reason as `_isolate_host_config`.
     canonical = tmp_path / "_install_root"
-    canonical.mkdir(exist_ok=True)
+    canonical.mkdir()
     monkeypatch.setattr(hooks_mod, "_install_root", lambda: canonical, raising=False)
     # register_hooks guards THREE prunable inputs, not just the install root: the
     # interpreter (baked into the launcher's `PY=`, the MCP command and the heal)
