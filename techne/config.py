@@ -401,7 +401,41 @@ class Config:
             return cfg
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
-        return cls._from_dict(raw, home=home)
+        cfg = cls._from_dict(raw, home=home)
+        cfg._refresh_fast_cache(home=home, source=path)
+        return cfg
+
+    def _refresh_fast_cache(self, home: Path, source: Path) -> None:
+        """Write the stdlib-readable hook cache (techne#470). Best-effort.
+
+        Populated HERE, from the fully-resolved config, so the cache cannot
+        disagree with the parse that produced it — the only way to keep a
+        derived file honest is to derive it at the same moment.
+
+        Only the default config path seeds the cache: `Config.load(path=...)`
+        with an explicit non-default file (tests, one-off tooling) must not
+        overwrite the cache the hooks read.
+        """
+        if source != home / "config.yaml":
+            return
+        try:
+            from techne.fastconfig import write_cache
+
+            write_cache(
+                {
+                    "db_path": self.db_path,
+                    "hooks.timeout_s": self.hooks.timeout_s,
+                    "hooks.codex_grep_assist": int(self.hooks.codex_grep_assist),
+                    "hooks.codex_grep_assist_limit": self.hooks.codex_grep_assist_limit,
+                    "hooks.per_turn_recall": int(self.hooks.per_turn_recall),
+                    "hooks.post_tool_use": int(self.hooks.post_tool_use),
+                    "hooks.capture_bash": int(self.hooks.capture_bash),
+                    "hooks.capture_read": int(self.hooks.capture_read),
+                },
+                home=home,
+            )
+        except Exception:  # noqa: BLE001 — a cache write must never break a load
+            pass
 
     @classmethod
     def _from_dict(cls, raw: dict, home: Path | None = None) -> "Config":

@@ -69,6 +69,27 @@ def main() -> None:
         sys.exit(0)
 
     # ------------------------------------------------------------------
+    # FAST PATH (techne#470). This rail is DEFAULT-OFF, so the overwhelmingly
+    # common case is "decide there is no work and exit". Doing that via
+    # `import techne.config` cost 100ms of a 145ms invocation, on a hook that
+    # fires on every matching tool call.
+    #
+    # The stdlib-only cache answers the gate question in ~0ms of import, so the
+    # disabled case now costs bare interpreter startup and nothing more. A miss
+    # (absent / stale / malformed) falls through to the real Config below, which
+    # regenerates the cache as a side effect — so this is an optimisation that
+    # cannot be wrong, only occasionally slow.
+    # ------------------------------------------------------------------
+    try:
+        from techne.fastconfig import get_bool, load_fast
+
+        fast = load_fast()
+        if fast is not None and not get_bool(fast, "hooks.codex_grep_assist"):
+            sys.exit(0)
+    except Exception:  # noqa: BLE001 — the fast path must never break the hook
+        pass
+
+    # ------------------------------------------------------------------
     # Config load can raise (corrupt/unreadable config). A PreToolUse hook that
     # throws would surface as a tool-call failure — degrade to a no-op instead.
     # ------------------------------------------------------------------
