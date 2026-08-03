@@ -764,10 +764,35 @@ def check_hook_drift(config: Config) -> list[str]:
     """
     try:
         settings = _load_json(SETTINGS_PATH)
-    except RuntimeError:
-        # settings.json exists but is unparseable — register/unregister already
-        # surface that loudly with remediation; don't double-report it here.
-        return []
+    except RuntimeError as exc:
+        # Report it HERE rather than deferring to register/unregister. The old
+        # comment reasoned that those "already surface it loudly with remediation",
+        # which is true and beside the point: they run only at `techne init`, never
+        # at session start and never from `techne status`. Returning [] meant a
+        # corrupt settings.json rendered a CLEAN bill of health while every hook
+        # was in an unknown state — a worse silence than the drift this function
+        # exists to report. (techne#452; Prudence, PR #457.)
+        return [
+            f"settings.json is unreadable ({exc}) — hook registration cannot be "
+            "verified; every techne hook may be unregistered"
+        ]
+    # Shape checks, not just parse checks. `[]`, `"hello"` and the plausible
+    # `{"hooks": []}` are all VALID JSON that sail past _load_json and then make
+    # `.get()` raise AttributeError below — which the session-start hook's
+    # `except Exception` swallows, yielding a green tick with nothing registered.
+    # Prudence measured all three shapes on PR #457.
+    if settings is not None and not isinstance(settings, dict):
+        return [
+            f"settings.json is valid JSON but not an object (got "
+            f"{type(settings).__name__}) — hook registration cannot be verified; "
+            "every techne hook may be unregistered"
+        ]
+    if isinstance(settings, dict) and not isinstance(settings.get("hooks", {}), dict):
+        return [
+            "settings.json's `hooks` key is not an object (got "
+            f"{type(settings.get('hooks')).__name__}) — hook registration cannot be "
+            "verified; every techne hook may be unregistered"
+        ]
     if settings is None:
         settings = {}
     hooks = settings.get("hooks", {})

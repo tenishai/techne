@@ -829,15 +829,39 @@ class TestHookDrift:
         assert any("SessionStart" in w and "NOT registered" in w for w in drift), drift
         assert any("PreToolUse/Grep" in w and "NOT registered" in w for w in drift), drift
 
-    def test_corrupt_settings_returns_empty(self, fake_home, cfg):
-        # An unparseable settings.json is already reported loudly by register/unregister;
-        # drift must not double-report (or crash) on it.
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "{corrupt not json",   # unparseable
+            "[]",                  # valid JSON, wrong shape
+            '"hello"',             # valid JSON, wrong shape
+            "123",                 # valid JSON, wrong shape
+            '{"hooks": []}',       # object, but `hooks` is not one — the plausible one
+            '{"hooks": "nope"}',
+        ],
+    )
+    def test_unusable_settings_is_reported_not_swallowed(self, fake_home, cfg, body):
+        """REPLACES test_corrupt_settings_returns_empty, which asserted the BUG.
+
+        The old contract was "register/unregister already surface it loudly, so don't
+        double-report" — true, and irrelevant: those run only at `techne init`, never
+        at session start and never from `techne status`. Returning [] there meant a
+        clean bill of health while every hook was in an unknown state.
+
+        Parse failure was only half of it. `[]`, `"hello"` and especially
+        `{"hooks": []}` are VALID JSON that then make `.get()` raise AttributeError,
+        which the session-start hook's `except Exception` swallows — a green tick with
+        nothing registered. Prudence measured all of these on PR #457.
+        """
         from techne.platforms.claude_code import hooks as hooks_mod
 
         path = hooks_mod.SETTINGS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{corrupt not json")
-        assert claude_code.check_hook_drift(cfg) == []
+        path.write_text(body)
+
+        drift = claude_code.check_hook_drift(cfg)  # must not raise
+        assert drift, f"unusable settings.json ({body!r}) must be reported, got {drift!r}"
+        assert any("may be unregistered" in w for w in drift), drift
 
 
 class TestInterpreterValidation:

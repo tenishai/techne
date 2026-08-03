@@ -69,33 +69,32 @@ def render_drift_block(config) -> str:
     if config.platform != "claude-code":
         return ""
     from techne.platforms.claude_code import check_hook_drift
-    from techne.platforms.claude_code.hooks import SETTINGS_PATH, _load_json
 
-    # An UNPARSEABLE settings.json makes check_hook_drift return [] — its comment
-    # reasons that "register/unregister already surface that loudly", which is true
-    # but does not transfer here: those run only at `techne init`, never at session
-    # start. So a corrupt file would render a clean banner while EVERY hook is in
-    # an unknown state — a worse silence than the one this block exists to break.
-    # Report it as its own condition rather than inferring drift we cannot measure.
-    # (Prudence, PR #457.)
-    try:
-        _load_json(SETTINGS_PATH)
-    except RuntimeError as exc:
-        return (
-            "\n## techne ⚠️ settings.json unreadable"
-            f"\n> {exc}"
-            "\n> Hook registration cannot be verified — every techne hook may be"
-            " unregistered. Fix the file, then re-check with `techne status`."
-        )
-
+    # Unreadable / wrong-shaped settings.json is reported BY check_hook_drift, not
+    # re-probed here. An earlier cut of this block did its own _load_json check,
+    # which caught only the unparseable shape — valid-but-not-an-object JSON
+    # (`[]`, `"hello"`, `{"hooks": []}`) still sailed through and produced a green
+    # tick with nothing registered. Putting the guard at the source fixes this
+    # surface AND `techne status`, which had the same hole. (Prudence, PR #457.)
     drift = check_hook_drift(config)
     if not drift:
         return ""
-    lines = [
-        "\n## techne ⚠️ hook drift",
-        "> Enabled in config.yaml but NOT registered in settings.json —",
-        "> these are silently dead (no error, no log; they simply never fire):",
-    ]
+    # Two distinct conditions share this reporter, and mislabelling them is its own
+    # small lie: "enabled in config but not registered" is a precise claim, and it is
+    # NOT what an unreadable/wrong-shaped settings.json means (there, we cannot tell).
+    unverifiable = any("cannot be verified" in w for w in drift)
+    if unverifiable:
+        lines = [
+            "\n## techne ⚠️ settings.json unusable",
+            "> Hook registration cannot be verified — every techne hook may be",
+            "> unregistered and silently not firing:",
+        ]
+    else:
+        lines = [
+            "\n## techne ⚠️ hook drift",
+            "> Enabled in config.yaml but NOT registered in settings.json —",
+            "> these are silently dead (no error, no log; they simply never fire):",
+        ]
     lines.extend(f">   • {w}" for w in drift)
     # Echo the CURRENT posture into the suggested command: `techne init` defaults
     # --posture to `auto`, which re-resolves and can silently change posture (and
