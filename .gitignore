@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 .venv/
+# scripts/ci-local.sh creates .venv-ci-3.12 / -3.13 / -vec; the bare `.venv/`
+# above is a literal match and does not cover them.
+.venv-*/
 .pytest_cache/
 .ruff_cache/
 *.db
