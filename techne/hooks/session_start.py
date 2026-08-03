@@ -69,6 +69,24 @@ def render_drift_block(config) -> str:
     if config.platform != "claude-code":
         return ""
     from techne.platforms.claude_code import check_hook_drift
+    from techne.platforms.claude_code.hooks import SETTINGS_PATH, _load_json
+
+    # An UNPARSEABLE settings.json makes check_hook_drift return [] — its comment
+    # reasons that "register/unregister already surface that loudly", which is true
+    # but does not transfer here: those run only at `techne init`, never at session
+    # start. So a corrupt file would render a clean banner while EVERY hook is in
+    # an unknown state — a worse silence than the one this block exists to break.
+    # Report it as its own condition rather than inferring drift we cannot measure.
+    # (Prudence, PR #457.)
+    try:
+        _load_json(SETTINGS_PATH)
+    except RuntimeError as exc:
+        return (
+            "\n## techne ⚠️ settings.json unreadable"
+            f"\n> {exc}"
+            "\n> Hook registration cannot be verified — every techne hook may be"
+            " unregistered. Fix the file, then re-check with `techne status`."
+        )
 
     drift = check_hook_drift(config)
     if not drift:
@@ -295,10 +313,19 @@ def _run_phases_2_to_9(
     # So the check moves to where you already look. A detector wired to a command
     # nobody runs has the same practical value as no detector.
     # ------------------------------------------------------------------
+    # Held in its own variable, NOT just appended to output_parts: Phase 9 sends
+    # output_parts[0] (always the health banner) as `systemMessage` — the only
+    # OPERATOR-facing surface (core/health.py:179) — and the joined remainder as
+    # `additionalContext`, which goes to the model. Appending alone therefore put
+    # this warning in front of the agent while the operator saw an unqualified
+    # green tick: a rail whose whole purpose is reporting silent no-ops, itself
+    # silently not reaching the person who has to run `techne init`.
+    # (Caught by Prudence on PR #457 — it is the exact class this PR is about.)
+    operator_drift = ""
     try:
-        drift_block = render_drift_block(config)
-        if drift_block:
-            output_parts.append(drift_block)
+        operator_drift = render_drift_block(config)
+        if operator_drift:
+            output_parts.append(operator_drift)
             output_parts.append("")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"hook drift check: {exc}")
@@ -474,6 +501,13 @@ def _run_phases_2_to_9(
     if output_parts:
         summary = "\n".join(output_parts)
         banner = output_parts[0] if output_parts else summary
+        # Hook-registration drift rides the OPERATOR surface, not just the agent's.
+        # `systemMessage` is what the operator sees; `additionalContext` goes to the
+        # model. Drift is only actionable by a human (`techne init`), so telling the
+        # model alone is telling the wrong party. Everything else in output_parts is
+        # context FOR the model and stays where it is. (techne#452 / PR #457.)
+        if operator_drift:
+            banner = f"{banner}\n{operator_drift}"
         print(
             json.dumps(
                 {

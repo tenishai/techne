@@ -64,7 +64,14 @@ def status(ctx):
         drift = check_hook_drift(config)
         if drift:
             click.echo()
-            click.echo("⚠ Hook registration drift — run 'techne init' to reconcile:")
+            # Pin --posture: it defaults to `auto`, which RE-DETECTS CC memory on
+            # every re-init, so a bare `techne init` can change posture (and whether
+            # reflect is advisory) as a side effect of fixing hook registration.
+            # Same reasoning as the session-start banner (techne#452).
+            click.echo(
+                f"⚠ Hook registration drift — run "
+                f"'techne init --posture {config.posture.mode}' to reconcile:"
+            )
             for w in drift:
                 click.echo(f"  {w}")
 

@@ -1270,18 +1270,42 @@ class TestDriftSurfacedInBanner:
         assert "NOT registered" in block, block
 
     def test_banner_pins_posture_in_the_suggested_command(self, fake_home, cfg):
-        """`techne init` defaults --posture to `auto`, which re-resolves and can
-        silently change posture (and whether reflect is advisory). The remedy for one
-        silent no-op must not hand the operator another, so the command echoes the
-        CURRENT posture rather than inviting a bare `techne init`."""
+        """`techne init` defaults --posture to `auto`, which RE-DETECTS on every
+        re-init and can change posture (and whether reflect is advisory). The remedy
+        for one no-op must not hand the operator another, so the command echoes the
+        CURRENT posture rather than inviting a bare `techne init`.
+
+        Uses a NON-DEFAULT posture deliberately. The first version of this test
+        asserted against the fixture's default (`observe`), so hardcoding
+        `--posture observe` in the implementation kept it green — it proved nothing.
+        Prudence caught that by mutation-testing it (PR #457).
+        """
+        from techne.config import PostureConfig
         from techne.hooks.session_start import render_drift_block
 
+        cfg.posture = PostureConfig(mode="spool-primary", cc_memory_detected=True)
         cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
         claude_code.register_hooks(cfg)
         cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
 
         block = render_drift_block(cfg)
-        assert f"--posture {cfg.posture.mode}" in block, block
+        assert "--posture spool-primary" in block, block
+        assert "--posture observe" not in block, block
+
+    def test_unreadable_settings_reports_rather_than_rendering_clean(self, fake_home, cfg):
+        """check_hook_drift returns [] on an unparseable settings.json, reasoning that
+        register/unregister surface it loudly — but those run only at `techne init`,
+        never at session start. Rendering nothing would show a clean banner while every
+        hook is in an unknown state. (Prudence, PR #457.)"""
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True)
+        claude_code.register_hooks(cfg)
+        claude_code.SETTINGS_PATH.write_text("{ this is not json")
+
+        block = render_drift_block(cfg)
+        assert "unreadable" in block, block
+        assert "may be unregistered" in block, block
 
     def test_no_drift_renders_nothing(self, fake_home, cfg):
         from techne.hooks.session_start import render_drift_block
@@ -1300,3 +1324,61 @@ class TestDriftSurfacedInBanner:
         cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
         cfg.platform = "standalone"
         assert render_drift_block(cfg) == ""
+
+
+class TestDriftReachesTheOperator:
+    """techne#452 / PR #457: the block must land in `systemMessage`, not only in
+    `additionalContext`.
+
+    Phase 9 sends output_parts[0] — always the health banner — as `systemMessage`,
+    the OPERATOR-facing surface (core/health.py:179), and the joined remainder as
+    `additionalContext`, which goes to the MODEL. The first cut of this feature only
+    appended to output_parts, so the warning reached the agent while the operator saw
+    an unqualified green tick. Drift is actionable only by a human running
+    `techne init`, so telling the model alone tells the wrong party.
+
+    The four unit tests around render_drift_block all passed while that was broken —
+    they exercised the renderer in isolation and never asserted DELIVERY. This drives
+    the real hook end-to-end and parses the actual payload. (Prudence, PR #457.)
+    """
+
+    def test_drift_appears_in_system_message_not_only_additional_context(self, tmp_path):
+        import json as _json
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+
+        home = tmp_path / "home"
+        cc_dir = home / ".claude"
+        techne_home = home / ".techne"
+        cc_dir.mkdir(parents=True)
+        techne_home.mkdir(parents=True)
+
+        # codex_grep_assist ON in config...
+        (techne_home / "config.yaml").write_text(
+            "platform: claude-code\nhooks:\n  post_tool_use: true\n  codex_grep_assist: true\n"
+        )
+        # ...and NOTHING registered in settings.json => guaranteed drift.
+        (cc_dir / "settings.json").write_text("{}")
+
+        env = {
+            **_os.environ,
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(cc_dir),
+            "TECHNE_HOME": str(techne_home),
+        }
+        r = _sp.run(
+            [_sys.executable, "-m", "techne.hooks.session_start"],
+            input="{}", capture_output=True, text=True, env=env, timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
+
+        payload = _json.loads(r.stdout)
+        system_message = payload.get("systemMessage", "")
+        additional = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+        assert "hook drift" in system_message, (
+            "drift must reach the OPERATOR via systemMessage; got:\n" + system_message
+        )
+        # Still useful to the agent too — but that alone is what the bug was.
+        assert "hook drift" in additional, additional
