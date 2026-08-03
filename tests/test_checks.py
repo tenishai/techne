@@ -207,9 +207,9 @@ class TestBuiltinChecks:
     def test_drained_and_recently_filled_is_live(self, config):
         """Nothing owed AND the producer is still enqueueing — genuinely fine."""
         recent = _iso(timedelta(hours=2))
-        self._enqueue(config, "t", recent, recent)
+        self._enqueue(config, "sync:t", recent, recent)
 
-        target = next(r for r in run_checks(config) if r.name == "outbox:t")
+        target = next(r for r in run_checks(config) if r.name == "outbox:sync:t")
         assert target.verdict is Verdict.LIVE
         assert "nothing owed" in target.detail
 
@@ -223,20 +223,44 @@ class TestBuiltinChecks:
         dead-for-eight-weeks incident. The backlog measures the DRAIN; it says
         nothing about the FILL.
         """
-        old = _iso(timedelta(days=60))
-        self._enqueue(config, "t", old, old)
+        from techne.core.database import connect
 
-        target = next(r for r in run_checks(config) if r.name == "outbox:t")
+        old = _iso(timedelta(days=60))
+        self._enqueue(config, "sync:t", old, old)
+
+        # Sessions HAVE run since the last enqueue — that, not the calendar, is
+        # the evidence of a dead producer. Measuring wall-clock instead reported
+        # a healthy lane as dead whenever the operator took a holiday
+        # (#469 review 3, finding 3).
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+                ("s-recent", _iso(timedelta(hours=1))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        target = next(r for r in run_checks(config) if r.name == "outbox:sync:t")
         assert target.verdict is Verdict.STALE
         assert "producer may be dead" in target.detail
+
+    def test_idle_operator_does_not_look_like_a_dead_producer(self, config):
+        """The other edge: an old enqueue with NO sessions since is just idle."""
+        old = _iso(timedelta(days=60))
+        self._enqueue(config, "sync:t", old, old)
+
+        target = next(r for r in run_checks(config) if r.name == "outbox:sync:t")
+        assert target.verdict is Verdict.LIVE
 
     def test_declared_lane_that_never_enqueued_still_produces_a_result(self, config):
         """Deriving the lane list from `GROUP BY target` made a never-used lane
         VANISH from the report — reintroducing, one layer up, the exact
         absence-reads-as-healthy bug run_checks prevents for raising probes.
         """
-        from techne.core import checks as checks_mod
         from techne.core.database import connect
+        from techne.lifecycle import THREAD_SUMMARY_SYNC_TARGET
 
         # Age the store past the fresh-install grace so absence is a finding.
         conn = connect(config.db_path)
@@ -246,9 +270,36 @@ class TestBuiltinChecks:
         finally:
             conn.close()
 
+        # Assert the lane the PRODUCER actually writes, imported from the module
+        # that defines it — NOT the checker's own constant. The previous version
+        # iterated `_DECLARED_OUTBOX_TARGETS` and so asserted the constant
+        # against itself, which is precisely why three wrong lane names shipped
+        # (#469 review 3, finding 2): bare "thread_summary" is a pre-#51 legacy
+        # name that `enqueue()` now rejects outright, and the real standalone
+        # lane was missing entirely.
+        assert config.standalone, "default topology assumed by this test"
         names = {r.name for r in run_checks(config)}
-        for declared in checks_mod._DECLARED_OUTBOX_TARGETS:
-            assert f"outbox:{declared}" in names, f"{declared} vanished from the report"
+        assert f"outbox:{THREAD_SUMMARY_SYNC_TARGET}" in names
+
+    def test_declared_lanes_are_reachable_under_their_topology(self, config):
+        """Every declared lane must be one this install could actually write.
+
+        Guards the failure mode directly: a declared lane that `enqueue()` would
+        reject can never clear, so it is an un-actionable permanent red.
+        """
+        from techne.core.checks import _declared_outbox_targets
+        from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
+
+        for target in _declared_outbox_targets(config):
+            assert target.startswith((SINK_PREFIX, SYNC_PREFIX)), (
+                f"{target!r} is not a namespaced target — enqueue() would reject it"
+            )
+
+        # Topology decides which lane is live; the other must not be declared.
+        config.standalone = True
+        assert not any(t.startswith("sink:") for t in _declared_outbox_targets(config)), (
+            "sink lanes are no-ops when standalone and must not be declared"
+        )
 
     def test_every_result_carries_evidence(self, config):
         """techne#941's 'demand proof of absence' rule: a verdict a reader
@@ -374,3 +425,148 @@ class TestNoFalseGreens:
         assert cov.verdict is Verdict.STALE
         assert "missing" in cov.detail
         assert cov.remedy
+
+
+class TestSurvivingMutations:
+    """Pins for the four mutations that survived the #469 review-3 suite.
+
+    Each corresponds to a feature that could be deleted wholesale without a
+    single test failing — which is how two of them shipped broken.
+    """
+
+    def test_session_marker_staleness_is_detected(self, config):
+        """M11: the session-marker branch had NOTHING asserting anything about
+        it, which is why it shipped comparing against the wrong session.
+
+        A session that has had its chance to write a marker and didn't is the
+        actual failure. Critically, an operator GAP must not trigger it.
+        """
+        from techne.core.database import connect
+        from techne.hooks._liveness import record_hook_run
+
+        record_hook_run(config.db_path, "session_start", outcome="ok", ts=_iso(timedelta(days=9)))
+        conn = connect(config.db_path)
+        try:
+            # Two settled sessions AFTER the marker: the hook stopped recording.
+            for i, ago in enumerate((timedelta(days=3), timedelta(days=2))):
+                conn.execute(
+                    "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+                    (f"s{i}", _iso(ago)),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        hook = next(r for r in run_checks(config) if r.name == "hook:session_start")
+        assert hook.verdict is Verdict.STALE
+
+    def test_long_gap_between_sessions_is_not_stale(self, config):
+        """M11's other edge, and the bug review 3 caught: comparing against the
+        NEWEST session measured the inter-session gap, so a once-a-day operator
+        went STALE every day. A 60-day gap with a healthy hook must stay LIVE.
+        """
+        from techne.core.database import connect
+        from techne.hooks._liveness import record_hook_run
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+                ("old", _iso(timedelta(days=60))),
+            )
+            conn.execute(
+                "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+                ("now", _iso(timedelta(minutes=1))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # Marker from the settled (old) session — the in-flight one has not
+        # written its marker yet, exactly as at real check time.
+        record_hook_run(config.db_path, "session_start", outcome="ok", ts=_iso(timedelta(days=60)))
+
+        hook = next(r for r in run_checks(config) if r.name == "hook:session_start")
+        assert hook.verdict is Verdict.LIVE, "an operator's absence is not a broken hook"
+
+
+class TestDoctorOutputHonesty:
+    """M2: the headline symptom of the worst bug was itself unpinned."""
+
+    def test_never_claims_all_live_when_none_are(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from techne.cli import main
+        from techne.core.database import connect, init_db
+
+        home = tmp_path / "h"
+        (home / ".techne").mkdir(parents=True)
+        db = home / ".techne" / "techne.db"
+        init_db(db).close()
+        conn = connect(db)
+        try:
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=1)),))
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setenv("HOME", str(home))
+
+        out = CliRunner().invoke(main, ["doctor"]).output
+        assert "All subsystems confirmed live" not in out, (
+            "must not confirm liveness it never observed"
+        )
+
+
+class TestResolveDbPathIsolation:
+    """M9: finding 6 had no test at all."""
+
+    def test_never_falls_back_to_a_bystander_home_store(self, tmp_path, monkeypatch):
+        """Config supports an explicit db_path elsewhere; guessing ~/.techne
+        lands on ANOTHER AGENT'S live store in the multi-agent layout (#112).
+        """
+        from techne.hooks._liveness import resolve_db_path
+
+        bystander = tmp_path / "home" / ".techne"
+        bystander.mkdir(parents=True)
+        (bystander / "techne.db").write_text("i am someone else's store")
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("TECHNE_HOME", raising=False)
+        # Config.load() must fail so the fallback path is the one under test.
+        monkeypatch.setattr(
+            "techne.config.Config.load", classmethod(lambda cls: (_ for _ in ()).throw(OSError()))
+        )
+
+        assert resolve_db_path() is None, "must not resolve to a bystander store"
+
+
+class TestRetiredLanes:
+    def test_legacy_unnamespaced_lane_is_dormant_not_stale(self, config):
+        """A lane `enqueue()` would reject is retired by migration, not broken.
+
+        `thread_summary` (bare) is pre-#51 residue that migration v10 left in
+        place. Reporting it "producer may be dead" is true and permanently
+        un-actionable — no operator action clears it — which is the nag that
+        teaches someone to skip the whole report (#469 review 3, finding 2).
+        """
+        from techne.core.database import connect
+
+        old = _iso(timedelta(days=60))
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO outbox (target, data_json, content_hash, status, created_at,"
+                " synced_at) VALUES (?,?,?,?,?,?)",
+                ("thread_summary", "{}", "legacy1", "synced", old, old),
+            )
+            conn.execute(
+                "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+                ("s", _iso(timedelta(hours=1))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        lane = next(r for r in run_checks(config) if r.name == "outbox:thread_summary")
+        assert lane.verdict is Verdict.DORMANT
+        assert lane.ok
+        assert "retired" in lane.detail

@@ -266,26 +266,50 @@ _HOOK_EXPECTATIONS = {
 #: operator worked, not whether the hook works.
 _SESSION_SCOPED = {"session_start", "session_end", "post_tool_use", "user_prompt_submit"}
 
-#: How far the marker may legitimately trail the newest session. session_start
-#: writes its marker AFTER collect_health renders, so the current session's
-#: marker is written late by design — one session of slack, not a time window.
-_SESSION_MARKER_SLACK = timedelta(hours=12)
-
 #: How long a store may exist without any session before "nothing has run yet"
 #: stops being a plausible explanation. Below this the store is genuinely new;
 #: above it, the absence of sessions is itself the finding.
-_NEW_STORE_GRACE = timedelta(hours=24)
+_NEW_STORE_GRACE = timedelta(days=7)
 
-#: Outbox lanes that are DECLARED to exist, so a lane which has never enqueued a
-#: single row still produces a result instead of vanishing from the report. The
-#: names are the literals the producers write (grep: `"thread_summary"`,
-#: `"sink:archivist"`, `"sink:archivist_knowledge"`).
-_DECLARED_OUTBOX_TARGETS = {"sink:archivist", "sink:archivist_knowledge", "thread_summary"}
+def _declared_outbox_targets(config) -> set[str]:
+    """The outbox lanes this install SHOULD be using, resolved from topology.
 
-#: How long a lane may go without ENQUEUEING anything before its producer is
-#: suspect. Distinct from the drain side: a lane can be perfectly drained and
-#: completely dead.
-_PRODUCER_SILENT_AFTER = timedelta(days=21)
+    Declared rather than discovered, so a lane that has never enqueued a row
+    still produces a result instead of vanishing from the report.
+
+    RESOLVED FROM THE CODE THAT WRITES, NOT FROM LITERALS (#469 review 3,
+    finding 2). An earlier version pinned three names grepped off a live store
+    and got all three wrong:
+
+    * bare ``"thread_summary"`` is a PRE-#51 legacy name. ``enqueue()`` now
+      rejects un-namespaced targets outright, so it was a phantom reporting
+      UNOBSERVABLE forever with no operator action able to clear it — and the
+      140 drained rows that made it look real are terminal legacy rows migration
+      v10 deliberately left alone.
+    * the lane that actually exists standalone, ``sync:thread_summary``, was NOT
+      declared — so when it had never enqueued it still vanished, which is the
+      absence-reads-as-healthy bug the declaration was added to close, left open
+      on the very lane the incident was about.
+    * the ``sink:`` lanes are no-ops when ``standalone`` (the default), so on a
+      default install all three declared lanes were structurally unreachable.
+
+    ``lifecycle._thread_summary_target`` is the single source of truth for which
+    egress lane is live, so this defers to it rather than restating the rule.
+    """
+    from techne.lifecycle import _thread_summary_target
+
+    targets = {_thread_summary_target(config)}
+    if not config.standalone:
+        # Team topology also drains the knowledge sink. Only meaningful when the
+        # sink lane is the live one — standalone never registers these.
+        targets.add("sink:archivist_knowledge")
+    return targets
+
+#: How far the newest SESSION may run past a lane's newest enqueue before the
+#: producer is suspect. Measured session-to-enqueue, not wall-clock: these lanes
+#: are fed at session end, so an idle operator must never look like a dead
+#: producer. Generous, because not every session produces a thread summary.
+_PRODUCER_SILENT_AFTER = timedelta(days=7)
 
 #: Hooks whose rail is behind a config flag, and the flag that gates it.
 #: CONFIG IS READ FIRST, MARKER SECOND — deliberately (#469 review). Because a
@@ -327,8 +351,22 @@ def check_hooks(config) -> list[CheckResult]:
         # (correct, and worth keeping — a red first run teaches the operator to
         # ignore the signal) while closing the indefinite window.
         sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        srow = conn.execute("SELECT MAX(started_at) FROM sessions").fetchone()
-        last_session = srow[0] if srow else None
+        # THE SECOND-NEWEST SESSION, not the newest (#469 review 3, finding 1).
+        # session_start's ordering is: Phase 3 inserts the session row → Phase 5
+        # runs collect_health → Phase 8 writes the marker. So at check time the
+        # NEWEST session is the in-flight one whose marker does not exist yet,
+        # and comparing against it measured the INTER-SESSION GAP rather than
+        # marker lag: a 12h slack meant a once-a-day operator (finish 6pm, start
+        # 9am = 15h) went STALE every single day. That is the bank-holiday alarm
+        # I set out to remove, firing six times more often.
+        #
+        # The second-newest session is the newest one that HAS HAD ITS CHANCE to
+        # write a marker, which is exactly the predicate wanted: did a session
+        # that should have recorded fail to?
+        srow = conn.execute(
+            "SELECT started_at FROM sessions ORDER BY started_at DESC LIMIT 1 OFFSET 1"
+        ).fetchone()
+        last_settled_session = srow[0] if srow else None
         row = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
         store_age = _age(row[0] if row else None)
         store_is_new = store_age is not None and store_age < _NEW_STORE_GRACE
@@ -359,7 +397,7 @@ def check_hooks(config) -> list[CheckResult]:
             if err:
                 verdict = Verdict.BROKEN
                 detail = f"last run FAILED: {err.get('stage', '?')} — {err.get('msg', '')}"[:160]
-            elif hook in _SESSION_SCOPED and last_session:
+            elif hook in _SESSION_SCOPED and last_settled_session:
                 # SESSION-SCOPED HOOKS ARE JUDGED AGAINST THE LAST SESSION, NOT
                 # THE CLOCK (#469 review, finding 5). For a hook that only fires
                 # when a session starts, "days since last fire" measures how
@@ -369,24 +407,30 @@ def check_hooks(config) -> list[CheckResult]:
                 # which is the teach-them-to-ignore-it failure arriving through
                 # the other door.
                 #
-                # The real question is: did a session happen and NOT leave a
-                # marker? The marker is written after collect_health renders, so
-                # it legitimately trails the current session — one session of
-                # slack, not a wall-clock window.
+                # The real question is: did a session that HAS HAD ITS CHANCE to
+                # record fail to? `last_settled_session` is the second-newest
+                # session precisely so the in-flight one — whose marker is
+                # written three phases after this check runs — is excluded
+                # rather than absorbed by a slack window wide enough to hide it.
+                # No wall-clock term at all: an operator's absence must never
+                # read as a broken hook.
                 marker = _parse_ts(last)
-                sess = _parse_ts(last_session)
+                sess = _parse_ts(last_settled_session)
                 if marker is None:
                     verdict = Verdict.UNOBSERVABLE
                     detail = f"{note}; sessions exist but no marker was ever written"
-                elif sess is not None and (sess - marker) > _SESSION_MARKER_SLACK:
+                elif sess is not None and marker < sess:
                     verdict = Verdict.STALE
-                    detail = f"{note}; a session started at {last_session} but left no marker"
+                    detail = (
+                        f"{note}; a session started at {last_settled_session} "
+                        f"and left no marker"
+                    )
                 else:
                     verdict = Verdict.LIVE
                     detail = f"{note}; last outcome: {outcome or 'unknown'}"
             elif not last and sessions == 0 and store_is_new:
                 verdict = Verdict.DORMANT
-                detail = "store created <24h ago, no sessions yet — nothing has run"
+                detail = "store created <7d ago, no sessions yet — nothing has run"
             elif not last and sessions == 0:
                 # Old store, still no sessions: the absence IS the finding.
                 verdict = Verdict.UNOBSERVABLE
@@ -495,12 +539,20 @@ def check_outbox_targets(config) -> list[CheckResult]:
     from techne.core.database import connect
 
     results: list[CheckResult] = []
+    # ONE connection for all three queries (#469 review 3, nit 6) — each
+    # `connect()` re-runs the WAL pragmas and `_ensure_initialized`, and this is
+    # the hot path the same PR is optimising.
     conn = connect(config.db_path)
     try:
         rows = conn.execute(
             "SELECT target, COUNT(*), MAX(synced_at), SUM(status='pending'), MAX(created_at) "
             "FROM outbox GROUP BY target"
         ).fetchall()
+        arow = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
+        # Sessions since the newest enqueue, per lane, is the activity clock for
+        # the producer test below — these lanes are fed at SESSION END, so
+        # wall-clock silence measures operator absence, not producer death.
+        srow = conn.execute("SELECT COUNT(*), MAX(started_at) FROM sessions").fetchone()
     finally:
         conn.close()
 
@@ -508,20 +560,16 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # from `GROUP BY target` alone (the previous version) meant a lane that has
     # NEVER enqueued a row produced NO RESULT AT ALL — reintroducing, one layer
     # up, exactly the absence-reads-as-healthy bug that `run_checks` goes to
-    # trouble to prevent for raising probes (#469 review, finding 2).
+    # trouble to prevent for raising probes.
     # Same store-age grace as the hook cohort: a store created minutes ago has
     # legitimately enqueued nothing, and reporting that as a failure would make
     # every fresh install red.
-    conn = connect(config.db_path)
-    try:
-        arow = conn.execute("SELECT MIN(applied_at) FROM schema_version").fetchone()
-    finally:
-        conn.close()
     age = _age(arow[0] if arow else None)
     store_is_new = age is not None and age < _NEW_STORE_GRACE
+    newest_session = srow[1] if srow else None
 
     seen = {r[0] for r in rows}
-    for missing in sorted(_DECLARED_OUTBOX_TARGETS - seen):
+    for missing in sorted(_declared_outbox_targets(config) - seen):
         results.append(
             CheckResult(
                 name=f"outbox:{missing}",
@@ -530,15 +578,38 @@ def check_outbox_targets(config) -> list[CheckResult]:
                 verdict=Verdict.DORMANT if store_is_new else Verdict.UNOBSERVABLE,
                 evidence=f"no outbox rows have ever existed for target={missing}",
                 detail=(
-                    "store created <24h ago — nothing enqueued yet"
+                    "store created <7d ago — nothing enqueued yet"
                     if store_is_new
                     else "declared lane has NEVER enqueued anything"
                 ),
             )
         )
 
+    from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
+
     for target, total, last_synced, pending, last_enqueued in rows:
         pending = pending or 0
+
+        # RETIRED LANES ARE DORMANT, NOT STALE. `enqueue()` rejects
+        # un-namespaced targets, so a bare name is pre-#51 residue that
+        # migration v10 deliberately left in place — its producer was retired
+        # ten schema versions ago, and no operator action can ever clear it.
+        # Reporting it as "producer may be dead" is technically true and
+        # permanently un-actionable, which is the nag that teaches an operator
+        # to skip the whole report (#469 review 3).
+        if not target.startswith((SINK_PREFIX, SYNC_PREFIX)):
+            results.append(
+                CheckResult(
+                    name=f"outbox:{target}",
+                    subsystem="sync",
+                    kind=Kind.TEMPORAL,
+                    verdict=Verdict.DORMANT,
+                    last_fired=last_synced,
+                    evidence=f"target={target!r} is not namespaced; enqueue() rejects it",
+                    detail=f"retired lane ({total} legacy rows) — superseded, not broken",
+                )
+            )
+            continue
 
         # TWO SIDES, NOT ONE. The backlog answers "is the DRAIN keeping up"; it
         # says nothing about whether the FILL still happens. `pending == 0` has
@@ -548,12 +619,22 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # created since) as healthy: the very lane this check's docstring cites
         # as the motivating eight-week-dead incident (#469 review, finding 2).
         if pending == 0:
-            enq_age = _age(last_enqueued)
-            if enq_age is not None and enq_age > _PRODUCER_SILENT_AFTER:
+            # PRODUCER SILENCE IS MEASURED AGAINST SESSIONS, NOT THE CLOCK
+            # (#469 review 3, finding 3). These lanes are fed at SESSION END, so
+            # "nothing enqueued in 21 days" measured operator absence — a three
+            # week holiday reported "producer may be dead" on a healthy lane,
+            # the same wall-clock error as finding 1 at a larger scale.
+            #
+            # The honest signal is: sessions have happened SINCE the newest
+            # enqueue. A session that ends without feeding a lane it should feed
+            # is the actual evidence of a dead producer.
+            enq = _parse_ts(last_enqueued)
+            newest = _parse_ts(newest_session)
+            if enq is not None and newest is not None and newest > enq + _PRODUCER_SILENT_AFTER:
                 verdict = Verdict.STALE
                 detail = (
-                    f"{total} rows drained, but nothing enqueued in "
-                    f"{enq_age.days}d — producer may be dead"
+                    f"{total} rows drained, but sessions have run since the last "
+                    f"enqueue ({last_enqueued}) — producer may be dead"
                 )
                 remedy = None
             else:
