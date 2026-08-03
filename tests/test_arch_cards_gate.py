@@ -191,3 +191,48 @@ def test_deleting_the_manifest_itself_fails(tmp_path: Path) -> None:
     r = _run(repo)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "ARCHITECTURE.md is missing" in r.stdout
+
+
+def test_manifest_with_frontmatter_stripped_fails(tmp_path: Path) -> None:
+    """The manifest is the one file exempt from the reverse check, so nothing was
+    verifying IT. Delete it and you get a loud failure; strip four lines from its head
+    and you got a clean bill of health — with its own `anchor:` silently unchecked.
+    Same failure class the forward check already names, applied to the file exempt
+    from it. (Prudence, PR #451.)"""
+    repo = _repo(tmp_path)
+    sha = _seam(repo, "pkg/seam.py")
+    _card(repo, "seam.md", f"pkg/seam.py sha={sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+    assert _run(repo).returncode == 0, "baseline must be green"
+
+    # Same file, same SEAMS index — frontmatter removed, so it no longer parses.
+    body = (repo / "ARCHITECTURE.md").read_text().split("---\n")[-1]
+    (repo / "ARCHITECTURE.md").write_text(body)
+
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "no longer parses as a card" in r.stdout
+    # The index is still readable, so the cross-check must keep running against it.
+    assert "not indexed" not in r.stdout
+
+
+def test_reformatted_index_blames_the_index_not_every_card(tmp_path: Path) -> None:
+    """A SEAMS block rewritten as markdown links matches nothing. Reporting each card
+    as unindexed would be N failures pointing at N innocent files; when NOTHING
+    matches, the defect is one line of formatting. (Prudence, PR #451.)"""
+    repo = _repo(tmp_path)
+    for name in ("a", "b", "c"):
+        sha = _seam(repo, f"pkg/{name}.py", body=f"{name} = 1\n")
+        _card(repo, f"{name}.md", f"pkg/{name}.py sha={sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    (repo / "ARCHITECTURE.md").write_text(
+        f"---\ncard: repo-card:test\nanchor: pkg/root.py sha={root_sha}\n---\n"
+        "# repo\n\nSEAMS → card:\n"
+        "- a  → [a](docs/arch/a.md)\n- b  → [b](docs/arch/b.md)\n- c  → [c](docs/arch/c.md)\n"
+    )
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "matched NO cards" in r.stdout
+    assert r.stdout.count("not indexed") == 0, "must not blame the individual cards"
+    assert "FAILED (1)" in r.stdout, "one index failure, not three card failures"

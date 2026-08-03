@@ -20,6 +20,22 @@ under the globs are skipped (reported, not failed). Any `anchor:` line that does
 parse exactly is a hard failure — a malformed anchor must never be silently ignored,
 or a typo'd sha on a multi-anchor card would leave that seam unguarded.
 
+COVERAGE, on top of freshness. `ARCHITECTURE.md` must exist, must itself parse as a
+card, and its `SEAMS → card:` block is the MANIFEST of seam cards. It is checked in
+both directions:
+
+  * every path the index names must still parse as a card (catches deletion, rename,
+    and frontmatter removal), and
+  * every card on disk must appear in the index (without this, a card that was NEVER
+    indexed could be deleted for exit 0 — regenerating the very false-green this
+    check exists to close, and doing it for NEW cards, which are the least likely to
+    have been wired in carefully).
+
+The manifest needs its own guard because it is the one file exempt from the reverse
+check — it indexes the seam cards, not itself — so nothing else would notice if its
+`card:` frontmatter were stripped and its own anchor silently stopped being verified.
+Retiring a seam stays green: drop the card AND its index line together.
+
 Deterministic, stdlib-only, no LLM.
 Exit 0 = all cards fresh · 1 = stale/malformed/missing · 2 = environment error.
 
@@ -125,11 +141,26 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
     # indexes must still parse as a card. Catches deletion/rename/frontmatter-removal,
     # none of which the glob can see.
     manifest = repo / MANIFEST_FILE
-    if not manifest.exists():
-        # The manifest IS the coverage check; without it every card below is
-        # unverifiable and deleting it would otherwise exit 0 (Prudence, PR #451).
-        problems.append((repo, f"{MANIFEST_FILE} is missing — seam-card coverage cannot be checked"))
-    else:
+    # The manifest is the ONE file exempt from the reverse check (it indexes the seam
+    # cards, not itself) — so nothing was verifying it. Delete it and you got a loud
+    # failure; strip four lines from its head and you got a clean bill of health,
+    # with its own `anchor:` silently unchecked. Same "deleted, renamed, or its
+    # `card:` frontmatter was removed" class the forward check already names, applied
+    # to the file exempt from it. Third instance of one pattern in this script: the
+    # check has a blind spot exactly where nothing checks the checker.
+    # (Prudence, PR #451.)
+    if MANIFEST_FILE not in found:
+        detail = (
+            "is missing"
+            if not manifest.exists()
+            else "no longer parses as a card (`card:` frontmatter removed)"
+        )
+        problems.append(
+            (repo, f"{MANIFEST_FILE} {detail} — seam-card coverage cannot be checked")
+        )
+    # Deliberately a second `if`, not an `else`: when only the frontmatter is gone the
+    # SEAMS block is still readable and still worth cross-checking.
+    if manifest.exists():
         indexed = set(MANIFEST_RE.findall(manifest.read_text(encoding="utf-8")))
         # Forward: everything the index claims must still parse as a card.
         for rel in sorted(indexed):
@@ -145,9 +176,24 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
         # for exit 0 — regenerating the false-green precisely for new cards, which
         # are the ones least likely to have been wired in carefully. It also catches
         # an index that drifted out of the matched shape. (Prudence, PR #451.)
-        for rel in sorted(found):
-            if rel == MANIFEST_FILE:
-                continue  # the manifest indexes the seam cards, not itself
+        seam_cards = [r for r in sorted(found) if r != MANIFEST_FILE]
+        if seam_cards and not indexed:
+            # Blame the INDEX, not the cards. A reformat of the SEAMS block (markdown
+            # links, backticks, an ASCII `->`) matches nothing, and the reverse loop
+            # would then report every card as unindexed: N failures pointing at N
+            # innocent files, under a trailer describing a different failure class.
+            # When NOTHING matches, the defect is one line of formatting.
+            # (Prudence, PR #451.)
+            problems.append((
+                manifest,
+                f"the `SEAMS → card:` index matched NO cards, but {len(seam_cards)} "
+                "exist on disk\n"
+                "        This is almost certainly a formatting change in the index,\n"
+                "        not a problem with the cards. Each entry must contain:\n"
+                "          → docs/arch/<name>.md      (a literal → then the bare path)",
+            ))
+            seam_cards = []  # don't also blame each card individually
+        for rel in seam_cards:
             if rel not in indexed:
                 problems.append((
                     repo / rel,
