@@ -829,15 +829,53 @@ class TestHookDrift:
         assert any("SessionStart" in w and "NOT registered" in w for w in drift), drift
         assert any("PreToolUse/Grep" in w and "NOT registered" in w for w in drift), drift
 
-    def test_corrupt_settings_returns_empty(self, fake_home, cfg):
-        # An unparseable settings.json is already reported loudly by register/unregister;
-        # drift must not double-report (or crash) on it.
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "{corrupt not json",   # unparseable
+            "[]",                  # valid JSON, wrong shape
+            '"hello"',             # valid JSON, wrong shape
+            "123",                 # valid JSON, wrong shape
+            '{"hooks": []}',       # object, but `hooks` is not one — the plausible one
+            '{"hooks": "nope"}',
+            '{"hooks": null}',
+            # The traversal walks FIVE levels; the first cut of this guard validated
+            # two. Prudence measured 10 of 14 shapes still raising AttributeError
+            # from further down — swallowed by session_start's `except Exception`
+            # into a green tick with every hook dead. Everything below is one of
+            # those levels. (PR #457.)
+            '{"hooks": {"SessionStart": {}}}',      # object where an array belongs
+            '{"hooks": {"SessionStart": null}}',    # rendered ✅ with hooks dead
+            '{"hooks": {"SessionStart": "x"}}',
+            '{"hooks": {"SessionStart": [null]}}',
+            '{"hooks": {"SessionStart": ["str"]}}',
+            '{"hooks": {"SessionStart": [{"hooks": "notalist"}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [null]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": ["str"]}]}}',
+        ],
+    )
+    def test_unusable_settings_is_reported_not_swallowed(self, fake_home, cfg, body):
+        """REPLACES test_corrupt_settings_returns_empty, which asserted the BUG.
+
+        The old contract was "register/unregister already surface it loudly, so don't
+        double-report" — true, and irrelevant: those run only at `techne init`, never
+        at session start and never from `techne status`. Returning [] there meant a
+        clean bill of health while every hook was in an unknown state.
+
+        Parse failure was only half of it. `[]`, `"hello"` and especially
+        `{"hooks": []}` are VALID JSON that then make `.get()` raise AttributeError,
+        which the session-start hook's `except Exception` swallows — a green tick with
+        nothing registered. Prudence measured all of these on PR #457.
+        """
         from techne.platforms.claude_code import hooks as hooks_mod
 
         path = hooks_mod.SETTINGS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{corrupt not json")
-        assert claude_code.check_hook_drift(cfg) == []
+        path.write_text(body)
+
+        drift = claude_code.check_hook_drift(cfg)  # must not raise
+        assert drift, f"unusable settings.json ({body!r}) must be reported, got {drift!r}"
+        assert any("may be unregistered" in w for w in drift), drift
 
 
 class TestInterpreterValidation:
@@ -1248,3 +1286,298 @@ class TestPythonpathOnlyInstallIsDiagnosed:
         with pytest.raises(RuntimeError, match="importable only via PYTHONPATH"):
             hooks_mod._interpreter()
         hooks_mod._IMPORT_PROBE.clear()
+class TestDriftSurfacedInBanner:
+    """techne#452: the drift check must appear where the operator already looks.
+
+    check_hook_drift has been correct since #287, but was rendered only by
+    `techne status`. In the gap that created, per_turn_recall and codex_grep_assist
+    were both dead for three days with their config flags reading `true`, and
+    nothing said so. These tests pin that the session-start banner reports it.
+    """
+
+    def test_drift_renders_in_banner_block(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)  # no PreToolUse written
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)  # flag flipped after
+
+        block = render_drift_block(cfg)
+        assert "hook drift" in block, block
+        assert "PreToolUse/Grep" in block, block
+        assert "NOT registered" in block, block
+
+    def test_banner_pins_posture_in_the_suggested_command(self, fake_home, cfg):
+        """`techne init` defaults --posture to `auto`, which RE-DETECTS on every
+        re-init and can change posture (and whether reflect is advisory). The remedy
+        for one no-op must not hand the operator another, so the command echoes the
+        CURRENT posture rather than inviting a bare `techne init`.
+
+        Uses a NON-DEFAULT posture deliberately. The first version of this test
+        asserted against the fixture's default (`observe`), so hardcoding
+        `--posture observe` in the implementation kept it green — it proved nothing.
+        Prudence caught that by mutation-testing it (PR #457).
+        """
+        from techne.config import PostureConfig
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.posture = PostureConfig(mode="spool-primary", cc_memory_detected=True)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        block = render_drift_block(cfg)
+        assert "--posture spool-primary" in block, block
+        assert "--posture observe" not in block, block
+
+    def test_unreadable_settings_reports_rather_than_rendering_clean(self, fake_home, cfg):
+        """check_hook_drift returns [] on an unparseable settings.json, reasoning that
+        register/unregister surface it loudly — but those run only at `techne init`,
+        never at session start. Rendering nothing would show a clean banner while every
+        hook is in an unknown state. (Prudence, PR #457.)"""
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True)
+        claude_code.register_hooks(cfg)
+        claude_code.SETTINGS_PATH.write_text("{ this is not json")
+
+        block = render_drift_block(cfg)
+        assert "unreadable" in block, block
+        assert "may be unregistered" in block, block
+
+    def test_no_drift_renders_nothing(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        claude_code.register_hooks(cfg)
+        assert render_drift_block(cfg) == ""
+
+    def test_non_claude_code_platform_renders_nothing(self, fake_home, cfg):
+        """settings.json registration is claude-code's mechanism; other platforms
+        must not get a warning about a file that has no bearing on them."""
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        cfg.platform = "standalone"
+        assert render_drift_block(cfg) == ""
+
+
+class TestDriftReachesTheOperator:
+    """techne#452 / PR #457: the block must land in `systemMessage`, not only in
+    `additionalContext`.
+
+    Phase 9 sends output_parts[0] — always the health banner — as `systemMessage`,
+    the OPERATOR-facing surface (core/health.py:179), and the joined remainder as
+    `additionalContext`, which goes to the MODEL. The first cut of this feature only
+    appended to output_parts, so the warning reached the agent while the operator saw
+    an unqualified green tick. Drift is actionable only by a human running
+    `techne init`, so telling the model alone tells the wrong party.
+
+    The four unit tests around render_drift_block all passed while that was broken —
+    they exercised the renderer in isolation and never asserted DELIVERY. This drives
+    the real hook end-to-end and parses the actual payload. (Prudence, PR #457.)
+    """
+
+    def test_drift_appears_in_system_message_not_only_additional_context(self, tmp_path):
+        import json as _json
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+
+        home = tmp_path / "home"
+        cc_dir = home / ".claude"
+        techne_home = home / ".techne"
+        cc_dir.mkdir(parents=True)
+        techne_home.mkdir(parents=True)
+
+        # codex_grep_assist ON in config...
+        (techne_home / "config.yaml").write_text(
+            "platform: claude-code\nhooks:\n  post_tool_use: true\n  codex_grep_assist: true\n"
+        )
+        # ...and NOTHING registered in settings.json => guaranteed drift.
+        (cc_dir / "settings.json").write_text("{}")
+
+        env = {
+            **_os.environ,
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(cc_dir),
+            "TECHNE_HOME": str(techne_home),
+        }
+        r = _sp.run(
+            [_sys.executable, "-m", "techne.hooks.session_start"],
+            input="{}", capture_output=True, text=True, env=env, timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
+
+        payload = _json.loads(r.stdout)
+        system_message = payload.get("systemMessage", "")
+        additional = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+        assert "hook drift" in system_message, (
+            "drift must reach the OPERATOR via systemMessage; got:\n" + system_message
+        )
+        # Still useful to the agent too — but that alone is what the bug was.
+        assert "hook drift" in additional, additional
+
+
+class TestUnusableSettingsIsAConditionNotProse:
+    """PR #457: the banner must branch on the CONDITION, not grep message text.
+
+    The prior cut used `any("cannot be verified" in w ...)`. Prudence flipped it two
+    ways: rewording a message in hooks.py left the whole suite green while the banner
+    silently reverted to the mislabel, and — because a drift warning embeds the
+    `matcher` string read from settings.json — a hook group NAMED "cannot be verified"
+    filed six genuine drift warnings under "settings.json unusable". User data must
+    not steer control flow.
+    """
+
+    def test_a_malicious_matcher_cannot_relabel_genuine_drift(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        # A well-formed settings.json with an ORPHANED TECHNE group whose matcher
+        # mimics the marker prose. Orphan warnings embed the matcher verbatim, so a
+        # prose-grep heading reads this attacker-free user data as "unusable".
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        settings["hooks"].setdefault("PreToolUse", []).append(
+            {
+                "matcher": "cannot be verified",
+                "hooks": [{"type": "command", "command": "sh techne-hook.sh -m techne.hooks.x"}],
+            }
+        )
+        claude_code.SETTINGS_PATH.write_text(json.dumps(settings))
+
+        # Precondition: this really does produce a drift warning carrying the phrase,
+        # otherwise the test would pass without exercising anything.
+        drift = claude_code.check_hook_drift(cfg)
+        assert any("cannot be verified" in w for w in drift), drift
+
+        block = render_drift_block(cfg)
+        assert "hook drift" in block, block
+        assert "settings.json unusable" not in block, block
+
+    def test_rewording_a_message_cannot_desync_the_heading(self, fake_home, cfg, monkeypatch):
+        """The heading and the message must come from ONE source. If they can drift,
+        the next reword silently restores the bug this split was added to fix."""
+        from techne.hooks.session_start import render_drift_block
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        claude_code.register_hooks(cfg)
+        claude_code.SETTINGS_PATH.write_text('{"hooks": {"SessionStart": null}}')
+
+        # Reword the SHAPE MESSAGE so it no longer contains the marker phrase, while
+        # the condition itself is unchanged. A prose-grep heading desyncs here; a
+        # condition-driven one does not.
+        monkeypatch.setattr(
+            hooks_mod, "_settings_shape_error", lambda _s: "settings.json is malformed"
+        )
+        drift = claude_code.check_hook_drift(cfg)
+        assert drift == ["settings.json is malformed"], drift
+        assert not any("cannot be verified" in w for w in drift), drift
+
+        block = render_drift_block(cfg)
+        assert "settings.json unusable" in block, block
+
+
+class TestNonStringCommandValues:
+    """PR #457 round 4: a JSON number/bool as a hook `command` made `"techne" in 5`
+    raise TypeError from the DEREFERENCE, below the shape validator. Measured by
+    Prudence: `techne status` exit 1 with a traceback; at session start
+    render_drift_block raised into session_start's `except Exception` and produced
+    the unqualified green tick — the same failure through a narrower door.
+
+    These shapes are STRUCTURALLY fine (containers all correct), so the right answer
+    is not "unusable" — it is to evaluate them without crashing and report the real
+    drift. Guarding at the dereference covers both call sites and cannot drift out of
+    sync with _settings_shape_error.
+    """
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": 5}]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": true}]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": 1.5}]}]}}',
+            # legacy flat shape — the other call site, same crash
+            '{"hooks": {"SessionStart": [{"type": "command", "command": 5}]}}',
+            # containers do NOT crash today, but pin them so a future rewrite can't
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": ["techne"]}]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": {"techne": 1}}]}]}}',
+        ],
+    )
+    def test_non_string_command_does_not_raise(self, fake_home, cfg, body):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+        drift = claude_code.check_hook_drift(cfg)  # must not raise
+        # Nothing techne is registered in any of these, so real drift is the truth.
+        assert any("NOT registered" in w for w in drift), drift
+        assert not any("may be unregistered" in w for w in drift), (
+            "structurally-valid settings must not be reported as unusable"
+        )
+
+
+class TestMatcherIsALeafToo:
+    """PR #457 round 5: the THIRD crash level, below two rounds of validator work.
+
+    `matcher` is a leaf that _settings_shape_error never inspects and
+    _group_contains_techne never touches, and it flows into `(event, matcher) not in
+    expected_set` — a HASH. A truthy list/dict raises TypeError: unhashable, which
+    `techne status` shows as a traceback and the banner swallows into a green tick.
+    The old `g.get("matcher") or ""` hid it: falsy containers collapse to "" and
+    hashable scalars survive, so ONLY truthy containers trip it. The suite was 73
+    passed with and without the fix — nothing pinned it.
+    """
+
+    @pytest.mark.parametrize(
+        "matcher",
+        ['["Grep"]', '{"a": 1}', '5', 'true', '1.5', '[]', '{}', 'null'],
+    )
+    def test_non_string_matcher_does_not_raise(self, fake_home, cfg, matcher):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"hooks": {"SessionStart": [{"matcher": %s, '
+            '"hooks": [{"type": "command", "command": "sh techne-hook.sh"}]}]}}' % matcher
+        )
+        drift = claude_code.check_hook_drift(cfg)  # must not raise
+        assert drift, "an orphaned techne group must still be reported"
+
+
+class TestUnusableBranchGivesAWorkableRemedy:
+    """PR #457 round 5: the banner appended `Reconcile: techne init` to BOTH branches,
+    but register_hooks walks the same unguarded structure — so for most unusable
+    shapes `techne init` itself raises. Telling the operator to run it is a second
+    lie on top of the first."""
+
+    def test_unusable_does_not_tell_you_to_run_init_alone(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        claude_code.register_hooks(cfg)
+        claude_code.SETTINGS_PATH.write_text('{"hooks": []}')
+
+        block = render_drift_block(cfg)
+        assert "settings.json unusable" in block, block
+        assert "Repair or move aside" in block, block
+        assert "Reconcile:" not in block, "init alone cannot fix an unusable file"
+
+    def test_real_drift_still_gets_the_init_remedy(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        block = render_drift_block(cfg)
+        assert "Reconcile:" in block, block
+        assert "Repair or move aside" not in block, block

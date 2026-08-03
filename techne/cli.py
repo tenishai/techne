@@ -64,7 +64,33 @@ def status(ctx):
         drift = check_hook_drift(config)
         if drift:
             click.echo()
-            click.echo("⚠ Hook registration drift — run 'techne init' to reconcile:")
+            # Pin --posture: it defaults to `auto`, which RE-DETECTS CC memory on
+            # every re-init, so a bare `techne init` can change posture (and whether
+            # reflect is advisory) as a side effect of fixing hook registration.
+            # Same reasoning as the session-start banner (techne#452).
+            # Same two-heading split as the session-start banner: "enabled in config
+            # but not registered" is a precise claim and is NOT what an unusable
+            # settings.json means — there we cannot tell. The banner got this
+            # treatment; status did not, leaving the same small lie on the other
+            # surface. Asks the CONDITION, never greps the prose. (Prudence, PR #457.)
+            from techne.platforms.claude_code import settings_unusable_reason
+
+            if settings_unusable_reason(config) is not None:
+                from techne.platforms.claude_code.hooks import SETTINGS_PATH
+
+                click.echo(
+                    "⚠ settings.json unusable — hook registration cannot be verified; "
+                    "every techne hook may be silently not firing:"
+                )
+                click.echo(
+                    f"  Repair or move aside {SETTINGS_PATH}, then run "
+                    f"'techne init --posture {config.posture.mode}'."
+                )
+            else:
+                click.echo(
+                    f"⚠ Hook registration drift — run "
+                    f"'techne init --posture {config.posture.mode}' to reconcile:"
+                )
             for w in drift:
                 click.echo(f"  {w}")
 

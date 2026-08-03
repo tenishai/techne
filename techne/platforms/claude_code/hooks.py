@@ -574,6 +574,22 @@ def _hook_command(module: str) -> str:
     return f"/bin/sh {shlex.quote(str(_launcher_path()))} -m {module}"
 
 
+def _matcher_of(group: dict) -> str:
+    """A group's `matcher` as a STRING, whatever settings.json actually holds.
+
+    Third crash level found on this PR, below two rounds of validator work. `matcher`
+    is a leaf that _settings_shape_error never inspects and _group_contains_techne
+    never touches, and it flows into `(event, matcher) not in expected_set` — a HASH.
+    A truthy list or dict there raises `TypeError: unhashable type`, which
+    `techne status` surfaces as a traceback and the banner swallows into the green
+    tick. The old `g.get("matcher") or ""` HID it: falsy containers ([] and {})
+    collapse to "" and hashable scalars (5, true) survive, so only truthy containers
+    trip it — which is why it took a third look. (Prudence, PR #457.)
+    """
+    m = group.get("matcher")
+    return m if isinstance(m, str) else ""
+
+
 def _group_contains_techne(group: dict) -> bool:
     """True if a settings.json hook-group entry references techne anywhere.
 
@@ -586,10 +602,22 @@ def _group_contains_techne(group: dict) -> bool:
     ``techne`` via both the launcher filename (``techne-hook.sh``) and the
     ``-m techne.hooks.X`` module argument, so this check requires no change.
     """
-    if "command" in group and "techne" in (group.get("command") or ""):
+    # isinstance at the DEREFERENCE, not another clause in the shape validator.
+    # A non-string `command` (a JSON number/bool) makes `"techne" in 5` raise
+    # TypeError — measured: `techne status` exits 1 with a traceback, and at session
+    # start render_drift_block raises into session_start's `except Exception`, giving
+    # the unqualified green tick #452 exists to kill, through a narrower door.
+    # Guarding here closes BOTH call sites at once and cannot drift out of sync with
+    # _settings_shape_error the way a parallel validator clause would.
+    # (Prudence, PR #457.)
+    def _mentions_techne(value: object) -> bool:
+        return isinstance(value, str) and "techne" in value
+
+    if _mentions_techne(group.get("command")):
         return True
-    for h in group.get("hooks") or []:
-        if "techne" in (h.get("command") or ""):
+    inner = group.get("hooks")
+    for h in inner if isinstance(inner, list) else []:
+        if isinstance(h, dict) and _mentions_techne(h.get("command")):
             return True
     return False
 
@@ -749,6 +777,86 @@ def _expected_registrations(config: Config) -> list[tuple[str, str]]:
     return expected
 
 
+_UNVERIFIABLE = " — hook registration cannot be verified; every techne hook may be unregistered"
+
+
+def _settings_shape_error(settings: object) -> str | None:
+    """Why *settings* cannot be traversed to verify hook registration, or None.
+
+    VALIDATES THE SHAPE THE TRAVERSAL ACTUALLY WALKS — five levels, not two. The
+    first cut checked only that `settings` and `hooks` were objects; Prudence then
+    measured 10 of 14 malformed shapes STILL raising AttributeError further down,
+    including ``{"hooks": {"SessionStart": {...}}}`` — an object where an array
+    belongs, i.e. the likeliest hand-edit slip. Those exceptions land in the
+    session-start hook's ``except Exception`` and render a GREEN TICK with every
+    hook dead, which is the exact failure techne#452 exists to kill.
+
+    Rule of thumb this encodes: validate every level you are about to walk, not the
+    first one that occurred to you. (Prudence, PR #457.)
+    """
+    if settings is None:
+        return None  # absent file is a normal state; drift logic handles it
+    if not isinstance(settings, dict):
+        return (
+            "settings.json is valid JSON but not an object "
+            f"(got {type(settings).__name__}){_UNVERIFIABLE}"
+        )
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return (
+            "settings.json's `hooks` key is not an object "
+            f"(got {type(hooks).__name__}){_UNVERIFIABLE}"
+        )
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            return (
+                f"settings.json's `hooks.{event}` is not an array (got "
+                f"{type(groups).__name__}){_UNVERIFIABLE}"
+            )
+        for group in groups:
+            if not isinstance(group, dict):
+                return (
+                    f"settings.json has a non-object entry in `hooks.{event}` (got "
+                    f"{type(group).__name__}){_UNVERIFIABLE}"
+                )
+            inner = group.get("hooks")
+            if inner is None:
+                continue  # legacy flat shape; _group_contains_techne handles it
+            if not isinstance(inner, list):
+                return (
+                    f"settings.json has a non-array `hooks` inside a `hooks.{event}` "
+                    f"group (got {type(inner).__name__}){_UNVERIFIABLE}"
+                )
+            for entry in inner:
+                if not isinstance(entry, dict):
+                    return (
+                        f"settings.json has a non-object hook in `hooks.{event}` (got "
+                        f"{type(entry).__name__}){_UNVERIFIABLE}"
+                    )
+    return None
+
+
+def settings_unusable_reason(config: Config) -> str | None:
+    """The single source of truth for "settings.json cannot be verified", or None.
+
+    Exists so callers branch on the CONDITION rather than grepping prose. The banner
+    previously decided its heading with ``any("cannot be verified" in w ...)``, which
+    reaches across a module boundary into message wording: Prudence flipped it two
+    ways — rewording a message here left the suite 56/56 green while the banner
+    reverted to the mislabel, and because a drift warning embeds the `matcher` read
+    from settings.json, a hook group literally named "cannot be verified" filed six
+    genuine drift warnings under "settings.json unusable". User data must not steer
+    control flow. (Prudence, PR #457.)
+    """
+    if config.platform != "claude-code":
+        return None
+    try:
+        settings = _load_json(SETTINGS_PATH)
+    except RuntimeError as exc:
+        return f"settings.json is unreadable ({exc}){_UNVERIFIABLE}"
+    return _settings_shape_error(settings)
+
+
 def check_hook_drift(config: Config) -> list[str]:
     """Report drift between config-enabled techne hooks and what's actually wired
     in settings.json. Returns human-readable warnings; empty list == in sync (techne#287).
@@ -764,17 +872,28 @@ def check_hook_drift(config: Config) -> list[str]:
     """
     try:
         settings = _load_json(SETTINGS_PATH)
-    except RuntimeError:
-        # settings.json exists but is unparseable — register/unregister already
-        # surface that loudly with remediation; don't double-report it here.
-        return []
+    except RuntimeError as exc:
+        # Report it HERE rather than deferring to register/unregister. The old
+        # comment reasoned that those "already surface it loudly with remediation",
+        # which is true and beside the point: they run only at `techne init`, never
+        # at session start and never from `techne status`. Returning [] meant a
+        # corrupt settings.json rendered a CLEAN bill of health while every hook
+        # was in an unknown state — a worse silence than the drift this function
+        # exists to report. (techne#452; Prudence, PR #457.)
+        return [
+            f"settings.json is unreadable ({exc}) — hook registration cannot be "
+            "verified; every techne hook may be unregistered"
+        ]
+    shape = _settings_shape_error(settings)
+    if shape:
+        return [shape]
     if settings is None:
         settings = {}
     hooks = settings.get("hooks", {})
 
     def _has_techne_group(event: str, matcher: str) -> bool:
         for g in hooks.get(event, []):
-            if (g.get("matcher") or "") == matcher and _group_contains_techne(g):
+            if _matcher_of(g) == matcher and _group_contains_techne(g):
                 return True
         return False
 
@@ -798,7 +917,7 @@ def check_hook_drift(config: Config) -> list[str]:
     # (e.g. a flag flipped off without a re-init) — it will keep firing until re-init.
     for event, groups in hooks.items():
         for g in groups:
-            matcher = g.get("matcher") or ""
+            matcher = _matcher_of(g)
             if _group_contains_techne(g) and (event, matcher) not in expected_set:
                 warnings.append(
                     f"{_label(event, matcher)} techne hook registered in "

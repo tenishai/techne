@@ -49,6 +49,93 @@ def _persist_hook_state(db_path, *, last_run: str, error: dict | None) -> None:
         print(f"techne: could not persist hook state: {exc}", file=sys.stderr)
 
 
+def render_drift_block(config) -> str:
+    """Render the hook-registration-drift warning for the banner, '' when in sync.
+
+    A ``hooks.*`` flag can be true in config.yaml while its entry is absent from
+    settings.json — init not re-run, or re-run while the flag was off, which STRIPS
+    the group. The rail then silently never fires: no error, no log, no symptom.
+
+    ``check_hook_drift`` (techne#287) has detected this since 2026-07-09, but it was
+    surfaced ONLY by ``techne status`` — a command you have to remember to run, and
+    which had gone 17 days uninvoked when this was found. In that window
+    ``per_turn_recall`` and ``codex_grep_assist`` were both dead for three days with
+    their flags still reading ``true``. So the check moves to where the operator
+    already looks: a detector wired to a command nobody runs is worth no more than
+    no detector at all. (techne#452)
+
+    Claude-code only — settings.json registration is that platform's mechanism.
+    """
+    if config.platform != "claude-code":
+        return ""
+    from techne.platforms.claude_code import check_hook_drift
+    from techne.platforms.claude_code.hooks import SETTINGS_PATH
+
+    # Unreadable / wrong-shaped settings.json is reported BY check_hook_drift, not
+    # re-probed here. An earlier cut of this block did its own _load_json check,
+    # which caught only the unparseable shape — valid-but-not-an-object JSON
+    # (`[]`, `"hello"`, `{"hooks": []}`) still sailed through and produced a green
+    # tick with nothing registered. Putting the guard at the source fixes this
+    # surface AND `techne status`, which had the same hole. (Prudence, PR #457.)
+    drift = check_hook_drift(config)
+    if not drift:
+        return ""
+    # Two distinct conditions share this reporter, and mislabelling them is its own
+    # small lie: "enabled in config but not registered" is a precise claim, and it is
+    # NOT what an unreadable/wrong-shaped settings.json means (there, we cannot tell).
+    #
+    # Ask the CONDITION, never grep the prose. The previous cut used
+    # `any("cannot be verified" in w ...)`, which (a) silently reverted to the wrong
+    # heading whenever a message in hooks.py was reworded — with the whole suite
+    # green — and (b) let a hook group NAMED "cannot be verified" in settings.json
+    # relabel six genuine drift warnings, because the drift message embeds the
+    # matcher read from that file. User data must not steer control flow.
+    # (Prudence, PR #457.)
+    from techne.platforms.claude_code.hooks import settings_unusable_reason
+
+    # TOCTOU, known and benign: check_hook_drift already read settings.json, and
+    # this reads it again. If the file changes in between, heading and body come
+    # from different snapshots — worst case a mislabelled heading, never a crash
+    # (_load_json converts OSError to RuntimeError, which this catches). Threading
+    # the reason out of check_hook_drift would remove it; not worth the signature
+    # churn for a mislabel. Note this second read happens ONLY when something is
+    # already wrong — the happy path returns above without it. (Prudence, PR #457.)
+    unverifiable = settings_unusable_reason(config) is not None
+    if unverifiable:
+        lines = [
+            "\n## techne ⚠️ settings.json unusable",
+            "> Hook registration cannot be verified — every techne hook may be",
+            "> unregistered and silently not firing:",
+        ]
+    else:
+        lines = [
+            "\n## techne ⚠️ hook drift",
+            "> Enabled in config.yaml but NOT registered in settings.json —",
+            "> these are silently dead (no error, no log; they simply never fire):",
+        ]
+    lines.extend(f">   • {w}" for w in drift)
+    if unverifiable:
+        # `techne init` is the WRONG remedy here and would be a second lie:
+        # register_hooks walks the same structure without guarding it, so for most
+        # unusable shapes init itself raises (e.g. AttributeError on {"hooks": []}).
+        # Repair the file first; only then is re-registering meaningful.
+        # (Prudence, PR #457.)
+        lines.append(
+            f"> Repair or move aside {SETTINGS_PATH}, then run "
+            f"`techne init --posture {config.posture.mode}`."
+        )
+    else:
+        # Echo the CURRENT posture into the suggested command: `techne init` defaults
+        # --posture to `auto`, which re-resolves and can silently change posture (and
+        # with it whether reflect is advisory). The fix for one silent no-op must not
+        # hand the operator another.
+        lines.append(
+            f"> Reconcile: `techne init --posture {config.posture.mode}` "
+            "(pin --posture — the `auto` default can change it)"
+        )
+    return "\n".join(lines)
+
+
 def main() -> None:
     run_ts = _now_iso()
     db_path = None
@@ -240,6 +327,39 @@ def _run_phases_2_to_9(
         output_parts.append("")
 
     # ------------------------------------------------------------------
+    # Phase 5.4: Hook-registration drift (techne#452) — non-fatal.
+    #
+    # A `hooks.*` flag can be true in config.yaml while its entry is absent from
+    # settings.json — init not re-run, or re-run while the flag was off, which
+    # STRIPS the group. The rail then silently never fires: no error, no log, no
+    # symptom. check_hook_drift (#287) has detected this since 2026-07-09, but it
+    # was surfaced ONLY by `techne status` — a command you must remember to run,
+    # and which had not been invoked in 17 days when this was found. In that gap
+    # per_turn_recall and codex_grep_assist were both dead for three days with
+    # their flags reading `true`.
+    #
+    # So the check moves to where you already look. A detector wired to a command
+    # nobody runs has the same practical value as no detector.
+    # ------------------------------------------------------------------
+    # Held in its own variable, NOT just appended to output_parts: Phase 9 sends
+    # output_parts[0] (always the health banner) as `systemMessage` — the only
+    # OPERATOR-facing surface (core/health.py:179) — and the joined remainder as
+    # `additionalContext`, which goes to the model. Appending alone therefore put
+    # this warning in front of the agent while the operator saw an unqualified
+    # green tick: a rail whose whole purpose is reporting silent no-ops, itself
+    # silently not reaching the person who has to run `techne init`.
+    # (Caught by Prudence on PR #457 — it is the exact class this PR is about.)
+    operator_drift = ""
+    try:
+        operator_drift = render_drift_block(config)
+        if operator_drift:
+            output_parts.append(operator_drift)
+            output_parts.append("")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"hook drift check: {exc}")
+        print(f"techne: hook drift check failed: {exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
     # Phase 5.5: Coordination presence + unread (techne#376)
     # ------------------------------------------------------------------
     try:
@@ -409,6 +529,13 @@ def _run_phases_2_to_9(
     if output_parts:
         summary = "\n".join(output_parts)
         banner = output_parts[0] if output_parts else summary
+        # Hook-registration drift rides the OPERATOR surface, not just the agent's.
+        # `systemMessage` is what the operator sees; `additionalContext` goes to the
+        # model. Drift is only actionable by a human (`techne init`), so telling the
+        # model alone is telling the wrong party. Everything else in output_parts is
+        # context FOR the model and stays where it is. (techne#452 / PR #457.)
+        if operator_drift:
+            banner = f"{banner}\n{operator_drift}"
         print(
             json.dumps(
                 {
