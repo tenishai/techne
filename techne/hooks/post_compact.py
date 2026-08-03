@@ -8,6 +8,12 @@ from techne.config import Config
 from techne.core.database import connect
 from techne.core.state import get_latest_checkpoint
 
+# Liveness key namespace: `hook:post_compact:last_run` (techne#468). Unlike its
+# pre-side sibling, this hook only READS (a checkpoint) and prints — it writes
+# nothing, so before #468 a restore that silently produced nothing was
+# indistinguishable from one that was never invoked.
+HOOK_NAME = "post_compact"
+
 
 def main():
     try:
@@ -30,11 +36,19 @@ def main():
         print(f"techne: config load failed, skipping restore: {e}", file=sys.stderr)
         sys.exit(0)
 
+    from techne.hooks._liveness import record_hook_run
+
     try:
         with bounded_hook(config.hooks.timeout_s, label="post_compact"):
             # Get the latest checkpoint
             checkpoint = get_latest_checkpoint(config.db_path, session_id)
             if not checkpoint:
+                # pre_compact writes checkpoints, so this hook is observable only
+                # by its ABSENCE of effect (techne#468). A missing checkpoint here
+                # means the pre-side never ran or never stored — worth a fact,
+                # since the restore silently producing nothing is exactly what a
+                # working restore with nothing to say also looks like.
+                record_hook_run(config.db_path, HOOK_NAME, outcome="noop:no-checkpoint")
                 sys.exit(0)
 
             cp_data = checkpoint["data"]
@@ -78,8 +92,20 @@ def main():
 
             if output_parts:
                 print("\n".join(output_parts))
+            record_hook_run(
+                config.db_path,
+                HOOK_NAME,
+                outcome="ok" if output_parts else "noop:nothing-to-restore",
+                detail=f"{len(threads)} threads" if threads else None,
+            )
     except Exception as e:
         print(f"techne: post_compact failed: {e}", file=sys.stderr)
+        record_hook_run(
+            config.db_path,
+            HOOK_NAME,
+            outcome="failed",
+            error={"stage": "restore", "msg": f"{type(e).__name__}: {e}"},
+        )
         sys.exit(0)
 
 

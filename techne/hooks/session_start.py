@@ -27,26 +27,25 @@ def _now_iso() -> str:
 
 
 def _persist_hook_state(db_path, *, last_run: str, error: dict | None) -> None:
-    """Write hook health to extension_state. Swallows all exceptions."""
-    try:
-        from techne.core.database import connect
-        from techne.core.extension_state import set_state
+    """Write hook health to extension_state. Swallows all exceptions.
 
-        conn = connect(db_path)
-        try:
-            set_state(conn, "hook:session_start:last_run", {"ts": last_run})
-            if error is not None:
-                set_state(conn, "hook:session_start:last_error", error)
-            else:
-                # Clear any stale error on a clean run.
-                from techne.core.extension_state import get_state
+    Thin wrapper over the shared helper (techne#468). This hook's markers came
+    first (techne#95) and were the template the other hooks now copy; delegating
+    keeps ONE implementation so `techne status` can enumerate every hook
+    uniformly instead of special-casing whichever ones diverged.
 
-                if get_state(conn, "hook:session_start:last_error") is not None:
-                    set_state(conn, "hook:session_start:last_error", {})
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001
-        print(f"techne: could not persist hook state: {exc}", file=sys.stderr)
+    Key names and payload shape are unchanged — `hook:session_start:last_run`
+    still carries `{"ts": ...}`, now alongside an `outcome`.
+    """
+    from techne.hooks._liveness import record_hook_run
+
+    record_hook_run(
+        db_path,
+        "session_start",
+        outcome="failed" if error else "ok",
+        error=error,
+        ts=last_run,
+    )
 
 
 def render_drift_block(config) -> str:

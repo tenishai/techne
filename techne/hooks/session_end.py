@@ -15,6 +15,17 @@ import sys
 
 MIN_NEW_OBSERVATIONS = 10
 
+# Liveness key namespace: `hook:session_end:last_run` (techne#468).
+#
+# This hook does the most consequential work of any of them — thread detection,
+# tier aging, outbox + sink flush — and, before #468, recorded NOTHING about
+# whether any of it happened. Its fail-silence is deliberate and must stay
+# (Claude Code treats a non-zero hook exit as a hard failure, so a raising
+# teardown hook is worse than a quiet one), which is exactly why the failure has
+# to be WRITTEN DOWN instead: silence is the correct behaviour and therefore
+# cannot also be the failure signal.
+HOOK_NAME = "session_end"
+
 
 def main():
     try:
@@ -39,6 +50,8 @@ def main():
     except Exception as e:
         print(f"techne: session_end config load failed: {e}", file=sys.stderr)
         sys.exit(0)
+
+    from techne.hooks._liveness import record_hook_run
 
     try:
         with bounded_hook(timeout_s, label="session_end"):
@@ -69,12 +82,24 @@ def main():
 
             if obs_count < MIN_NEW_OBSERVATIONS:
                 print(f"techne: session end skipped ({obs_count} observations)", file=sys.stderr)
+                record_hook_run(
+                    config.db_path,
+                    HOOK_NAME,
+                    outcome="noop:below-threshold",
+                    detail=f"{obs_count} obs < {MIN_NEW_OBSERVATIONS}",
+                )
                 sys.exit(0)
 
             try:
                 result = run_session_end(config, session_id, summary=data.get("summary"))
             except Exception as e:
                 print(f"techne: session_end failed: {e}", file=sys.stderr)
+                record_hook_run(
+                    config.db_path,
+                    HOOK_NAME,
+                    outcome="failed",
+                    error={"stage": "run_session_end", "msg": f"{type(e).__name__}: {e}"},
+                )
                 sys.exit(0)
 
             try:
@@ -105,8 +130,24 @@ def main():
                     f" {result['aged_stale']} stale",
                     file=sys.stderr,
                 )
+            record_hook_run(
+                config.db_path,
+                HOOK_NAME,
+                outcome="ok",
+                detail=f"{obs_count} obs, {result['threads']} threads",
+            )
     except Exception as e:
+        # Catches HookTimeout too. This is the path that mattered most: before
+        # #468 a teardown that blew its wall-clock budget mid-way left NOTHING
+        # behind, so a session whose threads were never detected looked exactly
+        # like one with nothing to detect.
         print(f"techne: session_end hook error: {e}", file=sys.stderr)
+        record_hook_run(
+            config.db_path,
+            HOOK_NAME,
+            outcome="failed",
+            error={"stage": "teardown", "msg": f"{type(e).__name__}: {e}"},
+        )
         sys.exit(0)
 
 

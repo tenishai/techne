@@ -269,7 +269,16 @@ class TestExtensionStatePersistence:
         assert "ts" in payload
 
     def test_last_run_written_directly(self, db_path: Path):
-        """Unit test: _persist_hook_state writes last_run correctly."""
+        """Unit test: _persist_hook_state writes last_run correctly.
+
+        The payload gained an ``outcome`` field in techne#468 — a deliberate
+        contract change, because a bare timestamp says the hook EXECUTED but not
+        whether it did its job, and that gap is the whole reason the rail audit
+        could not tell a working hook from a dead one. Asserting the timestamp
+        and the outcome separately (rather than exact-matching the whole dict)
+        keeps this test pinned to what it is actually about while letting the
+        payload carry the richer diagnostics the other hooks now emit.
+        """
         from techne.hooks.session_start import _persist_hook_state
 
         ts = "2026-06-20T12:00:00+00:00"
@@ -280,7 +289,27 @@ class TestExtensionStatePersistence:
             payload = get_state(conn, "hook:session_start:last_run")
         finally:
             conn.close()
-        assert payload == {"ts": ts}
+        assert payload["ts"] == ts
+        assert payload["outcome"] == "ok"
+
+    def test_last_run_records_failure_outcome(self, db_path: Path):
+        """A failed run is distinguishable from a clean one in last_run itself.
+
+        Regression guard for techne#468's core claim: before it, `last_run` said
+        only WHEN, so a hook that ran and blew up looked identical to one that
+        ran and succeeded unless you separately read `last_error`.
+        """
+        from techne.hooks.session_start import _persist_hook_state
+
+        ts = "2026-06-20T12:00:00+00:00"
+        _persist_hook_state(db_path, last_run=ts, error={"stage": "x", "msg": "boom"})
+
+        conn = connect(db_path)
+        try:
+            payload = get_state(conn, "hook:session_start:last_run")
+        finally:
+            conn.close()
+        assert payload["outcome"] == "failed"
 
     def test_last_error_written_on_failure(self, db_path: Path):
         """_persist_hook_state writes last_error when error dict is provided."""
@@ -638,3 +667,78 @@ class TestThreadsBoundedInjection:
         assert cfg.injection.max_recent_threads == 4
         assert cfg.injection.thread_char_budget == 800
         assert cfg.injection.thread_per_item_chars == 150
+
+
+class TestHookLiveness:
+    """techne#468 — every hook asserts when it last ran AND what it did.
+
+    The rule these pin: *a rail that emits no signal is not finished.* Before
+    #468, four of seven hooks wrote nothing anywhere, so their liveness was not
+    merely unknown but undecidable — a hook that never ran produced byte-identical
+    evidence to one that ran and correctly did nothing.
+    """
+
+    def test_records_run_and_outcome(self, db_path: Path):
+        from techne.hooks._liveness import record_hook_run
+
+        record_hook_run(db_path, "demo", outcome="ok", detail="3 things")
+
+        conn = connect(db_path)
+        try:
+            payload = get_state(conn, "hook:demo:last_run")
+        finally:
+            conn.close()
+        assert payload["outcome"] == "ok"
+        assert payload["detail"] == "3 things"
+        assert payload["ts"]
+
+    def test_noop_reason_is_recorded_not_silent(self, db_path: Path):
+        """The point of the change: a no-op names itself instead of exiting 0."""
+        from techne.hooks._liveness import record_hook_run
+
+        record_hook_run(db_path, "demo", outcome="noop:no-repo-db")
+
+        conn = connect(db_path)
+        try:
+            payload = get_state(conn, "hook:demo:last_run")
+        finally:
+            conn.close()
+        assert payload["outcome"] == "noop:no-repo-db"
+
+    def test_error_recorded_then_cleared_on_clean_run(self, db_path: Path):
+        from techne.hooks._liveness import record_hook_run
+
+        record_hook_run(db_path, "demo", outcome="failed", error={"stage": "s", "msg": "boom"})
+        conn = connect(db_path)
+        try:
+            err = get_state(conn, "hook:demo:last_error")
+        finally:
+            conn.close()
+        assert err["msg"] == "boom"
+        assert err["ts"], "error payload must be timestamped even when caller omits it"
+
+        # A fixed hook must stop reporting a failure it no longer has.
+        record_hook_run(db_path, "demo", outcome="ok")
+        conn = connect(db_path)
+        try:
+            cleared = get_state(conn, "hook:demo:last_error")
+        finally:
+            conn.close()
+        assert not cleared
+
+    def test_never_raises_on_unwritable_db(self, tmp_path: Path):
+        """Bookkeeping must never kill a hook — Claude Code treats a non-zero
+        hook exit as a hard failure, so this has to swallow its own errors."""
+        from techne.hooks._liveness import record_hook_run
+
+        record_hook_run(tmp_path / "nonexistent-dir" / "no.db", "demo", outcome="ok")
+
+    def test_hooks_declare_distinct_liveness_names(self):
+        """Each hook owns its own key namespace; a collision would make one
+        hook's liveness silently overwrite another's."""
+        from techne.hooks.post_compact import HOOK_NAME as post_compact_name
+        from techne.hooks.pre_tool_use import HOOK_NAME as grep_assist_name
+        from techne.hooks.session_end import HOOK_NAME as session_end_name
+
+        names = {grep_assist_name, session_end_name, post_compact_name, "session_start"}
+        assert len(names) == 4
