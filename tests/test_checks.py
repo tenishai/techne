@@ -190,9 +190,7 @@ class TestBuiltinChecks:
         assert rail.verdict is Verdict.DORMANT
         assert "reflect.enabled" in rail.detail
 
-    def test_outbox_target_with_no_backlog_is_not_stale(self, config):
-        """The discriminator is the BACKLOG, not the clock: an old target that
-        owes nothing is idle, not broken."""
+    def _enqueue(self, config, target, created_at, synced_at, status="synced"):
         from techne.core.database import connect
 
         conn = connect(config.db_path)
@@ -200,16 +198,57 @@ class TestBuiltinChecks:
             conn.execute(
                 "INSERT INTO outbox (target, data_json, content_hash, status, created_at,"
                 " synced_at) VALUES (?,?,?,?,?,?)",
-                ("t", "{}", "h1", "synced", "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
+                (target, "{}", f"h-{target}-{created_at}", status, created_at, synced_at),
             )
             conn.commit()
         finally:
             conn.close()
 
-        results = run_checks(config)
-        target = next(r for r in results if r.name == "outbox:t")
+    def test_drained_and_recently_filled_is_live(self, config):
+        """Nothing owed AND the producer is still enqueueing — genuinely fine."""
+        recent = _iso(timedelta(hours=2))
+        self._enqueue(config, "t", recent, recent)
+
+        target = next(r for r in run_checks(config) if r.name == "outbox:t")
         assert target.verdict is Verdict.LIVE
         assert "nothing owed" in target.detail
+
+    def test_drained_but_dead_producer_is_stale(self, config):
+        """THE FALSE GREEN THIS CHECK SHIPPED WITH (#469 review, finding 2).
+
+        `pending == 0` has two opposite causes — sync keeping up, or nothing
+        being produced — and short-circuiting both to LIVE reported
+        `thread_summary` (140 rows, last enqueued eight weeks earlier) as
+        healthy: the very lane the check's own docstring cites as the motivating
+        dead-for-eight-weeks incident. The backlog measures the DRAIN; it says
+        nothing about the FILL.
+        """
+        old = _iso(timedelta(days=60))
+        self._enqueue(config, "t", old, old)
+
+        target = next(r for r in run_checks(config) if r.name == "outbox:t")
+        assert target.verdict is Verdict.STALE
+        assert "producer may be dead" in target.detail
+
+    def test_declared_lane_that_never_enqueued_still_produces_a_result(self, config):
+        """Deriving the lane list from `GROUP BY target` made a never-used lane
+        VANISH from the report — reintroducing, one layer up, the exact
+        absence-reads-as-healthy bug run_checks prevents for raising probes.
+        """
+        from techne.core import checks as checks_mod
+        from techne.core.database import connect
+
+        # Age the store past the fresh-install grace so absence is a finding.
+        conn = connect(config.db_path)
+        try:
+            conn.execute("UPDATE schema_version SET applied_at = ?", ("2026-01-01 00:00:00",))
+            conn.commit()
+        finally:
+            conn.close()
+
+        names = {r.name for r in run_checks(config)}
+        for declared in checks_mod._DECLARED_OUTBOX_TARGETS:
+            assert f"outbox:{declared}" in names, f"{declared} vanished from the report"
 
     def test_every_result_carries_evidence(self, config):
         """techne#941's 'demand proof of absence' rule: a verdict a reader
@@ -248,3 +287,90 @@ class TestConfigGateBeatsMarker:
         )
         assert disabled.verdict is Verdict.DORMANT
         assert "hooks.codex_grep_assist" in disabled.detail
+
+
+class TestNoFalseGreens:
+    """Regression guards for the #469-review Critical findings.
+
+    Richard's standard for this work: a check that reports green while a
+    subsystem is dead is worse than no check at all. Each test here pins a
+    state where an earlier version reported healthy.
+    """
+
+    def _age_store(self, config, applied_at="2026-01-01 00:00:00"):
+        from techne.core.database import connect
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("UPDATE schema_version SET applied_at = ?", (applied_at,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_old_store_that_never_recorded_a_session_is_not_green(self, config):
+        """THE WORST BUG THIS MODULE SHIPPED WITH.
+
+        The fresh-install DORMANT branch keyed on `sessions == 0` with NO time
+        bound. If session_start never fires — mis-registered, wrong interpreter
+        (techne#458, three times), or the techne#942 shape — no session row is
+        ever written, so every hook stayed DORMANT and `techne doctor` printed
+        "All subsystems confirmed live" FOREVER. It confirmed the ABSENCE of
+        evidence and reported it as confirmation.
+        """
+        self._age_store(config)
+        config.hooks.codex_grep_assist = True  # else correctly DORMANT by config
+
+        hooks = [r for r in run_checks(config) if r.name.startswith("hook:")]
+        assert hooks
+        assert all(r.verdict is Verdict.UNOBSERVABLE for r in hooks), (
+            "an old store with no sessions must NOT read as healthy"
+        )
+        assert not any(r.ok for r in hooks)
+
+    def test_brand_new_store_is_still_quiet(self, config):
+        """The other direction must keep working: a genuinely fresh install
+        must not report red, or the operator learns to ignore the signal."""
+        hooks = [r for r in run_checks(config) if r.name.startswith("hook:")]
+        assert all(r.ok for r in hooks)
+
+    def test_uninstrumented_hooks_are_reported_not_omitted(self, config):
+        """post_tool_use IS the capture path; user_prompt_submit hosts
+        per_turn_recall — half the founding incident. Omitting them let a dead
+        capture rail produce byte-identical verdicts (#469 review, finding 3).
+        """
+        self._age_store(config)
+        names = {r.name for r in run_checks(config)}
+        for hook in ("post_tool_use", "user_prompt_submit", "pre_compact"):
+            assert f"hook:{hook}" in names, f"{hook} is invisible to the health check"
+
+    def test_expected_checks_are_all_present(self, config):
+        """Guards against a check being DELETED WHOLESALE without a failure.
+
+        `test_every_result_carries_evidence` and `test_summarize_counts_by_verdict`
+        iterate whatever happens to be registered, so they pass undiminished
+        when a check disappears — `check_vector_coverage` could be removed with
+        zero failures (#469 review, finding 7).
+        """
+        names = {r.name for r in run_checks(config)}
+        assert "vectors:coverage" in names
+        assert any(n.startswith("hook:") for n in names)
+        assert any(n.startswith("rail:") for n in names)
+        assert any(n.startswith("outbox:") for n in names)
+
+    def test_vector_coverage_reports_stale_when_rows_are_unembedded(self, config):
+        """Pins check_vector_coverage's FAILING branch, which was unpinned."""
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+
+        store(config.db_path, "a durable fact for coverage", type="fact")
+        conn = connect(config.db_path)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS knowledge_vec_rowids (rowid INTEGER)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
+        assert cov.verdict is Verdict.STALE
+        assert "missing" in cov.detail
+        assert cov.remedy

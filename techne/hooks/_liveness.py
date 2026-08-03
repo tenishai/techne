@@ -161,9 +161,18 @@ def resolve_db_path():
         import os
         from pathlib import Path
 
+        # $TECHNE_HOME ONLY — never ~/.techne (#469 review, finding 6). Config
+        # supports an explicit `db_path:` pointing anywhere, and in the
+        # multi-agent layout techne#112 exists to support, ~/.techne/techne.db
+        # is A DIFFERENT AGENT'S LIVE STORE. Guessing it gets BOTH halves wrong:
+        # the store that mattered stays silent (the undecidable state this
+        # exists to remove) and an innocent store is made to read LIVE for a
+        # hook that never ran against it. $TECHNE_HOME is the one signal that
+        # cannot belong to another agent, so it is the only fallback taken.
         home = os.environ.get("TECHNE_HOME")
-        base = Path(home) if home else Path.home() / ".techne"
-        candidate = base / "techne.db"
+        if not home:
+            return None
+        candidate = Path(home) / "techne.db"
         # Only use it if the store already exists: creating a db as a side
         # effect of a failed config load would be a mutation, and health
         # bookkeeping must not create state it was merely trying to describe.

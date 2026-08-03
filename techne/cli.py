@@ -151,7 +151,18 @@ def _render_liveness(config) -> int:
         # report is unfinished, so it must never render as passing.
         click.echo(f"\n{failing} subsystem(s) not confirmed working.")
     else:
-        click.echo("\nAll subsystems confirmed live.")
+        # NEVER claim more than was observed. `failing == 0` is not the same
+        # claim as "everything is live" — on a store where every check is
+        # DORMANT this previously printed "All subsystems confirmed live",
+        # confirming the absence of evidence (#469 review, finding 1).
+        live = sum(1 for r in results if r.verdict is Verdict.LIVE)
+        dormant = len(results) - live
+        if live == 0:
+            click.echo(f"\nNothing failing, but 0 of {len(results)} subsystems confirmed live.")
+        elif dormant:
+            click.echo(f"\n{live} live, {dormant} dormant — none failing.")
+        else:
+            click.echo(f"\nAll {live} subsystems confirmed live.")
     return failing
 
 
