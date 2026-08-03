@@ -244,7 +244,7 @@ def test_reformatted_index_blames_the_index_not_every_card(tmp_path: Path) -> No
     )
     r = _run(repo)
     assert r.returncode == 1, r.stdout + r.stderr
-    assert "matched NO cards" in r.stdout
+    assert "index entries matched" in r.stdout
     assert r.stdout.count("not indexed") == 0, "must not blame the individual cards"
     assert "FAILED (1)" in r.stdout, "one index failure, not three card failures"
 
