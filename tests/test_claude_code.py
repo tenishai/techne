@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -1159,3 +1160,84 @@ class TestVenvStateSubprocessPath:
         broken.chmod(0o755)
         assert hooks_mod._venv_state(broken) == (False, "")
         hooks_mod._VENV_PROBE.clear()
+
+
+class TestBakedInModulesStaysInSync:
+    """PR #460 round 3: the probe must cover EVERY module baked into a registered
+    command. That list lived in four places; drift between them is how this class of
+    bug recurs, so _BAKED_IN_MODULES is the single source and this test is the thing
+    that keeps it honest."""
+
+    def test_every_registered_module_is_in_the_probe_list(self, fake_home, cfg):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        cfg.hooks = HookConfig(
+            post_tool_use=True, codex_grep_assist=True, per_turn_recall=True
+        )
+        claude_code.register_hooks(cfg)
+        claude_code.register_mcp(cfg)
+
+        blob = claude_code.SETTINGS_PATH.read_text() + claude_code.MCP_CONFIG_PATH.read_text()
+        registered = set(re.findall(r"techne\.(?:hooks\.[a-z_]+|mcp_server)", blob))
+        missing = registered - set(hooks_mod._BAKED_IN_MODULES)
+        assert not missing, (
+            f"registered but NOT probed: {sorted(missing)} — the probe would pass "
+            "for an interpreter that cannot run them"
+        )
+
+    def test_probe_rejects_an_interpreter_missing_any_one_module(self, tmp_path, monkeypatch):
+        """The PyYAML shape: four of the eight import fine, four die. A probe that
+        asserts one representative module returns True while hooks are dead."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        hooks_mod._IMPORT_PROBE.clear()
+        py = tmp_path / "partial-python"
+        # Satisfies session_start alone; fails the union.
+        py.write_text(
+            '#!/bin/sh\n'
+            'case "$2" in\n'
+            '  "import techne.hooks.session_start") exit 0 ;;\n'
+            '  *) exit 1 ;;\n'
+            'esac\n'
+        )
+        py.chmod(0o755)
+        assert hooks_mod._can_import_techne(py) is False
+        hooks_mod._IMPORT_PROBE.clear()
+
+
+class TestPythonpathOnlyInstallIsDiagnosed:
+    """PR #460 round 3: `pip install --target=DIR` + exported PYTHONPATH supplies
+    techne AND its deps from one entry, so the strict strip reports it unusable. We
+    still REFUSE it — hooks run in Claude Code's environment, so a PYTHONPATH-only
+    install is fragile in the same way the masked one is broken — but a bare
+    'cannot determine a stable interpreter' is baffling when `import techne` plainly
+    works in the operator's shell. Diagnose the actual situation."""
+
+    @pytest.fixture(autouse=True)
+    def _real_interpreter(self, monkeypatch):
+        """conftest's _isolate_install_root stubs _interpreter module-wide; this class
+        exercises the real one. Without this the test passes vacuously — the stub
+        returns a path and never probes, so it can never raise."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
+        hooks_mod._IMPORT_PROBE.clear()
+        yield
+        hooks_mod._IMPORT_PROBE.clear()
+
+    def test_raise_names_the_pythonpath_only_case(self, tmp_path, monkeypatch):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        hooks_mod._IMPORT_PROBE.clear()
+        supplier = tmp_path / "target-dir"
+        (supplier / "techne").mkdir(parents=True)
+        py = tmp_path / "pythonpath-only-python"
+        py.write_text('#!/bin/sh\n[ -n "$PYTHONPATH" ] && exit 0\nexit 1\n')
+        py.chmod(0o755)
+
+        monkeypatch.setattr(sys, "executable", str(py))
+        monkeypatch.setattr(hooks_mod, "_console_script_interpreter", lambda: None)
+        monkeypatch.setenv("PYTHONPATH", str(supplier))
+
+        with pytest.raises(RuntimeError, match="importable only via PYTHONPATH"):
+            hooks_mod._interpreter()
+        hooks_mod._IMPORT_PROBE.clear()

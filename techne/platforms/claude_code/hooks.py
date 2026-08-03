@@ -117,6 +117,28 @@ def _launcher_path() -> Path:
 # Per-path memo for the import probe. register_hooks runs it for at most two
 # candidates, but the test suite calls register_hooks dozens of times; without this
 # each call would spawn a fresh interpreter.
+# Every module the registered commands invoke under the baked-in interpreter — the
+# UNION the probe must satisfy. Previously the probe asserted only
+# `techne.hooks.session_start`, which Prudence measured as tied for the WEAKEST of
+# the eight: techne/__init__.py is lazy (PEP 562) and techne/hooks/__init__.py is
+# empty, so it proves three files exist. Two shapes passed it while hooks died — a
+# partial install, and a complete source tree with PyYAML missing (which kills
+# pre_compact/post_compact/post_tool_use and techne.mcp_server). mcp_server matters
+# most: register_mcp bakes the same interpreter and the old probe did not represent
+# it at all. Kept as ONE tuple because this list was duplicated across four call
+# sites, and drift between them is how this class of bug keeps recurring.
+# (Prudence, PR #460.)
+_BAKED_IN_MODULES = (
+    "techne.hooks.session_start",
+    "techne.hooks.session_end",
+    "techne.hooks.pre_compact",
+    "techne.hooks.post_compact",
+    "techne.hooks.pre_tool_use",
+    "techne.hooks.post_tool_use",
+    "techne.hooks.user_prompt_submit",
+    "techne.mcp_server",
+)
+
 _IMPORT_PROBE: dict[str, bool] = {}
 # Generous on purpose: a cold interpreter on a slow/networked filesystem can take
 # seconds just to start. This bounds a hung probe rather than policing performance —
@@ -167,7 +189,9 @@ def _probe_env() -> dict[str, str]:
         # source; a second checkout or worktree is another. Both were measured
         # masking a broken interpreter while sitting nowhere near this root.
         # (Prudence, PR #460.)
-        if (resolved / "techne" / "__init__.py").exists() or (resolved / "techne").is_dir():
+        # `.is_dir()` alone: an `__init__.py` check would be dead code, since its
+        # existence implies the parent is a directory (Prudence, PR #460).
+        if (resolved / "techne").is_dir():
             continue
         kept.append(entry)
     if kept:
@@ -204,6 +228,17 @@ def _venv_state(exe: Path) -> tuple[bool, str]:
             lines = proc.stdout.splitlines()
             if proc.returncode == 0 and len(lines) >= 2:
                 state = (lines[0].strip() == "1", lines[1].strip())
+        except subprocess.TimeoutExpired:
+            # Loud, for the same reason _can_import_techne's is: folding a timeout
+            # into (False, "") silently routes a VENV install down the
+            # --break-system-packages branch — the exact harm this function exists
+            # to prevent, forty lines from where the sibling timeout is already
+            # made loud. (Prudence, PR #460.)
+            print(
+                f"techne: venv probe timed out after {_PROBE_TIMEOUT}s: {key}\n"
+                "        heal command may name the wrong install method.",
+                file=sys.stderr,
+            )
         except (OSError, subprocess.SubprocessError):
             pass
     _VENV_PROBE[key] = state
@@ -229,13 +264,12 @@ def _can_import_techne(candidate: Path) -> bool:
     try:
         with tempfile.TemporaryDirectory() as neutral:
             proc = subprocess.run(
-                # Probe what the HOOKS ACTUALLY RUN, not a weaker claim. Under
-                # PEP 420 `import techne` can succeed from a namespace package that
-                # supplies no submodules — measured True while
-                # `-m techne.hooks.session_start` returned rc=1, via an empty
-                # `techne/` dir left in site-packages by a partial uninstall (no env
-                # trickery at all). (Prudence, PR #460.)
-                [key, "-c", "import techne.hooks.session_start"],
+                # Probe EVERY module that gets baked in, not a representative one.
+                # Under PEP 420 `import techne` can succeed from a namespace package
+                # supplying no submodules, and any single hook module proves only its
+                # own import closure — a missing third-party dep (PyYAML) kills four
+                # of the eight while the other four still import.
+                [key, "-c", "import " + ",".join(_BAKED_IN_MODULES)],
                 cwd=neutral,
                 env=_probe_env(),  # cwd alone is not enough — see _probe_env
                 capture_output=True,
@@ -256,6 +290,35 @@ def _can_import_techne(candidate: Path) -> bool:
         ok = False
     _IMPORT_PROBE[key] = ok
     return ok
+
+
+def _imports_only_via_pythonpath(candidate: Path) -> bool:
+    """True if *candidate* imports the baked-in modules ONLY with PYTHONPATH intact.
+
+    Distinguishes two shapes that the strict probe reports identically, because they
+    ARE identical to a prober: an interpreter with no techne being MASKED by
+    PYTHONPATH, and a legitimate `pip install --target=DIR` + exported PYTHONPATH.
+
+    We still refuse both — and that is deliberate, not an oversight. The hooks run
+    from Claude Code's environment, not from the one that ran `techne init`, so an
+    install reachable only through an exported PYTHONPATH is fragile in exactly the
+    way the masked one is broken: same fragility, different intent. What we owe the
+    operator is not acceptance but an accurate diagnosis, since a bare "cannot
+    determine a stable interpreter" is baffling when `python -c "import techne"`
+    plainly works in their shell. (Prudence measured the false-negative on PR #460.)
+    """
+    try:
+        with tempfile.TemporaryDirectory() as neutral:
+            proc = subprocess.run(
+                [str(candidate), "-c", "import " + ",".join(_BAKED_IN_MODULES)],
+                cwd=neutral,
+                env=dict(os.environ),  # UNSTRIPPED, deliberately
+                capture_output=True,
+                timeout=_PROBE_TIMEOUT,
+            )
+            return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _console_script_interpreter() -> Path | None:
@@ -328,6 +391,19 @@ def _interpreter() -> Path:
                 )
             return candidate
 
+    if any(_imports_only_via_pythonpath(c) for c in candidates):
+        raise RuntimeError(
+            "techne is importable only via PYTHONPATH, not from the interpreter "
+            "itself.\n"
+            "Hooks run in Claude Code's environment, not the one running this "
+            "command, so a PYTHONPATH-only install would leave every hook dead with "
+            "ModuleNotFoundError (techne#458).\n"
+            "Install it INTO an interpreter instead:\n"
+            "  pipx install techne          # or: pipx install -e <checkout>\n"
+            "  <python> -m pip install -e <canonical-techne-checkout>\n"
+            "If you must keep a --target layout, export PYTHONPATH in the "
+            "environment that LAUNCHES Claude Code, then re-run `techne init`."
+        )
     tried = "\n".join(f"  - {c}" for c in candidates)
     raise RuntimeError(
         "techne cannot determine a stable interpreter to wire into ~/.claude.\n"
