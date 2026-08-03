@@ -99,3 +99,35 @@ jobs:
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
         run: pytest -m eval_vec -s
+
+  # (#383) Architecture-card freshness. Each card in ARCHITECTURE.md / docs/arch/*.md
+  # pins the git blob sha of the seam file(s) it describes; this recomputes them and
+  # fails when code drifted from its card — turning "detected staleness" into
+  # visible-at-PR staleness. NOTE it cannot BLOCK: branch protection is unavailable
+  # on this repo's plan (`gh api .../branches/main/protection` → 403), so no check
+  # here is required. Red means "stop" by convention, not by enforcement.
+  #
+  # Same reasoning as the eval gates above: a regression gate that nothing invokes
+  # protects nothing (Prudence, #397). This one was written 2026-07-20 and went
+  # unwired until 2026-08-02, by which point 2 of 8 cards had silently drifted —
+  # including a card carrying a GOTCHA that its own seam had since fixed.
+  #
+  # Its own unit tests (tests/test_arch_cards_gate.py) run in the matrix job; this
+  # runs the gate against the REAL cards, which is the part those tests can't cover.
+  # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
+  arch-cards:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@v4
+        with:
+          path: techne
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Architecture-card freshness gate
+        working-directory: techne
+        run: python scripts/check_arch_cards.py
