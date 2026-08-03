@@ -152,22 +152,33 @@ def test_ingest_file_returns_false_for_missing_file(tmp_path, db_path, session_i
 
 
 def test_run_full_walk_ingests_matching_files(tmp_path, db_path, session_id) -> None:
+    # Walk a subdirectory this test OWNS, not `tmp_path` itself. The autouse
+    # fixtures in conftest.py carve `_host` / `_install_root` out of every
+    # test's `tmp_path`, so a recursive walk rooted at `tmp_path` would traverse
+    # them. They are empty today, which is why this passed either way — but
+    # `_isolate_install_root` already pins PREFLIGHT_GUARD to
+    # `_install_root/preflight_guard.py`, so the day anything creates that file
+    # the count below silently becomes 3. Rooting the walk here makes the
+    # invariant structural again instead of contingent (techne#466 review).
+    #
     # Layout:
-    #   tmp_path/
+    #   tmp_path/src/
     #     keep.py
     #     skip.txt
     #     nested/keep.py
     #     .git/index           (excluded via glob)
-    (tmp_path / "keep.py").write_text("a")
-    (tmp_path / "skip.txt").write_text("b")
-    (tmp_path / "nested").mkdir()
-    (tmp_path / "nested" / "keep.py").write_text("c")
-    (tmp_path / ".git").mkdir()
-    (tmp_path / ".git" / "index").write_text("d")
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "keep.py").write_text("a")
+    (root / "skip.txt").write_text("b")
+    (root / "nested").mkdir()
+    (root / "nested" / "keep.py").write_text("c")
+    (root / ".git").mkdir()
+    (root / ".git" / "index").write_text("d")
 
     config = WatchConfig(
         db_path=db_path,
-        paths=[tmp_path],
+        paths=[root],
         session_id=session_id,
         include_globs=["*.py"],
         exclude_globs=["**/.git/**"],
