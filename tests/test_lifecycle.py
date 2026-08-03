@@ -824,3 +824,69 @@ def test_session_end_atomicity_boundaries_rolled_back_on_save_threads_failure(
         f"got {rows['c']} — boundaries were committed before the rollback "
         f"(non-atomic two-connection bug, techne#248)"
     )
+
+
+import pytest
+
+
+@pytest.mark.parametrize("reflect_enabled", [False, True])
+def test_archivist_push_failure_reports_its_own_error(tmp_path, monkeypatch, capsys, reflect_enabled):
+    """A failing archivist push must surface ITS OWN error and let teardown finish.
+
+    Regression for the `import sys` that sat inside the reflect except-handler in
+    run_session_end. Because a function-local import binds the name for the WHOLE
+    function, `sys` was unbound on every path where reflect did not raise — which
+    includes the default config, where reflect is disabled and the handler never
+    runs at all. The archivist handler below then died with UnboundLocalError,
+    replacing the real egress error with a traceback about `sys` and taking
+    session teardown down with it.
+
+    Observed live 2026-08-03: hook:session_end:last_error recorded
+    "UnboundLocalError: cannot access local variable 'sys'" while `techne doctor`
+    still reported session_end as healthy.
+
+    Both branches are pinned: reflect-disabled (the default) and reflect-enabled
+    -and-succeeding. The old code passed neither.
+    """
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.core.state import start_session, add_observation
+    from techne.lifecycle import run_session_end
+    import techne.core.archivist as archivist_mod
+
+    db_path = tmp_path / "lifecycle.db"
+    init_db(db_path)
+
+    config = Config()
+    config.db_path = db_path
+    config.reflect.enabled = reflect_enabled
+
+    if reflect_enabled:
+        # Reflect must SUCCEED — that is the precondition that left `sys` unbound.
+        import techne.core.reflect as reflect_mod
+
+        monkeypatch.setattr(
+            reflect_mod,
+            "reflect_on_session",
+            lambda *a, **k: {"threads_reflected": 0, "candidates_promoted": 0, "errors": 0},
+        )
+
+    def _explode(_config):
+        raise RuntimeError("archivist unreachable: the REAL error")
+
+    monkeypatch.setattr(archivist_mod, "push_knowledge_to_archivist", _explode)
+
+    session_id = start_session(db_path, project_path="/tmp/test", agent_identity="test-agent")
+    add_observation(db_path, session_id, "Bash", "some work")
+
+    # Must not raise: egress failure may never break session teardown.
+    result = run_session_end(config, session_id, summary="done")
+
+    assert result["knowledge_pushed"] == 0
+
+    stderr = capsys.readouterr().err
+    assert "archivist unreachable: the REAL error" in stderr, (
+        f"The real egress error must reach stderr, not be masked. Got: {stderr!r}"
+    )
+    assert "UnboundLocalError" not in stderr
+    assert "'sys'" not in stderr
