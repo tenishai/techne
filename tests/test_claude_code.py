@@ -1482,3 +1482,44 @@ class TestUnusableSettingsIsAConditionNotProse:
 
         block = render_drift_block(cfg)
         assert "settings.json unusable" in block, block
+
+
+class TestNonStringCommandValues:
+    """PR #457 round 4: a JSON number/bool as a hook `command` made `"techne" in 5`
+    raise TypeError from the DEREFERENCE, below the shape validator. Measured by
+    Prudence: `techne status` exit 1 with a traceback; at session start
+    render_drift_block raised into session_start's `except Exception` and produced
+    the unqualified green tick — the same failure through a narrower door.
+
+    These shapes are STRUCTURALLY fine (containers all correct), so the right answer
+    is not "unusable" — it is to evaluate them without crashing and report the real
+    drift. Guarding at the dereference covers both call sites and cannot drift out of
+    sync with _settings_shape_error.
+    """
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": 5}]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": true}]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": 1.5}]}]}}',
+            # legacy flat shape — the other call site, same crash
+            '{"hooks": {"SessionStart": [{"type": "command", "command": 5}]}}',
+            # containers do NOT crash today, but pin them so a future rewrite can't
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": ["techne"]}]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": {"techne": 1}}]}]}}',
+        ],
+    )
+    def test_non_string_command_does_not_raise(self, fake_home, cfg, body):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+        drift = claude_code.check_hook_drift(cfg)  # must not raise
+        # Nothing techne is registered in any of these, so real drift is the truth.
+        assert any("NOT registered" in w for w in drift), drift
+        assert not any("may be unregistered" in w for w in drift), (
+            "structurally-valid settings must not be reported as unusable"
+        )

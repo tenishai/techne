@@ -586,10 +586,22 @@ def _group_contains_techne(group: dict) -> bool:
     ``techne`` via both the launcher filename (``techne-hook.sh``) and the
     ``-m techne.hooks.X`` module argument, so this check requires no change.
     """
-    if "command" in group and "techne" in (group.get("command") or ""):
+    # isinstance at the DEREFERENCE, not another clause in the shape validator.
+    # A non-string `command` (a JSON number/bool) makes `"techne" in 5` raise
+    # TypeError — measured: `techne status` exits 1 with a traceback, and at session
+    # start render_drift_block raises into session_start's `except Exception`, giving
+    # the unqualified green tick #452 exists to kill, through a narrower door.
+    # Guarding here closes BOTH call sites at once and cannot drift out of sync with
+    # _settings_shape_error the way a parallel validator clause would.
+    # (Prudence, PR #457.)
+    def _mentions_techne(value: object) -> bool:
+        return isinstance(value, str) and "techne" in value
+
+    if _mentions_techne(group.get("command")):
         return True
-    for h in group.get("hooks") or []:
-        if "techne" in (h.get("command") or ""):
+    inner = group.get("hooks")
+    for h in inner if isinstance(inner, list) else []:
+        if isinstance(h, dict) and _mentions_techne(h.get("command")):
             return True
     return False
 
@@ -769,10 +781,16 @@ def _settings_shape_error(settings: object) -> str | None:
     if settings is None:
         return None  # absent file is a normal state; drift logic handles it
     if not isinstance(settings, dict):
-        return f"settings.json is valid JSON but not an object (got {type(settings).__name__}){_UNVERIFIABLE}"
+        return (
+            "settings.json is valid JSON but not an object "
+            f"(got {type(settings).__name__}){_UNVERIFIABLE}"
+        )
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
-        return f"settings.json's `hooks` key is not an object (got {type(hooks).__name__}){_UNVERIFIABLE}"
+        return (
+            "settings.json's `hooks` key is not an object "
+            f"(got {type(hooks).__name__}){_UNVERIFIABLE}"
+        )
     for event, groups in hooks.items():
         if not isinstance(groups, list):
             return (

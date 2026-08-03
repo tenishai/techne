@@ -92,6 +92,13 @@ def render_drift_block(config) -> str:
     # (Prudence, PR #457.)
     from techne.platforms.claude_code.hooks import settings_unusable_reason
 
+    # TOCTOU, known and benign: check_hook_drift already read settings.json, and
+    # this reads it again. If the file changes in between, heading and body come
+    # from different snapshots — worst case a mislabelled heading, never a crash
+    # (_load_json converts OSError to RuntimeError, which this catches). Threading
+    # the reason out of check_hook_drift would remove it; not worth the signature
+    # churn for a mislabel. Note this second read happens ONLY when something is
+    # already wrong — the happy path returns above without it. (Prudence, PR #457.)
     unverifiable = settings_unusable_reason(config) is not None
     if unverifiable:
         lines = [
