@@ -401,8 +401,9 @@ def _interpreter() -> Path:
             "Install it INTO an interpreter instead:\n"
             "  pipx install techne          # or: pipx install -e <checkout>\n"
             "  <python> -m pip install -e <canonical-techne-checkout>\n"
-            "If you must keep a --target layout, export PYTHONPATH in the "
-            "environment that LAUNCHES Claude Code, then re-run `techne init`."
+            "A --target layout cannot be made to work here: the probe strips exactly "
+            "the PYTHONPATH entry that supplies techne, so re-running init after "
+            "exporting it produces this same message."
         )
     tried = "\n".join(f"  - {c}" for c in candidates)
     raise RuntimeError(

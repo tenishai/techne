@@ -1179,10 +1179,17 @@ class TestBakedInModulesStaysInSync:
 
         blob = claude_code.SETTINGS_PATH.read_text() + claude_code.MCP_CONFIG_PATH.read_text()
         registered = set(re.findall(r"techne\.(?:hooks\.[a-z_]+|mcp_server)", blob))
-        missing = registered - set(hooks_mod._BAKED_IN_MODULES)
-        assert not missing, (
-            f"registered but NOT probed: {sorted(missing)} — the probe would pass "
-            "for an interpreter that cannot run them"
+        # EQUALITY, not subset. The subset form only caught "registered but not
+        # probed". The other direction is worse: because the probe is an
+        # all-or-nothing `import a,b,c`, ONE stale or misspelled name makes
+        # _can_import_techne False for EVERY interpreter — a machine-wide `techne
+        # init` outage. Prudence inserted `techne.hooks.sesion_start`: all eight real
+        # modules imported rc=0, the union returned rc=1, and the suite reported 66
+        # passed. Shipping green. (PR #460.)
+        assert registered == set(hooks_mod._BAKED_IN_MODULES), (
+            f"probed-but-not-registered (typo/stale?): "
+            f"{sorted(set(hooks_mod._BAKED_IN_MODULES) - registered)}\n"
+            f"registered-but-not-probed: {sorted(registered - set(hooks_mod._BAKED_IN_MODULES))}"
         )
 
     def test_probe_rejects_an_interpreter_missing_any_one_module(self, tmp_path, monkeypatch):
