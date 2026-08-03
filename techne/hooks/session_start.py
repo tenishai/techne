@@ -49,6 +49,47 @@ def _persist_hook_state(db_path, *, last_run: str, error: dict | None) -> None:
         print(f"techne: could not persist hook state: {exc}", file=sys.stderr)
 
 
+def render_drift_block(config) -> str:
+    """Render the hook-registration-drift warning for the banner, '' when in sync.
+
+    A ``hooks.*`` flag can be true in config.yaml while its entry is absent from
+    settings.json — init not re-run, or re-run while the flag was off, which STRIPS
+    the group. The rail then silently never fires: no error, no log, no symptom.
+
+    ``check_hook_drift`` (techne#287) has detected this since 2026-07-09, but it was
+    surfaced ONLY by ``techne status`` — a command you have to remember to run, and
+    which had gone 17 days uninvoked when this was found. In that window
+    ``per_turn_recall`` and ``codex_grep_assist`` were both dead for three days with
+    their flags still reading ``true``. So the check moves to where the operator
+    already looks: a detector wired to a command nobody runs is worth no more than
+    no detector at all. (techne#452)
+
+    Claude-code only — settings.json registration is that platform's mechanism.
+    """
+    if config.platform != "claude-code":
+        return ""
+    from techne.platforms.claude_code import check_hook_drift
+
+    drift = check_hook_drift(config)
+    if not drift:
+        return ""
+    lines = [
+        "\n## techne ⚠️ hook drift",
+        "> Enabled in config.yaml but NOT registered in settings.json —",
+        "> these are silently dead (no error, no log; they simply never fire):",
+    ]
+    lines.extend(f">   • {w}" for w in drift)
+    # Echo the CURRENT posture into the suggested command: `techne init` defaults
+    # --posture to `auto`, which re-resolves and can silently change posture (and
+    # with it whether reflect is advisory). The fix for one silent no-op must not
+    # hand the operator another.
+    lines.append(
+        f"> Reconcile: `techne init --posture {config.posture.mode}` "
+        "(pin --posture — the `auto` default can change it)"
+    )
+    return "\n".join(lines)
+
+
 def main() -> None:
     run_ts = _now_iso()
     db_path = None
@@ -238,6 +279,30 @@ def _run_phases_2_to_9(
         print(f"techne: health banner failed: {exc}", file=sys.stderr)
         output_parts.append("\n## techne ⚠️\n> Banner generation failed")
         output_parts.append("")
+
+    # ------------------------------------------------------------------
+    # Phase 5.4: Hook-registration drift (techne#452) — non-fatal.
+    #
+    # A `hooks.*` flag can be true in config.yaml while its entry is absent from
+    # settings.json — init not re-run, or re-run while the flag was off, which
+    # STRIPS the group. The rail then silently never fires: no error, no log, no
+    # symptom. check_hook_drift (#287) has detected this since 2026-07-09, but it
+    # was surfaced ONLY by `techne status` — a command you must remember to run,
+    # and which had not been invoked in 17 days when this was found. In that gap
+    # per_turn_recall and codex_grep_assist were both dead for three days with
+    # their flags reading `true`.
+    #
+    # So the check moves to where you already look. A detector wired to a command
+    # nobody runs has the same practical value as no detector.
+    # ------------------------------------------------------------------
+    try:
+        drift_block = render_drift_block(config)
+        if drift_block:
+            output_parts.append(drift_block)
+            output_parts.append("")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"hook drift check: {exc}")
+        print(f"techne: hook drift check failed: {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Phase 5.5: Coordination presence + unread (techne#376)

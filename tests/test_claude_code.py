@@ -1248,3 +1248,55 @@ class TestPythonpathOnlyInstallIsDiagnosed:
         with pytest.raises(RuntimeError, match="importable only via PYTHONPATH"):
             hooks_mod._interpreter()
         hooks_mod._IMPORT_PROBE.clear()
+class TestDriftSurfacedInBanner:
+    """techne#452: the drift check must appear where the operator already looks.
+
+    check_hook_drift has been correct since #287, but was rendered only by
+    `techne status`. In the gap that created, per_turn_recall and codex_grep_assist
+    were both dead for three days with their config flags reading `true`, and
+    nothing said so. These tests pin that the session-start banner reports it.
+    """
+
+    def test_drift_renders_in_banner_block(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)  # no PreToolUse written
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)  # flag flipped after
+
+        block = render_drift_block(cfg)
+        assert "hook drift" in block, block
+        assert "PreToolUse/Grep" in block, block
+        assert "NOT registered" in block, block
+
+    def test_banner_pins_posture_in_the_suggested_command(self, fake_home, cfg):
+        """`techne init` defaults --posture to `auto`, which re-resolves and can
+        silently change posture (and whether reflect is advisory). The remedy for one
+        silent no-op must not hand the operator another, so the command echoes the
+        CURRENT posture rather than inviting a bare `techne init`."""
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        block = render_drift_block(cfg)
+        assert f"--posture {cfg.posture.mode}" in block, block
+
+    def test_no_drift_renders_nothing(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        claude_code.register_hooks(cfg)
+        assert render_drift_block(cfg) == ""
+
+    def test_non_claude_code_platform_renders_nothing(self, fake_home, cfg):
+        """settings.json registration is claude-code's mechanism; other platforms
+        must not get a warning about a file that has no bearing on them."""
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        cfg.platform = "standalone"
+        assert render_drift_block(cfg) == ""
