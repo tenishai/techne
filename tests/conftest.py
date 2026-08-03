@@ -24,17 +24,41 @@ existing per-test fixtures, and it is reached exclusively through these two attr
 Subprocess tests re-import the module under their own env, so their frozen values
 are independent of this pin. Tests with their own redirection (``fake_home``,
 ``isolated_config``) run after this fixture and override the same attrs.
+
+PERFORMANCE — why these carve subdirs out of ``tmp_path`` instead of calling
+``tmp_path_factory.mktemp()`` (techne#466). ``mktemp(numbered=True)`` scans the
+base temp directory to find the next free number, so its cost grows with how
+many entries are already there: measured 411us/call over the first 200 dirs
+against 5555us/call once ~3800 exist — a 13.5x climb within a single run. These
+fixtures are AUTOUSE, so every test paid it TWICE, and the suite generates
+~3.3 numbered dirs per test (~7,600 in one flat directory at 2312 tests). That
+is quadratic cost which *looks* uniform once averaged, and it is ``getdents``
+time — the bulk of the ``sys > user`` profile behind techne#463.
+
+Carving out of the per-test ``tmp_path`` costs ONE numbered scan (pytest mints
+``tmp_path`` anyway) plus two O(1) mkdirs into a fresh directory, instead of
+three numbered scans. Isolation is unchanged: each test still gets a private,
+non-worktree directory, so techne#288 and techne#434 stay closed.
+
+Do NOT "simplify" these back to a shared session-scoped root with a counter —
+an earlier attempt did exactly that and broke
+``test_probe_env_strips_a_relative_entry_resolving_into_the_root``, because the
+install root must genuinely exist for a relative PYTHONPATH entry to resolve
+against it.
 """
 
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_host_config(tmp_path_factory, monkeypatch):
+def _isolate_host_config(tmp_path, monkeypatch):
     from techne.platforms import claude_code
     from techne.platforms.claude_code import hooks as hooks_mod
 
-    root = tmp_path_factory.mktemp("host")
+    # Carved out of the per-test `tmp_path`, NOT minted with
+    # `tmp_path_factory.mktemp()` — see the module docstring's PERFORMANCE note.
+    root = tmp_path / "_host"
+    root.mkdir(exist_ok=True)
     settings_path = root / ".claude" / "settings.json"
     mcp_path = root / ".claude.json"
     for target in (hooks_mod, claude_code):
@@ -43,7 +67,7 @@ def _isolate_host_config(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_install_root(tmp_path_factory, monkeypatch):
+def _isolate_install_root(tmp_path, monkeypatch):
     """Pin ``_install_root`` so tests never inherit the checkout's real layout.
 
     Same principle as ``_isolate_host_config`` above, for the other host-dependent
@@ -61,7 +85,10 @@ def _isolate_install_root(tmp_path_factory, monkeypatch):
     """
     from techne.platforms.claude_code import hooks as hooks_mod
 
-    canonical = tmp_path_factory.mktemp("install_root")
+    # Same carve-out as above; must genuinely EXIST, because the probe tests
+    # resolve relative PYTHONPATH entries against it.
+    canonical = tmp_path / "_install_root"
+    canonical.mkdir(exist_ok=True)
     monkeypatch.setattr(hooks_mod, "_install_root", lambda: canonical, raising=False)
     # register_hooks guards THREE prunable inputs, not just the install root: the
     # interpreter (baked into the launcher's `PY=`, the MCP command and the heal)
