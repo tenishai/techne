@@ -11,6 +11,7 @@ from techne.platforms.claude_code.hooks import (
     check_hook_drift,
     register_hooks,
     register_mcp,
+    settings_unusable_reason,
     unregister,
 )
 from techne.platforms.claude_code.transcript_import import (
@@ -25,6 +26,7 @@ __all__ = [
     "SETTINGS_PATH",
     "_group_contains_techne",
     "check_hook_drift",
+    "settings_unusable_reason",
     "register_hooks",
     "register_mcp",
     "unregister",
