@@ -21,11 +21,23 @@ deliberately NOT a portability seam", etc.
 `anchor:` sha in the card's frontmatter (the git blob sha of the seam file the card
 describes). A card whose recorded anchor sha no longer matches the seam file is *stale*.
 
+**When you ADD a card, add its line to the `SEAMS → card:` index in
+[`ARCHITECTURE.md`](ARCHITECTURE.md)** (the gate matches a `→ <bare path>` entry
+anywhere in that file; the SEAMS block is where they belong by convention) — an unindexed card is unprotected, because
+deleting it later would pass silently. The gate enforces this in both directions, so
+an unindexed card is a hard CI failure. Retiring a seam is fine: drop the card *and*
+its index line together. The index entry must contain a literal `→` followed by the
+bare path (`→ docs/arch/<seam>.md`); a markdown link or backticks reads as absent.
+
 **Staleness is checked, not hoped for.** `scripts/check_arch_cards.py` recomputes each
 card's anchor sha and fails if a seam drifted from its card (or an anchor is malformed).
-Run it locally before you push. Wiring it into CI to fail every PR on drift is a planned
-follow-up (see #383). Re-bless a card by updating its body and bumping its recorded sha
-together.
+Run it locally before you push. It also runs in CI on every push/PR — the `arch-cards`
+job in `.github/workflows/test.yml` (#383). CAVEAT, do not over-trust it: this repo's
+plan has no branch protection (`gh api repos/tenishai/techne/branches/main/protection`
+→ 403 "Upgrade to GitHub Pro"), so NO check here is a required status check. The job
+REPORTS drift; it cannot BLOCK a merge. Treat a red `arch-cards` as a stop signal by
+convention, not by enforcement. Re-bless a card by updating its body and bumping its
+recorded sha together.
 
 ```
 python scripts/check_arch_cards.py
