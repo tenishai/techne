@@ -69,6 +69,7 @@ def render_drift_block(config) -> str:
     if config.platform != "claude-code":
         return ""
     from techne.platforms.claude_code import check_hook_drift
+    from techne.platforms.claude_code.hooks import SETTINGS_PATH
 
     # Unreadable / wrong-shaped settings.json is reported BY check_hook_drift, not
     # re-probed here. An earlier cut of this block did its own _load_json check,
@@ -113,14 +114,25 @@ def render_drift_block(config) -> str:
             "> these are silently dead (no error, no log; they simply never fire):",
         ]
     lines.extend(f">   • {w}" for w in drift)
-    # Echo the CURRENT posture into the suggested command: `techne init` defaults
-    # --posture to `auto`, which re-resolves and can silently change posture (and
-    # with it whether reflect is advisory). The fix for one silent no-op must not
-    # hand the operator another.
-    lines.append(
-        f"> Reconcile: `techne init --posture {config.posture.mode}` "
-        "(pin --posture — the `auto` default can change it)"
-    )
+    if unverifiable:
+        # `techne init` is the WRONG remedy here and would be a second lie:
+        # register_hooks walks the same structure without guarding it, so for most
+        # unusable shapes init itself raises (e.g. AttributeError on {"hooks": []}).
+        # Repair the file first; only then is re-registering meaningful.
+        # (Prudence, PR #457.)
+        lines.append(
+            f"> Repair or move aside {SETTINGS_PATH}, then run "
+            f"`techne init --posture {config.posture.mode}`."
+        )
+    else:
+        # Echo the CURRENT posture into the suggested command: `techne init` defaults
+        # --posture to `auto`, which re-resolves and can silently change posture (and
+        # with it whether reflect is advisory). The fix for one silent no-op must not
+        # hand the operator another.
+        lines.append(
+            f"> Reconcile: `techne init --posture {config.posture.mode}` "
+            "(pin --posture — the `auto` default can change it)"
+        )
     return "\n".join(lines)
 
 

@@ -574,6 +574,22 @@ def _hook_command(module: str) -> str:
     return f"/bin/sh {shlex.quote(str(_launcher_path()))} -m {module}"
 
 
+def _matcher_of(group: dict) -> str:
+    """A group's `matcher` as a STRING, whatever settings.json actually holds.
+
+    Third crash level found on this PR, below two rounds of validator work. `matcher`
+    is a leaf that _settings_shape_error never inspects and _group_contains_techne
+    never touches, and it flows into `(event, matcher) not in expected_set` — a HASH.
+    A truthy list or dict there raises `TypeError: unhashable type`, which
+    `techne status` surfaces as a traceback and the banner swallows into the green
+    tick. The old `g.get("matcher") or ""` HID it: falsy containers ([] and {})
+    collapse to "" and hashable scalars (5, true) survive, so only truthy containers
+    trip it — which is why it took a third look. (Prudence, PR #457.)
+    """
+    m = group.get("matcher")
+    return m if isinstance(m, str) else ""
+
+
 def _group_contains_techne(group: dict) -> bool:
     """True if a settings.json hook-group entry references techne anywhere.
 
@@ -877,7 +893,7 @@ def check_hook_drift(config: Config) -> list[str]:
 
     def _has_techne_group(event: str, matcher: str) -> bool:
         for g in hooks.get(event, []):
-            if (g.get("matcher") or "") == matcher and _group_contains_techne(g):
+            if _matcher_of(g) == matcher and _group_contains_techne(g):
                 return True
         return False
 
@@ -901,7 +917,7 @@ def check_hook_drift(config: Config) -> list[str]:
     # (e.g. a flag flipped off without a re-init) — it will keep firing until re-init.
     for event, groups in hooks.items():
         for g in groups:
-            matcher = g.get("matcher") or ""
+            matcher = _matcher_of(g)
             if _group_contains_techne(g) and (event, matcher) not in expected_set:
                 warnings.append(
                     f"{_label(event, matcher)} techne hook registered in "

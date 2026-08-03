@@ -76,9 +76,15 @@ def status(ctx):
             from techne.platforms.claude_code import settings_unusable_reason
 
             if settings_unusable_reason(config) is not None:
+                from techne.platforms.claude_code.hooks import SETTINGS_PATH
+
                 click.echo(
                     "⚠ settings.json unusable — hook registration cannot be verified; "
                     "every techne hook may be silently not firing:"
+                )
+                click.echo(
+                    f"  Repair or move aside {SETTINGS_PATH}, then run "
+                    f"'techne init --posture {config.posture.mode}'."
                 )
             else:
                 click.echo(

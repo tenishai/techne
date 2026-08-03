@@ -1523,3 +1523,61 @@ class TestNonStringCommandValues:
         assert not any("may be unregistered" in w for w in drift), (
             "structurally-valid settings must not be reported as unusable"
         )
+
+
+class TestMatcherIsALeafToo:
+    """PR #457 round 5: the THIRD crash level, below two rounds of validator work.
+
+    `matcher` is a leaf that _settings_shape_error never inspects and
+    _group_contains_techne never touches, and it flows into `(event, matcher) not in
+    expected_set` — a HASH. A truthy list/dict raises TypeError: unhashable, which
+    `techne status` shows as a traceback and the banner swallows into a green tick.
+    The old `g.get("matcher") or ""` hid it: falsy containers collapse to "" and
+    hashable scalars survive, so ONLY truthy containers trip it. The suite was 73
+    passed with and without the fix — nothing pinned it.
+    """
+
+    @pytest.mark.parametrize(
+        "matcher",
+        ['["Grep"]', '{"a": 1}', '5', 'true', '1.5', '[]', '{}', 'null'],
+    )
+    def test_non_string_matcher_does_not_raise(self, fake_home, cfg, matcher):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        path = hooks_mod.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"hooks": {"SessionStart": [{"matcher": %s, '
+            '"hooks": [{"type": "command", "command": "sh techne-hook.sh"}]}]}}' % matcher
+        )
+        drift = claude_code.check_hook_drift(cfg)  # must not raise
+        assert drift, "an orphaned techne group must still be reported"
+
+
+class TestUnusableBranchGivesAWorkableRemedy:
+    """PR #457 round 5: the banner appended `Reconcile: techne init` to BOTH branches,
+    but register_hooks walks the same unguarded structure — so for most unusable
+    shapes `techne init` itself raises. Telling the operator to run it is a second
+    lie on top of the first."""
+
+    def test_unusable_does_not_tell_you_to_run_init_alone(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        claude_code.register_hooks(cfg)
+        claude_code.SETTINGS_PATH.write_text('{"hooks": []}')
+
+        block = render_drift_block(cfg)
+        assert "settings.json unusable" in block, block
+        assert "Repair or move aside" in block, block
+        assert "Reconcile:" not in block, "init alone cannot fix an unusable file"
+
+    def test_real_drift_still_gets_the_init_remedy(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        block = render_drift_block(cfg)
+        assert "Reconcile:" in block, block
+        assert "Repair or move aside" not in block, block
