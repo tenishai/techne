@@ -97,6 +97,53 @@ def test_stray_non_card_md_is_skipped_not_failed(tmp_path: Path) -> None:
     assert "skipped 1" in r.stdout
 
 
+def _repo_card(repo: Path, *indexed: str, anchor: str) -> None:
+    """Write ARCHITECTURE.md carrying a `SEAMS → card:` index — the manifest."""
+    rows = "\n".join(f"- name  pkg/x.py  (desc)  → {rel}" for rel in indexed)
+    (repo / "ARCHITECTURE.md").write_text(
+        f"---\ncard: repo-card:test\nanchor: {anchor}\n---\n"
+        f"# repo\n\nSEAMS → card:\n{rows}\n"
+    )
+
+
+def test_deleted_card_still_indexed_fails(tmp_path: Path) -> None:
+    """The glob cannot see a DELETED card — it just yields one fewer file and exits 0,
+    so coverage shrinks silently. The ARCHITECTURE.md manifest cross-check closes that
+    false-green (Prudence, PR #451)."""
+    repo = _repo(tmp_path)
+    seam_sha = _seam(repo, "pkg/seam.py")
+    _card(repo, "seam.md", f"pkg/seam.py sha={seam_sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+
+    assert _run(repo).returncode == 0, "baseline must be green before deleting"
+
+    (repo / "docs" / "arch" / "seam.md").unlink()  # delete the card, keep the index line
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "indexed in ARCHITECTURE.md" in r.stdout
+
+
+def test_removing_card_and_its_index_line_together_passes(tmp_path: Path) -> None:
+    """Retiring a seam is legitimate: drop the card AND its manifest line and the gate
+    stays green — the check must not become a ratchet that forbids deleting anything."""
+    repo = _repo(tmp_path)
+    keep_sha = _seam(repo, "pkg/keep.py")
+    _card(repo, "keep.md", f"pkg/keep.py sha={keep_sha}")
+    gone_sha = _seam(repo, "pkg/gone.py", body="g = 1\n")
+    _card(repo, "gone.md", f"pkg/gone.py sha={gone_sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(
+        repo, "docs/arch/keep.md", "docs/arch/gone.md", anchor=f"pkg/root.py sha={root_sha}"
+    )
+    assert _run(repo).returncode == 0, "baseline must be green"
+
+    (repo / "docs" / "arch" / "gone.md").unlink()
+    _repo_card(repo, "docs/arch/keep.md", anchor=f"pkg/root.py sha={root_sha}")
+    r = _run(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_no_cards_fails(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     (repo / "docs" / "arch" / "NOTES.md").write_text("# not a card\n")

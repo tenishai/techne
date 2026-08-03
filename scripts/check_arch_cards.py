@@ -33,6 +33,14 @@ import subprocess
 from pathlib import Path
 
 CARD_GLOBS = ("ARCHITECTURE.md", "docs/arch/*.md")
+# The repo card's `SEAMS → card:` block doubles as the MANIFEST of seam cards that
+# must exist. Globbing alone cannot see a DELETED card — it simply yields one fewer
+# file and still exits 0, so coverage shrinks silently (the same false-green class
+# this gate exists to prevent). Cross-checking the glob against the manifest closes
+# that: removing a card AND its index line is a deliberate, passing change; deleting
+# just the file is caught. Self-maintaining — no hardcoded card count to keep bumping.
+MANIFEST_FILE = "ARCHITECTURE.md"
+MANIFEST_RE = re.compile(r"→\s*(docs/arch/[^\s)]+\.md)")
 # Tolerate an optional BOM and CRLF line endings around the frontmatter fence.
 FRONTMATTER_RE = re.compile(r"\A﻿?---[ \t]*\r?\n(.*?)\r?\n---", re.S)
 CARD_KEY_RE = re.compile(r"^card:\s*\S", re.M)
@@ -77,6 +85,7 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
 
     problems: list[tuple[Path, str]] = []
     n_cards = n_anchors = n_skipped = 0
+    found: set[str] = set()  # repo-relative paths of files that parsed AS cards
 
     for f in find_cards(repo):
         fm = FRONTMATTER_RE.search(f.read_text(encoding="utf-8"))
@@ -85,6 +94,7 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
             n_skipped += 1
             continue
         n_cards += 1
+        found.add(f.relative_to(repo).as_posix())
         anchor_lines = ANCHOR_LINE_RE.findall(fm.group(1))
         if not anchor_lines:
             problems.append((f, "card has no `anchor:` line in frontmatter"))
@@ -106,6 +116,21 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
                 problems.append((
                     f,
                     f"seam drifted: {path}\n        recorded {recorded}\n        current  {current}",
+                ))
+
+    # Manifest cross-check (see MANIFEST_FILE above): every seam card the repo card
+    # indexes must still parse as a card. Catches deletion/rename/frontmatter-removal,
+    # none of which the glob can see.
+    manifest = repo / MANIFEST_FILE
+    if manifest.exists():
+        indexed = sorted(set(MANIFEST_RE.findall(manifest.read_text(encoding="utf-8"))))
+        for rel in indexed:
+            if rel not in found:
+                problems.append((
+                    manifest,
+                    f"card indexed in {MANIFEST_FILE} but not found as a card: {rel}\n"
+                    "        (deleted, renamed, or its `card:` frontmatter was removed)\n"
+                    "        If the removal is deliberate, drop its line from the SEAMS index too.",
                 ))
 
     if n_cards == 0:
