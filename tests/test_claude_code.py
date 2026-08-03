@@ -11,6 +11,13 @@ import pytest
 
 from techne.config import Config, HookConfig, SyncConfig
 from techne.platforms import claude_code
+from techne.platforms.claude_code import hooks as _hooks_at_import
+
+# conftest's autouse `_isolate_install_root` pins `_interpreter` to a fake path so
+# registration-shaped tests don't trip the worktree guard on a host detail. Capture
+# the GENUINE implementation here — module import runs before any fixture — so the
+# tests that exercise interpreter validation itself (techne#458) can restore it.
+_REAL_INTERPRETER = _hooks_at_import._interpreter
 
 
 @pytest.fixture
@@ -100,15 +107,21 @@ class TestRegisterHooks:
         from techne.platforms.claude_code import hooks as hooks_mod
         claude_code.register_hooks(cfg)
         launcher_content = hooks_mod._launcher_path().read_text()
-        # sys.executable must appear in the PY= line (possibly quoted by shlex)
-        assert sys.executable in launcher_content
+        # The VALIDATED interpreter must appear in the PY= line, possibly quoted by
+        # shlex — not a bare sys.executable (techne#458).
+        assert str(hooks_mod._interpreter()) in launcher_content
 
     def test_hook_commands_quote_spaces_in_launcher(self, fake_home, cfg, monkeypatch):
         # A space in sys.executable must be shell-quoted inside the launcher
         # file so exec "$PY" works correctly. The hook command itself references
         # the launcher path (which has no spaces), not the interpreter directly.
         from techne.platforms.claude_code import hooks as hooks_mod
-        monkeypatch.setattr(sys, "executable", "/Users/some user/python")
+        # Pin the SEAM, not the global: _interpreter() validates that its candidate
+        # can import techne (techne#458), which a synthetic path never will. The
+        # seam exists for exactly this — see its docstring.
+        monkeypatch.setattr(
+            hooks_mod, "_interpreter", lambda: Path("/Users/some user/python")
+        )
         claude_code.register_hooks(cfg)
         launcher_content = hooks_mod._launcher_path().read_text()
         # shlex.quote wraps the spaced path in single quotes
@@ -274,9 +287,9 @@ class TestLauncher:
         from techne.platforms.claude_code import hooks as hooks_mod
         claude_code.register_hooks(cfg)
         content = hooks_mod._launcher_path().read_text()
-        # shlex.quote may or may not add quotes depending on the path; the raw
-        # executable string must appear either way.
-        assert sys.executable in content
+        # shlex.quote may or may not add quotes depending on the path; the resolved
+        # interpreter string must appear either way.
+        assert str(hooks_mod._interpreter()) in content
 
     def test_launcher_heal_command_present(self, fake_home, cfg):
         # A heal block is present (the [ -x ] || { ... } guard).
@@ -387,7 +400,9 @@ class TestLauncher:
         # and pipx are on PATH at heal time.
         from techne.platforms.claude_code import hooks as hooks_mod
         monkeypatch.setattr(
-            sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
+            hooks_mod,
+            "_interpreter",
+            lambda: Path("/home/user/.local/pipx/venvs/techne/bin/python"),
         )
         claude_code.register_hooks(cfg)
         content = hooks_mod._launcher_path().read_text()
@@ -403,7 +418,9 @@ class TestHealCommand:
         # naming python3 we decouple from whatever Python pipx itself runs under).
         from techne.platforms.claude_code import hooks as hooks_mod
         monkeypatch.setattr(
-            sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
+            hooks_mod,
+            "_interpreter",
+            lambda: Path("/home/user/.local/pipx/venvs/techne/bin/python"),
         )
         assert hooks_mod._heal_command() == 'pipx reinstall --python "$(command -v python3)" techne'
 
@@ -456,11 +473,14 @@ class TestHealCommand:
 
 class TestRegisterMCP:
     def test_mcp_command_uses_sys_executable(self, fake_home, cfg):
-        # Regression: previously "python", same problem as hooks.
+        # Regression: previously "python", same problem as hooks. Now the VALIDATED
+        # interpreter (techne#458) — a poisoned pin kills the MCP server with -32000
+        # exactly as it kills the hooks (techne#578).
+        from techne.platforms.claude_code import hooks as hooks_mod
         claude_code.register_mcp(cfg)
         config = json.loads(claude_code.MCP_CONFIG_PATH.read_text())
         techne_server = config["mcpServers"]["techne"]
-        assert techne_server["command"] == sys.executable
+        assert techne_server["command"] == str(hooks_mod._interpreter())
         assert techne_server["args"] == ["-m", "techne.mcp_server"]
 
 
@@ -584,6 +604,7 @@ class TestLauncherExecution:
 
         dead_py = tmp_path / "venv" / "bin" / "python"
         monkeypatch.setattr(sys, "executable", str(dead_py))
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: dead_py)
         monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
         monkeypatch.setattr(sys, "base_prefix", "/usr/local")
 
@@ -615,6 +636,7 @@ class TestLauncherExecution:
 
         dead_py = tmp_path / "usr" / "bin" / "python3.11"
         monkeypatch.setattr(sys, "executable", str(dead_py))
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: dead_py)
         monkeypatch.setattr(sys, "prefix", "/usr")
         monkeypatch.setattr(sys, "base_prefix", "/usr")
 
@@ -658,7 +680,9 @@ class TestLauncherExecution:
         from techne.platforms.claude_code import hooks as hooks_mod
 
         monkeypatch.setattr(
-            sys, "executable", "/home/user/.local/pipx/venvs/techne/bin/python"
+            hooks_mod,
+            "_interpreter",
+            lambda: Path("/home/user/.local/pipx/venvs/techne/bin/python"),
         )
         monkeypatch.setattr(sys, "prefix", "/home/user/.local/pipx/venvs/techne")
         monkeypatch.setattr(sys, "base_prefix", "/usr/local")
@@ -790,3 +814,113 @@ class TestHookDrift:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{corrupt not json")
         assert claude_code.check_hook_drift(cfg) == []
+
+
+class TestInterpreterValidation:
+    """techne#458: register_hooks must never bake in an interpreter that cannot
+    import techne. Baking a bare sys.executable poisoned this machine's hooks three
+    times (#574/#576/#584/#587); the launcher's own guard can't catch it because it
+    tests `[ -x "$PY" ]` — a poisoned interpreter exists and is executable.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_interpreter_and_clean_cache(self, monkeypatch):
+        """These tests exercise `_interpreter` itself, so restore the real one over
+        conftest's `_isolate_install_root` stub, and keep the probe memo clean so a
+        cached verdict from a sibling test can't decide the outcome."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
+        hooks_mod._IMPORT_PROBE.clear()
+        yield
+        hooks_mod._IMPORT_PROBE.clear()
+
+    @staticmethod
+    def _fake_python(path: Path, body: str) -> Path:
+        path.write_text(body)
+        path.chmod(0o755)
+        return path
+
+    def test_probe_uses_a_neutral_cwd(self, tmp_path, monkeypatch):
+        """THE regression. On 2026-08-02 the poisoning interpreter imported techne
+        SUCCESSFULLY — because init ran inside the repo checkout, where `techne/` is
+        importable from cwd. A probe inheriting cwd would have passed it and pinned a
+        Homebrew python with no techne installed. The neutral cwd is what makes this
+        check real rather than decorative.
+        """
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        # An interpreter that "has techne" only when cwd happens to contain it.
+        py = self._fake_python(
+            tmp_path / "cwd-sensitive-python",
+            "#!/bin/sh\n[ -f ./techne/__init__.py ] && exit 0\nexit 1\n",
+        )
+        repo = tmp_path / "repo" / "techne"
+        repo.mkdir(parents=True)
+        (repo / "__init__.py").write_text("")
+        monkeypatch.chdir(tmp_path / "repo")
+
+        # Control: from this cwd it "works", which is exactly why the bug was silent.
+        assert subprocess.run([str(py)], cwd=str(tmp_path / "repo")).returncode == 0
+        # The probe must NOT be fooled by it.
+        assert hooks_mod._can_import_techne(py) is False
+
+    def test_falls_back_to_console_script_interpreter(self, tmp_path, monkeypatch):
+        """The repair, not just the detection: when the running interpreter can't
+        import techne, the installed entry point almost always can."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        bad = self._fake_python(tmp_path / "brew-python", "#!/bin/sh\nexit 1\n")
+        good = self._fake_python(tmp_path / "pipx-python", "#!/bin/sh\nexit 0\n")
+        monkeypatch.setattr(sys, "executable", str(bad))
+        monkeypatch.setattr(hooks_mod, "_console_script_interpreter", lambda: good)
+
+        assert hooks_mod._interpreter() == good
+
+    def test_raises_rather_than_pinning_a_broken_interpreter(self, tmp_path, monkeypatch):
+        """A failed `techne init` is visible and fixable in one command. A silently
+        poisoned pin takes down every hook with no diagnostic and has cost hours,
+        three times. So this fails loudly instead of writing something broken."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        bad = self._fake_python(tmp_path / "brew-python", "#!/bin/sh\nexit 1\n")
+        monkeypatch.setattr(sys, "executable", str(bad))
+        monkeypatch.setattr(hooks_mod, "_console_script_interpreter", lambda: None)
+
+        with pytest.raises(RuntimeError, match="cannot determine a stable interpreter"):
+            hooks_mod._interpreter()
+
+    def test_register_hooks_refuses_to_write_a_poisoned_pin(
+        self, fake_home, cfg, tmp_path, monkeypatch
+    ):
+        """End-to-end: the whole point is that nothing lands in settings.json."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        bad = self._fake_python(tmp_path / "brew-python", "#!/bin/sh\nexit 1\n")
+        monkeypatch.setattr(sys, "executable", str(bad))
+        monkeypatch.setattr(hooks_mod, "_console_script_interpreter", lambda: None)
+
+        with pytest.raises(RuntimeError):
+            claude_code.register_hooks(cfg)
+        assert not hooks_mod._launcher_path().exists(), "launcher must not be written"
+
+    def test_console_script_interpreter_reads_the_shebang(self, tmp_path, monkeypatch):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        script = tmp_path / "techne"
+        script.write_text("#!/opt/venvs/techne/bin/python -E\n# console script\n")
+        script.chmod(0o755)
+        monkeypatch.setattr(hooks_mod.shutil, "which", lambda _n: str(script))
+
+        assert hooks_mod._console_script_interpreter() == Path(
+            "/opt/venvs/techne/bin/python"
+        )
+
+    def test_console_script_interpreter_tolerates_a_non_script(self, tmp_path, monkeypatch):
+        """A Windows launcher .exe has no shebang — return None, never raise."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        binary = tmp_path / "techne.exe"
+        binary.write_bytes(b"MZ\x90\x00\x03\x00\x00\x00")
+        monkeypatch.setattr(hooks_mod.shutil, "which", lambda _n: str(binary))
+
+        assert hooks_mod._console_script_interpreter() is None
