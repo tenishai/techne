@@ -109,16 +109,76 @@ _DEDUP_CHECKS = [
 ]
 
 
+def _render_liveness(config) -> int:
+    """Print the subsystem-liveness table. Returns the count of failing checks.
+
+    Separate from the storage checks below because they answer different
+    questions: those ask "is the store internally consistent?", this asks "did
+    each subsystem actually RUN?". On 2026-08-03 `techne doctor` printed "All
+    checks passed" while consolidate and dream had been cold for four weeks —
+    a green health check that did not check the things that break.
+    """
+    from techne.core.checks import Verdict, run_checks
+
+    results = run_checks(config)
+    if not results:
+        click.echo("No subsystem checks registered.")
+        return 0
+
+    marks = {
+        Verdict.LIVE: "✓",
+        Verdict.DORMANT: "·",
+        Verdict.STALE: "!",
+        Verdict.UNOBSERVABLE: "?",
+        Verdict.BROKEN: "✗",
+        Verdict.UNKNOWN: "?",
+    }
+    click.echo("\nSubsystem liveness (techne#468):\n")
+    width = max(len(r.name) for r in results)
+    failing = 0
+    for r in sorted(results, key=lambda r: (r.ok, r.subsystem, r.name)):
+        if not r.ok:
+            failing += 1
+        click.echo(
+            f"  {marks[r.verdict]} {r.name:<{width}}  {r.verdict.value:<12} {r.detail}"
+        )
+        if r.remedy:
+            click.echo(f"    {' ' * width}    remedy: {r.remedy}")
+
+    if failing:
+        # UNOBSERVABLE counts as failing by decision (techne#468): "if we built a
+        # rail, shouldn't it have something to tell us?" A rail that cannot
+        # report is unfinished, so it must never render as passing.
+        click.echo(f"\n{failing} subsystem(s) not confirmed working.")
+    else:
+        click.echo("\nAll subsystems confirmed live.")
+    return failing
+
+
 @main.command()
 @click.option("--vacuum", is_flag=True, help="Reclaim freelist space (VACUUM) after the checks.")
+@click.option(
+    "--liveness/--no-liveness",
+    default=True,
+    help="Include subsystem liveness checks (did each rail actually run?).",
+)
 @click.pass_context
-def doctor(ctx, vacuum):
+def doctor(ctx, vacuum, liveness):
     """Health checks for the memory store.
 
-    Flags silent-accumulation bugs (duplicate rows a table shouldn't have) and
-    reclaimable space — failure modes that have no functional symptom and so are
-    invisible to behavior tests. Exits non-zero if duplicate-row debt is found,
-    so it is safe to run in CI / a scheduled audit.
+    Two independent questions:
+
+    \b
+      STORAGE  — silent-accumulation bugs (duplicate rows a table shouldn't
+                 have) and reclaimable space: failure modes with no functional
+                 symptom, invisible to behaviour tests.
+      LIVENESS — did each subsystem actually RUN? (techne#468) Configuration
+                 being correct proves nothing: in every one of the six
+                 built-but-never-wired failures found on 2026-08-02, the config
+                 was right and the rail was dead.
+
+    Exits non-zero if duplicate-row debt is found OR any subsystem is not
+    confirmed working, so it is safe to run in CI / a scheduled audit.
     """
     import sqlite3
     import sys
@@ -127,6 +187,8 @@ def doctor(ctx, vacuum):
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init")
         return
+
+    liveness_failures = _render_liveness(config) if liveness else 0
 
     conn = sqlite3.connect(config.db_path)
     # Wait for the write lock like the rest of techne (connect() sets the same), so
@@ -183,10 +245,18 @@ def doctor(ctx, vacuum):
 
     conn.close()
     click.echo()
-    if issues:
-        click.echo(f"{issues} issue(s) found.")
+    if issues or liveness_failures:
+        parts = []
+        if issues:
+            parts.append(f"{issues} storage issue(s)")
+        if liveness_failures:
+            parts.append(f"{liveness_failures} subsystem(s) not confirmed working")
+        click.echo(" · ".join(parts))
         sys.exit(1)
-    click.echo("All checks passed.")
+    # Deliberately does NOT say "all checks passed" unless liveness ran too — a
+    # green line that covers only storage is what let consolidate and dream sit
+    # cold for four weeks under a passing doctor (techne#468).
+    click.echo("All checks passed." if liveness else "Storage checks passed (liveness skipped).")
 
 
 @main.group(invoke_without_command=True)

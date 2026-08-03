@@ -155,6 +155,40 @@ def collect_health(config: Config) -> dict:
     except Exception:  # noqa: BLE001 — banner must survive any vector-status failure
         health["vectors"] = None
 
+    # Subsystem liveness (techne#468). The point of putting this HERE rather than
+    # only behind a command: check_hook_drift detected the dead rails correctly
+    # from 2026-07-09 but was wired solely to `techne status`, a command last run
+    # 17 days after it mattered (techne#452). A detector wired to a command nobody
+    # runs is worth no more than no detector — so liveness rides the surface the
+    # operator already sees on every session.
+    try:
+        from techne.core.checks import run_checks, summarize, worst
+
+        results = run_checks(config)
+        health["checks"] = [
+            {
+                "name": r.name,
+                "subsystem": r.subsystem,
+                "kind": r.kind.value,
+                "verdict": r.verdict.value,
+                "last_fired": r.last_fired,
+                "detail": r.detail,
+                "evidence": r.evidence,
+                "remedy": r.remedy,
+            }
+            for r in results
+        ]
+        w = worst(results)
+        health["checks_worst"] = w.value if w else None
+        health["checks_summary"] = summarize(results)
+    except Exception as e:  # noqa: BLE001
+        # Even the liveness layer failing must not read as healthy — record it
+        # rather than dropping the key, or absence would look like "all fine".
+        health["checks"] = []
+        health["checks_worst"] = "unknown"
+        health["checks_summary"] = {"unknown": 1}
+        health["checks_error"] = f"{type(e).__name__}: {e}"
+
     return health
 
 
@@ -171,8 +205,14 @@ def format_banner(health: dict) -> str:
     # ✅ only when running live code; an installed copy gets a ⚠️ so the
     # version-drift trap is visible at a glance.
     healthy = build == "live"
-    mark = "✅" if healthy else "⚠️"
     build_note = "live" if healthy else "installed — may lag repo HEAD"
+
+    # The headline mark must also reflect SUBSYSTEM liveness (techne#468).
+    # Otherwise the banner renders ✅ while listing a failing subsystem two lines
+    # below — a green top-line over a red detail is the precise shape of the bug
+    # this work exists to remove.
+    checks_bad = (health.get("checks_worst") or "live") not in ("live", "dormant")
+    mark = "✅" if (healthy and not checks_bad) else "⚠️"
 
     # techne owns its own heading line (renders bright/high-white in the
     # terminal markdown); the stats fold into a blockquote beneath it.
@@ -248,6 +288,29 @@ def format_banner(health: dict) -> str:
         msg = hook_err.get("msg", "?")
         err_ts = hook_err.get("ts", "")
         lines.append(f"> ⚠️ hook error [{stage}] {msg} (at {err_ts})")
+
+    # Subsystem liveness headline (techne#468). ONE line, and only when something
+    # is actually wrong — the banner's value is that a warning on it means
+    # something, so a permanent "all good" row would train the eye to skip it.
+    # Names the worst offenders rather than a bare count, because "3 stale" sends
+    # you hunting while "rail:consolidate, rail:dream" is actionable.
+    worst_verdict = health.get("checks_worst")
+    if worst_verdict and worst_verdict not in ("live", "dormant"):
+        all_bad = [
+            c
+            for c in (health.get("checks") or [])
+            if c.get("verdict") not in ("live", "dormant")
+        ]
+        # Name only the subsystems matching the HEADLINE verdict. Listing a
+        # STALE rail under an "UNOBSERVABLE:" label mislabels it, and a banner
+        # that misreports its own findings is worse than one that says less.
+        headline = [c for c in all_bad if c.get("verdict") == worst_verdict]
+        named = ", ".join(c["name"] for c in headline[:3])
+        extra = len(headline) - 3
+        others = len(all_bad) - len(headline)
+        tail = f" (+{extra} more)" if extra > 0 else ""
+        tail += f", {others} other" if others else ""
+        lines.append(f"> ⚠️ {worst_verdict.upper()}: {named}{tail} — `techne doctor`")
 
     return "\n".join(lines)
 
