@@ -826,27 +826,28 @@ def test_session_end_atomicity_boundaries_rolled_back_on_save_threads_failure(
     )
 
 
-import pytest
+def _assert_archivist_failure_is_reported(tmp_path, monkeypatch, capsys, *, reflect_enabled):
+    """Shared body: a failing archivist push must surface ITS OWN error.
 
+    Regression for the `import sys` that sat inside run_session_end's reflect
+    except-handler. A function-local import binds the name for the WHOLE
+    function, so `sys` was unbound on every path where reflect did NOT raise —
+    including the default config, where reflect is disabled and that handler
+    never runs at all. The archivist handler 20 lines below then died with
+    UnboundLocalError instead of printing the real egress error.
 
-@pytest.mark.parametrize("reflect_enabled", [False, True])
-def test_archivist_push_failure_reports_its_own_error(tmp_path, monkeypatch, capsys, reflect_enabled):
-    """A failing archivist push must surface ITS OWN error and let teardown finish.
+    That did not merely lose a log line. `session_end.py:76-78` catches and
+    `sys.exit(0)`s, which SKIPS both `flush` (line 84) and `flush_sinks`
+    (line 94) — so the outbox stopped draining too. Observed live 2026-08-03:
+    hook:session_end:last_error recorded the UnboundLocalError while
+    `techne doctor` still reported session_end healthy, and
+    sink:archivist_knowledge held 3 parked rows.
 
-    Regression for the `import sys` that sat inside the reflect except-handler in
-    run_session_end. Because a function-local import binds the name for the WHOLE
-    function, `sys` was unbound on every path where reflect did not raise — which
-    includes the default config, where reflect is disabled and the handler never
-    runs at all. The archivist handler below then died with UnboundLocalError,
-    replacing the real egress error with a traceback about `sys` and taking
-    session teardown down with it.
-
-    Observed live 2026-08-03: hook:session_end:last_error recorded
-    "UnboundLocalError: cannot access local variable 'sys'" while `techne doctor`
-    still reported session_end as healthy.
-
-    Both branches are pinned: reflect-disabled (the default) and reflect-enabled
-    -and-succeeding. The old code passed neither.
+    NOTE ON WHERE THE TEETH ARE: on the unfixed file this fails at the
+    `run_session_end` CALL, because the UnboundLocalError propagates out of the
+    except block rather than being printed. The stderr assertion below is the
+    load-bearing one for the fixed path — it matches a literal that only
+    `_explode` raises, so it cannot pass vacuously.
     """
     from techne.config import Config
     from techne.core.database import init_db
@@ -879,14 +880,31 @@ def test_archivist_push_failure_reports_its_own_error(tmp_path, monkeypatch, cap
     session_id = start_session(db_path, project_path="/tmp/test", agent_identity="test-agent")
     add_observation(db_path, session_id, "Bash", "some work")
 
-    # Must not raise: egress failure may never break session teardown.
+    # Must not raise: an egress failure may never break session teardown.
     result = run_session_end(config, session_id, summary="done")
 
+    # Teardown ran to completion past the failing handler, not just far enough
+    # to print. This is what keeps the caller's flush/flush_sinks reachable.
     assert result["knowledge_pushed"] == 0
+    assert "threads" in result and "queued" in result
 
     stderr = capsys.readouterr().err
     assert "archivist unreachable: the REAL error" in stderr, (
         f"The real egress error must reach stderr, not be masked. Got: {stderr!r}"
     )
-    assert "UnboundLocalError" not in stderr
-    assert "'sys'" not in stderr
+
+
+def test_archivist_push_failure_reported_with_reflect_disabled(tmp_path, monkeypatch, capsys):
+    """The DEFAULT config (reflect.enabled=False) — the handler never runs, so
+    the old function-local import never bound `sys` at all."""
+    _assert_archivist_failure_is_reported(
+        tmp_path, monkeypatch, capsys, reflect_enabled=False
+    )
+
+
+def test_archivist_push_failure_reported_with_reflect_succeeding(tmp_path, monkeypatch, capsys):
+    """Reflect enabled AND succeeding — the live path, where the code working
+    correctly is precisely what left `sys` unbound."""
+    _assert_archivist_failure_is_reported(
+        tmp_path, monkeypatch, capsys, reflect_enabled=True
+    )
