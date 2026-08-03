@@ -26,7 +26,9 @@ both directions:
 
   * every path the index names must still parse as a card (catches deletion, rename,
     and frontmatter removal), and
-  * every card on disk must appear in the index (without this, a card that was NEVER
+  * every card on disk must appear in the index (matching is by `→ <bare path>`
+    ANYWHERE in the file, not scoped to the SEAMS block — conventionally that block
+    is where they live; without this, a card that was NEVER
     indexed could be deleted for exit 0 — regenerating the very false-green this
     check exists to close, and doing it for NEW cards, which are the least likely to
     have been wired in carefully).
@@ -98,11 +100,21 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
             cwd=repo, capture_output=True, text=True,
         )
     except FileNotFoundError:
-        return 2, [(repo, "git executable not found on PATH")], 0, 0, 0
+        return 2, [(repo, "git executable not found on PATH", "env")], 0, 0, 0
     if probe.returncode != 0 or probe.stdout.strip() != "true":
-        return 2, [(repo, f"not a git work tree: {repo}")], 0, 0, 0
+        return 2, [(repo, f"not a git work tree: {repo}", "env")], 0, 0, 0
 
-    problems: list[tuple[Path, str]] = []
+    # (where, why, KIND). The kind is a DECISION recorded at the point of detection,
+    # not inferred later from message wording. The previous cut gated the anchor
+    # trailer with `any("drifted" in why or "malformed" in why ...)` — a prose grep,
+    # the very pattern removed from #457, and strictly worse here because three
+    # coverage messages INTERPOLATE REPO DATA (`{rel}`, `{path}`) into `why`. So the
+    # predicate matched card FILENAMES: a card named `docs/arch/drifted-clock.md`
+    # printed the anchor trailer under a coverage-only failure (demonstrated). It
+    # also UNDER-fired — "card has no `anchor:` line" is an anchor problem, was not
+    # enumerated, and is the one message with no inline remediation, so that reader
+    # got a bare line and nothing. (Prudence, PR #451.)
+    problems: list[tuple[Path, str, str]] = []
     n_cards = n_anchors = n_skipped = 0
     found: set[str] = set()  # repo-relative paths of files that parsed AS cards
 
@@ -116,7 +128,7 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
         found.add(f.relative_to(repo).as_posix())
         anchor_lines = ANCHOR_LINE_RE.findall(fm.group(1))
         if not anchor_lines:
-            problems.append((f, "card has no `anchor:` line in frontmatter"))
+            problems.append((f, "card has no `anchor:` line in frontmatter", "anchor"))
             continue
         for line in anchor_lines:
             n_anchors += 1
@@ -125,16 +137,18 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
                 problems.append((
                     f,
                     "malformed anchor (want 'anchor: <path> sha=<40-hex>'): " + line.strip(),
+                    "anchor",
                 ))
                 continue
             path, recorded = m.group("path"), m.group("sha")
             current = blob_sha(repo, path)
             if current is None:
-                problems.append((f, f"anchor seam file missing: {path}"))
+                problems.append((f, f"anchor seam file missing: {path}", "anchor"))
             elif current != recorded:
                 problems.append((
                     f,
                     f"seam drifted: {path}\n        recorded {recorded}\n        current  {current}",
+                    "anchor",
                 ))
 
     # Manifest cross-check (see MANIFEST_FILE above): every seam card the repo card
@@ -156,7 +170,7 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
             else "no longer parses as a card (`card:` frontmatter removed)"
         )
         problems.append(
-            (repo, f"{MANIFEST_FILE} {detail} — seam-card coverage cannot be checked")
+            (repo, f"{MANIFEST_FILE} {detail} — seam-card coverage cannot be checked", "coverage")
         )
     # Deliberately a second `if`, not an `else`: when only the frontmatter is gone the
     # SEAMS block is still readable and still worth cross-checking.
@@ -170,6 +184,7 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
                     f"card indexed in {MANIFEST_FILE} but not found as a card: {rel}\n"
                     "        (deleted, renamed, or its `card:` frontmatter was removed)\n"
                     "        If the removal is deliberate, drop its line from the SEAMS index too.",
+                    "coverage",
                 ))
         # Reverse: every card on disk must appear in the index. Without this the
         # check is one-directional, and a card that was NEVER indexed can be deleted
@@ -186,29 +201,31 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
             # (Prudence, PR #451.)
             problems.append((
                 manifest,
-                f"the `SEAMS → card:` index matched NO cards, but {len(seam_cards)} "
+                f"no `→ docs/arch/*.md` index entries matched, but {len(seam_cards)} "
                 "exist on disk\n"
                 "        Usually a formatting change in the index — or the entries\n"
                 "        were removed. Either way the cards are not at fault.\n"
                 "        Each entry must contain:\n"
                 "          → docs/arch/<name>.md      (a literal → then the bare path)",
+                "coverage",
             ))
             seam_cards = []  # don't also blame each card individually
         for rel in seam_cards:
             if rel not in indexed:
                 problems.append((
                     repo / rel,
-                    f"card is not indexed in {MANIFEST_FILE}'s `SEAMS → card:` block\n"
+                    f"card is not indexed in {MANIFEST_FILE}\n"
                     "        (a card absent from the index is unprotected — deleting it\n"
                     "         later would pass silently). Add a line containing:\n"
                     f"          → {rel}\n"
                     "        If a line for it already exists, check its SHAPE — only a\n"
                     "        literal → followed by the bare path is matched, so a\n"
                     "        markdown link or backticks reads as absent.",
+                    "coverage",
                 ))
 
     if n_cards == 0:
-        return 1, [(repo, "no architecture cards found")], 0, 0, n_skipped
+        return 1, [(repo, "no architecture cards found", "coverage")], 0, 0, n_skipped
     return (1 if problems else 0), problems, n_cards, n_anchors, n_skipped
 
 
@@ -225,7 +242,7 @@ def main() -> int:
     if problems:
         header = "ERROR" if code == 2 else f"FAILED ({len(problems)})"
         print(f"\n{header}:")
-        for where, why in problems:
+        for where, why, _kind in problems:
             try:
                 shown: Path | str = where.relative_to(repo)
             except ValueError:
@@ -237,10 +254,7 @@ def main() -> int:
         # correct inline remediation, and this footer CONTRADICTED the advice printed
         # directly above them — telling the reader to bump an `anchor:` sha that has
         # nothing to do with the failure. (Prudence, PR #451.)
-        anchor_problem = any(
-            ("drifted" in why or "malformed" in why or "seam file missing" in why)
-            for _where, why in problems
-        )
+        anchor_problem = any(kind == "anchor" for _where, _why, kind in problems)
         if code == 1 and anchor_problem:
             print(
                 "\nA seam changed (or an anchor is malformed) without its card being "

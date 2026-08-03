@@ -22,7 +22,8 @@ deliberately NOT a portability seam", etc.
 describes). A card whose recorded anchor sha no longer matches the seam file is *stale*.
 
 **When you ADD a card, add its line to the `SEAMS → card:` index in
-[`ARCHITECTURE.md`](ARCHITECTURE.md)** — an unindexed card is unprotected, because
+[`ARCHITECTURE.md`](ARCHITECTURE.md)** (the gate matches a `→ <bare path>` entry
+anywhere in that file; the SEAMS block is where they belong by convention) — an unindexed card is unprotected, because
 deleting it later would pass silently. The gate enforces this in both directions, so
 an unindexed card is a hard CI failure. Retiring a seam is fine: drop the card *and*
 its index line together. The index entry must contain a literal `→` followed by the

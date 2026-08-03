@@ -28,6 +28,7 @@ def _run(repo: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _repo(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     _git(tmp_path, "init", "-q")
     (tmp_path / "docs" / "arch").mkdir(parents=True)
     return tmp_path
@@ -97,7 +98,10 @@ def test_missing_seam_file_fails(tmp_path: Path) -> None:
     _card(repo, "seam.md", "pkg/gone.py sha=" + "0" * 40)
     r = _run(repo)
     assert r.returncode == 1
-    assert "missing" in r.stdout
+    # "seam file missing", not bare "missing": this fixture has no ARCHITECTURE.md,
+    # and the manifest-missing failure supplies the word "missing" by itself — so the
+    # loose assertion passed even if the branch it names never ran. (Prudence, #451.)
+    assert "anchor seam file missing" in r.stdout
 
 
 def test_stray_non_card_md_is_skipped_not_failed(tmp_path: Path) -> None:
@@ -278,3 +282,59 @@ def test_anchor_trailer_still_prints_for_real_drift(tmp_path: Path) -> None:
     assert r.returncode == 1
     assert "drifted" in r.stdout
     assert "bump its recorded `anchor:` sha" in r.stdout
+
+
+def test_trailer_fires_for_a_card_with_no_anchor_line(tmp_path: Path) -> None:
+    """UNDER-FIRE, and it was a live regression. `card has no 'anchor:' line` IS an
+    anchor problem, was not in the old prose-grep's vocabulary, and is the only
+    message in the script carrying no inline remediation — so gating it out left the
+    reader with a bare line and nothing. (Prudence, PR #451.)"""
+    repo = _repo(tmp_path)
+    (repo / "docs" / "arch" / "seam.md").write_text("---\ncard: arch-card:t\n---\n# no anchor\n")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout
+    assert "no `anchor:` line" in r.stdout
+    assert "bump its recorded `anchor:` sha" in r.stdout
+
+
+def test_trailer_does_not_fire_on_a_card_whose_FILENAME_says_drifted(tmp_path: Path) -> None:
+    """OVER-FIRE. The old gate grepped `why`, and three coverage messages interpolate
+    repo data into it — so a card FILENAME could trigger the anchor trailer. Producer
+    and consumer sharing a file bounds nothing when the matched text is user data."""
+    repo = _repo(tmp_path)
+    sha = _seam(repo, "pkg/a.py", body="a = 1\n")
+    _card(repo, "drifted-clock.md", f"pkg/a.py sha={sha}")      # filename says "drifted"
+    malformed_sha = _seam(repo, "pkg/b.py", body="b = 1\n")
+    _card(repo, "malformed-input.md", f"pkg/b.py sha={malformed_sha}")
+    root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+    # Index neither → coverage-only failures, whose messages embed those filenames.
+    _repo_card(repo, "docs/arch/absent.md", anchor=f"pkg/root.py sha={root_sha}")
+
+    r = _run(repo)
+    assert r.returncode == 1, r.stdout
+    assert "not indexed" in r.stdout
+    assert "bump its recorded `anchor:` sha" not in r.stdout, (
+        "a card filename must not decide whether the anchor trailer prints"
+    )
+
+
+def test_trailer_fires_for_malformed_and_for_a_missing_seam_file(tmp_path: Path) -> None:
+    """The old gate's `malformed` and `seam file missing` branches were entirely
+    unconstrained — collapsing the predicate to `"drifted" in why` killed 0 tests."""
+    for anchor, needle in (
+        ("pkg/x.py sha=NOTAHASH", "malformed"),
+        ("pkg/gone.py sha=" + "0" * 40, "anchor seam file missing"),
+    ):
+        repo = _repo(tmp_path / needle.replace(" ", "_"))
+        _seam(repo, "pkg/x.py", body="x = 1\n")
+        _card(repo, "seam.md", anchor)
+        root_sha = _seam(repo, "pkg/root.py", body="r = 1\n")
+        _repo_card(repo, "docs/arch/seam.md", anchor=f"pkg/root.py sha={root_sha}")
+
+        r = _run(repo)
+        assert r.returncode == 1, r.stdout
+        assert needle in r.stdout
+        assert "bump its recorded `anchor:` sha" in r.stdout, f"{needle}: trailer missing"
