@@ -118,7 +118,89 @@ def _launcher_path() -> Path:
 # candidates, but the test suite calls register_hooks dozens of times; without this
 # each call would spawn a fresh interpreter.
 _IMPORT_PROBE: dict[str, bool] = {}
+# Generous on purpose: a cold interpreter on a slow/networked filesystem can take
+# seconds just to start. This bounds a hung probe rather than policing performance —
+# and a TIMEOUT IS NOT THE SAME ANSWER AS "cannot import", so it warns on stderr
+# instead of being folded silently into a False (Prudence, PR #460).
 _PROBE_TIMEOUT = 15
+# (is_venv, sys.prefix) per interpreter — see _venv_state.
+_VENV_PROBE: dict[str, tuple[bool, str]] = {}
+
+
+def _probe_env() -> dict[str, str]:
+    """Environment for the import probe, with ``PYTHONPATH`` entries that resolve
+    INTO the install root stripped out.
+
+    Neutralizing ``cwd`` is not enough. ``PYTHONPATH`` is the same masking channel
+    wearing a different coat: measured, ``_can_import_techne(/usr/bin/python3)`` is
+    False bare and True under ``PYTHONPATH=<checkout>``, so
+    ``PYTHONPATH=. python3 -m techne.cli init`` would reproduce techne#458 straight
+    through this guard. (Prudence, PR #460.)
+
+    A blanket ``-E`` is deliberately NOT used: it would also drop ``PYTHONHOME``,
+    virtualenv plumbing and proxy/CA settings that a legitimate install may need, so
+    it could fail a genuinely good interpreter. Strip only the masking entries.
+    """
+    env = dict(os.environ)
+    raw = env.get("PYTHONPATH")
+    if not raw:
+        return env
+    try:
+        root = _install_root().resolve()
+    except OSError:
+        return env
+    kept: list[str] = []
+    for entry in raw.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            # Relative entries (".", "") resolve against the CURRENT cwd — which is
+            # exactly the checkout in the incident shape, so this catches them too.
+            resolved = Path(entry).resolve()
+        except OSError:
+            kept.append(entry)  # unresolvable: can't prove it masks, so keep it
+            continue
+        if resolved == root or root in resolved.parents:
+            continue
+        kept.append(entry)
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        env.pop("PYTHONPATH", None)
+    return env
+
+
+def _venv_state(exe: Path) -> tuple[bool, str]:
+    """``(is_venv, sys.prefix)`` OF THE GIVEN INTERPRETER — asked of it, not of us.
+
+    Before techne#458 the interpreter baked into the launcher was always the one
+    running init, so reading our own ``sys.prefix``/``sys.base_prefix`` was correct
+    by construction. Now that ``_interpreter()`` can return a DIFFERENT interpreter,
+    mixing the two produces actively wrong remediation — naming one venv as dead
+    while telling the operator to rebuild another, or routing a venv install down
+    the ``--break-system-packages`` branch. (Prudence, PR #460.)
+    """
+    key = str(exe)
+    if key in _VENV_PROBE:
+        return _VENV_PROBE[key]
+    if key == sys.executable:
+        state = (sys.prefix != sys.base_prefix, sys.prefix)
+    else:
+        state = (False, "")
+        try:
+            proc = subprocess.run(
+                [key, "-c", "import sys;print(int(sys.prefix!=sys.base_prefix));print(sys.prefix)"],
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_TIMEOUT,
+            )
+            lines = proc.stdout.splitlines()
+            if proc.returncode == 0 and len(lines) >= 2:
+                state = (lines[0].strip() == "1", lines[1].strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _VENV_PROBE[key] = state
+    return state
 
 
 def _can_import_techne(candidate: Path) -> bool:
@@ -142,10 +224,21 @@ def _can_import_techne(candidate: Path) -> bool:
             proc = subprocess.run(
                 [key, "-c", "import techne"],
                 cwd=neutral,
+                env=_probe_env(),  # cwd alone is not enough — see _probe_env
                 capture_output=True,
                 timeout=_PROBE_TIMEOUT,
             )
             ok = proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        # Distinct from "cannot import": we did not get an answer. Still refuse to
+        # pin it (an interpreter we can't verify must not reach ~/.claude), but say
+        # so, because a silent False here looks identical to a real failure.
+        print(
+            f"techne: interpreter probe timed out after {_PROBE_TIMEOUT}s: {key}\n"
+            "        treating it as unusable — re-run if this was a transient stall.",
+            file=sys.stderr,
+        )
+        ok = False
     except (OSError, subprocess.SubprocessError):
         ok = False
     _IMPORT_PROBE[key] = ok
@@ -211,6 +304,15 @@ def _interpreter() -> Path:
 
     for candidate in candidates:
         if _can_import_techne(candidate):
+            if candidate != candidates[0]:
+                # SAY SO. Substituting a different install is the right repair, but
+                # doing it silently means the operator's ~/.claude quietly points at
+                # an interpreter they did not choose and cannot see (Prudence, #460).
+                print(
+                    f"techne: {candidates[0]} cannot import techne; wiring hooks to "
+                    f"{candidate} (from the installed `techne` console script) instead.",
+                    file=sys.stderr,
+                )
             return candidate
 
     tried = "\n".join(f"  - {c}" for c in candidates)
@@ -296,8 +398,11 @@ def _heal_command() -> str:
     # The validated interpreter (techne#458), so install-method detection describes
     # the interpreter actually being baked in rather than whichever one happened to
     # run init — otherwise a poisoned run could emit a heal for the wrong install.
-    exe = str(_interpreter())
-    in_venv = sys.prefix != sys.base_prefix
+    exe_path = _interpreter()
+    exe = str(exe_path)
+    # Both read from the interpreter being BAKED IN, never from the one running init
+    # — those can now differ, and mixing them emits remediation for the wrong venv.
+    in_venv, venv_prefix = _venv_state(exe_path)
     is_pipx = "pipx/venvs/" in exe
     repo = _install_root()
 
@@ -318,8 +423,8 @@ def _heal_command() -> str:
     msg = (
         f"[techne] interpreter dead ({exe}) — "
         f"recreate the venv and reinstall: "
-        f"python3 -m venv {sys.prefix} && "
-        f"{sys.prefix}/bin/pip install -e {repo}"
+        f"python3 -m venv {venv_prefix} && "
+        f"{venv_prefix}/bin/pip install -e {repo}"
         f"; or if installed via pipx/uv: "
         f"pipx reinstall techne / uv tool install --force techne"
     )

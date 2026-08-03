@@ -20,6 +20,22 @@ from techne.platforms.claude_code import hooks as _hooks_at_import
 _REAL_INTERPRETER = _hooks_at_import._interpreter
 
 
+def _py_line(launcher_content: str) -> str:
+    """The launcher's `PY=` assignment line, isolated.
+
+    Asserting the interpreter appears ANYWHERE in the launcher does not protect the
+    thing under test: `_heal_command()` embeds the interpreter in its remediation
+    message too, so a launcher that pinned the WRONG interpreter in `PY=` still
+    contains the right string elsewhere and the assertion passes. Mutation-verified
+    by Prudence on PR #460 — reverting `_write_launcher` to `shlex.quote(sys.executable)`
+    left both callers green, i.e. the exact bug being fixed sailed through.
+    """
+    for line in launcher_content.splitlines():
+        if line.startswith("PY="):
+            return line
+    raise AssertionError(f"launcher has no PY= line:\n{launcher_content}")
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     """Redirect SETTINGS_PATH and MCP_CONFIG_PATH into a temp home.
@@ -107,9 +123,9 @@ class TestRegisterHooks:
         from techne.platforms.claude_code import hooks as hooks_mod
         claude_code.register_hooks(cfg)
         launcher_content = hooks_mod._launcher_path().read_text()
-        # The VALIDATED interpreter must appear in the PY= line, possibly quoted by
-        # shlex — not a bare sys.executable (techne#458).
-        assert str(hooks_mod._interpreter()) in launcher_content
+        # Assert against the PY= LINE specifically: the heal message embeds the
+        # interpreter too, so a whole-file search passes even when PY= is wrong.
+        assert str(hooks_mod._interpreter()) in _py_line(launcher_content)
 
     def test_hook_commands_quote_spaces_in_launcher(self, fake_home, cfg, monkeypatch):
         # A space in sys.executable must be shell-quoted inside the launcher
@@ -288,8 +304,9 @@ class TestLauncher:
         claude_code.register_hooks(cfg)
         content = hooks_mod._launcher_path().read_text()
         # shlex.quote may or may not add quotes depending on the path; the resolved
-        # interpreter string must appear either way.
-        assert str(hooks_mod._interpreter()) in content
+        # interpreter must appear in the PY= LINE either way (not merely somewhere
+        # in the file — the heal message would satisfy that vacuously).
+        assert str(hooks_mod._interpreter()) in _py_line(content)
 
     def test_launcher_heal_command_present(self, fake_home, cfg):
         # A heal block is present (the [ -x ] || { ... } guard).
@@ -429,10 +446,13 @@ class TestHealCommand:
         # --break-system-packages (same flag logic as preflight_guard), then PY
         # is reassigned so exec targets the freshly-resolved python3, not the
         # original dead interpreter (fixes the no-op heal bug from review #279).
+        # Pin the interpreter AND its venv state: since techne#458 _heal_command
+        # reads the state of the interpreter being BAKED IN, not of the process
+        # running init. Without pinning, probing a synthetic path fails and
+        # defaults to (False, ""), so this would pass for the wrong reason.
         from techne.platforms.claude_code import hooks as hooks_mod
-        monkeypatch.setattr(sys, "executable", "/usr/bin/python3.12")
-        monkeypatch.setattr(sys, "prefix", "/usr")
-        monkeypatch.setattr(sys, "base_prefix", "/usr")
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: Path("/usr/bin/python3.12"))
+        monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (False, "/usr"))
         cmd = hooks_mod._heal_command()
         assert "pip install" in cmd
         assert "--break-system-packages" in cmd
@@ -446,10 +466,12 @@ class TestHealCommand:
         # exit 1 instead of attempting a fragile auto-rebuild.
         from techne.platforms.claude_code import hooks as hooks_mod
         venv = tmp_path / "venv"
-        monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
-        monkeypatch.setattr(sys, "prefix", str(venv))
-        monkeypatch.setattr(sys, "base_prefix", "/usr/local")
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: venv / "bin" / "python")
+        monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (True, str(venv)))
         cmd = hooks_mod._heal_command()
+        # The remediation must name THIS venv — the bug was naming the venv of
+        # whichever interpreter ran init (Prudence, PR #460).
+        assert str(venv) in cmd
         assert "exit 1" in cmd
         # Must warn and exit — NOT auto-run pipx or pip as live commands.
         # (pipx/uv reinstall *text* may appear in the echoed help message, but
@@ -462,9 +484,10 @@ class TestHealCommand:
         # Only the `pipx/venvs/` PATH SEGMENT triggers pipx mode. A random
         # path that contains 'pipx' elsewhere must not false-positive.
         from techne.platforms.claude_code import hooks as hooks_mod
-        monkeypatch.setattr(sys, "executable", "/opt/pipx-tools/bin/python")
-        monkeypatch.setattr(sys, "prefix", "/opt/pipx-tools")
-        monkeypatch.setattr(sys, "base_prefix", "/opt/pipx-tools")
+        monkeypatch.setattr(
+            hooks_mod, "_interpreter", lambda: Path("/opt/pipx-tools/bin/python")
+        )
+        monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (False, "/opt/pipx-tools"))
         cmd = hooks_mod._heal_command()
         # system path without pipx/venvs/ → pip path, not pipx reinstall
         assert cmd != "pipx reinstall techne"
@@ -924,3 +947,108 @@ class TestInterpreterValidation:
         monkeypatch.setattr(hooks_mod.shutil, "which", lambda _n: str(binary))
 
         assert hooks_mod._console_script_interpreter() is None
+
+
+class TestProbeMaskingChannels:
+    """techne#458 / PR #460: neutralizing `cwd` is not enough. PYTHONPATH is the same
+    masking channel in a different coat — `PYTHONPATH=. python3 -m techne.cli init`
+    would otherwise reproduce the original bug straight through the new guard.
+    (Prudence measured it: probe(/usr/bin/python3) False bare, True under
+    PYTHONPATH=<checkout>.)
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_interpreter_and_clean_cache(self, monkeypatch):
+        from techne.platforms.claude_code import hooks as hooks_mod
+        monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
+        hooks_mod._IMPORT_PROBE.clear()
+        yield
+        hooks_mod._IMPORT_PROBE.clear()
+
+    def test_probe_env_strips_pythonpath_entries_inside_the_install_root(self, monkeypatch):
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        root = hooks_mod._install_root()
+        innocent = "/opt/some/other/lib"
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(root), innocent]))
+
+        env = hooks_mod._probe_env()
+        assert str(root) not in env.get("PYTHONPATH", ""), "masking entry must be stripped"
+        assert innocent in env["PYTHONPATH"], "unrelated entries must survive"
+
+    def test_probe_env_strips_a_relative_entry_resolving_into_the_root(
+        self, monkeypatch, tmp_path
+    ):
+        """`PYTHONPATH=.` is the realistic shape — it resolves against cwd, which in
+        the incident IS the checkout."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        root = hooks_mod._install_root()
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PYTHONPATH", ".")
+
+        assert "PYTHONPATH" not in hooks_mod._probe_env()
+
+    def test_pythonpath_cannot_mask_a_broken_interpreter(self, monkeypatch, tmp_path):
+        """End-to-end: an interpreter that only 'works' when PYTHONPATH is set must
+        still probe False, because the probe strips the masking entry."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        py = tmp_path / "pythonpath-sensitive-python"
+        py.write_text('#!/bin/sh\n[ -n "$PYTHONPATH" ] && exit 0\nexit 1\n')
+        py.chmod(0o755)
+
+        monkeypatch.setenv("PYTHONPATH", str(hooks_mod._install_root()))
+        assert hooks_mod._can_import_techne(py) is False, (
+            "PYTHONPATH pointing into the install root must not make a broken "
+            "interpreter look importable"
+        )
+
+        # Control: an UNRELATED PYTHONPATH is preserved, so the same fake passes —
+        # proving the probe strips selectively rather than blanket-clearing the env.
+        hooks_mod._IMPORT_PROBE.clear()
+        monkeypatch.setenv("PYTHONPATH", "/opt/some/other/lib")
+        assert hooks_mod._can_import_techne(py) is True
+
+    def test_substituting_a_different_install_is_announced(self, tmp_path, monkeypatch, capsys):
+        """Wiring ~/.claude to an interpreter the operator did not choose is the right
+        repair, but it must not be silent (Prudence, PR #460)."""
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        bad = tmp_path / "brew-python"
+        bad.write_text("#!/bin/sh\nexit 1\n")
+        bad.chmod(0o755)
+        good = tmp_path / "pipx-python"
+        good.write_text("#!/bin/sh\nexit 0\n")
+        good.chmod(0o755)
+        monkeypatch.setattr(sys, "executable", str(bad))
+        monkeypatch.setattr(hooks_mod, "_console_script_interpreter", lambda: good)
+
+        assert hooks_mod._interpreter() == good
+        err = capsys.readouterr().err
+        assert "cannot import techne" in err
+        assert str(good) in err
+
+
+class TestVenvStateFollowsTheChosenInterpreter:
+    """_heal_command must describe the interpreter being BAKED IN, not the one that
+    ran init — they can now differ, and mixing them names the wrong venv as dead."""
+
+    def test_venv_state_of_the_running_interpreter_uses_sys(self, monkeypatch):
+        from techne.platforms.claude_code import hooks as hooks_mod
+        hooks_mod._VENV_PROBE.clear()
+        in_venv, prefix = hooks_mod._venv_state(Path(sys.executable))
+        assert in_venv == (sys.prefix != sys.base_prefix)
+        assert prefix == sys.prefix
+
+    def test_heal_message_names_the_chosen_venv_not_ours(self, monkeypatch, tmp_path):
+        from techne.platforms.claude_code import hooks as hooks_mod
+        chosen = tmp_path / "their-venv"
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: chosen / "bin" / "python")
+        monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (True, str(chosen)))
+        # Our own prefix is something else entirely; it must not leak into the message.
+        monkeypatch.setattr(sys, "prefix", "/our/unrelated/venv")
+
+        cmd = hooks_mod._heal_command()
+        assert str(chosen) in cmd
+        assert "/our/unrelated/venv" not in cmd
