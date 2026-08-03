@@ -749,6 +749,80 @@ def _expected_registrations(config: Config) -> list[tuple[str, str]]:
     return expected
 
 
+_UNVERIFIABLE = " — hook registration cannot be verified; every techne hook may be unregistered"
+
+
+def _settings_shape_error(settings: object) -> str | None:
+    """Why *settings* cannot be traversed to verify hook registration, or None.
+
+    VALIDATES THE SHAPE THE TRAVERSAL ACTUALLY WALKS — five levels, not two. The
+    first cut checked only that `settings` and `hooks` were objects; Prudence then
+    measured 10 of 14 malformed shapes STILL raising AttributeError further down,
+    including ``{"hooks": {"SessionStart": {...}}}`` — an object where an array
+    belongs, i.e. the likeliest hand-edit slip. Those exceptions land in the
+    session-start hook's ``except Exception`` and render a GREEN TICK with every
+    hook dead, which is the exact failure techne#452 exists to kill.
+
+    Rule of thumb this encodes: validate every level you are about to walk, not the
+    first one that occurred to you. (Prudence, PR #457.)
+    """
+    if settings is None:
+        return None  # absent file is a normal state; drift logic handles it
+    if not isinstance(settings, dict):
+        return f"settings.json is valid JSON but not an object (got {type(settings).__name__}){_UNVERIFIABLE}"
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return f"settings.json's `hooks` key is not an object (got {type(hooks).__name__}){_UNVERIFIABLE}"
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            return (
+                f"settings.json's `hooks.{event}` is not an array (got "
+                f"{type(groups).__name__}){_UNVERIFIABLE}"
+            )
+        for group in groups:
+            if not isinstance(group, dict):
+                return (
+                    f"settings.json has a non-object entry in `hooks.{event}` (got "
+                    f"{type(group).__name__}){_UNVERIFIABLE}"
+                )
+            inner = group.get("hooks")
+            if inner is None:
+                continue  # legacy flat shape; _group_contains_techne handles it
+            if not isinstance(inner, list):
+                return (
+                    f"settings.json has a non-array `hooks` inside a `hooks.{event}` "
+                    f"group (got {type(inner).__name__}){_UNVERIFIABLE}"
+                )
+            for entry in inner:
+                if not isinstance(entry, dict):
+                    return (
+                        f"settings.json has a non-object hook in `hooks.{event}` (got "
+                        f"{type(entry).__name__}){_UNVERIFIABLE}"
+                    )
+    return None
+
+
+def settings_unusable_reason(config: Config) -> str | None:
+    """The single source of truth for "settings.json cannot be verified", or None.
+
+    Exists so callers branch on the CONDITION rather than grepping prose. The banner
+    previously decided its heading with ``any("cannot be verified" in w ...)``, which
+    reaches across a module boundary into message wording: Prudence flipped it two
+    ways — rewording a message here left the suite 56/56 green while the banner
+    reverted to the mislabel, and because a drift warning embeds the `matcher` read
+    from settings.json, a hook group literally named "cannot be verified" filed six
+    genuine drift warnings under "settings.json unusable". User data must not steer
+    control flow. (Prudence, PR #457.)
+    """
+    if config.platform != "claude-code":
+        return None
+    try:
+        settings = _load_json(SETTINGS_PATH)
+    except RuntimeError as exc:
+        return f"settings.json is unreadable ({exc}){_UNVERIFIABLE}"
+    return _settings_shape_error(settings)
+
+
 def check_hook_drift(config: Config) -> list[str]:
     """Report drift between config-enabled techne hooks and what's actually wired
     in settings.json. Returns human-readable warnings; empty list == in sync (techne#287).
@@ -776,23 +850,9 @@ def check_hook_drift(config: Config) -> list[str]:
             f"settings.json is unreadable ({exc}) — hook registration cannot be "
             "verified; every techne hook may be unregistered"
         ]
-    # Shape checks, not just parse checks. `[]`, `"hello"` and the plausible
-    # `{"hooks": []}` are all VALID JSON that sail past _load_json and then make
-    # `.get()` raise AttributeError below — which the session-start hook's
-    # `except Exception` swallows, yielding a green tick with nothing registered.
-    # Prudence measured all three shapes on PR #457.
-    if settings is not None and not isinstance(settings, dict):
-        return [
-            f"settings.json is valid JSON but not an object (got "
-            f"{type(settings).__name__}) — hook registration cannot be verified; "
-            "every techne hook may be unregistered"
-        ]
-    if isinstance(settings, dict) and not isinstance(settings.get("hooks", {}), dict):
-        return [
-            "settings.json's `hooks` key is not an object (got "
-            f"{type(settings.get('hooks')).__name__}) — hook registration cannot be "
-            "verified; every techne hook may be unregistered"
-        ]
+    shape = _settings_shape_error(settings)
+    if shape:
+        return [shape]
     if settings is None:
         settings = {}
     hooks = settings.get("hooks", {})

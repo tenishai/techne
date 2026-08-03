@@ -82,7 +82,17 @@ def render_drift_block(config) -> str:
     # Two distinct conditions share this reporter, and mislabelling them is its own
     # small lie: "enabled in config but not registered" is a precise claim, and it is
     # NOT what an unreadable/wrong-shaped settings.json means (there, we cannot tell).
-    unverifiable = any("cannot be verified" in w for w in drift)
+    #
+    # Ask the CONDITION, never grep the prose. The previous cut used
+    # `any("cannot be verified" in w ...)`, which (a) silently reverted to the wrong
+    # heading whenever a message in hooks.py was reworded — with the whole suite
+    # green — and (b) let a hook group NAMED "cannot be verified" in settings.json
+    # relabel six genuine drift warnings, because the drift message embeds the
+    # matcher read from that file. User data must not steer control flow.
+    # (Prudence, PR #457.)
+    from techne.platforms.claude_code.hooks import settings_unusable_reason
+
+    unverifiable = settings_unusable_reason(config) is not None
     if unverifiable:
         lines = [
             "\n## techne ⚠️ settings.json unusable",

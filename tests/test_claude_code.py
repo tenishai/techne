@@ -838,6 +838,20 @@ class TestHookDrift:
             "123",                 # valid JSON, wrong shape
             '{"hooks": []}',       # object, but `hooks` is not one — the plausible one
             '{"hooks": "nope"}',
+            '{"hooks": null}',
+            # The traversal walks FIVE levels; the first cut of this guard validated
+            # two. Prudence measured 10 of 14 shapes still raising AttributeError
+            # from further down — swallowed by session_start's `except Exception`
+            # into a green tick with every hook dead. Everything below is one of
+            # those levels. (PR #457.)
+            '{"hooks": {"SessionStart": {}}}',      # object where an array belongs
+            '{"hooks": {"SessionStart": null}}',    # rendered ✅ with hooks dead
+            '{"hooks": {"SessionStart": "x"}}',
+            '{"hooks": {"SessionStart": [null]}}',
+            '{"hooks": {"SessionStart": ["str"]}}',
+            '{"hooks": {"SessionStart": [{"hooks": "notalist"}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": [null]}]}}',
+            '{"hooks": {"SessionStart": [{"hooks": ["str"]}]}}',
         ],
     )
     def test_unusable_settings_is_reported_not_swallowed(self, fake_home, cfg, body):
@@ -1406,3 +1420,65 @@ class TestDriftReachesTheOperator:
         )
         # Still useful to the agent too — but that alone is what the bug was.
         assert "hook drift" in additional, additional
+
+
+class TestUnusableSettingsIsAConditionNotProse:
+    """PR #457: the banner must branch on the CONDITION, not grep message text.
+
+    The prior cut used `any("cannot be verified" in w ...)`. Prudence flipped it two
+    ways: rewording a message in hooks.py left the whole suite green while the banner
+    silently reverted to the mislabel, and — because a drift warning embeds the
+    `matcher` string read from settings.json — a hook group NAMED "cannot be verified"
+    filed six genuine drift warnings under "settings.json unusable". User data must
+    not steer control flow.
+    """
+
+    def test_a_malicious_matcher_cannot_relabel_genuine_drift(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        # A well-formed settings.json with an ORPHANED TECHNE group whose matcher
+        # mimics the marker prose. Orphan warnings embed the matcher verbatim, so a
+        # prose-grep heading reads this attacker-free user data as "unusable".
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        settings["hooks"].setdefault("PreToolUse", []).append(
+            {
+                "matcher": "cannot be verified",
+                "hooks": [{"type": "command", "command": "sh techne-hook.sh -m techne.hooks.x"}],
+            }
+        )
+        claude_code.SETTINGS_PATH.write_text(json.dumps(settings))
+
+        # Precondition: this really does produce a drift warning carrying the phrase,
+        # otherwise the test would pass without exercising anything.
+        drift = claude_code.check_hook_drift(cfg)
+        assert any("cannot be verified" in w for w in drift), drift
+
+        block = render_drift_block(cfg)
+        assert "hook drift" in block, block
+        assert "settings.json unusable" not in block, block
+
+    def test_rewording_a_message_cannot_desync_the_heading(self, fake_home, cfg, monkeypatch):
+        """The heading and the message must come from ONE source. If they can drift,
+        the next reword silently restores the bug this split was added to fix."""
+        from techne.hooks.session_start import render_drift_block
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        claude_code.register_hooks(cfg)
+        claude_code.SETTINGS_PATH.write_text('{"hooks": {"SessionStart": null}}')
+
+        # Reword the SHAPE MESSAGE so it no longer contains the marker phrase, while
+        # the condition itself is unchanged. A prose-grep heading desyncs here; a
+        # condition-driven one does not.
+        monkeypatch.setattr(
+            hooks_mod, "_settings_shape_error", lambda _s: "settings.json is malformed"
+        )
+        drift = claude_code.check_hook_drift(cfg)
+        assert drift == ["settings.json is malformed"], drift
+        assert not any("cannot be verified" in w for w in drift), drift
+
+        block = render_drift_block(cfg)
+        assert "settings.json unusable" in block, block
