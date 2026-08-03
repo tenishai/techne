@@ -3,7 +3,10 @@
 import json
 import os
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from techne.config import Config
@@ -111,13 +114,310 @@ def _launcher_path() -> Path:
     return SETTINGS_PATH.parent / "techne-hook.sh"
 
 
+# Per-path memo for the import probe. register_hooks runs it for at most two
+# candidates, but the test suite calls register_hooks dozens of times; without this
+# each call would spawn a fresh interpreter.
+# Every module the registered commands invoke under the baked-in interpreter — the
+# UNION the probe must satisfy. Previously the probe asserted only
+# `techne.hooks.session_start`, which Prudence measured as tied for the WEAKEST of
+# the eight: techne/__init__.py is lazy (PEP 562) and techne/hooks/__init__.py is
+# empty, so it proves three files exist. Two shapes passed it while hooks died — a
+# partial install, and a complete source tree with PyYAML missing (which kills
+# pre_compact/post_compact/post_tool_use and techne.mcp_server). mcp_server matters
+# most: register_mcp bakes the same interpreter and the old probe did not represent
+# it at all. Kept as ONE tuple because this list was duplicated across four call
+# sites, and drift between them is how this class of bug keeps recurring.
+# (Prudence, PR #460.)
+_BAKED_IN_MODULES = (
+    "techne.hooks.session_start",
+    "techne.hooks.session_end",
+    "techne.hooks.pre_compact",
+    "techne.hooks.post_compact",
+    "techne.hooks.pre_tool_use",
+    "techne.hooks.post_tool_use",
+    "techne.hooks.user_prompt_submit",
+    "techne.mcp_server",
+)
+
+_IMPORT_PROBE: dict[str, bool] = {}
+# Generous on purpose: a cold interpreter on a slow/networked filesystem can take
+# seconds just to start. This bounds a hung probe rather than policing performance —
+# and a TIMEOUT IS NOT THE SAME ANSWER AS "cannot import", so it warns on stderr
+# instead of being folded silently into a False (Prudence, PR #460).
+_PROBE_TIMEOUT = 15
+# (is_venv, sys.prefix) per interpreter — see _venv_state.
+_VENV_PROBE: dict[str, tuple[bool, str]] = {}
+
+
+def _probe_env() -> dict[str, str]:
+    """Environment for the import probe, with ``PYTHONPATH`` entries that resolve
+    INTO the install root stripped out.
+
+    Neutralizing ``cwd`` is not enough. ``PYTHONPATH`` is the same masking channel
+    wearing a different coat: measured, ``_can_import_techne(/usr/bin/python3)`` is
+    False bare and True under ``PYTHONPATH=<checkout>``, so
+    ``PYTHONPATH=. python3 -m techne.cli init`` would reproduce techne#458 straight
+    through this guard. (Prudence, PR #460.)
+
+    A blanket ``-E`` is deliberately NOT used: it would also drop ``PYTHONHOME``,
+    virtualenv plumbing and proxy/CA settings that a legitimate install may need, so
+    it could fail a genuinely good interpreter. Strip only the masking entries.
+    """
+    env = dict(os.environ)
+    raw = env.get("PYTHONPATH")
+    if not raw:
+        return env
+    try:
+        root = _install_root().resolve()
+    except OSError:
+        return env
+    kept: list[str] = []
+    for entry in raw.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            # Relative entries (".", "") resolve against the CURRENT cwd — which is
+            # exactly the checkout in the incident shape, so this catches them too.
+            resolved = Path(entry).resolve()
+        except OSError:
+            kept.append(entry)  # unresolvable: can't prove it masks, so keep it
+            continue
+        if resolved == root or root in resolved.parents:
+            continue
+        # Strip anything that SUPPLIES techne, not merely anything under our root.
+        # The root is literally named `techne`, so its PARENT is a namespace-package
+        # source; a second checkout or worktree is another. Both were measured
+        # masking a broken interpreter while sitting nowhere near this root.
+        # (Prudence, PR #460.)
+        # `.is_dir()` alone: an `__init__.py` check would be dead code, since its
+        # existence implies the parent is a directory (Prudence, PR #460).
+        if (resolved / "techne").is_dir():
+            continue
+        kept.append(entry)
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        env.pop("PYTHONPATH", None)
+    return env
+
+
+def _venv_state(exe: Path) -> tuple[bool, str]:
+    """``(is_venv, sys.prefix)`` OF THE GIVEN INTERPRETER — asked of it, not of us.
+
+    Before techne#458 the interpreter baked into the launcher was always the one
+    running init, so reading our own ``sys.prefix``/``sys.base_prefix`` was correct
+    by construction. Now that ``_interpreter()`` can return a DIFFERENT interpreter,
+    mixing the two produces actively wrong remediation — naming one venv as dead
+    while telling the operator to rebuild another, or routing a venv install down
+    the ``--break-system-packages`` branch. (Prudence, PR #460.)
+    """
+    key = str(exe)
+    if key in _VENV_PROBE:
+        return _VENV_PROBE[key]
+    if key == sys.executable:
+        state = (sys.prefix != sys.base_prefix, sys.prefix)
+    else:
+        state = (False, "")
+        try:
+            proc = subprocess.run(
+                [key, "-c", "import sys;print(int(sys.prefix!=sys.base_prefix));print(sys.prefix)"],
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_TIMEOUT,
+            )
+            lines = proc.stdout.splitlines()
+            if proc.returncode == 0 and len(lines) >= 2:
+                state = (lines[0].strip() == "1", lines[1].strip())
+        except subprocess.TimeoutExpired:
+            # Loud, for the same reason _can_import_techne's is: folding a timeout
+            # into (False, "") silently routes a VENV install down the
+            # --break-system-packages branch — the exact harm this function exists
+            # to prevent, forty lines from where the sibling timeout is already
+            # made loud. (Prudence, PR #460.)
+            print(
+                f"techne: venv probe timed out after {_PROBE_TIMEOUT}s: {key}\n"
+                "        heal command may name the wrong install method.",
+                file=sys.stderr,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _VENV_PROBE[key] = state
+    return state
+
+
+def _can_import_techne(candidate: Path) -> bool:
+    """Can *candidate* ``import techne`` from a NEUTRAL working directory?
+
+    The neutral cwd is the whole point, not defensive dressing. In the 2026-08-02
+    incident the poisoning interpreter imported techne **successfully** — because
+    the command ran inside the repo checkout, where ``techne/`` is importable from
+    cwd. An in-place probe would have passed and pinned a Homebrew python with no
+    techne installed, which is precisely what happened. Probing somewhere that
+    cannot mask a missing install is what makes this a real check.
+
+    Never raises: any failure to probe is reported as "cannot import".
+    """
+    key = str(candidate)
+    if key in _IMPORT_PROBE:
+        return _IMPORT_PROBE[key]
+    ok = False
+    try:
+        with tempfile.TemporaryDirectory() as neutral:
+            proc = subprocess.run(
+                # Probe EVERY module that gets baked in, not a representative one.
+                # Under PEP 420 `import techne` can succeed from a namespace package
+                # supplying no submodules, and any single hook module proves only its
+                # own import closure — a missing third-party dep (PyYAML) kills four
+                # of the eight while the other four still import.
+                [key, "-c", "import " + ",".join(_BAKED_IN_MODULES)],
+                cwd=neutral,
+                env=_probe_env(),  # cwd alone is not enough — see _probe_env
+                capture_output=True,
+                timeout=_PROBE_TIMEOUT,
+            )
+            ok = proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        # Distinct from "cannot import": we did not get an answer. Still refuse to
+        # pin it (an interpreter we can't verify must not reach ~/.claude), but say
+        # so, because a silent False here looks identical to a real failure.
+        print(
+            f"techne: interpreter probe timed out after {_PROBE_TIMEOUT}s: {key}\n"
+            "        treating it as unusable — re-run if this was a transient stall.",
+            file=sys.stderr,
+        )
+        ok = False
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    _IMPORT_PROBE[key] = ok
+    return ok
+
+
+def _imports_only_via_pythonpath(candidate: Path) -> bool:
+    """True if *candidate* imports the baked-in modules ONLY with PYTHONPATH intact.
+
+    Distinguishes two shapes that the strict probe reports identically, because they
+    ARE identical to a prober: an interpreter with no techne being MASKED by
+    PYTHONPATH, and a legitimate `pip install --target=DIR` + exported PYTHONPATH.
+
+    We still refuse both — and that is deliberate, not an oversight. The hooks run
+    from Claude Code's environment, not from the one that ran `techne init`, so an
+    install reachable only through an exported PYTHONPATH is fragile in exactly the
+    way the masked one is broken: same fragility, different intent. What we owe the
+    operator is not acceptance but an accurate diagnosis, since a bare "cannot
+    determine a stable interpreter" is baffling when `python -c "import techne"`
+    plainly works in their shell. (Prudence measured the false-negative on PR #460.)
+    """
+    try:
+        with tempfile.TemporaryDirectory() as neutral:
+            proc = subprocess.run(
+                [str(candidate), "-c", "import " + ",".join(_BAKED_IN_MODULES)],
+                cwd=neutral,
+                env=dict(os.environ),  # UNSTRIPPED, deliberately
+                capture_output=True,
+                timeout=_PROBE_TIMEOUT,
+            )
+            return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _console_script_interpreter() -> Path | None:
+    """The interpreter behind the installed ``techne`` console script, read from its
+    shebang — the stable, discoverable interpreter techne#576 asked for.
+
+    This is the fallback that repairs the failure mode rather than merely detecting
+    it: when the running interpreter can't import techne, the installed entry point
+    almost always can (pipx venv, uv tool, plain venv), because that is what the
+    operator actually installed. Returns None when there's no console script or its
+    shebang isn't parseable — callers treat that as "no candidate".
+    """
+    script = shutil.which("techne")
+    if not script:
+        return None
+    try:
+        with open(script, encoding="utf-8", errors="replace") as fh:
+            first = fh.readline().strip()
+    except OSError:
+        return None
+    if not first.startswith("#!"):
+        return None  # not a POSIX text script (e.g. a Windows launcher .exe)
+    try:
+        parts = shlex.split(first[2:])
+    except ValueError:
+        return None
+    return Path(parts[0]) if parts else None
+
+
 def _interpreter() -> Path:
-    """The interpreter register_hooks is about to bake in (launcher `PY=`, MCP
+    """The interpreter register_hooks is about to bake in (launcher ``PY=``, MCP
     command, heal). A seam, not indirection for its own sake: tests must be able
     to pin it without monkeypatching the global ``sys.executable``, which would
     break every test that spawns a subprocess.
+
+    VALIDATED, not assumed (techne#458). Baking in a bare ``sys.executable`` has
+    poisoned this machine's hooks three times (#574/#576/#584/#587): running
+    ``techne`` under any interpreter that can't import techne kills EVERY hook with
+    ``ModuleNotFoundError``, and the launcher's own liveness guard can't catch it
+    because it tests ``[ -x "$PY" ]`` — the poisoned interpreter exists and is
+    executable, it just has no techne. techne#576 named the fix on 2026-07-06:
+
+        techne should pin a stable, discoverable interpreter (the install's own
+        venv) rather than whatever ``sys.executable`` happens to be.
+
+    Order: the running interpreter first (correct in the overwhelmingly common
+    case), then the installed console script's interpreter. Each must prove it can
+    import techne from a neutral cwd before it is written anywhere.
+
+    Raises RuntimeError when nothing validates. That is deliberate: a failed
+    ``techne init`` is visible and fixable in one command, whereas silently pinning
+    a broken interpreter takes down every hook with no diagnostic and has, three
+    times now, cost hours to trace back.
     """
-    return Path(sys.executable)
+    candidates = [Path(sys.executable)]
+    console = _console_script_interpreter()
+    if console is not None and console != candidates[0]:
+        candidates.append(console)
+
+    for candidate in candidates:
+        if _can_import_techne(candidate):
+            if candidate != candidates[0]:
+                # SAY SO. Substituting a different install is the right repair, but
+                # doing it silently means the operator's ~/.claude quietly points at
+                # an interpreter they did not choose and cannot see (Prudence, #460).
+                print(
+                    f"techne: {candidates[0]} cannot import techne; wiring hooks to "
+                    f"{candidate} (from the installed `techne` console script) instead.",
+                    file=sys.stderr,
+                )
+            return candidate
+
+    if any(_imports_only_via_pythonpath(c) for c in candidates):
+        raise RuntimeError(
+            "techne is importable only via PYTHONPATH, not from the interpreter "
+            "itself.\n"
+            "Hooks run in Claude Code's environment, not the one running this "
+            "command, so a PYTHONPATH-only install would leave every hook dead with "
+            "ModuleNotFoundError (techne#458).\n"
+            "Install it INTO an interpreter instead:\n"
+            "  pipx install techne          # or: pipx install -e <checkout>\n"
+            "  <python> -m pip install -e <canonical-techne-checkout>\n"
+            "A --target layout cannot be made to work here: the probe strips exactly "
+            "the PYTHONPATH entry that supplies techne, so re-running init after "
+            "exporting it produces this same message."
+        )
+    tried = "\n".join(f"  - {c}" for c in candidates)
+    raise RuntimeError(
+        "techne cannot determine a stable interpreter to wire into ~/.claude.\n"
+        "None of these could `import techne` from a neutral working directory:\n"
+        f"{tried}\n"
+        "Writing one of them anyway would break every techne hook with "
+        "ModuleNotFoundError (techne#458).\n"
+        "Install techne so its entry point resolves, then re-run `techne init`:\n"
+        "  pipx install techne        # or: pipx install -e <checkout>\n"
+        f"  {sys.executable} -m pip install -e <canonical-techne-checkout>\n"
+        "NOTE: running `techne init` from inside the source checkout is NOT enough "
+        "— the repo cwd makes techne importable there but not from where hooks run."
+    )
 
 
 def _under_worktree(p: Path) -> Path | None:
@@ -185,8 +485,14 @@ def _heal_command() -> str:
       those tools but whose interpreter path did not match the ``pipx/venvs/`` pattern.
       The user must recreate and reinstall manually (techne#276).
     """
-    exe = sys.executable
-    in_venv = sys.prefix != sys.base_prefix
+    # The validated interpreter (techne#458), so install-method detection describes
+    # the interpreter actually being baked in rather than whichever one happened to
+    # run init — otherwise a poisoned run could emit a heal for the wrong install.
+    exe_path = _interpreter()
+    exe = str(exe_path)
+    # Both read from the interpreter being BAKED IN, never from the one running init
+    # — those can now differ, and mixing them emits remediation for the wrong venv.
+    in_venv, venv_prefix = _venv_state(exe_path)
     is_pipx = "pipx/venvs/" in exe
     repo = _install_root()
 
@@ -207,8 +513,8 @@ def _heal_command() -> str:
     msg = (
         f"[techne] interpreter dead ({exe}) — "
         f"recreate the venv and reinstall: "
-        f"python3 -m venv {sys.prefix} && "
-        f"{sys.prefix}/bin/pip install -e {repo}"
+        f"python3 -m venv {venv_prefix} && "
+        f"{venv_prefix}/bin/pip install -e {repo}"
         f"; or if installed via pipx/uv: "
         f"pipx reinstall techne / uv tool install --force techne"
     )
@@ -238,7 +544,7 @@ def _write_launcher() -> Path:
     launcher.parent.mkdir(parents=True, exist_ok=True)
     content = (
         "#!/bin/sh\n"
-        f"PY={shlex.quote(sys.executable)}\n"
+        f"PY={shlex.quote(str(_interpreter()))}\n"
         '[ -x "$PY" ] || { ' + _heal_command() + "; }\n"
         'exec "$PY" "$@"\n'
     )
@@ -515,7 +821,10 @@ def register_mcp(config: Config):
 
     servers = mcp_config.setdefault("mcpServers", {})
     servers["techne"] = {
-        "command": sys.executable,
+        # Validated interpreter, not a bare sys.executable (techne#458) — the MCP
+        # server dies with -32000 under a poisoned pin exactly as the hooks do
+        # (techne#578), and #370 tracks that it has no self-heal launcher yet.
+        "command": str(_interpreter()),
         "args": ["-m", "techne.mcp_server"],
         "env": {},
     }

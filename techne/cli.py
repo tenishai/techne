@@ -1254,8 +1254,17 @@ def init(ctx, platform, identity_dir, posture):
     if platform == "claude-code":
         from techne.platforms.claude_code import register_hooks, register_mcp
 
-        register_hooks(config)
-        register_mcp(config)
+        try:
+            register_hooks(config)
+            register_mcp(config)
+        except RuntimeError as exc:
+            # register_hooks refuses to wire an interpreter it cannot validate
+            # (techne#458) or a path inside a git worktree (techne#434). Both are
+            # operator-actionable and expected, not crashes — render them as one
+            # clear message instead of a traceback. ClickException exits 1, so init
+            # still fails loudly; nothing has been written to ~/.claude by then,
+            # because both guards run before the launcher/settings are touched.
+            raise click.ClickException(str(exc)) from exc
         click.echo("Claude Code hooks registered")
         click.echo("MCP server registered")
 
