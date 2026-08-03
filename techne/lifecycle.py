@@ -5,6 +5,8 @@ directly when embedding techne in a runtime that isn't Claude Code (e.g., a
 custom agent process or notebook).
 """
 
+import sys
+
 from techne.config import Config
 
 # Thread-summary outbox lanes, selected by topology (techne#224). One flag picks
@@ -271,8 +273,6 @@ def run_session_end(
 
             reflect_result = reflect_on_session(config, session_id, threads, observations)
         except Exception as e:
-            import sys
-
             print(f"techne: reflect pass failed: {e}", file=sys.stderr)
 
     if summary:
