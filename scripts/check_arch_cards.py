@@ -91,7 +91,7 @@ def find_cards(repo: Path) -> list[Path]:
     return cards
 
 
-def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
+def check(repo: Path) -> tuple[int, list[tuple[Path, str, str]], int, int, int]:
     """Return (exit_code, problems, n_cards, n_anchors, n_skipped)."""
     # Preflight: git present and repo is a work tree, else a clear env error (exit 2).
     try:
@@ -204,7 +204,9 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
                 f"no `→ docs/arch/*.md` index entries matched, but {len(seam_cards)} "
                 "exist on disk\n"
                 "        Usually a formatting change in the index — or the entries\n"
-                "        were removed. Either way the cards are not at fault.\n"
+                "        were removed. NOTE: with no entries matching, the forward\n"
+                "        check has nothing to verify either, so a genuinely deleted\n"
+                "        card would not be reported until the index is fixed.\n"
                 "        Each entry must contain:\n"
                 "          → docs/arch/<name>.md      (a literal → then the bare path)",
                 "coverage",
@@ -225,7 +227,10 @@ def check(repo: Path) -> tuple[int, list[tuple[Path, str]], int, int, int]:
                 ))
 
     if n_cards == 0:
-        return 1, [(repo, "no architecture cards found", "coverage")], 0, 0, n_skipped
+        # Append rather than replace: manifest problems collected above are real and
+        # were being discarded by the early return (Prudence, PR #451).
+        problems.append((repo, "no architecture cards found", "coverage"))
+        return 1, problems, 0, 0, n_skipped
     return (1 if problems else 0), problems, n_cards, n_anchors, n_skipped
 
 
@@ -255,11 +260,17 @@ def main() -> int:
         # directly above them — telling the reader to bump an `anchor:` sha that has
         # nothing to do with the failure. (Prudence, PR #451.)
         anchor_problem = any(kind == "anchor" for _where, _why, kind in problems)
+        # `code == 1` is redundant-by-construction now that problems carry a kind:
+        # exit 2 returns before any card is read, so no anchor-kind problem can
+        # coexist with it. Kept as defence in depth if the kind tag is ever lost —
+        # and NOT individually mutation-observable for exactly that reason (whichever
+        # belt survives suppresses the trailer alone). The kind side is pinned
+        # directly on check()'s return shape instead. (Prudence, PR #451.)
         if code == 1 and anchor_problem:
             print(
                 "\nA seam changed (or an anchor is malformed) without its card being "
-                "updated.\nFix the card body and bump its recorded `anchor:` sha in the "
-                "same change."
+                "updated.\nFix the card body and add or bump its recorded `anchor:` sha "
+                "in the same change."
             )
         return code
 

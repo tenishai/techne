@@ -160,6 +160,8 @@ def test_no_cards_fails(tmp_path: Path) -> None:
     r = _run(repo)
     assert r.returncode == 1
     assert "no architecture cards" in r.stdout
+    # kind@no-cards-found must stay "coverage".
+    assert "bump its recorded `anchor:` sha" not in r.stdout
 
 
 def test_card_absent_from_the_index_fails(tmp_path: Path) -> None:
@@ -195,6 +197,8 @@ def test_deleting_the_manifest_itself_fails(tmp_path: Path) -> None:
     r = _run(repo)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "ARCHITECTURE.md is missing" in r.stdout
+    # kind@manifest-missing must stay "coverage".
+    assert "bump its recorded `anchor:` sha" not in r.stdout
 
 
 def test_manifest_with_frontmatter_stripped_fails(tmp_path: Path) -> None:
@@ -245,6 +249,9 @@ def test_reformatted_index_blames_the_index_not_every_card(tmp_path: Path) -> No
     r = _run(repo)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "index entries matched" in r.stdout
+    # kind@index-matched-nothing must stay "coverage": flipping it to "anchor" put
+    # "the cards are not at fault" directly above "bump its recorded anchor sha".
+    assert "bump its recorded `anchor:` sha" not in r.stdout
     assert r.stdout.count("not indexed") == 0, "must not blame the individual cards"
     assert "FAILED (1)" in r.stdout, "one index failure, not three card failures"
 
@@ -338,3 +345,56 @@ def test_trailer_fires_for_malformed_and_for_a_missing_seam_file(tmp_path: Path)
         assert r.returncode == 1, r.stdout
         assert needle in r.stdout
         assert "bump its recorded `anchor:` sha" in r.stdout, f"{needle}: trailer missing"
+
+
+def test_environment_failure_is_exit_2_with_no_summary_or_trailer(tmp_path: Path) -> None:
+    """The exit-2 contract had NO test: both `kind@env -> "anchor"` and dropping the
+    `code == 1 and` guard killed zero tests. Exit 2 returns before any card is read,
+    so an env problem can never mix with anchor problems — which is what makes the
+    `env` kind safe redundancy rather than ambiguity. Pin the whole contract.
+    (Prudence, PR #451.)"""
+    not_a_repo = tmp_path / "plain-dir"
+    (not_a_repo / "docs" / "arch").mkdir(parents=True)
+
+    r = _run(not_a_repo)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "not a git work tree" in r.stdout
+    assert "ERROR" in r.stdout
+    # exit 2 suppresses the card/anchor summary — there was nothing to count.
+    assert "checked" not in r.stdout
+    # ...and must never print anchor remediation for an environment failure.
+    assert "bump its recorded `anchor:` sha" not in r.stdout
+
+
+def _load_checker():
+    """Import the gate as a module so its RETURN SHAPE can be asserted directly."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_arch_gate", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_env_failure_carries_the_env_kind(tmp_path: Path) -> None:
+    """The two belts guarding the trailer on an env failure — `kind == "env"` and
+    `code == 1 and ...` — are INDEPENDENTLY unobservable through stdout, because
+    whichever survives suppresses the trailer on its own. A stdout test therefore
+    cannot kill either mutant alone; only the double mutation shows.
+
+    That is defence in depth working as intended, not a gap to design away — so pin
+    each belt where it IS observable: the return shape. (Prudence, PR #451.)
+    """
+    mod = _load_checker()
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir(parents=True)
+
+    code, problems, n_cards, n_anchors, _skipped = mod.check(not_a_repo)
+
+    assert code == 2, "environment failure is exit 2, distinct from a card failure"
+    assert problems and all(kind == "env" for _w, _y, kind in problems), problems
+    assert not any(kind == "anchor" for _w, _y, kind in problems), (
+        "an env failure must never be tagged anchor — exit 2 returns before any card "
+        "is read, so it cannot legitimately mix with anchor problems"
+    )
+    assert (n_cards, n_anchors) == (0, 0)
