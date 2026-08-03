@@ -86,9 +86,19 @@ jobs:
         working-directory: techne
         run: .venv-ci/bin/python -m ruff check techne tests || true  # advisory until strict pass is done
 
+      # `-n auto` (#463). This step was 97.5% of the job — 654s of a 671s run,
+      # against ~5s for checkout+venv+install+ruff combined. The suite is
+      # SYSCALL-bound (sys > user), so it suffers badly on this runner: dev02 is
+      # only 1.45x slower than a dev laptop on CPU but 6.5x slower on this suite,
+      # because it sits at 81% disk with 33 containers competing for I/O.
+      # Parallel workers overlap that waiting instead of serializing it.
+      #
+      # NOT applied to the eval gates below or to eval-vec: both select a handful
+      # of tests where worker startup would cost more than it saves, and eval-vec
+      # additionally runs with `-s`, which xdist does not support.
       - name: Pytest (includes contract assertions)
         working-directory: techne
-        run: .venv-ci/bin/python -m pytest -q
+        run: .venv-ci/bin/python -m pytest -q -n auto
 
       # (#398) Deterministic eval gates — FTS-only, no vector/LLM deps, ~0.5s.
       # A regression gate that nothing invokes protects nothing (Prudence, #397).

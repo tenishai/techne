@@ -65,7 +65,10 @@ for PY in "${MATRIX[@]}"; do
   # Advisory in CI (`|| true`), so advisory here — reported, never fatal.
   "$VENV/bin/python" -m ruff check techne tests || echo "  (ruff advisory — non-blocking, same as CI)"
 
-  "$VENV/bin/python" -m pytest -q || FAILED+=("$PY: pytest")
+  # `-n auto` mirrors the workflow (#463). Keep the flag in sync with test.yml:
+  # the point of this script is that green here means green there, and a serial
+  # local run would not exercise the parallel execution CI now uses.
+  "$VENV/bin/python" -m pytest -q -n auto || FAILED+=("$PY: pytest")
 
   # CLI -m overrides pyproject's addopts exclusion. Easy to forget locally, which
   # is exactly why it's here: these gates are excluded from a bare `pytest` run.
