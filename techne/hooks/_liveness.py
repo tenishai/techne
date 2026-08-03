@@ -49,6 +49,12 @@ from datetime import datetime, timezone
 OUTCOME_OK = "ok"
 OUTCOME_NOOP = "noop"
 
+#: How long a liveness write waits for the db lock before giving up. Deliberately
+#: far below `connect()`'s 5s default (database.py): that budget exists so real
+#: work queues under WAL, and bookkeeping must not inherit it — a marker is not
+#: worth adding seconds to a tool call.
+LOCK_WAIT_MS = 200
+
 
 def now_iso() -> str:
     """UTC timestamp, second precision — matches session_start's existing format."""
@@ -81,12 +87,22 @@ def record_hook_run(
             clean run, which CLEARS any previously recorded error.
         ts: override the timestamp (tests); defaults to now.
     """
+    from techne.hooks._timeout import HookTimeout
+
     stamp = ts or now_iso()
     try:
         from techne.core.database import connect
         from techne.core.extension_state import get_state, set_state
 
         conn = connect(db_path)
+        # `connect()` sets PRAGMA busy_timeout=5000 so that real work waits its
+        # turn under WAL. Bookkeeping must NOT inherit that: `pre_tool_use`
+        # fires on every Grep and its liveness write is outside any
+        # `bounded_hook`, so a contended db would add five seconds to a tool
+        # call for a row nobody is blocked on. A marker that cannot get the
+        # lock promptly is worth less than the latency of waiting for it —
+        # give up and stay silent for this run instead.
+        conn.execute(f"PRAGMA busy_timeout={LOCK_WAIT_MS}")
         try:
             payload: dict = {"ts": stamp, "outcome": outcome}
             if detail:
@@ -105,19 +121,52 @@ def record_hook_run(
                 set_state(conn, error_key, {})
         finally:
             conn.close()
+    except HookTimeout:
+        # NEVER swallow the bounded_hook alarm. HookTimeout is a RuntimeError, so
+        # the blanket handler below would eat it — and most record_hook_run calls
+        # sit INSIDE a `with bounded_hook(...)` block. Eating it there does three
+        # things, all worse than the silence this module exists to remove: the
+        # block runs far past its wall-clock budget, bounded_hook's `timed_out`
+        # flag stays False so it prints the SOFT "approaching timeout" warning
+        # instead of "work was dropped", and the marker never lands — leaving a
+        # STALE last_run from a previous session that reads as healthy.
+        # Same guard, same reason, as session_end.py's backfill block.
+        raise
     except Exception as exc:  # noqa: BLE001 — bookkeeping must never break a hook
         print(f"techne: could not persist {hook} liveness: {exc}", file=sys.stderr)
 
 
 def resolve_db_path():
-    """Best-effort config load for the db path, or None.
+    """The db path for hooks that must record liveness BEFORE (or despite) a
+    config load, or None if even the fallback cannot be determined.
 
-    Several hooks need to record liveness on paths where config load itself is
-    what failed. Returns None rather than raising so the caller can degrade.
+    The paths this exists for are the awkward ones: a hook that bails on missing
+    ``session_id`` or on a config load that itself raised. Asking ``Config`` on
+    the second is circular — ``Config.load()`` is the thing that just failed —
+    so this falls back to the CONVENTIONAL location (``$TECHNE_HOME`` or
+    ``~/.techne/techne.db``) rather than giving up.
+
+    That fallback can be wrong for a non-default install, which is the honest
+    trade: a marker written to the default path is recoverable and visible,
+    whereas the alternative is exactly the undecidable silence techne#468 exists
+    to remove. Callers must treat None as "cannot record" and carry on.
     """
     try:
         from techne.config import Config
 
         return Config.load().db_path
+    except Exception:  # noqa: BLE001 — that failure is WHY we are here
+        pass
+    try:
+        import os
+        from pathlib import Path
+
+        home = os.environ.get("TECHNE_HOME")
+        base = Path(home) if home else Path.home() / ".techne"
+        candidate = base / "techne.db"
+        # Only use it if the store already exists: creating a db as a side
+        # effect of a failed config load would be a mutation, and health
+        # bookkeeping must not create state it was merely trying to describe.
+        return candidate if candidate.exists() else None
     except Exception:  # noqa: BLE001
         return None

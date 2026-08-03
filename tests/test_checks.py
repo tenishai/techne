@@ -141,6 +141,11 @@ class TestBuiltinChecks:
         """
         from techne.core.database import connect
 
+        # Enable the config-gated rail too, so this covers the whole cohort —
+        # a gated-off hook is correctly DORMANT and would otherwise mask the
+        # assertion (see TestConfigGateBeatsMarker).
+        config.hooks.codex_grep_assist = True
+
         conn = connect(config.db_path)
         try:
             conn.execute(
@@ -215,3 +220,31 @@ class TestBuiltinChecks:
     def test_summarize_counts_by_verdict(self, config):
         counts = summarize(run_checks(config))
         assert sum(counts.values()) == len(run_checks(config))
+
+
+class TestConfigGateBeatsMarker:
+    """#469 review: config is read FIRST, the marker second.
+
+    A disabled rail records nothing, so a rail switched OFF after use keeps its
+    last marker forever. Reading the marker alone would report it healthy
+    indefinitely — the marker must never be interpreted without its gate.
+    """
+
+    def test_disabled_rail_with_a_recent_marker_is_dormant_not_live(self, config):
+        from techne.hooks._liveness import record_hook_run
+
+        config.hooks.codex_grep_assist = True
+        record_hook_run(config.db_path, "codex_grep_assist", outcome="ok")
+
+        enabled = next(
+            r for r in run_checks(config) if r.name == "hook:codex_grep_assist"
+        )
+        assert enabled.verdict is Verdict.LIVE
+
+        # Operator turns it off. The marker is untouched and still recent.
+        config.hooks.codex_grep_assist = False
+        disabled = next(
+            r for r in run_checks(config) if r.name == "hook:codex_grep_assist"
+        )
+        assert disabled.verdict is Verdict.DORMANT
+        assert "hooks.codex_grep_assist" in disabled.detail

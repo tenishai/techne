@@ -22,11 +22,16 @@ def main():
         print(f"techne: post_compact received invalid JSON on stdin — restore skipped: {exc}", file=sys.stderr)
         data = {}
 
+    from techne.hooks._liveness import record_hook_run, resolve_db_path
+    from techne.hooks._timeout import bounded_hook
+
     session_id = data.get("session_id", "")
     if not session_id:
+        # Also the landing point for malformed stdin above (which sets data = {}).
+        db = resolve_db_path()
+        if db:
+            record_hook_run(db, HOOK_NAME, outcome="noop:no-session-id")
         sys.exit(0)
-
-    from techne.hooks._timeout import bounded_hook
 
     # Config.load() can raise (corrupt/unreadable config). A hook that throws here
     # would break the host's post-compaction restore; degrade to a no-op. (techne#166)
@@ -34,9 +39,15 @@ def main():
         config = Config.load()
     except Exception as e:
         print(f"techne: config load failed, skipping restore: {e}", file=sys.stderr)
+        db = resolve_db_path()
+        if db:
+            record_hook_run(
+                db,
+                HOOK_NAME,
+                outcome="failed",
+                error={"stage": "config-load", "msg": f"{type(e).__name__}: {e}"},
+            )
         sys.exit(0)
-
-    from techne.hooks._liveness import record_hook_run
 
     try:
         with bounded_hook(config.hooks.timeout_s, label="post_compact"):

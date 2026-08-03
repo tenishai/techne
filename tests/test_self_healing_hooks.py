@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -728,10 +729,63 @@ class TestHookLiveness:
 
     def test_never_raises_on_unwritable_db(self, tmp_path: Path):
         """Bookkeeping must never kill a hook — Claude Code treats a non-zero
-        hook exit as a hard failure, so this has to swallow its own errors."""
+        hook exit as a hard failure, so this has to swallow its own errors.
+
+        The parent must be a FILE, not a missing directory: ``connect()`` does
+        ``db_path.parent.mkdir(parents=True, exist_ok=True)``, so a nonexistent
+        directory is simply created and the "unwritable" path is never reached.
+        An earlier version of this test used a missing dir and therefore
+        exercised the happy path under a name claiming otherwise — it passed
+        with the exception handler deleted entirely (#469 review).
+        """
         from techne.hooks._liveness import record_hook_run
 
-        record_hook_run(tmp_path / "nonexistent-dir" / "no.db", "demo", outcome="ok")
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("i am a file")
+
+        record_hook_run(blocker / "no.db", "demo", outcome="ok")
+
+    def test_hook_timeout_is_never_swallowed(self, db_path: Path, monkeypatch):
+        """The bounded_hook alarm must escape.
+
+        HookTimeout is a RuntimeError, so a blanket ``except Exception`` eats it
+        — and most record_hook_run calls sit INSIDE a ``with bounded_hook(...)``
+        block. Swallowing it there is worse than the silence this module removes:
+        the block overruns its budget, bounded_hook reports the SOFT warning
+        because its timed_out flag never trips, and the marker never lands, so a
+        STALE last_run from a previous session reads as healthy (#469 review).
+        """
+        from techne.core import extension_state
+        from techne.hooks import _liveness
+        from techne.hooks._timeout import HookTimeout
+
+        def boom(*_a, **_kw):
+            raise HookTimeout("alarm")
+
+        # Must patch something INSIDE the try block. Patching `now_iso` would
+        # raise before the handler is even reached — a test that passes without
+        # exercising the guard, which is the failure mode this whole review
+        # round was about.
+        monkeypatch.setattr(extension_state, "set_state", boom)
+
+        with pytest.raises(HookTimeout):
+            _liveness.record_hook_run(db_path, "demo", outcome="ok")
+
+    def test_ordinary_errors_are_still_swallowed(self, db_path: Path, monkeypatch):
+        """The HookTimeout re-raise must not turn the helper into a raiser.
+
+        Companion to the test above: together they pin that exactly ONE
+        exception type escapes.
+        """
+        from techne.core import extension_state
+        from techne.hooks import _liveness
+
+        def boom(*_a, **_kw):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(extension_state, "set_state", boom)
+
+        _liveness.record_hook_run(db_path, "demo", outcome="ok")  # must not raise
 
     def test_hooks_declare_distinct_liveness_names(self):
         """Each hook owns its own key namespace; a collision would make one

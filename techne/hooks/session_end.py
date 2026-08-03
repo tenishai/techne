@@ -34,14 +34,23 @@ def main():
         print(f"techne: session_end received invalid JSON on stdin — teardown skipped: {exc}", file=sys.stderr)
         data = {}
 
+    from techne.hooks._liveness import record_hook_run, resolve_db_path
+    from techne.hooks._timeout import HookTimeout, bounded_hook
+
     session_id = data.get("session_id", "")
     if not session_id:
+        # Reached BOTH when session_id is genuinely absent and when stdin was
+        # malformed above (that path sets data = {} and falls through here), so
+        # "teardown was skipped entirely" must leave a trace. This is the hook
+        # doing the most consequential work; a silent skip here is precisely the
+        # undecidable state techne#468 exists to remove.
+        db = resolve_db_path()
+        if db:
+            record_hook_run(db, HOOK_NAME, outcome="noop:no-session-id")
         sys.exit(0)
 
     # Load config before arming the timer — reading a local YAML file is fast
     # and we need config.hooks.timeout_s to set the correct budget.
-    from techne.hooks._timeout import HookTimeout, bounded_hook
-
     try:
         from techne.config import Config
 
@@ -49,9 +58,17 @@ def main():
         timeout_s = config.hooks.timeout_s
     except Exception as e:
         print(f"techne: session_end config load failed: {e}", file=sys.stderr)
+        # Cannot ask Config for the path — Config is what just failed — so this
+        # falls back to the conventional store location (see resolve_db_path).
+        db = resolve_db_path()
+        if db:
+            record_hook_run(
+                db,
+                HOOK_NAME,
+                outcome="failed",
+                error={"stage": "config-load", "msg": f"{type(e).__name__}: {e}"},
+            )
         sys.exit(0)
-
-    from techne.hooks._liveness import record_hook_run
 
     try:
         with bounded_hook(timeout_s, label="session_end"):

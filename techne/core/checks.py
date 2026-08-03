@@ -249,6 +249,16 @@ _HOOK_EXPECTATIONS = {
     "post_compact": (timedelta(days=30), "fires only after a compaction"),
 }
 
+#: Hooks whose rail is behind a config flag, and the flag that gates it.
+#: CONFIG IS READ FIRST, MARKER SECOND — deliberately (#469 review). Because a
+#: disabled rail records nothing, a rail switched OFF after use keeps its last
+#: marker forever; reading the marker alone would report it healthy indefinitely.
+#: Config is the durable record of "should this run at all", so the marker must
+#: never be interpreted without its gate.
+_HOOK_CONFIG_GATE = {
+    "codex_grep_assist": ("hooks.codex_grep_assist", lambda c: c.hooks.codex_grep_assist),
+}
+
 
 @register_check
 def check_hooks(config) -> list[CheckResult]:
@@ -278,6 +288,23 @@ def check_hooks(config) -> list[CheckResult]:
             err = get_state(conn, f"hook:{hook}:last_error") or {}
             last = run.get("ts")
             outcome = run.get("outcome")
+
+            gate = _HOOK_CONFIG_GATE.get(hook)
+            if gate and not gate[1](config):
+                # CONFIG FIRST. Without this a rail turned off after use keeps a
+                # recent-looking marker and reads healthy forever.
+                results.append(
+                    CheckResult(
+                        name=f"hook:{hook}",
+                        subsystem="hooks",
+                        kind=Kind.TEMPORAL,
+                        verdict=Verdict.DORMANT,
+                        last_fired=last,
+                        evidence=f"config {gate[0]} = false",
+                        detail=f"disabled by config: {gate[0]}",
+                    )
+                )
+                continue
 
             if err:
                 verdict = Verdict.BROKEN
