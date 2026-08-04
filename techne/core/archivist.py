@@ -12,10 +12,13 @@ federation read-back loop that closes the recall side is PR 2.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from techne.sync.sinks import DeliveryResult, OutboxSink
+
+log = logging.getLogger(__name__)
 
 # The name under which the local base Archivist appears in recall's federation
 # fan-out (techne#346 PR2). A non-standalone instance recalls over its own
@@ -221,13 +224,10 @@ def push_knowledge_to_archivist(config) -> int:
        row). The ledger avoids re-enqueuing entirely."""
     if config.standalone:
         return 0
-    import logging
-
     from techne.core.knowledge import REDIRECTED_TYPES
     from techne.core.knowledge_export import query_live_knowledge
     from techne.sync.outbox import enqueue
 
-    log = logging.getLogger(__name__)
     ensure_registered_for(config)
     pushed = 0
     skipped = 0

@@ -403,7 +403,7 @@ def test_redirected_types_filter_follows_the_dict_not_a_literal(config, tmp_path
 
     conn = plain_connect(config.db_path)
     try:
-        for t in ("fact", "document"):
+        for t in ("fact", "document", "document_card"):
             conn.execute(
                 "INSERT INTO knowledge (type, content, confidence) VALUES (?, ?, ?)",
                 (t, f"a {t} row", "high"),
@@ -416,7 +416,7 @@ def test_redirected_types_filter_follows_the_dict_not_a_literal(config, tmp_path
         register_base_archivist(config)
         pushed = push_knowledge_to_archivist(config)
 
-    assert pushed == 1, f"the newly-redirected type leaked into the lane (pushed={pushed})"
+    assert pushed == 2, f"wrong set filtered (pushed={pushed})"
 
     conn = plain_connect(config.db_path)
     try:
@@ -426,4 +426,8 @@ def test_redirected_types_filter_follows_the_dict_not_a_literal(config, tmp_path
     finally:
         conn.close()
     types = sorted(json.loads(r[0])["type"] for r in rows)
-    assert types == ["fact"], f"expected only the fact to be enqueued, got {types}"
+    # document_card is in VALID_TYPES and NOT in REDIRECTED_TYPES, so it SHOULD
+    # egress. Asserting it survives is what kills the PULL_ONLY_TYPES mutant:
+    # that dict also contains "pattern", so a filter using it passes every other
+    # test in this file while silently blocking document_card from team memory.
+    assert types == ["document_card", "fact"], f"expected fact + document_card, got {types}"
