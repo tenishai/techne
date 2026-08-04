@@ -375,3 +375,55 @@ def test_pattern_knowledge_is_never_enqueued(config, tmp_path):
     types = sorted(json.loads(r[0])["type"] for r in rows)
     assert "pattern" not in types, f"a pattern row reached the lane: {types}"
     assert "fact" in types, f"the fact was dropped too — filter is too broad: {types}"
+
+
+def test_redirected_types_filter_follows_the_dict_not_a_literal(config, tmp_path, monkeypatch):
+    """The filter must track REDIRECTED_TYPES, not hardcode 'pattern' (#450 review).
+
+    REDIRECTED_TYPES is the single definition of "this type lives in another
+    store" — `store()` raises straight off it. A literal filter in the pusher
+    re-implements that membership test and drifts the moment a type is added.
+
+    This is the drift, demonstrated: add a second redirected type and a
+    literal-based filter lets it through into the lane that rejects it,
+    reproducing the identical permanent-pending loop. Against the dict, it is
+    skipped like any other.
+    """
+    import json
+
+    from techne.core import knowledge as knowledge_mod
+    from techne.core.database import init_db
+    from techne.core.stores import plain_connect
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+
+    monkeypatch.setitem(knowledge_mod.REDIRECTED_TYPES, "document", "the Librarian store")
+
+    conn = plain_connect(config.db_path)
+    try:
+        for t in ("fact", "document"):
+            conn.execute(
+                "INSERT INTO knowledge (type, content, confidence) VALUES (?, ?, ?)",
+                (t, f"a {t} row", "high"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with use_registry({}):
+        register_base_archivist(config)
+        pushed = push_knowledge_to_archivist(config)
+
+    assert pushed == 1, f"the newly-redirected type leaked into the lane (pushed={pushed})"
+
+    conn = plain_connect(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT data_json FROM outbox WHERE target = ?", (ARCHIVIST_KNOWLEDGE_TARGET,)
+        ).fetchall()
+    finally:
+        conn.close()
+    types = sorted(json.loads(r[0])["type"] for r in rows)
+    assert types == ["fact"], f"expected only the fact to be enqueued, got {types}"

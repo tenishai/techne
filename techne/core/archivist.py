@@ -221,24 +221,36 @@ def push_knowledge_to_archivist(config) -> int:
        row). The ledger avoids re-enqueuing entirely."""
     if config.standalone:
         return 0
+    import logging
+
+    from techne.core.knowledge import REDIRECTED_TYPES
     from techne.core.knowledge_export import query_live_knowledge
     from techne.sync.outbox import enqueue
 
+    log = logging.getLogger(__name__)
     ensure_registered_for(config)
     pushed = 0
+    skipped = 0
     for k in query_live_knowledge(config.db_path):
-        # SKIP type='pattern' AT THE SOURCE (#450). techne#137 split patterns out
-        # into the Architect store, and the sink handler rejects them outright:
-        #   ValueError: knowledge type 'pattern' is not stored in personal memory
-        # Enqueuing them anyway produced a PERMANENT PENDING LOOP — delivery
-        # fails, the row stays pending, and because this function re-enqueues all
-        # live knowledge on every call (KNOWN GAP 2 above), the next session end
-        # re-enqueues the same rows. Three pre-#137 legacy rows had been failing
-        # on every teardown since the team lane was first switched on.
+        # SKIP REDIRECTED TYPES AT THE SOURCE (#450). These live in another store
+        # (techne#137 moved patterns to architect.db) and the sink handler rejects
+        # them outright with a ValueError. Enqueuing them anyway produced a
+        # PERMANENT PENDING LOOP: delivery fails, the row stays pending, and
+        # because this function re-enqueues all live knowledge on every call
+        # (KNOWN GAP 2 above), the next teardown re-enqueues the same rows.
+        #
+        # TEST AGAINST REDIRECTED_TYPES, NOT A LITERAL. That dict is the single
+        # definition of this boundary — `store()` raises straight off it — so a
+        # literal `"pattern"` re-implements the membership test and drifts the
+        # moment a type is added. Demonstrated rather than assumed: adding
+        # `document` to REDIRECTED_TYPES reproduces the identical permanent-
+        # pending loop against a literal filter. Pinned by
+        # test_redirected_types_filter_follows_the_dict_not_a_literal.
         #
         # Filtered HERE rather than in query_live_knowledge, which is shared with
         # the export path and must keep returning the full set.
-        if k["type"] == "pattern":
+        if k["type"] in REDIRECTED_TYPES:
+            skipped += 1
             continue
         enqueue(
             config.db_path,
@@ -251,6 +263,13 @@ def push_knowledge_to_archivist(config) -> int:
             },
         )
         pushed += 1
+    if skipped:
+        # debug, not warning: a permanent data condition on installs carrying
+        # pre-#137 rows, so a louder level would fire on every teardown forever.
+        # Worth recording at all because this function returns the POST-filter
+        # count — without it, a shrinking `knowledge_pushed` is unanswerable
+        # from outside.
+        log.debug("archivist push: skipped %d redirected-type row(s)", skipped)
     return pushed
 
 
