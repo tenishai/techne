@@ -426,12 +426,22 @@ def check_hooks(config) -> list[CheckResult]:
                 #
                 # A quiet store is indistinguishable from an absent operator
                 # using only this hook's own writes — which is precisely why the
-                # wall-clock term was removed. Registration drift is the
-                # independent signal for the total-death case and is covered by
-                # `check_hook_drift`, not here. Do not "fix" this by
+                # wall-clock term was removed. Do not "fix" this by
                 # reintroducing a clock: that trades a real gap for a false
                 # positive every long weekend, which is the failure this module
                 # exists to prevent.
+                #
+                # PARTIAL COVER ONLY, and be precise about how partial (#469
+                # review 5). `check_hook_drift` catches the UNREGISTERED flavour
+                # of total death — a `hooks.*` flag enabled in config with no
+                # matching entry in settings.json. It does NOT catch a hook that
+                # is registered but points at a dead interpreter, because the
+                # comparison is deliberately COARSE: by (event, matcher)
+                # presence, explicitly ignoring interpreter and launcher-path
+                # differences so a re-pinned shim cannot false-positive
+                # (hooks.py:867-871). That is the right trade for drift, but it
+                # means the wrong-interpreter death this module's own docstring
+                # cites is caught by NEITHER check. It is a known, open gap.
                 marker = _parse_ts(last)
                 sess = _parse_ts(last_settled_session)
                 if marker is None:
@@ -708,10 +718,27 @@ def check_outbox_targets(config) -> list[CheckResult]:
                 verdict = Verdict.LIVE
                 detail = f"{total} rows, nothing owed"
                 remedy = None
-        elif config.sync.adapter == "noop":
+        elif target.startswith(SYNC_PREFIX) and config.sync.adapter == "noop":
             # noop PARKS rows deliberately rather than falsely marking them
             # synced, precisely so a real adapter can still take the backlog
             # (see sync/noop.py). Pending rows under noop are correct.
+            #
+            # ONLY FOR `sync:` LANES (#469 review 5, critical). `sync.adapter`
+            # governs `flush(adapter)`, which touches `WHERE target LIKE
+            # 'sync:%'` (outbox.py:112) and nothing else; `sink:` rows are
+            # drained by `flush_sinks`. Excusing every lane on the adapter
+            # setting therefore forgave a backlog the adapter was never
+            # responsible for — and on the TEAM topology `sync.adapter` is
+            # EXPECTED to stay "noop", so this was not a corner case but the
+            # normal configuration of the very lane this check's docstring is
+            # about. Probed: a 56-day-old pending `sink:archivist` row read
+            # `dormant, ok=True :: 1 parked — sync.adapter = noop`.
+            #
+            # This is exactly the reasoning error recorded in knowledge#967 —
+            # "pending + adapter=noop, therefore parked" — which was wrong about
+            # three real rows in prose, and was wrong here in code for the same
+            # reason: the noop explanation was applied to a lane it does not
+            # govern.
             verdict = Verdict.DORMANT
             detail = f"{pending} parked — sync.adapter = noop"
             remedy = None

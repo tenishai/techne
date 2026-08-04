@@ -756,3 +756,107 @@ class TestSurvivingMutants:
             f"a declared lane with a live consumer that never enqueued must FAIL, got "
             f"{[(r.name, r.verdict.value) for r in lanes]}"
         )
+
+
+class TestNoopExcusesOnlySyncLanes:
+    """#469 review 5, Critical: `sync.adapter == "noop"` excused a pending
+    backlog on ANY lane, including `sink:` ones.
+
+    `sync.adapter` governs `flush(adapter)`, which touches only
+    `WHERE target LIKE 'sync:%'`; `sink:` rows are drained by `flush_sinks`. And
+    on the TEAM topology `sync.adapter` is EXPECTED to stay "noop" — so this was
+    not a corner case, it was the normal configuration of the lane the check's
+    own docstring is about. A 56-day-old pending `sink:archivist` row read as
+    `dormant, ok=True`.
+
+    Same reasoning error as knowledge#967: "pending + noop, therefore parked",
+    applied to a lane the adapter does not govern.
+    """
+
+    def _pending(self, config, target, days_old):
+        from techne.core.database import connect
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=90)),))
+            conn.execute(
+                "INSERT INTO outbox (target, data_json, status, created_at) VALUES (?,?,?,?)",
+                (target, "{}", "pending", _iso(timedelta(days=days_old))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_sink_backlog_is_not_excused_by_the_sync_adapter(self, config):
+        config.standalone = False  # team topology — noop here is EXPECTED
+        config.sync.adapter = "noop"
+        self._pending(config, "sink:archivist", 56)
+        lane = next(r for r in run_checks(config) if r.name == "outbox:sink:archivist")
+        assert lane.verdict is not Verdict.DORMANT, (
+            "a sink backlog is not the sync adapter's business; noop must not excuse it"
+        )
+        assert not lane.ok
+
+    def test_sync_backlog_is_still_excused_by_noop(self, config):
+        """The other half — noop genuinely does park `sync:` rows on purpose, and
+        that must keep reading as healthy or the fix trades one false verdict for
+        another."""
+        config.standalone = True
+        config.sync.adapter = "noop"
+        self._pending(config, "sync:thread_summary", 56)
+        lane = next(r for r in run_checks(config) if r.name == "outbox:sync:thread_summary")
+        assert lane.verdict is Verdict.DORMANT
+        assert lane.ok
+
+
+class TestMarkerIsStampedAtWriteTime:
+    """#469 review 5: reverting critical 1 (`last_run=_now_iso()` back to
+    `run_ts`) left the whole suite GREEN. The fix had no pin at all.
+
+    `run_ts` is captured as the first statement of main(); the session row is
+    INSERTed in Phase 3. A marker carrying `run_ts` is therefore older than the
+    row `check_hooks` compares it against, which rendered a healthy hook STALE
+    on roughly 7% of sessions. Driving the phases with a deliberately ancient
+    `run_ts` makes the ordering deterministic instead of a ~70ms race.
+    """
+
+    def test_marker_is_not_older_than_the_session_it_registered(self, config, tmp_path):
+        """DRIVES THE REAL CALL PATH. My first attempt at this pin called
+        `_persist_hook_state` directly with `_now_iso()` — which is what main()
+        does, so it passed even with critical 1 reverted. It tested the helper
+        with the right argument instead of testing that the caller supplies it.
+
+        `_run_phases_2_to_9` is where the persist call lives, so driving it with
+        a deliberately ancient `run_ts` makes the ordering deterministic rather
+        than a ~70ms race: if the marker is stamped from `run_ts`, it lands a
+        year before the session row it just registered.
+        """
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state
+        from techne.hooks import session_start as ss
+
+        ancient = _iso(timedelta(days=365))
+        ss._run_phases_2_to_9(
+            config,
+            {"cwd": str(tmp_path), "session_id": "cc-sess"},
+            run_ts=ancient,
+            db_path=config.db_path,
+            output_parts=[],
+            failures=[],
+        )
+
+        conn = connect(config.db_path)
+        try:
+            marker = get_state(conn, "hook:session_start:last_run")
+            row = conn.execute("SELECT MAX(started_at) FROM sessions").fetchone()
+        finally:
+            conn.close()
+
+        assert marker and marker.get("ts"), "session_start must leave a marker"
+        assert marker["ts"] != ancient, (
+            "marker was stamped from run_ts (hook entry), not write time — "
+            "this is critical 1 reverting"
+        )
+        assert row[0] and marker["ts"] >= row[0], (
+            f"marker {marker['ts']} predates the session row {row[0]} it registered"
+        )

@@ -163,6 +163,43 @@ def _render_liveness(config) -> int:
             click.echo(f"\n{live} live, {dormant} dormant — none failing.")
         else:
             click.echo(f"\nAll {live} subsystems confirmed live.")
+
+    # REGISTRATION DRIFT BELONGS IN `doctor`, NOT ONLY IN THE BANNER (#469
+    # review 5). Drift was surfaced by `techne status` and by the SessionStart
+    # banner — but the banner is rendered BY the hook, so the one failure it is
+    # meant to report (a hook that never fires) is the one that silences it. The
+    # operator's deliberate "is this working?" invocation must carry it.
+    #
+    # It answers a different question from everything above: the checks ask "did
+    # this rail RUN?", drift asks "is it even WIRED?". A hook enabled in config
+    # and absent from settings.json can never leave a marker, so it reads
+    # UNOBSERVABLE with no indication of why — this supplies the why.
+    #
+    # REPORTED ALWAYS, COUNTED ONLY ON AN INSTALLED SYSTEM. A machine that has
+    # never run `techne init` has no settings.json, so EVERY config-enabled hook
+    # reads as drifted — and counting that would make a fresh install exit 1
+    # with nothing wrong, which is precisely the critical-2 mistake fixed
+    # earlier in this same PR (a verdict the operator cannot act on teaches them
+    # to ignore the signal). On an INSTALLED system the same warnings are real:
+    # a flag enabled in config that never made it into settings.json is a hook
+    # that can never fire.
+    try:
+        from techne.platforms.claude_code.hooks import SETTINGS_PATH, check_hook_drift
+
+        drift = check_hook_drift(config)
+        installed = SETTINGS_PATH.exists()
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the diagnosis
+        drift, installed = [], False
+    if drift:
+        click.echo("\nHook registration drift:")
+        for warning in drift:
+            click.echo(f"  ! {warning}")
+        if installed:
+            click.echo("  remedy: techne init --platform claude-code --posture <current mode>")
+            failing += len(drift)
+        else:
+            click.echo(f"  (not counted — no {SETTINGS_PATH.name}; run `techne init` to install)")
+
     return failing
 
 
