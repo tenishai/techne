@@ -515,12 +515,26 @@ def _run_phases_2_to_9(
     # Phase 8: Determine hook error status and persist state
     # ------------------------------------------------------------------
     if failures:
-        # Non-fatal failures — record the first one as the error signal.
+        # Non-fatal failures — record the first one as the error signal. The
+        # error payload keeps `run_ts` deliberately: it answers "when did the
+        # run that failed BEGIN".
         hook_error = {"ts": run_ts, "stage": "degraded", "msg": "; ".join(failures)[:200]}
     else:
         hook_error = None  # clean run — clear any prior error
 
-    _persist_hook_state(db_path, last_run=run_ts, error=hook_error)
+    # STAMP AT WRITE TIME, NOT AT ENTRY (#469 review 4, critical 1). `run_ts` is
+    # captured as the first statement of main(), but the session row is INSERTed
+    # in Phase 3 with DEFAULT CURRENT_TIMESTAMP — so a marker carrying `run_ts`
+    # is PROVABLY older than the row `check_hooks` compares it against. Measured
+    # window ~70ms; at one-second timestamp granularity that is roughly a 7%
+    # chance per session of the second ticking between them, which rendered a
+    # perfectly healthy hook as "a session started at X and left no marker".
+    #
+    # The marker answers "when did this hook last COMPLETE a run", so write time
+    # is not merely safer, it is the correct semantic. With this ordering,
+    # marker >= session_row holds for every healthy run and the comparison in
+    # check_hooks becomes sound.
+    _persist_hook_state(db_path, last_run=_now_iso(), error=hook_error)
 
     # ------------------------------------------------------------------
     # Phase 9: Emit output

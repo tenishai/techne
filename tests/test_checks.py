@@ -511,8 +511,26 @@ class TestDoctorOutputHonesty:
         monkeypatch.setenv("HOME", str(home))
 
         out = CliRunner().invoke(main, ["doctor"]).output
-        assert "All subsystems confirmed live" not in out, (
-            "must not confirm liveness it never observed"
+        # ASSERT AGAINST WHAT THE CODE EMITS, NOT A PARAPHRASE (#469 review 4,
+        # M20). The previous assertion was `"All subsystems confirmed live" not
+        # in out` — a literal that appears nowhere in cli.py except inside a
+        # COMMENT. Every emitted string interpolates a count
+        # (f"All {live} subsystems confirmed live."), so the assertion could
+        # never fail and the teeth-check it was written for never took.
+        import re
+
+        assert not re.search(r"All \d+ subsystems confirmed live", out), (
+            f"must not confirm liveness it never observed; got: {out!r}"
+        )
+        # The positive half — silence is not proof. Assert the output actually
+        # SAYS something honest, so a future change that emits nothing at all
+        # cannot pass on the negative assertion alone.
+        #
+        # Note this store has uninstrumented hooks, so it takes the `failing > 0`
+        # branch and reports a not-confirmed count; the "0 of N confirmed live"
+        # line lives in the `failing == 0` branch and is not reachable here.
+        assert re.search(r"\d+ subsystem\(s\) not confirmed working", out), (
+            f"expected an explicit not-confirmed count; got: {out!r}"
         )
 
 

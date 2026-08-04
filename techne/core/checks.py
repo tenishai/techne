@@ -414,6 +414,24 @@ def check_hooks(config) -> list[CheckResult]:
                 # rather than absorbed by a slack window wide enough to hide it.
                 # No wall-clock term at all: an operator's absence must never
                 # read as a broken hook.
+                # KNOWN LIMIT, stated rather than implied (#469 review 4,
+                # critical 3). For `session_start` this predicate detects a
+                # PARTIAL death only — one where the session row was written
+                # (Phase 3) and the marker was not. It CANNOT detect a total
+                # death, because session_start is the sole creator of session
+                # rows on the Claude Code path: if it never runs, there is no
+                # row to compare against, no observations either (add_observation
+                # does not create sessions and the FK is enforced), and the store
+                # simply goes quiet.
+                #
+                # A quiet store is indistinguishable from an absent operator
+                # using only this hook's own writes — which is precisely why the
+                # wall-clock term was removed. Registration drift is the
+                # independent signal for the total-death case and is covered by
+                # `check_hook_drift`, not here. Do not "fix" this by
+                # reintroducing a clock: that trades a real gap for a false
+                # positive every long weekend, which is the failure this module
+                # exists to prevent.
                 marker = _parse_ts(last)
                 sess = _parse_ts(last_settled_session)
                 if marker is None:
@@ -569,19 +587,43 @@ def check_outbox_targets(config) -> list[CheckResult]:
     newest_session = srow[1] if srow else None
 
     seen = {r[0] for r in rows}
+    # A LANE WITH NO CONSUMER IS DORMANT, NOT UNOBSERVABLE (#469 review 4,
+    # critical 2). `_thread_summary_target` answers WHICH lane; it does not
+    # answer WHETHER anything drains it. On a DEFAULT install — standalone=True,
+    # sync.adapter="noop" — `sync:thread_summary` is selected but has no live
+    # consumer, so it correctly never enqueues. Judging that UNOBSERVABLE made
+    # every fresh install fail on day 8, permanently, with remedy=None: a
+    # verdict the operator cannot act on and cannot clear.
+    #
+    # That is the "teach them to ignore it" failure this module exists to
+    # prevent, and it is worse than the gap it was covering. Under RULE 1
+    # (techne#959) UNOBSERVABLE is a FAILING state — which is exactly why it
+    # must be reserved for a rail that SHOULD be emitting and isn't, not spent
+    # on one that is correctly idle.
+    #
+    # `_has_live_consumer` is the same predicate `enqueue` gates on, so this
+    # asks the question the writer already asks rather than restating it.
+    from techne.lifecycle import _has_live_consumer
+
+    has_consumer = _has_live_consumer(config)
     for missing in sorted(_declared_outbox_targets(config) - seen):
+        if not has_consumer:
+            verdict = Verdict.DORMANT
+            detail = "no live consumer (sync.adapter=noop / no registered sink) — correctly idle"
+        elif store_is_new:
+            verdict = Verdict.DORMANT
+            detail = "store created <7d ago — nothing enqueued yet"
+        else:
+            verdict = Verdict.UNOBSERVABLE
+            detail = "declared lane has NEVER enqueued anything"
         results.append(
             CheckResult(
                 name=f"outbox:{missing}",
                 subsystem="sync",
                 kind=Kind.TEMPORAL,
-                verdict=Verdict.DORMANT if store_is_new else Verdict.UNOBSERVABLE,
+                verdict=verdict,
                 evidence=f"no outbox rows have ever existed for target={missing}",
-                detail=(
-                    "store created <7d ago — nothing enqueued yet"
-                    if store_is_new
-                    else "declared lane has NEVER enqueued anything"
-                ),
+                detail=detail,
             )
         )
 
