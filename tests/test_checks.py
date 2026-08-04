@@ -228,15 +228,28 @@ class TestBuiltinChecks:
         old = _iso(timedelta(days=60))
         self._enqueue(config, "sync:t", old, old)
 
-        # Sessions HAVE run since the last enqueue — that, not the calendar, is
+        # Sessions HAVE ENDED since the last enqueue — that, not the calendar, is
         # the evidence of a dead producer. Measuring wall-clock instead reported
         # a healthy lane as dead whenever the operator took a holiday
         # (#469 review 3, finding 3).
+        #
+        # FIXTURE CORRECTED (#469 review 4, Important): this previously inserted
+        # a session with `started_at` only. That is an IN-FLIGHT session, and
+        # these lanes are fed at session END — so a started-but-unended session
+        # has not yet had its chance to feed the lane and is not evidence of
+        # anything. Worse, the in-flight row is always ~now (collect_health runs
+        # in Phase 5, after Phase 3 inserts it), which is what made the whole
+        # predicate collapse back into `now > enq + 7d`.
+        #
+        # The assertion is UNCHANGED and the intent is unchanged — "a session ran
+        # since the last enqueue and did not feed the lane". Only the way the
+        # fixture expresses "a session ran" is corrected, from the buggy proxy
+        # (started) to the real one (ended).
         conn = connect(config.db_path)
         try:
             conn.execute(
-                "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
-                ("s-recent", _iso(timedelta(hours=1))),
+                "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)",
+                ("s-recent", _iso(timedelta(hours=2)), _iso(timedelta(hours=1))),
             )
             conn.commit()
         finally:
@@ -588,3 +601,71 @@ class TestRetiredLanes:
         assert lane.verdict is Verdict.DORMANT
         assert lane.ok
         assert "retired" in lane.detail
+
+
+class TestProducerSilenceIsNotWallClock:
+    """#469 review 4, Important: the producer test was wall-clock in a costume.
+
+    `check_outbox_targets` judged a drained lane by comparing the newest session
+    against the last enqueue. But it took MAX(started_at), which includes the
+    IN-FLIGHT session — and because `collect_health` runs in Phase 5, after
+    Phase 3 inserts that row, it was always ~now. So `newest > enq + 7d`
+    reduced to `now > enq + 7d`: exactly the wall-clock check it replaced, at
+    3x the sensitivity. A three-week holiday reported a healthy lane as
+    "producer may be dead".
+
+    The honest signal uses MAX(ended_at): these lanes are fed at SESSION END, so
+    only a session that ENDED without feeding the lane is evidence.
+    """
+
+    def _store(self, tmp_path, *, ended_days_ago, enq_days_ago, inflight):
+        import sqlite3
+
+        from techne.config import Config
+        from techne.core.database import init_db
+
+        cfg = Config()
+        cfg.db_path = tmp_path / f"t{ended_days_ago}-{enq_days_ago}-{inflight}.db"
+        cfg.standalone = False
+        cfg.sync.adapter = "noop"
+        init_db(cfg.db_path)
+        conn = sqlite3.connect(cfg.db_path)
+        conn.execute("UPDATE schema_version SET applied_at = datetime('now','-90 days')")
+        conn.execute(
+            "INSERT INTO sessions (id, started_at, ended_at) VALUES "
+            f"('settled', datetime('now','-{ended_days_ago} days'),"
+            f" datetime('now','-{ended_days_ago} days'))"
+        )
+        if inflight:
+            # The session the check is running INSIDE — started, not yet ended.
+            conn.execute("INSERT INTO sessions (id, started_at) VALUES ('inflight', datetime('now'))")
+        conn.execute(
+            "INSERT INTO outbox (target, data_json, status, synced_at, created_at) VALUES "
+            f"('sink:archivist', '{{}}', 'synced', datetime('now','-{enq_days_ago} days'),"
+            f" datetime('now','-{enq_days_ago} days'))"
+        )
+        conn.commit()
+        conn.close()
+        return cfg
+
+    def _verdict(self, cfg):
+        from techne.core.checks import check_outbox_targets
+
+        for r in check_outbox_targets(cfg):
+            if r.name == "outbox:sink:archivist":
+                return r.verdict
+        raise AssertionError("lane not reported")
+
+    def test_holiday_does_not_report_a_dead_producer(self, tmp_path):
+        """Away three weeks: nothing ended recently, so nothing failed to feed."""
+        from techne.core.checks import Verdict
+
+        cfg = self._store(tmp_path, ended_days_ago=21, enq_days_ago=21, inflight=True)
+        assert self._verdict(cfg) is Verdict.LIVE
+
+    def test_sessions_ending_without_feeding_the_lane_is_stale(self, tmp_path):
+        """Sessions ARE ending and the lane is not being fed — real evidence."""
+        from techne.core.checks import Verdict
+
+        cfg = self._store(tmp_path, ended_days_ago=1, enq_days_ago=30, inflight=True)
+        assert self._verdict(cfg) is Verdict.STALE

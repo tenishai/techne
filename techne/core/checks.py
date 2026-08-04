@@ -570,7 +570,18 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # Sessions since the newest enqueue, per lane, is the activity clock for
         # the producer test below — these lanes are fed at SESSION END, so
         # wall-clock silence measures operator absence, not producer death.
-        srow = conn.execute("SELECT COUNT(*), MAX(started_at) FROM sessions").fetchone()
+        #
+        # MAX(ended_at), NOT MAX(started_at) (#469 review 4, Important). These
+        # lanes are fed at SESSION END, so the only session that constitutes
+        # evidence is one that has actually ENDED without feeding the lane.
+        # `MAX(started_at)` included the IN-FLIGHT session — and because
+        # collect_health runs in Phase 5, after Phase 3 inserts that row, it was
+        # always ≈ now. The predicate `newest > enq + 7d` therefore reduced to
+        # `now > enq + 7d`: the wall-clock test this check was written to
+        # replace, at 3× the sensitivity. A three-week holiday reproduced it.
+        srow = conn.execute(
+            "SELECT COUNT(*), MAX(ended_at) FROM sessions WHERE ended_at IS NOT NULL"
+        ).fetchone()
     finally:
         conn.close()
 
