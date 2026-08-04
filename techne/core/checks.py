@@ -612,11 +612,25 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # must be reserved for a rail that SHOULD be emitting and isn't, not spent
     # on one that is correctly idle.
     #
-    # `_has_live_consumer` is the same predicate `enqueue` gates on, so this
-    # asks the question the writer already asks rather than restating it.
-    from techne.lifecycle import _has_live_consumer
-
-    has_consumer = _has_live_consumer(config)
+    # ASK THE CONFIG QUESTION, NOT THE PROCESS QUESTION. The obvious move is to
+    # reuse `lifecycle._has_live_consumer` — the predicate `enqueue` gates on —
+    # but it is subtly wrong HERE. On the team path it returns
+    # `get_sink(...) is not None`, i.e. "is a sink REGISTERED IN THIS PROCESS".
+    # That is true at enqueue time, because the writer registers first; it is
+    # FALSE inside `techne doctor`, which never registers anything (only
+    # `outbox flush-sinks` calls ensure_registered_for).
+    #
+    # Reusing it therefore reported a TEAM install's never-enqueued lane as
+    # "correctly idle" — masking the eight-week-dead-lane case this check exists
+    # to catch, which is a worse bug than the one the no-consumer branch fixes.
+    # Caught by a mutation sweep: UNOBSERVABLE->DORMANT survived, and writing
+    # the test to kill it exposed this.
+    #
+    # The question here is topological, and answerable from config alone:
+    #   standalone -> the sync adapter drains; "noop" means nothing does.
+    #   team       -> the archivist sink ships with the product; the lane HAS a
+    #                 consumer whether or not this particular process wired it.
+    has_consumer = (config.sync.adapter != "noop") if config.standalone else True
     for missing in sorted(_declared_outbox_targets(config) - seen):
         if not has_consumer:
             verdict = Verdict.DORMANT

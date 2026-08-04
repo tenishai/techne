@@ -669,3 +669,90 @@ class TestProducerSilenceIsNotWallClock:
 
         cfg = self._store(tmp_path, ended_days_ago=1, enq_days_ago=30, inflight=True)
         assert self._verdict(cfg) is Verdict.STALE
+
+
+class TestSurvivingMutants:
+    """Mutants that survived a sweep of the verdict decisions (#469 review 4).
+
+    Each of these is a one-line change to a verdict that the suite did NOT
+    notice. They are the load-bearing decisions in the module — the ones that
+    decide whether a dead rail reads as healthy — so an unkilled mutant here is
+    the module failing at its own stated job.
+    """
+
+    def _sessions(self, config, n=2):
+        """Two sessions: the session-scoped branch needs a SETTLED one (the
+        second-newest), so a single-session store silently takes a different
+        path — which is why the existing coverage missed this branch entirely.
+        """
+        from techne.core.database import connect
+
+        conn = connect(config.db_path)
+        try:
+            for i in range(n):
+                conn.execute(
+                    "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)",
+                    (f"s{i}", _iso(timedelta(days=n - i)), _iso(timedelta(days=n - i))),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_session_scoped_hook_with_no_marker_is_unobservable(self, config):
+        """M-survivor 1: UNOBSERVABLE -> LIVE went unnoticed on the session-scoped
+        branch. This is the single most important verdict in the module — a hook
+        that had its chance and left no marker must never read as working.
+        """
+        self._sessions(config)
+        hooks = [r for r in run_checks(config) if r.name.startswith("hook:")]
+        scoped = [r for r in hooks if r.name.endswith(("session_start", "session_end"))]
+        assert scoped, "expected session-scoped hooks in the cohort"
+        assert all(r.verdict is Verdict.UNOBSERVABLE for r in scoped), (
+            f"a hook with settled sessions and no marker must be UNOBSERVABLE, got "
+            f"{[(r.name, r.verdict.value) for r in scoped]}"
+        )
+        assert not any(r.ok for r in scoped)
+
+    def test_lane_without_a_consumer_is_dormant_not_live(self, config):
+        """M-survivor 2: DORMANT -> LIVE went unnoticed on the no-consumer lane.
+
+        DORMANT and LIVE are both `ok`, so the mutation is invisible to any
+        assertion that only checks pass/fail — it has to be pinned on the verdict
+        itself. The distinction is the whole point: LIVE claims the lane was
+        OBSERVED working, which is a claim this store cannot support.
+        """
+        config.standalone = True
+        config.sync.adapter = "noop"
+        self._sessions(config)
+        lanes = [r for r in run_checks(config) if r.name.startswith("outbox:")]
+        assert lanes, "expected a declared lane"
+        assert all(r.verdict is Verdict.DORMANT for r in lanes), (
+            f"a lane with no consumer is correctly idle, not observed-live, got "
+            f"{[(r.name, r.verdict.value) for r in lanes]}"
+        )
+        assert all("no live consumer" in (r.detail or "") for r in lanes)
+
+    def test_declared_lane_with_a_consumer_that_never_enqueued_is_unobservable(self, config):
+        """M-survivor 3: UNOBSERVABLE -> DORMANT went unnoticed.
+
+        The difference is exactly RULE 1 (techne#959): a lane that SHOULD be
+        emitting and never has is a FAILING state, not a benign idle one.
+        Collapsing it to DORMANT is how a dead lane goes quiet for eight weeks.
+        """
+        from techne.core.database import connect
+
+        config.standalone = False  # team topology -> the sink lane has a consumer
+        self._sessions(config)
+        conn = connect(config.db_path)
+        try:  # age the store past the fresh-install grace
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=60)),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        lanes = [r for r in run_checks(config) if r.name.startswith("outbox:")]
+        assert lanes, "expected a declared lane"
+        assert any(r.verdict is Verdict.UNOBSERVABLE for r in lanes), (
+            f"a declared lane with a live consumer that never enqueued must FAIL, got "
+            f"{[(r.name, r.verdict.value) for r in lanes]}"
+        )
