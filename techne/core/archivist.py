@@ -227,6 +227,19 @@ def push_knowledge_to_archivist(config) -> int:
     ensure_registered_for(config)
     pushed = 0
     for k in query_live_knowledge(config.db_path):
+        # SKIP type='pattern' AT THE SOURCE (#450). techne#137 split patterns out
+        # into the Architect store, and the sink handler rejects them outright:
+        #   ValueError: knowledge type 'pattern' is not stored in personal memory
+        # Enqueuing them anyway produced a PERMANENT PENDING LOOP — delivery
+        # fails, the row stays pending, and because this function re-enqueues all
+        # live knowledge on every call (KNOWN GAP 2 above), the next session end
+        # re-enqueues the same rows. Three pre-#137 legacy rows had been failing
+        # on every teardown since the team lane was first switched on.
+        #
+        # Filtered HERE rather than in query_live_knowledge, which is shared with
+        # the export path and must keep returning the full set.
+        if k["type"] == "pattern":
+            continue
         enqueue(
             config.db_path,
             ARCHIVIST_KNOWLEDGE_TARGET,

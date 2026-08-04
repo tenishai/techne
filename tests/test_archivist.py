@@ -315,3 +315,63 @@ def test_invalid_payload_rejected_at_enqueue(config):
         register_base_archivist(config)
         with pytest.raises(InvalidPayloadError):
             enqueue(config.db_path, ARCHIVIST_SINK_TARGET, {"bogus": "shape"}, deliver=False)
+
+
+def test_pattern_knowledge_is_never_enqueued(config, tmp_path):
+    """type='pattern' must not reach the archivist lane (#450).
+
+    techne#137 moved patterns into the Architect store, and the sink handler
+    rejects them outright:
+
+        ValueError: knowledge type 'pattern' is not stored in personal memory
+
+    Enqueuing them anyway produced a PERMANENT PENDING LOOP: delivery fails, the
+    row stays pending, and since push_knowledge_to_archivist re-enqueues all live
+    knowledge on every call, the next session end re-enqueues the same rows. On
+    the operator's store three pre-#137 legacy rows had been failing on every
+    teardown since the team lane was switched on.
+
+    Pins both halves: the pattern row is skipped, and non-pattern rows beside it
+    still go through — a filter that dropped everything would also pass a test
+    that only asserted the pattern was absent.
+    """
+    import json
+
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.core.stores import plain_connect
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+
+    store(config.db_path, "A durable fact worth sharing", type="fact", confidence="high")
+    # store() REFUSES type='pattern' (knowledge.py's #137 guard), so a pattern row
+    # can only exist as PRE-#137 LEGACY. Insert it the way the operator's three
+    # actually exist — directly — otherwise the fixture cannot reproduce the bug.
+    conn = plain_connect(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO knowledge (type, content, confidence) VALUES (?, ?, ?)",
+            ("pattern", "## Some Architecture Pattern", "high"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with use_registry({}):
+        register_base_archivist(config)
+        pushed = push_knowledge_to_archivist(config)
+
+    assert pushed == 1, f"only the fact should be enqueued, got {pushed}"
+
+    conn = plain_connect(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT data_json FROM outbox WHERE target = ?", (ARCHIVIST_KNOWLEDGE_TARGET,)
+        ).fetchall()
+    finally:
+        conn.close()
+    types = sorted(json.loads(r[0])["type"] for r in rows)
+    assert "pattern" not in types, f"a pattern row reached the lane: {types}"
+    assert "fact" in types, f"the fact was dropped too — filter is too broad: {types}"
