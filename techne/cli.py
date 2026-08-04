@@ -109,8 +109,16 @@ _DEDUP_CHECKS = [
 ]
 
 
-def _render_liveness(config) -> int:
-    """Print the subsystem-liveness table. Returns the count of failing checks.
+def _render_liveness(config) -> tuple[int, int]:
+    """Print the subsystem-liveness table. Returns (failing checks, drift failures).
+
+    TWO counts, not one. They answer different questions and must not be added
+    together: the checks ask "did this rail RUN?", drift asks "is it even WIRED?".
+    Folding drift into the first made a single run print, seven lines apart,
+    "Nothing failing, but 0 of 12 subsystems confirmed live" and "5 subsystem(s)
+    not confirmed working" — zero subsystems were failing, five WARNINGS were.
+    That is the honesty rule below ("NEVER claim more than was observed") leaking
+    through a different door. (#469 review 6, issue 4.)
 
     Separate from the storage checks below because they answer different
     questions: those ask "is the store internally consistent?", this asks "did
@@ -123,7 +131,7 @@ def _render_liveness(config) -> int:
     results = run_checks(config)
     if not results:
         click.echo("No subsystem checks registered.")
-        return 0
+        return 0, 0
 
     marks = {
         Verdict.LIVE: "✓",
@@ -176,31 +184,104 @@ def _render_liveness(config) -> int:
     # UNOBSERVABLE with no indication of why — this supplies the why.
     #
     # REPORTED ALWAYS, COUNTED ONLY ON AN INSTALLED SYSTEM. A machine that has
-    # never run `techne init` has no settings.json, so EVERY config-enabled hook
+    # never run `techne init` has nothing registered, so EVERY config-enabled hook
     # reads as drifted — and counting that would make a fresh install exit 1
     # with nothing wrong, which is precisely the critical-2 mistake fixed
     # earlier in this same PR (a verdict the operator cannot act on teaches them
     # to ignore the signal). On an INSTALLED system the same warnings are real:
     # a flag enabled in config that never made it into settings.json is a hook
     # that can never fire.
+    if config.platform != "claude-code":
+        # settings.json registration is CLAUDE-CODE's mechanism, and both sibling
+        # surfaces already guard on it (`techne status` above; render_drift_block,
+        # session_start.py). check_hook_drift does NOT self-guard —
+        # _expected_registrations returns SessionStart/PreCompact/PostCompact/Stop
+        # for any config at all. Without this guard, an operator on another
+        # platform who merely HAS a ~/.claude/settings.json on the machine (the
+        # ordinary case, not a corner one) gets a doctor that exits 1 on a
+        # correctly-configured system and a remedy telling them to reinstall onto
+        # a platform they do not use. doctor's docstring promises it is safe to
+        # run in CI, so that is a red they cannot clear. (#469 review 6.)
+        return failing, 0
+
+    drift_failures = 0
     try:
-        from techne.platforms.claude_code.hooks import SETTINGS_PATH, check_hook_drift
+        from techne.platforms.claude_code.hooks import (
+            SETTINGS_PATH,
+            _launcher_path,
+            check_hook_drift,
+            settings_unusable_reason,
+        )
 
         drift = check_hook_drift(config)
-        installed = SETTINGS_PATH.exists()
-    except Exception:  # noqa: BLE001 — a diagnostic must never break the diagnosis
-        drift, installed = [], False
+        # "HAVE WE INSTALLED HOOKS HERE?", not "does a settings file exist?".
+        # techne-hook.sh is written by register_hooks on every init and DELETED by
+        # unregister, so its presence means exactly "techne installed hooks here
+        # and has not uninstalled them" — the predicate this branch wants.
+        # SETTINGS_PATH.exists() was the wrong file: a system that WAS initialised
+        # and then lost settings.json is demonstrably installed yet reads as
+        # fresh, so a genuinely dead capture rail went uncounted and was told to
+        # "run `techne init` to install" — advice for a machine that has
+        # provably already run. Residual limit, stated rather than implied: an
+        # operator who deletes ~/.claude wholesale loses both files and still
+        # reads as fresh. That one is genuinely indistinguishable, and benign.
+        # (#469 review 6.)
+        installed = _launcher_path().exists()
+        unverifiable = settings_unusable_reason(config) is not None
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never break the diagnosis
+        # ...but it must not VANISH either. This previously set `drift, installed
+        # = [], False`, which printed nothing at all — and an absent check reads
+        # as "nothing wrong", the exact failure mode this module exists to
+        # prevent. run_checks holds the opposite policy twelve hundred lines
+        # earlier: a check that raises becomes an UNKNOWN result CARRYING the
+        # exception, never an absent one. Counted, because a registration we
+        # could not verify is unverified, not fine. (#469 review 6, nit 5.)
+        drift = [f"the drift check itself failed ({exc}) — registration NOT verified"]
+        installed, unverifiable = True, True
+
     if drift:
-        click.echo("\nHook registration drift:")
+        # Two distinct conditions share this reporter, and mislabelling them is
+        # its own small lie — the same one PR #457 removed from the banner and
+        # from `techne status`, reintroduced here on the third surface.
+        # "enabled in config but NOT registered" is a precise claim; an unreadable
+        # or wrong-shaped settings.json does not mean that, it means we cannot
+        # tell. Ask the CONDITION (settings_unusable_reason), never grep the
+        # prose. (#469 review 6, issue 2.)
+        if unverifiable:
+            click.echo("\nHook registration cannot be verified:")
+        else:
+            click.echo("\nHook registration drift:")
         for warning in drift:
             click.echo(f"  ! {warning}")
         if installed:
-            click.echo("  remedy: techne init --platform claude-code --posture <current mode>")
-            failing += len(drift)
+            if unverifiable:
+                # `techne init` is the WRONG remedy for an unusable file and would
+                # be a second lie: register_hooks walks the same structure without
+                # guarding it, so init itself raises on most unusable shapes
+                # (RuntimeError on `{ not json`, AttributeError on `{"hooks": []}`
+                # and on `[]` — measured, not quoted). Handing the operator a
+                # command that crashes, at the moment every hook may be dead, is
+                # worse than saying nothing. Repair the file first.
+                click.echo(
+                    f"  remedy: repair or move aside {SETTINGS_PATH}, then run "
+                    f"`techne init --platform claude-code --posture {config.posture.mode}`"
+                )
+            else:
+                # Pin --posture for the same reason the other two surfaces do: it
+                # defaults to `auto`, which re-resolves and can silently change
+                # posture as a side effect of fixing hook registration.
+                click.echo(
+                    "  remedy: techne init --platform claude-code --posture "
+                    f"{config.posture.mode}"
+                )
+            drift_failures = len(drift)
         else:
-            click.echo(f"  (not counted — no {SETTINGS_PATH.name}; run `techne init` to install)")
+            click.echo(
+                f"  (not counted — techne hooks are not installed here "
+                f"(no {_launcher_path().name}); run `techne init` to install)"
+            )
 
-    return failing
+    return failing, drift_failures
 
 
 @main.command()
@@ -236,7 +317,7 @@ def doctor(ctx, vacuum, liveness):
         click.echo("techne not initialized. Run: techne init")
         return
 
-    liveness_failures = _render_liveness(config) if liveness else 0
+    liveness_failures, drift_failures = _render_liveness(config) if liveness else (0, 0)
 
     conn = sqlite3.connect(config.db_path)
     # Wait for the write lock like the rest of techne (connect() sets the same), so
@@ -293,12 +374,19 @@ def doctor(ctx, vacuum, liveness):
 
     conn.close()
     click.echo()
-    if issues or liveness_failures:
+    if issues or liveness_failures or drift_failures:
         parts = []
         if issues:
             parts.append(f"{issues} storage issue(s)")
         if liveness_failures:
             parts.append(f"{liveness_failures} subsystem(s) not confirmed working")
+        if drift_failures:
+            # NOT folded into the subsystem count: a drift warning is not a
+            # subsystem that failed to run, and the two conditions arrive from
+            # different evidence. "registration issue(s)" rather than "not
+            # registered" because this line also covers the unverifiable case,
+            # where the precise claim cannot be made. (#469 review 6, issue 4.)
+            parts.append(f"{drift_failures} hook registration issue(s)")
         click.echo(" · ".join(parts))
         sys.exit(1)
     # Deliberately does NOT say "all checks passed" unless liveness ran too — a

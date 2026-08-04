@@ -268,6 +268,15 @@ def _run_phases_2_to_9(
         print(f"techne: {msg}", file=sys.stderr)
         hook_error = {"ts": run_ts, "stage": "session_register", "msg": str(exc)[:200]}
         if db_path:
+            # `last_run=run_ts` here, NOT `_now_iso()` as on the success path — and
+            # deliberately left that way. It is the same shape as the critical-1
+            # bug (a marker stamped from the hook's START rather than its
+            # COMPLETION, which can read older than the session it registered),
+            # but it cannot produce a false green on this branch: it always sets
+            # `hook_error`, and check_hooks short-circuits to BROKEN on a
+            # recorded error before it ever compares marker to session. Cosmetic,
+            # verified rather than assumed, and pinned by no test on purpose.
+            # (#469 review 6, mutation M6.)
             _persist_hook_state(db_path, last_run=run_ts, error=hook_error)
         print(
             json.dumps(

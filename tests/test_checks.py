@@ -517,7 +517,15 @@ class TestDoctorOutputHonesty:
         init_db(db).close()
         conn = connect(db)
         try:
-            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=1)),))
+            # PAST _NEW_STORE_GRACE (7d), not 1d. At one day old the store is
+            # still inside the grace window, so every hook reads DORMANT
+            # ("nothing has run") and doctor takes the `failing == 0` branch —
+            # which made the positive assertion below fail on a clean checkout
+            # while the comment beside it claimed the opposite branch was taken.
+            # The test was asserting against a state its own setup could not
+            # reach; ageing the store past the grace is what makes "sessions
+            # never happened" an actual FINDING rather than a young store.
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=30)),))
             conn.commit()
         finally:
             conn.close()

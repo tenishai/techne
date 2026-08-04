@@ -90,6 +90,156 @@ def test_doctor_exits_nonzero_when_a_subsystem_is_not_confirmed(cli_db):
     assert "not confirmed working" in result.output
 
 
+def _settings_path():
+    """The tmp SETTINGS_PATH the autouse `_isolate_host_config` fixture pinned."""
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    return hooks_mod.SETTINGS_PATH
+
+
+def _write_settings(body: str):
+    """Write settings.json into the isolated host dir (the fixture pins the path
+    but does not create the directory)."""
+    path = _settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def _install_launcher():
+    """Make the store look INSTALLED the way `techne init` makes it look installed.
+
+    `register_hooks` writes techne-hook.sh next to settings.json and `unregister`
+    deletes it, so its presence is the "techne installed hooks here" predicate the
+    doctor drift block gates on. Derived from SETTINGS_PATH, so the isolation
+    fixture already redirects it into tmp.
+    """
+    launcher = _settings_path().parent / "techne-hook.sh"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("#!/bin/sh\n")
+    return launcher
+
+
+def test_doctor_counts_drift_on_an_installed_system(cli_db):
+    """Drift on an INSTALLED machine must fail the command.
+
+    A hooks.* flag enabled in config.yaml but absent from settings.json is a hook
+    that can never fire — the silent no-op techne#287 exists to catch. Scoped to a
+    store where liveness itself is not failing (a fresh db is DORMANT, not
+    UNOBSERVABLE), so the exit code moves ONLY because drift is counted: this dies
+    to `failing += len(drift)` → `+= 0` and to deleting the block outright, the two
+    mutants that survived review 6.
+    """
+    _install_launcher()
+    # Valid JSON, correct shape, nothing registered — drift, not "unusable".
+    _write_settings("{}")
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 1, result.output
+    assert "Hook registration drift" in result.output
+    assert "hook registration issue(s)" in result.output
+    # Counted separately from liveness: a drift warning is not a subsystem that
+    # failed to run, and saying "N subsystem(s) not confirmed working" for it is
+    # the honesty rule leaking through another door (review 6, issue 4).
+    assert "subsystem(s) not confirmed working" not in result.output
+
+
+def test_doctor_reports_but_does_not_count_drift_when_not_installed(cli_db):
+    """A machine that never ran `techne init` must not exit 1 for drift.
+
+    Every config-enabled hook reads as drifted there, and a red the operator
+    cannot clear teaches them to ignore the signal — the critical-2 mistake fixed
+    earlier in this PR. The warning is still PRINTED; only the count is withheld.
+    """
+    _write_settings("{}")  # present, but no launcher => not installed
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "Hook registration drift" in result.output
+    assert "not counted" in result.output
+    assert "hook registration issue(s)" not in result.output
+
+
+def test_doctor_counts_drift_when_settings_json_is_missing_but_hooks_were_installed(cli_db):
+    """The false negative the launcher proxy exists to close.
+
+    A machine whose settings.json was deleted AFTER `techne init` looks identical
+    to a fresh one if you gate on settings.json — so the loudest possible signal
+    (every capture rail dead) was reported as "not counted — run `techne init` to
+    install" to a system that has demonstrably already run. techne-hook.sh
+    survives that deletion, so the two states are distinguishable after all.
+    """
+    _install_launcher()  # installed... and no settings.json at all
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 1, result.output
+    assert "Hook registration drift" in result.output
+    assert "hook registration issue(s)" in result.output
+    assert "not counted" not in result.output
+
+
+def test_doctor_reports_a_failing_drift_check_rather_than_swallowing_it(cli_db, monkeypatch):
+    """A diagnostic that raises must not go SILENT.
+
+    The first cut caught the exception into `drift, installed = [], False`, which
+    printed nothing — and an absent check reads as "nothing wrong", the exact
+    failure mode this module exists to prevent. run_checks holds the opposite
+    policy: a check that raises becomes an UNKNOWN result CARRYING the exception.
+    """
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    def _boom(config):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(hooks_mod, "check_hook_drift", _boom)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 1, result.output
+    assert "the drift check itself failed" in result.output
+    assert "probe exploded" in result.output
+    assert "hook registration issue(s)" in result.output
+
+
+def test_doctor_does_not_report_drift_on_another_platform(cli_db):
+    """settings.json registration is claude-code's mechanism only.
+
+    check_hook_drift does not self-guard, so without the platform gate an
+    opencode operator who merely HAS a ~/.claude/settings.json — ordinary on a
+    machine that runs both — gets exit 1 on a correct config plus a remedy
+    telling them to reinstall onto a platform they do not use. doctor promises it
+    is safe to run in CI; that is a red they cannot clear. (Review 6, critical 1.)
+    """
+    _install_launcher()
+    _write_settings("{}")
+    cli_db.platform = "opencode"
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "Hook registration" not in result.output
+
+
+def test_doctor_labels_an_unusable_settings_file_honestly(cli_db):
+    """The word "drift" is a precise claim, and an unreadable settings.json is not it.
+
+    There we cannot tell — and `techne init` is the wrong remedy besides:
+    register_hooks walks the same structure without guarding it, so init itself
+    raises on most unusable shapes. Handing over a command that crashes, at the
+    moment every hook may be dead, is the lie PR #457 removed from the other two
+    surfaces. (Review 6, issue 2.)
+    """
+    _install_launcher()
+    _write_settings("{ this is not json")
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 1, result.output
+    assert "cannot be verified" in result.output
+    assert "Hook registration drift" not in result.output
+    assert "repair or move aside" in result.output
+    # The counting IS right here: a present-but-unreadable settings.json is a
+    # real, actionable failure, unlike a machine that was never initialised.
+    assert "hook registration issue(s)" in result.output
+
+
 def test_doctor_vacuum_reports_and_shrinks_the_file(cli_db):
     """The --vacuum path must reclaim space and report an honest figure.
 
