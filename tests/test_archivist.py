@@ -315,3 +315,119 @@ def test_invalid_payload_rejected_at_enqueue(config):
         register_base_archivist(config)
         with pytest.raises(InvalidPayloadError):
             enqueue(config.db_path, ARCHIVIST_SINK_TARGET, {"bogus": "shape"}, deliver=False)
+
+
+def test_pattern_knowledge_is_never_enqueued(config, tmp_path):
+    """type='pattern' must not reach the archivist lane (#450).
+
+    techne#137 moved patterns into the Architect store, and the sink handler
+    rejects them outright:
+
+        ValueError: knowledge type 'pattern' is not stored in personal memory
+
+    Enqueuing them anyway produced a PERMANENT PENDING LOOP: delivery fails, the
+    row stays pending, and since push_knowledge_to_archivist re-enqueues all live
+    knowledge on every call, the next session end re-enqueues the same rows. On
+    the operator's store three pre-#137 legacy rows had been failing on every
+    teardown since the team lane was switched on.
+
+    Pins both halves: the pattern row is skipped, and non-pattern rows beside it
+    still go through — a filter that dropped everything would also pass a test
+    that only asserted the pattern was absent.
+    """
+    import json
+
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.core.stores import plain_connect
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+
+    store(config.db_path, "A durable fact worth sharing", type="fact", confidence="high")
+    # store() REFUSES type='pattern' (knowledge.py's #137 guard), so a pattern row
+    # can only exist as PRE-#137 LEGACY. Insert it the way the operator's three
+    # actually exist — directly — otherwise the fixture cannot reproduce the bug.
+    conn = plain_connect(config.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO knowledge (type, content, confidence) VALUES (?, ?, ?)",
+            ("pattern", "## Some Architecture Pattern", "high"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with use_registry({}):
+        register_base_archivist(config)
+        pushed = push_knowledge_to_archivist(config)
+
+    assert pushed == 1, f"only the fact should be enqueued, got {pushed}"
+
+    conn = plain_connect(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT data_json FROM outbox WHERE target = ?", (ARCHIVIST_KNOWLEDGE_TARGET,)
+        ).fetchall()
+    finally:
+        conn.close()
+    types = sorted(json.loads(r[0])["type"] for r in rows)
+    assert "pattern" not in types, f"a pattern row reached the lane: {types}"
+    assert "fact" in types, f"the fact was dropped too — filter is too broad: {types}"
+
+
+def test_redirected_types_filter_follows_the_dict_not_a_literal(config, tmp_path, monkeypatch):
+    """The filter must track REDIRECTED_TYPES, not hardcode 'pattern' (#450 review).
+
+    REDIRECTED_TYPES is the single definition of "this type lives in another
+    store" — `store()` raises straight off it. A literal filter in the pusher
+    re-implements that membership test and drifts the moment a type is added.
+
+    This is the drift, demonstrated: add a second redirected type and a
+    literal-based filter lets it through into the lane that rejects it,
+    reproducing the identical permanent-pending loop. Against the dict, it is
+    skipped like any other.
+    """
+    import json
+
+    from techne.core import knowledge as knowledge_mod
+    from techne.core.database import init_db
+    from techne.core.stores import plain_connect
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+
+    monkeypatch.setitem(knowledge_mod.REDIRECTED_TYPES, "document", "the Librarian store")
+
+    conn = plain_connect(config.db_path)
+    try:
+        for t in ("fact", "document", "document_card"):
+            conn.execute(
+                "INSERT INTO knowledge (type, content, confidence) VALUES (?, ?, ?)",
+                (t, f"a {t} row", "high"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with use_registry({}):
+        register_base_archivist(config)
+        pushed = push_knowledge_to_archivist(config)
+
+    assert pushed == 2, f"wrong set filtered (pushed={pushed})"
+
+    conn = plain_connect(config.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT data_json FROM outbox WHERE target = ?", (ARCHIVIST_KNOWLEDGE_TARGET,)
+        ).fetchall()
+    finally:
+        conn.close()
+    types = sorted(json.loads(r[0])["type"] for r in rows)
+    # document_card is in VALID_TYPES and NOT in REDIRECTED_TYPES, so it SHOULD
+    # egress. Asserting it survives is what kills the PULL_ONLY_TYPES mutant:
+    # that dict also contains "pattern", so a filter using it passes every other
+    # test in this file while silently blocking document_card from team memory.
+    assert types == ["document_card", "fact"], f"expected fact + document_card, got {types}"
