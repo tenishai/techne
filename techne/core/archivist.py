@@ -231,8 +231,16 @@ def push_knowledge_to_archivist(config) -> int:
     from ~772 facts.
 
     The pre-filter below asks the lane ONCE what it already holds. It is not a
-    substitute for the ledger: it does not fix (1), and a pruned outbox would
-    make it re-enqueue (correctly — the row really is gone)."""
+    substitute for the ledger: it does not fix (1), and a DELETED outbox row makes
+    it re-enqueue (correctly — the row really is gone).
+
+    3. NO BACK CATALOGUE FOR A REPOINTED ARCHIVIST. If `archivist_db_path` is
+       moved or the team store is reset, this now sends nothing: those rows are
+       legitimately `synced`, so the pre-filter skips them and the new store never
+       receives history. The OLD re-enqueue-everything behaviour repopulated it by
+       accident — that accident is worth naming rather than losing silently. A
+       status filter cannot fix this one; it needs #223's reconcile path, which
+       compares against what the SINK holds rather than what we enqueued."""
     if config.standalone:
         return 0
     from techne.core.database import connect
@@ -243,16 +251,32 @@ def push_knowledge_to_archivist(config) -> int:
     ensure_registered_for(config)
 
     # ONE query for what this lane already holds, instead of N round trips to
-    # rediscover it. Status is deliberately NOT filtered: a row that is pending,
-    # synced or failed has already been enqueued, and re-adding it is the waste
-    # this exists to remove. `INSERT OR IGNORE` in enqueue remains the backstop —
-    # this is a fast path in front of it, not a replacement for it.
+    # rediscover it.
+    #
+    # `status != 'dead'` IS LOAD-BEARING AND WAS MISSING. The schema's vocabulary
+    # is 'pending' | 'synced' | 'dead' (database.py) — there is no 'failed', which
+    # an earlier version of this comment assumed. `dead` means PERMANENTLY NOT
+    # DELIVERED, which is the opposite of "already enqueued" for a pre-filter's
+    # purposes, so sweeping those hashes in here silently drops the row forever.
+    #
+    # Not hypothetical: `techne outbox prune-orphans` does not call
+    # `ensure_registered_for` (unlike `flush-sinks` directly above it in cli.py),
+    # so in that fresh process every sink:archivist_knowledge row looks like an
+    # orphan and the whole pending backlog is marked dead. Measured on a 3-fact
+    # store: BEFORE this pre-filter existed, the next teardown re-enqueued all 3
+    # and the archivist recovered; with the pre-filter and no status clause, it
+    # re-enqueued 0, permanently. `INSERT OR IGNORE` cannot save it — the filter
+    # `continue`s before enqueue is ever reached. (Prudence, #482 review.)
+    #
+    # The general shape, worth carrying to any "stop repeating this work" change:
+    # AN OUTBOX IS A LOG OF ENQUEUES, NOT A RECORD OF WHAT THE SINK HOLDS, and the
+    # redundancy being removed was quietly doubling as a reconcile path.
     conn = connect(config.db_path)
     try:
         already = {
             row[0]
             for row in conn.execute(
-                "SELECT content_hash FROM outbox WHERE target = ?",
+                "SELECT content_hash FROM outbox WHERE target = ? AND status != 'dead'",
                 (ARCHIVIST_KNOWLEDGE_TARGET,),
             )
         }

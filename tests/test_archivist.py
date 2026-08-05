@@ -602,3 +602,50 @@ def test_enqueue_default_hash_is_content_hash_for(config, tmp_path):
     finally:
         conn.close()
     assert stored == content_hash_for(data)
+
+
+def test_rows_marked_dead_are_re_enqueued_not_stranded(config, tmp_path):
+    """A `dead` row is PERMANENTLY NOT DELIVERED — the opposite of "already
+    enqueued", and sweeping it into the pre-filter strands it forever.
+
+    The trigger is real, not contrived: `techne outbox prune-orphans` does not
+    call `ensure_registered_for` (unlike `flush-sinks` beside it), so in that
+    fresh process every sink:archivist_knowledge row looks like an orphan and the
+    whole pending backlog is marked dead. Before the pre-filter existed the next
+    teardown re-enqueued them and the archivist recovered; with an unfiltered
+    pre-filter it recovers never, and `INSERT OR IGNORE` cannot help because the
+    filter `continue`s before enqueue is reached.
+
+    Kills the mutation that drops `AND status != 'dead'` — which survived the
+    entire suite when this PR was first submitted. (Prudence, #482 review.)
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.core.stores import plain_connect
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+    for i in range(3):
+        store(config.db_path, f"fact for the dead-row case {i}", type="fact", confidence="high")
+
+    with use_registry({}):
+        register_base_archivist(config)
+        assert push_knowledge_to_archivist(config) == 3
+
+        # Exactly what prune_orphans does to a lane it cannot see registered.
+        conn = plain_connect(config.db_path)
+        try:
+            conn.execute(
+                "UPDATE outbox SET status = 'dead' WHERE target = ?",
+                (ARCHIVIST_KNOWLEDGE_TARGET,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        recovered = push_knowledge_to_archivist(config)
+
+    assert recovered == 3, (
+        f"dead rows must be re-enqueued so the lane can recover; got {recovered}"
+    )
