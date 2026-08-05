@@ -1071,7 +1071,9 @@ def test_every_aggregator_survives_a_new_counts_key(tmp_path):
 
     with _mock.patch.object(Config, "load", classmethod(lambda cls: config)):
         result = CliRunner().invoke(main, ["reflect", "ingest", str(responses)])
-    assert result.exit_code == 0, f"`techne reflect ingest` crashed: {result.output}\n{result.exception}"
+    assert result.exit_code == 0, (
+        f"`techne reflect ingest` crashed: {result.output}\n{result.exception}"
+    )
 
 
 def test_cli_ingest_reports_a_parse_failure(tmp_path):
