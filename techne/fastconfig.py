@@ -121,6 +121,11 @@ def write_cache(
     home = home or _home()
     source = home / SOURCE_NAME
     if stamp is None:
+        # SELF-STAMPING IS THE TOCTOU, so it is safe only for a caller that has
+        # NOT already read the source — direct `write_cache` users, i.e. tests.
+        # `Config.load`, which has read it, never reaches here: it passes its
+        # pre-read stamp and skips the write entirely when it could not take one
+        # (#471 review round 2, nit).
         try:
             stamp = _stamp(source)
         except OSError:
@@ -145,9 +150,17 @@ def write_cache(
     # PID-UNIQUE TMP. `replace()` is atomic for the RENAME, not for the CONTENT
     # being renamed: with a shared tmp name, two concurrent writers interleave
     # their writes into one file and a torn mix is renamed into place under a
-    # fresh stamp. Measured at 217 of 2768 reads with 6 writers; 0 of 3589 with
-    # this line (#471 review, finding 2). Thirteen modules call Config.load(),
-    # and every call writes this file.
+    # fresh stamp. Thirteen modules call Config.load(), and every call writes
+    # this file.
+    #
+    # THE TEAR NEEDS A PAYLOAD BIG ENOUGH TO SPLIT ACROSS write() SYSCALLS, and
+    # today's cache is ~425 bytes, well under it. Measured against the pre-fix
+    # code with 6 writer processes: 0 tears in 19,853 reads at production size,
+    # first tears at 16KB (2 / 16,247), 48 / 3,909 at 200KB. So this is a latent
+    # hazard rather than a live one — CACHED_KEYS is explicitly growable, and the
+    # line costs nothing. The numbers live here and in the regression test's
+    # docstring; keep them in agreement (#471 review finding 2, whose original
+    # 217/2768 figure was retracted in round 2 after both of us re-measured).
     tmp = home / f"{CACHE_NAME}.{os.getpid()}.tmp"
     try:
         home.mkdir(parents=True, exist_ok=True)

@@ -217,6 +217,23 @@ class TestTheCacheCannotBeWrongOnlySlow:
             f"source says the rail is on, cache says {fast}"
         )
 
+    def test_a_load_that_could_not_stamp_first_writes_no_cache(self, home):
+        """The only remaining route to a post-parse stamp, closed by hand.
+
+        `Config.load` takes the stamp before the read; if that stat fails it
+        passes None, and a `write_cache` that then self-stamps would recreate
+        finding 1 exactly. Unreachable through `load()` today — a failed stat
+        means the `open()` two lines later fails and propagates — but that is a
+        property of today's control flow, not of the invariant, so the skip is
+        asserted rather than assumed (#471 review round 2, nit).
+        """
+        cfg = Config.load()
+        (home / CACHE_NAME).unlink(missing_ok=True)
+        cfg._refresh_fast_cache(home=home, source=home / "config.yaml", stamp=None)
+        assert not (home / CACHE_NAME).exists(), (
+            "wrote a cache stamped AFTER the parse — the TOCTOU, reintroduced"
+        )
+
     def test_concurrent_writers_never_publish_a_torn_cache(self, home):
         """`replace()` is atomic for the RENAME, not for the CONTENT being
         renamed — a shared tmp filename let two writers interleave into one file

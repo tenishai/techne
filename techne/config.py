@@ -430,6 +430,14 @@ class Config:
         """
         if source != home / "config.yaml":
             return
+        if stamp is None:
+            # Could not stamp before the read, so the only stamp available now
+            # would be taken AFTER the parse — the exact TOCTOU this signature
+            # exists to prevent. Skip the write; the next load regenerates it.
+            # Unreachable today (a failed stat here means the open() failed and
+            # propagated), but "unreachable" describes today's control flow, not
+            # the invariant (#471 review round 2, nit).
+            return
         try:
             from techne.fastconfig import write_cache
 
