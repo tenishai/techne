@@ -15,14 +15,53 @@ without redirecting them writes the developer's real config. Pinning the module
 attrs (and the package re-exports) into a per-test tmp closes every one of those
 write paths regardless of import/run order.
 
-Scope note — we pin ONLY these frozen attrs and touch NO environment variable.
-Redirecting ``HOME`` breaks the embedding/model cache (keyed under ~/.cache);
-redirecting ``CLAUDE_CONFIG_DIR`` / ``TECHNE_HOME`` overrides and leaks into the many
-tests that relocate via their own env (including subprocess ``env_overrides``).
-Neither is needed: ``~/.claude`` is the only real-write path not already isolated by
-existing per-test fixtures, and it is reached exclusively through these two attrs.
+Scope note — the attr pin covers ``~/.claude``; the ENV pin below covers
+``~/.techne``. This note used to end "we touch NO environment variable… neither is
+needed: ``~/.claude`` is the only real-write path not already isolated". That was
+wrong, and measurably so (techne#477).
+
+THE DIRECTION IS THE OPPOSITE OF THE OBVIOUS ONE, and I got it backwards once
+before measuring. ``TECHNE_HOME`` OUTRANKS ``HOME``: ``techne_home()`` returns
+``$TECHNE_HOME`` and only falls back to ``$HOME/.techne``. The subprocess hook
+tests override ``HOME`` to a tmp dir and were correctly isolated *when
+TECHNE_HOME was unset* — and wrote straight into the operator's LIVE store
+whenever it was SET, which is the normal state for anyone actually running techne
+(Prudence's launcher exports it). Measured on this branch: with ``TECHNE_HOME``
+pointing at the real store, one run of ``test_self_healing_hooks.py`` added THREE
+session rows to it; with this fixture, zero.
+
+Historically that put 322 junk session rows in the live store going back to
+2026-06-09, with ``context_injections`` logged against them and ``hook:*:last_run``
+liveness markers stamped there — so ``techne doctor`` reported the test suite's
+last run as the machine's health, which is the one thing techne#468 exists not to
+do. It is the same root cause as the read-side failures found in PR #469 review 7,
+where five tests graded the developer's real store instead of their fixture.
+
+Redirecting ``HOME`` is still refused — it breaks the embedding/model cache (keyed
+under ~/.cache) — so the two vars are pinned directly instead.
+
+The original objection to pinning them ("overrides and leaks into the many tests
+that relocate via their own env, including subprocess ``env_overrides``") does not
+apply to a BASELINE: an autouse fixture runs BEFORE the test body, so a test's own
+``monkeypatch.setenv`` and any subprocess ``env_overrides`` both still win. What
+the baseline removes is the case nobody intended — a test silently inheriting the
+developer's ambient value.
+
+PRECONDITION, load-bearing and easy to break silently: that holds for
+FUNCTION-SCOPED-OR-LATER setters only. A SESSION- or module-scoped fixture setting
+``TECHNE_HOME`` would be clobbered by this one, because higher-scoped fixtures
+instantiate FIRST. It is safe today only because ``tests/`` contains no
+non-function-scoped fixture that sets these — if you add one, it must set the env
+itself at the point of use, not rely on scope ordering. (Prudence, PR #478.)
+
+There is also a class this fixture CANNOT reach: anything binding a path at IMPORT
+time, before any fixture runs. ``Config``'s ``db_path``/``data_dir`` were exactly
+that and are now ``default_factory`` (techne#477); ``PROJECTS_DIR`` in
+transcript_import.py still is, which is why the test asserting on it derives the
+root from the resolver rather than hardcoding ``.claude``.
+
 Subprocess tests re-import the module under their own env, so their frozen values
-are independent of this pin. Tests with their own redirection (``fake_home``,
+are independent of the attr pin. Tests with their own redirection (``fake_home``,
 ``isolated_config``) run after this fixture and override the same attrs.
 
 PERFORMANCE — why these carve subdirs out of ``tmp_path`` instead of calling
@@ -60,6 +99,29 @@ recursively would see anything created here. Keep these carve-outs empty.
 """
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_store_env(tmp_path, monkeypatch):
+    """Pin TECHNE_HOME / CLAUDE_CONFIG_DIR so no test can reach the real stores.
+
+    A BASELINE, not an override: this runs before the test body, so a test that
+    sets its own value — directly, or via a subprocess ``env_overrides`` — still
+    wins. What it removes is the unintended case, where a test inherits whatever
+    the developer happened to have exported.
+
+    Both symptoms are the same root cause (techne#477), and both fire when the
+    vars are SET — the normal state for anyone running techne. In-process tests
+    read the developer's real store and fail on a healthy machine; subprocess
+    hook tests, which override only HOME, WRITE to it, because TECHNE_HOME
+    outranks HOME. A test suite must not be able to tell you your hooks are fine.
+
+    Deliberately NOT created on disk: an absent dir is a normal, handled state
+    (``Config.load`` falls back to defaults rather than creating a store), and
+    creating one here would hide tests that depend on the store already existing.
+    """
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "_techne_home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "_claude_config"))
 
 
 @pytest.fixture(autouse=True)
