@@ -45,8 +45,20 @@ that relocate via their own env, including subprocess ``env_overrides``") does n
 apply to a BASELINE: an autouse fixture runs BEFORE the test body, so a test's own
 ``monkeypatch.setenv`` and any subprocess ``env_overrides`` both still win. What
 the baseline removes is the case nobody intended — a test silently inheriting the
-developer's ambient value. Verified by running the full suite twice, once with
-both vars set to the real dirs and once with them stripped: identical results.
+developer's ambient value.
+
+PRECONDITION, load-bearing and easy to break silently: that holds for
+FUNCTION-SCOPED-OR-LATER setters only. A SESSION- or module-scoped fixture setting
+``TECHNE_HOME`` would be clobbered by this one, because higher-scoped fixtures
+instantiate FIRST. It is safe today only because ``tests/`` contains no
+non-function-scoped fixture that sets these — if you add one, it must set the env
+itself at the point of use, not rely on scope ordering. (Prudence, PR #478.)
+
+There is also a class this fixture CANNOT reach: anything binding a path at IMPORT
+time, before any fixture runs. ``Config``'s ``db_path``/``data_dir`` were exactly
+that and are now ``default_factory`` (techne#477); ``PROJECTS_DIR`` in
+transcript_import.py still is, which is why the test asserting on it derives the
+root from the resolver rather than hardcoding ``.claude``.
 
 Subprocess tests re-import the module under their own env, so their frozen values
 are independent of the attr pin. Tests with their own redirection (``fake_home``,
@@ -105,9 +117,8 @@ def _isolate_store_env(tmp_path, monkeypatch):
     outranks HOME. A test suite must not be able to tell you your hooks are fine.
 
     Deliberately NOT created on disk: an absent dir is a normal, handled state
-    (``resolve_db_path`` returns None rather than creating a store, and
-    ``Config.load`` falls back to defaults), and creating one here would hide
-    tests that depend on the store already existing.
+    (``Config.load`` falls back to defaults rather than creating a store), and
+    creating one here would hide tests that depend on the store already existing.
     """
     monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "_techne_home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "_claude_config"))

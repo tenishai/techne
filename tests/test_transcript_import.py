@@ -514,10 +514,21 @@ def test_project_slug_replaces_all_non_alphanumerics(tmp_path):
 
 
 def test_default_transcripts_dir_under_home(tmp_path):
+    """The slug and the `projects/` level, NOT the config dir's literal name.
+
+    This asserted `.parent.parent.name == ".claude"`, which is only true when
+    CLAUDE_CONFIG_DIR is unset or happens to end in `.claude` — so it failed on
+    exactly the layout techne#112 exists to support, one config dir per agent
+    (`.../prudence/claude`). It read as an ambient-environment flake and was not:
+    it was the test hardcoding one deployment's directory name. Derive the
+    expected root from the same resolver the code uses. (techne#477.)
+    """
+    from techne.platforms.claude_code.transcript_import import PROJECTS_DIR
+
     d = default_transcripts_dir(Path("/Users/alice/x"))
     assert d.name == "-Users-alice-x"
     assert d.parent.name == "projects"
-    assert d.parent.parent.name == ".claude"
+    assert d.parent == PROJECTS_DIR
 
 
 def test_angle_prefix_filter_suppresses_injected_blocks(db_path, tmp_path):

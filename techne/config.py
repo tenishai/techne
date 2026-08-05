@@ -318,13 +318,20 @@ class PostureConfig:
 
 @dataclass
 class Config:
-    # These bind the import-time snapshot, so a bare Config() does NOT honor a
-    # TECHNE_HOME set after import. Config.load() and _from_dict() both overwrite
-    # db_path/data_dir from techne_home() at call time, so every runtime path is
-    # correct; only direct Config() construction sees the snapshot. Always go
-    # through Config.load() when the env knob must apply.
-    db_path: Path = DEFAULT_DB
-    data_dir: Path = DEFAULT_DIR
+    # RESOLVED AT CONSTRUCTION, not at import. These used to bind the
+    # import-time DEFAULT_DB/DEFAULT_DIR snapshot, with a comment saying that was
+    # fine because "Config.load() and _from_dict() both overwrite db_path/data_dir
+    # from techne_home() at call time; only direct Config() construction sees the
+    # snapshot". Direct construction turned out to be common — and in tests it
+    # meant a bare Config() pointed data_dir at the OPERATOR'S REAL store, so
+    # anything deriving a domain db from it (``<data_dir>/librarian.db``) was
+    # created in the live directory. Note the attr-pin trick used elsewhere in
+    # the suite cannot fix this from outside: a dataclass default binds at CLASS
+    # CREATION, so patching DEFAULT_DIR afterwards does nothing. A default_factory
+    # is the only thing that makes TECHNE_HOME apply at the point of use.
+    # (techne#477, found by Prudence on PR #478.)
+    db_path: Path = field(default_factory=lambda: techne_home() / "techne.db")
+    data_dir: Path = field(default_factory=techne_home)
     identity_dir: Path | None = None
     sync: SyncConfig = field(default_factory=SyncConfig)
     # Domain stores (db-per-domain, techne#88/#98): domain name → StoreSpec.
