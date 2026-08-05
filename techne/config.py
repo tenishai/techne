@@ -399,13 +399,25 @@ class Config:
             cfg.db_path = home / "techne.db"
             cfg.data_dir = home
             return cfg
+        # STAMP BEFORE THE READ, not after. The stamp is the cache's claim about
+        # WHICH revision of config.yaml produced its values; taken after the
+        # parse, an edit landing in between gets v1's values labelled v2 —
+        # permanently fresh-looking and permanently wrong. Taken here, the same
+        # edit makes the cache look stale, which costs one slow load and
+        # self-corrects (#471 review, finding 1).
+        try:
+            from techne.fastconfig import stamp_source
+
+            pre_stamp: str | None = stamp_source(path)
+        except (OSError, ImportError):
+            pre_stamp = None
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
         cfg = cls._from_dict(raw, home=home)
-        cfg._refresh_fast_cache(home=home, source=path)
+        cfg._refresh_fast_cache(home=home, source=path, stamp=pre_stamp)
         return cfg
 
-    def _refresh_fast_cache(self, home: Path, source: Path) -> None:
+    def _refresh_fast_cache(self, home: Path, source: Path, stamp: str | None = None) -> None:
         """Write the stdlib-readable hook cache (techne#470). Best-effort.
 
         Populated HERE, from the fully-resolved config, so the cache cannot
@@ -428,11 +440,13 @@ class Config:
                     "hooks.codex_grep_assist": int(self.hooks.codex_grep_assist),
                     "hooks.codex_grep_assist_limit": self.hooks.codex_grep_assist_limit,
                     "hooks.per_turn_recall": int(self.hooks.per_turn_recall),
+                    "hooks.per_turn_seed": int(self.hooks.per_turn_seed),
                     "hooks.post_tool_use": int(self.hooks.post_tool_use),
                     "hooks.capture_bash": int(self.hooks.capture_bash),
                     "hooks.capture_read": int(self.hooks.capture_read),
                 },
                 home=home,
+                stamp=stamp,
             )
         except Exception:  # noqa: BLE001 — a cache write must never break a load
             pass
