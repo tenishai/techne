@@ -633,6 +633,37 @@ def check_runtime_revision(config) -> CheckResult | None:
             evidence=f"git rev-parse origin/main failed in {runtime}",
         )
 
+    # A WORKING CHECKOUT IS NOT A DEPLOYMENT, and conflating them makes this
+    # check a red nobody can clear. CI checks out the PR branch and every dev
+    # worktree sits on a feature branch — both are legitimately behind main, and
+    # reporting that as "a merged fix is not deployed" is noise on the exact
+    # surface that must stay trustworthy. Caught by CI going red on this PR's own
+    # branch; it passed locally only because my branch happened to be AHEAD of
+    # main, which is luck, not coverage.
+    #
+    # The question this check exists to answer is about the DEPLOYED runtime, and
+    # a deployment tracks main. Anything else reports what it is and stays quiet.
+    # ONLY `main` COUNTS AS A DEPLOYMENT. I first allowed a detached HEAD too,
+    # reasoning "detached at a released tag" — but CI checks out detached as well,
+    # so that exemption would have kept the false red on every CI run while
+    # looking like it fixed it. The deployment this check exists for
+    # (~/.techne/runtime) tracks the main branch, so gate on exactly that; a
+    # detached tag-deploy loses the staleness signal, which is the cheaper miss.
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch != "main":
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=(
+                f"running {head} on {branch!r} — a working checkout, not a deployment"
+                if branch != "HEAD"
+                else f"running {head} at a detached HEAD — not a tracked deployment"
+            ),
+            evidence=f"HEAD is on {branch!r} in {runtime}",
+        )
+
     behind = _git("rev-list", "--count", "HEAD..origin/main")
     dirty = _git("status", "--porcelain")
     fetched = _git("log", "-1", "--format=%cr", "origin/main") or "unknown"

@@ -1474,3 +1474,47 @@ class TestRuntimeRevision:
         r = self._check(config, runtime, monkeypatch)
         assert r.verdict is Verdict.STALE
         assert "local ref" in r.detail, r.detail
+
+
+def test_a_feature_branch_is_not_reported_as_an_undeployed_runtime(config, tmp_path, monkeypatch):
+    """A working checkout is not a deployment.
+
+    CI checks out the PR branch and every dev worktree sits on a feature branch —
+    both are legitimately behind main. Reporting that as "a merged fix is not
+    deployed" is a red nobody can clear, on the surface that most needs to stay
+    trustworthy. CI caught this on this check's own PR; the local suite passed
+    only because the branch happened to be AHEAD of main.
+    """
+    import subprocess
+
+    from techne.core.checks import Verdict
+
+    runtime = TestRuntimeRevision._repo(tmp_path, behind=2)
+    subprocess.run(
+        ["git", "-C", str(runtime), "checkout", "-q", "-b", "feat/something"],
+        capture_output=True, check=True,
+    )
+    r = TestRuntimeRevision._check(config, runtime, monkeypatch)
+    assert r.verdict is Verdict.DORMANT, r.detail
+    assert r.ok, "a developer on a branch must not fail the command"
+    assert "not a deployment" in r.detail, r.detail
+    assert "feat/something" in r.detail
+
+
+def test_a_detached_head_is_not_a_deployment_either(config, tmp_path, monkeypatch):
+    """CI checks out detached, so exempting only named branches would have kept
+    the false red on every CI run while looking like the bug was fixed."""
+    import subprocess
+
+    from techne.core.checks import Verdict
+
+    runtime = TestRuntimeRevision._repo(tmp_path, behind=2)
+    sha = subprocess.run(
+        ["git", "-C", str(runtime), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(runtime), "checkout", "-q", sha], capture_output=True, check=True
+    )
+    r = TestRuntimeRevision._check(config, runtime, monkeypatch)
+    assert r.verdict is Verdict.DORMANT and r.ok, r.detail
+    assert "detached" in r.detail, r.detail
