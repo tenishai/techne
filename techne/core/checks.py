@@ -564,6 +564,75 @@ _RAIL_EXPECTATIONS = {
 
 
 @register_check
+def check_mcp_registration(config) -> CheckResult | None:
+    """Is the MCP surface LAUNCHABLE? (techne#370)
+
+    Not about whether something RAN: the MCP server is launched by the HOST, not
+    by us, so there is no marker to read. What can be checked is whether the
+    recorded launch command still points at something that exists.
+
+    Kind.FRESHNESS, which is the taxonomy's "a source moved and its mirror did
+    not" — the interpreter moved and the registration did not. I nearly added a
+    fifth Kind before reading that docstring; the bucket was already there.
+
+    THE FAILURE THIS EXISTS FOR IS SPLIT-BRAIN AND SILENT. The registration held a
+    raw interpreter path; when that path went (a reboot clearing a /tmp venv, a
+    worktree cleanup, a pipx reinstall landing elsewhere) the hooks self-healed
+    and rendered `techne ✅ live` while `claude mcp list` said `✘ Failed to
+    connect` and no mcp__techne__* tool existed for the entire session. The CLI,
+    hooks and DB all worked. Only the surface the agent talks through was dead,
+    and nothing said so.
+
+    Registration now routes through the self-healing launcher, but an install
+    created before that keeps its raw path — so this is what tells that operator,
+    rather than leaving it to be discovered mid-session.
+    """
+    if config.platform != CLAUDE_CODE:
+        return None
+    try:
+        from techne.platforms.claude_code.hooks import mcp_registration_problem
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            name="mcp:registration",
+            subsystem="mcp",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNKNOWN,
+            detail=f"could not check MCP registration: {type(exc).__name__}: {exc}",
+            evidence="import of mcp_registration_problem failed",
+        )
+
+    # NOT OUR BUSINESS ON AN UNINITIALISED MACHINE. techne-hook.sh is written by
+    # register_hooks and deleted by unregister, so its absence means techne has
+    # not installed here — and telling that operator their MCP is broken is a red
+    # they cannot act on, the same mistake #469 review 6 caught in the drift
+    # block. Once installed, a missing or dead registration is a real failure.
+    from techne.platforms.claude_code.hooks import _launcher_path
+
+    if not _launcher_path().exists():
+        return None
+
+    problem = mcp_registration_problem(config)
+    if problem is None:
+        return CheckResult(
+            name="mcp:registration",
+            subsystem="mcp",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.LIVE,
+            detail="launch command resolves",
+            evidence="mcpServers.techne command/args target exists",
+        )
+    return CheckResult(
+        name="mcp:registration",
+        subsystem="mcp",
+        kind=Kind.FRESHNESS,
+        verdict=Verdict.BROKEN,
+        detail=problem,
+        evidence="mcpServers.techne in the claude MCP config",
+        remedy=init_remedy(config),
+    )
+
+
+@register_check
 def check_maintenance_rails(config) -> list[CheckResult]:
     """reflect / consolidate / dream liveness, from what they actually produced.
 
