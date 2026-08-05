@@ -29,6 +29,11 @@ import sys
 # feeding it to the symbol FTS yields noise/nothing — excluded (techne#206 dogfood).
 ASSIST_TOOLS = {"Grep"}
 
+# Liveness key namespace: `hook:codex_grep_assist:last_run` (techne#468). Named
+# for the RAIL rather than the hook file, because that is the thing an operator
+# turns on in config and therefore the thing they expect a status for.
+HOOK_NAME = "codex_grep_assist"
+
 
 def _build_context(pattern: str, results: list[dict]) -> str:
     """Render matching symbols into a compact additionalContext block.
@@ -75,13 +80,26 @@ def main() -> None:
         print(f"techne: config load failed, skipping grep-assist: {e}", file=sys.stderr)
         sys.exit(0)
 
-    # Default-off gate: this is opt-in, experimental.
+    # Default-off gate: this is opt-in, experimental. Deliberately NOT recorded
+    # as a liveness event — a disabled rail is DORMANT by configuration, not a
+    # rail that ran and did nothing, and conflating the two is what makes
+    # "enabled" indistinguishable from "working" (techne#468).
     if not config.hooks.codex_grep_assist:
         sys.exit(0)
+
+    # From here on the rail is ON, so every exit path names itself. Before this
+    # (techne#468) all five returned a silent exit 0 and wrote nothing anywhere,
+    # which made this hook's liveness undecidable rather than merely unknown.
+    from techne.hooks._liveness import record_hook_run
+
+    # NB: deliberately NOT named `db_path` — that name is rebound below to the
+    # per-repo CODEX db, and liveness belongs in the main techne db.
+    techne_db = config.db_path
 
     tool_input = data.get("tool_input", {})
     pattern = tool_input.get("pattern", "")
     if not pattern:
+        record_hook_run(techne_db, HOOK_NAME, outcome="noop:no-pattern")
         sys.exit(0)
 
     # Resolve which repo the agent is actually working in: the Grep's target
@@ -105,6 +123,11 @@ def main() -> None:
 
         db_path = resolve_repo_db_for_query(config, start_path)
         if db_path is None:
+            # The single most likely reason this rail looks "on but does
+            # nothing": the repo being searched was never indexed.
+            record_hook_run(
+                techne_db, HOOK_NAME, outcome="noop:no-repo-db", detail=str(start_path)
+            )
             sys.exit(0)
         with bounded_hook(config.hooks.timeout_s, label="pre_tool_use"):
             results = annotate_freshness(
@@ -113,9 +136,16 @@ def main() -> None:
             )
     except Exception as e:  # noqa: BLE001  — catches HookTimeout too
         print(f"techne: grep-assist degraded: {e}", file=sys.stderr)
+        record_hook_run(
+            techne_db,
+            HOOK_NAME,
+            outcome="noop:degraded",
+            error={"stage": "search", "msg": f"{type(e).__name__}: {e}"},
+        )
         sys.exit(0)
 
     if not results:
+        record_hook_run(techne_db, HOOK_NAME, outcome="noop:no-results")
         sys.exit(0)
 
     # ------------------------------------------------------------------
@@ -136,8 +166,17 @@ def main() -> None:
         )
     except Exception as e:  # noqa: BLE001
         print(f"techne: grep-assist emit failed: {e}", file=sys.stderr)
+        record_hook_run(
+            techne_db,
+            HOOK_NAME,
+            outcome="noop:emit-failed",
+            error={"stage": "emit", "msg": f"{type(e).__name__}: {e}"},
+        )
         sys.exit(0)
 
+    # The one path where the rail actually did its job. `detail` carries the
+    # symbol count so `techne status` can show utilization, not just liveness.
+    record_hook_run(techne_db, HOOK_NAME, outcome="ok", detail=f"{len(results)} symbols")
     sys.exit(0)
 
 

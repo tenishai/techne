@@ -16,6 +16,12 @@ Platform = Literal["claude-code", "codex", "standalone", "cabal", "opencode"]
 # client here and it propagates everywhere.
 PLATFORMS: tuple[str, ...] = get_args(Platform)
 
+#: The platform whose hook mechanism is settings.json registration. Named rather
+#: than spelled inline at each guard so a rename is caught by the type checker
+#: (the annotation forces it to stay a member of ``Platform``) instead of by an
+#: operator whose drift check silently stopped guarding. (#469 review 8.)
+CLAUDE_CODE: Platform = "claude-code"
+
 
 def techne_home() -> Path:
     """Root dir for techne state. TECHNE_HOME overrides the default ~/.techne so

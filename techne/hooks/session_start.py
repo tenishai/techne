@@ -27,26 +27,25 @@ def _now_iso() -> str:
 
 
 def _persist_hook_state(db_path, *, last_run: str, error: dict | None) -> None:
-    """Write hook health to extension_state. Swallows all exceptions."""
-    try:
-        from techne.core.database import connect
-        from techne.core.extension_state import set_state
+    """Write hook health to extension_state. Swallows all exceptions.
 
-        conn = connect(db_path)
-        try:
-            set_state(conn, "hook:session_start:last_run", {"ts": last_run})
-            if error is not None:
-                set_state(conn, "hook:session_start:last_error", error)
-            else:
-                # Clear any stale error on a clean run.
-                from techne.core.extension_state import get_state
+    Thin wrapper over the shared helper (techne#468). This hook's markers came
+    first (techne#95) and were the template the other hooks now copy; delegating
+    keeps ONE implementation so `techne status` can enumerate every hook
+    uniformly instead of special-casing whichever ones diverged.
 
-                if get_state(conn, "hook:session_start:last_error") is not None:
-                    set_state(conn, "hook:session_start:last_error", {})
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001
-        print(f"techne: could not persist hook state: {exc}", file=sys.stderr)
+    Key names and payload shape are unchanged — `hook:session_start:last_run`
+    still carries `{"ts": ...}`, now alongside an `outcome`.
+    """
+    from techne.hooks._liveness import record_hook_run
+
+    record_hook_run(
+        db_path,
+        "session_start",
+        outcome="failed" if error else "ok",
+        error=error,
+        ts=last_run,
+    )
 
 
 def render_drift_block(config) -> str:
@@ -66,7 +65,11 @@ def render_drift_block(config) -> str:
 
     Claude-code only — settings.json registration is that platform's mechanism.
     """
-    if config.platform != "claude-code":
+    # Local import, matching this module's deliberate lazy-import style (hook
+    # startup latency): a constant, not a subsystem.
+    from techne.config import CLAUDE_CODE
+
+    if config.platform != CLAUDE_CODE:
         return ""
     from techne.platforms.claude_code import check_hook_drift
     from techne.platforms.claude_code.hooks import SETTINGS_PATH
@@ -269,6 +272,15 @@ def _run_phases_2_to_9(
         print(f"techne: {msg}", file=sys.stderr)
         hook_error = {"ts": run_ts, "stage": "session_register", "msg": str(exc)[:200]}
         if db_path:
+            # `last_run=run_ts` here, NOT `_now_iso()` as on the success path — and
+            # deliberately left that way. It is the same shape as the critical-1
+            # bug (a marker stamped from the hook's START rather than its
+            # COMPLETION, which can read older than the session it registered),
+            # but it cannot produce a false green on this branch: it always sets
+            # `hook_error`, and check_hooks short-circuits to BROKEN on a
+            # recorded error before it ever compares marker to session. Cosmetic,
+            # verified rather than assumed, and pinned by no test on purpose.
+            # (#469 review 6, mutation M6.)
             _persist_hook_state(db_path, last_run=run_ts, error=hook_error)
         print(
             json.dumps(
@@ -516,12 +528,26 @@ def _run_phases_2_to_9(
     # Phase 8: Determine hook error status and persist state
     # ------------------------------------------------------------------
     if failures:
-        # Non-fatal failures — record the first one as the error signal.
+        # Non-fatal failures — record the first one as the error signal. The
+        # error payload keeps `run_ts` deliberately: it answers "when did the
+        # run that failed BEGIN".
         hook_error = {"ts": run_ts, "stage": "degraded", "msg": "; ".join(failures)[:200]}
     else:
         hook_error = None  # clean run — clear any prior error
 
-    _persist_hook_state(db_path, last_run=run_ts, error=hook_error)
+    # STAMP AT WRITE TIME, NOT AT ENTRY (#469 review 4, critical 1). `run_ts` is
+    # captured as the first statement of main(), but the session row is INSERTed
+    # in Phase 3 with DEFAULT CURRENT_TIMESTAMP — so a marker carrying `run_ts`
+    # is PROVABLY older than the row `check_hooks` compares it against. Measured
+    # window ~70ms; at one-second timestamp granularity that is roughly a 7%
+    # chance per session of the second ticking between them, which rendered a
+    # perfectly healthy hook as "a session started at X and left no marker".
+    #
+    # The marker answers "when did this hook last COMPLETE a run", so write time
+    # is not merely safer, it is the correct semantic. With this ordering,
+    # marker >= session_row holds for every healthy run and the comparison in
+    # check_hooks becomes sound.
+    _persist_hook_state(db_path, last_run=_now_iso(), error=hook_error)
 
     # ------------------------------------------------------------------
     # Phase 9: Emit output
