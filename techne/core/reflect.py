@@ -15,11 +15,12 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from techne.config import Config
 
 log = logging.getLogger(__name__)
-from techne.core._resident import extract_json_array
+from techne.core._resident import extract_json_array_or_none
 from techne.core._resident import prompt_hash as _prompt_hash
 from techne.core.database import connect
 from techne.core.knowledge import VALID_TYPES as KNOWLEDGE_TYPES
@@ -135,16 +136,57 @@ def _existing_knowledge_block(db_path: Path, query: str, k: int) -> str:
     return "\n".join(lines)
 
 
-def parse_response(raw: str, max_items: int) -> list[Candidate]:
+class ParsedResponse(NamedTuple):
+    """What a reflection response actually was, not just what survived it.
+
+    THREE OUTCOMES SHARE ONE SHAPE AND MUST NOT. Before this, `parse_response`
+    returned a bare list and "returns [] on any parse failure (caller decides
+    whether to surface that)" — the caller did not surface it, so ingest reported
+    `{"candidates_proposed": 0, ..., "errors": 0}` for BOTH a discarded
+    reflection and a correct pass where the model genuinely had nothing to save.
+    A whole session's reflection could be thrown away and reported as success,
+    with no log line, no counter, and no signal to go looking (techne#465).
+
+    The realistic triggers are not exotic: a truncated response hitting an output
+    limit, a raw newline inside a JSON string, or a model that explains in prose
+    instead of emitting the array.
+
+    - ``failure`` — no array could be extracted at all. THE PASS DID NOT HAPPEN.
+    - ``dropped`` — the array parsed and N items were REJECTED by validation
+      (bad scope, unknown type, empty content). The model produced candidates and
+      every one was discarded, which is its own kind of silence: distinct from a
+      parse failure and equally invisible before this.
+    - both zero with an empty ``candidates`` — the honest "nothing worth saving".
+    """
+
+    candidates: list[Candidate]
+    failure: str | None = None
+    dropped: int = 0
+
+
+def parse_response(raw: str, max_items: int) -> ParsedResponse:
     """Parse the LLM's JSON array into validated Candidate objects.
 
     Tolerant of common LLM noise: leading/trailing prose, fenced code blocks.
-    Returns [] on any parse failure (caller decides whether to surface that).
+
+    RETURNS A ParsedResponse, NOT A BARE LIST, and deliberately leaves no lossy
+    entry point beside it. A back-compat wrapper returning just the list was the
+    obvious smaller change and was rejected: there is exactly one production
+    caller, and a second, lossier signature is how this bug gets reintroduced by
+    the next person who reaches for the simpler-looking one.
     """
-    items = extract_json_array(raw)
+    items = extract_json_array_or_none(raw)
+    if items is None:
+        # Distinguish an EMPTY response from an unparseable one. A model that
+        # returns nothing at all has still failed to reflect, but it is a
+        # different failure from one that emitted prose or truncated JSON, and
+        # the operator's next move differs.
+        reason = "empty response" if not (raw or "").strip() else "no JSON array found"
+        return ParsedResponse([], failure=reason, dropped=0)
 
     out: list[Candidate] = []
-    for item in items[:max_items]:
+    considered = items[:max_items]
+    for item in considered:
         if not isinstance(item, dict):
             continue
         scope = item.get("scope")
@@ -173,7 +215,7 @@ def parse_response(raw: str, max_items: int) -> list[Candidate]:
                 confidence=confidence,
             )
         )
-    return out
+    return ParsedResponse(out, failure=None, dropped=len(considered) - len(out))
 
 
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
@@ -459,9 +501,50 @@ def ingest_reflection_response(
         "candidates_written": 0,
         "candidates_promoted": 0,
         "errors": 0,
+        # BOTH ARE COUNTS, not the reason string the first draft used. These
+        # dicts are aggregated across threads with `result[key] += val`, so a
+        # str-valued key breaks the sum — and a count is the more useful thing at
+        # the session level anyway ("2 of 9 threads were discarded"). The REASON
+        # goes to the log, which is where a human looks.
+        "parse_failures": 0,
+        "candidates_dropped": 0,
     }
-    candidates = parse_response(raw_response, config.reflect.max_candidates_per_thread)
-    kept = [c for c in candidates if _meets_min_confidence(c, config.reflect.min_confidence)]
+    parsed = parse_response(raw_response, config.reflect.max_candidates_per_thread)
+
+    if parsed.failure:
+        # THE PASS DID NOT HAPPEN, and this is the line whose absence was the bug.
+        # `errors` is incremented so the count is not byte-identical to a correct
+        # pass that found nothing — that identity is what let a whole session's
+        # reflection be discarded and reported as success (techne#465).
+        counts["errors"] += 1
+        counts["parse_failures"] += 1
+        log.warning(
+            "reflect: response could not be parsed (%s) — this thread's reflection"
+            " was DISCARDED, not empty (session=%s thread=%s, %d chars)%s",
+            parsed.failure,
+            session_id,
+            thread_id,
+            len(raw_response or ""),
+            ""
+            if config.reflect.log_raw_response
+            else " — set reflect.log_raw_response to capture the response itself",
+        )
+        return counts
+
+    if parsed.dropped:
+        # The model DID produce candidates and every one of these was rejected by
+        # validation. Distinct from a parse failure and equally invisible before
+        # this: a prompt drifting out of contract shows up here first.
+        counts["candidates_dropped"] = parsed.dropped
+        log.warning(
+            "reflect: %d candidate(s) rejected by validation (session=%s thread=%s)"
+            " — bad scope, unknown type, or empty content",
+            parsed.dropped,
+            session_id,
+            thread_id,
+        )
+
+    kept = [c for c in parsed.candidates if _meets_min_confidence(c, config.reflect.min_confidence)]
     counts["candidates_proposed"] += len(kept)
 
     raw_for_store = raw_response if config.reflect.log_raw_response else None
@@ -523,6 +606,12 @@ def reflect_on_session(
         "candidates_written": 0,
         "candidates_promoted": 0,
         "errors": 0,
+        # Must mirror ingest_reflection_response's keys exactly — this sums with
+        # `result[key] += val`, so a key present there and missing here is a
+        # KeyError at runtime, not a quiet zero. Pinned by
+        # test_session_result_carries_every_per_thread_key.
+        "parse_failures": 0,
+        "candidates_dropped": 0,
     }
     if not config.reflect.enabled:
         return result

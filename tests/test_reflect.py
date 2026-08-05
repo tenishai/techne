@@ -43,7 +43,7 @@ def test_parse_response_clean_json():
             },
         ]
     )
-    parsed = parse_response(raw, max_items=10)
+    parsed = parse_response(raw, max_items=10).candidates
     assert len(parsed) == 2
     assert parsed[0].scope == "knowledge"
     assert parsed[0].type == "decision"
@@ -56,7 +56,7 @@ def test_parse_response_tolerates_code_fence():
         + json.dumps([{"scope": "knowledge", "type": "fact", "content": "x", "confidence": "low"}])
         + "\n```"
     )
-    parsed = parse_response(raw, max_items=10)
+    parsed = parse_response(raw, max_items=10).candidates
     assert len(parsed) == 1
 
 
@@ -68,7 +68,7 @@ def test_parse_response_tolerates_leading_prose():
         )
         + "]\nThank you."
     )
-    parsed = parse_response(raw, max_items=10)
+    parsed = parse_response(raw, max_items=10).candidates
     assert len(parsed) == 1
     assert parsed[0].type == "decision"
 
@@ -79,19 +79,19 @@ def test_parse_response_rejects_team_domain_pattern():
     raw = json.dumps(
         [{"scope": "knowledge", "type": "pattern", "content": "x", "confidence": "high"}]
     )
-    assert parse_response(raw, max_items=10) == []
+    assert parse_response(raw, max_items=10).candidates == []
 
 
 def test_parse_response_rejects_invalid_scope():
     raw = json.dumps([{"scope": "lol", "type": "fact", "content": "x", "confidence": "high"}])
-    assert parse_response(raw, max_items=10) == []
+    assert parse_response(raw, max_items=10).candidates == []
 
 
 def test_parse_response_rejects_invalid_knowledge_type():
     raw = json.dumps(
         [{"scope": "knowledge", "type": "not-a-real-type", "content": "x", "confidence": "high"}]
     )
-    assert parse_response(raw, max_items=10) == []
+    assert parse_response(raw, max_items=10).candidates == []
 
 
 def test_parse_response_respects_max_items():
@@ -101,17 +101,51 @@ def test_parse_response_respects_max_items():
             for i in range(10)
         ]
     )
-    parsed = parse_response(raw, max_items=3)
+    parsed = parse_response(raw, max_items=3).candidates
     assert len(parsed) == 3
 
 
 def test_parse_response_empty_list_is_valid():
-    assert parse_response("[]", max_items=5) == []
+    """A parsed-but-empty array is the model saying "nothing worth saving".
+
+    It must NOT read as a failure — that direction matters as much as the other,
+    or every quiet-but-correct pass starts reporting an error.
+    """
+    r = parse_response("[]", max_items=5)
+    assert r.candidates == []
+    assert r.failure is None
+    assert r.dropped == 0
 
 
-def test_parse_response_garbage_returns_empty():
-    assert parse_response("not json at all", max_items=5) == []
-    assert parse_response("", max_items=5) == []
+def test_parse_response_garbage_reports_a_failure_not_an_empty_pass():
+    """techne#465: the whole point. Unparseable and "nothing to save" produced
+    byte-identical results, so a discarded reflection was reported as success."""
+    garbage = parse_response("not json at all", max_items=5)
+    assert garbage.candidates == []
+    assert garbage.failure == "no JSON array found"
+
+    empty = parse_response("", max_items=5)
+    assert empty.failure == "empty response", "an empty reply is a distinct failure"
+
+    truncated = parse_response('[{"scope": "knowledge", "type": "fact",', max_items=5)
+    assert truncated.failure, "a truncated array is the realistic trigger (output limit)"
+
+    prose = parse_response("I reviewed the session and found nothing notable.", max_items=5)
+    assert prose.failure, "a prose-only reply is a failure, not an empty result"
+
+
+def test_parse_response_counts_rejected_items_as_dropped():
+    """The third outcome: the array parsed and every item was thrown away.
+
+    A prompt drifting out of contract shows up here first, and before this it was
+    as silent as a parse failure.
+    """
+    raw = '[{"scope": "nonsense", "type": "fact", "content": "x"},' \
+          ' {"scope": "knowledge", "type": "not-a-type", "content": "y"}]'
+    r = parse_response(raw, max_items=5)
+    assert r.candidates == []
+    assert r.failure is None, "the array DID parse — this is not a parse failure"
+    assert r.dropped == 2
 
 
 # --- reflect_on_session ---------------------------------------------------
@@ -880,3 +914,118 @@ def test_reflect_on_session_logs_on_make_generate_fn_failure(tmp_path, caplog):
     assert any(
         "reflect_on_session" in r.message for r in caplog.records
     ), "log.exception must emit a record naming the function"
+
+
+# ---------------------------------------------------------------------------
+# techne#465 — a discarded reflection must not report as a successful empty one
+# ---------------------------------------------------------------------------
+
+
+def _ingest(config, session_id, raw):
+    from techne.core.reflect import ingest_reflection_response
+
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    return ingest_reflection_response(config, session_id, f"{session_id}-1", "deadbeef", raw)
+
+
+def test_a_discarded_reflection_is_not_reported_as_an_empty_one(tmp_path):
+    """THE BUG, at the level the operator actually reads.
+
+    `parse_response` returned [] on failure and the caller never surfaced it, so
+    ingest returned `{..., "errors": 0}` for BOTH an unparseable response and a
+    correct pass where the model had nothing to save. A whole session's
+    reflection could be thrown away and reported as success.
+
+    Asserted as a DIFFERENCE between the two, not as an absolute — an assertion
+    on the failure alone would still pass if the honest-empty case started
+    reporting an error too, which would be a different bug of the same family.
+    """
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+
+    broken = _ingest(config, session_id, "the model explained itself in prose")
+    honest = _ingest(config, session_id, "[]")
+
+    assert broken["errors"] == 1, broken
+    assert broken["parse_failures"] == 1, broken
+    assert honest["errors"] == 0, honest
+    assert honest["parse_failures"] == 0, honest
+
+    moving = ("errors", "parse_failures")
+    assert {k: broken[k] for k in moving} != {k: honest[k] for k in moving}, (
+        "a discarded reflection is still indistinguishable from an empty one"
+    )
+
+
+def test_a_truncated_response_is_the_realistic_trigger(tmp_path):
+    """Not an exotic case: a long reflection hitting an output limit yields an
+    unterminated array, and that is the most likely way this fires in practice."""
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    counts = _ingest(config, session_id, '[{"scope": "knowledge", "type": "fact", "conte')
+    assert counts["parse_failures"] == 1 and counts["errors"] == 1
+
+
+def test_a_parse_failure_says_so_in_the_log(tmp_path, caplog):
+    """The counter is machine-readable; the WARNING is what a human sees.
+
+    It must say the reflection was discarded rather than empty, because the whole
+    defect was an operator reasonably concluding "the model found nothing".
+    """
+    import logging
+
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+
+    # The escape-hatch hint is for operators who do NOT already capture the raw
+    # response — pointing at a setting that is already on would be noise.
+    config.reflect.log_raw_response = False
+    with caplog.at_level(logging.WARNING):
+        _ingest(config, session_id, "prose, no array")
+    text = caplog.text
+    assert "DISCARDED" in text, text
+    assert "log_raw_response" in text, "must point at the escape hatch for diagnosis"
+
+    caplog.clear()
+    config.reflect.log_raw_response = True
+    with caplog.at_level(logging.WARNING):
+        _ingest(config, session_id, "prose, no array")
+    assert "DISCARDED" in caplog.text
+    assert "log_raw_response" not in caplog.text, (
+        "do not advise turning on a setting that is already on"
+    )
+
+
+def test_all_candidates_rejected_is_reported_separately(tmp_path):
+    """The array parsed and every item was thrown away by validation — distinct
+    from a parse failure, and equally silent before this."""
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    counts = _ingest(
+        config,
+        session_id,
+        '[{"scope": "bogus", "type": "fact", "content": "x"},'
+        ' {"scope": "knowledge", "type": "nope", "content": "y"}]',
+    )
+    assert counts["candidates_dropped"] == 2, counts
+    assert counts["parse_failures"] == 0, "the array DID parse"
+    assert counts["errors"] == 0, "a rejected candidate is not an insert error"
+
+
+def test_session_result_carries_every_per_thread_key(tmp_path):
+    """reflect_on_session sums per-thread counts with `result[key] += val`, so a
+    key present in one dict and absent from the other is a KeyError at runtime,
+    not a quiet zero. This caught exactly that during the fix."""
+    import inspect
+
+    from techne.core.reflect import ingest_reflection_response, reflect_on_session
+
+    src_ingest = inspect.getsource(ingest_reflection_response)
+    src_session = inspect.getsource(reflect_on_session)
+    for key in ("parse_failures", "candidates_dropped", "errors"):
+        assert f'"{key}"' in src_ingest, key
+        assert f'"{key}"' in src_session, f"{key} missing from the session aggregator"
