@@ -29,6 +29,18 @@ SYNC_PREFIX = "sync:"  # adapter-bound — drained by flush(adapter) to the team
 SINK_PREFIX = "sink:"  # sink-bound — delivered by flush_sinks via a registered OutboxSink
 
 
+def content_hash_for(data: dict) -> str:
+    """The outbox's dedup key for *data*.
+
+    EXPOSED SO CALLERS CAN PRE-FILTER WITHOUT RE-DERIVING IT. A bulk producer
+    that wants to skip rows this lane already holds has to compute the same hash
+    the outbox would, and a second copy of the formula silently stops matching
+    the moment either side changes — the same drift the REDIRECTED_TYPES filter
+    was rewritten to avoid (#450). One definition, two callers. (techne#475.)
+    """
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def enqueue(
     db_path: Path,
     target: str,
@@ -79,7 +91,7 @@ def enqueue(
         )
 
     if content_hash is None:
-        content_hash = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+        content_hash = content_hash_for(data)
 
     conn = connect(db_path)
     try:
