@@ -290,18 +290,26 @@ _HOOK_EXPECTATIONS = {
     "session_end": (timedelta(days=3), "fires at session teardown"),
     "codex_grep_assist": (timedelta(days=7), "fires on Grep, when enabled"),
     "post_compact": (timedelta(days=7), "fires after a compaction"),
-    # NOT YET INSTRUMENTED (#469 review finding 3). These three carry no
-    # record_hook_run call, so they will report UNOBSERVABLE — which is exactly
-    # right and exactly why they are listed here rather than omitted. Leaving
-    # them out made a DEAD CAPTURE RAIL invisible: deleting a month of
-    # observations produced byte-identical verdicts. post_tool_use IS the
-    # observation capture path (techne is functionally dead without it), and
-    # user_prompt_submit hosts per_turn_recall — half the founding incident
-    # this module cites. An uninstrumented rail must read as "nothing to tell
-    # us", never as absent.
-    "post_tool_use": (timedelta(days=3), "captures observations — NOT YET INSTRUMENTED"),
-    "user_prompt_submit": (timedelta(days=3), "per_turn_recall — NOT YET INSTRUMENTED"),
-    "pre_compact": (timedelta(days=7), "checkpoints before compaction — NOT YET INSTRUMENTED"),
+    # INSTRUMENTED as of techne#479. These were listed here while carrying no
+    # record_hook_run call at all, deliberately — so they read UNOBSERVABLE
+    # rather than being absent, because leaving them out made a DEAD CAPTURE
+    # RAIL invisible: deleting a month of observations produced byte-identical
+    # verdicts (#469 review 3).
+    #
+    # INTERVALS ARE A FALLBACK HERE, NOT THE MECHANISM — and the first draft of
+    # this comment claimed otherwise. post_tool_use and user_prompt_submit are
+    # both in _SESSION_SCOPED, and that branch is tested BEFORE
+    # temporal_verdict(last, interval), so what actually catches a dead rail is
+    # the marker-vs-last-settled-session comparison, not the window below.
+    # Measured: a FIVE-DAY-OLD marker on a 3-session store still reads LIVE under
+    # an 18h window, because the interval is only reachable on a store with fewer
+    # than two settled sessions. 18h is chosen for that thin case — tight enough
+    # to be useful on a near-new store, loose enough that a quiet evening is not
+    # an alert. pre_compact stays generous: a compaction is an event an operator
+    # may legitimately go a week without triggering. (#479 review 1.)
+    "post_tool_use": (timedelta(hours=18), "captures observations — techne is dead without it"),
+    "user_prompt_submit": (timedelta(hours=18), "per_turn_recall / per_turn_seed"),
+    "pre_compact": (timedelta(days=7), "checkpoints before compaction"),
 }
 
 #: Hooks that fire once per SESSION. Judged against session activity rather than
@@ -362,6 +370,19 @@ _PRODUCER_SILENT_AFTER = timedelta(days=7)
 #: never be interpreted without its gate.
 _HOOK_CONFIG_GATE = {
     "codex_grep_assist": ("hooks.codex_grep_assist", lambda c: c.hooks.codex_grep_assist),
+    # post_tool_use is deliberately NOT gated. `hooks.post_tool_use` disables
+    # CAPTURE, not the hook: main() carries on into the reminder (#207), coord
+    # (#376) and codex edit (#335) rails unconditionally. Gating here would mean
+    # the marker is never read, so if those rails died nothing would say so —
+    # config-first would give a WRONG verdict rather than a cheap one. The hook
+    # records `noop:capture-disabled` on that path instead. (#479 review 1.)
+    # Two flags, either of which makes the rail live — the hook emits when
+    # EITHER is on, so gating on one alone would report a working rail as
+    # disabled (techne#479).
+    "user_prompt_submit": (
+        "hooks.per_turn_recall / hooks.per_turn_seed",
+        lambda c: c.hooks.per_turn_recall or c.hooks.per_turn_seed,
+    ),
 }
 
 

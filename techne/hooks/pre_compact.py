@@ -10,8 +10,19 @@ from pathlib import Path
 from techne.config import Config
 from techne.core.state import save_checkpoint
 
+#: Liveness key — must match the entry in ``checks._HOOK_EXPECTATIONS``, since
+#: that is what turns a written marker into a reported verdict (techne#479).
+HOOK_NAME = "pre_compact"
+
 
 def main():
+    # LIVENESS (techne#479). Every exit below records WHAT THIS RUN DID, because
+    # a checkpoint rail that silently stops is indistinguishable from an operator
+    # who simply never compacted. `resolve_db_path` is used for the exits that
+    # happen before (or instead of) a successful config load — the marker must
+    # survive the paths where the config itself is the thing that failed.
+    from techne.hooks._liveness import record_hook_run, resolve_db_path
+
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
@@ -23,6 +34,11 @@ def main():
     transcript_path = data.get("transcript_path", "")
 
     if not session_id:
+        # NOT a failure: a compaction with no session id is nothing to check
+        # point against. Recorded so it reads as "ran, had nothing to do".
+        db = resolve_db_path()
+        if db:
+            record_hook_run(db, HOOK_NAME, outcome="noop:no-session-id")
         sys.exit(0)
 
     from techne.hooks._timeout import bounded_hook
@@ -33,6 +49,14 @@ def main():
         config = Config.load()
     except Exception as e:
         print(f"techne: config load failed, skipping checkpoint: {e}", file=sys.stderr)
+        db = resolve_db_path()
+        if db:
+            record_hook_run(
+                db,
+                HOOK_NAME,
+                outcome="failed",
+                error={"stage": "config_load", "msg": str(e)[:200]},
+            )
         sys.exit(0)
 
     try:
@@ -57,8 +81,17 @@ def main():
 
             save_checkpoint(config.db_path, session_id, trigger, checkpoint)
             print(f"techne: checkpoint saved ({trigger})", file=sys.stderr)
+        record_hook_run(config.db_path, HOOK_NAME, outcome="ok", detail=f"trigger={trigger}")
     except Exception as e:
+        # INSIDE the bounded_hook's except, so this also catches HookTimeout —
+        # a checkpoint that ran out of budget must read BROKEN, not silent.
         print(f"techne: pre_compact failed: {e}", file=sys.stderr)
+        record_hook_run(
+            config.db_path,
+            HOOK_NAME,
+            outcome="failed",
+            error={"stage": "checkpoint", "msg": str(e)[:200]},
+        )
         sys.exit(0)
 
 
