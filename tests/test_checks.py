@@ -1420,7 +1420,6 @@ class TestRuntimeRevision:
     @staticmethod
     def _check(config, runtime, monkeypatch):
         import techne
-
         from techne.core.checks import check_runtime_revision
 
         monkeypatch.setattr(techne, "__file__", str(runtime / "techne" / "__init__.py"))
