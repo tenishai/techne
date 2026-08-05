@@ -137,11 +137,19 @@ def test_doctor_counts_drift_on_an_installed_system(cli_db):
     result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 1, result.output
     assert "Hook registration drift" in result.output
-    assert "hook registration issue(s)" in result.output
+    # ASSERT THE COUNT, not just the noun. `drift_failures = len(drift)` → `= 1`
+    # survived review 6's sweep because only the substring was pinned; derive the
+    # expected number from the warning lines the same run printed.
+    warnings = [ln for ln in result.output.splitlines() if ln.startswith("  ! ")]
+    assert len(warnings) > 1, result.output
+    assert f"{len(warnings)} hook registration issue(s)" in result.output
     # Counted separately from liveness: a drift warning is not a subsystem that
     # failed to run, and saying "N subsystem(s) not confirmed working" for it is
     # the honesty rule leaking through another door (review 6, issue 4).
     assert "subsystem(s) not confirmed working" not in result.output
+    # The remedy carries the operator's ACTUAL posture, never a literal — a bare
+    # `techne init` re-resolves `auto` and can change posture as a side effect.
+    assert f"--posture {cli_db.posture.mode}" in result.output
 
 
 def test_doctor_reports_but_does_not_count_drift_when_not_installed(cli_db):
@@ -176,6 +184,96 @@ def test_doctor_counts_drift_when_settings_json_is_missing_but_hooks_were_instal
     assert "Hook registration drift" in result.output
     assert "hook registration issue(s)" in result.output
     assert "not counted" not in result.output
+
+
+def test_doctor_remedy_echoes_a_non_default_posture(cli_db):
+    """The remedy must never hardcode a posture.
+
+    `techne init --posture observe` handed to an operator in `spool-primary`
+    DEMOTES THEM GLOBALLY — init resolves the flag, rebuilds PostureConfig and
+    saves it, flipping reflect out of advisory — because the health check told
+    them to. Asserted with a non-default value so a hardcoded "observe" cannot
+    pass by coincidence. (#469 review 7, critical 2.)
+    """
+    _install_launcher()
+    _write_settings("{}")
+    cli_db.posture.mode = "spool-primary"
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "--posture spool-primary" in result.output, result.output
+    assert "--posture observe" not in result.output
+
+
+def test_doctor_survives_the_drift_import_itself_failing(cli_db, monkeypatch):
+    """The handler must not crash the command it exists to protect.
+
+    Everything imported inside the try is a function-local for the whole
+    function, so an import-time failure — a real one: hooks.py resolves the
+    claude config dir at module scope and `Path("~nosuchuser/x").expanduser()`
+    raises — left the handler referencing an unbound SETTINGS_PATH. The operator
+    lost the entire remainder of the report to an UnboundLocalError, from the
+    block written so a failing diagnostic "must not VANISH". (Review 7,
+    critical 1.)
+    """
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    # Make the from-import itself fail, the same shape as an import-time raise.
+    # monkeypatch.delattr, never a bare delattr — these names must come back, or
+    # the rest of the suite runs against a module we amputated.
+    for name in ("SETTINGS_PATH", "_launcher_path", "check_hook_drift", "settings_unusable_reason"):
+        monkeypatch.delattr(hooks_mod, name, raising=False)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    # SystemExit is the ordinary non-zero exit; anything else is the crash.
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        f"doctor raised instead of reporting: {result.exception!r}"
+    )
+    assert "the drift check itself failed" in result.output
+    # The REST OF THE REPORT still ran — the actual damage of the crash.
+    assert "Reclaimable space" in result.output
+    assert result.exit_code == 1, result.output
+
+
+def test_doctor_blames_itself_not_the_operators_settings_when_the_probe_breaks(cli_db, monkeypatch):
+    """An internal bug must not be routed to the settings.json remedy.
+
+    Telling an operator whose settings.json is FINE to move aside the file
+    holding the rest of their Claude Code configuration — because of a bug in our
+    code — is the issue-2 mislabel arriving through the exception door. The
+    heading is honest ("cannot be verified"); the remedy must not name a file we
+    have no evidence against. (Review 7, issue 5.)
+    """
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    _install_launcher()
+    _write_settings("{}")  # healthy and readable — the point of the test
+
+    def _boom(config):
+        raise TypeError("unhashable type: 'list'")
+
+    monkeypatch.setattr(hooks_mod, "check_hook_drift", _boom)
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "Hook registration cannot be verified" in result.output
+    assert "techne bug" in result.output
+    assert "repair or move aside" not in result.output
+    assert "hook registration issue(s)" in result.output
+
+
+def test_doctor_passes_when_no_checks_are_registered(cli_db, monkeypatch):
+    """The empty-registry path returns two zeros, not one zero and a stray.
+
+    Pins `return 0, 0`: with nothing registered there is nothing to fail and
+    nothing drifted, so doctor must exit 0 and say why the table is missing.
+    """
+    from techne.core import checks as checks_mod
+
+    monkeypatch.setattr(checks_mod, "run_checks", lambda config: [])
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "No subsystem checks registered." in result.output
+    assert "All checks passed" in result.output
 
 
 def test_doctor_reports_a_failing_drift_check_rather_than_swallowing_it(cli_db, monkeypatch):

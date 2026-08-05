@@ -235,6 +235,30 @@ def temporal_verdict(last: str | None, interval: timedelta) -> Verdict:
     return Verdict.LIVE if age <= interval else Verdict.STALE
 
 
+def init_remedy(config) -> str | None:
+    """The ``techne init`` command line to hand this operator, or None.
+
+    ONE BUILDER, so a new surface cannot be added without inheriting both guards.
+    They were learned at THREE different sites inside a single PR, and every time
+    the defect had the same shape: a remedy that is precise, confident and wrong.
+
+    PLATFORM — settings.json registration is claude-code's mechanism. Off that
+    platform "reinstall onto claude-code" is advice for a machine the operator
+    does not have. It was being printed six times, one screen above a drift block
+    that had just been guarded against printing it once.
+
+    POSTURE — never a literal. A bare ``techne init`` defaults ``--posture`` to
+    ``auto``, which RE-RESOLVES and can change posture as a side effect of fixing
+    hook registration. A hardcoded ``--posture observe`` is worse: an operator in
+    ``spool-primary`` who follows doctor's own advice is DEMOTED globally (init
+    resolves the flag, rebuilds PostureConfig and SAVES it), with reflect flipped
+    out of advisory — because the health check told them to.
+    """
+    if config.platform != "claude-code":
+        return None
+    return f"techne init --platform claude-code --posture {config.posture.mode}"
+
+
 # ---------------------------------------------------------------------------
 # Built-in checks
 # ---------------------------------------------------------------------------
@@ -479,7 +503,7 @@ def check_hooks(config) -> list[CheckResult]:
                     evidence=f"extension_state hook:{hook}:last_run = {run or '(absent)'}",
                     detail=detail,
                     remedy=(
-                        "techne init --platform claude-code --posture observe"
+                        init_remedy(config)
                         if verdict in (Verdict.UNOBSERVABLE, Verdict.BROKEN)
                         else None
                     ),

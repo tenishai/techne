@@ -505,7 +505,21 @@ class TestSurvivingMutations:
 class TestDoctorOutputHonesty:
     """M2: the headline symptom of the worst bug was itself unpinned."""
 
-    def test_never_claims_all_live_when_none_are(self, tmp_path, monkeypatch):
+    @staticmethod
+    def _doctor_on_a_store_aged(tmp_path, monkeypatch, age: timedelta) -> tuple[str, object]:
+        """Run `doctor` against a fresh store of a chosen age, and nothing else.
+
+        READS THE STORE IT BUILDS — the property this helper exists to guarantee.
+        Setting HOME is not enough: ``Config.load()`` honors ``TECHNE_HOME``
+        FIRST, and conftest deliberately touches no environment variable (for
+        good reason — redirecting it leaks into the many tests that relocate via
+        their own env). So on any techne-instrumented machine, including the
+        session that authored this PR, this test ran `doctor` against the
+        DEVELOPER'S REAL LIVE STORE and every assertion below described that
+        instead of the fixture. Harmless to the store (no --vacuum) and lethal to
+        the verdict: on a machine whose techne is genuinely healthy the positive
+        assertion went red on a perfectly good PR. (#469 review 7, issue 4.)
+        """
         from click.testing import CliRunner
 
         from techne.cli import main
@@ -517,42 +531,124 @@ class TestDoctorOutputHonesty:
         init_db(db).close()
         conn = connect(db)
         try:
-            # PAST _NEW_STORE_GRACE (7d), not 1d. At one day old the store is
-            # still inside the grace window, so every hook reads DORMANT
-            # ("nothing has run") and doctor takes the `failing == 0` branch —
-            # which made the positive assertion below fail on a clean checkout
-            # while the comment beside it claimed the opposite branch was taken.
-            # The test was asserting against a state its own setup could not
-            # reach; ageing the store past the grace is what makes "sessions
-            # never happened" an actual FINDING rather than a young store.
-            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=30)),))
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(age),))
             conn.commit()
         finally:
             conn.close()
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("TECHNE_HOME", raising=False)
 
         out = CliRunner().invoke(main, ["doctor"]).output
+        # The store under test is the store that was graded. Without this the
+        # whole class can pass or fail on the developer's ambient environment.
+        assert str(db) in out, f"doctor graded a different store; got: {out!r}"
+        return out, db
+
+    def test_never_claims_all_live_when_none_are(self, tmp_path, monkeypatch):
+        """The DORMANT branch — a young store where nothing has run yet.
+
+        ONE DAY OLD ON PURPOSE, inside _NEW_STORE_GRACE. That is the exact state
+        finding 1's symptom needed: every check DORMANT, `failing == 0`, and
+        doctor nonetheless printing "All N subsystems confirmed live". Ageing the
+        store past the grace (which is what I did first, and what this comment
+        exists to stop the next person repeating) moves the test into the
+        `failing > 0` branch where that string is UNREACHABLE BY CONSTRUCTION —
+        so the negative assertion could no longer fail whatever the other branch
+        does, and the test passed on code containing the bug it was written for.
+        The red came from the POSITIVE assertion, added in review 4 for a branch
+        this setup never reached; the fix is to match the assertion to the
+        branch, not the branch to the assertion. (#469 review 7, issue 3.)
+        """
+        import re
+
+        out, _db = self._doctor_on_a_store_aged(tmp_path, monkeypatch, timedelta(days=1))
+
         # ASSERT AGAINST WHAT THE CODE EMITS, NOT A PARAPHRASE (#469 review 4,
         # M20). The previous assertion was `"All subsystems confirmed live" not
         # in out` — a literal that appears nowhere in cli.py except inside a
         # COMMENT. Every emitted string interpolates a count
         # (f"All {live} subsystems confirmed live."), so the assertion could
         # never fail and the teeth-check it was written for never took.
-        import re
-
         assert not re.search(r"All \d+ subsystems confirmed live", out), (
             f"must not confirm liveness it never observed; got: {out!r}"
         )
         # The positive half — silence is not proof. Assert the output actually
         # SAYS something honest, so a future change that emits nothing at all
-        # cannot pass on the negative assertion alone.
-        #
-        # Note this store has uninstrumented hooks, so it takes the `failing > 0`
-        # branch and reports a not-confirmed count; the "0 of N confirmed live"
-        # line lives in the `failing == 0` branch and is not reachable here.
+        # cannot pass on the negative assertion alone. This is the line the
+        # `failing == 0` branch really emits for a store with zero live checks.
+        assert re.search(r"0 of \d+ subsystems confirmed live", out), (
+            f"expected the honest zero-confirmed line; got: {out!r}"
+        )
+
+    def test_reports_a_not_confirmed_count_once_the_grace_expires(self, tmp_path, monkeypatch):
+        """The failing branch — the other half, pinned separately rather than
+        by moving the first test's setup.
+
+        Past _NEW_STORE_GRACE, "no session has ever been recorded" stops being a
+        young store and becomes a FINDING, so the hooks escalate to UNOBSERVABLE
+        and doctor must both exit non-zero and say how many.
+        """
+        import re
+
+        out, _db = self._doctor_on_a_store_aged(tmp_path, monkeypatch, timedelta(days=30))
+
         assert re.search(r"\d+ subsystem\(s\) not confirmed working", out), (
             f"expected an explicit not-confirmed count; got: {out!r}"
         )
+        assert not re.search(r"All \d+ subsystems confirmed live", out), (
+            f"must not confirm liveness it never observed; got: {out!r}"
+        )
+
+
+class TestInitRemedy:
+    """One builder for the `techne init` advice, because the same defect — a
+    remedy that is precise, confident and wrong — appeared at three sites in one
+    PR. (#469 review 7, critical 2.)"""
+
+    def test_no_remedy_off_claude_code(self):
+        from techne.config import Config
+        from techne.core.checks import init_remedy
+
+        cfg = Config()
+        cfg.platform = "opencode"
+        assert init_remedy(cfg) is None
+
+    def test_remedy_carries_the_operators_posture_not_a_literal(self):
+        from techne.config import Config
+        from techne.core.checks import init_remedy
+
+        cfg = Config()
+        cfg.platform = "claude-code"
+        cfg.posture.mode = "spool-primary"
+        assert init_remedy(cfg) == "techne init --platform claude-code --posture spool-primary"
+
+    def test_hook_checks_carry_no_remedy_off_claude_code(self, tmp_path):
+        """The site that was printing it six times per run.
+
+        An UNOBSERVABLE hook on an opencode config used to advise `techne init
+        --platform claude-code --posture observe` — wrong platform AND a
+        hardcoded posture that demotes a spool-primary operator who follows it.
+        """
+        from techne.config import Config
+        from techne.core.checks import Verdict, check_hooks
+        from techne.core.database import connect, init_db
+
+        db = tmp_path / "techne.db"
+        init_db(db).close()
+        conn = connect(db)
+        try:
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=30)),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        cfg = Config()
+        cfg.db_path = db
+        cfg.platform = "opencode"
+        results = check_hooks(cfg)
+        escalated = [r for r in results if r.verdict in (Verdict.UNOBSERVABLE, Verdict.BROKEN)]
+        assert escalated, "expected at least one escalated hook on an aged, sessionless store"
+        assert all(r.remedy is None for r in escalated), [r.remedy for r in escalated]
 
 
 class TestResolveDbPathIsolation:

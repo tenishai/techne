@@ -126,7 +126,7 @@ def _render_liveness(config) -> tuple[int, int]:
     checks passed" while consolidate and dream had been cold for four weeks —
     a green health check that did not check the things that break.
     """
-    from techne.core.checks import Verdict, run_checks
+    from techne.core.checks import Verdict, init_remedy, run_checks
 
     results = run_checks(config)
     if not results:
@@ -205,6 +205,19 @@ def _render_liveness(config) -> tuple[int, int]:
         return failing, 0
 
     drift_failures = 0
+    # BOUND BEFORE THE TRY, because the import itself can raise and everything
+    # imported inside a try is a function-local for the WHOLE function. The first
+    # cut referenced SETTINGS_PATH in the handler and died with UnboundLocalError
+    # on a real invocation (CLAUDE_CONFIG_DIR='~nosuchuser/claude' — hooks.py
+    # resolves the config dir at MODULE scope, and Path.expanduser() raises on an
+    # unresolvable ~user). The operator lost the whole rest of the report —
+    # storage checks, reclaimable space, summary — to a traceback, from the block
+    # written so that a failing diagnostic "must not VANISH". It survived a
+    # missing-name ImportError only because SETTINGS_PATH sorts first in the
+    # import list: luck, not design. (#469 review 7, critical 1.)
+    settings_path = None
+    launcher_name = None
+    probe_failed = False
     try:
         from techne.platforms.claude_code.hooks import (
             SETTINGS_PATH,
@@ -213,6 +226,8 @@ def _render_liveness(config) -> tuple[int, int]:
             settings_unusable_reason,
         )
 
+        settings_path = SETTINGS_PATH
+        launcher_name = _launcher_path().name
         drift = check_hook_drift(config)
         # "HAVE WE INSTALLED HOOKS HERE?", not "does a settings file exist?".
         # techne-hook.sh is written by register_hooks on every init and DELETED by
@@ -225,7 +240,10 @@ def _render_liveness(config) -> tuple[int, int]:
         # provably already run. Residual limit, stated rather than implied: an
         # operator who deletes ~/.claude wholesale loses both files and still
         # reads as fresh. That one is genuinely indistinguishable, and benign.
-        # (#469 review 6.)
+        # Second residual: the launcher landed in 1fe7cac (#276/#279, 2026-07-07),
+        # so a machine last initialised BEFORE that has registered hooks and no
+        # techne-hook.sh, and reads as not-installed — drift reported, uncounted.
+        # Any re-init closes it. (#469 reviews 6 and 7.)
         installed = _launcher_path().exists()
         unverifiable = settings_unusable_reason(config) is not None
     except Exception as exc:  # noqa: BLE001 — a diagnostic must never break the diagnosis
@@ -237,7 +255,7 @@ def _render_liveness(config) -> tuple[int, int]:
         # exception, never an absent one. Counted, because a registration we
         # could not verify is unverified, not fine. (#469 review 6, nit 5.)
         drift = [f"the drift check itself failed ({exc}) — registration NOT verified"]
-        installed, unverifiable = True, True
+        installed, unverifiable, probe_failed = True, True, True
 
     if drift:
         # Two distinct conditions share this reporter, and mislabelling them is
@@ -254,7 +272,19 @@ def _render_liveness(config) -> tuple[int, int]:
         for warning in drift:
             click.echo(f"  ! {warning}")
         if installed:
-            if unverifiable:
+            if probe_failed:
+                # A THIRD CASE, not a flavour of "unusable". Routing our own bug
+                # to the settings.json remedy tells an operator whose settings
+                # are FINE to move aside the file holding the rest of their
+                # Claude Code configuration — the issue-2 mislabel arriving
+                # through the exception door. The heading is honest; the remedy
+                # must not name a file we have no evidence against.
+                # (#469 review 7, issue 5.)
+                click.echo(
+                    "  remedy: none — this is a techne bug, not a problem with "
+                    "your settings. Please report it with the traceback."
+                )
+            elif unverifiable:
                 # `techne init` is the WRONG remedy for an unusable file and would
                 # be a second lie: register_hooks walks the same structure without
                 # guarding it, so init itself raises on most unusable shapes
@@ -263,22 +293,16 @@ def _render_liveness(config) -> tuple[int, int]:
                 # command that crashes, at the moment every hook may be dead, is
                 # worse than saying nothing. Repair the file first.
                 click.echo(
-                    f"  remedy: repair or move aside {SETTINGS_PATH}, then run "
-                    f"`techne init --platform claude-code --posture {config.posture.mode}`"
+                    f"  remedy: repair or move aside {settings_path}, then run "
+                    f"`{init_remedy(config)}`"
                 )
             else:
-                # Pin --posture for the same reason the other two surfaces do: it
-                # defaults to `auto`, which re-resolves and can silently change
-                # posture as a side effect of fixing hook registration.
-                click.echo(
-                    "  remedy: techne init --platform claude-code --posture "
-                    f"{config.posture.mode}"
-                )
+                click.echo(f"  remedy: {init_remedy(config)}")
             drift_failures = len(drift)
         else:
             click.echo(
                 f"  (not counted — techne hooks are not installed here "
-                f"(no {_launcher_path().name}); run `techne init` to install)"
+                f"(no {launcher_name}); run `techne init` to install)"
             )
 
     return failing, drift_failures
@@ -289,7 +313,11 @@ def _render_liveness(config) -> tuple[int, int]:
 @click.option(
     "--liveness/--no-liveness",
     default=True,
-    help="Include subsystem liveness checks (did each rail actually run?).",
+    help=(
+        "Include subsystem liveness checks (did each rail actually run?). "
+        "Also carries the hook-registration drift report, which is a different "
+        "question (is it WIRED?) — --no-liveness drops both."
+    ),
 )
 @click.pass_context
 def doctor(ctx, vacuum, liveness):
