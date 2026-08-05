@@ -10,12 +10,18 @@ import hashlib
 import json
 
 
-def extract_json_array(raw: str) -> list:
-    """Tolerant extraction of a JSON array from raw LLM output.
+def extract_json_array_or_none(raw: str) -> list | None:
+    """Tolerant extraction of a JSON array, or None when there ISN'T ONE.
 
-    Strips markdown code fences (``` or ```json), finds the first '[' and last ']',
-    and json.loads the slice. Returns [] on any parse failure, missing brackets, or
-    if the parsed value is not a list.
+    Same tolerance as ``extract_json_array`` — strips markdown fences, finds the
+    first '[' and last ']', json.loads the slice — but it DISTINGUISHES the two
+    outcomes that the list-returning version conflates: a successfully parsed
+    EMPTY array (``[]``) and a response with no parseable array at all (``None``).
+
+    That collapse is what made a discarded reflection indistinguishable from a
+    model that genuinely had nothing to say (techne#465). Callers that need to
+    tell those apart must use this; ``extract_json_array`` remains for callers
+    that legitimately do not care.
     """
     text = (raw or "").strip()
     if text.startswith("```"):
@@ -24,14 +30,25 @@ def extract_json_array(raw: str) -> list:
     start = text.find("[")
     end = text.rfind("]")
     if start < 0 or end < 0 or end < start:
-        return []
+        return None
     try:
         items = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
-        return []
+        return None
     if not isinstance(items, list):
-        return []
+        return None
     return items
+
+
+def extract_json_array(raw: str) -> list:
+    """Tolerant extraction of a JSON array from raw LLM output.
+
+    Returns [] on any parse failure, missing brackets, or if the parsed value is
+    not a list. ONE IMPLEMENTATION, delegating — a second copy of the fence/slice
+    logic would drift from this one, and the tolerance is the whole value here.
+    """
+    items = extract_json_array_or_none(raw)
+    return [] if items is None else items
 
 
 def extract_json_object(raw: str) -> dict:
