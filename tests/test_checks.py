@@ -1479,11 +1479,22 @@ class TestRuntimeRevision:
         seen = []
 
         def guard(args, *a, **kw):
-            # args is ["git", "-C", <path>, <subcommand>, ...]
-            if isinstance(args, list) and args and args[0] == "git":
-                sub = args[3] if len(args) > 3 else None
-                seen.append(sub)
-                assert sub in self.ALLOWED_GIT, f"git subcommand not on the allow-list: {args}"
+            # FAILS CLOSED. The first version only inspected argv whose first
+            # element was literally "git", so it SKIPPED anything it did not
+            # recognise — and a real `git fetch` got past it two ways in review:
+            # `/usr/bin/git ...` (argv[0] is not the string "git") and
+            # `shell=True` with a command STRING rather than a list. Neither is
+            # reachable through `_git`, which always builds ["git", "-C", ...],
+            # so the realistic regression was caught; but a guard that vouches
+            # only for shapes it recognises is the same defect this PR fixed in
+            # the check itself. Now anything unrecognised is a failure.
+            assert not kw.get("shell"), f"shell=True bypasses argv inspection: {args!r}"
+            assert isinstance(args, list), f"non-list argv cannot be inspected: {args!r}"
+            assert len(args) > 3, f"unexpectedly short argv: {args!r}"
+            assert os.path.basename(args[0]) == "git", f"non-git subprocess: {args!r}"
+            sub = args[3]
+            seen.append(sub)
+            assert sub in self.ALLOWED_GIT, f"git subcommand not on the allow-list: {args}"
             return real(args, *a, **kw)
 
         monkeypatch.setattr(subprocess, "run", guard)
@@ -1585,6 +1596,49 @@ class TestRuntimeRevision:
         assert not r.ok, "a failed probe must not read as healthy"
         assert "could not count" in r.detail, r.detail
 
+    def test_a_failed_branch_probe_is_unknown_not_a_working_checkout(
+        self, config, tmp_path, monkeypatch
+    ):
+        """Without the branch, this cannot tell a deployment from a working
+        checkout — so it must assert neither. It used to render the failure into
+        the sentence ("on None — a working checkout"), which looked malformed
+        rather than authoritative; "obviously broken" is not the standard."""
+        import subprocess
+
+        runtime = self._repo(tmp_path, behind=0)
+        real = subprocess.run
+
+        def break_abbrev_ref(args, *a, **kw):
+            if isinstance(args, list) and "--abbrev-ref" in args:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="boom")
+            return real(args, *a, **kw)
+
+        monkeypatch.setattr(subprocess, "run", break_abbrev_ref)
+        r = self._check(config, runtime, monkeypatch)
+        assert r.verdict is Verdict.UNKNOWN, r.detail
+        assert "None" not in r.detail, f"rendered the failed probe into the sentence: {r.detail}"
+
+    def test_a_failed_status_probe_does_not_read_as_a_clean_tree(
+        self, config, tmp_path, monkeypatch
+    ):
+        """`_git` returns None on failure and "" when clean — two different
+        answers that both read as falsy. Collapsing them made a failed `git
+        status` indistinguishable from a clean tree on a genuinely dirty one."""
+        import subprocess
+
+        runtime = self._repo(tmp_path, behind=0, dirty=True)
+        real = subprocess.run
+
+        def break_status(args, *a, **kw):
+            if isinstance(args, list) and "status" in args:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="boom")
+            return real(args, *a, **kw)
+
+        monkeypatch.setattr(subprocess, "run", break_status)
+        r = self._check(config, runtime, monkeypatch)
+        assert "LOCAL EDITS UNKNOWN" in r.detail, r.detail
+        assert "WORKING TREE DIRTY" not in r.detail, "claimed to know the tree state"
+
     def test_ahead_of_main_is_named_not_called_level_with(
         self, config, tmp_path, monkeypatch
     ):
@@ -1679,6 +1733,11 @@ class TestExpensiveChecksStayOutOfTheHotPath:
 
         assert git_calls == [], f"git ran inside the SessionStart path: {git_calls}"
         names = {c["name"] for c in (health.get("checks") or [])}
+        # ANTI-VACUITY. If collect_health's try-arm ever blew up, `checks` would be
+        # absent, `names` empty, and the assertion below would pass for the wrong
+        # reason — non-vacuous in fact, but not by construction (#487 review round
+        # 2, nit 3). Same protection as `assert seen` in the network test.
+        assert names, f"no checks in the payload: checks_error={health.get('checks_error')!r}"
         assert "runtime:revision" not in names, "the expensive check reached the banner payload"
 
 

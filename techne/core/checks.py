@@ -808,8 +808,18 @@ def check_runtime_revision(config) -> CheckResult | None:
             evidence=f"git rev-list --left-right --count origin/main...HEAD = {counts!r}",
         )
     behind, ahead = int(parts[0]), int(parts[1])
+
+    # `_git` returns None on failure and "" on a clean tree — two different
+    # answers that both read as falsy. Collapsing them made a FAILED `git status`
+    # indistinguishable from a clean one, i.e. the same don't-vouch-for-what-you-
+    # cannot-see shape as the rev-list branch above (#487 review round 2, nit 1).
+    # Not fatal to the verdict — how far behind you are is the headline and it is
+    # already known here — so this degrades the suffix rather than the result.
     dirty = _git("status", "--porcelain")
-    dirty_suffix = " — WORKING TREE DIRTY" if dirty else ""
+    if dirty is None:
+        dirty_suffix = " — LOCAL EDITS UNKNOWN (git status failed)"
+    else:
+        dirty_suffix = " — WORKING TREE DIRTY" if dirty else ""
 
     # A WORKING CHECKOUT IS NOT A DEPLOYMENT, and conflating them makes this
     # check a red nobody can clear. CI checks out the PR branch and every dev
@@ -837,6 +847,20 @@ def check_runtime_revision(config) -> CheckResult | None:
     # NOT a red that CI can never clear: keep DORMANT and `ok`, and put the number
     # in front of the operator reading `doctor`. (#487 review finding 2.)
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch is None:
+        # Same rule again: without the branch this cannot tell a deployment from
+        # a working checkout, so it must not assert either. It previously rendered
+        # the failure into the sentence — "running 9494351 on None — a working
+        # checkout" — which at least looked malformed rather than authoritative,
+        # but "looks obviously broken" is not the standard this module holds.
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNKNOWN,
+            detail=f"running {head}, but could not determine which branch is checked out",
+            evidence=f"git rev-parse --abbrev-ref HEAD failed in {runtime}",
+        )
     if branch != "main":
         where = (
             f"on {branch!r}" if branch != "HEAD" else "at a detached HEAD"
