@@ -593,6 +593,33 @@ class TestDoctorOutputHonesty:
         """
         import re
 
+        # DRIVEN WITH AN ALL-DORMANT RESULT SET, not with a young store.
+        #
+        # A young store USED to produce that state, and this test relied on it.
+        # It no longer does: checks that observe MACHINE STATE rather than store
+        # activity (mcp:registration in #370, runtime:revision in #473) are
+        # legitimately LIVE on a brand-new store, and each one broke this test in
+        # turn. The premise was never "the store is young" — it was "nothing is
+        # confirmable", which is the state finding 1's symptom needed. Building
+        # that state directly keeps the test about the RENDERING rule and stops it
+        # failing every time a state-based check is added.
+        #
+        # The end-to-end path stays covered by the 30-day sibling below.
+        from techne.core import checks as _checks_mod
+
+        def _all_dormant(config):
+            return [
+                CheckResult(
+                    name=f"hook:{n}",
+                    subsystem="hooks",
+                    kind=Kind.TEMPORAL,
+                    verdict=Verdict.DORMANT,
+                    detail="nothing has run",
+                )
+                for n in ("a", "b", "c")
+            ]
+
+        monkeypatch.setattr(_checks_mod, "run_checks", _all_dormant)
         out, _db = self._doctor_on_a_store_aged(tmp_path, monkeypatch, timedelta(days=1))
 
         # ASSERT AGAINST WHAT THE CODE EMITS, NOT A PARAPHRASE (#469 review 4,
@@ -1335,3 +1362,116 @@ class TestCoreRailsAreInstrumented:
             elif _real_calls(src) == 0:
                 missing.append(hook)
         assert not missing, f"expected a liveness marker, found no record_hook_run call: {missing}"
+
+
+class TestRuntimeRevision:
+    """techne#473 — a merged fix is not a deployed fix, and nothing said so.
+
+    Demonstrated live on 2026-08-03: PR #472 merged to main while the machine's
+    interpreter pointed at a shared working tree sitting on a peer's branch, so
+    the machine kept running the bug. Merging changed nothing about what
+    executed.
+    """
+
+    @staticmethod
+    def _repo(tmp_path, behind: int = 0, dirty: bool = False):
+        """A real git checkout with a real origin/main, N commits ahead of HEAD."""
+        import subprocess
+
+        def g(cwd, *a):
+            subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, check=True)
+
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        g(origin, "init", "-q", "-b", "main")
+        subprocess.run(["git", "-C", str(origin), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(origin), "config", "user.name", "t"], check=True)
+        pkg = origin / "techne"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        g(origin, "add", "-A")
+        subprocess.run(
+            ["git", "-C", str(origin), "-c", "commit.gpgsign=false", "commit", "-qm", "base"],
+            capture_output=True, check=True,
+        )
+
+        clone = tmp_path / "runtime"
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(clone)], capture_output=True, check=True
+        )
+        subprocess.run(["git", "-C", str(clone), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(clone), "config", "user.name", "t"], check=True)
+
+        for i in range(behind):
+            (origin / f"new{i}.txt").write_text("x")
+            g(origin, "add", "-A")
+            subprocess.run(
+                ["git", "-C", str(origin), "-c", "commit.gpgsign=false", "commit", "-qm", f"c{i}"],
+                capture_output=True, check=True,
+            )
+        if behind:
+            subprocess.run(
+                ["git", "-C", str(clone), "fetch", "-q", "origin"], capture_output=True, check=True
+            )
+        if dirty:
+            (clone / "techne" / "__init__.py").write_text("# edited\n")
+        return clone
+
+    @staticmethod
+    def _check(config, runtime, monkeypatch):
+        import techne
+
+        from techne.core.checks import check_runtime_revision
+
+        monkeypatch.setattr(techne, "__file__", str(runtime / "techne" / "__init__.py"))
+        return check_runtime_revision(config)
+
+    def test_a_runtime_behind_main_is_stale_not_live(self, config, tmp_path, monkeypatch):
+        """THE BUG. Two commits sit on origin/main that this runtime is not
+        running, and before this nothing reported it."""
+        r = self._check(config, self._repo(tmp_path, behind=2), monkeypatch)
+        assert r.verdict is Verdict.STALE, r.detail
+        assert "2 commit(s) BEHIND" in r.detail, r.detail
+        assert "not deployed" in r.detail
+        assert r.remedy and "pull" in r.remedy
+
+    def test_a_current_runtime_is_live(self, config, tmp_path, monkeypatch):
+        """The other direction must stay quiet, or the check gets ignored."""
+        r = self._check(config, self._repo(tmp_path, behind=0), monkeypatch)
+        assert r.verdict is Verdict.LIVE, r.detail
+        assert "level with" in r.detail
+
+    def test_a_dirty_runtime_says_so(self, config, tmp_path, monkeypatch):
+        """Level with main but locally edited: still running something nobody
+        reviewed, which the operator should know."""
+        r = self._check(config, self._repo(tmp_path, behind=0, dirty=True), monkeypatch)
+        assert "DIRTY" in r.detail, r.detail
+
+    def test_a_packaged_install_is_dormant_not_broken(self, config, tmp_path, monkeypatch):
+        """A real non-editable install has no revision to compare. That is a
+        healthy state — reporting it red would be a red nobody can clear."""
+        plain = tmp_path / "sitepkgs"
+        (plain / "techne").mkdir(parents=True)
+        r = self._check(config, plain, monkeypatch)
+        assert r.verdict is Verdict.DORMANT, r.detail
+        assert r.ok, "a packaged install must not fail the command"
+
+    def test_the_comparison_does_not_hit_the_network(self, config, tmp_path, monkeypatch):
+        """A health check that fetches fails on a plane and stops being a
+        diagnostic. The detail says the comparison is against the local ref."""
+        import subprocess
+
+        # Build the scenario FIRST — the fixture itself fetches, and arming the
+        # guard around it trips on my own setup rather than on the code.
+        runtime = self._repo(tmp_path, behind=1)
+
+        real = subprocess.run
+
+        def guard(args, *a, **kw):
+            assert "fetch" not in args and "pull" not in args, f"network call: {args}"
+            return real(args, *a, **kw)
+
+        monkeypatch.setattr(subprocess, "run", guard)
+        r = self._check(config, runtime, monkeypatch)
+        assert r.verdict is Verdict.STALE
+        assert "local ref" in r.detail, r.detail

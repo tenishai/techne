@@ -564,6 +564,109 @@ _RAIL_EXPECTATIONS = {
 
 
 @register_check
+def check_runtime_revision(config) -> CheckResult | None:
+    """WHAT CODE IS ACTUALLY RUNNING? (techne#473)
+
+    Every other check here asks whether a subsystem ran. This one asks which
+    REVISION did the running, because a merged fix is not a deployed fix and
+    nothing said so.
+
+    Demonstrated live on 2026-08-03: PR #472 fixed a production crash and merged
+    to main, while the interpreter every hook on the machine runs was an EDITABLE
+    install whose `.pth` was a bare path to a shared working tree — a pointer to a
+    CHECKOUT, not to a revision. That checkout sat on a peer session's branch
+    predating the merge, so the machine kept running the bug. Merging changed
+    nothing about what executed, and no surface reported it.
+
+    The structural half is done (the runtime is now a dedicated clone that only
+    tracks main), but it is still a git checkout somebody can leave behind, so
+    this is the half that makes it legible.
+
+    NO NETWORK, DELIBERATELY. The comparison is against the LOCAL `origin/main`
+    ref, so it is only as fresh as the last fetch — which the detail says outright
+    rather than implying a live comparison. Fetching from a health check would
+    make `techne doctor` fail on a plane and turn a diagnostic into an action.
+
+    Not in `collect_health` / the banner: that path is a hot startup hook and
+    deliberately avoids git subprocesses. `doctor` is an explicit invocation.
+    """
+    import subprocess
+    from pathlib import Path
+
+    import techne
+
+    runtime = Path(techne.__file__).resolve().parent.parent
+
+    def _git(*args) -> str | None:
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(runtime), *args],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    head = _git("rev-parse", "--short", "HEAD")
+    if head is None:
+        # A real (non-editable) install has no revision to compare, and that is a
+        # legitimate, healthy state — not something to report red.
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=f"not a git checkout — packaged install at {runtime}",
+            evidence=f"git rev-parse in {runtime} did not resolve",
+        )
+
+    upstream = _git("rev-parse", "--short", "origin/main")
+    if upstream is None:
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNKNOWN,
+            detail=f"running {head}, but no local origin/main to compare against",
+            evidence=f"git rev-parse origin/main failed in {runtime}",
+        )
+
+    behind = _git("rev-list", "--count", "HEAD..origin/main")
+    dirty = _git("status", "--porcelain")
+    fetched = _git("log", "-1", "--format=%cr", "origin/main") or "unknown"
+    n = int(behind) if (behind or "").isdigit() else None
+
+    if n:
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.STALE,
+            detail=(
+                f"running {head}, {n} commit(s) BEHIND origin/main ({upstream}) — "
+                f"a merged fix is not deployed. Comparison is against the local ref, "
+                f"last known origin/main commit {fetched}"
+            ),
+            evidence=f"git rev-list --count HEAD..origin/main = {n} in {runtime}",
+            remedy=f"git -C {runtime} pull",
+        )
+
+    return CheckResult(
+        name="runtime:revision",
+        subsystem="runtime",
+        kind=Kind.FRESHNESS,
+        verdict=Verdict.LIVE,
+        detail=(
+            f"running {head}, level with the local origin/main"
+            + (" — WORKING TREE DIRTY" if dirty else "")
+        ),
+        evidence=f"HEAD={head} origin/main={upstream} in {runtime}",
+    )
+
+
+@register_check
 def check_maintenance_rails(config) -> list[CheckResult]:
     """reflect / consolidate / dream liveness, from what they actually produced.
 
