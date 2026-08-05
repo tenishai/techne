@@ -332,7 +332,12 @@ def test_reflect_skips_thin_threads(tmp_path):
 
 
 def test_reflect_min_confidence_filter(tmp_path):
-    """Candidates below config.reflect.min_confidence are dropped silently."""
+    """Candidates below config.reflect.min_confidence are dropped.
+
+    NO LONGER SILENTLY — they are counted in `candidates_below_confidence` and
+    logged (techne#465). This test still pins the FILTER; the counting is pinned
+    by test_low_confidence_candidates_are_not_silently_dropped.
+    """
     config = _mk_config(tmp_path, enabled=True)
     config.reflect.min_confidence = "high"
     session_id, obs = _mk_session_with_obs(config, 5)
@@ -1016,16 +1021,112 @@ def test_all_candidates_rejected_is_reported_separately(tmp_path):
     assert counts["errors"] == 0, "a rejected candidate is not an insert error"
 
 
-def test_session_result_carries_every_per_thread_key(tmp_path):
-    """reflect_on_session sums per-thread counts with `result[key] += val`, so a
-    key present in one dict and absent from the other is a KeyError at runtime,
-    not a quiet zero. This caught exactly that during the fix."""
-    import inspect
+def test_every_aggregator_survives_a_new_counts_key(tmp_path):
+    """DRIVE the aggregators; do not read them.
 
-    from techne.core.reflect import ingest_reflection_response, reflect_on_session
+    This replaces an `inspect.getsource` check that asserted the key names
+    appeared in each function's text. Prudence showed it was a false-negative
+    machine: deleting the keys while leaving a COMMENT that merely named them in
+    quotes made it pass, while nine behavioural tests caught the same mutation.
+    Worse, being anchored to one function by name it structurally could not have
+    caught the third aggregator — `techne reflect ingest` in cli.py — which
+    crashed with KeyError on every non-empty response through 2381 passing tests.
 
-    src_ingest = inspect.getsource(ingest_reflection_response)
-    src_session = inspect.getsource(reflect_on_session)
-    for key in ("parse_failures", "candidates_dropped", "errors"):
-        assert f'"{key}"' in src_ingest, key
-        assert f'"{key}"' in src_session, f"{key} missing from the session aggregator"
+    So: call each path for real with a response that populates a new key, and let
+    the `+=` blow up if a dict is missing it.
+    """
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.reflect import reflect_on_session
+
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, obs = _mk_session_with_obs(config, 5)
+    thread = Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5)))
+    _save_thread_row(config, session_id, thread)
+
+    # 1. the session aggregator
+    reflect_on_session(config, session_id, [thread], obs)
+
+    # 2. the CLI aggregator — the one nothing exercised. A NON-EMPTY response is
+    #    required: the crash was on the `totals[k] += v` loop, which an empty
+    #    input never reaches.
+    responses = tmp_path / "responses.json"
+    responses.write_text(
+        _json.dumps(
+            [
+                {
+                    "session_id": session_id,
+                    "thread_id": f"{session_id}-1",
+                    "prompt_hash": "deadbeef",
+                    "raw_response": _candidate_array(),
+                }
+            ]
+        )
+    )
+    import unittest.mock as _mock
+
+    with _mock.patch.object(Config, "load", classmethod(lambda cls: config)):
+        result = CliRunner().invoke(main, ["reflect", "ingest", str(responses)])
+    assert result.exit_code == 0, f"`techne reflect ingest` crashed: {result.output}\n{result.exception}"
+
+
+def test_cli_ingest_reports_a_parse_failure(tmp_path):
+    """The CLI must also SURFACE the new signal, not merely survive it."""
+    import json as _json
+    import unittest.mock as _mock
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    session_id, _ = _mk_session_with_obs(config, 5)
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5))),
+    )
+    responses = tmp_path / "r.json"
+    responses.write_text(
+        _json.dumps(
+            [
+                {
+                    "session_id": session_id,
+                    "thread_id": f"{session_id}-1",
+                    "prompt_hash": "d",
+                    "raw_response": "the model wrote prose instead of an array",
+                }
+            ]
+        )
+    )
+    with _mock.patch.object(Config, "load", classmethod(lambda cls: config)):
+        result = CliRunner().invoke(main, ["reflect", "ingest", str(responses)])
+    assert result.exit_code == 0, result.output
+
+
+def test_low_confidence_candidates_are_not_silently_dropped(tmp_path):
+    """The same silence one line past validation, on the DEFAULT config.
+
+    min_confidence defaults to "medium" while the prompt invites "low", so valid
+    low-confidence candidates are discarded here — and before this produced a
+    counts dict byte-identical to honest-empty. (Prudence, #483 review.)
+    """
+    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    # The fixture relaxes this to "low"; the DEFAULT is "medium" and that is the
+    # config the silence actually bites on, so set it back explicitly.
+    config.reflect.min_confidence = "medium"
+    session_id, _ = _mk_session_with_obs(config, 5)
+    raw = (
+        '[{"scope": "knowledge", "type": "fact", "content": "a hunch", "confidence": "low"},'
+        ' {"scope": "knowledge", "type": "fact", "content": "another hunch",'
+        ' "confidence": "low"}]'
+    )
+    counts = _ingest(config, session_id, raw)
+    assert counts["candidates_below_confidence"] == 2, counts
+    assert counts["candidates_proposed"] == 0
+    assert counts["parse_failures"] == 0, "the array parsed and the items were valid"

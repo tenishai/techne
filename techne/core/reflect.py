@@ -136,6 +136,33 @@ def _existing_knowledge_block(db_path: Path, query: str, k: int) -> str:
     return "\n".join(lines)
 
 
+def new_ingest_counts() -> dict:
+    """The per-thread counts shape, defined ONCE.
+
+    THREE HAND-MAINTAINED COPIES OF THIS DICT EXISTED — `ingest_reflection_response`,
+    `reflect_on_session`, and `techne reflect ingest` in cli.py — all summed with
+    `result[key] += val`. Adding a key to the first meant finding the other two,
+    and I found one: the CLI crashed with `KeyError: 'parse_failures'` on every
+    non-empty response, through 2381 passing tests, because no test exercises
+    that command at all.
+
+    A comment saying "keep these in sync" was the previous fix and it is what
+    failed. This is the version that cannot drift: a new key is added here and
+    every aggregator inherits it. (techne#465, Prudence's review of #483.)
+    """
+    return {
+        "candidates_proposed": 0,
+        "candidates_written": 0,
+        "candidates_promoted": 0,
+        "errors": 0,
+        # Counts, not reason strings — these dicts are SUMMED, so a str-valued
+        # key breaks the aggregation. The reasons go to the log.
+        "parse_failures": 0,
+        "candidates_dropped": 0,
+        "candidates_below_confidence": 0,
+    }
+
+
 class ParsedResponse(NamedTuple):
     """What a reflection response actually was, not just what survived it.
 
@@ -496,19 +523,7 @@ def ingest_reflection_response(
     reflect_on_session. `thread_id` is the real threads.id (from thread_row_id /
     the emit batch), so the candidates FK resolves. Returns per-thread counts.
     """
-    counts = {
-        "candidates_proposed": 0,
-        "candidates_written": 0,
-        "candidates_promoted": 0,
-        "errors": 0,
-        # BOTH ARE COUNTS, not the reason string the first draft used. These
-        # dicts are aggregated across threads with `result[key] += val`, so a
-        # str-valued key breaks the sum — and a count is the more useful thing at
-        # the session level anyway ("2 of 9 threads were discarded"). The REASON
-        # goes to the log, which is where a human looks.
-        "parse_failures": 0,
-        "candidates_dropped": 0,
-    }
+    counts = new_ingest_counts()
     parsed = parse_response(raw_response, config.reflect.max_candidates_per_thread)
 
     if parsed.failure:
@@ -545,6 +560,22 @@ def ingest_reflection_response(
         )
 
     kept = [c for c in parsed.candidates if _meets_min_confidence(c, config.reflect.min_confidence)]
+    below = len(parsed.candidates) - len(kept)
+    if below:
+        # THE SAME SILENCE, ONE LINE LATER — and on the DEFAULT config, not a
+        # corner. min_confidence defaults to "medium" while the prompt invites
+        # "low", so valid low-confidence candidates are dropped here and produced
+        # a counts dict byte-identical to honest-empty. Drawing the boundary at
+        # validation and stopping was arbitrary. (Prudence, #483 review.)
+        counts["candidates_below_confidence"] = below
+        log.warning(
+            "reflect: %d candidate(s) below min_confidence=%s were discarded"
+            " (session=%s thread=%s)",
+            below,
+            config.reflect.min_confidence,
+            session_id,
+            thread_id,
+        )
     counts["candidates_proposed"] += len(kept)
 
     raw_for_store = raw_response if config.reflect.log_raw_response else None
@@ -599,20 +630,7 @@ def reflect_on_session(
     `generate_fn` is an injectable LLM callable for tests; in prod it's built
     from config.reflect.model (falling back to config.model).
     """
-    result = {
-        "threads_considered": len(threads),
-        "threads_reflected": 0,
-        "candidates_proposed": 0,
-        "candidates_written": 0,
-        "candidates_promoted": 0,
-        "errors": 0,
-        # Must mirror ingest_reflection_response's keys exactly — this sums with
-        # `result[key] += val`, so a key present there and missing here is a
-        # KeyError at runtime, not a quiet zero. Pinned by
-        # test_session_result_carries_every_per_thread_key.
-        "parse_failures": 0,
-        "candidates_dropped": 0,
-    }
+    result = {"threads_considered": len(threads), "threads_reflected": 0, **new_ingest_counts()}
     if not config.reflect.enabled:
         return result
 

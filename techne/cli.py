@@ -2247,15 +2247,13 @@ def reflect_ingest(ctx, responses_file):
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.core.reflect import ingest_reflection_response
+    from techne.core.reflect import ingest_reflection_response, new_ingest_counts
 
     items = json.loads(responses_file.read_text(encoding="utf-8"))
-    totals = {
-        "candidates_proposed": 0,
-        "candidates_written": 0,
-        "candidates_promoted": 0,
-        "errors": 0,
-    }
+    # From the ONE definition — this dict is summed with `totals[k] += v`, and a
+    # hand-maintained copy here is what crashed with KeyError on every non-empty
+    # response when a key was added upstream (techne#465).
+    totals = new_ingest_counts()
     skipped = 0
     for it in items:
         raw = it.get("raw_response")
