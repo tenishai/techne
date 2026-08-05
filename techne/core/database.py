@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -181,6 +181,15 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_dedup
     ON outbox(content_hash) WHERE status = 'pending';
+-- Covering index for the per-target liveness check (techne#468). Without it that
+-- check does `SCAN outbox` + `USE TEMP B-TREE FOR GROUP BY` over the whole table
+-- — measured 103ms on a 60k-row outbox, inside the SessionStart hot path, and
+-- GROWING FOREVER because nothing ever deletes a synced row (both
+-- `DELETE FROM outbox` statements are `WHERE status = 'pending'`). With it the
+-- same query is a covering scan at ~11ms. Columns ordered to serve
+-- `GROUP BY target` with the aggregates read straight from the index.
+CREATE INDEX IF NOT EXISTS idx_outbox_target_status
+    ON outbox(target, status, synced_at, created_at);
 
 -- Checkpoints (pre-compaction state snapshots)
 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -1063,4 +1072,19 @@ END;
         ).fetchone():
             _add_column_if_missing(conn, "knowledge", "vec_stale", "INTEGER NOT NULL DEFAULT 0")
         conn.execute("INSERT INTO schema_version (version) VALUES (19)")
+
+    if from_version < 20 and to_version >= 20:
+        # techne#468: covering index for the per-target outbox liveness check.
+        # Existing stores are exactly the ones that need it — the cost scales
+        # with accumulated synced rows, which are never deleted, so an old store
+        # pays the most. Index-only; no data change, and IF NOT EXISTS makes it
+        # a no-op on a store created from the current schema.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbox'"
+        ).fetchone():
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_outbox_target_status "
+                "ON outbox(target, status, synced_at, created_at)"
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (20)")
     conn.commit()

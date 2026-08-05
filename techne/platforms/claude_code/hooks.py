@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from techne.config import Config
+from techne.config import CLAUDE_CODE, Config
 from techne.platforms.claude_code.paths import claude_config_dir, claude_json_path
 
 # Import-time snapshots, honoring CLAUDE_CONFIG_DIR set before launch. The hook
@@ -848,7 +848,7 @@ def settings_unusable_reason(config: Config) -> str | None:
     genuine drift warnings under "settings.json unusable". User data must not steer
     control flow. (Prudence, PR #457.)
     """
-    if config.platform != "claude-code":
+    if config.platform != CLAUDE_CODE:
         return None
     try:
         settings = _load_json(SETTINGS_PATH)

@@ -8,6 +8,12 @@ from techne.config import Config
 from techne.core.database import connect
 from techne.core.state import get_latest_checkpoint
 
+# Liveness key namespace: `hook:post_compact:last_run` (techne#468). Unlike its
+# pre-side sibling, this hook only READS (a checkpoint) and prints — it writes
+# nothing, so before #468 a restore that silently produced nothing was
+# indistinguishable from one that was never invoked.
+HOOK_NAME = "post_compact"
+
 
 def main():
     try:
@@ -16,11 +22,16 @@ def main():
         print(f"techne: post_compact received invalid JSON on stdin — restore skipped: {exc}", file=sys.stderr)
         data = {}
 
+    from techne.hooks._liveness import record_hook_run, resolve_db_path
+    from techne.hooks._timeout import bounded_hook
+
     session_id = data.get("session_id", "")
     if not session_id:
+        # Also the landing point for malformed stdin above (which sets data = {}).
+        db = resolve_db_path()
+        if db:
+            record_hook_run(db, HOOK_NAME, outcome="noop:no-session-id")
         sys.exit(0)
-
-    from techne.hooks._timeout import bounded_hook
 
     # Config.load() can raise (corrupt/unreadable config). A hook that throws here
     # would break the host's post-compaction restore; degrade to a no-op. (techne#166)
@@ -28,6 +39,14 @@ def main():
         config = Config.load()
     except Exception as e:
         print(f"techne: config load failed, skipping restore: {e}", file=sys.stderr)
+        db = resolve_db_path()
+        if db:
+            record_hook_run(
+                db,
+                HOOK_NAME,
+                outcome="failed",
+                error={"stage": "config-load", "msg": f"{type(e).__name__}: {e}"},
+            )
         sys.exit(0)
 
     try:
@@ -35,6 +54,12 @@ def main():
             # Get the latest checkpoint
             checkpoint = get_latest_checkpoint(config.db_path, session_id)
             if not checkpoint:
+                # pre_compact writes checkpoints, so this hook is observable only
+                # by its ABSENCE of effect (techne#468). A missing checkpoint here
+                # means the pre-side never ran or never stored — worth a fact,
+                # since the restore silently producing nothing is exactly what a
+                # working restore with nothing to say also looks like.
+                record_hook_run(config.db_path, HOOK_NAME, outcome="noop:no-checkpoint")
                 sys.exit(0)
 
             cp_data = checkpoint["data"]
@@ -78,8 +103,20 @@ def main():
 
             if output_parts:
                 print("\n".join(output_parts))
+            record_hook_run(
+                config.db_path,
+                HOOK_NAME,
+                outcome="ok" if output_parts else "noop:nothing-to-restore",
+                detail=f"{len(threads)} threads" if threads else None,
+            )
     except Exception as e:
         print(f"techne: post_compact failed: {e}", file=sys.stderr)
+        record_hook_run(
+            config.db_path,
+            HOOK_NAME,
+            outcome="failed",
+            error={"stage": "restore", "msg": f"{type(e).__name__}: {e}"},
+        )
         sys.exit(0)
 
 
