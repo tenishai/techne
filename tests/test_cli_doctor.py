@@ -117,6 +117,29 @@ def _install_launcher():
     launcher = _settings_path().parent / "techne-hook.sh"
     launcher.parent.mkdir(parents=True, exist_ok=True)
     launcher.write_text("#!/bin/sh\n")
+
+    # AND the MCP registration, because `techne init` writes both and "installed"
+    # means both. Without it the MCP check (techne#370) correctly reports a
+    # missing registration, which is a real failure but not the one these tests
+    # isolate — they exist to move the exit code on DRIFT alone.
+    import json as _json
+
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    mcp = hooks_mod.MCP_CONFIG_PATH
+    mcp.parent.mkdir(parents=True, exist_ok=True)
+    mcp.write_text(
+        _json.dumps(
+            {
+                "mcpServers": {
+                    "techne": {
+                        "command": "/bin/sh",
+                        "args": [str(launcher), "-m", "techne.mcp_server"],
+                    }
+                }
+            }
+        )
+    )
     return launcher
 
 
@@ -432,3 +455,76 @@ def test_doctor_vacuum_reports_and_shrinks_the_file(cli_db):
     assert "VACUUM" in result.output and "reclaimed" in result.output
     after = os.path.getsize(cli_db.db_path)
     assert after < before, f"file did not shrink: {before} -> {after}"
+
+
+# ---------------------------------------------------------------------------
+# techne#370 — the MCP surface can be dead while everything else reads green
+# ---------------------------------------------------------------------------
+
+
+def _write_mcp(entry):
+    """Write an mcpServers.techne entry verbatim, or clear the file if None."""
+    import json as _json
+
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    mcp = hooks_mod.MCP_CONFIG_PATH
+    mcp.parent.mkdir(parents=True, exist_ok=True)
+    mcp.write_text(_json.dumps({"mcpServers": {"techne": entry}} if entry else {}))
+    return mcp
+
+
+def test_a_dead_mcp_interpreter_is_reported(cli_db, tmp_path):
+    """THE BUG. A raw interpreter path that no longer exists — a reboot clearing
+    a /tmp venv, a worktree cleanup, a pipx reinstall landing elsewhere.
+
+    The observed failure was split-brain and silent: the SessionStart badge said
+    `techne ✅ live` because the hooks self-heal, while `claude mcp list` said
+    `✘ Failed to connect` and no mcp__techne__* tool existed for the whole
+    session. Nothing reported it.
+    """
+    _install_launcher()
+    _write_settings("{}")
+    _write_mcp({"command": "/private/tmp/gone/.venv/bin/python", "args": ["-m", "techne.mcp_server"]})
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "mcp:registration" in result.output
+    assert "/private/tmp/gone" in result.output, result.output
+    assert result.exit_code == 1
+
+
+def test_a_launcher_backed_mcp_entry_is_healthy(cli_db):
+    """The self-healing form must read clean — otherwise the fix reports itself
+    as the bug and the operator learns to ignore the check."""
+    launcher = _install_launcher()
+    _write_settings("{}")
+    _write_mcp({"command": "/bin/sh", "args": [str(launcher), "-m", "techne.mcp_server"]})
+
+    out = CliRunner().invoke(main, ["doctor"]).output
+    assert "mcp:registration" in out
+    assert "launch command resolves" in out, out
+
+
+def test_a_missing_mcp_registration_is_not_silently_healthy(cli_db):
+    """An absent MCP config read as HEALTHY in my first cut — the false green
+    this check exists to remove, reintroduced inside the fix for it."""
+    _install_launcher()
+    _write_settings("{}")
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    hooks_mod.MCP_CONFIG_PATH.unlink(missing_ok=True)
+
+    out = CliRunner().invoke(main, ["doctor"]).output
+    assert "not registered as an MCP server" in out, out
+
+
+def test_an_uninitialised_machine_is_not_told_its_mcp_is_broken(cli_db):
+    """No launcher means techne never installed here. Reporting a broken MCP
+    there is a red the operator cannot act on — the mistake #469 review 6 caught
+    in the drift block, which must not be repeated one check over."""
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    hooks_mod.MCP_CONFIG_PATH.unlink(missing_ok=True)
+
+    out = CliRunner().invoke(main, ["doctor"]).output
+    assert "mcp:registration" not in out, out

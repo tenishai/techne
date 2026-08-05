@@ -930,9 +930,25 @@ def check_hook_drift(config: Config) -> list[str]:
 def register_mcp(config: Config):
     """Register the techne MCP server in Claude's MCP config.
 
-    NOTE: MCP config is command+args (not a shell line) with different restart
-    semantics — the interpreter launcher from register_hooks deliberately does not
-    cover MCP yet (follow-up, techne#276).
+    ROUTED THROUGH THE SAME LAUNCHER AS THE HOOKS (techne#370). This recorded a
+    raw interpreter path, which is a pointer to a FILE rather than to an install —
+    so it went stale on a reboot that cleared a /tmp venv, a worktree cleanup, or
+    a pipx/uv reinstall landing elsewhere. The observed failure was split-brain
+    and silent: the SessionStart badge rendered `techne ✅ live` from the hooks,
+    which self-heal, while `claude mcp list` showed `✘ Failed to connect` and no
+    `mcp__techne__*` tool existed for the whole session. The CLI, hooks and DB all
+    worked; only the surface the agent talks through was dead.
+
+    The launcher already solves exactly this for hooks — it stats the baked
+    interpreter and fires the install-method-aware heal before exec'ing — so this
+    reuses it rather than inventing a second mechanism. `/bin/sh <launcher>`
+    rather than executing the launcher directly, matching `_hook_command`: it
+    survives the exec bit being lost, which a copy across filesystems does.
+
+    NOTE ON EXISTING INSTALLS: this only takes effect on the next `techne init`.
+    A machine registered before this change keeps its raw path, which is why
+    `check_mcp_registration` (core/checks.py) reports an unlaunchable command
+    rather than leaving it to be discovered mid-session.
     """
     mcp_config = _load_json(MCP_CONFIG_PATH)
     if mcp_config is None:
@@ -940,15 +956,64 @@ def register_mcp(config: Config):
 
     servers = mcp_config.setdefault("mcpServers", {})
     servers["techne"] = {
-        # Validated interpreter, not a bare sys.executable (techne#458) — the MCP
-        # server dies with -32000 under a poisoned pin exactly as the hooks do
-        # (techne#578), and #370 tracks that it has no self-heal launcher yet.
-        "command": str(_interpreter()),
-        "args": ["-m", "techne.mcp_server"],
+        "command": "/bin/sh",
+        "args": [str(_launcher_path()), "-m", "techne.mcp_server"],
         "env": {},
     }
 
     _save_json(MCP_CONFIG_PATH, mcp_config)
+
+
+def mcp_registration_problem(config: Config) -> str | None:
+    """Why the recorded MCP launch command cannot run, or None.
+
+    THE SINGLE SOURCE OF TRUTH for "is the MCP surface launchable", so callers
+    branch on the CONDITION rather than re-deriving it — the same discipline
+    `settings_unusable_reason` enforces for settings.json (PR #457).
+
+    Deliberately checks the RECORDED command rather than what we would write
+    today: the whole failure mode is a registration that has drifted from the
+    install, so asking "what would I register now?" answers the wrong question.
+    """
+    if config.platform != CLAUDE_CODE:
+        return None
+    try:
+        mcp_config = _load_json(MCP_CONFIG_PATH)
+    except RuntimeError as exc:
+        return f"{MCP_CONFIG_PATH.name} is unreadable ({exc})"
+    if mcp_config is not None and not isinstance(mcp_config, dict):
+        return f"{MCP_CONFIG_PATH.name} is not an object"
+
+    if mcp_config is None:
+        # ABSENT FILE IS NOT HEALTHY. An earlier cut returned None here, which
+        # read as "the MCP surface is fine" for a machine that has no MCP config
+        # at all — the false green this check exists to remove. Gated on the
+        # launcher below rather than reported unconditionally, so a machine that
+        # never ran `techne init` is not told off for it (the same
+        # installed-or-not distinction the hook-drift block makes).
+        return "no MCP config file, so techne is not registered as an MCP server"
+
+    servers = mcp_config.get("mcpServers")
+    if not isinstance(servers, dict) or "techne" not in servers:
+        return "techne is not registered as an MCP server"
+    entry = servers.get("techne")
+    if not isinstance(entry, dict):
+        return "the techne MCP entry is not an object"
+
+    command = entry.get("command")
+    if not isinstance(command, str) or not command:
+        return "the techne MCP entry has no command"
+
+    # The thing that actually gets executed. For the launcher form that is
+    # /bin/sh (always present), so the script it is handed is what can go
+    # missing; for a legacy raw-interpreter registration it is the interpreter.
+    args = entry.get("args") or []
+    target = Path(command)
+    if command in ("/bin/sh", "sh", "/bin/bash", "bash") and args:
+        target = Path(str(args[0]))
+    if not target.exists():
+        return f"the MCP launch target does not exist: {target}"
+    return None
 
 
 def unregister(config: Config):
