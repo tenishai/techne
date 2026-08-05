@@ -94,8 +94,20 @@ def _run_hook(
     hook_input: dict | None = None,
     env_overrides: dict | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run session_start as a subprocess, returning the CompletedProcess."""
-    env = {**os.environ, **(env_overrides or {})}
+    """Run session_start as a subprocess, returning the CompletedProcess.
+
+    SAY WHICH STORE, DO NOT IMPLY IT. Callers pass ``HOME`` meaning "put the db
+    under this tmp dir", but ``techne_home()`` reads ``TECHNE_HOME`` FIRST and
+    only falls back to ``$HOME/.techne`` — so the intent held solely on a machine
+    where ``TECHNE_HOME`` happened to be unset. Where it was set, these tests ran
+    against that store; where it was not, they WROTE to the operator's real one
+    (techne#477). A ``HOME`` override now implies the matching ``TECHNE_HOME``,
+    unless the caller names one itself.
+    """
+    env_overrides = dict(env_overrides or {})
+    if "HOME" in env_overrides and "TECHNE_HOME" not in env_overrides:
+        env_overrides["TECHNE_HOME"] = str(Path(env_overrides["HOME"]) / ".techne")
+    env = {**os.environ, **env_overrides}
     stdin_bytes = json.dumps(hook_input or {}).encode()
     return subprocess.run(
         [sys.executable, "-m", "techne.hooks.session_start"],
@@ -129,7 +141,13 @@ class TestHookAlwaysExitsZero:
         assert result.returncode == 0
 
     def test_malformed_stdin_exits_zero(self, tmp_path):
-        env = {**os.environ, "HOME": str(tmp_path)}
+        # TECHNE_HOME alongside HOME for the same reason as _run_hook: this one
+        # builds its env by hand and would otherwise inherit the ambient store.
+        env = {
+            **os.environ,
+            "HOME": str(tmp_path),
+            "TECHNE_HOME": str(tmp_path / ".techne"),
+        }
         result = subprocess.run(
             [sys.executable, "-m", "techne.hooks.session_start"],
             input=b"not json {{",
