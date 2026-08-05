@@ -65,7 +65,11 @@ def render_drift_block(config) -> str:
 
     Claude-code only — settings.json registration is that platform's mechanism.
     """
-    if config.platform != "claude-code":
+    # Local import, matching this module's deliberate lazy-import style (hook
+    # startup latency): a constant, not a subsystem.
+    from techne.config import CLAUDE_CODE
+
+    if config.platform != CLAUDE_CODE:
         return ""
     from techne.platforms.claude_code import check_hook_drift
     from techne.platforms.claude_code.hooks import SETTINGS_PATH

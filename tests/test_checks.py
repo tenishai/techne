@@ -622,6 +622,40 @@ class TestInitRemedy:
         cfg.posture.mode = "spool-primary"
         assert init_remedy(cfg) == "techne init --platform claude-code --posture spool-primary"
 
+    def test_healthy_hooks_carry_no_remedy(self, tmp_path):
+        """The verdict gate, which was unpinned.
+
+        Dropping `if verdict in (UNOBSERVABLE, BROKEN)` made doctor print
+        "remedy: techne init ..." beneath six green ✓ live hooks — telling the
+        operator to reinstall rails that demonstrably work. (Review 8, nit 6.)
+        """
+        from techne.config import Config
+        from techne.core.checks import Verdict, check_hooks
+        from techne.core.database import connect, init_db
+        from techne.hooks._liveness import record_hook_run
+
+        db = tmp_path / "techne.db"
+        init_db(db).close()
+        conn = connect(db)
+        try:
+            conn.execute(
+                "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)",
+                ("s1", _iso(timedelta(hours=2)), _iso(timedelta(hours=1))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # A marker newer than that session, written through the real recorder.
+        for hook in ("session_start", "session_end"):
+            record_hook_run(db, hook, ts=_iso(timedelta(minutes=1)))
+
+        cfg = Config()
+        cfg.db_path = db
+        results = {r.name: r for r in check_hooks(cfg)}
+        live = [r for r in results.values() if r.verdict is Verdict.LIVE]
+        assert live, [(r.name, r.verdict) for r in results.values()]
+        assert all(r.remedy is None for r in live), [(r.name, r.remedy) for r in live]
+
     def test_hook_checks_carry_no_remedy_off_claude_code(self, tmp_path):
         """The site that was printing it six times per run.
 

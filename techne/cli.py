@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from techne import __version__
-from techne.config import PLATFORMS, Config, PostureConfig, techne_home
+from techne.config import CLAUDE_CODE, PLATFORMS, Config, PostureConfig, techne_home
 
 
 @click.group()
@@ -58,7 +58,7 @@ def status(ctx):
     # Hook-registration drift (claude-code only): a hooks.* flag can be enabled in
     # config.yaml but never written to settings.json (init not re-run) — a silent
     # no-op the user has no other way to notice. Surface it here (techne#287).
-    if config.platform == "claude-code":
+    if config.platform == CLAUDE_CODE:
         from techne.platforms.claude_code import check_hook_drift
 
         drift = check_hook_drift(config)
@@ -191,7 +191,7 @@ def _render_liveness(config) -> tuple[int, int]:
     # to ignore the signal). On an INSTALLED system the same warnings are real:
     # a flag enabled in config that never made it into settings.json is a hook
     # that can never fire.
-    if config.platform != "claude-code":
+    if config.platform != CLAUDE_CODE:
         # settings.json registration is CLAUDE-CODE's mechanism, and both sibling
         # surfaces already guard on it (`techne status` above; render_drift_block,
         # session_start.py). check_hook_drift does NOT self-guard —
@@ -280,9 +280,12 @@ def _render_liveness(config) -> tuple[int, int]:
                 # through the exception door. The heading is honest; the remedy
                 # must not name a file we have no evidence against.
                 # (#469 review 7, issue 5.)
+                # "with the message above", NOT "with the traceback": this path
+                # formats str(exc) and nothing else prints a traceback, so asking
+                # for one names an artefact we withheld. (#469 review 8, nit 5.)
                 click.echo(
                     "  remedy: none — this is a techne bug, not a problem with "
-                    "your settings. Please report it with the traceback."
+                    "your settings. Please report it with the message above."
                 )
             elif unverifiable:
                 # `techne init` is the WRONG remedy for an unusable file and would
@@ -292,12 +295,20 @@ def _render_liveness(config) -> tuple[int, int]:
                 # and on `[]` — measured, not quoted). Handing the operator a
                 # command that crashes, at the moment every hook may be dead, is
                 # worse than saying nothing. Repair the file first.
-                click.echo(
-                    f"  remedy: repair or move aside {settings_path}, then run "
-                    f"`{init_remedy(config)}`"
-                )
+                # SKIP THE COMMAND WHEN THERE ISN'T ONE. init_remedy returns None
+                # off claude-code, and f-stringing it raw would print
+                # "remedy: None" — the platform guard is inherited only because
+                # the caller honours the None. The early return above makes that
+                # unreachable HERE, but the docstring's promise ("a new surface
+                # cannot be added without inheriting both guards") is only true
+                # if callers behave this way. (#469 review 8, nit 7.)
+                remedy = init_remedy(config)
+                repair = f"  remedy: repair or move aside {settings_path}"
+                click.echo(f"{repair}, then run `{remedy}`" if remedy else f"{repair}.")
             else:
-                click.echo(f"  remedy: {init_remedy(config)}")
+                remedy = init_remedy(config)
+                if remedy:
+                    click.echo(f"  remedy: {remedy}")
             drift_failures = len(drift)
         else:
             click.echo(

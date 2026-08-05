@@ -45,6 +45,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Callable
 
+from techne.config import CLAUDE_CODE
+
 
 class Verdict(str, Enum):
     """Outcome of a single check, worst-last so ``max()`` finds the headline."""
@@ -254,7 +256,7 @@ def init_remedy(config) -> str | None:
     resolves the flag, rebuilds PostureConfig and SAVES it), with reflect flipped
     out of advisory — because the health check told them to.
     """
-    if config.platform != "claude-code":
+    if config.platform != CLAUDE_CODE:
         return None
     return f"techne init --platform claude-code --posture {config.posture.mode}"
 

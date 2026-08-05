@@ -21,6 +21,7 @@ SEAMS → card:
 - egress         techne/core/egress.py        (Tier-0 SessionStart injection)           → docs/arch/egress.md
 - reflect        techne/core/reflect.py + sleepdream.py (self-maintenance)              → docs/arch/reflect-pipeline.md
 - search/embed   techne/core/embeddings.py + search.py (hybrid FTS+vector; model2vec on py3.14) → docs/arch/search-embeddings.md
+- liveness       techne/core/checks.py        (did each rail actually RUN?)             → docs/arch/liveness.md
 - (uncarded) mcp_server.py (33-tool surface); core/federation.py (fan-out recall over local+remote); core/evidence.py (claim-vs-ledger check behind techne_check_evidence)
 
 DEPS: imported/hosted by siblings cabal (orchestrator) + limenal (MCP gateway; limenal.handlers.memory imports techne.VALID_TYPES). techne itself has NO cross-repo runtime deps (local-first).

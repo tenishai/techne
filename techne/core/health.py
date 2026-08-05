@@ -296,6 +296,18 @@ def format_banner(health: dict) -> str:
     # you hunting while "rail:consolidate, rail:dream" is actionable.
     worst_verdict = health.get("checks_worst")
     if worst_verdict and worst_verdict not in ("live", "dormant"):
+        # THE LIVENESS LAYER ITSELF FAILED — a separate case, and previously the
+        # worst line the banner could print. collect_health's except arm leaves
+        # `checks` EMPTY, so the naming code below rendered
+        # "> ⚠️ UNKNOWN:  — `techne doctor`" — strictly worse than the bare count
+        # it was written to improve on, and it discarded the one actionable fact:
+        # `checks_error` was WRITTEN at collect_health and read nowhere in the
+        # repository. Same defect as doctor's probe-failure path, on the surface
+        # the operator actually sees. (#469 review 8, issue 2.)
+        checks_error = health.get("checks_error")
+        if checks_error:
+            lines.append(f"> ⚠️ liveness check FAILED: {checks_error} — `techne doctor`")
+            return "\n".join(lines)
         all_bad = [
             c
             for c in (health.get("checks") or [])

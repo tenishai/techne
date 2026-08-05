@@ -186,6 +186,25 @@ def test_doctor_counts_drift_when_settings_json_is_missing_but_hooks_were_instal
     assert "not counted" not in result.output
 
 
+def test_doctor_names_the_settings_path_and_the_launcher(cli_db):
+    """The interpolations, not just the surrounding prose.
+
+    Setting `settings_path = None` / `launcher_name = None` at their assignment
+    passed every test in this file while printing "repair or move aside None" and
+    "(no None)" — because the assertions pinned the substring and never the
+    value. (#469 review 8, issue 4.)
+    """
+    settings = _write_settings("{ this is not json")
+    launcher = _install_launcher()
+
+    unusable = CliRunner().invoke(main, ["doctor"]).output
+    assert f"repair or move aside {settings}" in unusable
+
+    launcher.unlink()  # installed -> not installed, same store
+    not_installed = CliRunner().invoke(main, ["doctor"]).output
+    assert f"(no {launcher.name})" in not_installed
+
+
 def test_doctor_remedy_echoes_a_non_default_posture(cli_db):
     """The remedy must never hardcode a posture.
 
@@ -257,7 +276,43 @@ def test_doctor_blames_itself_not_the_operators_settings_when_the_probe_breaks(c
     assert "Hook registration cannot be verified" in result.output
     assert "techne bug" in result.output
     assert "repair or move aside" not in result.output
+    # Do not ask for an artefact this path withholds: it formats str(exc) only,
+    # and nothing here prints a traceback. (Review 8, nit 5.)
+    assert "traceback" not in result.output.lower()
     assert "hook registration issue(s)" in result.output
+
+
+def test_doctor_summary_names_both_live_and_dormant(cli_db, monkeypatch):
+    """The three-way honesty summary's middle branch, the one with no test.
+
+    `elif dormant:` → `elif False:` survived the suite and made doctor print
+    "All 6 subsystems confirmed live." beneath a table listing twelve, six of
+    them dormant. That is the ordinary steady state of a healthy install, not a
+    corner case — and it is finding 1's lie by another route. (Review 8, issue 3.)
+    """
+    from techne.core import checks as checks_mod
+    from techne.core.checks import CheckResult, Kind, Verdict
+
+    def _mixed(config):
+        return [
+            CheckResult(
+                name=f"rail:{n}",
+                subsystem="rails",
+                kind=Kind.TEMPORAL,
+                verdict=v,
+                detail="",
+            )
+            for n, v in (("a", Verdict.LIVE), ("b", Verdict.LIVE), ("c", Verdict.DORMANT))
+        ]
+
+    monkeypatch.setattr(checks_mod, "run_checks", _mixed)
+
+    result = CliRunner().invoke(main, ["doctor", "--no-liveness"])
+    assert result.exit_code == 0  # sanity: the flag still skips the table
+
+    result = CliRunner().invoke(main, ["doctor"])
+    assert "2 live, 1 dormant — none failing." in result.output
+    assert "subsystems confirmed live" not in result.output
 
 
 def test_doctor_passes_when_no_checks_are_registered(cli_db, monkeypatch):

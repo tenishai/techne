@@ -310,3 +310,98 @@ def test_banner_memory_line_appends_non_canonical_types_after_canonical(config):
     assert "1 pattern" in banner
     # canonical 'fact' renders BEFORE the non-canonical 'pattern'
     assert banner.index("1 fact") < banner.index("1 pattern")
+
+
+class TestBannerLiveness:
+    """The banner's liveness integration, which had NO tests at all (#469 review 8).
+
+    Both load-bearing mutations survived the full suite: forcing ``checks_bad``
+    to False (so the headline mark ignores subsystem liveness) and deleting the
+    ``⚠️ VERDICT: names`` line outright. The comment in health.py nominates this
+    as the surface the whole detector rests on — "a detector wired to a command
+    nobody runs is worth no more than no detector" — and the entire mechanism
+    that claim depends on could be deleted with the suite green.
+    """
+
+    def test_headline_mark_reflects_a_failing_subsystem(self, config):
+        h = collect_health(config)
+        h["build"] = "live"
+        h["checks_worst"] = "stale"
+        h["checks"] = [
+            {"name": "rail:consolidate", "verdict": "stale"},
+            {"name": "rail:dream", "verdict": "stale"},
+        ]
+        banner = format_banner(h)
+        # A green top-line over a red detail is the precise shape of the bug
+        # techne#468 exists to remove.
+        assert banner.startswith("\n## techne ⚠️")
+        # Named, not counted: "3 stale" sends you hunting, names are actionable.
+        assert "STALE: rail:consolidate, rail:dream" in banner
+        assert "`techne doctor`" in banner
+
+    def test_dormant_is_not_a_warning(self, config):
+        """DORMANT means correctly idle, not broken — it must not flip the mark
+        or emit a verdict line, or the banner trains the eye to skip it."""
+        h = collect_health(config)
+        h["build"] = "live"
+        h["checks_worst"] = "dormant"
+        h["checks"] = [{"name": "rail:dream", "verdict": "dormant"}]
+        banner = format_banner(h)
+        assert banner.startswith("\n## techne ✅")
+        assert "techne doctor" not in banner
+
+    def test_absent_liveness_data_leaves_the_mark_alone(self, config):
+        """No checks key at all (an older payload) must not manufacture a warning."""
+        h = collect_health(config)
+        h["build"] = "live"
+        h.pop("checks_worst", None)
+        h.pop("checks", None)
+        assert format_banner(h).startswith("\n## techne ✅")
+
+    def test_only_the_headline_verdict_is_named(self, config):
+        """Listing a STALE rail under an UNOBSERVABLE label mislabels it; the
+        others are counted, not named."""
+        h = collect_health(config)
+        h["build"] = "live"
+        h["checks_worst"] = "unobservable"
+        h["checks"] = [
+            {"name": "hook:pre_compact", "verdict": "unobservable"},
+            {"name": "rail:dream", "verdict": "stale"},
+        ]
+        banner = format_banner(h)
+        assert "UNOBSERVABLE: hook:pre_compact" in banner
+        assert "rail:dream" not in banner
+        assert "1 other" in banner
+
+    def test_a_failing_liveness_layer_names_the_error_not_the_empty_set(self, config):
+        """The except arm of collect_health, end to end.
+
+        `checks` is EMPTY there, so the naming code rendered
+        "> ⚠️ UNKNOWN:  — `techne doctor`" — strictly worse than a bare count —
+        while `checks_error` held the only actionable fact and was read nowhere
+        in the repository. (#469 review 8, issue 2.)
+        """
+        h = collect_health(config)
+        h["build"] = "live"
+        h["checks"] = []
+        h["checks_worst"] = "unknown"
+        h["checks_error"] = "TypeError: unhashable type: 'list'"
+        banner = format_banner(h)
+        assert banner.startswith("\n## techne ⚠️")
+        assert "liveness check FAILED: TypeError: unhashable type: 'list'" in banner
+        # The empty-name line must be gone, not merely accompanied.
+        assert "UNKNOWN:  —" not in banner
+
+    def test_the_failure_path_is_reachable_from_collect_health(self, config, monkeypatch):
+        """Pins the wiring, not just the formatter: a raising run_checks must
+        land in the except arm with the exception recorded."""
+        from techne.core import checks as checks_mod
+
+        def _boom(config):
+            raise TypeError("unhashable type: 'list'")
+
+        monkeypatch.setattr(checks_mod, "run_checks", _boom)
+        h = collect_health(config)
+        assert h["checks_worst"] == "unknown"
+        assert h["checks_error"] == "TypeError: unhashable type: 'list'"
+        assert "liveness check FAILED" in format_banner(h)
