@@ -296,14 +296,17 @@ _HOOK_EXPECTATIONS = {
     # RAIL invisible: deleting a month of observations produced byte-identical
     # verdicts (#469 review 3).
     #
-    # INTERVALS ARE PER-HOOK FIRING RATE, NOT A HOUSE DEFAULT. post_tool_use
-    # fires on every tool call and user_prompt_submit on every prompt, so the
-    # 3-day window they inherited from session_start could not catch a dead rail
-    # for three days — in the founding incident (techne#452) two rails were dead
-    # for exactly that long. Tightened to a working day: long enough that an
-    # evening away is not an alert, short enough that a rail dying on Monday is
-    # visible on Tuesday. pre_compact stays generous — a compaction is an event
-    # the operator may legitimately go a week without triggering.
+    # INTERVALS ARE A FALLBACK HERE, NOT THE MECHANISM — and the first draft of
+    # this comment claimed otherwise. post_tool_use and user_prompt_submit are
+    # both in _SESSION_SCOPED, and that branch is tested BEFORE
+    # temporal_verdict(last, interval), so what actually catches a dead rail is
+    # the marker-vs-last-settled-session comparison, not the window below.
+    # Measured: a FIVE-DAY-OLD marker on a 3-session store still reads LIVE under
+    # an 18h window, because the interval is only reachable on a store with fewer
+    # than two settled sessions. 18h is chosen for that thin case — tight enough
+    # to be useful on a near-new store, loose enough that a quiet evening is not
+    # an alert. pre_compact stays generous: a compaction is an event an operator
+    # may legitimately go a week without triggering. (#479 review 1.)
     "post_tool_use": (timedelta(hours=18), "captures observations — techne is dead without it"),
     "user_prompt_submit": (timedelta(hours=18), "per_turn_recall / per_turn_seed"),
     "pre_compact": (timedelta(days=7), "checkpoints before compaction"),
@@ -367,7 +370,12 @@ _PRODUCER_SILENT_AFTER = timedelta(days=7)
 #: never be interpreted without its gate.
 _HOOK_CONFIG_GATE = {
     "codex_grep_assist": ("hooks.codex_grep_assist", lambda c: c.hooks.codex_grep_assist),
-    "post_tool_use": ("hooks.post_tool_use", lambda c: c.hooks.post_tool_use),
+    # post_tool_use is deliberately NOT gated. `hooks.post_tool_use` disables
+    # CAPTURE, not the hook: main() carries on into the reminder (#207), coord
+    # (#376) and codex edit (#335) rails unconditionally. Gating here would mean
+    # the marker is never read, so if those rails died nothing would say so —
+    # config-first would give a WRONG verdict rather than a cheap one. The hook
+    # records `noop:capture-disabled` on that path instead. (#479 review 1.)
     # Two flags, either of which makes the rail live — the hook emits when
     # EITHER is on, so gating on one alone would report a working rail as
     # disabled (techne#479).

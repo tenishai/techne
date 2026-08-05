@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-liveness
-updated: 2026-08-04
-anchor: techne/core/checks.py sha=3dfafa58478a7043ae9fd642f66228e9320cc7ba
+updated: 2026-08-05
+anchor: techne/core/checks.py sha=53bf5a76be2153137e197b5e16857c9261333048
 ---
 # liveness — subsystem health checks (techne#468/#469)
 
@@ -15,7 +15,7 @@ INVARIANTS — the ones a diff will not show you:
 - **UNOBSERVABLE IS A FAILING STATE, NOT A WARNING.** A rail that cannot report is unfinished. "It might be fine" must never render as passing; that ambiguity is the whole reason this subsystem exists. (techne#468, Richard: "i want to know that when i run something it works, or it doesnt.")
 - **CHECKS REPORT, THEY NEVER SELF-HEAL.** Print the remedy command; do not run it.
 - **NEVER CLAIM MORE THAN WAS OBSERVED.** `failing == 0` is not "everything is live". A store where every check is DORMANT gets "0 of N confirmed live", never "All N confirmed live" — confirming the absence of evidence is the headline bug this subsystem was built to remove, and it has been reintroduced by accident more than once.
-- **SESSION-SCOPED HOOKS ARE JUDGED AGAINST THE LAST SESSION, NOT THE CLOCK.** For a hook that only fires when a session starts, "days since last fire" measures how recently the OPERATOR WORKED. The comparison uses the SECOND-newest settled session (`LIMIT 1 OFFSET 1`), because the newest one is the session currently asking.
+- **SESSION-SCOPED HOOKS ARE JUDGED AGAINST THE LAST SESSION, NOT THE CLOCK.** "Days since last fire" measures how recently the OPERATOR WORKED, not whether the hook works. The comparison uses the SECOND-newest settled session (`LIMIT 1 OFFSET 1`), because the newest one is the session currently asking. NOTE THE SET IS NO LONGER JUST SESSION-BOUNDARY HOOKS: techne#479 brought `post_tool_use` and `user_prompt_submit` under this branch, which fire per tool call and per prompt. The rule still holds for them — an idle operator must not look like a dead rail — and it has a consequence worth knowing: because this branch is tested BEFORE `temporal_verdict`, the per-hook interval is only reachable on a store with fewer than two settled sessions. A five-day-old marker on a 3-session store reads LIVE under an 18h window.
 - **A MARKER IS STAMPED AT COMPLETION, NOT AT ENTRY.** `last_run` written from the hook's start time can read older than the session it just registered, which renders STALE on a working hook. (One deliberate exception, commented at the site: the session-registration failure path, where a recorded `hook_error` short-circuits to BROKEN before the comparison is reached.)
 - **_NEW_STORE_GRACE (7d).** Under it, "nothing has happened yet" is DORMANT. Past it, the same absence IS the finding and escalates to UNOBSERVABLE. Tests that want the failing branch must age the store past the grace; tests that want the dormant branch must stay inside it. NOT UNIVERSAL: the grace is only reached when the rail should otherwise be emitting. An outbox lane with no live consumer (`sync.adapter=noop` / no registered sink) is DORMANT at ANY store age — correctly idle, checked before the age question is asked.
 - **LIVENESS AND DRIFT ARE COUNTED SEPARATELY.** `_render_liveness` returns `(liveness_failures, drift_failures)`. Adding them made one run print "Nothing failing, but 0 of 12 subsystems confirmed live" and "5 subsystem(s) not confirmed working" seven lines apart.

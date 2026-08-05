@@ -366,7 +366,6 @@ def _enable_all_config_gated_hooks(config):
     rather than quietly narrowing the assertion.
     """
     config.hooks.codex_grep_assist = True
-    config.hooks.post_tool_use = True
     config.hooks.per_turn_recall = True
 
 
@@ -1200,6 +1199,40 @@ class TestCoreRailsAreInstrumented:
         after = next(r for r in run_checks(config) if r.name == "hook:post_tool_use")
         assert after.verdict is Verdict.LIVE, after.detail
 
+    def test_capture_disabled_still_records_because_the_hook_still_runs(
+        self, config, monkeypatch, tmp_path
+    ):
+        """`hooks.post_tool_use` turns off CAPTURE, not the hook.
+
+        main() goes on to run the reminder (#207), coord (#376) and codex edit
+        (#335) rails regardless. Reporting DORMANT-by-config there would leave
+        those three unobservable behind a tidy "disabled by config" — a WRONG
+        verdict, not a cheap one, which is why this hook carries no entry in
+        _HOOK_CONFIG_GATE. (#479 review 1, found by driving the real main() with
+        the flag off and a due reminder seeded.)
+        """
+        from techne.hooks import post_tool_use
+
+        config.hooks.post_tool_use = False
+        self._seed_session(config)
+        self._run_hook(
+            post_tool_use,
+            {
+                "session_id": "s1",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(tmp_path / "a.py")},
+                "tool_response": "ok",
+            },
+            config,
+            monkeypatch,
+        )
+        assert self._marker(config, "post_tool_use").get("outcome") == "noop:capture-disabled"
+
+        verdict = next(r for r in run_checks(config) if r.name == "hook:post_tool_use")
+        assert "disabled by config" not in (verdict.detail or ""), (
+            "a hook that still runs three other rails must not read as config-dormant"
+        )
+
     def test_user_prompt_submit_records_an_empty_recall_as_a_noop(self, config, monkeypatch):
         """"Injected nothing" is a legal outcome (#414), and it is the ONLY thing
         that distinguishes a working-but-quiet retrieval rail from a dead one."""
@@ -1265,6 +1298,7 @@ class TestCoreRailsAreInstrumented:
         with a remedy that cannot clear it, which is a red the operator cannot
         act on (#469 review 10, nit 2).
         """
+        import ast
         import pathlib
 
         from techne.core.checks import _HOOK_EXPECTATIONS
@@ -1273,11 +1307,31 @@ class TestCoreRailsAreInstrumented:
         # session_start/session_end/codex_grep_assist live in differently-named
         # modules; map the ones whose file name is not the hook name.
         module_for = {"codex_grep_assist": "pre_tool_use"}
+
+        def _real_calls(path: pathlib.Path) -> int:
+            """COUNT CALLS, NOT MENTIONS.
+
+            This was a substring check, and post_tool_use.py names
+            `record_hook_run` in a COMMENT — so that file satisfied the guard
+            with every real call deleted. A guard that a comment can pass is not
+            a guard. Parsing is the only version that cannot be talked into
+            passing: an import, a docstring and a prose mention are all invisible
+            to it. (#479 review 1.)
+            """
+            tree = ast.parse(path.read_text())
+            return sum(
+                1
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(node.func, "attr", None))
+                == "record_hook_run"
+            )
+
         missing = []
         for hook in _HOOK_EXPECTATIONS:
             src = root / f"{module_for.get(hook, hook)}.py"
             if not src.exists():
                 missing.append(f"{hook} (no module {src.name})")
-            elif "record_hook_run" not in src.read_text():
+            elif _real_calls(src) == 0:
                 missing.append(hook)
         assert not missing, f"expected a liveness marker, found no record_hook_run call: {missing}"

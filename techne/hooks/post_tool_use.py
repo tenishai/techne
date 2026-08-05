@@ -716,16 +716,20 @@ def main():
             from techne.lifecycle import capture_tool_use
 
             captured = capture_tool_use(config, session_id, tool_name, tool_input, tool_output)
-        if config.hooks.post_tool_use:
-            # `captured is False` with the rail ENABLED means should_capture()
-            # filtered this tool — a real outcome, not a failure, and the one that
-            # makes a quiet capture rail legible: "ran, chose not to store this".
-            record_hook_run(
-                config.db_path,
-                HOOK_NAME,
-                outcome="ok" if captured else "noop:filtered",
-                detail=tool_name,
-            )
+        # RECORDED ON EVERY PATH, including capture-disabled. `hooks.post_tool_use`
+        # turns off CAPTURE, not this hook — it goes on to run the reminder, coord
+        # and edit rails below either way — so skipping the marker there would
+        # leave those rails unobservable while doctor reported a tidy "disabled by
+        # config". `captured is False` with the rail ENABLED means should_capture()
+        # filtered this tool: a real outcome, not a failure, and the one that makes
+        # a quiet capture rail legible ("ran, chose not to store this").
+        if not config.hooks.post_tool_use:
+            outcome = "noop:capture-disabled"
+        elif captured:
+            outcome = "ok"
+        else:
+            outcome = "noop:filtered"
+        record_hook_run(config.db_path, HOOK_NAME, outcome=outcome, detail=tool_name)
     except Exception as e:
         # Catches HookTimeout too: a capture that ran out of budget is a DROPPED
         # observation, which must read BROKEN rather than vanish.
