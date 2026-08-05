@@ -7,6 +7,8 @@ The read-back loop (federation) is PR 2.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from techne.core.archivist import (
@@ -431,3 +433,219 @@ def test_redirected_types_filter_follows_the_dict_not_a_literal(config, tmp_path
     # that dict also contains "pattern", so a filter using it passes every other
     # test in this file while silently blocking document_card from team memory.
     assert types == ["document_card", "fact"], f"expected fact + document_card, got {types}"
+
+
+# ---------------------------------------------------------------------------
+# techne#475 — the re-enqueue was the dominant term in session teardown
+# ---------------------------------------------------------------------------
+
+
+def _outbox_rows(config):
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(config.db_path)
+    try:
+        return conn.execute(
+            "SELECT content_hash, data_json FROM outbox WHERE target = ?",
+            (ARCHIVIST_KNOWLEDGE_TARGET,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_second_push_enqueues_nothing_new(config, tmp_path):
+    """THE BUG: every teardown re-enqueued ALL live knowledge.
+
+    ``enqueue`` opens, commits and closes its own SQLite connection per row, so
+    this was 5.15s of a 5.52s teardown against a 5.0s hook budget — measured on a
+    380MB store — and the budget then ABORTED teardown mid-flight. The cost scaled
+    with the size of the KNOWLEDGE BASE, not the session, so it looked flat
+    against session length and grew monotonically as memory did (116,174
+    accumulated rows in this lane on the operator's store, from ~772 facts).
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+    for i in range(5):
+        store(config.db_path, f"durable fact number {i}", type="fact", confidence="high")
+
+    with use_registry({}):
+        register_base_archivist(config)
+        first = push_knowledge_to_archivist(config)
+        after_first = len(_outbox_rows(config))
+        second = push_knowledge_to_archivist(config)
+        after_second = len(_outbox_rows(config))
+
+    assert first == 5, first
+    assert second == 0, f"a second push must enqueue nothing new, got {second}"
+    assert after_second == after_first, (
+        f"the lane grew on a no-op push: {after_first} -> {after_second}"
+    )
+
+
+def test_a_changed_fact_is_still_pushed(config, tmp_path):
+    """The pre-filter must not suppress real work.
+
+    Skipping by content hash is only safe because a changed fact hashes
+    differently — if this ever stops holding, the optimisation becomes silent
+    data loss to the team store, which is strictly worse than the cost it saved.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+    store(config.db_path, "the original wording", type="fact", confidence="high")
+
+    with use_registry({}):
+        register_base_archivist(config)
+        assert push_knowledge_to_archivist(config) == 1
+        store(config.db_path, "a genuinely different fact", type="fact", confidence="high")
+        assert push_knowledge_to_archivist(config) == 1, "a new fact must reach the lane"
+
+    contents = {json.loads(r[1])["content"] for r in _outbox_rows(config)}
+    assert contents == {"the original wording", "a genuinely different fact"}, contents
+
+
+def test_the_prefilter_hash_is_the_outboxs_own(config, tmp_path):
+    """DRIFT GUARD. The pre-filter must ask the outbox for its dedup key rather
+    than re-deriving it: a second copy of the formula stops matching the moment
+    either side changes, and a silently non-matching filter degrades back to
+    re-enqueuing everything — with no symptom except the clock."""
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.sync.outbox import content_hash_for
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+    store(config.db_path, "a fact to hash", type="fact", confidence="high", tags="x")
+
+    with use_registry({}):
+        register_base_archivist(config)
+        push_knowledge_to_archivist(config)
+
+    rows = _outbox_rows(config)
+    assert len(rows) == 1
+    stored_hash, data_json = rows[0]
+    assert stored_hash == content_hash_for(json.loads(data_json)), (
+        "the stored hash is not what content_hash_for produces — the pre-filter "
+        "will never match and the re-enqueue returns silently"
+    )
+
+
+def test_push_does_not_open_a_connection_per_row(config, tmp_path):
+    """The mechanism, not just the count.
+
+    A pre-filter that skipped rows but still opened a connection each time would
+    pass the count assertions above and fix nothing — the connections WERE the
+    cost (2,306 of them per teardown).
+    """
+    import techne.core.database as db_mod
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+    for i in range(20):
+        store(config.db_path, f"fact {i}", type="fact", confidence="high")
+
+    with use_registry({}):
+        register_base_archivist(config)
+        push_knowledge_to_archivist(config)  # first push: pays the real cost
+
+        calls = {"n": 0}
+        real = db_mod.connect
+
+        def counting(*a, **kw):
+            calls["n"] += 1
+            return real(*a, **kw)
+
+        db_mod.connect = counting
+        try:
+            assert push_knowledge_to_archivist(config) == 0
+        finally:
+            db_mod.connect = real
+
+    # One SELECT for what the lane holds, plus whatever ensure_registered_for
+    # needs. Generous ceiling — the point is that it does NOT scale with 20 rows.
+    assert calls["n"] <= 5, f"a no-op push opened {calls['n']} connections for 20 rows"
+
+
+def test_enqueue_default_hash_is_content_hash_for(config, tmp_path):
+    """The drift guard in the OTHER direction.
+
+    The archivist push passes its hash explicitly, so mutating ``enqueue``'s
+    internal formula does not break it — a mutation sweep found exactly that gap.
+    But every other caller relies on the default, and if the two formulas part
+    company the pre-filter silently stops matching those rows. Pin the default to
+    the shared helper so one definition really is one definition.
+    """
+    from techne.core.database import init_db
+    from techne.core.stores import plain_connect
+    from techne.sync.outbox import content_hash_for, enqueue
+
+    init_db(config.db_path)
+    data = {"content": "z", "type": "fact", "tags": "a", "confidence": "high"}
+    enqueue(config.db_path, "sync:thread_summary", data)  # no content_hash passed
+
+    conn = plain_connect(config.db_path)
+    try:
+        stored = conn.execute(
+            "SELECT content_hash FROM outbox WHERE target = 'sync:thread_summary'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert stored == content_hash_for(data)
+
+
+def test_rows_marked_dead_are_re_enqueued_not_stranded(config, tmp_path):
+    """A `dead` row is PERMANENTLY NOT DELIVERED — the opposite of "already
+    enqueued", and sweeping it into the pre-filter strands it forever.
+
+    The trigger is real, not contrived: `techne outbox prune-orphans` does not
+    call `ensure_registered_for` (unlike `flush-sinks` beside it), so in that
+    fresh process every sink:archivist_knowledge row looks like an orphan and the
+    whole pending backlog is marked dead. Before the pre-filter existed the next
+    teardown re-enqueued them and the archivist recovered; with an unfiltered
+    pre-filter it recovers never, and `INSERT OR IGNORE` cannot help because the
+    filter `continue`s before enqueue is reached.
+
+    Kills the mutation that drops `AND status != 'dead'` — which survived the
+    entire suite when this PR was first submitted. (Prudence, #482 review.)
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.core.stores import plain_connect
+
+    config.standalone = False
+    config.archivist_db_path = str(tmp_path / "shared-archivist.db")
+    init_db(config.db_path)
+    for i in range(3):
+        store(config.db_path, f"fact for the dead-row case {i}", type="fact", confidence="high")
+
+    with use_registry({}):
+        register_base_archivist(config)
+        assert push_knowledge_to_archivist(config) == 3
+
+        # Exactly what prune_orphans does to a lane it cannot see registered.
+        conn = plain_connect(config.db_path)
+        try:
+            conn.execute(
+                "UPDATE outbox SET status = 'dead' WHERE target = ?",
+                (ARCHIVIST_KNOWLEDGE_TARGET,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        recovered = push_knowledge_to_archivist(config)
+
+    assert recovered == 3, (
+        f"dead rows must be re-enqueued so the lane can recover; got {recovered}"
+    )

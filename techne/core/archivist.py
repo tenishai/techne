@@ -217,20 +217,75 @@ def push_knowledge_to_archivist(config) -> int:
        in the Archivist — so both revisions stay live there and recall can surface
        the stale one. v1 is append-only to the team store; propagating supersession
        needs a ledger that maps local ids → archivist rows.
-    2. RE-ENQUEUE COST. It re-enqueues ALL live knowledge each call. The outbox's
-       unique index is PARTIAL (``WHERE status='pending'``), so it only collapses
-       still-pending duplicates — already-synced rows accumulate and each call
-       re-delivers every fact (the handler no-ops on dup, but pays a SELECT per
-       row). The ledger avoids re-enqueuing entirely."""
+    2. STALE-REVISION LEDGER still absent (see 1) — the full fix in techne#223.
+
+    RE-ENQUEUE COST — FIXED (techne#475), and it was not a cost, it was the
+    dominant term in session teardown. This re-enqueued ALL live knowledge on
+    EVERY call, and ``enqueue`` opens, commits and closes its own SQLite
+    connection per row: 760 enqueues, 2,306 connections, **5.15s of a 5.52s
+    teardown — 93%**, against a 5.0s hook budget that then aborted teardown
+    mid-flight (measured on a 380MB store; profile in the issue). The cost scaled
+    with the size of the KNOWLEDGE BASE, not the session, which is why it looked
+    flat against session length and why it would get monotonically worse as
+    memory grows — 116,174 accumulated rows in this lane on the operator's store,
+    from ~772 facts.
+
+    The pre-filter below asks the lane ONCE what it already holds. It is not a
+    substitute for the ledger: it does not fix (1), and a DELETED outbox row makes
+    it re-enqueue (correctly — the row really is gone).
+
+    3. NO BACK CATALOGUE FOR A REPOINTED ARCHIVIST. If `archivist_db_path` is
+       moved or the team store is reset, this now sends nothing: those rows are
+       legitimately `synced`, so the pre-filter skips them and the new store never
+       receives history. The OLD re-enqueue-everything behaviour repopulated it by
+       accident — that accident is worth naming rather than losing silently. A
+       status filter cannot fix this one; it needs #223's reconcile path, which
+       compares against what the SINK holds rather than what we enqueued."""
     if config.standalone:
         return 0
+    from techne.core.database import connect
     from techne.core.knowledge import REDIRECTED_TYPES
     from techne.core.knowledge_export import query_live_knowledge
-    from techne.sync.outbox import enqueue
+    from techne.sync.outbox import content_hash_for, enqueue
 
     ensure_registered_for(config)
+
+    # ONE query for what this lane already holds, instead of N round trips to
+    # rediscover it.
+    #
+    # `status != 'dead'` IS LOAD-BEARING AND WAS MISSING. The schema's vocabulary
+    # is 'pending' | 'synced' | 'dead' (database.py) — there is no 'failed', which
+    # an earlier version of this comment assumed. `dead` means PERMANENTLY NOT
+    # DELIVERED, which is the opposite of "already enqueued" for a pre-filter's
+    # purposes, so sweeping those hashes in here silently drops the row forever.
+    #
+    # Not hypothetical: `techne outbox prune-orphans` does not call
+    # `ensure_registered_for` (unlike `flush-sinks` directly above it in cli.py),
+    # so in that fresh process every sink:archivist_knowledge row looks like an
+    # orphan and the whole pending backlog is marked dead. Measured on a 3-fact
+    # store: BEFORE this pre-filter existed, the next teardown re-enqueued all 3
+    # and the archivist recovered; with the pre-filter and no status clause, it
+    # re-enqueued 0, permanently. `INSERT OR IGNORE` cannot save it — the filter
+    # `continue`s before enqueue is ever reached. (Prudence, #482 review.)
+    #
+    # The general shape, worth carrying to any "stop repeating this work" change:
+    # AN OUTBOX IS A LOG OF ENQUEUES, NOT A RECORD OF WHAT THE SINK HOLDS, and the
+    # redundancy being removed was quietly doubling as a reconcile path.
+    conn = connect(config.db_path)
+    try:
+        already = {
+            row[0]
+            for row in conn.execute(
+                "SELECT content_hash FROM outbox WHERE target = ? AND status != 'dead'",
+                (ARCHIVIST_KNOWLEDGE_TARGET,),
+            )
+        }
+    finally:
+        conn.close()
+
     pushed = 0
     skipped = 0
+    unchanged = 0
     for k in query_live_knowledge(config.db_path):
         # SKIP REDIRECTED TYPES AT THE SOURCE (#450). These live in another store
         # (techne#137 moved patterns to architect.db) and the sink handler rejects
@@ -252,16 +307,22 @@ def push_knowledge_to_archivist(config) -> int:
         if k["type"] in REDIRECTED_TYPES:
             skipped += 1
             continue
-        enqueue(
-            config.db_path,
-            ARCHIVIST_KNOWLEDGE_TARGET,
-            {
-                "content": k["content"],
-                "type": k["type"],
-                "tags": k.get("tags") or "",
-                "confidence": k.get("confidence") or "medium",
-            },
-        )
+        data = {
+            "content": k["content"],
+            "type": k["type"],
+            "tags": k.get("tags") or "",
+            "confidence": k.get("confidence") or "medium",
+        }
+        # Hash computed by the OUTBOX's own helper, never re-derived here — a
+        # second copy of the formula stops matching the moment either side
+        # changes, and a silently non-matching pre-filter degrades to exactly the
+        # behaviour this removed.
+        digest = content_hash_for(data)
+        if digest in already:
+            unchanged += 1
+            continue
+        enqueue(config.db_path, ARCHIVIST_KNOWLEDGE_TARGET, data, content_hash=digest)
+        already.add(digest)
         pushed += 1
     if skipped:
         # debug, not warning: a permanent data condition on installs carrying
