@@ -496,16 +496,37 @@ class TestHealCommand:
 
 
 class TestRegisterMCP:
-    def test_mcp_command_uses_sys_executable(self, fake_home, cfg):
-        # Regression: previously "python", same problem as hooks. Now the VALIDATED
-        # interpreter (techne#458) — a poisoned pin kills the MCP server with -32000
-        # exactly as it kills the hooks (techne#578).
+    def test_mcp_command_routes_through_the_self_healing_launcher(self, fake_home, cfg):
+        """The MCP entry must point at the LAUNCHER, not a raw interpreter path.
+
+        A raw path is a pointer to a FILE rather than to an install, so it goes
+        stale on a reboot clearing a /tmp venv, a worktree cleanup, or a pipx
+        reinstall landing elsewhere — and the failure is silent and split-brain:
+        hooks self-heal and render a green badge while the MCP surface is dead
+        for the whole session (techne#370).
+
+        THE ORIGINAL INTENT OF THIS TEST SURVIVES ONE LEVEL DOWN. It was written
+        for techne#458 — never a bare "python", always the validated interpreter,
+        because a poisoned pin kills the MCP server with -32000 exactly as it
+        kills the hooks (techne#578). The launcher is what bakes that interpreter
+        in now, so this asserts it there rather than dropping the guarantee.
+        """
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_mcp(cfg)
         config = json.loads(claude_code.MCP_CONFIG_PATH.read_text())
         techne_server = config["mcpServers"]["techne"]
-        assert techne_server["command"] == str(hooks_mod._interpreter())
-        assert techne_server["args"] == ["-m", "techne.mcp_server"]
+
+        launcher = hooks_mod._launcher_path()
+        assert techne_server["command"] == "/bin/sh"
+        assert techne_server["args"] == [str(launcher), "-m", "techne.mcp_server"]
+
+        # The techne#458 guarantee, now one level down: the launcher pins the
+        # VALIDATED interpreter, not a bare "python" resolved from PATH.
+        hooks_mod._write_launcher()
+        baked = launcher.read_text()
+        assert str(hooks_mod._interpreter()) in baked, baked
+        assert "\nPY=python\n" not in baked, "a bare interpreter would reintroduce techne#458"
 
 
 class TestConfigSafety:
