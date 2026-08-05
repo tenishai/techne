@@ -49,7 +49,15 @@ from techne.config import CLAUDE_CODE
 
 
 class Verdict(str, Enum):
-    """Outcome of a single check, worst-last so ``max()`` finds the headline."""
+    """Outcome of a single check.
+
+    DECLARATION ORDER IS NOT SEVERITY ORDER — ``worst()`` ranks by ``_SEVERITY``
+    below, and UNKNOWN deliberately sits between DORMANT and STALE rather than
+    last. This docstring previously said "worst-last so ``max()`` finds the
+    headline", which described the declaration and was read as describing the
+    ranking; the architecture card then repeated it. Two documents agreeing does
+    not make either true. (#469 review 9.)
+    """
 
     LIVE = "live"
     #: Off by configuration. Most default-off flags are correctly off — per
@@ -71,6 +79,15 @@ class Verdict(str, Enum):
 #: Severity order for picking the banner headline. DORMANT sorts with LIVE
 #: because deliberate dormancy is a healthy state; it is surfaced in the full
 #: table, not escalated to the banner.
+#:
+#: UNKNOWN MUST OUTRANK LIVE/DORMANT — this is the module's founding invariant
+#: expressed as a number, and it was held by an untested constant. Set it to 0
+#: and a probe that RAISED ties with a healthy rail: the banner renders ✅ and
+#: the failure is never named, which is precisely the "confirming the absence of
+#: evidence" bug this subsystem exists to remove. It sits BELOW stale/
+#: unobservable/broken on purpose: a check that could not run is less
+#: informative than one that ran and reported trouble, so a real finding should
+#: win the headline over a broken probe. Pinned in test_checks.py. (#469 review 9.)
 _SEVERITY = {
     Verdict.LIVE: 0,
     Verdict.DORMANT: 0,

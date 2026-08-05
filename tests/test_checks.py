@@ -600,6 +600,44 @@ class TestDoctorOutputHonesty:
         )
 
 
+class TestSeverityInvariants:
+    """The founding invariant, previously held by an untested constant.
+
+    Both `_SEVERITY[UNKNOWN]` and `CheckResult.ok` were unpinned in both
+    directions: setting the first to 0 makes a RAISED probe tie with a healthy
+    rail (banner renders ✅, failure never named), and admitting STALE to the
+    second makes `techne doctor` print "All checks passed" and exit 0 on a cold
+    rail. (#469 review 9.)
+    """
+
+    def test_a_probe_that_could_not_run_outranks_a_healthy_one(self):
+        from techne.core.checks import Verdict, worst
+
+        def _r(v):
+            from techne.core.checks import CheckResult, Kind
+
+            return CheckResult(name="x", subsystem="s", kind=Kind.TEMPORAL, verdict=v, detail="")
+
+        assert worst([_r(Verdict.LIVE), _r(Verdict.UNKNOWN)]) is Verdict.UNKNOWN
+        assert worst([_r(Verdict.DORMANT), _r(Verdict.UNKNOWN)]) is Verdict.UNKNOWN
+        # ...and loses to a real finding, which is more informative than a
+        # broken probe. This direction is deliberate, not incidental.
+        assert worst([_r(Verdict.UNKNOWN), _r(Verdict.STALE)]) is Verdict.STALE
+        assert worst([_r(Verdict.UNKNOWN), _r(Verdict.BROKEN)]) is Verdict.BROKEN
+
+    def test_only_live_and_dormant_are_ok(self):
+        from techne.core.checks import CheckResult, Kind, Verdict
+
+        def _ok(v):
+            return CheckResult(
+                name="x", subsystem="s", kind=Kind.TEMPORAL, verdict=v, detail=""
+            ).ok
+
+        assert _ok(Verdict.LIVE) and _ok(Verdict.DORMANT)
+        for bad in (Verdict.STALE, Verdict.UNOBSERVABLE, Verdict.BROKEN, Verdict.UNKNOWN):
+            assert not _ok(bad), bad
+
+
 class TestInitRemedy:
     """One builder for the `techne init` advice, because the same defect — a
     remedy that is precise, confident and wrong — appeared at three sites in one

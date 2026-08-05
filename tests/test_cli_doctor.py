@@ -161,11 +161,17 @@ def test_doctor_reports_but_does_not_count_drift_when_not_installed(cli_db):
     """
     _write_settings("{}")  # present, but no launcher => not installed
 
+    cli_db.posture.mode = "spool-primary"
+
     result = CliRunner().invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "Hook registration drift" in result.output
     assert "not counted" in result.output
     assert "hook registration issue(s)" not in result.output
+    # Even the INSTALL hint goes through init_remedy: a bare `techne init`
+    # re-resolves --posture from `auto` and saves it, which is the same silent
+    # demotion fixed at three other sites. (#469 review 9.)
+    assert "--posture spool-primary" in result.output
 
 
 def test_doctor_counts_drift_when_settings_json_is_missing_but_hooks_were_installed(cli_db):

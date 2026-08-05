@@ -311,9 +311,14 @@ def _render_liveness(config) -> tuple[int, int]:
                     click.echo(f"  remedy: {remedy}")
             drift_failures = len(drift)
         else:
+            # THE LAST BARE `techne init` ON THIS SURFACE. It re-resolves
+            # --posture from `auto` and SAVES the result, which is the silent
+            # demotion this PR has now fixed at three other sites; an install
+            # instruction is not exempt from it. (#469 review 9.)
+            install = init_remedy(config) or "techne init"
             click.echo(
                 f"  (not counted — techne hooks are not installed here "
-                f"(no {launcher_name}); run `techne init` to install)"
+                f"(no {launcher_name}); run `{install}` to install)"
             )
 
     return failing, drift_failures

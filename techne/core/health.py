@@ -307,22 +307,27 @@ def format_banner(health: dict) -> str:
         checks_error = health.get("checks_error")
         if checks_error:
             lines.append(f"> ⚠️ liveness check FAILED: {checks_error} — `techne doctor`")
-            return "\n".join(lines)
-        all_bad = [
-            c
-            for c in (health.get("checks") or [])
-            if c.get("verdict") not in ("live", "dormant")
-        ]
-        # Name only the subsystems matching the HEADLINE verdict. Listing a
-        # STALE rail under an "UNOBSERVABLE:" label mislabels it, and a banner
-        # that misreports its own findings is worse than one that says less.
-        headline = [c for c in all_bad if c.get("verdict") == worst_verdict]
-        named = ", ".join(c["name"] for c in headline[:3])
-        extra = len(headline) - 3
-        others = len(all_bad) - len(headline)
-        tail = f" (+{extra} more)" if extra > 0 else ""
-        tail += f", {others} other" if others else ""
-        lines.append(f"> ⚠️ {worst_verdict.upper()}: {named}{tail} — `techne doctor`")
+            # `else`, not an early return: this block happens to be last today,
+            # so a return loses nothing — but it would silently drop any line
+            # appended below it later, on the one path where the operator most
+            # needs the full banner. (#469 review 9.)
+        else:
+            all_bad = [
+                c
+                for c in (health.get("checks") or [])
+                if c.get("verdict") not in ("live", "dormant")
+            ]
+            # Name only the subsystems matching the HEADLINE verdict. Listing a
+            # STALE rail under an "UNOBSERVABLE:" label mislabels it, and a
+            # banner that misreports its own findings is worse than one that
+            # says less.
+            headline = [c for c in all_bad if c.get("verdict") == worst_verdict]
+            named = ", ".join(c["name"] for c in headline[:3])
+            extra = len(headline) - 3
+            others = len(all_bad) - len(headline)
+            tail = f" (+{extra} more)" if extra > 0 else ""
+            tail += f", {others} other" if others else ""
+            lines.append(f"> ⚠️ {worst_verdict.upper()}: {named}{tail} — `techne doctor`")
 
     return "\n".join(lines)
 
