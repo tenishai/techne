@@ -212,7 +212,16 @@ def parse_response(raw: str, max_items: int) -> ParsedResponse:
         return ParsedResponse([], failure=reason, dropped=0)
 
     out: list[Candidate] = []
+    # THE FOURTH PLACE A CANDIDATE VANISHES, and the last one where the number
+    # lost was unknowable. `dropped` is counted against `considered`, i.e. AFTER
+    # this slice — so eight candidates against a cap of five reported
+    # proposed=5 with every counter at zero. Unlike the other three this is not
+    # byte-identical to honest-empty, so the operator is not actively misled; but
+    # "we discarded three things you produced and cannot tell you how many" is
+    # still the wrong answer, and the cap is config (max_candidates_per_thread),
+    # so it is tuned blind without this. (Prudence, #483 review.)
     considered = items[:max_items]
+    truncated = max(0, len(items) - len(considered))
     for item in considered:
         if not isinstance(item, dict):
             continue
@@ -242,7 +251,9 @@ def parse_response(raw: str, max_items: int) -> ParsedResponse:
                 confidence=confidence,
             )
         )
-    return ParsedResponse(out, failure=None, dropped=len(considered) - len(out))
+    return ParsedResponse(
+        out, failure=None, dropped=(len(considered) - len(out)) + truncated
+    )
 
 
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}

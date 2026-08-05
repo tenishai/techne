@@ -1043,13 +1043,20 @@ def test_every_aggregator_survives_a_new_counts_key(tmp_path):
     from techne.config import Config
     from techne.core.reflect import reflect_on_session
 
-    config = _mk_config(tmp_path, enabled=False, write_to="candidates")
+    # enabled=True IS LOAD-BEARING. With enabled=False, reflect_on_session returns
+    # at its guard BEFORE the `result[key] += val` loop this test is named for —
+    # so leg 1 was hollow: popping a key from the session seed PASSED it while
+    # failing nine other tests. Caught by Prudence mutating exactly that.
+    config = _mk_config(tmp_path, enabled=True, write_to="candidates")
     session_id, obs = _mk_session_with_obs(config, 5)
     thread = Thread(thread_num=1, label="a", summary="a", observation_indices=list(range(5)))
     _save_thread_row(config, session_id, thread)
 
-    # 1. the session aggregator
-    reflect_on_session(config, session_id, [thread], obs)
+    # 1. the session aggregator — driven with a stub model so the loop is reached
+    #    without an LLM call.
+    reflect_on_session(
+        config, session_id, [thread], obs, generate_fn=lambda *a, **kw: _candidate_array()
+    )
 
     # 2. the CLI aggregator — the one nothing exercised. A NON-EMPTY response is
     #    required: the crash was on the `totals[k] += v` loop, which an empty
@@ -1132,3 +1139,22 @@ def test_low_confidence_candidates_are_not_silently_dropped(tmp_path):
     assert counts["candidates_below_confidence"] == 2, counts
     assert counts["candidates_proposed"] == 0
     assert counts["parse_failures"] == 0, "the array parsed and the items were valid"
+
+
+def test_candidates_beyond_max_items_are_counted_as_dropped(tmp_path):
+    """The fourth silent drop: `max_items` truncation.
+
+    `dropped` was computed after the slice, so a model producing more candidates
+    than `max_candidates_per_thread` had the excess vanish with every counter at
+    zero. Not byte-identical to honest-empty — the operator is not misled — but
+    the cap is CONFIG, and tuning it blind is the thing this issue is about.
+    """
+    from techne.core.reflect import parse_response
+
+    items = ", ".join(
+        f'{{"scope": "knowledge", "type": "fact", "content": "fact {i}"}}' for i in range(8)
+    )
+    r = parse_response(f"[{items}]", max_items=5)
+    assert len(r.candidates) == 5
+    assert r.failure is None
+    assert r.dropped == 3, f"the 3 truncated candidates must be counted, got {r.dropped}"
