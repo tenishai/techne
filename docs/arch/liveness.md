@@ -1,13 +1,14 @@
 ---
 card: arch-card:techne-liveness
 updated: 2026-08-05
-anchor: techne/core/checks.py sha=53bf5a76be2153137e197b5e16857c9261333048
+anchor: techne/core/checks.py sha=0edda95f9c7936a63ba2f204a3614b03607c92fd
 ---
 # liveness — subsystem health checks (techne#468/#469)
 
 WHAT: answers "did each rail actually RUN?", as distinct from "is the store internally consistent?" (storage checks) and "is it even WIRED?" (hook-registration drift). Born from 2026-08-02/03, when six built-but-never-wired rails were found cold — `reflect` for four weeks — under a `techne doctor` printing "All checks passed", because doctor only looked at duplicate rows and reclaimable space.
 SEAM: a registry (`register_check` / `registered_checks` / `run_checks`) of `CheckFn(config) -> CheckResult | list[CheckResult]`, plus the marker-writing side in `techne/hooks/_liveness.py` (`record_hook_run`, one `hook:<name>:last_run` / `:last_error` row per hook in `extension_state`).
 VERDICTS (`Verdict`): live · dormant · stale · unobservable · broken · unknown. DECLARATION ORDER IS NOT SEVERITY ORDER — `worst()` ranks by `_SEVERITY`, where DORMANT TIES WITH LIVE (deliberate dormancy is healthy) and UNKNOWN sits BETWEEN them and STALE, not last: a probe that could not run must outrank a healthy rail, but loses the headline to a rail that ran and reported trouble. `CheckResult.ok` is true for live and dormant ONLY.
+CHECKS: per-hook liveness, the self-maintenance rails, outbox lanes, vector coverage, and `mcp:registration` — the last of which asks a different question from the rest. The MCP server is launched by the HOST, so there is no marker to read; what is checkable is whether the RECORDED launch command still resolves (techne#370). Kind.FRESHNESS: a source moved and its mirror did not.
 CONSUMERS: `techne doctor` (`cli.py:_render_liveness`) and the SessionStart banner (`core/health.py` — `checks_worst` / `checks_summary` / `checks_error`). NOT `techne status`, which renders hook-registration DRIFT only and no liveness at all.
 
 INVARIANTS — the ones a diff will not show you:
