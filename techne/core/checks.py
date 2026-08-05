@@ -33,6 +33,13 @@ TWO CONSTRAINTS THIS MODULE HOLDS TO:
    queries against tables that already exist — never a probe that executes the
    rail it is checking.
 
+   A check that genuinely cannot be cheap declares it with :func:`expensive` and
+   is skipped when ``run_checks(cheap_only=True)``. That marker exists because
+   the constraint was previously held by nothing but this paragraph: #487 added a
+   check spawning six git subprocesses, and its docstring asserted twice that it
+   stayed out of the banner while ``collect_health`` ran the whole registry
+   unfiltered. Prose cannot enforce a budget; the parameter can.
+
 A check NEVER raises: a probe that fails reports :attr:`Verdict.UNKNOWN` with the
 error as evidence. Silently dropping a failed check would reproduce the exact bug
 this module exists to catch.
@@ -167,15 +174,43 @@ def registered_checks() -> list[CheckFn]:
     return list(_REGISTRY)
 
 
-def run_checks(config) -> list[CheckResult]:
+def expensive(fn: CheckFn) -> CheckFn:
+    """Mark a check as too costly for the SessionStart hot path.
+
+    Applied UNDER ``@register_check`` so the two read together — the check is
+    registered, and it declares its own cost. Marked checks still run under
+    ``techne doctor``, which is an explicit invocation that can afford them.
+
+    The bar is deliberately high: subprocesses, filesystem walks, or network. A
+    slightly slower SQL query is not expensive, and marking one to be safe would
+    quietly empty the banner of the checks it exists to show.
+    """
+    fn.expensive = True  # type: ignore[attr-defined]
+    return fn
+
+
+def run_checks(config, *, cheap_only: bool = False) -> list[CheckResult]:
     """Run every registered check. Never raises.
 
     A check that raises becomes an UNKNOWN result carrying the exception — never
     an absent one. An absent check reads as "nothing wrong", which is the failure
     mode this whole module exists to prevent.
+
+    ``cheap_only=True`` skips checks marked :func:`expensive`, for the
+    SessionStart path. THIS IS THE ONE PLACE THE MODULE DELIBERATELY OMITS A
+    CHECK, so it is worth naming the tension: an absent check does read as
+    "nothing wrong", and that is the very bug this module exists to catch. It is
+    acceptable here only because the omission is *bounded and known* — the banner
+    is a summary surface, ``techne doctor`` remains the complete one, and the
+    alternative is worse. An expensive check in the hot path can blow the hook's
+    wall-clock budget, and that path is fail-open: one timeout drops the ENTIRE
+    banner, silently, taking every cheap check with it. Omitting one check beats
+    a tail risk of omitting all of them without saying so.
     """
     results: list[CheckResult] = []
     for fn in _REGISTRY:
+        if cheap_only and getattr(fn, "expensive", False):
+            continue
         try:
             out = fn(config)
         except Exception as exc:  # noqa: BLE001 — a failed probe is a result
@@ -629,6 +664,255 @@ def check_mcp_registration(config) -> CheckResult | None:
         detail=problem,
         evidence="mcpServers.techne in the claude MCP config",
         remedy=init_remedy(config),
+    )
+
+
+@register_check
+@expensive
+def check_runtime_revision(config) -> CheckResult | None:
+    """WHAT CODE IS ACTUALLY RUNNING? (techne#473)
+
+    Every other check here asks whether a subsystem ran. This one asks which
+    REVISION did the running, because a merged fix is not a deployed fix and
+    nothing said so.
+
+    Demonstrated live on 2026-08-03: PR #472 fixed a production crash and merged
+    to main, while the interpreter every hook on the machine runs was an EDITABLE
+    install whose `.pth` was a bare path to a shared working tree — a pointer to a
+    CHECKOUT, not to a revision. That checkout sat on a peer session's branch
+    predating the merge, so the machine kept running the bug. Merging changed
+    nothing about what executed, and no surface reported it.
+
+    The structural half is done (the runtime is now a dedicated clone that only
+    tracks main), but it is still a git checkout somebody can leave behind, so
+    this is the half that makes it legible.
+
+    NO NETWORK, DELIBERATELY. The comparison is against the LOCAL `origin/main`
+    ref, so it is only as fresh as the last fetch — which EVERY detail says
+    outright rather than implying a live comparison. Fetching from a health check
+    would make `techne doctor` fail on a plane and turn a diagnostic into an
+    action.
+
+    Marked `@expensive`, so `collect_health` (the SessionStart banner) skips it
+    and only `doctor` pays. An earlier revision of this docstring ASSERTED that
+    exemption while nothing implemented it: `collect_health` ran the whole
+    registry, so this check's six git subprocesses — ceiling 6 x timeout=5 = 30s
+    against a 5s hook budget, on a fail-open path that drops the whole banner on
+    overrun — ran in the hot path the comment said they avoided. Caught in
+    #487 review. The marker is now the mechanism; this paragraph only describes it.
+    """
+    import subprocess
+    from pathlib import Path
+
+    import techne
+
+    runtime = Path(techne.__file__).resolve().parent.parent
+
+    def _git(*args) -> str | None:
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(runtime), *args],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    head = _git("rev-parse", "--short", "HEAD")
+    if head is None:
+        # A real (non-editable) install has no revision to compare, and that is a
+        # legitimate, healthy state — not something to report red.
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=f"not a git checkout — packaged install at {runtime}",
+            evidence=f"git rev-parse in {runtime} did not resolve",
+        )
+
+    upstream = _git("rev-parse", "--short", "origin/main")
+    if upstream is None:
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNKNOWN,
+            detail=f"running {head}, but no local origin/main to compare against",
+            evidence=f"git rev-parse origin/main failed in {runtime}",
+        )
+
+    # A WORKING CHECKOUT IS NOT A DEPLOYMENT, and conflating them makes this
+    # check a red nobody can clear. CI checks out the PR branch and every dev
+    # worktree sits on a feature branch — both are legitimately behind main, and
+    # reporting that as "a merged fix is not deployed" is noise on the exact
+    # surface that must stay trustworthy. Caught by CI going red on this PR's own
+    # branch; it passed locally only because my branch happened to be AHEAD of
+    # main, which is luck, not coverage.
+    #
+    # The question this check exists to answer is about the DEPLOYED runtime, and
+    # a deployment tracks main. Anything else reports what it is and stays quiet.
+    # ONLY `main` COUNTS AS A DEPLOYMENT. I first allowed a detached HEAD too,
+    # reasoning "detached at a released tag" — but CI checks out detached as well,
+    # so that exemption would have kept the false red on every CI run while
+    # looking like it fixed it. The deployment this check exists for
+    # (~/.techne/runtime) tracks the main branch, so gate on exactly that; a
+    # detached tag-deploy loses the staleness signal, which is the cheaper miss.
+    def _last_fetch() -> str | None:
+        """When the local origin/main ref last MOVED — the real freshness bound.
+
+        NOT the tip commit's committer date, which is what this reported before
+        #487 review: a backdated commit fetched seconds earlier rendered "last
+        known origin/main commit 2 years, 7 months ago", describing the comparison
+        as ancient when it was current. The ref's own reflog answers the question
+        actually being asked. It is empty in a clone that has never re-fetched
+        (verified), hence the None the callers fall back from.
+        """
+        sel = _git("log", "-g", "-1", "--date=relative", "--format=%gd", "origin/main")
+        if sel and "@{" in sel and sel.endswith("}"):
+            return sel.split("@{", 1)[1][:-1]
+        return None
+
+    # THE FRESHNESS CAVEAT GOES ON EVERY BRANCH, not just STALE. It was on STALE
+    # alone, which is backwards: "level with origin/main" is the FALSE-GREEN case,
+    # the one where a ref last fetched three weeks ago reads as up to date. The
+    # branch that most needs the caveat was the branch that omitted it.
+    fetch_age = _last_fetch()
+    if fetch_age:
+        freshness = f"compared against the local ref, last fetched {fetch_age}"
+    else:
+        tip = _git("log", "-1", "--format=%cr", "origin/main") or "unknown"
+        freshness = (
+            "compared against the local ref; last fetch time unknown "
+            f"(origin/main tip committed {tip})"
+        )
+
+    # One call for both directions: "<behind>\t<ahead>". Needed on the working-
+    # checkout path too — see the DORMANT block below.
+    counts = _git("rev-list", "--left-right", "--count", "origin/main...HEAD")
+    parts = (counts or "").split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        # A PROBE THAT FAILED IS NOT A HEALTHY RUNTIME. Previously this fell
+        # through to LIVE "level with the local origin/main" — the check asserting
+        # exactly what it had just failed to determine, thirty lines below the
+        # `upstream is None` branch that handles the identical situation
+        # correctly. Reached in practice via the 5s timeout (#487 review).
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNKNOWN,
+            detail=f"running {head}, but could not count commits against origin/main",
+            evidence=f"git rev-list --left-right --count origin/main...HEAD = {counts!r}",
+        )
+    behind, ahead = int(parts[0]), int(parts[1])
+
+    # `_git` returns None on failure and "" on a clean tree — two different
+    # answers that both read as falsy. Collapsing them made a FAILED `git status`
+    # indistinguishable from a clean one, i.e. the same don't-vouch-for-what-you-
+    # cannot-see shape as the rev-list branch above (#487 review round 2, nit 1).
+    # Not fatal to the verdict — how far behind you are is the headline and it is
+    # already known here — so this degrades the suffix rather than the result.
+    dirty = _git("status", "--porcelain")
+    if dirty is None:
+        dirty_suffix = " — LOCAL EDITS UNKNOWN (git status failed)"
+    else:
+        dirty_suffix = " — WORKING TREE DIRTY" if dirty else ""
+
+    # A WORKING CHECKOUT IS NOT A DEPLOYMENT, and conflating them makes this
+    # check a red nobody can clear. CI checks out the PR branch and every dev
+    # worktree sits on a feature branch — both are legitimately behind main, and
+    # reporting that as "a merged fix is not deployed" is noise on the exact
+    # surface that must stay trustworthy. Caught by CI going red on this PR's own
+    # branch; it passed locally only because my branch happened to be AHEAD of
+    # main, which is luck, not coverage.
+    #
+    # The question this check exists to answer is about the DEPLOYED runtime, and
+    # a deployment tracks main. Anything else reports what it is and stays quiet.
+    # ONLY `main` COUNTS AS A DEPLOYMENT. I first allowed a detached HEAD too,
+    # reasoning "detached at a released tag" — but CI checks out detached as well,
+    # so that exemption would have kept the false red on every CI run while
+    # looking like it fixed it. The deployment this check exists for
+    # (~/.techne/runtime) tracks the main branch, so gate on exactly that; a
+    # detached tag-deploy loses the staleness signal, which is the cheaper miss.
+    #
+    # BUT THE VERDICT STAYING QUIET DOES NOT LICENSE THE DETAIL SAYING NOTHING.
+    # This DORMANT branch IS the #473 incident state — an editable install
+    # pointing at a shared tree parked on a peer's branch, behind the merge — and
+    # it reported green with no distance and no remedy, rendering identically to a
+    # healthy runtime. That is the #486 shape (an un-healed thing indistinguishable
+    # from a healed one) inside the check written to make #473 legible. The fix is
+    # NOT a red that CI can never clear: keep DORMANT and `ok`, and put the number
+    # in front of the operator reading `doctor`. (#487 review finding 2.)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch is None:
+        # Same rule again: without the branch this cannot tell a deployment from
+        # a working checkout, so it must not assert either. It previously rendered
+        # the failure into the sentence — "running 9494351 on None — a working
+        # checkout" — which at least looked malformed rather than authoritative,
+        # but "looks obviously broken" is not the standard this module holds.
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNKNOWN,
+            detail=f"running {head}, but could not determine which branch is checked out",
+            evidence=f"git rev-parse --abbrev-ref HEAD failed in {runtime}",
+        )
+    if branch != "main":
+        where = (
+            f"on {branch!r}" if branch != "HEAD" else "at a detached HEAD"
+        )
+        if behind:
+            distance = f"{behind} commit(s) behind origin/main ({upstream})"
+        else:
+            distance = f"level with origin/main ({upstream})"
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=(
+                f"running {head} {where} — a working checkout, not a deployment; "
+                f"{distance}{dirty_suffix}. {freshness}"
+            ),
+            evidence=(
+                f"HEAD is on {branch!r} in {runtime}; "
+                f"behind={behind} ahead={ahead} vs origin/main"
+            ),
+        )
+
+    if behind:
+        return CheckResult(
+            name="runtime:revision",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.STALE,
+            detail=(
+                f"running {head}, {behind} commit(s) BEHIND origin/main ({upstream}) — "
+                f"a merged fix is not deployed{dirty_suffix}. {freshness}"
+            ),
+            evidence=f"git rev-list behind={behind} vs origin/main in {runtime}",
+            remedy=f"git -C {runtime} pull",
+        )
+
+    # Ahead-of-main is still LIVE — nothing is undeployed — but on a deployment a
+    # commit nobody pushed is worth naming rather than papering over as "level
+    # with". It is also the state that let this PR pass locally while CI went red.
+    position = (
+        f"{ahead} commit(s) AHEAD of origin/main ({upstream}) — unpushed local commits"
+        if ahead
+        else f"level with the local origin/main ({upstream})"
+    )
+    return CheckResult(
+        name="runtime:revision",
+        subsystem="runtime",
+        kind=Kind.FRESHNESS,
+        verdict=Verdict.LIVE,
+        detail=f"running {head}, {position}{dirty_suffix}. {freshness}",
+        evidence=f"HEAD={head} origin/main={upstream} behind=0 ahead={ahead} in {runtime}",
     )
 
 

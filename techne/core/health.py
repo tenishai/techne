@@ -164,7 +164,11 @@ def collect_health(config: Config) -> dict:
     try:
         from techne.core.checks import run_checks, summarize, worst
 
-        results = run_checks(config)
+        # cheap_only: this runs inside the SessionStart hook under
+        # `hooks.timeout_s`, and that path is fail-open — one overrun drops the
+        # WHOLE banner, silently. Checks marked @expensive (subprocesses, walks,
+        # network) are left to `techne doctor`, which is explicitly invoked.
+        results = run_checks(config, cheap_only=True)
         health["checks"] = [
             {
                 "name": r.name,
