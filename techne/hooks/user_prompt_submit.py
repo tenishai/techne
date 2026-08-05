@@ -50,6 +50,31 @@ import sys
 # docstring). Accept known candidates in priority order.
 PROMPT_KEYS = ("prompt", "user_prompt", "text")
 
+#: Liveness key — must match the entry in ``checks._HOOK_EXPECTATIONS``, since
+#: that is what turns a written marker into a reported verdict (techne#479).
+HOOK_NAME = "user_prompt_submit"
+
+
+def _record(record_hook_run, config, degraded: str | None, *, outcome: str, detail: str = ""):
+    """Write the liveness marker, folding in a degraded recall if one happened.
+
+    A DEGRADED RECALL MUST NOT READ AS A CLEAN RUN. The recall block is caught
+    and swallowed by design — the seed block should still emit when search dies —
+    so without this, a rail whose every search raises would keep writing
+    ``outcome=ok`` forever and report LIVE. That is the shape of the bug this
+    module exists to surface, one level down. When recall degraded, the run is
+    recorded as failed and carries the exception, whatever else succeeded.
+    """
+    if degraded is not None:
+        record_hook_run(
+            config.db_path,
+            HOOK_NAME,
+            outcome="failed",
+            error={"stage": "recall", "msg": degraded},
+        )
+        return
+    record_hook_run(config.db_path, HOOK_NAME, outcome=outcome, detail=detail or None)
+
 
 # Per-turn SEED nudge (techne#277). Static text — rides the already-warm
 # context, costs no DB query, and the model self-gates (stores only a genuine
@@ -88,9 +113,18 @@ def _build_context(rows: list[dict]) -> str:
 
 
 def main() -> None:
-    # ------------------------------------------------------------------
-    # Parse stdin. Malformed → no-op.
-    # ------------------------------------------------------------------
+    # LIVENESS (techne#479). This hook hosts per_turn_recall — half the founding
+    # incident techne#468 cites, and one of the two rails techne is FOR. Until
+    # now it reported nothing at all, so a dead retrieval rail and an idle
+    # operator produced identical evidence.
+    #
+    # NOTHING IS RECORDED BEFORE THE CONFIG GATE, deliberately. Both flags
+    # default OFF, this fires on EVERY prompt, and a marker write on a rail the
+    # operator has not enabled would be a per-turn write for no signal.
+    # `check_hooks` reads `_HOOK_CONFIG_GATE` FIRST and reports DORMANT from the
+    # config alone, so the disabled case is already answerable without a marker.
+    from techne.hooks._liveness import record_hook_run, resolve_db_path
+
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError:
@@ -121,13 +155,27 @@ def main() -> None:
         config = Config.load()
     except Exception as e:  # noqa: BLE001
         print(f"techne: config load failed, skipping per-turn recall: {e}", file=sys.stderr)
+        # Recorded even though the gate is unknown here: a config that cannot be
+        # read is a real failure, and it is precisely the state where every other
+        # signal about this rail is unavailable.
+        db = resolve_db_path()
+        if db:
+            record_hook_run(
+                db,
+                HOOK_NAME,
+                outcome="failed",
+                error={"stage": "config_load", "msg": str(e)[:200]},
+            )
         sys.exit(0)
 
     # Both per-turn injections are opt-in (default OFF). Neither on → no-op.
+    # No marker: see the note at the top of main().
     if not (config.hooks.per_turn_recall or config.hooks.per_turn_seed):
         sys.exit(0)
 
     blocks: list[str] = []
+    degraded: str | None = None
+    rows: list = []
 
     # ------------------------------------------------------------------
     # Recall block (techne#109) — durable facts relevant to this prompt. Scope
@@ -168,6 +216,7 @@ def main() -> None:
                 )
         except Exception as e:  # noqa: BLE001  — catches HookTimeout too
             print(f"techne: per-turn recall degraded: {e}", file=sys.stderr)
+            degraded = str(e)[:200]
 
     # ------------------------------------------------------------------
     # Seed block (techne#277) — static nudge to store a durable if one emerged.
@@ -177,6 +226,10 @@ def main() -> None:
         blocks.append(_SEED_NUDGE)
 
     if not blocks:
+        # "INJECTED NOTHING" IS A LEGAL OUTCOME, not a failure (#414) — a recall
+        # that fired and matched nothing is a fact worth recording, and it is the
+        # only thing that distinguishes a working-but-quiet rail from a dead one.
+        _record(record_hook_run, config, degraded, outcome="noop:nothing-to-inject")
         sys.exit(0)
 
     # ------------------------------------------------------------------
@@ -193,8 +246,15 @@ def main() -> None:
                 }
             )
         )
+        _record(record_hook_run, config, degraded, outcome="ok", detail=f"{len(rows)} rows")
     except Exception as e:  # noqa: BLE001
         print(f"techne: per-turn hook emit failed: {e}", file=sys.stderr)
+        record_hook_run(
+            config.db_path,
+            HOOK_NAME,
+            outcome="failed",
+            error={"stage": "emit", "msg": str(e)[:200]},
+        )
 
     sys.exit(0)
 

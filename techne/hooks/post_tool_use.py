@@ -20,6 +20,10 @@ from techne.config import Config
 
 # Throttle window: skip a due reminder whose last_surfaced_at is within this many
 # seconds. ~3h keeps the signal fresh without repeating on every tool call. (#207)
+#: Liveness key — must match the entry in ``checks._HOOK_EXPECTATIONS``, since
+#: that is what turns a written marker into a reported verdict (techne#479).
+HOOK_NAME = "post_tool_use"
+
 REMINDER_THROTTLE_SECONDS = 3 * 60 * 60
 
 # Per-session surfaced-state keys older than this are pruned to keep extension_state
@@ -650,10 +654,30 @@ def _inject_coord_messages(config: Config, session_id: str) -> str | None:
 
 
 def main():
+    # LIVENESS (techne#479). THIS IS THE CAPTURE RAIL — techne is functionally
+    # dead without it, and until now it reported nothing, so a rail that stopped
+    # capturing looked exactly like an operator who stopped working. Deleting a
+    # month of observations produced byte-identical verdicts (#469 review 3).
+    #
+    # Hot path: this fires on EVERY tool call, so the marker is one indexed upsert
+    # and nothing more, and it is skipped entirely when the rail is disabled by
+    # config (`check_hooks` reads `_HOOK_CONFIG_GATE` first and reports DORMANT
+    # from the flag alone, so a disabled rail is answerable without a per-call
+    # write). `record_hook_run` is best-effort by contract and cannot raise here.
+    from techne.hooks._liveness import record_hook_run, resolve_db_path
+
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
         print(f"techne: post_tool_use received invalid JSON on stdin — capture skipped: {exc}", file=sys.stderr)
+        db = resolve_db_path()
+        if db:
+            record_hook_run(
+                db,
+                HOOK_NAME,
+                outcome="failed",
+                error={"stage": "stdin", "msg": str(exc)[:200]},
+            )
         sys.exit(0)
 
     session_id = data.get("session_id", "")
@@ -662,6 +686,10 @@ def main():
     tool_output = data.get("tool_response", "")
 
     if not session_id or not tool_name:
+        # Not a failure — nothing identifiable to attribute an observation to.
+        db = resolve_db_path()
+        if db:
+            record_hook_run(db, HOOK_NAME, outcome="noop:no-session-or-tool")
         sys.exit(0)
 
     from techne.hooks._timeout import bounded_hook
@@ -673,15 +701,41 @@ def main():
         config = Config.load()
     except Exception as e:
         print(f"techne: config load failed, skipping capture: {e}", file=sys.stderr)
+        db = resolve_db_path()
+        if db:
+            record_hook_run(
+                db,
+                HOOK_NAME,
+                outcome="failed",
+                error={"stage": "config_load", "msg": str(e)[:200]},
+            )
         sys.exit(0)
 
     try:
         with bounded_hook(config.hooks.timeout_s, label="post_tool_use:capture"):
             from techne.lifecycle import capture_tool_use
 
-            capture_tool_use(config, session_id, tool_name, tool_input, tool_output)
+            captured = capture_tool_use(config, session_id, tool_name, tool_input, tool_output)
+        if config.hooks.post_tool_use:
+            # `captured is False` with the rail ENABLED means should_capture()
+            # filtered this tool — a real outcome, not a failure, and the one that
+            # makes a quiet capture rail legible: "ran, chose not to store this".
+            record_hook_run(
+                config.db_path,
+                HOOK_NAME,
+                outcome="ok" if captured else "noop:filtered",
+                detail=tool_name,
+            )
     except Exception as e:
+        # Catches HookTimeout too: a capture that ran out of budget is a DROPPED
+        # observation, which must read BROKEN rather than vanish.
         print(f"techne: capture failed: {e}", file=sys.stderr)
+        record_hook_run(
+            config.db_path,
+            HOOK_NAME,
+            outcome="failed",
+            error={"stage": "capture", "msg": str(e)[:200]},
+        )
         sys.exit(0)  # don't fail the tool call
 
     # Mid-session codex freshness (techne#301) — best-effort, opt-in. Runs BEFORE

@@ -141,10 +141,10 @@ class TestBuiltinChecks:
         """
         from techne.core.database import connect
 
-        # Enable the config-gated rail too, so this covers the whole cohort —
+        # Enable every config-gated rail, so this covers the whole cohort —
         # a gated-off hook is correctly DORMANT and would otherwise mask the
         # assertion (see TestConfigGateBeatsMarker).
-        config.hooks.codex_grep_assist = True
+        _enable_all_config_gated_hooks(config)
 
         conn = connect(config.db_path)
         try:
@@ -158,6 +158,7 @@ class TestBuiltinChecks:
 
         results = run_checks(config)
         hooks = [r for r in results if r.name.startswith("hook:")]
+        _assert_no_hook_is_gated_off(hooks)
         assert all(r.verdict is Verdict.UNOBSERVABLE for r in hooks)
         assert not any(r.ok for r in hooks)
 
@@ -353,6 +354,37 @@ class TestConfigGateBeatsMarker:
         assert "hooks.codex_grep_assist" in disabled.detail
 
 
+def _enable_all_config_gated_hooks(config):
+    """Turn ON every rail behind a config flag, so a cohort assertion covers all
+    of them. A gated-off hook is correctly DORMANT and would otherwise silently
+    shrink the cohort a test believes it is checking.
+
+    Kept as one helper because the alternative — a flag list inline in each test —
+    drifted the moment techne#479 added two gates: two cohort tests started
+    passing over a smaller set than they claimed. Pair it with
+    ``_assert_no_hook_is_gated_off`` so an unlisted future gate fails loudly here
+    rather than quietly narrowing the assertion.
+    """
+    config.hooks.codex_grep_assist = True
+    config.hooks.post_tool_use = True
+    config.hooks.per_turn_recall = True
+
+
+def _assert_no_hook_is_gated_off(hooks):
+    """Guard for the helper above: every hook check must have been reachable."""
+    from techne.core.checks import Verdict
+
+    gated = [
+        r.name
+        for r in hooks
+        if r.verdict is Verdict.DORMANT and "disabled by config" in r.detail
+    ]
+    assert not gated, (
+        f"these hooks are gated off, so the cohort assertion below does not cover them: {gated}. "
+        "Add their flag to _enable_all_config_gated_hooks."
+    )
+
+
 class TestNoFalseGreens:
     """Regression guards for the #469-review Critical findings.
 
@@ -382,10 +414,11 @@ class TestNoFalseGreens:
         evidence and reported it as confirmation.
         """
         self._age_store(config)
-        config.hooks.codex_grep_assist = True  # else correctly DORMANT by config
+        _enable_all_config_gated_hooks(config)  # else correctly DORMANT by config
 
         hooks = [r for r in run_checks(config) if r.name.startswith("hook:")]
         assert hooks
+        _assert_no_hook_is_gated_off(hooks)
         assert all(r.verdict is Verdict.UNOBSERVABLE for r in hooks), (
             "an old store with no sessions must NOT read as healthy"
         )
@@ -1036,3 +1069,215 @@ class TestMarkerIsStampedAtWriteTime:
         assert row[0] and marker["ts"] >= row[0], (
             f"marker {marker['ts']} predates the session row {row[0]} it registered"
         )
+
+
+class TestCoreRailsAreInstrumented:
+    """techne#479 — the capture and per-turn-recall rails must REPORT.
+
+    They worked for months and said nothing, so a dead rail and an idle operator
+    produced identical evidence. These tests drive each hook's real `main()`
+    rather than calling `record_hook_run` directly: the defect being pinned is
+    "the caller never records", and a test that records on the hook's behalf
+    would pass against exactly the code it is meant to reject.
+    """
+
+    @staticmethod
+    def _run_hook(module, payload, config, monkeypatch):
+        """Drive a hook's main() with a stdin payload, returning its SystemExit."""
+        import io
+        import json as _json
+
+        from techne.config import Config
+
+        monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+        monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(payload)))
+        # Some paths sys.exit(0), others simply return — both are "exited 0" as
+        # far as the host is concerned, and asserting on one shape would make
+        # these tests brittle against a refactor that is not the thing under test.
+        try:
+            module.main()
+        except SystemExit as exc:
+            assert exc.code in (0, None), f"a hook must never exit non-zero: {exc.code}"
+            return exc.code
+        return 0
+
+    @staticmethod
+    def _seed_session(config, session_id="s1"):
+        """observations.session_id is a FOREIGN KEY — a capture against a session
+        row that does not exist fails at the DB, which is a real error and not
+        the state under test."""
+        from techne.core.database import connect
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, started_at) VALUES (?, ?)",
+                (session_id, "2026-08-01 00:00:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _marker(config, hook):
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state
+
+        conn = connect(config.db_path)
+        try:
+            return get_state(conn, f"hook:{hook}:last_run") or {}
+        finally:
+            conn.close()
+
+    def test_post_tool_use_records_a_capture(self, config, monkeypatch, tmp_path):
+        from techne.hooks import post_tool_use
+
+        config.hooks.post_tool_use = True
+        self._seed_session(config)
+        code = self._run_hook(
+            post_tool_use,
+            {
+                "session_id": "s1",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(tmp_path / "a.py")},
+                "tool_response": "ok",
+            },
+            config,
+            monkeypatch,
+        )
+        assert code == 0 or code is None
+        marker = self._marker(config, "post_tool_use")
+        assert marker.get("outcome") == "ok", marker
+        assert marker.get("ts")
+
+    def test_post_tool_use_records_a_filtered_call_as_a_noop_not_silence(
+        self, config, monkeypatch
+    ):
+        """A tool the capture filter skips is still a RUN. Recording nothing here
+        is what made a quiet rail indistinguishable from a dead one."""
+        from techne.hooks import post_tool_use
+
+        config.hooks.post_tool_use = True
+        self._seed_session(config)
+        # Read with capture_read OFF (the default) — the filter that fires most
+        # often in practice, so this is the ordinary quiet case rather than a
+        # contrived one.
+        config.hooks.capture_read = False
+        self._run_hook(
+            post_tool_use,
+            {
+                "session_id": "s1",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/tmp/x"},
+                "tool_response": "",
+            },
+            config,
+            monkeypatch,
+        )
+        assert self._marker(config, "post_tool_use").get("outcome") == "noop:filtered"
+
+    def test_post_tool_use_marker_makes_doctor_report_it_live(self, config, monkeypatch, tmp_path):
+        """End to end: the marker must move the REPORTED VERDICT, which is the
+        only thing the operator ever sees."""
+        from techne.hooks import post_tool_use
+
+        config.hooks.post_tool_use = True
+        self._seed_session(config)
+        before = next(r for r in run_checks(config) if r.name == "hook:post_tool_use")
+        assert before.verdict is not Verdict.LIVE
+
+        self._run_hook(
+            post_tool_use,
+            {
+                "session_id": "s1",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(tmp_path / "a.py")},
+                "tool_response": "ok",
+            },
+            config,
+            monkeypatch,
+        )
+        after = next(r for r in run_checks(config) if r.name == "hook:post_tool_use")
+        assert after.verdict is Verdict.LIVE, after.detail
+
+    def test_user_prompt_submit_records_an_empty_recall_as_a_noop(self, config, monkeypatch):
+        """"Injected nothing" is a legal outcome (#414), and it is the ONLY thing
+        that distinguishes a working-but-quiet retrieval rail from a dead one."""
+        from techne.hooks import user_prompt_submit
+
+        config.hooks.per_turn_recall = True
+        self._run_hook(
+            user_prompt_submit, {"prompt": "nothing will match this"}, config, monkeypatch
+        )
+        assert self._marker(config, "user_prompt_submit").get("outcome") == "noop:nothing-to-inject"
+
+    def test_user_prompt_submit_writes_nothing_when_the_rail_is_disabled(
+        self, config, monkeypatch
+    ):
+        """Both flags default OFF and this fires on EVERY prompt — a marker write
+        for a rail the operator has not enabled would be a per-turn write for no
+        signal. The config gate answers that case without one."""
+        from techne.hooks import user_prompt_submit
+
+        config.hooks.per_turn_recall = False
+        config.hooks.per_turn_seed = False
+        self._run_hook(user_prompt_submit, {"prompt": "hello"}, config, monkeypatch)
+        assert self._marker(config, "user_prompt_submit") == {}
+
+        verdict = next(r for r in run_checks(config) if r.name == "hook:user_prompt_submit")
+        assert verdict.verdict is Verdict.DORMANT
+        assert "disabled by config" in verdict.detail
+
+    def test_a_degraded_recall_does_not_read_as_a_clean_run(self, config, monkeypatch):
+        """The recall block is caught and swallowed by design, so the seed block
+        can still emit. Without folding the failure into the marker, a rail whose
+        every search raises would write outcome=ok forever and report LIVE."""
+        from techne.hooks import user_prompt_submit
+
+        config.hooks.per_turn_recall = True
+        config.hooks.per_turn_seed = True  # so the hook still emits a block
+
+        def _boom(*a, **kw):
+            raise RuntimeError("search exploded")
+
+        monkeypatch.setattr("techne.core.search.search", _boom)
+        self._run_hook(user_prompt_submit, {"prompt": "anything"}, config, monkeypatch)
+
+        marker = self._marker(config, "user_prompt_submit")
+        assert marker.get("outcome") == "failed", marker
+        verdict = next(r for r in run_checks(config) if r.name == "hook:user_prompt_submit")
+        assert verdict.verdict is Verdict.BROKEN
+
+    def test_pre_compact_records_a_checkpoint(self, config, monkeypatch):
+        from techne.hooks import pre_compact
+
+        self._run_hook(
+            pre_compact, {"session_id": "s1", "trigger": "auto"}, config, monkeypatch
+        )
+        marker = self._marker(config, "pre_compact")
+        assert marker.get("outcome") == "ok", marker
+
+    def test_no_hook_is_left_uninstrumented(self):
+        """The list and the code must not drift apart again.
+
+        Every hook `checks` expects a marker from must contain a real
+        `record_hook_run` call — otherwise doctor reports UNOBSERVABLE forever
+        with a remedy that cannot clear it, which is a red the operator cannot
+        act on (#469 review 10, nit 2).
+        """
+        import pathlib
+
+        from techne.core.checks import _HOOK_EXPECTATIONS
+
+        root = pathlib.Path(__file__).resolve().parents[1] / "techne" / "hooks"
+        # session_start/session_end/codex_grep_assist live in differently-named
+        # modules; map the ones whose file name is not the hook name.
+        module_for = {"codex_grep_assist": "pre_tool_use"}
+        missing = []
+        for hook in _HOOK_EXPECTATIONS:
+            src = root / f"{module_for.get(hook, hook)}.py"
+            if not src.exists():
+                missing.append(f"{hook} (no module {src.name})")
+            elif "record_hook_run" not in src.read_text():
+                missing.append(hook)
+        assert not missing, f"expected a liveness marker, found no record_hook_run call: {missing}"
