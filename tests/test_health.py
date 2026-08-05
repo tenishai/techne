@@ -397,7 +397,12 @@ class TestBannerLiveness:
         land in the except arm with the exception recorded."""
         from techne.core import checks as checks_mod
 
-        def _boom(config):
+        def _boom(config, **kwargs):
+            # **kwargs: collect_health passes cheap_only=True (#487 review
+            # finding 1). A stub with a narrower signature than the real function
+            # fails on the CALL, not in the code under test — it would still go
+            # red here, but for the wrong reason, and a future signature change
+            # should not read as this path breaking.
             raise TypeError("unhashable type: 'list'")
 
         monkeypatch.setattr(checks_mod, "run_checks", _boom)

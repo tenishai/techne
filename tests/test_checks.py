@@ -8,6 +8,7 @@ is to make "cannot tell" a distinct, failing answer.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1455,6 +1456,16 @@ class TestRuntimeRevision:
         assert r.verdict is Verdict.DORMANT, r.detail
         assert r.ok, "a packaged install must not fail the command"
 
+    #: The ONLY git subcommands this check may run. An ALLOW-LIST, because the
+    #: previous guard asserted `"fetch" not in args and "pull" not in args` —
+    #: a spelling check, not a network check. Two genuine network commands walked
+    #: through it and survived every test in this class (#487 review): `git remote
+    #: update`, which fetches without the word "fetch" (demonstrated advancing
+    #: origin/main against a file:// origin), and `git ls-remote`, which dials out
+    #: (demonstrated blocking the full timeout against an unroutable host).
+    #: Enumerating what is permitted cannot be outflanked by a synonym.
+    ALLOWED_GIT = {"rev-parse", "rev-list", "status", "log"}
+
     def test_the_comparison_does_not_hit_the_network(self, config, tmp_path, monkeypatch):
         """A health check that fetches fails on a plane and stops being a
         diagnostic. The detail says the comparison is against the local ref."""
@@ -1465,15 +1476,210 @@ class TestRuntimeRevision:
         runtime = self._repo(tmp_path, behind=1)
 
         real = subprocess.run
+        seen = []
 
         def guard(args, *a, **kw):
-            assert "fetch" not in args and "pull" not in args, f"network call: {args}"
+            # args is ["git", "-C", <path>, <subcommand>, ...]
+            if isinstance(args, list) and args and args[0] == "git":
+                sub = args[3] if len(args) > 3 else None
+                seen.append(sub)
+                assert sub in self.ALLOWED_GIT, f"git subcommand not on the allow-list: {args}"
             return real(args, *a, **kw)
 
         monkeypatch.setattr(subprocess, "run", guard)
         r = self._check(config, runtime, monkeypatch)
         assert r.verdict is Verdict.STALE
         assert "local ref" in r.detail, r.detail
+        assert seen, "the guard never saw a git call — it would pass vacuously"
+
+    def test_the_live_branch_states_the_freshness_caveat_too(
+        self, config, tmp_path, monkeypatch
+    ):
+        """THE FALSE-GREEN CASE IS THE ONE THAT NEEDED THE CAVEAT AND LACKED IT.
+
+        "level with origin/main" against a ref last fetched three weeks ago reads
+        as up to date. The caveat was on STALE only (#487 review finding 3).
+        """
+        import subprocess
+
+        # behind=1 so the fixture's fetch actually MOVES origin/main and writes a
+        # reflog entry; then fast-forward so the verdict is LIVE. A plain clone
+        # has no reflog for origin/main (that fallback is the next test).
+        runtime = self._repo(tmp_path, behind=1)
+        subprocess.run(
+            ["git", "-C", str(runtime), "merge", "-q", "--ff-only", "origin/main"],
+            capture_output=True, check=True,
+        )
+        r = self._check(config, runtime, monkeypatch)
+        assert r.verdict is Verdict.LIVE, r.detail
+        assert "local ref" in r.detail, r.detail
+        assert "last fetched" in r.detail, r.detail
+
+    def test_a_never_refetched_clone_says_the_fetch_time_is_unknown(
+        self, config, tmp_path, monkeypatch
+    ):
+        """The reflog is empty in a clone that has never re-fetched (verified in
+        #487 review), so the caveat degrades to naming what it CAN see — the tip's
+        commit date, labelled as such — rather than silently claiming a fetch time
+        it does not have."""
+        r = self._check(config, self._repo(tmp_path, behind=0), monkeypatch)
+        assert r.verdict is Verdict.LIVE, r.detail
+        assert "last fetch time unknown" in r.detail, r.detail
+        assert "tip committed" in r.detail, r.detail
+
+    def test_the_age_reported_is_the_fetch_not_the_tip_commit_date(
+        self, config, tmp_path, monkeypatch
+    ):
+        """A backdated commit fetched seconds ago must not read as ancient.
+
+        This reported the tip's COMMITTER DATE, so a commit authored years ago and
+        fetched moments ago rendered "last known origin/main commit 2 years, 7
+        months ago" — describing the comparison as stale when it was current.
+        """
+        import subprocess
+
+        runtime = self._repo(tmp_path, behind=0)
+        origin = tmp_path / "origin"
+        (origin / "old.txt").write_text("x")
+        subprocess.run(["git", "-C", str(origin), "add", "-A"], capture_output=True, check=True)
+        subprocess.run(
+            ["git", "-C", str(origin), "-c", "commit.gpgsign=false", "commit", "-qm", "backdated"],
+            capture_output=True,
+            check=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_DATE": "2019-01-01T00:00:00",
+                "GIT_COMMITTER_DATE": "2019-01-01T00:00:00",
+            },
+        )
+        subprocess.run(
+            ["git", "-C", str(runtime), "fetch", "-q", "origin"], capture_output=True, check=True
+        )
+
+        r = self._check(config, runtime, monkeypatch)
+        assert r.verdict is Verdict.STALE, r.detail
+        assert "last fetched" in r.detail, r.detail
+        assert "years" not in r.detail, f"reported the tip's commit date, not the fetch: {r.detail}"
+
+    def test_a_failed_commit_count_is_unknown_not_live(self, config, tmp_path, monkeypatch):
+        """A PROBE THAT FAILED IS NOT A HEALTHY RUNTIME.
+
+        `rev-list` returning non-zero (in practice: the 5s timeout) fell through
+        to LIVE "level with the local origin/main" — the check asserting exactly
+        what it had just failed to determine, thirty lines below an identical case
+        handled correctly as UNKNOWN (#487 review finding 4).
+        """
+        import subprocess
+
+        runtime = self._repo(tmp_path, behind=0)
+        real = subprocess.run
+
+        def break_rev_list(args, *a, **kw):
+            if isinstance(args, list) and "rev-list" in args:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="boom")
+            return real(args, *a, **kw)
+
+        monkeypatch.setattr(subprocess, "run", break_rev_list)
+        r = self._check(config, runtime, monkeypatch)
+        assert r.verdict is Verdict.UNKNOWN, r.detail
+        assert not r.ok, "a failed probe must not read as healthy"
+        assert "could not count" in r.detail, r.detail
+
+    def test_ahead_of_main_is_named_not_called_level_with(
+        self, config, tmp_path, monkeypatch
+    ):
+        """On a deployment, a local commit nobody pushed is worth naming — and it
+        is the state that let this PR pass locally while CI went red."""
+        import subprocess
+
+        runtime = self._repo(tmp_path, behind=0)
+        (runtime / "local.txt").write_text("x")
+        subprocess.run(["git", "-C", str(runtime), "add", "-A"], capture_output=True, check=True)
+        subprocess.run(
+            ["git", "-C", str(runtime), "-c", "commit.gpgsign=false", "commit", "-qm", "local"],
+            capture_output=True,
+            check=True,
+        )
+        r = self._check(config, runtime, monkeypatch)
+        assert r.verdict is Verdict.LIVE, r.detail
+        assert "AHEAD" in r.detail, r.detail
+        assert "level with" not in r.detail, r.detail
+
+    def test_behind_and_dirty_reports_both(self, config, tmp_path, monkeypatch):
+        """`dirty` was computed before the branch and rendered only on LIVE, so
+        the most alarming combination — behind AND locally edited — was the one
+        told least."""
+        r = self._check(config, self._repo(tmp_path, behind=2, dirty=True), monkeypatch)
+        assert r.verdict is Verdict.STALE, r.detail
+        assert "BEHIND" in r.detail and "DIRTY" in r.detail, r.detail
+
+
+class TestExpensiveChecksStayOutOfTheHotPath:
+    """techne#468 constraint 2, finally held by something other than a comment.
+
+    `check_runtime_revision` (#487) shipped a docstring asserting TWICE that it
+    stayed out of `collect_health`, while `collect_health` ran the whole registry
+    unfiltered — so its six git subprocesses ran inside the SessionStart hook.
+    Ceiling 6 x timeout=5 = 30s against `hooks.timeout_s = 5.0`, on a fail-open
+    path where one overrun drops the ENTIRE banner silently, taking every cheap
+    check with it. Prose asserted the constraint; nothing enforced it.
+    """
+
+    def test_cheap_only_skips_a_check_marked_expensive(self, config, monkeypatch):
+        from techne.core import checks as checks_mod
+
+        ran: list[str] = []
+
+        def cheap(cfg):
+            ran.append("cheap")
+            return None
+
+        @checks_mod.expensive
+        def costly(cfg):
+            ran.append("costly")
+            return None
+
+        monkeypatch.setattr(checks_mod, "_REGISTRY", [cheap, costly])
+
+        checks_mod.run_checks(config, cheap_only=True)
+        assert ran == ["cheap"], "an @expensive check ran in the cheap-only path"
+
+        ran.clear()
+        checks_mod.run_checks(config)
+        assert ran == ["cheap", "costly"], "doctor must still run everything"
+
+    def test_the_runtime_revision_check_is_marked_expensive(self):
+        """Pins the marker itself. Without this, removing the decorator silently
+        puts the git subprocesses back into the banner."""
+        from techne.core.checks import check_runtime_revision
+
+        assert getattr(check_runtime_revision, "expensive", False) is True
+
+    def test_collect_health_spawns_no_git_subprocesses(self, config, monkeypatch):
+        """THE ACTUAL INVARIANT, asserted where it broke.
+
+        Instruments `subprocess.run` for the whole `collect_health` call rather
+        than trusting the registry wiring — this is the assertion whose absence
+        let the docstring and the behaviour disagree.
+        """
+        import subprocess
+
+        from techne.core.health import collect_health
+
+        real = subprocess.run
+        git_calls: list = []
+
+        def watch(args, *a, **kw):
+            if isinstance(args, (list, tuple)) and args and args[0] == "git":
+                git_calls.append(list(args))
+            return real(args, *a, **kw)
+
+        monkeypatch.setattr(subprocess, "run", watch)
+        health = collect_health(config)
+
+        assert git_calls == [], f"git ran inside the SessionStart path: {git_calls}"
+        names = {c["name"] for c in (health.get("checks") or [])}
+        assert "runtime:revision" not in names, "the expensive check reached the banner payload"
 
 
 def test_a_feature_branch_is_not_reported_as_an_undeployed_runtime(config, tmp_path, monkeypatch):
@@ -1499,6 +1705,34 @@ def test_a_feature_branch_is_not_reported_as_an_undeployed_runtime(config, tmp_p
     assert r.ok, "a developer on a branch must not fail the command"
     assert "not a deployment" in r.detail, r.detail
     assert "feat/something" in r.detail
+
+
+def test_a_working_checkout_still_states_how_far_behind_it_is(config, tmp_path, monkeypatch):
+    """THIS IS THE #473 INCIDENT STATE, and it used to report green in silence.
+
+    An editable install pointing at a shared tree parked on a peer's branch,
+    behind the merge — exactly the machine that kept running the #472 crash for
+    hours. The check written to make that legible reported DORMANT with no
+    distance and no number, rendering identically to a healthy runtime: the #486
+    shape (an un-healed thing indistinguishable from a healed one) reproduced
+    inside its own fix (#487 review finding 2).
+
+    The verdict deliberately stays DORMANT and `ok` — a red here is one CI and
+    every dev worktree could never clear. What changes is that the operator
+    reading `doctor` now sees the count.
+    """
+    import subprocess
+
+    from techne.core.checks import Verdict
+
+    runtime = TestRuntimeRevision._repo(tmp_path, behind=3)
+    subprocess.run(
+        ["git", "-C", str(runtime), "checkout", "-q", "-b", "peer/session-work"],
+        capture_output=True, check=True,
+    )
+    r = TestRuntimeRevision._check(config, runtime, monkeypatch)
+    assert r.verdict is Verdict.DORMANT and r.ok, r.detail
+    assert "3 commit(s) behind" in r.detail, f"the distance is the whole point: {r.detail}"
 
 
 def test_a_detached_head_is_not_a_deployment_either(config, tmp_path, monkeypatch):
