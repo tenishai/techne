@@ -47,6 +47,43 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+#: Namespace prefixes for ``coord_reads.reader_session``. The column holds two
+#: KINDS of identity, and an unprefixed value cannot say which it is — so they are
+#: tagged rather than left to be inferred from shape (techne#446).
+READER_NAME = "name:"
+READER_UUID = "uuid:"
+
+
+def reader_key(session_id: str) -> str:
+    """The identity a read receipt is filed under — DURABLE where one exists.
+
+    THE BUG THIS EXISTS TO FIX (techne#446): receipts were keyed on the session
+    UUID, which Claude Code mints fresh per launch. A relaunched session had zero
+    receipts and re-read the entire backlog, so the unread count only ever grew:
+    97 messages spanning the bus's whole life (2026-07-17 onward) reported as
+    "unread" on a machine where they had all been read, repeatedly, by earlier
+    incarnations of the same agent. Measured before the fix: 291 receipt rows
+    across 10 reader sessions, none of which helped its successor.
+
+    The display name (the CLI ``-n`` alias, e.g. ``poe_1``) survives relaunch, so
+    it is the right key when present. THREE CONSEQUENCES, each a real choice:
+
+    1. A RECYCLED NAME INHERITS RECEIPTS. A fresh ``poe_2`` skips what the
+       previous ``poe_2`` read but it never saw. Deliberate: the name denotes a
+       persistent ROLE, not a process — that is exactly why it is stable enough to
+       key on. The cost is bounded (a missed broadcast on a channel whose messages
+       are announcements, not commands); the alternative is the bug above.
+    2. AN UNNAMED SESSION KEEPS THE OLD BEHAVIOUR. No ``-n`` means no durable
+       identity to offer, so it falls back to the UUID and re-reads on each
+       launch. Stated here rather than discovered.
+    3. RECEIPTS DO NOT TRANSFER when a session gains a name it did not have
+       before; the pre-fix UUID rows stay UUID-keyed. The backlog drains once more
+       per name, then stops. See the migration note in database.py step 21.
+    """
+    name = session_name(session_id)
+    return f"{READER_NAME}{name}" if name else f"{READER_UUID}{session_id}"
+
+
 def resolve_recipient(to: str) -> str:
     """Resolve a send target to the value stored in ``recipient`` (techne#376 phase 2).
 
@@ -182,15 +219,42 @@ def threads(
 
 
 def _unread_rows(conn, session_id: str, channels: list[str]):
+    """Unread = on a watched channel, not authored by me, no receipt from me.
+
+    THE SESSION UUID APPEARED TWICE HERE AND MEANT TWO DIFFERENT THINGS — which is
+    why the fix is not a blanket substitution:
+
+      * the RECEIPT subquery asks "have I read this?", which must survive relaunch
+        → keyed on :func:`reader_key`;
+      * the AUTHORSHIP filter asks "did I write this?", which is a property of the
+        MESSAGE ROW and stays a UUID comparison.
+
+    But authorship had the SAME ephemeral-identity bug, and it was the larger half
+    of it: `from_session != <my new uuid>` is true of every message my previous
+    incarnation sent, so a relaunched `poe_1` was shown its own back catalogue as
+    unread. On the live store that was 58 of 97 messages — the majority of the
+    noise, for the most active facet. `coord_messages.from_name` is a permanent
+    snapshot taken at send time, so when this session has a name, exclude by name
+    as well. Same durable-identity rule, same recycled-name caveat as
+    :func:`reader_key` (techne#446).
+    """
     placeholders = ",".join("?" for _ in channels)
+    name = session_name(session_id)
+    # NULL from_name (pre-#376 rows, or a sender with no -n alias) must not match
+    # anyone's name — SQL's `!=` on NULL is NULL, i.e. the row is filtered out, so
+    # the comparison is written to leave those rows visible.
+    author_clause = "AND from_session != ?" + (
+        " AND (from_name IS NULL OR from_name != ?)" if name else ""
+    )
+    author_params = (session_id, name) if name else (session_id,)
     return conn.execute(
         f"SELECT id, from_session, from_name, recipient, thread_id, body, created_at"
         f"  FROM coord_messages"
         f" WHERE recipient IN ({placeholders})"
-        f"   AND from_session != ?"
+        f"   {author_clause}"
         f"   AND id NOT IN (SELECT message_id FROM coord_reads WHERE reader_session = ?)"
         f" ORDER BY id",
-        (*channels, session_id, session_id),
+        (*channels, *author_params, reader_key(session_id)),
     ).fetchall()
 
 
@@ -215,10 +279,11 @@ def inbox(
         msgs = [dict(r) for r in rows]
         if mark_read and msgs:
             now = _now_iso()
+            key = reader_key(session_id)
             conn.executemany(
                 "INSERT OR IGNORE INTO coord_reads (message_id, reader_session, read_at)"
                 " VALUES (?, ?, ?)",
-                [(m["id"], session_id, now) for m in msgs],
+                [(m["id"], key, now) for m in msgs],
             )
             conn.commit()
         return msgs
@@ -262,10 +327,11 @@ def mark_read(
         if not ids:
             return 0
         now = _now_iso()
+        key = reader_key(session_id)
         cur = conn.executemany(
             "INSERT OR IGNORE INTO coord_reads (message_id, reader_session, read_at)"
             " VALUES (?, ?, ?)",
-            [(mid, session_id, now) for mid in ids],
+            [(mid, key, now) for mid in ids],
         )
         conn.commit()
         return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(ids)

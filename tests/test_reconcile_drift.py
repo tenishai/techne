@@ -58,10 +58,10 @@ def test_fresh_db_is_current_version(db):
     conn = connect(db)
     try:
         v = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        # Bumped 19 -> 20 for techne#468's idx_outbox_target_status. The literal
+        # Bumped 20 -> 21 for techne#446's coord-receipt namespacing. The literal
         # is deliberate: it makes a SCHEMA_VERSION bump fail here so it cannot
         # pass unnoticed.
-        assert v == SCHEMA_VERSION == 20
+        assert v == SCHEMA_VERSION == 21
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"

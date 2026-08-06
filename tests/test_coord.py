@@ -450,3 +450,106 @@ def test_live_sessions_reaps_dead_pid(tmp_path, monkeypatch):
     sids = {s["session_id"] for s in coord.live_sessions()}
     assert "uuid-alive" in sids  # our own live process survives
     assert "uuid-dead" not in sids  # dead PID reaped despite a fresh heartbeat
+
+
+# ---------------------------------------------------------------------------
+# Receipt identity — techne#446
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def named(monkeypatch):
+    """Map session_id -> display name, the way the CC sidecars would."""
+    names: dict[str, str] = {}
+    monkeypatch.setattr(coord, "session_name", lambda sid: names.get(sid))
+    return names
+
+
+A2 = "a2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a2a2"  # same facet as A, relaunched
+C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+
+def test_a_relaunched_session_does_not_re_read_the_backlog(db_path, named):
+    """THE BUG (techne#446). Claude Code mints a fresh UUID per launch, so receipts
+    keyed on it were worthless to the next launch: on the live store, 97 messages
+    spanning the bus's entire life reported unread on a machine where every one had
+    already been read, repeatedly, by earlier incarnations of the same agent."""
+    named[A] = named[A2] = "poe_1"
+    named[B] = "poe_2"
+
+    coord.send(db_path, B, "one", to="coord", from_name="poe_2")
+    coord.send(db_path, B, "two", to="coord", from_name="poe_2")
+    assert coord.mark_read(db_path, A) == 2  # poe_1 reads them under session A
+
+    # Same agent, new launch, new UUID.
+    assert coord.inbox(db_path, A2) == []
+    assert coord.unread_count(db_path, A2) == 0
+
+
+def test_a_different_name_still_reads_independently(db_path, named):
+    """The fanout must NOT collapse: `coord` is a broadcast, and if one peer
+    marking a message read cleared it for all, the slower peer would silently
+    never see it. The bug was the receipt's IDENTITY, not the per-reader fanout."""
+    named[A] = "poe_1"
+    named[C] = "poe_3"
+
+    coord.send(db_path, B, "for everyone", to="coord", from_name="poe_2")
+    coord.mark_read(db_path, A)
+
+    assert [m["body"] for m in coord.inbox(db_path, C)] == ["for everyone"]
+
+
+def test_an_unnamed_session_falls_back_to_the_uuid(db_path, named):
+    """No -n alias means no durable identity to offer. Documented behaviour, not
+    an oversight — an unnamed session keeps the pre-fix semantics."""
+    coord.send(db_path, B, "hello", to="coord", from_name="poe_2")
+    assert coord.reader_key(A) == f"{coord.READER_UUID}{A}"
+    coord.mark_read(db_path, A)
+    assert coord.unread_count(db_path, A) == 0
+    assert coord.unread_count(db_path, A2) == 1  # a new UUID still re-reads
+
+
+def test_a_relaunched_session_does_not_see_its_own_back_catalogue(db_path, named):
+    """The authorship filter had the SAME ephemeral-identity bug, and it was the
+    larger half: `from_session != <my new uuid>` is true of every message my
+    previous incarnation sent. On the live store that was 58 of 97 messages."""
+    named[A] = named[A2] = "poe_1"
+
+    coord.send(db_path, A, "my own broadcast", to="coord", from_name="poe_1")
+
+    assert coord.inbox(db_path, A) == []  # sender never sees its own, as before
+    assert coord.inbox(db_path, A2) == []  # ...and neither does its next launch
+
+
+def test_a_null_from_name_is_not_swallowed_by_the_author_filter(db_path, named):
+    """SQL's `!=` is NULL-poisoned: a naive `from_name != ?` silently drops every
+    message whose sender had no alias. Those are real messages (13 on the live
+    store) and must stay visible."""
+    named[A] = "poe_1"
+    coord.send(db_path, B, "from an unnamed sender", to="coord", from_name=None)
+    assert [m["body"] for m in coord.inbox(db_path, A)] == ["from an unnamed sender"]
+
+
+def test_receipts_are_namespaced_so_the_column_says_which_identity_it_holds(
+    db_path, named
+):
+    """Two KINDS of identity in one column; an unprefixed value cannot say which.
+
+    ASSERTS THE LITERAL WIRE FORMAT, not `coord.READER_NAME` + name. Written the
+    latter way this passed with the prefix set to "" — the expectation moved with
+    the constant, so it asserted nothing. The stored string is a persisted format
+    that migration step 21 also hardcodes; pinning it here is the point.
+    """
+    named[A] = "poe_1"
+    coord.send(db_path, B, "x", to="coord", from_name="poe_2")
+    coord.mark_read(db_path, A)
+
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        keys = [r[0] for r in conn.execute("SELECT reader_session FROM coord_reads")]
+    finally:
+        conn.close()
+    assert keys == ["name:poe_1"]
+    assert coord.reader_key(B) == f"uuid:{B}"  # the other namespace, also literal
