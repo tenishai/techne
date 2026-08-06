@@ -54,6 +54,67 @@ READER_NAME = "name:"
 READER_UUID = "uuid:"
 
 
+def _durable_name(session_id: str, records: list[dict] | None = None) -> str | None:
+    """This session's display name, but ONLY when it identifies it UNIQUELY.
+
+    AMBIGUITY IS THE LIMIT OF THIS WHOLE IDEA, and it is not theoretical:
+    ``resolve_recipient``'s own docstring says duplicate ``-n`` names are
+    reachable. A name is a durable identity ACROSS TIME (the point of #446) but
+    not necessarily ACROSS CONCURRENCY — and merging identity IS merging
+    cardinality when two LIVE sessions answer to one name. The first cut of #446
+    merged them: one ``poe_1`` marking a message read emptied the other's inbox
+    silently, and because the authorship filter matched on the name too, two
+    same-named peers were completely invisible to each other. That is a
+    REGRESSION — distinct UUIDs used to work — and it was the one case that
+    contradicted the invariant this change claimed to hold (#490 review).
+
+    So: shared name → no durable identity → fall back to the UUID. The cost is
+    that two concurrent same-named sessions each re-read the backlog, which is
+    the OLD, noisy behaviour. That is the right direction to fail. Noise is
+    visible and self-correcting; a silently swallowed broadcast on a channel
+    whose whole purpose is "tell the other session what I am about to do" is not.
+
+    ``records`` lets a caller pass sidecar records it has already read, so one
+    read serves both the receipt key and the authorship filter (see
+    :func:`_identity`).
+    """
+    recs = _session_records() if records is None else records
+    mine = next((r for r in recs if r.get("sessionId") == session_id), None)
+    name = mine.get("name") if mine else None
+    if not name:
+        return None
+    # Another LIVE session answering to the same name makes it ambiguous. Only
+    # live ones count: a dead session's sidecar lingers (presence is TTL+reap,
+    # never deregistered), and treating those as rivals would permanently demote
+    # a name that is in fact unique right now.
+    live_ids = {s["session_id"] for s in live_sessions()}
+    rivals = [
+        r
+        for r in recs
+        if r.get("name") == name
+        and r.get("sessionId") != session_id
+        and r.get("sessionId") in live_ids
+    ]
+    return None if rivals else name
+
+
+def _identity(session_id: str) -> tuple[str | None, str]:
+    """``(durable_name_or_None, reader_key)`` — resolved ONCE per public call.
+
+    WHY THIS EXISTS AT ALL: the first cut called ``session_name()`` 2-3 times per
+    ``inbox()``/``unread_count()``/``mark_read()``, each one re-globbing and
+    re-parsing every sidecar in ``~/.claude/sessions`` with no cache. That is
+    ~6ms of filesystem work per tool call on the post_tool_use hot path, landing
+    in the commit right after the one that took hooks from 100ms to 50ms (#490
+    review). Resolving once and threading the result down removes the duplication
+    outright rather than caching around it.
+    """
+    records = _session_records()
+    name = _durable_name(session_id, records)
+    key = f"{READER_NAME}{name}" if name else f"{READER_UUID}{session_id}"
+    return name, key
+
+
 def reader_key(session_id: str) -> str:
     """The identity a read receipt is filed under — DURABLE where one exists.
 
@@ -79,9 +140,14 @@ def reader_key(session_id: str) -> str:
     3. RECEIPTS DO NOT TRANSFER when a session gains a name it did not have
        before; the pre-fix UUID rows stay UUID-keyed. The backlog drains once more
        per name, then stops. See the migration note in database.py step 21.
+    4. A NAME SHARED BY TWO LIVE SESSIONS IS NOT DURABLE — see
+       :func:`_durable_name`. Both fall back to the UUID rather than merging into
+       one reader.
+
+    Public and standalone for callers that want just the key; the internal paths
+    use :func:`_identity` so one sidecar read serves the whole call.
     """
-    name = session_name(session_id)
-    return f"{READER_NAME}{name}" if name else f"{READER_UUID}{session_id}"
+    return _identity(session_id)[1]
 
 
 def resolve_recipient(to: str) -> str:
@@ -218,7 +284,7 @@ def threads(
     return out[:limit]
 
 
-def _unread_rows(conn, session_id: str, channels: list[str]):
+def _unread_rows(conn, session_id: str, channels: list[str], ident: tuple[str | None, str]):
     """Unread = on a watched channel, not authored by me, no receipt from me.
 
     THE SESSION UUID APPEARED TWICE HERE AND MEANT TWO DIFFERENT THINGS — which is
@@ -239,7 +305,7 @@ def _unread_rows(conn, session_id: str, channels: list[str]):
     :func:`reader_key` (techne#446).
     """
     placeholders = ",".join("?" for _ in channels)
-    name = session_name(session_id)
+    name, key = ident
     # NULL from_name (pre-#376 rows, or a sender with no -n alias) must not match
     # anyone's name — SQL's `!=` on NULL is NULL, i.e. the row is filtered out, so
     # the comparison is written to leave those rows visible.
@@ -254,7 +320,7 @@ def _unread_rows(conn, session_id: str, channels: list[str]):
         f"   {author_clause}"
         f"   AND id NOT IN (SELECT message_id FROM coord_reads WHERE reader_session = ?)"
         f" ORDER BY id",
-        (*channels, *author_params, reader_key(session_id)),
+        (*channels, *author_params, key),
     ).fetchall()
 
 
@@ -273,13 +339,14 @@ def inbox(
     from techne.core.database import connect
 
     chans = _channels_for(session_id, channels)
+    ident = _identity(session_id)  # one sidecar read for the whole call
     conn = connect(db_path)
     try:
-        rows = _unread_rows(conn, session_id, chans)
+        rows = _unread_rows(conn, session_id, chans, ident)
         msgs = [dict(r) for r in rows]
         if mark_read and msgs:
             now = _now_iso()
-            key = reader_key(session_id)
+            key = ident[1]
             conn.executemany(
                 "INSERT OR IGNORE INTO coord_reads (message_id, reader_session, read_at)"
                 " VALUES (?, ?, ?)",
@@ -298,9 +365,10 @@ def unread_count(
     from techne.core.database import connect
 
     chans = _channels_for(session_id, channels)
+    ident = _identity(session_id)
     conn = connect(db_path)
     try:
-        return len(_unread_rows(conn, session_id, chans))
+        return len(_unread_rows(conn, session_id, chans, ident))
     finally:
         conn.close()
 
@@ -317,17 +385,18 @@ def mark_read(
     of new read receipts written (idempotent — re-marking is a no-op)."""
     from techne.core.database import connect
 
+    ident = _identity(session_id)
     conn = connect(db_path)
     try:
         if message_ids is None:
             chans = _channels_for(session_id, channels)
-            ids = [r["id"] for r in _unread_rows(conn, session_id, chans)]
+            ids = [r["id"] for r in _unread_rows(conn, session_id, chans, ident)]
         else:
             ids = list(message_ids)
         if not ids:
             return 0
         now = _now_iso()
-        key = reader_key(session_id)
+        key = ident[1]
         cur = conn.executemany(
             "INSERT OR IGNORE INTO coord_reads (message_id, reader_session, read_at)"
             " VALUES (?, ?, ?)",

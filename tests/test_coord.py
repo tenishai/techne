@@ -459,9 +459,22 @@ def test_live_sessions_reaps_dead_pid(tmp_path, monkeypatch):
 
 @pytest.fixture
 def named(monkeypatch):
-    """Map session_id -> display name, the way the CC sidecars would."""
+    """Map session_id -> display name, the way the CC sidecars would.
+
+    live_sessions() is pinned EMPTY, which is the relaunch scenario these tests
+    are about: the sidecars remember the name, but no other session is currently
+    holding it, so the name is unambiguous and therefore durable. Concurrency —
+    where two LIVE sessions share a name — is a different case with its own tests
+    below (`_live`), and conflating the two is what let the first cut of #446 ship
+    a silent fanout collapse.
+    """
     names: dict[str, str] = {}
-    monkeypatch.setattr(coord, "session_name", lambda sid: names.get(sid))
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": sid, "name": n} for sid, n in names.items()],
+    )
+    monkeypatch.setattr(coord, "live_sessions", lambda **k: [])
     return names
 
 
@@ -503,7 +516,10 @@ def test_an_unnamed_session_falls_back_to_the_uuid(db_path, named):
     """No -n alias means no durable identity to offer. Documented behaviour, not
     an oversight — an unnamed session keeps the pre-fix semantics."""
     coord.send(db_path, B, "hello", to="coord", from_name="poe_2")
-    assert coord.reader_key(A) == f"{coord.READER_UUID}{A}"
+    # LITERAL, not f"{coord.READER_UUID}{A}" — written that way this passed with
+    # READER_UUID set to "", asserting nothing (#490 review; fourth instance of
+    # this shape in one session).
+    assert coord.reader_key(A) == f"uuid:{A}"
     coord.mark_read(db_path, A)
     assert coord.unread_count(db_path, A) == 0
     assert coord.unread_count(db_path, A2) == 1  # a new UUID still re-reads
@@ -553,3 +569,96 @@ def test_receipts_are_namespaced_so_the_column_says_which_identity_it_holds(
         conn.close()
     assert keys == ["name:poe_1"]
     assert coord.reader_key(B) == f"uuid:{B}"  # the other namespace, also literal
+
+
+def _live(monkeypatch, records):
+    """Pin BOTH sidecar reads and liveness: _durable_name reads the raw records and
+    intersects them with live_sessions(), so a test must control both or the
+    ambiguity check silently sees nobody."""
+    monkeypatch.setattr(coord, "_session_records", lambda: records)
+    monkeypatch.setattr(
+        coord,
+        "live_sessions",
+        lambda **k: [{"session_id": r["sessionId"], "name": r.get("name")} for r in records],
+    )
+
+
+def test_two_live_sessions_sharing_a_name_keep_independent_inboxes(db_path, monkeypatch):
+    """THE REGRESSION #490's review caught in the first cut of #446.
+
+    A name is a durable identity ACROSS TIME but not ACROSS CONCURRENCY, and
+    merging identity IS merging cardinality: with both keyed on `name:poe_1`, X
+    marking a message read emptied Y's inbox SILENTLY. Distinct UUIDs used to
+    work, so it was a regression, and it contradicted the very invariant the
+    change claimed to hold. Shared name -> not durable -> fall back to the UUID.
+    """
+    _live(
+        monkeypatch,
+        [
+            {"sessionId": A, "name": "poe_1"},
+            {"sessionId": A2, "name": "poe_1"},  # a SECOND live session, same -n
+            {"sessionId": B, "name": "poe_2"},
+        ],
+    )
+    coord.send(db_path, B, "everyone should see this", to="coord", from_name="poe_2")
+
+    coord.mark_read(db_path, A)
+    assert coord.unread_count(db_path, A) == 0
+    assert coord.unread_count(db_path, A2) == 1, "one peer's read emptied the other's inbox"
+
+
+def test_two_live_sessions_sharing_a_name_can_still_hear_each_other(db_path, monkeypatch):
+    """The other half of the same regression: because the AUTHORSHIP filter also
+    matched on the name, two same-named live peers were completely invisible to
+    each other — on a bus whose entire purpose is telling the other session what
+    you are about to do."""
+    _live(
+        monkeypatch,
+        [{"sessionId": A, "name": "poe_1"}, {"sessionId": A2, "name": "poe_1"}],
+    )
+    coord.send(db_path, A, "claiming branch feat/x", to="coord", from_name="poe_1")
+    assert [m["body"] for m in coord.inbox(db_path, A2)] == ["claiming branch feat/x"]
+    assert coord.inbox(db_path, A) == []  # still never your own
+
+
+def test_a_dead_sidecar_does_not_demote_a_unique_name(db_path, monkeypatch):
+    """Sidecars linger — presence is TTL+reap, never deregistered. Counting dead
+    twins as rivals would permanently demote a name that IS unique right now,
+    quietly restoring the #446 bug for every relaunched session."""
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": A, "name": "poe_1"}, {"sessionId": A2, "name": "poe_1"}],
+    )
+    # Only A is live; A2's sidecar is a corpse.
+    monkeypatch.setattr(coord, "live_sessions", lambda **k: [{"session_id": A, "name": "poe_1"}])
+    assert coord.reader_key(A) == "name:poe_1"
+
+
+def test_the_unread_path_reads_the_sidecars_once(db_path, monkeypatch):
+    """techne#470 took hooks from 100ms to 50ms; the first cut of #446 then put
+    2-3 uncached sidecar scans back onto the post_tool_use hot path (#490 review).
+    Resolve once per call, thread it down."""
+    calls = {"n": 0}
+    real = coord._session_records
+
+    def counting():
+        calls["n"] += 1
+        return [{"sessionId": A, "name": "poe_1"}]
+
+    monkeypatch.setattr(coord, "_session_records", counting)
+    monkeypatch.setattr(coord, "live_sessions", lambda **k: [{"session_id": A, "name": "poe_1"}])
+    coord.send(db_path, B, "x", to="coord", from_name="poe_2")
+
+    calls["n"] = 0
+    coord.unread_count(db_path, A)
+    assert calls["n"] == 1, f"unread_count scanned the sidecars {calls['n']}x"
+
+    calls["n"] = 0
+    coord.inbox(db_path, A, mark_read=True)
+    assert calls["n"] == 1, f"inbox scanned the sidecars {calls['n']}x"
+
+    calls["n"] = 0
+    coord.mark_read(db_path, A)
+    assert calls["n"] == 1, f"mark_read scanned the sidecars {calls['n']}x"
+    assert real is not coord._session_records  # the patch actually took
