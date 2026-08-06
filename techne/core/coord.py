@@ -482,7 +482,10 @@ def live_sessions(
     ``records`` lets a caller that has ALREADY read the sidecars hand them in, so
     the directory is globbed and parsed once per call rather than once per reader
     (see :func:`_identity`). Default ``None`` reads them itself — every existing
-    caller is unaffected.
+    caller is unaffected. IT MUST BE THE COMPLETE, UNFILTERED ``_session_records()``
+    OUTPUT: this function IS the filter, so a pre-filtered roster does not raise —
+    it silently yields a NARROWER liveness verdict. Hand it only same-cwd records
+    and ``_durable_name`` sees no rivals and wrongly promotes an ambiguous name.
     """
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     live: list[dict] = []
