@@ -1195,12 +1195,24 @@ def _dotted_attr(obj, dotted: str):
 
 #: Governed keys whose VALUE is safe to print. Everything else reports presence
 #: only. DEFAULT-DENY IS THE WHOLE POINT — see :func:`_describe_destination`.
-#: `llm_api_base` is deliberately absent: a URL can carry credentials in its
-#: userinfo (``https://user:pass@host``), so it reports presence like the key
-#: beside it.
-_PRINTABLE_DESTINATIONS = frozenset(
-    {"model", "reflect.model", "conflict.model", "standalone", "archivist_db_path"}
-)
+#:
+#: MEMBERSHIP IS A STRUCTURAL ARGUMENT, NOT A JUDGEMENT CALL, and that is the
+#: property to preserve when adding to it. `standalone` is a bool. The three
+#: model ids cannot carry a credential because the key that would — their
+#: sibling `llm_api_base` — is denied, and a URL carries credentials in its
+#: userinfo (``https://user:pass@host``).
+#:
+#: `archivist_db_path` WAS here and was removed. It is a local path today and a
+#: DSN after techne#87, so it was kept printable behind a `("://", "@")` shape
+#: test — a two-element hand-kept DENY-list living inside an allow-list, i.e.
+#: the discipline of this very constant inverted one layer down. It failed both
+#: ways under execution: libpq keyword/value form
+#: (``host=db password=pa55 user=x``) contains neither substring and printed the
+#: password, while ``model: vertex_ai/claude-3-5-sonnet@20240620`` tripped the
+#: guard and rendered "model set" — the useless string, on the one key where
+#: naming the destination is the entire job. The fix was to DELETE the
+#: heuristic, not sharpen it. (Prudence, PR #508 r5, found while approving.)
+_PRINTABLE_DESTINATIONS = frozenset({"model", "reflect.model", "conflict.model", "standalone"})
 
 
 def _describe_destination(key: str, value, default=None) -> str:
@@ -1257,25 +1269,9 @@ def _describe_destination(key: str, value, default=None) -> str:
         return f"sync.adapter={value.adapter}{suffix}"
     if key in ("connections", "stores"):
         return f"{len(value)} {key} entr{'y' if len(value) == 1 else 'ies'}"
-    if key in _PRINTABLE_DESTINATIONS and not _looks_like_a_locator(value):
+    if key in _PRINTABLE_DESTINATIONS:
         return f"{key}={value}"
     return f"{key} set"
-
-
-def _looks_like_a_locator(value) -> bool:
-    """Does an allow-listed value carry the shape of a credential-bearing URL/DSN?
-
-    The residual hazard on the ALLOW side: default-deny protects against a new
-    KEY, not against an allowed key's VALUE SHAPE changing under it.
-    `archivist_db_path` prints in full and is a local path today, while
-    techne#87 (postgres stores) is this module's own documented expiry
-    condition — the event that turns it into a DSN with a password in it. That
-    change would arrive with no diff here, which is the exact silence this
-    round removed everywhere else, so it is guarded structurally rather than
-    noted in a comment. (Prudence, PR #508 r4, nit.)
-    """
-    text = str(value)
-    return "://" in text or "@" in text
 
 
 @register_check

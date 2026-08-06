@@ -832,12 +832,14 @@ class TestTheDetailNeverLeaksACredential:
         assert detail.count("sync.adapter=noop") == 0 or "+" in detail
         assert "extra" in detail or "token" in detail
 
-    def test_an_allowed_key_whose_value_turns_into_a_dsn_reports_presence(
+    def test_archivist_db_path_reports_presence_whatever_shape_its_value_takes(
         self, tmp_path, monkeypatch
     ):
-        """techne#87 is this module's own documented expiry condition, and it is
-        the event that turns `archivist_db_path` from a local path into a DSN
-        with a password in it — arriving with no diff here."""
+        """techne#87 turns `archivist_db_path` from a local path into a DSN with
+        a password in it, arriving with no diff here — so it is denied by
+        MEMBERSHIP rather than by a shape test. The shape test that preceded
+        this missed libpq keyword/value form entirely (`host=db password=pa55`)
+        and simultaneously broke `model: vertex_ai/...@20240620`."""
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
         (tmp_path / "config.yaml").write_text(
             yaml.dump({"archivist_db_path": "postgres://user:pa55@db.internal/archivist"})
@@ -847,3 +849,16 @@ class TestTheDetailNeverLeaksACredential:
 
         assert "pa55" not in detail
         assert "archivist_db_path set" in detail
+
+    def test_a_model_id_containing_an_at_sign_is_still_named_in_full(self, tmp_path, monkeypatch):
+        """The collateral damage of the deleted heuristic: a versioned Vertex
+        model id trips a naive `@` test, and naming the destination is the whole
+        job of this key."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump({"model": "vertex_ai/claude-3-5-sonnet@20240620"})
+        )
+
+        detail = self._detail(Config.load())
+
+        assert "model=vertex_ai/claude-3-5-sonnet@20240620" in detail
