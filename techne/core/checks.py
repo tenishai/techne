@@ -1193,20 +1193,56 @@ def _dotted_attr(obj, dotted: str):
     return obj
 
 
+#: Governed keys whose VALUE is safe to print. Everything else reports presence
+#: only. DEFAULT-DENY IS THE WHOLE POINT — see :func:`_describe_destination`.
+#: `llm_api_base` is deliberately absent: a URL can carry credentials in its
+#: userinfo (``https://user:pass@host``), so it reports presence like the key
+#: beside it.
+_PRINTABLE_DESTINATIONS = frozenset(
+    {"model", "reflect.model", "conflict.model", "standalone", "archivist_db_path"}
+)
+
+
 def _describe_destination(key: str, value) -> str:
     """One short operator-facing phrase per departed-from-default key.
 
-    NEVER RENDERS A SECRET. `llm_api_key` and `sync.auth` are credentials, and
-    this string lands in `techne doctor` output and the SessionStart banner —
-    both of which get pasted into issues. Presence is the reportable fact.
+    NEVER RENDERS A SECRET, AND THAT IS ENFORCED BY DEFAULT-DENY RATHER THAN BY
+    THIS SENTENCE. An unrecognised key reports presence only; the informative
+    renderings are the explicit exceptions.
+
+    The first version inverted this — four hardcoded safe cases with
+    ``f"{key}={value}"`` as the fallback — and it was a hazard of exactly the
+    shape the derived key list had just been built to remove. The derivation
+    GUARANTEES a new governed key is reported; the deny-list did NOT guarantee it
+    is reported safely, so the next round to add a credential-bearing key (the
+    way `stores` was added) would have printed it into `techne doctor` output
+    with no diff to review. Demonstrated by Prudence on PR #508 r3, simulated
+    against a future `sync.auth` entry: `sync.auth=sk-BRAND-NEW-SECRET`.
+    A forgotten key is now merely uninformative instead of a leak.
+
+    Where this lands: `techne doctor`'s detail column (`cli.py` prints
+    `r.detail` for every verdict), which gets pasted into issues. NOT the
+    SessionStart banner — `format_banner` renders check NAMES only, and only for
+    non-live/dormant verdicts, so `detail` reaches it on no path. An earlier
+    revision of this docstring claimed both surfaces; the conclusion held but the
+    claim was false, and it was written in the round dedicated to removing false
+    claims, contradicting the card in the same commit.
     """
     if key == "sync":
-        return f"sync.adapter={value.adapter}"
+        # The one whole-block key rendered from a single field, which let it
+        # print its OWN DEFAULT into a departed-from-default list: an install
+        # with `adapter=noop` but `url`/`auth` set reported `sync.adapter=noop`,
+        # true and useless — an operator reads straight past it. Name the other
+        # fields that are set, by NAME ONLY: `sync.url` and `sync.auth` can both
+        # carry credentials.
+        extra = [f for f in ("url", "auth", "audience", "path") if getattr(value, f, "")]
+        suffix = f" (+{', '.join(extra)})" if extra else ""
+        return f"sync.adapter={value.adapter}{suffix}"
     if key in ("connections", "stores"):
         return f"{len(value)} {key} entr{'y' if len(value) == 1 else 'ies'}"
-    if key == "llm_api_key":
-        return "llm_api_key set"
-    return f"{key}={value}"
+    if key in _PRINTABLE_DESTINATIONS:
+        return f"{key}={value}"
+    return f"{key} set"
 
 
 @register_check

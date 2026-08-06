@@ -758,3 +758,58 @@ class TestEveryGovernedKeyIsReportable:
         # Presence is reportable; the secret itself is not.
         assert "llm_api_key set" in detail
         assert "sk-should-not-be-printed" not in detail
+
+
+class TestTheDetailNeverLeaksACredential:
+    """Default-deny, pinned. The derived key list guarantees a new governed key
+    is REPORTED; only this guarantees it is reported SAFELY. Prudence
+    demonstrated the gap on PR #508 r3 by simulating the next round adding a
+    credential key the way `stores` was added — it printed straight into doctor
+    output with no diff to review.
+    """
+
+    def _detail(self, config):
+        from techne.core.checks import check_config_trust
+
+        return check_config_trust(config).detail
+
+    def test_a_newly_governed_key_reports_presence_not_value(self, tmp_path, monkeypatch):
+        """The simulated future round: a credential-bearing key joins the set."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump({"sync": {"adapter": "http", "auth": "sk-BRAND-NEW-SECRET"}})
+        )
+        monkeypatch.setattr(config_trust, "EGRESS_KEYS", (*config_trust.EGRESS_KEYS, "sync.auth"))
+
+        detail = self._detail(Config.load())
+
+        assert "sk-BRAND-NEW-SECRET" not in detail
+        assert "sync.auth set" in detail
+
+    def test_llm_api_base_reports_presence_because_a_url_can_carry_credentials(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump({"llm_api_base": "https://user:pa55@proxy.internal"})
+        )
+
+        detail = self._detail(Config.load())
+
+        assert "pa55" not in detail
+        assert "llm_api_base set" in detail
+
+    def test_a_sync_block_that_departed_only_in_its_secret_fields_is_still_legible(
+        self, tmp_path, monkeypatch
+    ):
+        """`sync.adapter=noop` alone was true and useless — the operator reads
+        past their own default. Name the departed fields, never their values."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump({"sync": {"adapter": "noop", "url": "https://x.example", "auth": "sk-tok"}})
+        )
+
+        detail = self._detail(Config.load())
+
+        assert "sk-tok" not in detail and "x.example" not in detail
+        assert "+url, auth" in detail
