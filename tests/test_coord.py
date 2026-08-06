@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -450,3 +451,236 @@ def test_live_sessions_reaps_dead_pid(tmp_path, monkeypatch):
     sids = {s["session_id"] for s in coord.live_sessions()}
     assert "uuid-alive" in sids  # our own live process survives
     assert "uuid-dead" not in sids  # dead PID reaped despite a fresh heartbeat
+
+
+# ---------------------------------------------------------------------------
+# Receipt identity — techne#446
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def named(monkeypatch):
+    """Map session_id -> display name, the way the CC sidecars would.
+
+    live_sessions() is pinned EMPTY, which is the relaunch scenario these tests
+    are about: the sidecars remember the name, but no other session is currently
+    holding it, so the name is unambiguous and therefore durable. Concurrency —
+    where two LIVE sessions share a name — is a different case with its own tests
+    below (`_live`), and conflating the two is what let the first cut of #446 ship
+    a silent fanout collapse.
+
+    THAT TWO-WAY SPLIT IS INCOMPLETE, and the missing third case is a live defect
+    (#492). A DORMANT twin — running, but idle past the presence TTL — is
+    concurrency, yet it arranges EXACTLY like this fixture, because
+    `live_sessions()` cannot see it either. So the dormant-twin bug executes under
+    THIS fixture's arrangement while being asserted here as correct behaviour.
+    Production cannot tell the two apart: a dead predecessor and a dormant twin
+    are the same observation, and only the operator's intent differs. See #492 —
+    a fix must separate role-succession from concurrent twins, and
+    `test_a_relaunched_session_does_not_re_read_the_backlog` is the boundary it
+    must not cross.
+    """
+    names: dict[str, str] = {}
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": sid, "name": n} for sid, n in names.items()],
+    )
+    monkeypatch.setattr(coord, "live_sessions", lambda **k: [])
+    return names
+
+
+A2 = "a2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a2a2"  # same facet as A, relaunched
+C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+
+def test_a_relaunched_session_does_not_re_read_the_backlog(db_path, named):
+    """THE BUG (techne#446). Claude Code mints a fresh UUID per launch, so receipts
+    keyed on it were worthless to the next launch: on the live store, 97 messages
+    spanning the bus's entire life reported unread on a machine where every one had
+    already been read, repeatedly, by earlier incarnations of the same agent."""
+    named[A] = named[A2] = "poe_1"
+    named[B] = "poe_2"
+
+    coord.send(db_path, B, "one", to="coord", from_name="poe_2")
+    coord.send(db_path, B, "two", to="coord", from_name="poe_2")
+    assert coord.mark_read(db_path, A) == 2  # poe_1 reads them under session A
+
+    # Same agent, new launch, new UUID.
+    assert coord.inbox(db_path, A2) == []
+    assert coord.unread_count(db_path, A2) == 0
+
+
+def test_a_different_name_still_reads_independently(db_path, named):
+    """The fanout must NOT collapse: `coord` is a broadcast, and if one peer
+    marking a message read cleared it for all, the slower peer would silently
+    never see it. The bug was the receipt's IDENTITY, not the per-reader fanout."""
+    named[A] = "poe_1"
+    named[C] = "poe_3"
+
+    coord.send(db_path, B, "for everyone", to="coord", from_name="poe_2")
+    coord.mark_read(db_path, A)
+
+    assert [m["body"] for m in coord.inbox(db_path, C)] == ["for everyone"]
+
+
+def test_an_unnamed_session_falls_back_to_the_uuid(db_path, named):
+    """No -n alias means no durable identity to offer. Documented behaviour, not
+    an oversight — an unnamed session keeps the pre-fix semantics."""
+    coord.send(db_path, B, "hello", to="coord", from_name="poe_2")
+    # LITERAL, not f"{coord.READER_UUID}{A}" — written that way this passed with
+    # READER_UUID set to "", asserting nothing (#490 review; fourth instance of
+    # this shape in one session).
+    assert coord.reader_key(A) == f"uuid:{A}"
+    coord.mark_read(db_path, A)
+    assert coord.unread_count(db_path, A) == 0
+    assert coord.unread_count(db_path, A2) == 1  # a new UUID still re-reads
+
+
+def test_a_relaunched_session_does_not_see_its_own_back_catalogue(db_path, named):
+    """The authorship filter had the SAME ephemeral-identity bug, and it was the
+    larger half: `from_session != <my new uuid>` is true of every message my
+    previous incarnation sent. On the live store that was 58 of 97 messages."""
+    named[A] = named[A2] = "poe_1"
+
+    coord.send(db_path, A, "my own broadcast", to="coord", from_name="poe_1")
+
+    assert coord.inbox(db_path, A) == []  # sender never sees its own, as before
+    assert coord.inbox(db_path, A2) == []  # ...and neither does its next launch
+
+
+def test_a_null_from_name_is_not_swallowed_by_the_author_filter(db_path, named):
+    """SQL's `!=` is NULL-poisoned: a naive `from_name != ?` silently drops every
+    message whose sender had no alias. Those are real messages (13 on the live
+    store) and must stay visible."""
+    named[A] = "poe_1"
+    coord.send(db_path, B, "from an unnamed sender", to="coord", from_name=None)
+    assert [m["body"] for m in coord.inbox(db_path, A)] == ["from an unnamed sender"]
+
+
+def test_receipts_are_namespaced_so_the_column_says_which_identity_it_holds(
+    db_path, named
+):
+    """Two KINDS of identity in one column; an unprefixed value cannot say which.
+
+    ASSERTS THE LITERAL WIRE FORMAT, not `coord.READER_NAME` + name. Written the
+    latter way this passed with the prefix set to "" — the expectation moved with
+    the constant, so it asserted nothing. The stored string is a persisted format
+    that migration step 21 also hardcodes; pinning it here is the point.
+    """
+    named[A] = "poe_1"
+    coord.send(db_path, B, "x", to="coord", from_name="poe_2")
+    coord.mark_read(db_path, A)
+
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        keys = [r[0] for r in conn.execute("SELECT reader_session FROM coord_reads")]
+    finally:
+        conn.close()
+    assert keys == ["name:poe_1"]
+    assert coord.reader_key(B) == f"uuid:{B}"  # the other namespace, also literal
+
+
+def _live(monkeypatch, records):
+    """Pin BOTH sidecar reads and liveness: _durable_name reads the raw records and
+    intersects them with live_sessions(), so a test must control both or the
+    ambiguity check silently sees nobody."""
+    monkeypatch.setattr(coord, "_session_records", lambda: records)
+    monkeypatch.setattr(
+        coord,
+        "live_sessions",
+        lambda **k: [{"session_id": r["sessionId"], "name": r.get("name")} for r in records],
+    )
+
+
+def test_two_live_sessions_sharing_a_name_keep_independent_inboxes(db_path, monkeypatch):
+    """THE REGRESSION #490's review caught in the first cut of #446.
+
+    A name is a durable identity ACROSS TIME but not ACROSS CONCURRENCY, and
+    merging identity IS merging cardinality: with both keyed on `name:poe_1`, X
+    marking a message read emptied Y's inbox SILENTLY. Distinct UUIDs used to
+    work, so it was a regression, and it contradicted the very invariant the
+    change claimed to hold. Shared name -> not durable -> fall back to the UUID.
+    """
+    _live(
+        monkeypatch,
+        [
+            {"sessionId": A, "name": "poe_1"},
+            {"sessionId": A2, "name": "poe_1"},  # a SECOND live session, same -n
+            {"sessionId": B, "name": "poe_2"},
+        ],
+    )
+    coord.send(db_path, B, "everyone should see this", to="coord", from_name="poe_2")
+
+    coord.mark_read(db_path, A)
+    assert coord.unread_count(db_path, A) == 0
+    assert coord.unread_count(db_path, A2) == 1, "one peer's read emptied the other's inbox"
+
+
+def test_two_live_sessions_sharing_a_name_can_still_hear_each_other(db_path, monkeypatch):
+    """The other half of the same regression: because the AUTHORSHIP filter also
+    matched on the name, two same-named live peers were completely invisible to
+    each other — on a bus whose entire purpose is telling the other session what
+    you are about to do."""
+    _live(
+        monkeypatch,
+        [{"sessionId": A, "name": "poe_1"}, {"sessionId": A2, "name": "poe_1"}],
+    )
+    coord.send(db_path, A, "claiming branch feat/x", to="coord", from_name="poe_1")
+    assert [m["body"] for m in coord.inbox(db_path, A2)] == ["claiming branch feat/x"]
+    assert coord.inbox(db_path, A) == []  # still never your own
+
+
+def test_a_dead_sidecar_does_not_demote_a_unique_name(db_path, monkeypatch):
+    """Sidecars linger — presence is TTL+reap, never deregistered. Counting dead
+    twins as rivals would permanently demote a name that IS unique right now,
+    quietly restoring the #446 bug for every relaunched session."""
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": A, "name": "poe_1"}, {"sessionId": A2, "name": "poe_1"}],
+    )
+    # Only A is live; A2's sidecar is a corpse.
+    monkeypatch.setattr(coord, "live_sessions", lambda **k: [{"session_id": A, "name": "poe_1"}])
+    assert coord.reader_key(A) == "name:poe_1"
+
+
+def test_the_unread_path_reads_the_sidecars_once(db_path, monkeypatch):
+    """techne#470 took hooks from 100ms to 50ms; the first cut of #446 then put
+    2-3 uncached sidecar scans back onto the post_tool_use hot path (#490 review).
+    Resolve once per call, thread it down.
+
+    DO NOT PIN ``live_sessions`` HERE. An earlier version of this test did, and it
+    was hollow in the exact dimension it claims to measure: ``_durable_name`` calls
+    ``live_sessions()``, which calls ``_session_records()`` AGAIN, so the named path
+    really scanned TWICE — stubbing the second scanner is what hid it. Measured on
+    the real path with 61 sidecars: 2 scans, ~7ms per call. The one thing this test
+    must exercise is the collaboration between the two readers, so it may pin
+    neither. ``_pid_alive`` is pinned instead — that is the reaper, not a scanner.
+    """
+    calls = {"n": 0}
+    real = coord._session_records
+    now_ms = time.time() * 1000
+
+    def counting():
+        calls["n"] += 1
+        return [{"sessionId": A, "name": "poe_1", "updatedAt": now_ms, "pid": 4242}]
+
+    monkeypatch.setattr(coord, "_session_records", counting)
+    monkeypatch.setattr(coord, "_pid_alive", lambda pid: True)
+    coord.send(db_path, B, "x", to="coord", from_name="poe_2")
+
+    calls["n"] = 0
+    coord.unread_count(db_path, A)
+    assert calls["n"] == 1, f"unread_count scanned the sidecars {calls['n']}x"
+
+    calls["n"] = 0
+    coord.inbox(db_path, A, mark_read=True)
+    assert calls["n"] == 1, f"inbox scanned the sidecars {calls['n']}x"
+
+    calls["n"] = 0
+    coord.mark_read(db_path, A)
+    assert calls["n"] == 1, f"mark_read scanned the sidecars {calls['n']}x"
+    assert real is not coord._session_records  # the patch actually took

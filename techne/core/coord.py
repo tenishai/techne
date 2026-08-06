@@ -47,6 +47,112 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+#: Namespace prefixes for ``coord_reads.reader_session``. The column holds two
+#: KINDS of identity, and an unprefixed value cannot say which it is — so they are
+#: tagged rather than left to be inferred from shape (techne#446).
+READER_NAME = "name:"
+READER_UUID = "uuid:"
+
+
+def _durable_name(session_id: str, records: list[dict] | None = None) -> str | None:
+    """This session's display name, but ONLY when it identifies it UNIQUELY.
+
+    AMBIGUITY IS THE LIMIT OF THIS WHOLE IDEA, and it is not theoretical:
+    ``resolve_recipient``'s own docstring says duplicate ``-n`` names are
+    reachable. A name is a durable identity ACROSS TIME (the point of #446) but
+    not necessarily ACROSS CONCURRENCY — and merging identity IS merging
+    cardinality when two LIVE sessions answer to one name. The first cut of #446
+    merged them: one ``poe_1`` marking a message read emptied the other's inbox
+    silently, and because the authorship filter matched on the name too, two
+    same-named peers were completely invisible to each other. That is a
+    REGRESSION — distinct UUIDs used to work — and it was the one case that
+    contradicted the invariant this change claimed to hold (#490 review).
+
+    So: shared name → no durable identity → fall back to the UUID. The cost is
+    that two concurrent same-named sessions each re-read the backlog, which is
+    the OLD, noisy behaviour. That is the right direction to fail. Noise is
+    visible and self-correcting; a silently swallowed broadcast on a channel
+    whose whole purpose is "tell the other session what I am about to do" is not.
+
+    ``records`` lets a caller pass sidecar records it has already read, so one
+    read serves both the receipt key and the authorship filter (see
+    :func:`_identity`).
+    """
+    recs = _session_records() if records is None else records
+    mine = next((r for r in recs if r.get("sessionId") == session_id), None)
+    name = mine.get("name") if mine else None
+    if not name:
+        return None
+    # Another LIVE session answering to the same name makes it ambiguous. Only
+    # live ones count: a dead session's sidecar lingers (presence is TTL+reap,
+    # never deregistered), and treating those as rivals would permanently demote
+    # a name that is in fact unique right now.
+    # Reuse the records already read — live_sessions() would otherwise re-glob and
+    # re-parse the whole directory, which is the SECOND scan that made the "read
+    # the sidecars once" fix untrue on the named path (see :func:`_identity`).
+    live_ids = {s["session_id"] for s in live_sessions(records=recs)}
+    rivals = [
+        r
+        for r in recs
+        if r.get("name") == name
+        and r.get("sessionId") != session_id
+        and r.get("sessionId") in live_ids
+    ]
+    return None if rivals else name
+
+
+def _identity(session_id: str) -> tuple[str | None, str]:
+    """``(durable_name_or_None, reader_key)`` — resolved ONCE per public call.
+
+    WHY THIS EXISTS AT ALL: the first cut called ``session_name()`` 2-3 times per
+    ``inbox()``/``unread_count()``/``mark_read()``, each one re-globbing and
+    re-parsing every sidecar in ``~/.claude/sessions`` with no cache. That is
+    ~6ms of filesystem work per tool call on the post_tool_use hot path, landing
+    in the commit right after the one that took hooks from 100ms to 50ms (#490
+    review). Resolving once and threading the result down removes the duplication
+    outright rather than caching around it.
+    """
+    records = _session_records()
+    name = _durable_name(session_id, records)
+    key = f"{READER_NAME}{name}" if name else f"{READER_UUID}{session_id}"
+    return name, key
+
+
+def reader_key(session_id: str) -> str:
+    """The identity a read receipt is filed under — DURABLE where one exists.
+
+    THE BUG THIS EXISTS TO FIX (techne#446): receipts were keyed on the session
+    UUID, which Claude Code mints fresh per launch. A relaunched session had zero
+    receipts and re-read the entire backlog, so the unread count only ever grew:
+    97 messages spanning the bus's whole life (2026-07-17 onward) reported as
+    "unread" on a machine where they had all been read, repeatedly, by earlier
+    incarnations of the same agent. Measured before the fix: 291 receipt rows
+    across 10 reader sessions, none of which helped its successor.
+
+    The display name (the CLI ``-n`` alias, e.g. ``poe_1``) survives relaunch, so
+    it is the right key when present. FOUR CONSEQUENCES, each a real choice:
+
+    1. A RECYCLED NAME INHERITS RECEIPTS. A fresh ``poe_2`` skips what the
+       previous ``poe_2`` read but it never saw. Deliberate: the name denotes a
+       persistent ROLE, not a process — that is exactly why it is stable enough to
+       key on. The cost is bounded (a missed broadcast on a channel whose messages
+       are announcements, not commands); the alternative is the bug above.
+    2. AN UNNAMED SESSION KEEPS THE OLD BEHAVIOUR. No ``-n`` means no durable
+       identity to offer, so it falls back to the UUID and re-reads on each
+       launch. Stated here rather than discovered.
+    3. RECEIPTS DO NOT TRANSFER when a session gains a name it did not have
+       before; the pre-fix UUID rows stay UUID-keyed. The backlog drains once more
+       per name, then stops. See the migration note in database.py step 21.
+    4. A NAME SHARED BY TWO LIVE SESSIONS IS NOT DURABLE — see
+       :func:`_durable_name`. Both fall back to the UUID rather than merging into
+       one reader.
+
+    Public and standalone for callers that want just the key; the internal paths
+    use :func:`_identity` so one sidecar read serves the whole call.
+    """
+    return _identity(session_id)[1]
+
+
 def resolve_recipient(to: str) -> str:
     """Resolve a send target to the value stored in ``recipient`` (techne#376 phase 2).
 
@@ -181,16 +287,43 @@ def threads(
     return out[:limit]
 
 
-def _unread_rows(conn, session_id: str, channels: list[str]):
+def _unread_rows(conn, session_id: str, channels: list[str], ident: tuple[str | None, str]):
+    """Unread = on a watched channel, not authored by me, no receipt from me.
+
+    THE SESSION UUID APPEARED TWICE HERE AND MEANT TWO DIFFERENT THINGS — which is
+    why the fix is not a blanket substitution:
+
+      * the RECEIPT subquery asks "have I read this?", which must survive relaunch
+        → keyed on :func:`reader_key`;
+      * the AUTHORSHIP filter asks "did I write this?", which is a property of the
+        MESSAGE ROW and stays a UUID comparison.
+
+    But authorship had the SAME ephemeral-identity bug, and it was the larger half
+    of it: `from_session != <my new uuid>` is true of every message my previous
+    incarnation sent, so a relaunched `poe_1` was shown its own back catalogue as
+    unread. On the live store that was 58 of 97 messages — the majority of the
+    noise, for the most active facet. `coord_messages.from_name` is a permanent
+    snapshot taken at send time, so when this session has a name, exclude by name
+    as well. Same durable-identity rule, same recycled-name caveat as
+    :func:`reader_key` (techne#446).
+    """
     placeholders = ",".join("?" for _ in channels)
+    name, key = ident
+    # NULL from_name (pre-#376 rows, or a sender with no -n alias) must not match
+    # anyone's name — SQL's `!=` on NULL is NULL, i.e. the row is filtered out, so
+    # the comparison is written to leave those rows visible.
+    author_clause = "AND from_session != ?" + (
+        " AND (from_name IS NULL OR from_name != ?)" if name else ""
+    )
+    author_params = (session_id, name) if name else (session_id,)
     return conn.execute(
         f"SELECT id, from_session, from_name, recipient, thread_id, body, created_at"
         f"  FROM coord_messages"
         f" WHERE recipient IN ({placeholders})"
-        f"   AND from_session != ?"
+        f"   {author_clause}"
         f"   AND id NOT IN (SELECT message_id FROM coord_reads WHERE reader_session = ?)"
         f" ORDER BY id",
-        (*channels, session_id, session_id),
+        (*channels, *author_params, key),
     ).fetchall()
 
 
@@ -209,16 +342,18 @@ def inbox(
     from techne.core.database import connect
 
     chans = _channels_for(session_id, channels)
+    ident = _identity(session_id)  # one sidecar read for the whole call
     conn = connect(db_path)
     try:
-        rows = _unread_rows(conn, session_id, chans)
+        rows = _unread_rows(conn, session_id, chans, ident)
         msgs = [dict(r) for r in rows]
         if mark_read and msgs:
             now = _now_iso()
+            key = ident[1]
             conn.executemany(
                 "INSERT OR IGNORE INTO coord_reads (message_id, reader_session, read_at)"
                 " VALUES (?, ?, ?)",
-                [(m["id"], session_id, now) for m in msgs],
+                [(m["id"], key, now) for m in msgs],
             )
             conn.commit()
         return msgs
@@ -233,9 +368,10 @@ def unread_count(
     from techne.core.database import connect
 
     chans = _channels_for(session_id, channels)
+    ident = _identity(session_id)
     conn = connect(db_path)
     try:
-        return len(_unread_rows(conn, session_id, chans))
+        return len(_unread_rows(conn, session_id, chans, ident))
     finally:
         conn.close()
 
@@ -252,20 +388,22 @@ def mark_read(
     of new read receipts written (idempotent — re-marking is a no-op)."""
     from techne.core.database import connect
 
+    ident = _identity(session_id)
     conn = connect(db_path)
     try:
         if message_ids is None:
             chans = _channels_for(session_id, channels)
-            ids = [r["id"] for r in _unread_rows(conn, session_id, chans)]
+            ids = [r["id"] for r in _unread_rows(conn, session_id, chans, ident)]
         else:
             ids = list(message_ids)
         if not ids:
             return 0
         now = _now_iso()
+        key = ident[1]
         cur = conn.executemany(
             "INSERT OR IGNORE INTO coord_reads (message_id, reader_session, read_at)"
             " VALUES (?, ?, ?)",
-            [(mid, session_id, now) for mid in ids],
+            [(mid, key, now) for mid in ids],
         )
         conn.commit()
         return cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(ids)
@@ -328,7 +466,10 @@ def _pid_alive(pid: object) -> bool:
 
 
 def live_sessions(
-    *, exclude_session: str | None = None, fresh_seconds: int = _PRESENCE_FRESH_SECONDS
+    *,
+    exclude_session: str | None = None,
+    fresh_seconds: int = _PRESENCE_FRESH_SECONDS,
+    records: list[dict] | None = None,
 ) -> list[dict]:
     """Sessions Claude Code currently considers live, newest-activity first.
 
@@ -337,10 +478,18 @@ def live_sessions(
     heartbeat freshness alone advertised dead PIDs as routable sessions during the
     TTL window; a caller would route to a corpse). Returns dicts:
     ``{session_id, name, cwd, status, pid, updated_at_ms}``.
+
+    ``records`` lets a caller that has ALREADY read the sidecars hand them in, so
+    the directory is globbed and parsed once per call rather than once per reader
+    (see :func:`_identity`). Default ``None`` reads them itself — every existing
+    caller is unaffected. IT MUST BE THE COMPLETE, UNFILTERED ``_session_records()``
+    OUTPUT: this function IS the filter, so a pre-filtered roster does not raise —
+    it silently yields a NARROWER liveness verdict. Hand it only same-cwd records
+    and ``_durable_name`` sees no rivals and wrongly promotes an ambiguous name.
     """
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     live: list[dict] = []
-    for rec in _session_records():
+    for rec in _session_records() if records is None else records:
         sid = rec.get("sessionId")
         if not sid or sid == exclude_session:
             continue
