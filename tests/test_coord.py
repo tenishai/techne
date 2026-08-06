@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -638,16 +639,26 @@ def test_a_dead_sidecar_does_not_demote_a_unique_name(db_path, monkeypatch):
 def test_the_unread_path_reads_the_sidecars_once(db_path, monkeypatch):
     """techne#470 took hooks from 100ms to 50ms; the first cut of #446 then put
     2-3 uncached sidecar scans back onto the post_tool_use hot path (#490 review).
-    Resolve once per call, thread it down."""
+    Resolve once per call, thread it down.
+
+    DO NOT PIN ``live_sessions`` HERE. An earlier version of this test did, and it
+    was hollow in the exact dimension it claims to measure: ``_durable_name`` calls
+    ``live_sessions()``, which calls ``_session_records()`` AGAIN, so the named path
+    really scanned TWICE — stubbing the second scanner is what hid it. Measured on
+    the real path with 61 sidecars: 2 scans, ~7ms per call. The one thing this test
+    must exercise is the collaboration between the two readers, so it may pin
+    neither. ``_pid_alive`` is pinned instead — that is the reaper, not a scanner.
+    """
     calls = {"n": 0}
     real = coord._session_records
+    now_ms = time.time() * 1000
 
     def counting():
         calls["n"] += 1
-        return [{"sessionId": A, "name": "poe_1"}]
+        return [{"sessionId": A, "name": "poe_1", "updatedAt": now_ms, "pid": 4242}]
 
     monkeypatch.setattr(coord, "_session_records", counting)
-    monkeypatch.setattr(coord, "live_sessions", lambda **k: [{"session_id": A, "name": "poe_1"}])
+    monkeypatch.setattr(coord, "_pid_alive", lambda pid: True)
     coord.send(db_path, B, "x", to="coord", from_name="poe_2")
 
     calls["n"] = 0

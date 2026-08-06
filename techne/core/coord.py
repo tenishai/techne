@@ -87,7 +87,10 @@ def _durable_name(session_id: str, records: list[dict] | None = None) -> str | N
     # live ones count: a dead session's sidecar lingers (presence is TTL+reap,
     # never deregistered), and treating those as rivals would permanently demote
     # a name that is in fact unique right now.
-    live_ids = {s["session_id"] for s in live_sessions()}
+    # Reuse the records already read — live_sessions() would otherwise re-glob and
+    # re-parse the whole directory, which is the SECOND scan that made the "read
+    # the sidecars once" fix untrue on the named path (see :func:`_identity`).
+    live_ids = {s["session_id"] for s in live_sessions(records=recs)}
     rivals = [
         r
         for r in recs
@@ -463,7 +466,10 @@ def _pid_alive(pid: object) -> bool:
 
 
 def live_sessions(
-    *, exclude_session: str | None = None, fresh_seconds: int = _PRESENCE_FRESH_SECONDS
+    *,
+    exclude_session: str | None = None,
+    fresh_seconds: int = _PRESENCE_FRESH_SECONDS,
+    records: list[dict] | None = None,
 ) -> list[dict]:
     """Sessions Claude Code currently considers live, newest-activity first.
 
@@ -472,10 +478,15 @@ def live_sessions(
     heartbeat freshness alone advertised dead PIDs as routable sessions during the
     TTL window; a caller would route to a corpse). Returns dicts:
     ``{session_id, name, cwd, status, pid, updated_at_ms}``.
+
+    ``records`` lets a caller that has ALREADY read the sidecars hand them in, so
+    the directory is globbed and parsed once per call rather than once per reader
+    (see :func:`_identity`). Default ``None`` reads them itself — every existing
+    caller is unaffected.
     """
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     live: list[dict] = []
-    for rec in _session_records():
+    for rec in _session_records() if records is None else records:
         sid = rec.get("sessionId")
         if not sid or sid == exclude_session:
             continue
