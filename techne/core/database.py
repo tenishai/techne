@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -374,6 +374,13 @@ CREATE INDEX IF NOT EXISTS idx_coord_messages_recipient ON coord_messages(recipi
 -- Per-reader read receipts, so a broadcast-channel message can be read independently
 -- by each session. Unread for a session = messages to its channels or itself, not
 -- authored by it, with no matching coord_reads row.
+--
+-- reader_session is a NAMESPACED identity, not a raw session id: 'name:<display>'
+-- when the session has a -n alias, else 'uuid:<session-id>'. Built by
+-- coord.reader_key(). The column holds two KINDS of identity and an unprefixed
+-- value cannot say which, so they are tagged (techne#446, migration step 21).
+-- Keying on the bare UUID was the bug: Claude Code mints one per launch, so every
+-- relaunch re-read the entire backlog.
 CREATE TABLE IF NOT EXISTS coord_reads (
     message_id INTEGER NOT NULL,
     reader_session TEXT NOT NULL,
@@ -1087,4 +1094,30 @@ END;
                 "ON outbox(target, status, synced_at, created_at)"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (20)")
+
+    if from_version < 21 and to_version >= 21:
+        # techne#446: coord read receipts were keyed on the session UUID, which
+        # Claude Code mints fresh per launch — so a relaunched session inherited
+        # zero receipts and re-read the whole backlog, and the unread count only
+        # ever grew (97 messages, the bus's entire history, reported unread).
+        # `reader_key()` now files receipts under `name:<display-name>` when the
+        # session has one, falling back to `uuid:<session-id>`.
+        #
+        # THIS STEP ONLY NAMESPACES THE EXISTING ROWS. It does NOT rewrite them to
+        # names, and that is deliberate rather than lazy: the UUID->name map lives
+        # in Claude Code's per-session sidecars, and the sidecars for dead sessions
+        # are gone. Inventing a mapping would fabricate the very "who read what"
+        # claim the receipt exists to record. So old rows keep their UUID identity,
+        # correctly tagged as such; each name drains the backlog once more and then
+        # stops. Cost is bounded and one-time, and it is honest.
+        #
+        # Idempotent by construction — only bare values (neither prefix) match.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coord_reads'"
+        ).fetchone():
+            conn.execute(
+                "UPDATE coord_reads SET reader_session = 'uuid:' || reader_session "
+                "WHERE reader_session NOT LIKE 'uuid:%' AND reader_session NOT LIKE 'name:%'"
+            )
+        conn.execute("INSERT INTO schema_version (version) VALUES (21)")
     conn.commit()

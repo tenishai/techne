@@ -2455,3 +2455,88 @@ class TestV16ToV17ThreadBoundariesDedup:
     def test_version_bumped(self, v16_conn):
         _migrate(v16_conn, 16, 17)
         assert v16_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 17
+
+
+# ---------------------------------------------------------------------------
+# v20 -> v21: namespace coord read receipts (techne#446)
+# ---------------------------------------------------------------------------
+
+V20_COORD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS coord_reads (
+    message_id INTEGER NOT NULL,
+    reader_session TEXT NOT NULL,
+    read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, reader_session)
+);
+"""
+
+_UUID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_UUID_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+@pytest.fixture
+def v20_coord_conn(tmp_path):
+    """A pre-#446 store: receipts keyed on bare session UUIDs."""
+    db_path = tmp_path / "v20.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(V20_COORD_SCHEMA)
+    conn.executemany(
+        "INSERT INTO coord_reads (message_id, reader_session, read_at) VALUES (?, ?, ?)",
+        [(1, _UUID_A, "2026-08-01 00:00:00"), (2, _UUID_A, "2026-08-01 00:00:00"),
+         (1, _UUID_B, "2026-08-02 00:00:00")],
+    )
+    conn.execute("INSERT INTO schema_version (version) VALUES (20)")
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+class TestV21CoordReceiptNamespacing:
+    """The migration TAGS existing rows; it deliberately does not rewrite them.
+
+    The UUID->name map lives in Claude Code's per-session sidecars, and the
+    sidecars for dead sessions are gone — so inventing a mapping would fabricate
+    the very "who read what" claim the receipt exists to record.
+    """
+
+    def test_bare_uuids_gain_the_uuid_namespace(self, v20_coord_conn):
+        _migrate(v20_coord_conn, 20, 21)
+        keys = sorted(
+            r[0] for r in v20_coord_conn.execute("SELECT DISTINCT reader_session FROM coord_reads")
+        )
+        assert keys == [f"uuid:{_UUID_A}", f"uuid:{_UUID_B}"]
+
+    def test_no_receipt_is_lost(self, v20_coord_conn):
+        before = v20_coord_conn.execute("SELECT COUNT(*) FROM coord_reads").fetchone()[0]
+        _migrate(v20_coord_conn, 20, 21)
+        after = v20_coord_conn.execute("SELECT COUNT(*) FROM coord_reads").fetchone()[0]
+        assert before == after == 3
+
+    def test_rerunning_does_not_double_prefix(self, v20_coord_conn):
+        """Idempotent by construction — only bare values match. A double-prefixed
+        `uuid:uuid:...` would silently orphan the receipt it was meant to preserve."""
+        _migrate(v20_coord_conn, 20, 21)
+        _migrate(v20_coord_conn, 20, 21)
+        keys = [r[0] for r in v20_coord_conn.execute("SELECT reader_session FROM coord_reads")]
+        assert all(k.count("uuid:") == 1 for k in keys), keys
+
+    def test_already_namespaced_rows_are_left_alone(self, v20_coord_conn):
+        v20_coord_conn.execute(
+            "INSERT INTO coord_reads (message_id, reader_session, read_at) VALUES (?, ?, ?)",
+            (3, "name:poe_1", "2026-08-03 00:00:00"),
+        )
+        _migrate(v20_coord_conn, 20, 21)
+        row = v20_coord_conn.execute(
+            "SELECT reader_session FROM coord_reads WHERE message_id = 3"
+        ).fetchone()
+        assert row[0] == "name:poe_1"
+
+    def test_version_bumped(self, v20_coord_conn):
+        _migrate(v20_coord_conn, 20, 21)
+        v = v20_coord_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        assert v == 21
