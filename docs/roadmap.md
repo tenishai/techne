@@ -8,6 +8,10 @@
 
 Status legend: ☐ todo · ◐ in progress · ☑ done · ⏸ parked/blocked
 
+> **Markers reconciled against GitHub 2026-08-06 (#425).** Every `#N` in this file was checked with `gh issue view N --json state,stateReason`; 11 markers said todo/parked for issues since closed as COMPLETED (#19, #20, #56, #76, #80–#86) and were corrected to ☑. Two are genuinely still open and were left alone (#75 parked, #89 in progress).
+> **Why this mattered:** the header below already says this document is historical, and a reviewer read it anyway and cited closed #84 as an open risk, building an argument on a wrong premise (#424). A `☐` reads as live status regardless of what the surrounding prose claims — a stale marker is worse than no marker, because it reads as authoritative.
+> **The dated PROSE in each review entry is deliberately NOT rewritten** — those are records of what was believed on that date and are correct as such. Only the status markers, which assert something about *now*, were touched. Markers drift as issues close; treat any marker as accurate only as of the date above.
+
 ---
 
 ## ☑ Session 2026-06-20 — un-shadowing → promotion → Librarian → db-per-domain
@@ -64,7 +68,7 @@ Staff Python + architect review of the db-per-domain session (knowledge#337). Fi
 
 - ☑ #71, ☑ #72 shipped (above).
 - ☑ **#78 — harden auto-migration for multi-machine use.** Done (`34c7a75`). Cross-process file lock (flock on `<db>.migrate.lock`) serializes the concurrent-hook race so the migration body runs once; WAL-safe pre-migration backup to `backups/`; stderr announce. Degrades to legacy path where fcntl absent. Tests incl. 6-way concurrent open → migrates exactly once. **Land this before the team pulls the v9 merge.**
-- ◐ **#76 — SessionStart health banner.** Done on branch `feat/76-session-start-health-banner` (`72233db`), not yet pushed/merged. Factored `core/health.py::collect_health/format_banner` as the single source shared by MCP `techne_status` + the login banner. 607 tests pass, eval gate green. Renders at next session restart. Filed 2026-06-17.
+- ☑ **#76 — SessionStart health banner.** Done on branch `feat/76-session-start-health-banner` (`72233db`), not yet pushed/merged. Factored `core/health.py::collect_health/format_banner` as the single source shared by MCP `techne_status` + the login banner. 607 tests pass, eval gate green. Renders at next session restart. Filed 2026-06-17.
 
 ## ✅ Merged to main 2026-06-17 (now `9d75f57`, v0.6.2)
 
@@ -91,23 +95,23 @@ Enqueue wrote a `thread_summary` row every session_end regardless of adapter, bu
 ## Tier 4 — deferred / blocked / low
 
 - ☑ **#51 — outbox flush()/flush_sinks race. CLOSED 2026-06-17 (`31431bf`).** Fixed via target namespaces (Approach A): `sync:<name>` adapter-bound, `sink:<name>` sink-bound; enqueue rejects un-namespaced targets; the two flush paths filter disjoint prefixes so ownership is a permanent row property, never dependent on registry state at flush time. Removed the `_register_lifecycle_sinks`/`ok=False` stub. Regression test proves no cross-draining. **Unblocks cabal#14** (Archivist registers `sink:archivist`). 666 tests pass.
-- ☐ **#56 — minor backlog tracker (06-16 staff reviews).** Opportunistic.
+- ☑ **#56 — minor backlog tracker (06-16 staff reviews).** Opportunistic.
 
 ### Staff review 2026-06-17 (`e41d204..7d45067`, #57/#51 work) — verdicts SHIP-WITH-FIXES / SOUND-WITH-CAVEATS
 Blocker fixed inline (`7d45067`): `thread_boundaries` grew unboundedly on per-turn `run_session_end` (live: 72k rows, one session 37k) — DELETE-then-insert now, test guards boundary count. Filed:
-- ☐ **#80 — migrate un-namespaced pending outbox rows** (post-#51; live DB unaffected, defensive). Recommend.
-- ☐ **#81 — `sessions.platform` is write-only** — wire a read path (`techne status` breakdown) + decide cross-client resume-context scoping.
-- ☐ **#82 — `link_threshold` YAML fallback is the unreachable 0.85** (pre-existing v0.5.0 bug; configs with a `threads:` block get zero links).
-- ☐ **#83 — minor backlog bundle** (purge_pending doc, chat.message role filter, inject escaping, jsonl_records→hooks smell, PORTING.md).
+- ☑ **#80 — migrate un-namespaced pending outbox rows** (post-#51; live DB unaffected, defensive). Recommend.
+- ☑ **#81 — `sessions.platform` is write-only** — wire a read path (`techne status` breakdown) + decide cross-client resume-context scoping.
+- ☑ **#82 — `link_threshold` YAML fallback is the unreachable 0.85** (pre-existing v0.5.0 bug; configs with a `threads:` block get zero links).
+- ☑ **#83 — minor backlog bundle** (purge_pending doc, chat.message role filter, inject escaping, jsonl_records→hooks smell, PORTING.md).
 - **Open op task (awaiting go):** dedup the live DB's 72k stale `thread_boundaries` (classifier-blocked; code fix stops future growth).
 
 ### Staff Linux portability review 2026-06-17 — verdict PORTS-WITH-FIXES
 Core (FTS-only default) runs on Debian/Ubuntu with **zero code changes**; paths are `Path.home()`-relative, hooks wire via `sys.executable`, CI already on ubuntu-latest. Filed:
-- ☐ **#84 — `search[vectors]` `enable_load_extension` crash** (HIGH, code) on Linux Python without loadable-extension support; only bites the `[vectors]` extra. Fix = broaden the except.
-- ☐ **#85 — add a Dockerfile** (the "containerizable" goal has no artifact; working minimal one in the issue).
-- ☐ **#86 — Linux `techne watch` polish** (systemd unit + inotify watch-limit docs).
-- ⏸ **#20 — end-of-session reflect pass.** Parked — mid 2-week observation window on `experiment/reflect-pass`.
-- ⏸ **#19 — tag inference + MCP-sampling fact extraction.** Blocked — no API key, no client supports MCP sampling. Needs local-model fallback first.
+- ☑ **#84 — `search[vectors]` `enable_load_extension` crash** (HIGH, code) on Linux Python without loadable-extension support; only bites the `[vectors]` extra. Fix = broaden the except.
+- ☑ **#85 — add a Dockerfile** (the "containerizable" goal has no artifact; working minimal one in the issue).
+- ☑ **#86 — Linux `techne watch` polish** (systemd unit + inotify watch-limit docs).
+- ☑ **#20 — end-of-session reflect pass.** Parked — mid 2-week observation window on `experiment/reflect-pass`.
+- ☑ **#19 — tag inference + MCP-sampling fact extraction.** Blocked — no API key, no client supports MCP sampling. Needs local-model fallback first.
 - ⏸ **#75 — eval v2 (cold/warm arm + running-model LLM-judge).** Deferred — cold/warm needs a freshness feature; LLM-judge must use the running model (never an API key). Filed from #68 close-out.
 
 ---
