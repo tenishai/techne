@@ -2,9 +2,13 @@
 # Run the CI workflow's checks locally, without spending GitHub Actions minutes.
 #
 # techne is a PRIVATE repo, so Actions minutes are metered — and as of 2026-07-25
-# the org's jobs stopped starting entirely on a billing failure. This script is the
-# stopgap AND the fast inner loop: it mirrors .github/workflows/test.yml step for
-# step, so "green here" means the same thing it means there.
+# the org's jobs stopped starting entirely on a billing failure (since resolved;
+# CI now runs on the self-hosted runner, #424). This script is the fast inner loop:
+# it mirrors .github/workflows/test.yml step for step.
+#
+# "GREEN HERE" DOES NOT MEAN "GREEN THERE". The step sequence matches; the
+# ENVIRONMENT deliberately does not, in three known ways. Two are below under WHAT
+# THIS DOES NOT COVER; the third is the interpreter source, noted at the bottom.
 #
 #   ./scripts/ci-local.sh          # test job on the full 3.12/3.13 matrix
 #   ./scripts/ci-local.sh 3.13     # one interpreter
@@ -19,9 +23,19 @@
 # reported ALL GREEN throughout. Local green is not CI green — push and let the
 # self-hosted runner have the last word.
 #
-# Interpreters come from `uv python`, which downloads a missing version rather than
+# A REUSED VENV CAN STAY GREEN WHERE CI GOES RED. `uv pip install -e` adds and
+# upgrades, but does NOT uninstall a package that has since been REMOVED from
+# pyproject.toml — so a stale .venv-ci-$PY keeps satisfying an import that CI's
+# always-fresh venv no longer provides. Use --fresh before trusting a green run
+# that follows a dependency change.
+#
+# Interpreters come from `uv python`, which DOWNLOADS a missing version rather than
 # failing — the point is to test the versions CI gates, not the one that happens to
-# be installed.
+# be installed. NOTE THIS IS THE OPPOSITE OF CI, which pins UV_PYTHON_PREFERENCE=
+# only-system and UV_PYTHON_DOWNLOADS=never (test.yml:42-43) precisely so it cannot
+# silently run an interpreter nobody chose. The divergence is deliberate — a dev box
+# should not need 3.14 pre-baked — but it means the interpreter you test on here is
+# not provably the interpreter CI used.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -86,15 +100,25 @@ done
 if [ "$RUN_VEC" = 1 ]; then
   step "job: eval-vec — Python 3.14"
   VENV=".venv-ci-vec"
-  { [ "$FRESH" = 1 ] || [ ! -x "$VENV/bin/python" ]; } && uv venv --python 3.14 "$VENV" --clear --quiet
-  
-  uv pip install --python "$VENV/bin/python" -e ".[dev,codex,vectors]" --quiet \
-    || FAILED+=("vec: install")
+  # GUARD THE VENV STEP, exactly like the matrix loop above. Without this, a failed
+  # `uv venv --python 3.14` fell straight through into `uv pip install --python
+  # .venv-ci-vec/bin/python`, which failed too and got recorded as "vec: install" —
+  # the WRONG DIAGNOSIS — and then ran two more doomed steps. The exit code was
+  # still correctly non-zero; only the reported cause was wrong, which is the more
+  # expensive kind of wrong because it sends you to the wrong file.
+  # The matrix loop can say `continue`; this block is not a loop, so each step is
+  # gated on the previous one having worked.
+  vec_ok=1
+  if [ "$FRESH" = 1 ] || [ ! -x "$VENV/bin/python" ]; then
+    uv venv --python 3.14 "$VENV" --clear --quiet || { FAILED+=("vec: venv"); vec_ok=0; }
+  fi
+  [ "$vec_ok" = 1 ] && { uv pip install --python "$VENV/bin/python" -e ".[dev,codex,vectors]" --quiet \
+    || { FAILED+=("vec: install"); vec_ok=0; }; }
   # The eval_vec fixture SKIPS unless the pinned model is already cached (it probes
   # with allow_download=False), so fetch it first or the gate silently no-ops.
-  "$VENV/bin/python" -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)" \
-    || FAILED+=("vec: model fetch")
-  "$VENV/bin/python" -m pytest -m eval_vec -s || FAILED+=("vec: eval_vec gate")
+  [ "$vec_ok" = 1 ] && { "$VENV/bin/python" -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)" \
+    || { FAILED+=("vec: model fetch"); vec_ok=0; }; }
+  [ "$vec_ok" = 1 ] && { "$VENV/bin/python" -m pytest -m eval_vec -s || FAILED+=("vec: eval_vec gate"); }
 fi
 
 # --- verdict ------------------------------------------------------------------
