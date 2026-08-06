@@ -813,3 +813,37 @@ class TestTheDetailNeverLeaksACredential:
 
         assert "sk-tok" not in detail and "x.example" not in detail
         assert "+url, auth" in detail
+
+    def test_an_unrecognised_sync_subkey_is_named_not_swallowed(self, tmp_path, monkeypatch):
+        """`SyncConfig.extra` catches EVERY unrecognised key under `sync:` — the
+        one field that collects what the code does not know about. The
+        hand-kept four-name list did not cover it, so a departed block rendered
+        a bare `sync.adapter=noop`. Derived from `dataclasses.fields` now.
+        (Prudence, PR #508 r4 — executed, not proposed.)
+        """
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump({"sync": {"adapter": "noop", "token": "ghp_LIVE_SECRET"}})
+        )
+
+        detail = self._detail(Config.load())
+
+        assert "ghp_LIVE_SECRET" not in detail
+        assert detail.count("sync.adapter=noop") == 0 or "+" in detail
+        assert "extra" in detail or "token" in detail
+
+    def test_an_allowed_key_whose_value_turns_into_a_dsn_reports_presence(
+        self, tmp_path, monkeypatch
+    ):
+        """techne#87 is this module's own documented expiry condition, and it is
+        the event that turns `archivist_db_path` from a local path into a DSN
+        with a password in it — arriving with no diff here."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump({"archivist_db_path": "postgres://user:pa55@db.internal/archivist"})
+        )
+
+        detail = self._detail(Config.load())
+
+        assert "pa55" not in detail
+        assert "archivist_db_path set" in detail

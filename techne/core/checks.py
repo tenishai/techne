@@ -1203,7 +1203,7 @@ _PRINTABLE_DESTINATIONS = frozenset(
 )
 
 
-def _describe_destination(key: str, value) -> str:
+def _describe_destination(key: str, value, default=None) -> str:
     """One short operator-facing phrase per departed-from-default key.
 
     NEVER RENDERS A SECRET, AND THAT IS ENFORCED BY DEFAULT-DENY RATHER THAN BY
@@ -1220,29 +1220,62 @@ def _describe_destination(key: str, value) -> str:
     against a future `sync.auth` entry: `sync.auth=sk-BRAND-NEW-SECRET`.
     A forgotten key is now merely uninformative instead of a leak.
 
-    Where this lands: `techne doctor`'s detail column (`cli.py` prints
-    `r.detail` for every verdict), which gets pasted into issues. NOT the
-    SessionStart banner — `format_banner` renders check NAMES only, and only for
-    non-live/dormant verdicts, so `detail` reaches it on no path. An earlier
-    revision of this docstring claimed both surfaces; the conclusion held but the
-    claim was false, and it was written in the round dedicated to removing false
-    claims, contradicting the card in the same commit.
+    WHERE THIS LANDS — three surfaces, and the third is the one that makes
+    default-deny load-bearing rather than tidy:
+      1. `techne doctor`'s detail column (`cli.py` prints `r.detail` for every
+         verdict), which gets pasted into issues.
+      2. NOT the SessionStart banner — `format_banner` renders check NAMES only,
+         and only for non-live/dormant verdicts, so `detail` reaches it on no
+         path. An earlier revision claimed it did; the conclusion held but the
+         claim was false, written in the round dedicated to removing false
+         claims and contradicting the card in the same commit.
+      3. THE CONSTRAINED AGENT'S OWN CONTEXT. `mcp_server.py` returns
+         `collect_health(config)` verbatim, `health.py` copies `r.detail` into
+         it, and this check carries no `@expensive` marker — so the string
+         reaches the very agent this seam exists to constrain. Nothing leaks
+         today, and that is default-deny earning its keep on a surface no
+         enumeration here had noticed. (Prudence, PR #508 r4.)
     """
     if key == "sync":
-        # The one whole-block key rendered from a single field, which let it
-        # print its OWN DEFAULT into a departed-from-default list: an install
-        # with `adapter=noop` but `url`/`auth` set reported `sync.adapter=noop`,
-        # true and useless — an operator reads straight past it. Name the other
-        # fields that are set, by NAME ONLY: `sync.url` and `sync.auth` can both
-        # carry credentials.
-        extra = [f for f in ("url", "auth", "audience", "path") if getattr(value, f, "")]
-        suffix = f" (+{', '.join(extra)})" if extra else ""
+        # DERIVED FROM THE DATACLASS, not from a hand-kept name list. The list
+        # version read four fields and SyncConfig has five: `extra`, which
+        # `Config._from_dict` fills with EVERY unrecognised key under `sync:` —
+        # i.e. precisely the catch-all for things this code does not know about.
+        # So `sync: {token: ghp_LIVE_SECRET}` departed from default and rendered
+        # a bare `sync.adapter=noop`, the same "true and useless" string this
+        # renderer was just rewritten to kill, at the one field that catches
+        # everything. Not hypothetical — executed. (Prudence, PR #508 r4.)
+        import dataclasses
+
+        base = default if default is not None else type(value)()
+        departed = [
+            f.name
+            for f in dataclasses.fields(value)
+            if f.name != "adapter" and getattr(value, f.name) != getattr(base, f.name, None)
+        ]
+        suffix = f" (+{', '.join(departed)})" if departed else ""
         return f"sync.adapter={value.adapter}{suffix}"
     if key in ("connections", "stores"):
         return f"{len(value)} {key} entr{'y' if len(value) == 1 else 'ies'}"
-    if key in _PRINTABLE_DESTINATIONS:
+    if key in _PRINTABLE_DESTINATIONS and not _looks_like_a_locator(value):
         return f"{key}={value}"
     return f"{key} set"
+
+
+def _looks_like_a_locator(value) -> bool:
+    """Does an allow-listed value carry the shape of a credential-bearing URL/DSN?
+
+    The residual hazard on the ALLOW side: default-deny protects against a new
+    KEY, not against an allowed key's VALUE SHAPE changing under it.
+    `archivist_db_path` prints in full and is a local path today, while
+    techne#87 (postgres stores) is this module's own documented expiry
+    condition — the event that turns it into a DSN with a password in it. That
+    change would arrive with no diff here, which is the exact silence this
+    round removed everywhere else, so it is guarded structurally rather than
+    noted in a comment. (Prudence, PR #508 r4, nit.)
+    """
+    text = str(value)
+    return "://" in text or "@" in text
 
 
 @register_check
@@ -1335,7 +1368,7 @@ def check_config_trust(config) -> CheckResult:
     # the benign string — which is the one thing this line exists not to do.
     d = Config()
     live_destinations = [
-        _describe_destination(key, value)
+        _describe_destination(key, value, _dotted_attr(d, key))
         for key in config_trust.EGRESS_KEYS
         if (value := _dotted_attr(config, key)) != _dotted_attr(d, key)
     ]
