@@ -1277,7 +1277,12 @@ def check_vector_coverage(config) -> CheckResult:
     covered = embedded - stale
     missing = total - embedded
     pct = (covered / total * 100) if total else 100.0
-    detail = f"{covered}/{total} live knowledge embedded ({pct:.0f}%)"
+    # "and current" is load-bearing: this numerator is `covered` (embedded AND not
+    # vec_stale), while `evidence` reports the raw `embedded`. Without the phrase a
+    # reader comparing the two lines sees 1/6 against embedded=3 and reads a
+    # contradiction — and evidence exists precisely so a finding can be re-derived
+    # (#497 review, nit 1).
+    detail = f"{covered}/{total} live knowledge embedded and current ({pct:.0f}%)"
     if missing:
         detail += f", {missing} missing"
     if stale:
