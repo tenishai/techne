@@ -468,6 +468,17 @@ def named(monkeypatch):
     where two LIVE sessions share a name — is a different case with its own tests
     below (`_live`), and conflating the two is what let the first cut of #446 ship
     a silent fanout collapse.
+
+    THAT TWO-WAY SPLIT IS INCOMPLETE, and the missing third case is a live defect
+    (#492). A DORMANT twin — running, but idle past the presence TTL — is
+    concurrency, yet it arranges EXACTLY like this fixture, because
+    `live_sessions()` cannot see it either. So the dormant-twin bug executes under
+    THIS fixture's arrangement while being asserted here as correct behaviour.
+    Production cannot tell the two apart: a dead predecessor and a dormant twin
+    are the same observation, and only the operator's intent differs. See #492 —
+    a fix must separate role-succession from concurrent twins, and
+    `test_a_relaunched_session_does_not_re_read_the_backlog` is the boundary it
+    must not cross.
     """
     names: dict[str, str] = {}
     monkeypatch.setattr(

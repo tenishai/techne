@@ -130,7 +130,7 @@ def reader_key(session_id: str) -> str:
     across 10 reader sessions, none of which helped its successor.
 
     The display name (the CLI ``-n`` alias, e.g. ``poe_1``) survives relaunch, so
-    it is the right key when present. THREE CONSEQUENCES, each a real choice:
+    it is the right key when present. FOUR CONSEQUENCES, each a real choice:
 
     1. A RECYCLED NAME INHERITS RECEIPTS. A fresh ``poe_2`` skips what the
        previous ``poe_2`` read but it never saw. Deliberate: the name denotes a
