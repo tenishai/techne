@@ -472,6 +472,202 @@ class TestNoFalseGreens:
         assert "missing" in cov.detail
         assert cov.remedy
 
+    def test_a_superseded_row_does_not_count_as_missing_forever(self, config):
+        """techne#496 — THE CHECK COULD NEVER GO GREEN.
+
+        `backfill_vectors` embeds only `superseded_by IS NULL` and purges the
+        embeddings of superseded rows (techne#168: a stale vector occupies a
+        top-k slot). The denominator was ALL knowledge, so every superseded row
+        was counted as permanently "missing" — 16 of 786 on the live store,
+        verdict STALE forever, with a remedy that provably embedded nothing.
+        Superseding is normal operation, so the phantom count only ever grew.
+
+        Pins the arithmetic on LITERALS, not on the implementation's own query:
+        two rows, one superseded, one live-and-embedded => LIVE, 1/1.
+        """
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+
+        keep = store(config.db_path, "the live row that must be embedded", type="fact")
+        gone = store(config.db_path, "the superseded row that must not count", type="fact")
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS knowledge_vec_rowids (rowid INTEGER)")
+            conn.execute("UPDATE knowledge SET superseded_by = ? WHERE id = ?", (keep, gone))
+            # Only the live row is embedded — exactly what backfill_vectors leaves behind.
+            conn.execute("INSERT INTO knowledge_vec_rowids (rowid) VALUES (?)", (keep,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
+        assert cov.verdict is Verdict.LIVE, f"superseded row counted as missing: {cov.detail}"
+        assert "1/1" in cov.detail
+        assert cov.remedy is None
+
+    def test_a_superseded_row_that_kept_its_embedding_is_reported(self, config):
+        """The other half of techne#496: scoping must not HIDE an orphan.
+
+        Nothing auto-runs backfill in production, so a row superseded AFTER being
+        embedded keeps a live ANN vector until the next explicit run. Scoping both
+        counts to live rows would make that invisible. It is counted separately
+        and fails the check, because the same remedy genuinely fixes it — the
+        purge runs at the head of backfill's knowledge pass.
+        """
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+
+        keep = store(config.db_path, "a live embedded row", type="fact")
+        gone = store(config.db_path, "superseded but still carrying a vector", type="fact")
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS knowledge_vec_rowids (rowid INTEGER)")
+            conn.execute("UPDATE knowledge SET superseded_by = ? WHERE id = ?", (keep, gone))
+            # BOTH embedded — the superseded one's vector was never purged.
+            conn.executemany(
+                "INSERT INTO knowledge_vec_rowids (rowid) VALUES (?)", [(keep,), (gone,)]
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
+        assert cov.verdict is Verdict.STALE, "an unpurged superseded embedding must be reported"
+        assert "superseded row(s) still embedded" in cov.detail
+        assert cov.remedy == "techne vectors backfill"
+
+    def test_an_edited_row_is_not_covered_just_because_it_is_present(self, config):
+        """techne#496 / #497 review — THE MIRROR-IMAGE FALSE GREEN.
+
+        `backfill_vectors` re-embeds `(NOT in vec OR vec_stale = 1) AND
+        superseded_by IS NULL`. Scoping the denominator while counting only
+        "is it present" counted two of that population's three parts, so a row
+        edited in place — `vec_stale = 1`, set on ANY in-place content edit —
+        read as covered. Measured before the fix: 2/2, 100%, remedy None, while
+        a backfill had real work to do. That is the false-green shape this check
+        exists to remove, arriving from the opposite side of the never-green one.
+        """
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+
+        edited = store(config.db_path, "this row gets rewritten in place", type="fact")
+        clean = store(config.db_path, "this row is untouched", type="fact")
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS knowledge_vec_rowids (rowid INTEGER)")
+            conn.executemany(
+                "INSERT INTO knowledge_vec_rowids (rowid) VALUES (?)", [(edited,), (clean,)]
+            )
+            # Exactly what an in-place content edit does (see cards.py).
+            conn.execute(
+                "UPDATE knowledge SET content = 'rewritten', vec_stale = 1 WHERE id = ?",
+                (edited,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
+        assert cov.verdict is Verdict.STALE, f"edited row read as covered: {cov.detail}"
+        assert "1/2" in cov.detail
+        assert "1 stale (edited since embedding)" in cov.detail
+        assert cov.remedy == "techne vectors backfill"
+
+    def test_a_dangling_vector_is_reported_but_carries_no_remedy(self, config):
+        """The mutation that survived the whole suite (#497 review, finding 1).
+
+        Reverting `embedded` to a raw `COUNT(*) FROM knowledge_vec_rowids` passed
+        all 2449 tests, because on a healthy store the two counts coincide. The
+        state that separates them is a vec rowid with NO knowledge row behind it,
+        which is reachable: `knowledge.delete()` and the pattern cleanup both
+        delete through a plain `connect()`, which cannot touch a vec0 table.
+
+        AND IT MUST NOT FAIL THE CHECK. The purge deletes `WHERE rowid IN (SELECT
+        id FROM knowledge WHERE superseded_by IS NOT NULL)` — it selects FROM
+        knowledge, so a rowid with no row behind it is never matched (verified:
+        purge removed 0 of 2). Failing here would attach a remedy that cannot
+        clear the finding, which is precisely the never-green defect #496 fixed.
+        Visible in the detail, absent from the verdict.
+        """
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+
+        kept = store(config.db_path, "the row that survives", type="fact")
+        doomed = store(config.db_path, "hard-deleted after being embedded", type="fact")
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS knowledge_vec_rowids (rowid INTEGER)")
+            conn.executemany(
+                "INSERT INTO knowledge_vec_rowids (rowid) VALUES (?)", [(kept,), (doomed,)]
+            )
+            conn.execute("DELETE FROM knowledge WHERE id = ?", (doomed,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
+        # The live population is whole, so the check is GREEN...
+        assert cov.verdict is Verdict.LIVE, f"dangling must not create an unclearable red: {cov}"
+        assert cov.remedy is None
+        # ...but the dangling vector is NOT swallowed.
+        assert "1 dangling vector(s) with no knowledge row" in cov.detail
+        assert "dangling=1" in cov.evidence
+
+    def test_the_check_agrees_with_a_REAL_vec0_shadow_table(self, config):
+        """#497 review nit 4 — the other tests supply the schema they assert against.
+
+        This PR strengthened the dependency on `knowledge_vec_rowids` from
+        CARDINALITY (`COUNT(*)`) to IDENTITY (`id IN (SELECT rowid ...)`). Every
+        other test in this class creates that table itself as a plain table, so
+        none of them can fail if the real vec0 shadow table disagrees — the
+        assertion and the fixture share an author. This one builds a REAL vec0
+        virtual table via sqlite_vec and checks the same query works against it,
+        which is the only way the identity assumption is actually pinned.
+
+        Skips where sqlite_vec is unavailable (the repo's existing pattern —
+        tests/test_cli_vectors.py), so it is a bonus pin, never a false green:
+        a skip here does not weaken the other tests, it just does not strengthen
+        them.
+        """
+        import struct
+
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+        from techne.core.search import _ensure_vec_table
+
+        live = store(config.db_path, "embedded in a real vec0 table", type="fact")
+        store(config.db_path, "not embedded at all", type="fact")  # makes total=2
+
+        conn = connect(config.db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            _ensure_vec_table(conn, "knowledge_vec", 8)
+            conn.execute(
+                "INSERT INTO knowledge_vec(rowid, embedding) VALUES (?, ?)",
+                (live, struct.pack("8f", *([0.1] * 8))),
+            )
+            conn.commit()
+            # The shadow table must expose rowid the way the check assumes.
+            rowids = [r[0] for r in conn.execute("SELECT rowid FROM knowledge_vec_rowids")]
+            assert rowids == [live], f"real vec0 rowid shape differs: {rowids}"
+        finally:
+            conn.close()
+
+        cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
+        assert cov.verdict is Verdict.STALE
+        assert "1/2" in cov.detail
+        assert "1 missing" in cov.detail
+        assert "embedded=1" in cov.evidence
+        assert "dangling=0" in cov.evidence, "a real vec0 row must not read as dangling"
+
 
 class TestSurvivingMutations:
     """Pins for the four mutations that survived the #469 review-3 suite.

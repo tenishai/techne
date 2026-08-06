@@ -1192,14 +1192,69 @@ def check_vector_coverage(config) -> CheckResult:
     predicate reported every row fresh (`vec_stale = 0`) while ~177 of 758 rows
     had no vector at all — "not stale" and "present" are different questions, and
     only the second one tells you hybrid search is whole.
+
+    BOTH COUNTS ARE SCOPED TO LIVE ROWS, and that scoping is the whole point of
+    techne#496. ``backfill_vectors`` embeds only ``superseded_by IS NULL`` and
+    additionally PURGES the embeddings of superseded rows, because search_vec
+    filters superseded results only AFTER the k-nearest cut, so a stale embedding
+    occupies a top-k slot and starves a live one (techne#168). Taking the
+    denominator from ALL knowledge therefore counted every superseded row as
+    permanently "missing": on the live store, 16 of 786, verdict STALE forever,
+    offering a remedy that provably embedded nothing (measured — a second
+    consecutive backfill returned `knowledge: 0` and the warning was unchanged).
+    It also grew monotonically, since superseding a row is NORMAL operation, so
+    the warning would diverge from reality for as long as the store was used.
+
+    A CHECK THAT CAN NEVER GO GREEN TRAINS THE OPERATOR TO IGNORE IT — which is
+    precisely the failure this check was added to fix, arriving from the opposite
+    direction. Prefer a narrower question you can answer honestly over a broader
+    one you cannot.
+
+    COUNT ALL THREE PARTS OF THAT POPULATION, NOT TWO. ``backfill_vectors``
+    re-embeds ``(NOT in vec OR vec_stale = 1) AND superseded_by IS NULL``
+    (search.py) and purges superseded embeddings. Scoping the denominator while
+    counting only "is it present" left `vec_stale = 1` — set on ANY in-place
+    content edit — covered by no check in this module at all, and it produced the
+    mirror-image false green: 2/2, 100%, remedy None, while a backfill had real
+    work to do (#497 review). Each condition is counted separately, named in the
+    detail, and fails the check, because the SAME remedy genuinely fixes each.
+
+    DANGLING VECTORS ARE REPORTED BUT DO NOT FAIL, AND THAT ASYMMETRY IS THE
+    POINT. A vec rowid whose knowledge row was HARD-DELETED (``knowledge.delete``
+    and the pattern cleanup both delete through a plain ``connect()``, which
+    cannot touch a vec0 table) is a real defect — but the purge deletes
+    ``WHERE rowid IN (SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)``,
+    which selects FROM knowledge, so a rowid with no knowledge row behind it is
+    never matched. VERIFIED: purge removed 0 of 2 in that state. Failing here
+    would therefore attach a remedy that cannot clear the finding — recreating
+    the never-green defect this check was just fixed for. It is surfaced in the
+    detail and evidence instead, so it is visible without being unclearable.
+    Owning issue: techne#408 (the same shape on threads_vec).
     """
     from techne.core.database import connect
 
     conn = connect(config.db_path)
     try:
-        total = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+        live = "superseded_by IS NULL"
+        total = conn.execute(f"SELECT COUNT(*) FROM knowledge WHERE {live}").fetchone()[0]
+        superseded = conn.execute(
+            "SELECT COUNT(*) FROM knowledge WHERE superseded_by IS NOT NULL"
+        ).fetchone()[0]
         try:
-            embedded = conn.execute("SELECT COUNT(*) FROM knowledge_vec_rowids").fetchone()[0]
+            in_vec = "id IN (SELECT rowid FROM knowledge_vec_rowids)"
+            embedded = conn.execute(
+                f"SELECT COUNT(*) FROM knowledge WHERE {live} AND {in_vec}"
+            ).fetchone()[0]
+            stale = conn.execute(
+                f"SELECT COUNT(*) FROM knowledge WHERE {live} AND {in_vec} AND vec_stale = 1"
+            ).fetchone()[0]
+            orphans = conn.execute(
+                f"SELECT COUNT(*) FROM knowledge WHERE superseded_by IS NOT NULL AND {in_vec}"
+            ).fetchone()[0]
+            dangling = conn.execute(
+                "SELECT COUNT(*) FROM knowledge_vec_rowids"
+                " WHERE rowid NOT IN (SELECT id FROM knowledge)"
+            ).fetchone()[0]
         except Exception:  # noqa: BLE001 — vec tables absent = channel not enabled
             return CheckResult(
                 name="vectors:coverage",
@@ -1212,14 +1267,44 @@ def check_vector_coverage(config) -> CheckResult:
     finally:
         conn.close()
 
-    missing = max(total - embedded, 0)
-    pct = (embedded / total * 100) if total else 100.0
+    # No clamp. Not because the old `max(..., 0)` was vestigial — it FIRED, in a
+    # reachable state: hard-deleting an embedded row leaves the raw vec count
+    # EXCEEDING the knowledge count (measured: total - embedded = -2), and the
+    # clamp rendered those dangling vectors as a clean 0. It was guarding, badly.
+    # The new code is immune for a better reason: `embedded` carries the same
+    # `live` predicate as `total`, so it is a true subset by construction, and
+    # dangling rows cannot enter it at all — they are counted explicitly instead.
+    covered = embedded - stale
+    missing = total - embedded
+    pct = (covered / total * 100) if total else 100.0
+    # "and current" is load-bearing: this numerator is `covered` (embedded AND not
+    # vec_stale), while `evidence` reports the raw `embedded`. Without the phrase a
+    # reader comparing the two lines sees 1/6 against embedded=3 and reads a
+    # contradiction — and evidence exists precisely so a finding can be re-derived
+    # (#497 review, nit 1).
+    detail = f"{covered}/{total} live knowledge embedded and current ({pct:.0f}%)"
+    if missing:
+        detail += f", {missing} missing"
+    if stale:
+        detail += f", {stale} stale (edited since embedding)"
+    if orphans:
+        detail += f", {orphans} superseded row(s) still embedded"
+    if dangling:
+        detail += f", {dangling} dangling vector(s) with no knowledge row (techne#408)"
+    if not (missing or stale or orphans) and superseded:
+        detail += f" ({superseded} superseded, correctly excluded)"
+    # `dangling` deliberately absent — no remedy clears it; see the docstring.
+    healthy = missing == 0 and stale == 0 and orphans == 0
     return CheckResult(
         name="vectors:coverage",
         subsystem="search",
         kind=Kind.COVERAGE,
-        verdict=Verdict.LIVE if missing == 0 else Verdict.STALE,
-        evidence=f"knowledge={total}, knowledge_vec_rowids={embedded}",
-        detail=f"{embedded}/{total} embedded ({pct:.0f}%), {missing} missing",
-        remedy="techne vectors backfill" if missing else None,
+        verdict=Verdict.LIVE if healthy else Verdict.STALE,
+        evidence=(
+            f"live knowledge={total}, embedded={embedded}, stale={stale}, "
+            f"superseded={superseded}, superseded-but-embedded={orphans}, "
+            f"dangling={dangling}"
+        ),
+        detail=detail,
+        remedy=None if healthy else "techne vectors backfill",
     )
