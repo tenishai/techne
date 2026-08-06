@@ -1192,14 +1192,48 @@ def check_vector_coverage(config) -> CheckResult:
     predicate reported every row fresh (`vec_stale = 0`) while ~177 of 758 rows
     had no vector at all — "not stale" and "present" are different questions, and
     only the second one tells you hybrid search is whole.
+
+    BOTH COUNTS ARE SCOPED TO LIVE ROWS, and that scoping is the whole point of
+    techne#496. ``backfill_vectors`` embeds only ``superseded_by IS NULL`` and
+    additionally PURGES the embeddings of superseded rows, because search_vec
+    filters superseded results only AFTER the k-nearest cut, so a stale embedding
+    occupies a top-k slot and starves a live one (techne#168). Taking the
+    denominator from ALL knowledge therefore counted every superseded row as
+    permanently "missing": on the live store, 16 of 786, verdict STALE forever,
+    offering a remedy that provably embedded nothing (measured — a second
+    consecutive backfill returned `knowledge: 0` and the warning was unchanged).
+    It also grew monotonically, since superseding a row is NORMAL operation, so
+    the warning would diverge from reality for as long as the store was used.
+
+    A CHECK THAT CAN NEVER GO GREEN TRAINS THE OPERATOR TO IGNORE IT — which is
+    precisely the failure this check was added to fix, arriving from the opposite
+    direction. Prefer a narrower question you can answer honestly over a broader
+    one you cannot.
+
+    ORPHANS ARE REPORTED, NOT HIDDEN. Scoping alone would make a superseded-
+    after-embedding row invisible here: it leaves a live ANN vector that this
+    check no longer counts. Nothing auto-runs the backfill in production, so that
+    state is reachable between runs. It is counted separately and fails the check,
+    because the same remedy genuinely fixes it — the purge runs at the head of
+    backfill's knowledge pass.
     """
     from techne.core.database import connect
 
     conn = connect(config.db_path)
     try:
-        total = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+        live = "superseded_by IS NULL"
+        total = conn.execute(f"SELECT COUNT(*) FROM knowledge WHERE {live}").fetchone()[0]
+        superseded = conn.execute(
+            "SELECT COUNT(*) FROM knowledge WHERE superseded_by IS NOT NULL"
+        ).fetchone()[0]
         try:
-            embedded = conn.execute("SELECT COUNT(*) FROM knowledge_vec_rowids").fetchone()[0]
+            in_vec = "id IN (SELECT rowid FROM knowledge_vec_rowids)"
+            embedded = conn.execute(
+                f"SELECT COUNT(*) FROM knowledge WHERE {live} AND {in_vec}"
+            ).fetchone()[0]
+            orphans = conn.execute(
+                f"SELECT COUNT(*) FROM knowledge WHERE superseded_by IS NOT NULL AND {in_vec}"
+            ).fetchone()[0]
         except Exception:  # noqa: BLE001 — vec tables absent = channel not enabled
             return CheckResult(
                 name="vectors:coverage",
@@ -1212,14 +1246,29 @@ def check_vector_coverage(config) -> CheckResult:
     finally:
         conn.close()
 
-    missing = max(total - embedded, 0)
+    # No clamp: `embedded` counts a SUBSET of the same population as `total` (both
+    # carry the `live` predicate), so it cannot exceed it. The previous version
+    # needed `max(..., 0)` precisely because its two counts spanned different
+    # populations — the clamp was hiding the bug rather than guarding anything.
+    missing = total - embedded
     pct = (embedded / total * 100) if total else 100.0
+    detail = f"{embedded}/{total} live knowledge embedded ({pct:.0f}%)"
+    if missing:
+        detail += f", {missing} missing"
+    if orphans:
+        detail += f", {orphans} superseded row(s) still embedded"
+    if not missing and not orphans and superseded:
+        detail += f" ({superseded} superseded, correctly excluded)"
+    healthy = missing == 0 and orphans == 0
     return CheckResult(
         name="vectors:coverage",
         subsystem="search",
         kind=Kind.COVERAGE,
-        verdict=Verdict.LIVE if missing == 0 else Verdict.STALE,
-        evidence=f"knowledge={total}, knowledge_vec_rowids={embedded}",
-        detail=f"{embedded}/{total} embedded ({pct:.0f}%), {missing} missing",
-        remedy="techne vectors backfill" if missing else None,
+        verdict=Verdict.LIVE if healthy else Verdict.STALE,
+        evidence=(
+            f"live knowledge={total}, embedded={embedded}, "
+            f"superseded={superseded}, superseded-but-embedded={orphans}"
+        ),
+        detail=detail,
+        remedy=None if healthy else "techne vectors backfill",
     )
