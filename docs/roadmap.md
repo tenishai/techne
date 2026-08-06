@@ -8,7 +8,8 @@
 
 Status legend: ☐ todo · ◐ in progress · ☑ done · ⏸ parked/blocked
 
-> **Markers reconciled against GitHub 2026-08-06 (#425).** Every `#N` in this file was checked with `gh issue view N --json state,stateReason`; 11 markers said todo/parked for issues since closed as COMPLETED (#19, #20, #56, #76, #80–#86) and were corrected to ☑. Two are genuinely still open and were left alone (#75 parked, #89 in progress).
+> **Markers reconciled against GitHub 2026-08-06 (#425).** Every `#N` in this file was checked with `gh issue view N --json state,stateReason`; 11 markers said todo/parked for issues since closed as COMPLETED (#19, #20, #56, #76, #80–#86) and were corrected to ☑. Two are genuinely still open and were left alone (#75 parked, #89 in progress). **One exception:** #73 is ☑ but closed `NOT_PLANNED`, not `COMPLETED` — its own line says so ("CLOSED as largely-addressed") and is left as written.
+> **The first pass of this reconciliation MISSED the "Recommended sequence" section** (caught in review, #495): the sweep matched a bulleted `- ☐ **#N` pattern, so a NUMBERED list was invisible to it, and the file briefly contradicted itself — #19/#20 marked ☑ above while that section still called them blocked/parked. A sweep is only as good as the shapes its pattern can see; when reconciling this file again, enumerate every `#N` in the raw text FIRST and only then look at what marker precedes it.
 > **Why this mattered:** the header below already says this document is historical, and a reviewer read it anyway and cited closed #84 as an open risk, building an argument on a wrong premise (#424). A `☐` reads as live status regardless of what the surrounding prose claims — a stale marker is worse than no marker, because it reads as authoritative.
 > **The dated PROSE in each review entry is deliberately NOT rewritten** — those are records of what was believed on that date and are correct as such. Only the status markers, which assert something about *now*, were touched. Markers drift as issues close; treat any marker as accurate only as of the date above.
 
@@ -110,19 +111,19 @@ Core (FTS-only default) runs on Debian/Ubuntu with **zero code changes**; paths 
 - ☑ **#84 — `search[vectors]` `enable_load_extension` crash** (HIGH, code) on Linux Python without loadable-extension support; only bites the `[vectors]` extra. Fix = broaden the except.
 - ☑ **#85 — add a Dockerfile** (the "containerizable" goal has no artifact; working minimal one in the issue).
 - ☑ **#86 — Linux `techne watch` polish** (systemd unit + inotify watch-limit docs).
-- ☑ **#20 — end-of-session reflect pass.** Parked — mid 2-week observation window on `experiment/reflect-pass`.
-- ☑ **#19 — tag inference + MCP-sampling fact extraction.** Blocked — no API key, no client supports MCP sampling. Needs local-model fallback first.
+- ☑ **#20 — end-of-session reflect pass.** (Was: parked — mid 2-week observation window on `experiment/reflect-pass`.) Since CLOSED/COMPLETED.
+- ☑ **#19 — tag inference + MCP-sampling fact extraction.** (Was: blocked — no API key, no client supports MCP sampling; needed a local-model fallback first.) Since CLOSED/COMPLETED — the agent-loop `generate_fn` path removed the API-key blocker.
 - ⏸ **#75 — eval v2 (cold/warm arm + running-model LLM-judge).** Deferred — cold/warm needs a freshness feature; LLM-judge must use the running model (never an API key). Filed from #68 close-out.
 
 ---
 
-## Recommended sequence
+## Recommended sequence (as of 2026-06-20; items reconciled 2026-08-06)
 1. ✅ #71 → #72 → #68 (M1+M2) — shipped.
 2. ✅ Tier-2 relevance cluster (#74 + #77 stemming) + #73 dispositioned (closed) — shipped/closed.
 3. ✅ #79 outbox gate/purge — shipped.
 4. ☑ **#57 — memory portability.** CLOSED — opencode full parity (read+write). Optional follow-ups in the issue close comment. **NEXT within #57:** A.2 path de-hardcoding + decide PlatformHookContract's fate; then opencode prompt/session-end capture. Aider remains a later SourceAdapter test (markdown history; no MCP/hooks).
-5. Opportunistic: confirm-and-close **#51** (likely moot post-#79); **#56** staff-review backlog.
-6. Blocked/parked: #75 (needs freshness feature), #19 (no API key / no MCP-sampling client), #20 (mid reflect-experiment).
+5. ✅ Opportunistic: confirm-and-close **#51** (likely moot post-#79); **#56** staff-review backlog. — both CLOSED/COMPLETED.
+6. Blocked/parked: #75 (needs freshness feature) — **still open**. ✅ #19 (was: no API key / no MCP-sampling client) and ✅ #20 (was: mid reflect-experiment) have since CLOSED/COMPLETED; the blockers named here were real at the time and were subsequently cleared.
 
 ## Parked: cabal (separate track)
 #13 three-tier memory · #14 archivist outbox sink · #12 A2A streaming · #11 AbortGraph. After techne core is trustworthy, unless a launch milestone needs cabal.
