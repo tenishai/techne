@@ -65,8 +65,18 @@ class TestLockPredicateAgainstRealFiles:
         finds nothing writable.
         """
         hosts = Path("/etc/hosts")
-        if not hosts.exists() or os.geteuid() == 0:
-            pytest.skip("needs a root-owned /etc/hosts and a non-root euid")
+        if not hosts.exists():
+            pytest.skip("no /etc/hosts on this host")
+        if os.geteuid() == 0:
+            # A ROOT ENVIRONMENT GETS AN ASSERTION, NOT A SKIP. This is the only
+            # unpatched LOCKED coverage in the module, and this repo's own
+            # Dockerfile produces a root container — so skipping here left the
+            # predicate with zero real coverage while the suite still reported
+            # green (Prudence, PR #508). Under root, LOCKED is unreachable BY
+            # DESIGN, so the honest test is that the euid-0 branch fires.
+            v = evaluate_lock(hosts)
+            assert v.state == UNLOCKED and "euid 0" in v.reason
+            return
         st = os.stat(hosts)
         if st.st_uid == os.geteuid() or st.st_mode & 0o022:
             pytest.skip("/etc/hosts is not root-owned 0644 on this host")
@@ -510,3 +520,128 @@ class TestCheckConfigTrust:
         result = self._run(Config())
 
         assert result.verdict.value == "dormant"
+
+
+class TestSaveDoesNotDestroyTheFileItOverrules:
+    """Regression pins for the data loss found on PR #508.
+
+    The original `save()` test seeded `config.yaml` with a single non-egress key,
+    so there was never an egress value present to be destroyed — the test was
+    constructed around the gap it was meant to cover. These seed real values,
+    including credentials.
+    """
+
+    def _seed(self, home: Path) -> dict:
+        raw = {
+            "sync": {"adapter": "filesystem", "path": "/srv/out", "auth": "SECRET-TOKEN"},
+            "llm_api_base": "https://proxy.internal",
+            "llm_api_key": "sk-operator",
+            "connections": {"team": {"role": "team", "db_path": "/srv/team.db"}},
+            "stores": {"librarian": {"adapter": "sqlite", "dsn": "/srv/lib.db"}},
+            "staleness_hours": 7,
+        }
+        (home / "config.yaml").write_text(yaml.dump(raw))
+        return raw
+
+    def test_unlocked_save_preserves_the_agent_side_values_including_credentials(
+        self, tmp_path, monkeypatch
+    ):
+        """`techne init` is a load->mutate->save round-trip. Before the fix it
+        deleted sync.auth and llm_api_key outright, unrecoverably, on a routine
+        command — along the path the card itself names as the expected mistake."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        self._seed(tmp_path)
+        operator = tmp_path / "operator.yaml"
+        operator.write_text(yaml.dump({"sync": {"adapter": "noop"}}))
+        _force(monkeypatch, UNLOCKED, operator)
+
+        cfg = Config.load()
+        cfg.save()
+
+        after = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert after["sync"]["auth"] == "SECRET-TOKEN"
+        assert after["sync"]["adapter"] == "filesystem"
+        assert after["llm_api_key"] == "sk-operator"
+        assert after["llm_api_base"] == "https://proxy.internal"
+        assert after["connections"]["team"]["db_path"] == "/srv/team.db"
+        assert after["stores"]["librarian"]["dsn"] == "/srv/lib.db"
+        assert after["staleness_hours"] == 7
+
+    def test_the_gate_still_ignores_what_the_file_preserves(self, tmp_path, monkeypatch):
+        """Preservation must not become permission. The file records the request;
+        the running config still refuses it."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        self._seed(tmp_path)
+        operator = tmp_path / "operator.yaml"
+        operator.write_text(yaml.dump({"sync": {"adapter": "noop"}}))
+        _force(monkeypatch, UNLOCKED, operator)
+
+        cfg = Config.load()
+        cfg.save()
+
+        assert cfg.sync.adapter == "noop"
+        assert cfg.llm_api_base == ""
+        assert Config.load().sync.adapter == "noop"
+
+    def test_locked_save_never_writes_the_operator_values_down(self, tmp_path, monkeypatch):
+        """The other half, unchanged: the OPERATOR's pins must not land in the
+        agent-writable file, or they would outlive the layer that granted them."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(yaml.dump({"staleness_hours": 7}))
+        operator = tmp_path / "operator.yaml"
+        operator.write_text(yaml.dump({"sync": {"adapter": "filesystem", "path": "/srv/OPERATOR"}}))
+        _force(monkeypatch, LOCKED, operator)
+
+        cfg = Config.load()
+        cfg.save()
+
+        after = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert "/srv/OPERATOR" not in yaml.dump(after)
+        assert "sync" not in after
+
+
+class TestResolvedPathSoundness:
+    def test_a_symlinked_ancestor_we_control_defeats_the_lock(self, tmp_path):
+        """Walking only the RESOLVED chain reported LOCKED here.
+
+        `/agent/link -> /etc` with `/agent` writable by us: lstat follows the
+        intermediate symlink to a genuine root-owned file, resolve() yields
+        root-owned ancestors — while the directory that decides where the later
+        open() lands was never inspected.
+        """
+        if os.geteuid() == 0 or not Path("/etc/hosts").exists():
+            pytest.skip("needs a non-root euid and a root-owned /etc/hosts")
+        link = tmp_path / "link"
+        link.symlink_to("/etc")
+
+        verdict = evaluate_lock(link / "hosts")
+
+        assert verdict.state == UNLOCKED
+        assert "parent dir" in verdict.reason
+        assert str(tmp_path) in verdict.reason
+
+    def test_the_verdict_carries_the_inode_it_proved(self, tmp_path):
+        """Readers must open what the predicate proved, not re-walk the name."""
+        if os.geteuid() == 0 or not Path("/etc/hosts").exists():
+            pytest.skip("needs a non-root euid and a root-owned /etc/hosts")
+        verdict = evaluate_lock(Path("/etc/hosts"))
+
+        assert verdict.state == LOCKED
+        assert verdict.read_target == Path("/etc/hosts").resolve()
+
+
+class TestStoresAreGoverned:
+    def test_store_dsn_is_an_egress_key(self, tmp_path, monkeypatch):
+        """`stores.*.dsn` routes domain memory to an arbitrary path, structurally
+        identical to the already-governed `archivist_db_path`."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump({"stores": {"librarian": {"adapter": "sqlite", "dsn": "/tmp/leak.db"}}})
+        )
+        operator = tmp_path / "operator.yaml"
+        operator.write_text(yaml.dump({"sync": {"adapter": "noop"}}))
+        _force(monkeypatch, LOCKED, operator)
+
+        cfg = Config.load()
+
+        assert cfg.stores == {}

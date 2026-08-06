@@ -399,6 +399,11 @@ class Config:
     #: setting, and writing it back down into the agent-writable file would let
     #: the agent forge the appearance of a lock.
     egress_trust: TrustVerdict | None = None
+    #: config.yaml's OWN egress values as read from disk, captured before the
+    #: gate stripped them. Replayed verbatim by :meth:`save` so an enforcing
+    #: verdict never destroys the file it overrules. Empty when nothing is
+    #: enforcing (the file is already authoritative) — never serialized itself.
+    preserved_egress: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -410,9 +415,10 @@ class Config:
             # one. Going through the same gate keeps that from being a special
             # case someone has to remember.
             raw: dict[str, Any] = {}
-            trust = cls._gate_egress(raw, home)
+            trust, preserved = cls._gate_egress(raw, home)
             cfg = cls._from_dict(raw, home=home)
             cfg.egress_trust = trust
+            cfg.preserved_egress = preserved
             return cfg
         # STAMP BEFORE THE READ, not after. The stamp is the cache's claim about
         # WHICH revision of config.yaml produced its values; taken after the
@@ -428,14 +434,15 @@ class Config:
             pre_stamp = None
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
-        trust = cls._gate_egress(raw, home)
+        trust, preserved = cls._gate_egress(raw, home)
         cfg = cls._from_dict(raw, home=home)
         cfg.egress_trust = trust
+        cfg.preserved_egress = preserved
         cfg._refresh_fast_cache(home=home, source=path, stamp=pre_stamp)
         return cfg
 
     @staticmethod
-    def _gate_egress(raw: dict[str, Any], home: Path) -> TrustVerdict:
+    def _gate_egress(raw: dict[str, Any], home: Path) -> tuple[TrustVerdict, dict[str, Any]]:
         """Resolve the operator layer and rewrite ``raw``'s egress keys in place.
 
         THE SINGLE CHOKEPOINT for techne#393. It sits in ``load()`` rather than
@@ -459,11 +466,17 @@ class Config:
           was never deployed.
         """
         verdict = config_trust.evaluate_lock(config_trust.resolve_operator_config(home))
-        if verdict.state == config_trust.LOCKED and verdict.path is not None:
-            config_trust.apply_operator_layer(raw, config_trust.read_operator_layer(verdict.path))
-        elif verdict.state == config_trust.UNLOCKED:
+        if not verdict.enforcing:
+            return verdict, {}
+        # Snapshot BEFORE the strip. The gate must ignore these values, not
+        # destroy them — see capture_egress for the data-loss this prevents.
+        preserved = config_trust.capture_egress(raw)
+        target = verdict.read_target
+        if verdict.state == config_trust.LOCKED and target is not None:
+            config_trust.apply_operator_layer(raw, config_trust.read_operator_layer(target))
+        else:
             config_trust.strip_egress(raw)
-        return verdict
+        return verdict, preserved
 
     def _refresh_fast_cache(self, home: Path, source: Path, stamp: str | None = None) -> None:
         """Write the stdlib-readable hook cache (techne#470). Best-effort.
@@ -905,6 +918,7 @@ class Config:
         # authorship of a decision it did not make.
         if self.egress_trust is not None and self.egress_trust.enforcing:
             config_trust.strip_egress(data)
+            config_trust.restore_egress(data, self.preserved_egress)
         # Write atomically with owner-only perms FROM CREATION. The config can hold
         # secrets (llm_api_key, sync.auth); the old open()+chmod() created the file
         # world-readable (≈0644) and only narrowed it afterward — a TOCTOU window in

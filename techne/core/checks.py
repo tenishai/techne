@@ -1240,6 +1240,14 @@ def check_config_trust(config) -> CheckResult:
     verdict = config_trust.evaluate_lock(config_trust.resolve_operator_config(techne_home()))
     recorded = getattr(config, "egress_trust", None)
 
+    # WHICH TIER is in force is a security fact, not a detail: only
+    # SYSTEM_OPERATOR_CONFIG is unreachable by the agent's environment. A layer
+    # found via $TECHNE_OPERATOR_CONFIG can be switched off with `env -u`, so an
+    # operator who deployed there has a correct LOCKED verdict and no boundary.
+    # Reporting LIVE without naming the tier would be exactly the false green
+    # this module exists to prevent.
+    tier = "system" if verdict.path == config_trust.SYSTEM_OPERATOR_CONFIG else "env-selected"
+
     # Which destination keys does this install actually depart from defaults on?
     # Compared against a fresh Config so the baseline cannot drift from the
     # dataclass the way a hardcoded list would.
@@ -1278,8 +1286,16 @@ def check_config_trust(config) -> CheckResult:
             subsystem="security",
             kind=Kind.FAIL_OPEN,
             verdict=Verdict.LIVE,
-            evidence=f"{path}: {verdict.reason}",
-            detail=f"egress pinned by operator layer ({selected})",
+            evidence=f"{path} [{tier} tier]: {verdict.reason}",
+            detail=(
+                f"egress pinned by operator layer ({selected})"
+                + (
+                    ""
+                    if tier == "system"
+                    else " — WARNING: env-selected tier, an agent can bypass it with "
+                    "`env -u TECHNE_OPERATOR_CONFIG`; only /etc/techne is a real lock"
+                )
+            ),
         )
 
     if verdict.state == config_trust.UNLOCKED:
@@ -1291,10 +1307,21 @@ def check_config_trust(config) -> CheckResult:
             evidence=f"{path}: {verdict.reason}",
             detail=(
                 "operator layer present but this process could rewrite it — "
-                "egress forced to closed defaults, config.yaml ignored"
+                "egress forced to the BUILT-IN DEFAULT destinations (not silence: "
+                "the default model still routes to its provider), config.yaml ignored "
+                "for egress but preserved on disk"
             ),
             remedy=(
-                f"chown to an operator uid and chmod 0644: {path} "
+                # The generic chown advice CANNOT clear the euid-0 branch — root
+                # can rewrite anything, so no ownership makes it lockable. A
+                # remedy that cannot clear its own finding is the never-green
+                # defect this module was fixed for once already, so this branches
+                # on the reason. techne's own Dockerfile has no USER directive
+                # and mounts /root/.techne, so the shipped image lands here.
+                "run techne as a non-root user (the Dockerfile has no USER "
+                "directive); a root process can never honor an operator layer"
+                if "euid 0" in verdict.reason
+                else f"chown to an operator uid and chmod 0644: {path} "
                 "(and place it outside the agent's writable tree)"
             ),
         )

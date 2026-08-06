@@ -50,10 +50,26 @@ import yaml
 
 #: Config keys that select a destination for memory, in dotted form. The
 #: operator layer is authoritative for this ENTIRE set: any key it does not
-#: declare reverts to the in-code default (all of which are closed), rather than
-#: falling back to config.yaml. Partial authority is not authority — an operator
-#: layer that pinned only ``sync`` while config.yaml kept ``llm_api_base`` would
-#: read as locked while leaving a destination the agent still chooses.
+#: declare reverts to the IN-CODE DEFAULT, rather than falling back to
+#: config.yaml. Partial authority is not authority — an operator layer that
+#: pinned only ``sync`` while config.yaml kept ``llm_api_base`` would read as
+#: locked while leaving a destination the agent still chooses.
+#:
+#: THE DEFAULTS ARE NOT ALL "CLOSED", and an earlier revision of this comment
+#: said they were. ``model`` defaults to ``claude-haiku-4-5-20251001`` — a live
+#: destination — and with ``llm_api_base``/``llm_api_key`` empty, litellm falls
+#: back to env-var provider routing (``ANTHROPIC_API_KEY``; see config.py's own
+#: note at the ``llm_api_base`` field). So techne under an enforcing verdict
+#: still makes outbound LLM calls to the built-in provider. The guarantee is
+#: that the agent cannot REPOINT them, not that nothing leaves. Say "built-in
+#: default destinations", never "closed defaults" — the second reads as "no
+#: traffic" to an operator, and that is false.
+#:
+#: EXPIRY CONDITION: this set is correct for today's code partly by accident of
+#: scope — ``stores`` DSNs are SQLite-only (`core/stores.py:load_store` raises on
+#: any other adapter, techne#135) and sync adapters are enumerated. techne#87
+#: (postgres stores) would make a store DSN a network destination; whoever lands
+#: it must revisit this tuple.
 EGRESS_KEYS: tuple[str, ...] = (
     # Whole block: adapter selects a push target; url/path/auth parameterize it.
     "sync",
@@ -74,16 +90,33 @@ EGRESS_KEYS: tuple[str, ...] = (
     # standalone=false routes team memory to the archivist sink at this path.
     "archivist_db_path",
     "standalone",
+    # Domain-store DSNs (librarian/codex/architect/documents). Structurally
+    # identical to archivist_db_path — an arbitrary path that domain memory is
+    # written to (`core/stores.py:store_path`) — so the "destination, not
+    # volume" line that includes one must include the other. Bounded today by
+    # SQLite-only, but a world-readable DSN is already a cross-agent leak in the
+    # one-install-per-agent deployment where this gate is meant to be a wall.
+    "stores",
 )
 
-#: Not env-relocatable, and therefore the only resolution step an agent cannot
-#: step around by editing its own environment. An agent that can write here
-#: already has root, at which point this module is not the thing standing
-#: between it and the network.
+#: THE ONLY TIER THAT IS A REAL LOCK. Not env-relocatable, so it is the one
+#: resolution step an agent cannot step around by editing its own environment.
+#: An agent that can write here already has root, at which point this module is
+#: not the thing standing between it and the network.
 SYSTEM_OPERATOR_CONFIG = Path("/etc/techne/config.operator.yaml")
 
-#: Env override, for deployments whose operator-owned tree is not /etc. Consulted
-#: only when the system path is absent — see :func:`resolve_operator_config`.
+#: Env override, for deployments whose operator-owned tree is not /etc.
+#:
+#: A CONVENIENCE, NOT A LOCK, and the distinction is the whole security story.
+#: `resolve_operator_config` closes the DANGLING-pointer case (a set-but-wrong
+#: value is reported rather than ignored), but it cannot close the UNSET case:
+#: an agent running `env -u TECHNE_OPERATOR_CONFIG techne ...` — or relocating
+#: `TECHNE_HOME`, which `config.techne_home()` also reads from the environment —
+#: falls through to ``absent``, and config.yaml regains full authority. An
+#: operator who deploys to /opt and satisfies every instruction in the card will
+#: get a correct LOCKED verdict and still have no boundary. Only the hardcoded
+#: /etc path survives a hostile environment. (Found by Prudence on PR #508;
+#: verified by observation, not argued.)
 OPERATOR_CONFIG_ENV = "TECHNE_OPERATOR_CONFIG"
 
 ABSENT = "absent"
@@ -103,7 +136,10 @@ class TrustVerdict:
     * ``locked``   — the layer exists and this process cannot rewrite it. Its
       values are authoritative; config.yaml's egress keys are ignored.
     * ``unlocked`` — the layer exists but this process COULD rewrite it. Fail
-      closed: neither file is trusted for egress, so the closed defaults apply.
+      closed: neither file is trusted for egress, so the BUILT-IN DEFAULT
+      destinations apply. Note "built-in default", not "closed" — `model`
+      defaults to a live Anthropic destination and litellm still routes on env
+      credentials. The agent cannot REPOINT that traffic; it does not stop.
 
     ``reason`` is quotable evidence, not a category — a reader should be able to
     re-derive the verdict from it (which uid owns the file, which parent dir is
@@ -113,11 +149,23 @@ class TrustVerdict:
     state: str
     path: Path | None
     reason: str
+    #: The path whose properties were actually PROVEN — ``path`` with symlinks
+    #: resolved. Readers must open THIS, not ``path``: the predicate walks the
+    #: resolved ancestor chain, so opening the unresolved path can land on a
+    #: different inode when an intermediate component is a symlink we control.
+    #: ``path`` stays the configured spelling, because that is what an operator
+    #: needs to see in a remedy.
+    resolved: Path | None = None
 
     @property
     def enforcing(self) -> bool:
         """True when this verdict overrides config.yaml's egress keys."""
         return self.state in (LOCKED, UNLOCKED)
+
+    @property
+    def read_target(self) -> Path | None:
+        """The inode to actually read the layer from."""
+        return self.resolved or self.path
 
 
 def resolve_operator_config(home: Path) -> Path | None:
@@ -159,8 +207,8 @@ def _writable_by_us(path: Path) -> bool:
     return os.access(path, os.W_OK)
 
 
-def _writable_parent(path: Path) -> Path | None:
-    """The nearest ancestor dir this process can write, if any.
+def _writable_parent(path: Path, resolved: Path | None = None) -> Path | None:
+    """The nearest ancestor dir this process can write, on EITHER path chain.
 
     A writable ancestor defeats every property of the file itself: the agent
     renames the directory aside and supplies its own tree. This is the check
@@ -168,10 +216,22 @@ def _writable_parent(path: Path) -> Path | None:
     unlockable for a same-uid agent — $HOME is writable, so the whole subtree is
     replaceable — and it is why the deployment doc points operators at a tree
     outside the agent's home.
+
+    BOTH CHAINS ARE WALKED, and walking only the resolved one was a real hole
+    (Prudence, PR #508). Given ``/agent/link -> /etc/techne`` with ``/agent``
+    writable by us, ``lstat`` follows the intermediate symlink and reports the
+    genuine root-owned file, and ``resolve()`` yields ``/etc/techne/...`` whose
+    ancestors are all root-owned — LOCKED, while the directory that actually
+    decides where a later ``open()`` lands was never inspected. Reproduced
+    before fixing.
     """
-    for parent in path.resolve().parents:
-        if _writable_by_us(parent):
-            return parent
+    chains = [path.parents]
+    if resolved is not None and resolved != path:
+        chains.append(resolved.parents)
+    for chain in chains:
+        for parent in chain:
+            if _writable_by_us(parent):
+                return parent
     return None
 
 
@@ -185,49 +245,69 @@ def evaluate_lock(path: Path | None) -> TrustVerdict:
     if path is None:
         return TrustVerdict(ABSENT, None, "no operator config found")
 
+    # Resolved ONCE, here, and carried on the verdict so the caller reads the
+    # inode whose properties were proven rather than re-walking the name.
+    try:
+        resolved: Path | None = path.resolve()
+    except OSError:
+        resolved = None
+
     try:
         st = os.lstat(path)
     except OSError as exc:
-        return TrustVerdict(UNLOCKED, path, f"cannot stat: {type(exc).__name__}: {exc}")
+        return TrustVerdict(UNLOCKED, path, f"cannot stat: {type(exc).__name__}: {exc}", resolved)
 
     import stat as _stat
 
     if _stat.S_ISLNK(st.st_mode):
         return TrustVerdict(
-            UNLOCKED, path, "is a symlink — whoever owns the link chooses the target"
+            UNLOCKED, path, "is a symlink — whoever owns the link chooses the target", resolved
         )
     if not _stat.S_ISREG(st.st_mode):
-        return TrustVerdict(UNLOCKED, path, "not a regular file")
+        return TrustVerdict(UNLOCKED, path, "not a regular file", resolved)
 
     if not hasattr(os, "geteuid"):
         return TrustVerdict(
-            UNLOCKED, path, "ownership checks unavailable on this platform (no os.geteuid)"
+            UNLOCKED,
+            path,
+            "ownership checks unavailable on this platform (no os.geteuid)",
+            resolved,
         )
     euid = os.geteuid()
 
     if euid == 0:
         return TrustVerdict(
-            UNLOCKED, path, "this process runs as root (euid 0) — no file is unwritable to it"
+            UNLOCKED,
+            path,
+            "this process runs as root (euid 0) — no file is unwritable to it",
+            resolved,
         )
     if st.st_uid == euid:
         return TrustVerdict(
             UNLOCKED,
             path,
             f"owned by this process's own euid {euid} — an owner can always chmod it back",
+            resolved,
         )
     if st.st_mode & 0o022:
         return TrustVerdict(
-            UNLOCKED, path, f"mode {oct(st.st_mode & 0o777)} is group- or world-writable"
+            UNLOCKED,
+            path,
+            f"mode {oct(st.st_mode & 0o777)} is group- or world-writable",
+            resolved,
         )
     if _writable_by_us(path):
-        return TrustVerdict(UNLOCKED, path, "writable by this process (group membership or ACL)")
-    bad_parent = _writable_parent(path)
+        return TrustVerdict(
+            UNLOCKED, path, "writable by this process (group membership or ACL)", resolved
+        )
+    bad_parent = _writable_parent(path, resolved)
     if bad_parent is not None:
         return TrustVerdict(
             UNLOCKED,
             path,
             f"parent dir {bad_parent} is writable by this process — "
             "the file can be replaced by renaming its directory aside",
+            resolved,
         )
 
     return TrustVerdict(
@@ -235,6 +315,13 @@ def evaluate_lock(path: Path | None) -> TrustVerdict:
         path,
         f"owned by uid {st.st_uid} (not our euid {euid}), mode {oct(st.st_mode & 0o777)}, "
         "no writable ancestor",
+        # THE ONE THAT MATTERS MOST. Every other branch refuses the layer, so a
+        # missing `resolved` there costs nothing; this branch is the only one
+        # whose file is actually READ, and omitting it here would send the reader
+        # back to the unresolved name — reinstating the exact symlink hole the
+        # ancestor walk above was just extended to close. Caught by this module's
+        # own test, not by review.
+        resolved,
     )
 
 
@@ -291,6 +378,39 @@ def strip_egress(raw: dict) -> list[str]:
     rather than dropping an operator's setting silently.
     """
     return [key for key in EGRESS_KEYS if _pop(raw, key)]
+
+
+def capture_egress(raw: dict) -> dict[str, Any]:
+    """Snapshot the egress keys AS WRITTEN in the agent-writable file.
+
+    Taken BEFORE the gate strips them, and carried on the Config so ``save()``
+    can write the file back with the operator's own prior values intact. Without
+    it, the gate's strip is a DESTRUCTIVE read: `techne init` is a
+    load→mutate→save round-trip, so the first init after a layer appears rewrites
+    config.yaml without `sync`, `connections`, `llm_api_base`, `llm_api_key`,
+    `model`, `standalone`, `archivist_db_path` or `stores` — including the
+    credentials in `sync.auth` and `llm_api_key`, unrecoverably. Reproduced on PR
+    #508 before this existed; found by Prudence, and the test that was supposed to
+    cover `save()` seeded no egress key, so it could not have caught it.
+
+    NOT PERSISTING THE OPERATOR'S VALUES AND NOT DESTROYING THE FILE'S OWN ARE
+    DIFFERENT REQUIREMENTS, and satisfying only the first produced the mirror
+    error: a revocation that outlives the thing that caused it. config.yaml
+    records what the agent-side asked for; the gate goes on ignoring it.
+    """
+    captured: dict[str, Any] = {}
+    for key in EGRESS_KEYS:
+        value = _get(raw, key)
+        if value is not _MISSING:
+            captured[key] = value
+    return captured
+
+
+def restore_egress(data: dict, captured: dict[str, Any]) -> list[str]:
+    """Write captured egress values back into a serialization dict."""
+    for key, value in captured.items():
+        _set(data, key, value)
+    return list(captured)
 
 
 def apply_operator_layer(raw: dict, operator_raw: dict) -> list[str]:
