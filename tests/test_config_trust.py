@@ -44,9 +44,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _force(monkeypatch, state: str, path: Path | None = None, reason: str = "test"):
+def _force(monkeypatch, state: str, path: Path | None = None, reason: str = "test", resolved=None):
     """Pin the trust verdict Config.load will see."""
-    verdict = TrustVerdict(state, path, reason)
+    verdict = TrustVerdict(state, path, reason, resolved)
     monkeypatch.setattr(config_trust, "evaluate_lock", lambda _p: verdict)
     return verdict
 
@@ -257,7 +257,9 @@ class TestLoadGate:
         assert cfg.sync.path == "/srv/out"
         assert cfg.standalone is False
 
-    def test_key_omitted_by_the_operator_reverts_to_the_closed_default(self, tmp_path, monkeypatch):
+    def test_key_omitted_by_the_operator_reverts_to_the_builtin_default(
+        self, tmp_path, monkeypatch
+    ):
         """Authority over the set is all-or-nothing.
 
         config.yaml asks for a foreign endpoint; the operator layer pins only
@@ -460,7 +462,7 @@ class TestCheckConfigTrust:
         assert "agent-writable" in result.detail
         assert "sync.adapter=filesystem" in result.detail
 
-    def test_absent_with_closed_defaults_says_so(self, tmp_path, monkeypatch):
+    def test_absent_with_builtin_defaults_says_so(self, tmp_path, monkeypatch):
         """Same verdict as above, opposite significance — the detail is the only
         thing that distinguishes a benign default install from an exposed one."""
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
@@ -468,12 +470,12 @@ class TestCheckConfigTrust:
         result = self._run(Config.load())
 
         assert result.verdict.value == "dormant"
-        assert "all destinations at defaults" in result.detail
+        assert "all destinations at built-in values" in result.detail
 
     def test_unlocked_is_broken_with_an_actionable_remedy(self, tmp_path, monkeypatch):
         """The state that should alarm: someone deployed a boundary and does not
         have one. A plain 'is egress closed?' check would render this GREEN,
-        because failing closed means egress IS closed at that moment."""
+        because the keys it would read sit at their built-in values here."""
         operator = tmp_path / "operator.yaml"
         operator.write_text(yaml.dump({"sync": {"adapter": "noop"}}))
         _force(monkeypatch, UNLOCKED, operator, reason="owned by this process's own euid 501")
@@ -622,9 +624,16 @@ class TestResolvedPathSoundness:
 
     def test_the_verdict_carries_the_inode_it_proved(self, tmp_path):
         """Readers must open what the predicate proved, not re-walk the name."""
-        if os.geteuid() == 0 or not Path("/etc/hosts").exists():
+        hosts = Path("/etc/hosts")
+        if os.geteuid() == 0 or not hosts.exists():
             pytest.skip("needs a non-root euid and a root-owned /etc/hosts")
-        verdict = evaluate_lock(Path("/etc/hosts"))
+        st = os.stat(hosts)
+        # Same environmental guard as the sibling above. Without it this test
+        # fails for a HOST reason inside the file whose job is to tell real
+        # failures apart from environmental ones.
+        if st.st_uid == os.geteuid() or st.st_mode & 0o022:
+            pytest.skip("/etc/hosts is not root-owned 0644 on this host")
+        verdict = evaluate_lock(hosts)
 
         assert verdict.state == LOCKED
         assert verdict.read_target == Path("/etc/hosts").resolve()
@@ -645,3 +654,107 @@ class TestStoresAreGoverned:
         cfg = Config.load()
 
         assert cfg.stores == {}
+
+
+class TestTheLayerIsReadFromTheInodeThatWasProven:
+    def test_load_reads_resolved_not_path(self, tmp_path, monkeypatch):
+        """Threading `resolved` onto the verdict is only half the fix; the gate
+        must CONSUME it.
+
+        Nothing caught the consumption half — `_force` left `resolved=None`, so
+        `read_target` and `path` were indistinguishable in every gate test and
+        reverting `verdict.read_target` to `verdict.path` kept the suite green.
+        That is the same shape of half-application caught by hand last round, on
+        the half that actually opens the file. (Prudence, PR #508 r2, nit 2.)
+        """
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        decoy = tmp_path / "decoy.yaml"
+        decoy.write_text(yaml.dump({"sync": {"adapter": "filesystem", "path": "/FROM-DECOY"}}))
+        proven = tmp_path / "proven.yaml"
+        proven.write_text(yaml.dump({"sync": {"adapter": "filesystem", "path": "/FROM-PROVEN"}}))
+        _force(monkeypatch, LOCKED, decoy, resolved=proven)
+
+        cfg = Config.load()
+
+        assert cfg.sync.path == "/FROM-PROVEN"
+
+
+class TestTierIsNamedAndSoIsItsLever:
+    """Blocker 2's entire code-visible remedy had no assertion behind it — the
+    one thing separating "documented" from "handled". (Prudence r2, nit 1.)"""
+
+    def _detail(self, config):
+        from techne.core.checks import check_config_trust
+
+        return check_config_trust(config)
+
+    def test_system_tier_carries_no_warning(self, tmp_path, monkeypatch):
+        system = tmp_path / "etc" / "config.operator.yaml"
+        system.parent.mkdir()
+        system.write_text(yaml.dump({"sync": {"adapter": "noop"}}))
+        monkeypatch.setattr(config_trust, "SYSTEM_OPERATOR_CONFIG", system)
+        _force(monkeypatch, LOCKED, system)
+
+        result = self._detail(Config.load())
+
+        assert result.verdict.value == "live"
+        assert "WARNING" not in result.detail
+        assert "[system tier]" in result.evidence
+
+    def test_env_var_tier_names_the_env_var_as_the_lever(self, tmp_path, monkeypatch):
+        chosen = tmp_path / "operator.yaml"
+        chosen.write_text(yaml.dump({"sync": {"adapter": "noop"}}))
+        monkeypatch.setenv(config_trust.OPERATOR_CONFIG_ENV, str(chosen))
+        _force(monkeypatch, LOCKED, chosen)
+
+        result = self._detail(Config.load())
+
+        assert "WARNING" in result.detail
+        assert f"env -u {config_trust.OPERATOR_CONFIG_ENV}" in result.detail
+
+    def test_home_tier_names_TECHNE_HOME_not_the_env_var(self, tmp_path, monkeypatch):
+        """The binary tier split told an operator on the <techne_home> tier to
+        defend against `env -u TECHNE_OPERATOR_CONFIG`, which does nothing to
+        that tier — its lever is TECHNE_HOME. Handing someone the wrong bypass
+        is worse than handing them none."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        monkeypatch.delenv(config_trust.OPERATOR_CONFIG_ENV, raising=False)
+        layer = tmp_path / "config.operator.yaml"
+        layer.write_text(yaml.dump({"sync": {"adapter": "noop"}}))
+        _force(monkeypatch, LOCKED, layer)
+
+        result = self._detail(Config.load())
+
+        assert "WARNING" in result.detail
+        assert "TECHNE_HOME" in result.detail
+        assert "env -u" not in result.detail
+
+
+class TestEveryGovernedKeyIsReportable:
+    def test_the_reported_list_is_derived_from_the_governed_set(self, tmp_path, monkeypatch):
+        """`stores` was governed but unreported, so an install with a custom DSN
+        said "all destinations at built-in values" — the benign string. The key
+        list is now derived from EGRESS_KEYS, so a key cannot join the governed
+        set and silently fail to be reported. (Prudence r2, Important 2.)"""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            yaml.dump(
+                {
+                    "stores": {"librarian": {"adapter": "sqlite", "dsn": "/tmp/leak.db"}},
+                    "standalone": False,
+                    "reflect": {"model": "openai/gpt-4"},
+                    "llm_api_key": "sk-should-not-be-printed",
+                }
+            )
+        )
+        from techne.core.checks import check_config_trust
+
+        detail = check_config_trust(Config.load()).detail
+
+        assert "all destinations at built-in values" not in detail
+        assert "stores" in detail
+        assert "standalone" in detail
+        assert "reflect.model" in detail
+        # Presence is reportable; the secret itself is not.
+        assert "llm_api_key set" in detail
+        assert "sk-should-not-be-printed" not in detail

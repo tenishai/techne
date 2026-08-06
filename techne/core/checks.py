@@ -47,9 +47,11 @@ this module exists to catch.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Callable
 
 from techne.config import CLAUDE_CODE
@@ -1182,11 +1184,36 @@ def check_outbox_targets(config) -> list[CheckResult]:
     return results
 
 
+def _dotted_attr(obj, dotted: str):
+    """Read an EGRESS_KEYS path off a Config. Missing intermediates read as None."""
+    for part in dotted.split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return None
+    return obj
+
+
+def _describe_destination(key: str, value) -> str:
+    """One short operator-facing phrase per departed-from-default key.
+
+    NEVER RENDERS A SECRET. `llm_api_key` and `sync.auth` are credentials, and
+    this string lands in `techne doctor` output and the SessionStart banner —
+    both of which get pasted into issues. Presence is the reportable fact.
+    """
+    if key == "sync":
+        return f"sync.adapter={value.adapter}"
+    if key in ("connections", "stores"):
+        return f"{len(value)} {key} entr{'y' if len(value) == 1 else 'ies'}"
+    if key == "llm_api_key":
+        return "llm_api_key set"
+    return f"{key}={value}"
+
+
 @register_check
 def check_config_trust(config) -> CheckResult:
     """Is the file that SELECTS egress writable by the agent it constrains?
 
-    A FAIL_OPEN check. techne's egress surface is closed by default, but
+    A FAIL_OPEN check. techne's memory-egress surface is closed by default, but
     ``config.yaml`` chooses that default and lives in the agent's own writable
     tree — so the control it appears to provide is only as strong as the file
     permissions nobody was checking (techne#393).
@@ -1201,9 +1228,13 @@ def check_config_trust(config) -> CheckResult:
     * ``unlocked`` → BROKEN. A layer was DEPLOYED and is NOT HOLDING — someone
       intended a boundary and does not have one. This is the only state that
       should alarm, and it is the one a naive "is egress closed?" check would
-      have rendered green, because failing closed means egress *is* closed at
-      that moment. Closed-by-accident and closed-by-enforcement are different
-      states and only one of them survives an adversary.
+      have rendered green — because the keys such a check reads (`sync.adapter`,
+      `llm_api_base`) are sitting at their built-in values in exactly that state.
+      Closed-by-accident and closed-by-enforcement are different states and only
+      one of them survives an adversary. (The older wording here said "failing
+      closed means egress IS closed at that moment", which this module's own
+      EGRESS_KEYS note contradicts: `model` defaults to a live destination. The
+      argument survives the rewording; that sentence did not.)
     * ``absent``   → DORMANT, with the reason named. A single-user install that
       never deployed a layer is not lying about anything, and DORMANT sorts with
       LIVE so it stays out of the banner headline. It is still reported, because
@@ -1211,8 +1242,8 @@ def check_config_trust(config) -> CheckResult:
       multi-agent rollout needs, and silence would read as safety.
 
     ABSENT IS REPORTED ALONGSIDE WHAT config.yaml ACTUALLY SELECTS. "No operator
-    layer" is benign on an install whose destinations are all at their closed
-    defaults and is the whole vulnerability on one that has already set
+    layer" is benign on an install whose destinations are all at their built-in
+    values and is the whole vulnerability on one that has already set
     ``sync.adapter`` or ``llm_api_base`` — same verdict, opposite significance,
     so the detail must distinguish them or the check has not said anything.
 
@@ -1241,29 +1272,40 @@ def check_config_trust(config) -> CheckResult:
     recorded = getattr(config, "egress_trust", None)
 
     # WHICH TIER is in force is a security fact, not a detail: only
-    # SYSTEM_OPERATOR_CONFIG is unreachable by the agent's environment. A layer
-    # found via $TECHNE_OPERATOR_CONFIG can be switched off with `env -u`, so an
-    # operator who deployed there has a correct LOCKED verdict and no boundary.
-    # Reporting LIVE without naming the tier would be exactly the false green
-    # this module exists to prevent.
-    tier = "system" if verdict.path == config_trust.SYSTEM_OPERATOR_CONFIG else "env-selected"
+    # SYSTEM_OPERATOR_CONFIG is unreachable by the agent's environment. THREE-
+    # VALUED, not two — the previous binary split labelled the <techne_home>
+    # tier "env-selected" and then told the operator to defend against
+    # `env -u TECHNE_OPERATOR_CONFIG`, which does nothing to that tier. Its
+    # lever is TECHNE_HOME (config.py:techne_home), and handing someone the
+    # wrong bypass is worse than handing them none. (Prudence, PR #508 r2.)
+    if verdict.path == config_trust.SYSTEM_OPERATOR_CONFIG:
+        tier, tier_lever = "system", None
+    elif (
+        verdict.path is not None
+        and verdict.path
+        == Path(os.environ.get(config_trust.OPERATOR_CONFIG_ENV, "\0")).expanduser()
+    ):
+        tier, tier_lever = "env-var", f"env -u {config_trust.OPERATOR_CONFIG_ENV}"
+    else:
+        tier, tier_lever = "techne-home", "TECHNE_HOME"
 
     # Which destination keys does this install actually depart from defaults on?
-    # Compared against a fresh Config so the baseline cannot drift from the
-    # dataclass the way a hardcoded list would.
+    # BOTH THE KEY LIST AND THE BASELINE ARE DERIVED — the list from EGRESS_KEYS,
+    # the values from a fresh Config. The previous version derived only the
+    # baseline while hardcoding five of the (then nine) keys, and its comment
+    # claimed drift-proofing it did not have. It then drifted immediately: the
+    # round that added `stores` to the governed set did not add it here, so an
+    # install with a custom store DSN reported "all destinations at defaults" —
+    # the benign string — which is the one thing this line exists not to do.
     d = Config()
-    live_destinations = []
-    if config.sync.adapter != d.sync.adapter:
-        live_destinations.append(f"sync.adapter={config.sync.adapter}")
-    if config.llm_api_base:
-        live_destinations.append("llm_api_base set")
-    if config.model != d.model:
-        live_destinations.append(f"model={config.model}")
-    if config.archivist_db_path:
-        live_destinations.append("archivist_db_path set")
-    if config.connections:
-        live_destinations.append(f"{len(config.connections)} federation connection(s)")
-    selected = ", ".join(live_destinations) if live_destinations else "all destinations at defaults"
+    live_destinations = [
+        _describe_destination(key, value)
+        for key in config_trust.EGRESS_KEYS
+        if (value := _dotted_attr(config, key)) != _dotted_attr(d, key)
+    ]
+    selected = (
+        ", ".join(live_destinations) if live_destinations else "all destinations at built-in values"
+    )
 
     path = verdict.path
     if recorded is not None and recorded.state != verdict.state:
@@ -1291,9 +1333,10 @@ def check_config_trust(config) -> CheckResult:
                 f"egress pinned by operator layer ({selected})"
                 + (
                     ""
-                    if tier == "system"
-                    else " — WARNING: env-selected tier, an agent can bypass it with "
-                    "`env -u TECHNE_OPERATOR_CONFIG`; only /etc/techne is a real lock"
+                    if tier_lever is None
+                    else f" — WARNING: {tier} tier, an agent can bypass it by changing "
+                    f"`{tier_lever}` in its own environment; only "
+                    f"{config_trust.SYSTEM_OPERATOR_CONFIG} is a real lock"
                 )
             ),
         )

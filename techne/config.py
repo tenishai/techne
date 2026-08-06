@@ -457,8 +457,9 @@ class Config:
         * ``locked``   — operator values win, config.yaml's egress keys are
           dropped rather than merged.
         * ``unlocked`` — a layer exists but this process could rewrite it, so
-          NEITHER file is trusted and the closed in-code defaults stand. Failing
-          closed here is the whole point: the alternative silently restores the
+          NEITHER file is trusted and the BUILT-IN DEFAULT destinations stand
+          (not silence — `model` is a live default). Failing closed here is the
+          whole point: the alternative silently restores the
           authority of the file the layer was deployed to overrule.
         * ``absent``   — unchanged behavior. config.yaml keeps full authority,
           and ``check_config_trust`` reports the install as having an
@@ -913,7 +914,7 @@ class Config:
         # would be copied into config.yaml — where they read as authoritative,
         # and where they would keep applying if the operator layer were later
         # removed. A privilege that outlives the thing that granted it is not a
-        # boundary. Applies to `unlocked` too: those values are the closed
+        # boundary. Applies to `unlocked` too: those values are the built-in
         # defaults, and persisting them would still be config.yaml claiming
         # authorship of a decision it did not make.
         if self.egress_trust is not None and self.egress_trust.enforcing:

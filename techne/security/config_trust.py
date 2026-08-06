@@ -2,8 +2,9 @@
 
 WHY THIS EXISTS
 ---------------
-techne's egress surface is closed by default — ``sync.adapter=noop``, no
-``llm_api_base``, no federation connections — but the file that *selects* all of
+techne's MEMORY-egress surface is closed by default — ``sync.adapter=noop``, no
+``llm_api_base``, no federation connections. (Scoped deliberately: the LLM path
+is not closed, see :data:`EGRESS_KEYS`.) But the file that *selects* all of
 that, ``config.yaml``, lives under ``techne_home()`` and is writable by the
 agent. The coord trust model states the premise plainly (``docs/arch/coord.md``):
 "anything that writes techne.db can already do anything." So a prompt-injected
@@ -374,8 +375,12 @@ _MISSING = _Missing()
 def strip_egress(raw: dict) -> list[str]:
     """Delete every :data:`EGRESS_KEYS` entry from ``raw`` in place.
 
-    Returns the keys actually removed, so the caller can report what it ignored
-    rather than dropping an operator's setting silently.
+    Returns the keys actually removed. NOT a reporting channel — the production
+    caller (`Config._gate_egress`) discards it, deliberately, because
+    `check_config_trust` probes the filesystem live rather than trusting a value
+    threaded from load time. An earlier docstring here promised "so the caller
+    can report what it ignored", which was an unkept API contract: no caller did.
+    The return is for tests and for anyone composing these primitives.
     """
     return [key for key in EGRESS_KEYS if _pop(raw, key)]
 
@@ -434,7 +439,7 @@ def read_operator_layer(path: Path) -> dict:
     """Parse the operator file. A malformed or unreadable layer yields {}.
 
     Returning {} keeps the fail-closed direction: an operator file that cannot
-    be parsed grants nothing, so the closed defaults stand. The caller still
+    be parsed grants nothing, so the built-in default destinations stand. The caller still
     reports the file as present, so this does not read as ``absent``.
     """
     try:
