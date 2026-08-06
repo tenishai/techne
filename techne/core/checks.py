@@ -357,6 +357,7 @@ _SESSION_SCOPED = {"session_start", "session_end", "post_tool_use", "user_prompt
 #: above it, the absence of sessions is itself the finding.
 _NEW_STORE_GRACE = timedelta(days=7)
 
+
 def _declared_outbox_targets(config) -> set[str]:
     """The outbox lanes this install SHOULD be using, resolved from topology.
 
@@ -390,6 +391,7 @@ def _declared_outbox_targets(config) -> set[str]:
         # sink lane is the live one — standalone never registers these.
         targets.add("sink:archivist_knowledge")
     return targets
+
 
 #: How far the newest SESSION may run past a lane's newest enqueue before the
 #: producer is suspect. Measured session-to-enqueue, not wall-clock: these lanes
@@ -549,8 +551,7 @@ def check_hooks(config) -> list[CheckResult]:
                 elif sess is not None and marker < sess:
                     verdict = Verdict.STALE
                     detail = (
-                        f"{note}; a session started at {last_settled_session} "
-                        f"and left no marker"
+                        f"{note}; a session started at {last_settled_session} and left no marker"
                     )
                 else:
                     verdict = Verdict.LIVE
@@ -862,9 +863,7 @@ def check_runtime_revision(config) -> CheckResult | None:
             evidence=f"git rev-parse --abbrev-ref HEAD failed in {runtime}",
         )
     if branch != "main":
-        where = (
-            f"on {branch!r}" if branch != "HEAD" else "at a detached HEAD"
-        )
+        where = f"on {branch!r}" if branch != "HEAD" else "at a detached HEAD"
         if behind:
             distance = f"{behind} commit(s) behind origin/main ({upstream})"
         else:
@@ -879,8 +878,7 @@ def check_runtime_revision(config) -> CheckResult | None:
                 f"{distance}{dirty_suffix}. {freshness}"
             ),
             evidence=(
-                f"HEAD is on {branch!r} in {runtime}; "
-                f"behind={behind} ahead={ahead} vs origin/main"
+                f"HEAD is on {branch!r} in {runtime}; behind={behind} ahead={ahead} vs origin/main"
             ),
         )
 
@@ -1182,6 +1180,134 @@ def check_outbox_targets(config) -> list[CheckResult]:
             )
         )
     return results
+
+
+@register_check
+def check_config_trust(config) -> CheckResult:
+    """Is the file that SELECTS egress writable by the agent it constrains?
+
+    A FAIL_OPEN check. techne's egress surface is closed by default, but
+    ``config.yaml`` chooses that default and lives in the agent's own writable
+    tree — so the control it appears to provide is only as strong as the file
+    permissions nobody was checking (techne#393).
+
+    THE THREE VERDICTS ARE NOT A SEVERITY LADDER, they are three different
+    facts, and conflating them is what made this worth a check rather than a
+    boolean:
+
+    * ``locked``   → LIVE. An operator layer exists and this process cannot
+      rewrite it. The evidence names the owning uid and mode so the claim is
+      re-derivable rather than trusted.
+    * ``unlocked`` → BROKEN. A layer was DEPLOYED and is NOT HOLDING — someone
+      intended a boundary and does not have one. This is the only state that
+      should alarm, and it is the one a naive "is egress closed?" check would
+      have rendered green, because failing closed means egress *is* closed at
+      that moment. Closed-by-accident and closed-by-enforcement are different
+      states and only one of them survives an adversary.
+    * ``absent``   → DORMANT, with the reason named. A single-user install that
+      never deployed a layer is not lying about anything, and DORMANT sorts with
+      LIVE so it stays out of the banner headline. It is still reported, because
+      "no boundary was ever deployed" is exactly the fact an operator planning a
+      multi-agent rollout needs, and silence would read as safety.
+
+    ABSENT IS REPORTED ALONGSIDE WHAT config.yaml ACTUALLY SELECTS. "No operator
+    layer" is benign on an install whose destinations are all at their closed
+    defaults and is the whole vulnerability on one that has already set
+    ``sync.adapter`` or ``llm_api_base`` — same verdict, opposite significance,
+    so the detail must distinguish them or the check has not said anything.
+
+    THE PROBE IS LIVE, and does not read ``config.egress_trust``. The first
+    version of this check did, and it was wrong in a way worth recording: a
+    ``Config`` built by direct construction carries no verdict, so the check
+    answered UNKNOWN — a check whose result depends on how its input was
+    CONSTRUCTED is not measuring the subsystem, it is measuring its caller. The
+    question "is a boundary in place" is a property of the filesystem and is
+    answerable directly, on one code path that always runs.
+
+    The recorded verdict is still consulted for ONE thing: whether it disagrees
+    with the live probe. A layer deployed after this process loaded its config
+    is not yet in force here — the running process is still honoring the
+    resolution it made at load time — so reporting the live LOCKED alone would
+    be a false green of exactly the kind this module exists to prevent. The
+    disagreement is its own verdict, with both facts named.
+    """
+    from techne.config import Config, techne_home
+    from techne.security import config_trust
+
+    # Resolved against techne_home() rather than config.data_dir SO THAT IT
+    # MATCHES WHAT Config.load DID. A different home here would manufacture
+    # disagreements out of a lookup difference and report them as drift.
+    verdict = config_trust.evaluate_lock(config_trust.resolve_operator_config(techne_home()))
+    recorded = getattr(config, "egress_trust", None)
+
+    # Which destination keys does this install actually depart from defaults on?
+    # Compared against a fresh Config so the baseline cannot drift from the
+    # dataclass the way a hardcoded list would.
+    d = Config()
+    live_destinations = []
+    if config.sync.adapter != d.sync.adapter:
+        live_destinations.append(f"sync.adapter={config.sync.adapter}")
+    if config.llm_api_base:
+        live_destinations.append("llm_api_base set")
+    if config.model != d.model:
+        live_destinations.append(f"model={config.model}")
+    if config.archivist_db_path:
+        live_destinations.append("archivist_db_path set")
+    if config.connections:
+        live_destinations.append(f"{len(config.connections)} federation connection(s)")
+    selected = ", ".join(live_destinations) if live_destinations else "all destinations at defaults"
+
+    path = verdict.path
+    if recorded is not None and recorded.state != verdict.state:
+        return CheckResult(
+            name="config:trust",
+            subsystem="security",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.STALE,
+            evidence=f"loaded as '{recorded.state}', now '{verdict.state}' at {path}",
+            detail=(
+                f"operator layer changed since this config was loaded — this process is "
+                f"still honoring the '{recorded.state}' resolution"
+            ),
+            remedy="restart the techne MCP server / re-run the command to reload config",
+        )
+
+    if verdict.state == config_trust.LOCKED:
+        return CheckResult(
+            name="config:trust",
+            subsystem="security",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.LIVE,
+            evidence=f"{path}: {verdict.reason}",
+            detail=f"egress pinned by operator layer ({selected})",
+        )
+
+    if verdict.state == config_trust.UNLOCKED:
+        return CheckResult(
+            name="config:trust",
+            subsystem="security",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.BROKEN,
+            evidence=f"{path}: {verdict.reason}",
+            detail=(
+                "operator layer present but this process could rewrite it — "
+                "egress forced to closed defaults, config.yaml ignored"
+            ),
+            remedy=(
+                f"chown to an operator uid and chmod 0644: {path} "
+                "(and place it outside the agent's writable tree)"
+            ),
+        )
+
+    return CheckResult(
+        name="config:trust",
+        subsystem="security",
+        kind=Kind.FAIL_OPEN,
+        verdict=Verdict.DORMANT,
+        evidence=f"no operator layer at {config_trust.SYSTEM_OPERATOR_CONFIG}, "
+        f"${config_trust.OPERATOR_CONFIG_ENV}, or <techne_home>/config.operator.yaml",
+        detail=f"egress selected by agent-writable config.yaml ({selected})",
+    )
 
 
 @register_check
