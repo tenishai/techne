@@ -47,6 +47,14 @@ Environment=TECHNE_HOME=%h/.techne
 Restart=on-failure
 RestartSec=5s
 
+# Exit 78 is sysexits.h EX_CONFIG: `techne watch` uses it for a startup
+# precondition that restarting cannot satisfy — today, the `[watch]` extra
+# not being installed. Without this line the unit respawns every RestartSec
+# forever and fills the journal with a traceback that reads like a runtime
+# fault, when the fix is `pip install techne[watch]`.
+# This value is the contract in techne/exit_codes.py; change both or neither.
+RestartPreventExitStatus=78
+
 # Give the watchdog time to flush pending events before the kernel kills it.
 TimeoutStopSec=10s
 

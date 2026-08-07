@@ -273,3 +273,101 @@ def test_watch_loop_with_polling_observer(tmp_path, db_path, session_id) -> None
     # we rely on the test exiting (daemon thread). For clean shutdown, the
     # watch() public API takes signal handlers — we passed install=False so
     # signals are not wired. The polling observer will be GC'd with the thread.
+
+
+# ---- EX_CONFIG exit contract (techne#498) ---------------------------------
+#
+# A missing `[watch]` extra is a configuration error, not a transient fault.
+# Before #498 it surfaced as a generic exit 1, so a systemd unit with
+# Restart=on-failure respawned it every 5s forever. These assert BOTH halves
+# of the contract: the process emits EX_CONFIG, and the shipped unit tells the
+# supervisor not to respawn on it.
+
+
+def test_watch_raises_startup_config_error_when_watchdog_missing(
+    monkeypatch, tmp_path, db_path, session_id
+) -> None:
+    """The missing-extra path must be distinguishable at the exit boundary.
+
+    Guards the regression directly: a bare RuntimeError here is
+    indistinguishable from a runtime fault, which is what produced the
+    crash-loop.
+    """
+    import sys
+
+    from techne.exit_codes import StartupConfigError
+
+    # None in sys.modules makes `from watchdog.events import ...` raise
+    # ImportError, simulating an install without the [watch] extra without
+    # having to uninstall anything.
+    monkeypatch.setitem(sys.modules, "watchdog.events", None)
+
+    from techne.watch import watch
+
+    config = WatchConfig(
+        db_path=db_path,
+        paths=[tmp_path],
+        session_id=session_id,
+        include_globs=["*.txt"],
+        debounce_ms=50,
+        resync_interval_seconds=3600,
+    )
+
+    with pytest.raises(StartupConfigError, match=r"pip install techne\[watch\]"):
+        watch(config, install_signal_handlers=False)
+
+
+def test_startup_config_error_stays_a_runtime_error() -> None:
+    """The compatibility half of the change.
+
+    StartupConfigError was introduced under an existing `except RuntimeError`
+    handler. If it ever stops subclassing RuntimeError, callers that only
+    catch RuntimeError start leaking it — silently, since nothing else asserts
+    the relationship.
+    """
+    from techne.exit_codes import StartupConfigError
+
+    assert issubclass(StartupConfigError, RuntimeError)
+
+
+def test_watch_cmd_exits_ex_config_on_startup_config_error(monkeypatch) -> None:
+    """`techne watch` must exit 78, not 1, so the supervisor can act on it."""
+    from click.testing import CliRunner
+
+    import techne.watch as watch_mod
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.exit_codes import EX_CONFIG, StartupConfigError
+
+    init_db(Config.load().db_path)
+
+    def _boom(*_args, **_kwargs):
+        raise StartupConfigError("watchdog is not installed; run `pip install techne[watch]`")
+
+    monkeypatch.setattr(watch_mod, "watch", _boom)
+
+    result = CliRunner().invoke(main, ["watch", "."])
+
+    assert result.exit_code == EX_CONFIG, result.output
+    assert "watchdog is not installed" in result.output
+
+
+def test_shipped_unit_refuses_to_respawn_on_ex_config() -> None:
+    """The unit half of the contract, derived rather than retyped.
+
+    Asserting the literal 78 here would be a second copy of the constant that
+    could drift from techne/exit_codes.py without failing. Deriving it means
+    changing EX_CONFIG alone breaks this test, which is the intent.
+    """
+    from techne.exit_codes import EX_CONFIG
+
+    unit = Path(__file__).resolve().parents[1] / "deploy" / "techne-watch.service"
+    body = unit.read_text()
+
+    assert f"RestartPreventExitStatus={EX_CONFIG}" in body, (
+        "the shipped unit does not prevent restart on the code the app exits with; "
+        "one half of the contract without the other still crash-loops"
+    )
+    # The setting is inert unless the unit actually restarts on failure.
+    assert "Restart=on-failure" in body
