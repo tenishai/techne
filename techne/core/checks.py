@@ -309,9 +309,26 @@ def init_remedy(config) -> str | None:
     ``spool-primary`` who follows doctor's own advice is DEMOTED globally (init
     resolves the flag, rebuilds PostureConfig and SAVES it), with reflect flipped
     out of advisory — because the health check told them to.
+
+    NOTHING TO PRESERVE IS NOT THE SAME AS A PRESERVED DEFAULT (techne#480). The
+    posture guard protects a choice the operator already made. On a machine that
+    has used Claude Code but has NEVER run ``techne init`` there is no config
+    file, so ``config.posture.mode`` is the dataclass default ``observe`` — not a
+    choice. Pinning it there does the very thing the guard exists to prevent, one
+    case over: it suppresses the auto-detection that would have found
+    ``spool-primary`` from the CC memory sitting on disk, and freezes a first
+    install into the weakest posture. With no file, ``--posture auto`` IS the
+    honest value; auto-detection is the correct behaviour on a first install and
+    the only reason to pin is to protect an existing answer.
+
+    Still ONE BUILDER: this is a condition inside it, not a second remedy string
+    at a call site, so every surface keeps inheriting both guards.
     """
     if config.platform != CLAUDE_CODE:
         return None
+    if config.loaded_from is None:
+        # No config.yaml — posture.mode is a default, not an answer.
+        return "techne init --platform claude-code --posture auto"
     return f"techne init --platform claude-code --posture {config.posture.mode}"
 
 

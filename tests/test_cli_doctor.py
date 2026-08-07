@@ -26,6 +26,16 @@ def cli_db(tmp_path, monkeypatch):
     init_db(db).close()
     cfg = Config()
     cfg.db_path = db
+    # This fixture stands for a machine techne HAS been initialised on — every
+    # test using it asserts about drift, remedies or a posture the operator
+    # chose, none of which exist on a fresh machine. Stubbing load() without
+    # reproducing its contract left loaded_from None, i.e. "no config.yaml",
+    # which is a state where posture.mode is a dataclass default rather than an
+    # answer (techne#480). The file is written as well as recorded so the two
+    # cannot disagree.
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("platform: claude-code\n")
+    cfg.loaded_from = config_file
     monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
     return cfg
 

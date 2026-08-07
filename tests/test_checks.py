@@ -907,14 +907,60 @@ class TestInitRemedy:
         cfg.platform = "opencode"
         assert init_remedy(cfg) is None
 
-    def test_remedy_carries_the_operators_posture_not_a_literal(self):
+    def test_remedy_carries_the_operators_posture_not_a_literal(self, tmp_path):
+        """An ESTABLISHED posture is preserved verbatim.
+
+        `loaded_from` is what makes spool-primary a choice rather than an
+        accident of the dataclass: without a config.yaml there is nothing to
+        preserve, and this test would be asserting that we pin a default
+        (techne#480).
+        """
+        from techne.config import Config
+        from techne.core.checks import init_remedy
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("platform: claude-code\nposture:\n  mode: spool-primary\n")
+
+        cfg = Config()
+        cfg.platform = "claude-code"
+        cfg.posture.mode = "spool-primary"
+        cfg.loaded_from = config_file
+        assert init_remedy(cfg) == "techne init --platform claude-code --posture spool-primary"
+
+    def test_remedy_asks_for_auto_when_the_machine_was_never_initialised(self):
+        """techne#480 — the neighbouring case the posture guard was over-applied to.
+
+        No config.yaml means posture.mode is the dataclass default `observe`,
+        not a preserved answer. Pinning it there suppresses the auto-detection
+        that would have found spool-primary from the CC memory on disk, and
+        freezes a first install into the weakest posture — doing the exact
+        harm the guard exists to prevent, one case over.
+        """
         from techne.config import Config
         from techne.core.checks import init_remedy
 
         cfg = Config()
         cfg.platform = "claude-code"
-        cfg.posture.mode = "spool-primary"
-        assert init_remedy(cfg) == "techne init --platform claude-code --posture spool-primary"
+        assert cfg.loaded_from is None, "a directly-constructed Config has no file"
+        assert cfg.posture.mode == "observe", "the default this must NOT pin"
+
+        assert init_remedy(cfg) == "techne init --platform claude-code --posture auto"
+
+    def test_never_initialised_still_inherits_the_platform_guard(self):
+        """The new branch must not become a second surface that skips a guard.
+
+        init_remedy has ONE builder precisely so a new case cannot be added
+        without inheriting both guards (#469 review 7, critical 2). The
+        never-initialised branch is inside it, so an off-platform machine still
+        gets no remedy at all.
+        """
+        from techne.config import Config
+        from techne.core.checks import init_remedy
+
+        cfg = Config()
+        cfg.platform = "opencode"
+        assert cfg.loaded_from is None
+        assert init_remedy(cfg) is None
 
     def test_healthy_hooks_carry_no_remedy(self, tmp_path):
         """The verdict gate, which was unpinned.
