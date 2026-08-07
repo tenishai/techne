@@ -3,12 +3,16 @@ name: test
 # Techne has no private sibling deps — full suite runs on every push/PR.
 # The contract job catches breaking renames before cabal/limenal CI fires.
 #
-# RUNS ON A SELF-HOSTED RUNNER (dev02), not ubuntu-latest. Why: GitHub-hosted jobs
-# on this org stopped STARTING in July 2026 — "recent account payments have failed
-# or your spending limit needs to be increased", a scheduling refusal that reports
-# as a plain `failure` with no runner assigned. Self-hosted dispatch is unaffected
-# (verified empirically; see the agora write-up). Runner setup lives at
-# /var/servers/gha-runner + /var/servers/docker-compose/ci on dev02.
+# All jobs self-hosted (#424, #461) — do not add a hosted one. Hosted jobs here
+# can fail to START: July 2026 billing refusal reported `failure` (probe 764f160,
+# which also showed self-hosted unaffected), the 2026-08-06 outage reported
+# `cancelled` at 901s while the self-hosted legs of the same runs queued and ran
+# on recovery. Neither cleared by a rerun.
+# `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it. Same
+# CONTAINER image on both (FROM ubuntu:24.04), both hosts 2 physical / 4 logical
+# cores, and both containers cpus:"3" — so the -n 4 calibration transfers. HOST
+# OS and RAM differ (dev02 24.04/15GB cap 8g, prinkle 26.04/7GB cap 5g).
+# Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
 # actions/setup-python here: the runner is EPHEMERAL, and setup-python would
@@ -44,16 +48,12 @@ env:
 
 jobs:
   test:
-    # NB: there is currently ONE runner, so these matrix legs and eval-vec run
-    # SEQUENTIALLY rather than in parallel — expect ~30min wall-clock for the full
-    # workflow, against ~2min when this ran on GitHub-hosted. Scale by starting
-    # more replicas of the runner container if that becomes the bottleneck.
+    # Legs distribute across the pool. Scale by adding a HOST (safe — its own 2
+    # physical cores). Adding a container to an EXISTING host oversubscribes:
+    # replicas x workers, so 2 replicas x -n 4 = 8 workers on 2 cores, which the
+    # pin does not prevent — lower -n in step if you do that.
     runs-on: [self-hosted, linux, x64, dev02]
-    # The default is 360 MINUTES. On a hosted runner a hung job was a local
-    # nuisance; with ONE self-hosted runner it is an org-wide CI outage, because
-    # every other job queues behind it (#424 review — Prudence). A full leg is
-    # ~12min on this hardware, so 45 is generous headroom and still bounds the
-    # blast radius at under an hour.
+    # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
     strategy:
       matrix:
@@ -109,9 +109,10 @@ jobs:
       # moves without anyone editing this file — inside a container it follows
       # CPU AFFINITY, which `--cpus` does not constrain (only `--cpuset-cpus`
       # does), and it drops to PHYSICAL cores if `psutil` ever arrives as a
-      # transitive dep. It also does not compose with the documented scaling
-      # path above: 2 runner replicas x `auto` would be 8 workers on 2 physical
-      # cores. 4 matches what was measured here; change it deliberately.
+      # transitive dep. 4 matches what was measured here; change it
+      # deliberately. NOTE the pin does NOT bound total concurrency: adding a
+      # container to a host oversubscribes at any -n (see the jobs comment
+      # above), so replicas are not an argument for pinning either way.
       #
       # NOT applied to the eval gates below or to eval-vec: both select exactly
       # 2 tests (verified via --collect-only), where worker startup costs more
@@ -192,18 +193,23 @@ jobs:
   # runs the gate against the REAL cards, which is the part those tests can't cover.
   # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
   arch-cards:
-    runs-on: ubuntu-latest
+    # Do not move back to ubuntu-latest (#461): hosted jobs here can fail to
+    # SCHEDULE and never run, which no rerun clears. Failure mode now: no free
+    # runner = ~24h queued, then expiry. timeout-minutes cannot bound either
+    # case — it counts from job START (the 901s deaths above ran under the
+    # default 360min).
+    runs-on: [self-hosted, linux, x64, dev02]
+    timeout-minutes: 5
     steps:
       - name: Checkout techne
         uses: actions/checkout@v4
         with:
           path: techne
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
+      # Keep the versioned name: only python3.12/3.13/3.14 are proven present;
+      # a bare `python3` symlink is NOT implied by the image. This step also
+      # needs `git` on PATH (rev-parse/hash-object); without it the gate exits 2
+      # with "git executable not found", i.e. loud, not green.
       - name: Architecture-card freshness gate
         working-directory: techne
-        run: python scripts/check_arch_cards.py
+        run: python3.13 scripts/check_arch_cards.py

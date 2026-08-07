@@ -83,8 +83,9 @@ for PY in "${MATRIX[@]}"; do
   # exercise the execution model CI now uses.
   #
   # The WORKER COUNT deliberately differs: CI pins `-n 4` because it must be
-  # deterministic and must compose with runner replicas; a dev box should use
-  # what it has. That is safe to diverge on because worker count provably does
+  # deterministic and because 4 is what was measured on the runner; a dev box
+  # should use what it has. (NOT because it composes with replicas — it does
+  # not: replicas oversubscribe at any -n.) That is safe to diverge on because worker count provably does
   # not change OUTCOMES — the #424/#463 review sharded all 2312 node ids four
   # ways, ran the shards serially and then concurrently, and got byte-identical
   # pass/fail/skip counts. Keep the FLAG in sync with test.yml; the number is
