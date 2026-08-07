@@ -418,3 +418,35 @@ def test_correction_reserve_frac_default():
     """Default correction_reserve_frac is 0.3 (matches select_tier0_injection default)."""
     cfg = Config()
     assert cfg.injection.correction_reserve_frac == 0.3
+
+
+def test_a_config_carrying_the_removed_mmr_lambda_still_loads(tmp_path, monkeypatch):
+    """Backward compat for #420: both live configs on this machine carry a
+    serialized `search.mmr_lambda: 0.3`, so removing the field must not make
+    them fail to load.
+
+    A FORWARD GUARD, not an active proof: `_from_dict` reads every key through
+    an explicit `s.get(...)` and structurally ignores unknown ones, and there is
+    no strict validator, so the load half cannot fail today — only the
+    `not hasattr` line has teeth against this removal. It fires the day someone
+    adds strict schema parsing. (Prudence, PR #513.)"""
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"search": {"mmr_lambda": 0.3, "bm25_weight": 0.9}})
+    )
+
+    cfg = Config.load()
+
+    assert cfg.search.bm25_weight == 0.9
+    assert not hasattr(cfg.search, "mmr_lambda")
+
+
+def test_save_does_not_reintroduce_the_removed_knob(tmp_path, monkeypatch):
+    """A load->save round-trip must not write it back, or `techne init` would
+    keep reseeding a knob that does nothing."""
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(yaml.dump({"search": {"mmr_lambda": 0.3}}))
+
+    Config.load().save()
+
+    assert "mmr_lambda" not in (tmp_path / "config.yaml").read_text()
