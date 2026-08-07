@@ -818,3 +818,23 @@ def test_procstart_is_read_as_utc_not_local(monkeypatch):
         else:
             os.environ["TZ"] = original
         _t.tzset()
+
+
+@pytest.mark.parametrize("corpse_last", [True, False])
+def test_a_corpse_does_not_hide_a_twin_that_shares_its_pid(db_path, monkeypatch, corpse_last):
+    """Two dormant same-name sidecars, ONE pid: a corpse whose pid was recycled
+    onto a running twin. Keyed by pid alone the LAST record wins, and when that
+    is the corpse the twin is lost and #492 is back for its own repro case.
+
+    PARAMETRISED ON ORDER because only one order fails: with the corpse FIRST
+    the twin's claim wins the dict and the buggy code passes. A test pinning
+    only that order sails straight through the bug. (Prudence, PR #512 r2 —
+    the r1 fix shipped with no test and reverting it left the suite green.)
+    """
+    live = os.getpid()
+    twin = _sidecar(A2, "poe_1", age_s=_STALE, pid=live)
+    corpse = _sidecar(C, "poe_1", age_s=_STALE, pid=live, proc_start="Thu Jan  1 00:00:00 2015")
+    order = [twin, corpse] if corpse_last else [corpse, twin]
+    _honest(monkeypatch, [_sidecar(A, "poe_1"), *order])
+
+    assert coord._durable_name(A) is None, "a running twin sharing a corpse's pid is a rival"
