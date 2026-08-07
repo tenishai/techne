@@ -9,9 +9,9 @@ name: test
 # `cancelled` at 901s while the self-hosted legs of the same runs queued and ran
 # on recovery. Neither cleared by a rerun.
 # `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it. Same
-# CONTAINER image on both (FROM ubuntu:24.04) and both hosts are 2 physical /
-# 4 logical cores, so the calibration below transfers. HOST OS and RAM differ
-# (dev02 24.04/15GB cap 8g, prinkle 26.04/7GB cap 5g).
+# CONTAINER image on both (FROM ubuntu:24.04), both hosts 2 physical / 4 logical
+# cores, and both containers cpus:"3" — so the -n 4 calibration transfers. HOST
+# OS and RAM differ (dev02 24.04/15GB cap 8g, prinkle 26.04/7GB cap 5g).
 # Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
@@ -109,9 +109,10 @@ jobs:
       # moves without anyone editing this file — inside a container it follows
       # CPU AFFINITY, which `--cpus` does not constrain (only `--cpuset-cpus`
       # does), and it drops to PHYSICAL cores if `psutil` ever arrives as a
-      # transitive dep. It also does not compose with the documented scaling
-      # path above: 2 runner replicas x `auto` would be 8 workers on 2 physical
-      # cores. 4 matches what was measured here; change it deliberately.
+      # transitive dep. 4 matches what was measured here; change it
+      # deliberately. NOTE the pin does NOT bound total concurrency: adding a
+      # container to a host oversubscribes at any -n (see the jobs comment
+      # above), so replicas are not an argument for pinning either way.
       #
       # NOT applied to the eval gates below or to eval-vec: both select exactly
       # 2 tests (verified via --collect-only), where worker startup costs more
@@ -206,7 +207,9 @@ jobs:
           path: techne
 
       # Keep the versioned name: only python3.12/3.13/3.14 are proven present;
-      # a bare `python3` symlink is NOT implied by the image.
+      # a bare `python3` symlink is NOT implied by the image. This step also
+      # needs `git` on PATH (rev-parse/hash-object); without it the gate exits 2
+      # with "git executable not found", i.e. loud, not green.
       - name: Architecture-card freshness gate
         working-directory: techne
         run: python3.13 scripts/check_arch_cards.py
