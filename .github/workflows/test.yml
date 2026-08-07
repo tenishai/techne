@@ -3,9 +3,14 @@ name: test
 # Techne has no private sibling deps — full suite runs on every push/PR.
 # The contract job catches breaking renames before cabal/limenal CI fires.
 #
-# All jobs self-hosted (#424, #461) — do not add a hosted one.
-# `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it.
-# Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci.
+# All jobs self-hosted (#424, #461) — do not add a hosted one. Hosted jobs here
+# can fail to START: July 2026 billing refusal reported `failure`, the 2026-08-06
+# outage reported `cancelled` at 901s — both with no runner assigned, neither
+# cleared by a rerun. Self-hosted dispatch was unaffected in both (see 764f160).
+# `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it. The hosts
+# are NOT identical — same image and 4 logical cores, but dev02 15GB/24.04 vs
+# prinkle 7GB/26.04 (container capped 8g vs 5g). Calibration below is dev02's.
+# Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
 # actions/setup-python here: the runner is EPHEMERAL, and setup-python would
@@ -41,7 +46,8 @@ env:
 
 jobs:
   test:
-    # Legs distribute across the pool; scale with more runner replicas.
+    # Legs distribute across the pool; scale with more runner containers (see
+    # docker-compose/ci) or more hosts carrying the label.
     runs-on: [self-hosted, linux, x64, dev02]
     # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
@@ -183,8 +189,10 @@ jobs:
   # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
   arch-cards:
     # Do not move back to ubuntu-latest (#461): hosted jobs here can fail to
-    # SCHEDULE and read as permanent red. Failure mode now: no free runner =
-    # ~24h queued grey, and timeout-minutes will not fire (counts from start).
+    # SCHEDULE and never run, which no rerun clears. Failure mode now: no free
+    # runner = ~24h queued, then expiry. timeout-minutes cannot bound either
+    # case — it counts from job START (the 901s deaths above ran under the
+    # default 360min).
     runs-on: [self-hosted, linux, x64, dev02]
     timeout-minutes: 5
     steps:
