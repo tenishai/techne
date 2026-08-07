@@ -926,9 +926,10 @@ _LONG_LIVED_PROCESSES = ("techne.mcp_server", "techne.watch", "techne watch")
 def _running_techne_processes() -> list[tuple[int, float, str]] | None:
     """(pid, start_epoch, command) per long-lived techne process.
 
-    Returns None when the process table could not be READ, which is a different
-    fact from an empty list ("read it, nothing running") and must not collapse
-    into it — one is UNKNOWN, the other is DORMANT.
+    Returns None when the table could not be READ **or when every matching row
+    failed to parse** — both are failed probes (UNKNOWN). An empty list means
+    "read it, understood it, nothing long-lived is running" (DORMANT). Collapsing
+    the two would let a broken parser emit an all-clear.
 
     `lstart` is a local-time string ("Thu Aug  6 15:41:42 2026") and is converted
     through `time.mktime`, which interprets a naive struct_time as LOCAL time —
@@ -950,9 +951,11 @@ def _running_techne_processes() -> list[tuple[int, float, str]] | None:
         return None
 
     found: list[tuple[int, float, str]] = []
+    matched = 0
     for line in out.stdout.splitlines():
         if not any(pat in line for pat in _LONG_LIVED_PROCESSES):
             continue
+        matched += 1
         parts = line.split()
         # pid + the five lstart tokens + at least one command token
         if len(parts) < 7:
@@ -963,17 +966,75 @@ def _running_techne_processes() -> list[tuple[int, float, str]] | None:
         except (ValueError, OverflowError):
             continue
         found.append((pid, start, " ".join(parts[6:])))
+
+    # SOME ROWS FAILED AND EVERY ROW FAILED ARE DIFFERENT FACTS. Skipping a bad
+    # row keeps one oddity from taking down `techne doctor`; skipping ALL of them
+    # means the `lstart` shape is not what this parser assumes, and returning []
+    # then renders as "no long-lived techne process running (nothing can hold
+    # stale modules)" — an affirmative ok=True all-clear, emitted precisely when
+    # the probe has stopped working. That is a silent green in the one check whose
+    # job is to stop silent greens. A parser that matched processes and understood
+    # none of them has FAILED, not observed an empty machine.
+    # (Prudence, PR #510 — demonstrated, and the fix prototyped, before I took it.)
+    if matched and not found:
+        return None
     return found
 
 
-def _runtime_committed_at(runtime) -> int | None:
-    """Committer epoch of the runtime's HEAD, or None if it is not a git checkout.
+def _deployment_checkout():
+    """The checkout the LONG-LIVED PROCESSES run from — not necessarily ours.
 
-    Its own function so a test can arrange the deploy time without stubbing
-    `subprocess.run` wholesale — stubbing the process spawner would also silence
-    the `ps` read this check turns on, which is the concept under test.
+    `runtime:revision` may reasonably ask about the checkout it was imported
+    from, because it only ever talks about itself. This check compares a
+    timestamp against OTHER processes, and those two come apart hard: running
+    `techne doctor` from a review worktree made `deployed_at` the worktree's own
+    HEAD — a commit that exists nowhere else on the machine — and a server that
+    started after it was reported healthy against a revision it could not
+    possibly have loaded. That is the #473 configuration turning this check
+    green. Measured on a real box (Prudence, PR #510).
+
+    So prefer the deployed clone at `<techne_home>/runtime`, which is what
+    techne#473 established as THE deployment, and fall back to our own checkout
+    only when it is absent. Either way the caller names the path it measured, so
+    the number is falsifiable by whoever reads it.
+    """
+    from pathlib import Path
+
+    import techne
+    from techne.config import techne_home
+
+    deployed = techne_home() / "runtime"
+    if (deployed / ".git").exists():
+        return deployed
+    return Path(techne.__file__).resolve().parent.parent
+
+
+def _runtime_deployed_at(runtime) -> tuple[int, str] | None:
+    """(epoch, how) for when `runtime` last LANDED at its current revision.
+
+    COMMITTER TIME IS NOT DEPLOY TIME, and the gap is a false green: a commit
+    lands upstream at 22:02, the operator pulls at 23:00, a server starts at
+    22:30. It loaded pre-pull code, yet it started after the commit — reported
+    LIVE. Local landing time closes that, and it also shrinks the check's duty
+    cycle, because pulls are rarer than commits on an actively developed repo —
+    which is the difference between a useful warning and a permanently-amber one.
+
+    `.git/logs/HEAD`'s mtime is when the ref last MOVED here: one stat, no
+    subprocess. NOT `.git/HEAD`, whose mtime read three days stale on the live
+    runtime — a fast-forward rewrites `refs/heads/main` and the reflog, never the
+    symref. Falls back to the committer date when there is no reflog (a fresh
+    clone with logging off), and says which it used.
     """
     import subprocess
+    from pathlib import Path
+
+    runtime = Path(runtime)
+    reflog = runtime / ".git" / "logs" / "HEAD"
+    try:
+        if reflog.is_file():
+            return int(reflog.stat().st_mtime), "landed here"
+    except OSError:
+        pass
 
     try:
         out = subprocess.run(
@@ -987,7 +1048,7 @@ def _runtime_committed_at(runtime) -> int | None:
     if out.returncode != 0 or not out.stdout.strip():
         return None
     try:
-        return int(out.stdout.strip())
+        return int(out.stdout.strip()), "committed upstream"
     except ValueError:
         return None
 
@@ -1038,13 +1099,10 @@ def check_runtime_loaded(config) -> CheckResult | None:
     the follow-up if the conservative version proves too noisy in practice.
     """
     from datetime import datetime, timezone
-    from pathlib import Path
 
-    import techne
-
-    runtime = Path(techne.__file__).resolve().parent.parent
-    deployed_at = _runtime_committed_at(runtime)
-    if deployed_at is None:
+    runtime = _deployment_checkout()
+    landed = _runtime_deployed_at(runtime)
+    if landed is None:
         # Same call as the sibling makes: a packaged install has no revision to
         # compare and that is healthy, not red.
         return CheckResult(
@@ -1053,8 +1111,9 @@ def check_runtime_loaded(config) -> CheckResult | None:
             kind=Kind.FRESHNESS,
             verdict=Verdict.DORMANT,
             detail=f"not a git checkout — packaged install at {runtime}",
-            evidence=f"git log -1 --format=%ct in {runtime} did not resolve",
+            evidence=f"no reflog and no HEAD commit date in {runtime}",
         )
+    deployed_at, how = landed
 
     procs = _running_techne_processes()
     if procs is None:
@@ -1063,8 +1122,11 @@ def check_runtime_loaded(config) -> CheckResult | None:
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.UNKNOWN,
-            detail="could not read the process table",
-            evidence="ps -eo pid=,lstart=,args= failed",
+            detail="could not read or could not parse the process table",
+            evidence=(
+                "ps -eo pid=,lstart=,args= failed, or matched processes whose "
+                "lstart shape this parser does not understand"
+            ),
         )
     if not procs:
         return CheckResult(
@@ -1073,7 +1135,10 @@ def check_runtime_loaded(config) -> CheckResult | None:
             kind=Kind.FRESHNESS,
             verdict=Verdict.DORMANT,
             detail="no long-lived techne process running (nothing can hold stale modules)",
-            evidence=f"no process matching {', '.join(_LONG_LIVED_PROCESSES)}",
+            evidence=(
+                f"no process matching {', '.join(_LONG_LIVED_PROCESSES)}; "
+                f"measured against {runtime} ({how} {deployed_at})"
+            ),
         )
 
     stale = [(pid, start) for pid, start, _cmd in procs if start < deployed_at]
@@ -1084,8 +1149,10 @@ def check_runtime_loaded(config) -> CheckResult | None:
             subsystem="runtime",
             kind=Kind.FRESHNESS,
             verdict=Verdict.LIVE,
-            detail=f"{len(procs)} long-lived process(es), all started after the deploy ({when})",
-            evidence=f"deployed_at={deployed_at}; "
+            detail=(
+                f"{len(procs)} long-lived process(es), all started after the runtime {how} ({when})"
+            ),
+            evidence=f"{runtime} {how} {deployed_at}; "
             + "; ".join(f"pid {p} start={int(s)}" for p, s, _ in procs),
         )
 
@@ -1098,12 +1165,15 @@ def check_runtime_loaded(config) -> CheckResult | None:
         kind=Kind.FRESHNESS,
         verdict=Verdict.STALE,
         detail=(
-            f"{len(stale)} of {len(procs)} long-lived process(es) started BEFORE the deployed "
-            f"revision was committed ({when}) — running code that predates it. "
-            "Whether any is actually torn depends on which modules it has yet to import; "
-            "this reports the ordering, not a tear."
+            # LEAD WITH THE QUALIFICATION. The row renders at ~250 chars behind a
+            # "!" and a capitalised verdict, so a skimmer meets the alarm two
+            # wrapped lines before the hedge. Six words in is where it has to be.
+            f"ordering only: {len(stale)} of {len(procs)} long-lived process(es) started before "
+            f"the runtime {how} ({when}), so they run code that predates it. Whether any is "
+            "actually torn depends on which modules it has yet to import — this is not a "
+            "tear detector."
         ),
-        evidence=f"deployed_at={deployed_at}; {ages}",
+        evidence=f"{runtime} {how} {deployed_at}; {ages}",
         remedy="restart the techne MCP server (or the session that owns it) to reload the runtime",
     )
 

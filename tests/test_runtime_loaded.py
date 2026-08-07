@@ -13,6 +13,8 @@ redefine the concept the assertion turns on.)
 
 from __future__ import annotations
 
+import os
+import pathlib
 import subprocess
 import time
 
@@ -56,9 +58,13 @@ def _fake_ps(monkeypatch, stdout: str, returncode: int = 0):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
 
-def _arrange(monkeypatch, procs, deployed_at):
+def _arrange(monkeypatch, procs, deployed_at, how="landed here"):
     monkeypatch.setattr(checks_mod, "_running_techne_processes", lambda: procs)
-    monkeypatch.setattr(checks_mod, "_runtime_committed_at", lambda _r: deployed_at)
+    monkeypatch.setattr(
+        checks_mod,
+        "_runtime_deployed_at",
+        lambda _r: None if deployed_at is None else (deployed_at, how),
+    )
 
 
 class TestProcessTableParsing:
@@ -96,6 +102,87 @@ class TestProcessTableParsing:
         procs = _real_scan()
 
         assert [p for p, _s, _c in procs] == [26356, 64447]
+
+
+class TestABrokenParserNeverReportsAllClear:
+    """Finding 2 on PR #510: "some rows failed" and "every row failed" are
+    different facts, and conflating them emitted an affirmative all-clear from a
+    probe that had stopped working."""
+
+    def test_matching_rows_that_all_fail_to_parse_are_a_failed_probe(self, monkeypatch):
+        _fake_ps(monkeypatch, "pid=912 started=whenever -m techne.mcp_server\n")
+
+        assert _real_scan() is None
+
+    def test_and_the_check_calls_that_unknown_not_dormant(self, monkeypatch):
+        """The failure it prevents, end to end: DORMANT here reads "nothing can
+        hold stale modules" with ok=True — in the exact situation the check
+        exists to catch."""
+        monkeypatch.setattr(checks_mod, "_running_techne_processes", lambda: None)
+        monkeypatch.setattr(checks_mod, "_runtime_deployed_at", lambda _r: (1_700_000_000, "x"))
+
+        r = check_runtime_loaded(Config())
+
+        assert r.verdict is Verdict.UNKNOWN
+        assert r.ok is False
+
+    def test_a_genuinely_empty_machine_is_still_dormant(self, monkeypatch):
+        """The fix must not turn "nothing running" into a failure."""
+        _fake_ps(monkeypatch, "  501 Thu Aug  6 09:00:00 2026 /usr/sbin/notifyd\n")
+
+        assert _real_scan() == []
+
+
+class TestItMeasuresTheDeploymentNotItsOwnCheckout:
+    """Finding 3 on PR #510, reproduced live: running from a review worktree made
+    `deployed_at` that worktree's HEAD — a commit existing nowhere else — and a
+    server that started after it was vouched for against a revision it could not
+    have loaded. The #473 configuration turning the new check green."""
+
+    def test_prefers_the_deployed_runtime_over_the_importing_checkout(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        (tmp_path / "runtime" / ".git").mkdir(parents=True)
+
+        assert checks_mod._deployment_checkout() == tmp_path / "runtime"
+
+    def test_falls_back_to_the_importing_checkout_when_no_runtime_is_deployed(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+
+        import techne
+
+        expected = pathlib.Path(techne.__file__).resolve().parent.parent
+        assert checks_mod._deployment_checkout() == expected
+
+    def test_landing_time_beats_committer_time(self, tmp_path):
+        """A commit lands upstream at 22:02, the operator pulls at 23:00, a server
+        starts at 22:30: it loaded pre-pull code but started after the commit, and
+        committer time reports it LIVE. The reflog mtime is when the ref moved HERE."""
+        logs = tmp_path / ".git" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "HEAD").write_text("ref moved\n")
+        os.utime(logs / "HEAD", (1_786_100_000, 1_786_100_000))
+
+        stamp, how = checks_mod._runtime_deployed_at(tmp_path)
+
+        assert stamp == 1_786_100_000
+        assert how == "landed here"
+
+    def test_every_verdict_names_the_checkout_it_measured(self, monkeypatch):
+        """So the number is falsifiable by whoever reads it, rather than trusted.
+
+        Asserts the PATH THAT WAS MEASURED appears, not the substring "runtime" —
+        the first version of this checked for that word and failed on a worktree
+        whose path simply doesn't contain it, which would have been a test of the
+        directory name rather than of the property.
+        """
+        _arrange(monkeypatch, [(1, 1.0, "python -m techne.mcp_server")], 1_700_000_000)
+
+        evidence = check_runtime_loaded(Config()).evidence
+
+        assert str(checks_mod._deployment_checkout()) in evidence
+        assert "landed here 1700000000" in evidence
 
 
 class TestVerdicts:
@@ -146,16 +233,34 @@ class TestVerdicts:
     def test_local_time_is_not_read_as_utc(self, monkeypatch):
         """Regression pin for the tz footgun named in `_running_techne_processes`.
 
-        `ps` emits LOCAL time and `mktime` consumes it as local. Reading it as UTC
-        instead would shift every process start by the UTC offset and mark a
-        freshly-started process stale for hours after each deploy. A process
-        started one minute AFTER the deploy must be LIVE regardless of the host's
-        timezone.
-        """
-        deployed = int(_epoch("Thu Aug  6 22:02:08 2026"))
-        _arrange(monkeypatch, [(1, deployed + 60, "python -m techne.mcp_server")], deployed)
+        THE PREVIOUS VERSION OF THIS TEST WAS HOLLOW IN THE WORST WAY: it went
+        through `_arrange`, which stubs the process scan wholesale and hands the
+        check a float, so `strptime`/`mktime` were never called at all —
+        instrumented at 0 calls. It passed under ANY implementation, in any
+        timezone. Worse, the suite as a whole went green under `TZ=UTC` with
+        `calendar.timegm` substituted, and CI containers default to UTC, so the
+        footgun was unguarded exactly where regressions are meant to be caught.
+        (Prudence, PR #510 — she ran both substitutions to prove it.)
 
-        assert check_runtime_loaded(Config()).verdict is Verdict.LIVE
+        So this goes through the REAL parser and PINS THE TIMEZONE rather than
+        inheriting the host's, asserting a hardcoded epoch. Under `timegm` the
+        parsed value would be the UTC reading and this fails by 5 hours.
+        """
+        monkeypatch.setenv("TZ", "America/New_York")
+        time.tzset()
+        _fake_ps(monkeypatch, "  912 Thu Aug  6 15:41:42 2026 python -m techne.mcp_server\n")
+
+        (_pid, start, _cmd) = _real_scan()[0]
+
+        # 2026-08-06 15:41:42 in America/New_York (EDT, UTC-4) == 19:41:42Z.
+        assert start == 1786045302.0
+        assert start != 1786030902.0  # the timegm misreading, five hours off
+
+    def test_the_tz_pin_is_restored_for_other_tests(self):
+        """`tzset()` mutates process-global state; monkeypatch.setenv unwinds the
+        env var but the C-level zone only reverts on the next tzset call. Pinned
+        so a future edit cannot leave the suite in EDT."""
+        time.tzset()
 
     def test_mixed_fleet_counts_only_the_old_ones(self, monkeypatch):
         deployed = int(_epoch("Thu Aug  6 22:02:08 2026"))
