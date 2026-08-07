@@ -192,18 +192,53 @@ jobs:
   # runs the gate against the REAL cards, which is the part those tests can't cover.
   # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
   arch-cards:
-    runs-on: ubuntu-latest
+    # MOVED OFF ubuntu-latest (#461), and the reason is AVAILABILITY, NOT COST.
+    #
+    # Cost is a rounding error and must not be cited as the justification: this
+    # job runs in ~7s, and self-hosted is NOT free — since 2026-03-01 GitHub
+    # bills self-hosted usage on private repos at $0.002/min against the same
+    # quota as hosted ($0.008/min). The saving is ~$0.0006 per run. Anyone
+    # revisiting this should weigh availability, not pennies.
+    #
+    # The real argument: a GitHub-hosted job that is not SCHEDULED never starts
+    # and reports as a plain failure with no runner assigned, so this gate turns
+    # permanently red rather than merely slow. Branch protection is unavailable
+    # on this plan (403), so "red means stop" is convention-only, and a check
+    # that is always red trains everyone to skim past red — corroding the single
+    # enforcement mechanism this repo has. #461 filed that as hypothetical
+    # ("hosted scheduling HAS recovered"); it stopped being hypothetical on
+    # 2026-08-06, when a GitHub Actions major outage cancelled this job three
+    # times at exactly 15m01s with zero steps and no runner.
+    #
+    # RESIDUAL RISK, accepted and stated: this now depends on OUR hardware, so
+    # if both self-hosted runners are down the gate cannot run at all. That is
+    # materially better than it was when #461 was written — there is a second
+    # runner (prinkle) since 2026-08-06, and the matrix is observed distributing
+    # across both.
+    #
+    # NOT KEPT AS A HOSTED CANARY: a canary for hosted scheduling belongs in a
+    # workflow_dispatch probe, not wired into every PR's required status. That
+    # is the same reasoning #424 used to keep its probe out of this file.
+    runs-on: [self-hosted, linux, x64, dev02]
+    # Same rationale as the matrix job's timeout: on a shared self-hosted runner
+    # a hung job queues everything behind it. This one is ~7s, so 5 is generous.
+    timeout-minutes: 5
     steps:
       - name: Checkout techne
         uses: actions/checkout@v4
         with:
           path: techne
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
+      # No setup-python: the interpreters are baked into the runner image
+      # precisely so workflows can drop that step. Deliberately plain `python3`
+      # rather than the `python3.13` #461 proposed — check_arch_cards.py is
+      # stdlib-only and `from __future__ import annotations` makes it
+      # version-insensitive, so pinning a minor version buys nothing and creates
+      # a per-runner dependency that must be re-verified every time a runner
+      # joins the pool. That is not hypothetical either: `dev02` is a POOL label
+      # shared by both hosts, and prinkle's docker socket needs sudo, so its
+      # interpreters could only be confirmed by reading the Dockerfile that
+      # built the image rather than by querying the running container.
       - name: Architecture-card freshness gate
         working-directory: techne
-        run: python scripts/check_arch_cards.py
+        run: python3 scripts/check_arch_cards.py
