@@ -3,10 +3,9 @@ name: test
 # Techne has no private sibling deps — full suite runs on every push/PR.
 # The contract job catches breaking renames before cabal/limenal CI fires.
 #
-# All jobs self-hosted, none hosted (#424, #461). Hosted jobs on this org stop
-# STARTING under a billing refusal or an outage — reports as a failure with no
-# runner. `dev02` is a POOL LABEL: two hosts (dev02, prinkle) carry it since
-# 2026-08-06. Setup: /var/servers/gha-runner + /var/servers/docker-compose/ci.
+# All jobs self-hosted (#424, #461) — do not add a hosted one.
+# `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it.
+# Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
 # actions/setup-python here: the runner is EPHEMERAL, and setup-python would
@@ -42,11 +41,9 @@ env:
 
 jobs:
   test:
-    # Two runners share the pool label, so these legs distribute (observed;
-    # longest leg 5m44s). Scale by starting more replicas.
+    # Legs distribute across the pool; scale with more runner replicas.
     runs-on: [self-hosted, linux, x64, dev02]
-    # Default is 360min. A hung job starves the small pool (#424), so bound it;
-    # a full leg is ~6-12min here.
+    # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
     strategy:
       matrix:
@@ -185,11 +182,9 @@ jobs:
   # runs the gate against the REAL cards, which is the part those tests can't cover.
   # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
   arch-cards:
-    # Self-hosted, not ubuntu-latest (#461). Reason is availability, not cost:
-    # an unscheduled hosted job never starts and reads as a permanent red — it
-    # happened 2026-08-06 (3x cancelled, 901s, no runner). Cost is under a cent
-    # either way; the per-minute self-hosted rate is disputed, see 764f160.
-    # Tradeoff: no runner now means a ~24h queued grey, not a fast red.
+    # Do not move back to ubuntu-latest (#461): hosted jobs here can fail to
+    # SCHEDULE and read as permanent red. Failure mode now: no free runner =
+    # ~24h queued grey, and timeout-minutes will not fire (counts from start).
     runs-on: [self-hosted, linux, x64, dev02]
     timeout-minutes: 5
     steps:
@@ -198,8 +193,8 @@ jobs:
         with:
           path: techne
 
-      # Versioned name: probes have only ever established python3.12/3.13/3.14;
-      # a bare `python3` symlink is not implied. Script is stdlib-only.
+      # Keep the versioned name: only python3.12/3.13/3.14 are proven present;
+      # a bare `python3` symlink is NOT implied by the image.
       - name: Architecture-card freshness gate
         working-directory: techne
         run: python3.13 scripts/check_arch_cards.py
