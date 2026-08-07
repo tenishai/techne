@@ -57,32 +57,52 @@ READER_NAME = "name:"
 READER_UUID = "uuid:"
 
 
-def _is_same_process(rec: dict) -> bool:
-    """Is the process at rec['pid'] the one this sidecar describes? (#492)
+def _same_process_pids(recs: list[dict]) -> set[int]:
+    """Which of these sidecars' pids are still the process the sidecar describes?
 
     Tells a dormant twin (alive, same process) from a corpse whose pid was
-    recycled (alive, different process). COMPARE AS EPOCHS: procStart is UTC,
-    `ps -o lstart=` prints local — the strings differ by the UTC offset.
-    No procStart -> False, i.e. pre-#492 behaviour.
+    recycled (alive, different process) — the guard that makes a TTL-free rival
+    check safe instead of restoring #446.
+
+    COMPARE AS EPOCHS: procStart is UTC, `ps -o lstart=` prints local; the two
+    renderings of one instant differ by the UTC offset. ONE ps for all
+    candidates — per-candidate calls cost ~6ms each on the post_tool_use path.
+    Unknown/unparseable -> absent, i.e. pre-#492 behaviour. DST fall-back hour:
+    mktime guesses tm_isdst and can miss by 3600s; fails safe (absent).
     """
-    claimed = rec.get("procStart")
-    pid = rec.get("pid")
-    if not claimed or not isinstance(pid, int) or pid <= 0:
-        return False
+    wanted = {
+        r["pid"]: r["procStart"]
+        for r in recs
+        if isinstance(r.get("pid"), int) and r["pid"] > 0 and r.get("procStart")
+    }
+    if not wanted:
+        return set()
     try:
         out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+            ["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in wanted)],
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    if out.returncode != 0 or not out.stdout.strip():
-        return False
-    try:
-        actual = time.mktime(time.strptime(out.stdout.strip(), "%a %b %d %H:%M:%S %Y"))
-        recorded = calendar.timegm(time.strptime(claimed, "%a %b %d %H:%M:%S %Y"))
-    except (ValueError, OverflowError):
-        return False
-    return int(actual) == int(recorded)
+        return set()
+    if out.returncode != 0:
+        return set()
+
+    same: set[int] = set()
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            pid = int(parts[0])
+            actual = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+            recorded = calendar.timegm(time.strptime(wanted[pid], "%a %b %d %H:%M:%S %Y"))
+        except (ValueError, OverflowError, KeyError):
+            continue
+        if int(actual) == int(recorded):
+            same.add(pid)
+    return same
 
 
 def _durable_name(session_id: str, records: list[dict] | None = None) -> str | None:
@@ -127,10 +147,12 @@ def _durable_name(session_id: str, records: list[dict] | None = None) -> str | N
     # updatedAt before checking the pid, so a twin idle past the TTL was
     # invisible (#492). Do NOT simplify to a pid-only check: a recycled pid on a
     # lingering sidecar would then demote the name forever, which is #446.
+    dormant = [
+        r for r in same_name if r.get("sessionId") not in live_ids and _pid_alive(r.get("pid"))
+    ]
+    still_running = _same_process_pids(dormant) if dormant else set()
     rivals = [
-        r
-        for r in same_name
-        if r.get("sessionId") in live_ids or (_pid_alive(r.get("pid")) and _is_same_process(r))
+        r for r in same_name if r.get("sessionId") in live_ids or r.get("pid") in still_running
     ]
     return None if rivals else name
 

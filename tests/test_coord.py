@@ -673,13 +673,13 @@ def test_a_dead_sidecar_does_not_demote_a_unique_name(db_path, monkeypatch):
     """Sidecars linger — presence is TTL+reap, never deregistered. Counting dead
     twins as rivals would permanently demote a name that IS unique right now,
     quietly restoring the #446 bug for every relaunched session."""
-    monkeypatch.setattr(
-        coord,
-        "_session_records",
-        lambda: [{"sessionId": A, "name": "poe_1"}, {"sessionId": A2, "name": "poe_1"}],
+    # A2 is a corpse: stale heartbeat AND a dead pid. `live_sessions` runs for
+    # real — pinning it here would define the concept the assertion turns on,
+    # which is how the suite missed #492.
+    _honest(
+        monkeypatch,
+        [_sidecar(A, "poe_1"), _sidecar(A2, "poe_1", age_s=_STALE, pid=_DEAD_PID)],
     )
-    # Only A is live; A2's sidecar is a corpse.
-    monkeypatch.setattr(coord, "live_sessions", lambda **k: [{"session_id": A, "name": "poe_1"}])
     assert coord.reader_key(A) == "name:poe_1"
 
 
@@ -734,6 +734,9 @@ def _honest(monkeypatch, records):
 
 _STALE = coord._PRESENCE_FRESH_SECONDS + 60
 
+#: A pid that is reliably NOT running: os.kill(pid, 0) raises ProcessLookupError.
+_DEAD_PID = 2**22 - 1
+
 
 def test_dormant_twin_broadcast_is_not_swallowed(db_path, monkeypatch):
     """Repro A. A twin idle past the presence TTL is still RUNNING and can still
@@ -777,3 +780,41 @@ def test_a_recycled_pid_does_not_demote_a_unique_name(db_path, monkeypatch):
     )
 
     assert coord.reader_key(A) == "name:poe_1"
+
+
+def test_procstart_is_read_as_utc_not_local(monkeypatch):
+    """Pins the epoch/TZ insight the whole fix rests on, with LITERAL inputs.
+
+    The other tests derive procStart through the inverse of production's own
+    transform, so the two cancel and the property holds under any timezone —
+    mutating `calendar.timegm` -> `time.mktime` in production passes under
+    TZ=UTC, which is what CI runs. This asserts against fixed strings under a
+    pinned non-UTC zone, so that mutation fails here. (Prudence, PR #512.)
+    """
+    import subprocess as _sp
+    import time as _t
+
+    original = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/New_York"
+        _t.tzset()
+        # One instant, two renderings: ps prints local (EDT = UTC-4), the
+        # sidecar records UTC. Same process, so this must MATCH.
+        monkeypatch.setattr(
+            _sp,
+            "run",
+            lambda *a, **k: _sp.CompletedProcess(a[0], 0, "  912 Thu Aug  6 15:41:41 2026\n", ""),
+        )
+        rec = {"pid": 912, "procStart": "Thu Aug  6 19:41:41 2026"}
+        assert coord._same_process_pids([rec]) == {912}
+
+        # And a sidecar whose UTC string is the LOCAL rendering is a different
+        # instant by four hours — a recycled pid, not this process.
+        rec_wrong = {"pid": 912, "procStart": "Thu Aug  6 15:41:41 2026"}
+        assert coord._same_process_pids([rec_wrong]) == set()
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        _t.tzset()
