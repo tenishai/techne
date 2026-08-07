@@ -126,7 +126,9 @@ class TestQueryTurnEvidence:
     def test_bash_commit_sha_parsed(self, db_path):
         _insert_session(db_path, "sess-git")
         _insert_obs(
-            db_path, "sess-git", "Bash",
+            db_path,
+            "sess-git",
+            "Bash",
             "Ran: git commit -m 'feat: add evidence'\n"
             "Output: [main abc1234] feat: add evidence\n 1 file changed",
         )
@@ -138,7 +140,9 @@ class TestQueryTurnEvidence:
         # Same SHA from two Bash rows (e.g. verbose git output).
         for _ in range(2):
             _insert_obs(
-                db_path, "sess-dup-sha", "Bash",
+                db_path,
+                "sess-dup-sha",
+                "Bash",
                 "Ran: git log --oneline\nOutput: [main abc1234] some commit",
             )
         ev = query_turn_evidence(db_path, "sess-dup-sha")
@@ -150,7 +154,9 @@ class TestQueryTurnEvidence:
         _insert_obs(db_path, "sess-mix", "Write", "Wrote: /proj/a.py\nContent: ...")
         _insert_obs(db_path, "sess-mix", "Edit", "Edited: /proj/b.py\nChange: x → y")
         _insert_obs(
-            db_path, "sess-mix", "Bash",
+            db_path,
+            "sess-mix",
+            "Bash",
             "Ran: git commit -m 'wip'\nOutput: [main deadbeef] wip",
         )
         ev = query_turn_evidence(db_path, "sess-mix")
@@ -194,7 +200,9 @@ class TestQueryTurnEvidence:
         tools); it fails in the safe direction (false-back, not false-flag)."""
         _insert_session(db_path, "sess-active")
         _insert_obs(
-            db_path, "sess-active", "mcp__techne__techne_store",
+            db_path,
+            "sess-active",
+            "mcp__techne__techne_store",
             "Tool: mcp__techne__techne_store\nInput: {}\nOutput: ok",
         )
         ev = query_turn_evidence(db_path, "sess-active")
@@ -209,12 +217,20 @@ class TestQueryTurnEvidence:
 class TestSinceIsoWindow:
     def test_observations_before_cutoff_excluded(self, db_path):
         _insert_session(db_path, "sess-win")
-        _insert_obs(db_path, "sess-win", "Write",
-                    "Wrote: /old.py\nContent: ...",
-                    timestamp="2026-01-01T00:00:00")
-        _insert_obs(db_path, "sess-win", "Write",
-                    "Wrote: /new.py\nContent: ...",
-                    timestamp="2026-06-01T00:00:00")
+        _insert_obs(
+            db_path,
+            "sess-win",
+            "Write",
+            "Wrote: /old.py\nContent: ...",
+            timestamp="2026-01-01T00:00:00",
+        )
+        _insert_obs(
+            db_path,
+            "sess-win",
+            "Write",
+            "Wrote: /new.py\nContent: ...",
+            timestamp="2026-06-01T00:00:00",
+        )
         ev = query_turn_evidence(db_path, "sess-win", since_iso="2026-03-01T00:00:00")
         assert "/new.py" in ev.artifacts
         assert "/old.py" not in ev.artifacts
@@ -222,12 +238,20 @@ class TestSinceIsoWindow:
 
     def test_since_iso_none_returns_all(self, db_path):
         _insert_session(db_path, "sess-all")
-        _insert_obs(db_path, "sess-all", "Write",
-                    "Wrote: /old.py\nContent: ...",
-                    timestamp="2026-01-01T00:00:00")
-        _insert_obs(db_path, "sess-all", "Write",
-                    "Wrote: /new.py\nContent: ...",
-                    timestamp="2026-06-01T00:00:00")
+        _insert_obs(
+            db_path,
+            "sess-all",
+            "Write",
+            "Wrote: /old.py\nContent: ...",
+            timestamp="2026-01-01T00:00:00",
+        )
+        _insert_obs(
+            db_path,
+            "sess-all",
+            "Write",
+            "Wrote: /new.py\nContent: ...",
+            timestamp="2026-06-01T00:00:00",
+        )
         ev = query_turn_evidence(db_path, "sess-all")
         assert ev.observation_count == 2
         assert "/old.py" in ev.artifacts
@@ -236,9 +260,13 @@ class TestSinceIsoWindow:
     def test_cutoff_at_boundary_is_exclusive(self, db_path):
         """timestamp > since_iso, so an observation exactly at the cutoff is excluded."""
         _insert_session(db_path, "sess-bnd")
-        _insert_obs(db_path, "sess-bnd", "Write",
-                    "Wrote: /exact.py\nContent: ...",
-                    timestamp="2026-06-01T12:00:00")
+        _insert_obs(
+            db_path,
+            "sess-bnd",
+            "Write",
+            "Wrote: /exact.py\nContent: ...",
+            timestamp="2026-06-01T12:00:00",
+        )
         ev = query_turn_evidence(db_path, "sess-bnd", since_iso="2026-06-01T12:00:00")
         assert ev.observation_count == 0
 
@@ -252,7 +280,9 @@ class TestSuiteEvidence:
     def test_green_suite_parsed(self, db_path):
         _insert_session(db_path, "sess-tg")
         _insert_obs(
-            db_path, "sess-tg", "Bash",
+            db_path,
+            "sess-tg",
+            "Bash",
             "Ran: pytest -q\nOutput: 5 passed in 0.50s",
         )
         ev = query_turn_evidence(db_path, "sess-tg")
@@ -262,7 +292,9 @@ class TestSuiteEvidence:
     def test_failing_suite_parsed(self, db_path):
         _insert_session(db_path, "sess-tf")
         _insert_obs(
-            db_path, "sess-tf", "Bash",
+            db_path,
+            "sess-tf",
+            "Bash",
             "Ran: pytest -q\nOutput: 1 failed, 3 passed in 0.50s",
         )
         ev = query_turn_evidence(db_path, "sess-tf")
@@ -281,7 +313,9 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-intact")
         _insert_obs(
-            db_path, "sess-intact", "Bash",
+            db_path,
+            "sess-intact",
+            "Bash",
             "Ran: pytest -q\nOutput: 2189 passed, 17 skipped in 68.60s",
         )
         ev = query_turn_evidence(db_path, "sess-intact")
@@ -299,7 +333,9 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-elided")
         _insert_obs(
-            db_path, "sess-elided", "Bash",
+            db_path,
+            "sess-elided",
+            "Bash",
             "Ran: pytest -q\nOutput: 5 passed"
             "\n… [4000 chars elided] …\n"
             "  coverage: 82% of statements",
@@ -327,7 +363,9 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-elided-zero")
         _insert_obs(
-            db_path, "sess-elided-zero", "Bash",
+            db_path,
+            "sess-elided-zero",
+            "Bash",
             "Ran: jest\nOutput: Tests: 0 failed, 5 passed"
             "\n… [4000 chars elided] …\n"
             "  coverage table",
@@ -340,7 +378,9 @@ class TestSuiteEvidence:
         """A surviving failure count keeps the suite red — elision never rescues it."""
         _insert_session(db_path, "sess-elided-red")
         _insert_obs(
-            db_path, "sess-elided-red", "Bash",
+            db_path,
+            "sess-elided-red",
+            "Bash",
             "Ran: jest\nOutput: Tests: 3 failed, 5 passed"
             "\n… [4000 chars elided] …\n"
             "  coverage table",
@@ -359,13 +399,16 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-vouch")
         _insert_obs(
-            db_path, "sess-vouch", "Bash",
+            db_path,
+            "sess-vouch",
+            "Bash",
             "Ran: cargo test -p small\nOutput: test result: ok. 3 passed; 0 failed",
         )
         _insert_obs(
-            db_path, "sess-vouch", "Bash",
-            "Ran: pytest -q\nOutput: 900 passed"
-            "\n… [5000 chars elided] …\ncoverage 82%",
+            db_path,
+            "sess-vouch",
+            "Bash",
+            "Ran: pytest -q\nOutput: 900 passed\n… [5000 chars elided] …\ncoverage 82%",
         )
         ev = query_turn_evidence(db_path, "sess-vouch")
         assert ev.tests.totals_unreliable is True
@@ -373,7 +416,7 @@ class TestSuiteEvidence:
         assert check_claims([{"type": "tests_green"}], ev)[0]["status"] == "unverifiable"
 
     def test_zero_errors_does_not_substitute_for_a_missing_failure_count(self, db_path):
-        """"0 errors" says nothing about failures — different categories.
+        """ "0 errors" says nothing about failures — different categories.
 
         The guard originally required `errors is None`, so any parsed zero-errors
         anywhere disarmed it and returned green. `_ERRORS_RE` is loose enough to
@@ -381,9 +424,10 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-zeroerr")
         _insert_obs(
-            db_path, "sess-zeroerr", "Bash",
-            "Ran: pytest -q\nOutput: 900 passed, 0 errors"
-            "\n… [5000 chars elided] …\ntail",
+            db_path,
+            "sess-zeroerr",
+            "Bash",
+            "Ran: pytest -q\nOutput: 900 passed, 0 errors\n… [5000 chars elided] …\ntail",
         )
         ev = query_turn_evidence(db_path, "sess-zeroerr")
         assert ev.tests.suite_green is None
@@ -393,9 +437,10 @@ class TestSuiteEvidence:
         """A row with real errors is red, not unverifiable — it can't false-green."""
         _insert_session(db_path, "sess-poserr")
         _insert_obs(
-            db_path, "sess-poserr", "Bash",
-            "Ran: pytest -q\nOutput: 900 passed, 4 errors"
-            "\n… [5000 chars elided] …\ntail",
+            db_path,
+            "sess-poserr",
+            "Bash",
+            "Ran: pytest -q\nOutput: 900 passed, 4 errors\n… [5000 chars elided] …\ntail",
         )
         ev = query_turn_evidence(db_path, "sess-poserr")
         assert ev.tests.suite_green is False
@@ -454,11 +499,15 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-red-wins")
         _insert_obs(
-            db_path, "sess-red-wins", "Bash",
+            db_path,
+            "sess-red-wins",
+            "Bash",
             "Ran: pytest -q\nOutput: 900 passed\n… [5000 chars elided] …\ntail",
         )
         _insert_obs(
-            db_path, "sess-red-wins", "Bash",
+            db_path,
+            "sess-red-wins",
+            "Bash",
             "Ran: pytest -q\nOutput: 12 failed, 30 passed in 3s",
         )
         ev = query_turn_evidence(db_path, "sess-red-wins")
@@ -501,12 +550,16 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-mypy")
         _insert_obs(
-            db_path, "sess-mypy", "Bash",
+            db_path,
+            "sess-mypy",
+            "Bash",
             "Ran: make check\nOutput: mypy: Found 0 errors in 42 files"
             "\n… [6000 chars elided] …\ndone",
         )
         _insert_obs(
-            db_path, "sess-mypy", "Bash",
+            db_path,
+            "sess-mypy",
+            "Bash",
             "Ran: pytest tests/unit -q\nOutput: 8 passed in 1.1s",
         )
         ev = query_turn_evidence(db_path, "sess-mypy")
@@ -523,12 +576,11 @@ class TestSuiteEvidence:
         direction is safe, so the gate declines rather than picks one.
         """
         _insert_session(db_path, "sess-ambig")
-        message = (
-            "git commit -F - <<EOF\nfix: thing\n\n"
-            "Output: 2206 passed, 17 skipped\nEOF"
-        )
+        message = "git commit -F - <<EOF\nfix: thing\n\nOutput: 2206 passed, 17 skipped\nEOF"
         _insert_obs(
-            db_path, "sess-ambig", "Bash",
+            db_path,
+            "sess-ambig",
+            "Bash",
             f"Ran: {message}\nOutput: [main deadbee] fix: thing",
         )
         ev = query_turn_evidence(db_path, "sess-ambig")
@@ -546,7 +598,9 @@ class TestSuiteEvidence:
         gate must never take (techne#105).
         """
         _insert_session(db_path, "sess-noprefix")
-        _insert_obs(db_path, "sess-noprefix", "Bash", "Bash: git commit\n[main abc1234] some commit")
+        _insert_obs(
+            db_path, "sess-noprefix", "Bash", "Bash: git commit\n[main abc1234] some commit"
+        )
         ev = query_turn_evidence(db_path, "sess-noprefix")
         assert "abc1234" in ev.commits
         assert check_claims([{"type": "commit"}], ev)[0]["status"] == "backed"
@@ -560,9 +614,10 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-gitlog")
         _insert_obs(
-            db_path, "sess-gitlog", "Bash",
-            "Ran: git log -1\nOutput: commit 93db80e\n\n"
-            "    Full suite: 2209 passed, 17 skipped.\n",
+            db_path,
+            "sess-gitlog",
+            "Bash",
+            "Ran: git log -1\nOutput: commit 93db80e\n\n    Full suite: 2209 passed, 17 skipped.\n",
         )
         ev = query_turn_evidence(db_path, "sess-gitlog")
         assert ev.tests.passed is None
@@ -594,7 +649,9 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-quoted")
         _insert_obs(
-            db_path, "sess-quoted", "Bash",
+            db_path,
+            "sess-quoted",
+            "Bash",
             'Ran: git commit -m "fix the pytest flake"\nOutput: [main abc1234] 3 passed',
         )
         ev = query_turn_evidence(db_path, "sess-quoted")
@@ -611,7 +668,9 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-loose")
         _insert_obs(
-            db_path, "sess-loose", "Bash",
+            db_path,
+            "sess-loose",
+            "Bash",
             'Ran: echo "about to run pytest against the worktree"\nOutput: 5 passed',
         )
         ev = query_turn_evidence(db_path, "sess-loose")
@@ -656,9 +715,20 @@ class TestSuiteEvidence:
         from techne.core.evidence import _command_runs_tests
 
         for command in (
-            "go test ./...", "cargo test --workspace", "npm test", "npm run test",
-            "yarn test", "pnpm test", "bun test", "mvn -q test", "gradle test",
-            "dotnet test", "bundle exec rspec", "rake spec", "vitest run", "jest --ci",
+            "go test ./...",
+            "cargo test --workspace",
+            "npm test",
+            "npm run test",
+            "yarn test",
+            "pnpm test",
+            "bun test",
+            "mvn -q test",
+            "gradle test",
+            "dotnet test",
+            "bundle exec rspec",
+            "rake spec",
+            "vitest run",
+            "jest --ci",
         ):
             assert _command_runs_tests(command) is True, command
 
@@ -672,8 +742,13 @@ class TestSuiteEvidence:
         from techne.core.evidence import _command_runs_tests
 
         for command in (
-            "uv run pytest -q", "poetry run pytest", "npx jest", "pipx run pytest",
-            "python -m unittest discover", "python -m tox", '"$VENV" -m nox -s tests',
+            "uv run pytest -q",
+            "poetry run pytest",
+            "npx jest",
+            "pipx run pytest",
+            "python -m unittest discover",
+            "python -m tox",
+            '"$VENV" -m nox -s tests',
         ):
             assert _command_runs_tests(command) is True, command
 
@@ -689,9 +764,15 @@ class TestSuiteEvidence:
         from techne.core.evidence import _command_runs_tests
 
         for command in (
-            "make -C build test", "make -j 4 test", "make V=1 test",
-            "mvn clean test", "gradle clean test", "cargo +nightly test",
-            "npm --prefix web test", "yarn --cwd web test", "dotnet test -v n",
+            "make -C build test",
+            "make -j 4 test",
+            "make V=1 test",
+            "mvn clean test",
+            "gradle clean test",
+            "cargo +nightly test",
+            "npm --prefix web test",
+            "yarn --cwd web test",
+            "dotnet test -v n",
         ):
             assert _command_runs_tests(command) is True, command
 
@@ -727,10 +808,13 @@ class TestSuiteEvidence:
         # followed by a heredoc: with a per-line mask the second line starts
         # clean, reads the message's CLOSING quote as an opening one, hides the
         # real `<<'SH'` opener, and the body's runner line escapes.
-        assert _command_runs_tests(
-            'git commit -m "fix: a message\n\nspanning lines." '
-            "&& cat > /tmp/probe.sh <<'SH'\npytest -q\nSH"
-        ) is False
+        assert (
+            _command_runs_tests(
+                'git commit -m "fix: a message\n\nspanning lines." '
+                "&& cat > /tmp/probe.sh <<'SH'\npytest -q\nSH"
+            )
+            is False
+        )
         assert _command_runs_tests("cat > f <<-PY\npytest x\n\tPY\npytest -q") is True
         # An indented tag inside a PLAIN `<<` body is body text, not the end. A
         # lenient `.strip()` terminator ends the body here and lets the `pytest`
@@ -750,7 +834,9 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-var")
         _insert_obs(
-            db_path, "sess-var", "Bash",
+            db_path,
+            "sess-var",
+            "Bash",
             'Ran: cd "$WT" && PYTHONPATH="$WT" "$VENV" -m pytest tests/ -q\n'
             "Output: 25 passed in 1.2s",
         )
@@ -768,12 +854,16 @@ class TestSuiteEvidence:
         """
         _insert_session(db_path, "sess-make")
         _insert_obs(
-            db_path, "sess-make", "Bash",
+            db_path,
+            "sess-make",
+            "Bash",
             "Ran: make check\nOutput: mypy: Found 0 errors in 42 files"
             "\n… [6000 chars elided] …\ndone",
         )
         _insert_obs(
-            db_path, "sess-make", "Bash",
+            db_path,
+            "sess-make",
+            "Bash",
             "Ran: pytest tests/unit -q\nOutput: 8 passed in 1.1s",
         )
         ev = query_turn_evidence(db_path, "sess-make")
@@ -792,10 +882,12 @@ class TestSuiteEvidence:
         """
         from techne.core.evidence import _command_runs_tests
 
-        assert _command_runs_tests(
-            "cat > probe.py <<'PY'\n# don't remove this\nPY\n"
-            "cat > run.sh <<'SH'\npytest -q\nSH"
-        ) is False
+        assert (
+            _command_runs_tests(
+                "cat > probe.py <<'PY'\n# don't remove this\nPY\ncat > run.sh <<'SH'\npytest -q\nSH"
+            )
+            is False
+        )
 
     def test_property_no_heredoc_body_line_is_ever_a_command(self):
         """Generated commands: a runner inside a body must never be an invocation.
@@ -815,11 +907,17 @@ class TestSuiteEvidence:
         from techne.core.evidence import _command_runs_tests
 
         openers = ["<<'PY'", '<<"PY"', "<<PY", "<<-PY", "<<\\PY", "<<'PY-1'"]
-        terminators = {"<<'PY'": "PY", '<<"PY"': "PY", "<<PY": "PY",
-                       "<<-PY": "\tPY", "<<\\PY": "PY", "<<'PY-1'": "PY-1"}
+        terminators = {
+            "<<'PY'": "PY",
+            '<<"PY"': "PY",
+            "<<PY": "PY",
+            "<<-PY": "\tPY",
+            "<<\\PY": "PY",
+            "<<'PY-1'": "PY-1",
+        }
         bodies = [
-            "# don't remove this",      # unbalanced single quote
-            'x = "oops',                # unbalanced double quote
+            "# don't remove this",  # unbalanced single quote
+            'x = "oops',  # unbalanced double quote
             "it's fine",
             "echo 'balanced'",
             "plain text",
@@ -842,12 +940,106 @@ class TestSuiteEvidence:
             # FIRST body, a prefix that hides that opener exposes it (round 3) —
             # verified by emulating each prior implementation.
             for command in (
-                f"{prefix}cat > a.py {opener}\n{body}\n{end}\n"
-                f"cat > b.sh {opener}\n{runner}\n{end}",
-                f"{prefix}cat > a.sh {opener}\n{runner}\n{end}\n"
-                f"cat > b.py {opener}\n{body}\n{end}",
+                f"{prefix}cat > a.py {opener}\n{body}\n{end}\ncat > b.sh {opener}\n{runner}\n{end}",
+                f"{prefix}cat > a.sh {opener}\n{runner}\n{end}\ncat > b.py {opener}\n{body}\n{end}",
             ):
                 assert _command_runs_tests(command) is False, command
+
+    def test_property_a_c_wrapped_runner_is_always_seen(self):
+        """Generated: wrapping a runner in `<shell> -c` must never hide it.
+
+        The #445 half of the grammar. Starvation in this gate is a FALSE GREEN,
+        not a harmless miss — an unrecognised row raises no `totals_unreliable`
+        flag, so an intact run elsewhere in the window certifies the lot.
+        """
+        import itertools
+
+        from techne.core.evidence import _command_runs_tests
+
+        shells = ["bash", "sh", "zsh", "/bin/bash", "/usr/bin/env"]
+        flags = ["-c", "-lc", "-ec"]
+        quotes = ["'", '"']
+        runners = ["pytest -q", "go test ./...", "npm test", "python -m pytest"]
+
+        for shell, flag, q, runner in itertools.product(shells, flags, quotes, runners):
+            if q in runner:
+                continue
+            command = f"{shell} {flag} {q}{runner}{q}"
+            expected = shell != "/usr/bin/env"  # env is not a shell; must NOT expand
+            assert _command_runs_tests(command) is expected, command
+
+    def test_property_a_c_wrapper_never_invents_a_runner(self):
+        """The mirror invariant, and the reason `bash` is NOT in the wrapper
+        allowlist: a `-c` script that merely MENTIONS a runner, or prints
+        count-shaped output, must stay False. Adding bash to
+        `_TEST_RUNNER_WRAPPERS` would have matched all of these — #440 through
+        the front door.
+        """
+        import itertools
+
+        from techne.core.evidence import _command_runs_tests
+
+        shells = ["bash", "sh", "zsh"]
+        # WHAT THIS GUARDS: a `-c` script that merely MENTIONS a runner is not a
+        # test run. It does NOT guard the `_TEST_RUNNER_WRAPPERS` exclusion —
+        # verified by adding `bash` to that set, under which these cases still
+        # pass, because `_expand_shell_c` replaces the `bash -c` segment before
+        # the wrapper rule sees a `bash` head. That exclusion is pinned by
+        # `test_bash_is_not_a_test_runner_wrapper`, which DOES fail under the
+        # same mutation.
+        payloads = [
+            "echo pytest passed",  # bare `pytest` token in rest
+            "echo 12 passed",
+            "git commit -m fix-the-pytest-flake",  # bare, unquoted
+            "echo 'pytest is great'",
+            "cat pytest.ini",
+            "ls pytest",
+        ]
+        for shell, payload in itertools.product(shells, payloads):
+            command = f"{shell} -c '{payload}'"
+            assert _command_runs_tests(command) is False, command
+
+    def test_bash_is_not_a_test_runner_wrapper(self):
+        """The #440 exclusion, pinned where it is OBSERVABLE.
+
+        `_TEST_RUNNER_WRAPPERS` matches a head whose ARGUMENT is a runner. With
+        `bash` in that set, `bash -x pytest.log` would read as a test run. The
+        `-c` shapes cannot pin this — `_expand_shell_c` consumes them first — so
+        it takes a bash invocation with no `-c`. Teeth-checked: adding `bash` to
+        the set fails THIS test and no other.
+        """
+        from techne.core.evidence import _TEST_RUNNER_WRAPPERS, _command_runs_tests
+
+        assert "bash" not in _TEST_RUNNER_WRAPPERS
+        assert "sh" not in _TEST_RUNNER_WRAPPERS
+        assert _command_runs_tests("bash -x pytest.log") is False
+        assert _command_runs_tests("bash run-pytest.sh") is False
+
+    def test_the_capture_side_is_untouched_by_the_gate_expansion(self):
+        """#445's load-bearing constraint. `_split_bash_segments` is SHARED with
+        the capture-time noise filter, and the two want opposite things: the gate
+        needs to see INTO `bash -c`, while the noise filter must keep heading on
+        `bash` — expanding there would head on `ls`, return True, and DROP a row
+        it currently captures, against its documented fail-safe.
+
+        So the expansion lives gate-side and this pins that the shared splitter
+        kept its semantics.
+        """
+        from techne.hooks.post_tool_use import _bash_is_readonly_noise, _split_bash_segments
+
+        assert _split_bash_segments("bash -c 'ls -la'") == ["bash -c 'ls -la'"]
+        assert _bash_is_readonly_noise("bash -c 'ls -la'") is False, "must still CAPTURE"
+        assert _bash_is_readonly_noise("ls -la") is True
+
+    def test_unparseable_c_segments_are_left_alone(self):
+        """A segment shlex cannot parse (heredoc bodies routinely leave unbalanced
+        quotes) must be passed through, not guessed at."""
+        from techne.core.evidence import _shell_c_script
+
+        assert _shell_c_script("bash -c 'unterminated") is None
+        assert _shell_c_script("bash -c") is None  # -c with no script
+        assert _shell_c_script("bash script.sh") is None  # positional, not -c
+        assert _shell_c_script("pytest -q") is None
 
     def test_no_test_output_returns_none(self, db_path):
         _insert_session(db_path, "sess-nt")
@@ -859,7 +1051,9 @@ class TestSuiteEvidence:
     def test_error_count_makes_suite_red(self, db_path):
         _insert_session(db_path, "sess-te")
         _insert_obs(
-            db_path, "sess-te", "Bash",
+            db_path,
+            "sess-te",
+            "Bash",
             "Ran: pytest\nOutput: 2 passed, 1 error in 0.12s",
         )
         ev = query_turn_evidence(db_path, "sess-te")
@@ -938,8 +1132,11 @@ class TestCheckClaims:
         Bash-off turn must NOT flip an honest agent's completion claim to 'unbacked'. With
         no deed and Bash off, the deeds could be uncaptured Bash → unverifiable."""
         ev = self._ev(
-            any_tool_call=True, active_tool_call=False, artifacts=[],
-            observation_count=1, bash_captured=False,
+            any_tool_call=True,
+            active_tool_call=False,
+            artifacts=[],
+            observation_count=1,
+            bash_captured=False,
         )
         verdicts = check_claims([{"type": "completion"}], ev)
         assert verdicts[0]["status"] == "unverifiable"
@@ -1004,20 +1201,33 @@ class TestCheckClaims:
         assert verdicts[0]["status"] == "unbacked"
 
     def test_tests_green_backed(self):
-        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[],
-                      suite_green=True, passed=5, failed=0)
+        ev = self._ev(
+            any_tool_call=True,
+            artifacts=[],
+            commits=[],
+            actions=[],
+            suite_green=True,
+            passed=5,
+            failed=0,
+        )
         verdicts = check_claims([{"type": "tests_green"}], ev)
         assert verdicts[0]["status"] == "backed"
 
     def test_tests_green_unbacked(self):
-        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[],
-                      suite_green=False, passed=3, failed=1)
+        ev = self._ev(
+            any_tool_call=True,
+            artifacts=[],
+            commits=[],
+            actions=[],
+            suite_green=False,
+            passed=3,
+            failed=1,
+        )
         verdicts = check_claims([{"type": "tests_green"}], ev)
         assert verdicts[0]["status"] == "unbacked"
 
     def test_tests_green_unverifiable(self):
-        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[],
-                      suite_green=None)
+        ev = self._ev(any_tool_call=True, artifacts=[], commits=[], actions=[], suite_green=None)
         verdicts = check_claims([{"type": "tests_green"}], ev)
         assert verdicts[0]["status"] == "unverifiable"
 
@@ -1063,11 +1273,10 @@ class TestCheckClaims:
         assert "alien_claim" in verdicts[0]["detail"]
 
     def test_multiple_claims_unbacked_count(self):
-        ev = self._ev(any_tool_call=False, artifacts=[], commits=[], actions=[],
-                      suite_green=None)
+        ev = self._ev(any_tool_call=False, artifacts=[], commits=[], actions=[], suite_green=None)
         claims = [
-            {"type": "completion"},       # unbacked
-            {"type": "tests_green"},      # unverifiable
+            {"type": "completion"},  # unbacked
+            {"type": "tests_green"},  # unverifiable
             {"type": "wrote_file", "path": "x.py"},  # unbacked
         ]
         verdicts = check_claims(claims, ev)
@@ -1091,7 +1300,9 @@ class TestMcpCheckEvidence:
         _insert_session(db_path, "sess-mcp")
         _insert_obs(db_path, "sess-mcp", "Write", "Wrote: /tmp/out.py\nContent: x=1...")
         _insert_obs(
-            db_path, "sess-mcp", "Bash",
+            db_path,
+            "sess-mcp",
+            "Bash",
             "Ran: git commit -m 'add'\nOutput: [main abc9999] add\n",
         )
 
@@ -1117,6 +1328,7 @@ class TestMcpCheckEvidence:
         assert "isError" not in result or result.get("isError") is False
         text = result["content"][0]["text"]
         import json
+
         data = json.loads(text)
         assert "evidence" in data
         assert "verdicts" in data
@@ -1161,6 +1373,7 @@ class TestMcpCheckEvidence:
             config,
         )
         import json
+
         data = json.loads(response["result"]["content"][0]["text"])
         by_type = {v["claim"]["type"]: v["status"] for v in data["verdicts"]}
         assert by_type["completion"] == "unverifiable"
@@ -1189,6 +1402,7 @@ class TestMcpCheckEvidence:
 
     def test_description_leads_with_trigger(self, config):
         from techne.mcp_server import TOOLS
+
         by_name = {t["name"]: t["description"] for t in TOOLS}
         assert by_name["techne_check_evidence"].startswith("Call this before asserting")
 
@@ -1216,8 +1430,7 @@ class TestEvidenceCli:
         conn.close()
         _insert_session(db, "sess-cli")
         _insert_obs(db, "sess-cli", "Write", "Wrote: /tmp/cli.py\nContent: ...")
-        _insert_obs(db, "sess-cli", "Bash",
-                    "Ran: pytest\nOutput: 7 passed in 1.2s")
+        _insert_obs(db, "sess-cli", "Bash", "Ran: pytest\nOutput: 7 passed in 1.2s")
 
         runner = CliRunner()
         result = runner.invoke(main, ["evidence", "sess-cli"], catch_exceptions=False)
@@ -1233,16 +1446,25 @@ class TestEvidenceCli:
         conn = init_db(db)
         conn.close()
         _insert_session(db, "sess-cli2")
-        _insert_obs(db, "sess-cli2", "Write",
-                    "Wrote: /tmp/old.py\nContent: ...",
-                    timestamp="2026-01-01T00:00:00")
-        _insert_obs(db, "sess-cli2", "Write",
-                    "Wrote: /tmp/new.py\nContent: ...",
-                    timestamp="2026-06-01T00:00:00")
+        _insert_obs(
+            db,
+            "sess-cli2",
+            "Write",
+            "Wrote: /tmp/old.py\nContent: ...",
+            timestamp="2026-01-01T00:00:00",
+        )
+        _insert_obs(
+            db,
+            "sess-cli2",
+            "Write",
+            "Wrote: /tmp/new.py\nContent: ...",
+            timestamp="2026-06-01T00:00:00",
+        )
 
         runner = CliRunner()
         result = runner.invoke(
-            main, ["evidence", "sess-cli2", "--since", "2026-03-01T00:00:00"],
+            main,
+            ["evidence", "sess-cli2", "--since", "2026-03-01T00:00:00"],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output

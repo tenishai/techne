@@ -219,11 +219,29 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
 # commit message that says "2209 passed" certified a green suite with no test run
 # (8 rows), and `ruff check` printing "Found 181 errors" turned a green window red
 # (29 rows) — the false-accusation direction techne#105 exists to prevent.
-_TEST_RUNNER_HEADS = frozenset({
-    "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "jasmine",
-    "ava", "karma", "rspec", "minitest", "phpunit", "behat", "ctest", "bats",
-    "gotestsum", "nextest", "unittest",
-})
+_TEST_RUNNER_HEADS = frozenset(
+    {
+        "pytest",
+        "py.test",
+        "tox",
+        "nox",
+        "jest",
+        "vitest",
+        "mocha",
+        "jasmine",
+        "ava",
+        "karma",
+        "rspec",
+        "minitest",
+        "phpunit",
+        "behat",
+        "ctest",
+        "bats",
+        "gotestsum",
+        "nextest",
+        "unittest",
+    }
+)
 
 # Heads that run tests only under a specific subcommand — `go test`, not `go build`.
 _TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
@@ -256,10 +274,24 @@ _TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
 
 # Interpreters and task runners that invoke a real runner as an argument:
 # `python -m pytest`, `uv run pytest`, `poetry run pytest`.
-_TEST_RUNNER_WRAPPERS = frozenset({
-    "python", "python3", "py", "uv", "poetry", "pdm", "hatch", "pipenv", "rye", "npx",
-    "bundle", "pipx", "pdm", "just",
-})
+_TEST_RUNNER_WRAPPERS = frozenset(
+    {
+        "python",
+        "python3",
+        "py",
+        "uv",
+        "poetry",
+        "pdm",
+        "hatch",
+        "pipenv",
+        "rye",
+        "npx",
+        "bundle",
+        "pipx",
+        "pdm",
+        "just",
+    }
+)
 
 # Modules a `-m` flag can name to mean "run the suite".
 _TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
@@ -356,6 +388,82 @@ def _strip_heredoc_bodies(command: str) -> str:
     return "\n".join(kept)
 
 
+#: Shells whose ``-c`` argument is a nested script the gate must look inside.
+#: NOT added to `_TEST_RUNNER_WRAPPERS`: that set matches a head whose ARGUMENT
+#: is a runner, so `bash` there would make `bash -c 'echo 12 passed'` read as a
+#: test run — #440 through the front door.
+_SHELL_C_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+#: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
+#: a command is pathological and the gate stops rather than recursing on input.
+_MAX_SHELL_C_DEPTH = 3
+
+
+def _expand_shell_c(segments: list[str], depth: int = 0) -> list[str]:
+    """Replace ``bash -c '<script>'`` segments with the script's own segments.
+
+    GATE-SIDE ONLY, and that placement is the whole design (techne#445). The
+    splitter is SHARED with the capture-time noise filter, and the two want
+    opposite things from a `-c` wrapper:
+
+      gate         `bash -c 'pytest -q'` unseen -> the row raises no
+                   `totals_unreliable` flag, so an intact run elsewhere in the
+                   window certifies the whole thing green. Starvation IS a false
+                   green here (techne#438).
+      noise filter `bash -c 'ls'` currently heads on `bash`, which is not
+                   read-only, so it CAPTURES. Expanding it there would head on
+                   `ls` and DROP it — flipping False->True, i.e. LESS capture,
+                   against that filter's documented fail-safe. Measured both
+                   before choosing: the heredoc precedent (#444 r2) does not
+                   transfer, because it only ever added segments.
+
+    So the shared splitter keeps its semantics exactly and the gate expands
+    afterwards.
+    """
+    if depth >= _MAX_SHELL_C_DEPTH:
+        return segments
+    out: list[str] = []
+    for seg in segments:
+        script = _shell_c_script(seg)
+        if script is None:
+            out.append(seg)
+            continue
+        from techne.hooks.post_tool_use import _split_bash_segments
+
+        inner = _split_bash_segments(_strip_heredoc_bodies(script))
+        out.extend(_expand_shell_c(inner, depth + 1))
+    return out
+
+
+def _shell_c_script(segment: str) -> str | None:
+    """The script argument of a ``<shell> -c <script>`` segment, else None.
+
+    Uses `shlex` so the quoting that HID the runner is what now reveals it: the
+    script arrives already unquoted. A segment shlex cannot parse (unbalanced
+    quotes, which heredoc bodies produce) is left alone rather than guessed at.
+    """
+    import shlex
+
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return None
+    i = 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+        i += 1
+    if i >= len(tokens) or tokens[i].rsplit("/", 1)[-1] not in _SHELL_C_WRAPPERS:
+        return None
+    # `-c`, and clustered short flags ending in c (`-lc`, `-ec`). The script is
+    # the token after it.
+    for j in range(i + 1, len(tokens)):
+        t = tokens[j]
+        if t.startswith("-") and t.lstrip("-").endswith("c"):
+            return tokens[j + 1] if j + 1 < len(tokens) else None
+        if not t.startswith("-"):
+            return None  # a positional before any -c: not a -c invocation
+    return None
+
+
 def _command_runs_tests(command: str) -> bool:
     """True when some segment of `command` actually invokes a test runner.
 
@@ -369,7 +477,8 @@ def _command_runs_tests(command: str) -> bool:
     """
     from techne.hooks.post_tool_use import _split_bash_segments
 
-    for segment in _split_bash_segments(_strip_heredoc_bodies(command)):
+    segments = _split_bash_segments(_strip_heredoc_bodies(command))
+    for segment in _expand_shell_c(segments):
         tokens = segment.split()
         i = 0
         # Skip leading `VAR=val` env assignments to find the real head.
