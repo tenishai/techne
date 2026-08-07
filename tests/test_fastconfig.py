@@ -36,11 +36,31 @@ def home(tmp_path: Path, monkeypatch) -> Path:
     return h
 
 
+#: Every module `fastconfig` may import, anywhere in the file. An ALLOWLIST, not
+#: a blocklist, and that inversion is the point of techne#489: the three previous
+#: guards all asked "is this techne (or yaml)?", which is a question about
+#: IDENTITY. The invariant is about COST. Prudence walked two imports past all 22
+#: tests — a deferred `import yaml` inside load_fast() (16.0ms) and a module-level
+#: `import tempfile` (11.9ms) — neither of which is techne, either of which
+#: deletes most of the 55ms benefit while CI stays green. A blocklist can only
+#: ever name the expensive things someone already thought of.
+#:
+#: Adding an entry here is deliberate and should be justified in the PR: the
+#: module's contract is that it imports ONLY what interpreter startup has already
+#: paid for.
+_FASTCONFIG_ALLOWED_IMPORTS = frozenset({"__future__", "os", "pathlib"})
+
+
 class TestImportCheapness:
-    def test_fastconfig_imports_nothing_from_techne(self):
+    def test_fastconfig_imports_only_allowlisted_modules(self):
         """THE load-bearing invariant. The whole 60ms win is that this module
-        does not drag in the import graph — a single `techne.*` import here
-        silently deletes the benefit, because the graph IS the cost.
+        does not drag in the import graph — the graph IS the cost.
+
+        Walks the WHOLE AST, so a deferred import inside a function body is
+        caught exactly like a module-level one. That is the hole #471 finding 4
+        found: a relative `from .config import techne_home` deferred inside
+        `load_fast()` evaded all three guards while pulling yaml and three techne
+        modules into the hot path, with CI green throughout.
         """
         # Parsed, not grepped: the module's own docstring quotes
         # `import techne.config` in its measurement table, which a string match
@@ -51,22 +71,73 @@ class TestImportCheapness:
         offenders: list[str] = []
         for node in ast.walk(ast.parse(src)):
             if isinstance(node, ast.Import):
-                offenders += [a.name for a in node.names if a.name.split(".")[0] == "techne"]
+                offenders += [
+                    a.name
+                    for a in node.names
+                    if a.name.split(".")[0] not in _FASTCONFIG_ALLOWED_IMPORTS
+                ]
             elif isinstance(node, ast.ImportFrom):
-                # `node.level > 0` catches RELATIVE imports, which record the
-                # module WITHOUT the package prefix: `from .config import
-                # techne_home` is module="config", level=1, so the startswith
-                # check alone waved it through. A module-level relative import
-                # was still caught by the yaml test, but a DEFERRED one inside
-                # load_fast() evaded all three guards while pulling yaml and
-                # three techne modules into the hot path — green CI, and the
-                # entire 55ms benefit gone (#471 review, finding 4).
-                if node.level > 0 or (node.module or "").startswith("techne"):
+                # A RELATIVE import records the module WITHOUT its package
+                # prefix (`from .config import x` is module="config", level=1),
+                # so it can never be checked against the allowlist by name — any
+                # relative import is a techne import by construction, and offends.
+                if node.level > 0:
                     offenders.append(("." * node.level) + (node.module or "?"))
-        assert not offenders, f"fastconfig must stay stdlib-only, found: {offenders}"
+                elif (node.module or "").split(".")[0] not in _FASTCONFIG_ALLOWED_IMPORTS:
+                    offenders.append(node.module or "?")
+        assert not offenders, (
+            f"fastconfig may import only {sorted(_FASTCONFIG_ALLOWED_IMPORTS)}, "
+            f"found: {offenders}. The import graph is the cost — add to the "
+            "allowlist deliberately, not by accident."
+        )
+
+    def test_importing_fastconfig_stays_under_the_module_budget(self):
+        """The allowlist above governs THIS file; this governs what the file's
+        imports drag in behind them — the transitive half, which no AST can see.
+
+        A COUNT, deliberately, not a set of names: enumerating the transitive
+        closure would be a hand-kept list that drifts with every Python release
+        (pathlib's internals alone move between versions), which is the same
+        maintenance trap #489 exists to escape. The count is the quantity the
+        invariant actually cares about, since each module imported is cost paid.
+
+        The bound is measured, not guessed (2026-08-07, CPython 3.14.6):
+
+            import techne.fastconfig            12 top-level modules
+            ...plus `import yaml`               21   <- cheapest known offender
+            ...plus `import tempfile`           31
+            import techne.config                54   <- the thing this avoids
+
+        18 sits clear of today's 12 (headroom for stdlib drift) and well below
+        21, so the cheapest offender anyone has actually smuggled past a guard
+        still trips it.
+        """
+        out = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; base = set(sys.modules); import techne.fastconfig; "
+                "print(len({m.split('.')[0] for m in set(sys.modules) - base}))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        count = int(out.stdout.strip())
+        assert count <= 18, (
+            f"importing techne.fastconfig now pulls {count} top-level modules "
+            "(budget 18). Something in the import graph got expensive — that is "
+            "the entire cost this module exists to avoid."
+        )
 
     def test_importing_fastconfig_does_not_pull_yaml(self):
-        """yaml alone is 17ms of the 55ms `import techne.config` cost."""
+        """yaml alone is 17ms of the 55ms `import techne.config` cost.
+
+        Subsumed by the budget test above, kept as a NAMED regression: yaml is
+        the specific module that made the fast path necessary, and a named
+        failure reads better than "the count went up" when it is the one at fault.
+        """
         out = subprocess.run(
             [sys.executable, "-c", "import techne.fastconfig, sys; print('yaml' in sys.modules)"],
             capture_output=True,
