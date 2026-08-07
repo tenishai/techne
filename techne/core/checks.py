@@ -916,6 +916,198 @@ def check_runtime_revision(config) -> CheckResult | None:
     )
 
 
+#: Long-lived techne consumers worth asking "what did you LOAD?", matched against
+#: the process command line. A short-lived process (the CLI, a hook) forks a fresh
+#: interpreter per invocation and cannot hold stale modules, so it is not a
+#: candidate — the question only exists for a process that outlives a deploy.
+_LONG_LIVED_PROCESSES = ("techne.mcp_server", "techne.watch", "techne watch")
+
+
+def _running_techne_processes() -> list[tuple[int, float, str]] | None:
+    """(pid, start_epoch, command) per long-lived techne process.
+
+    Returns None when the process table could not be READ, which is a different
+    fact from an empty list ("read it, nothing running") and must not collapse
+    into it — one is UNKNOWN, the other is DORMANT.
+
+    `lstart` is a local-time string ("Thu Aug  6 15:41:42 2026") and is converted
+    through `time.mktime`, which interprets a naive struct_time as LOCAL time —
+    matching how `ps` emitted it. Do not "fix" this to `calendar.timegm`: that
+    would read a local timestamp as UTC and shift every process start by the
+    UTC offset, which on this timezone would silently mark a fresh process stale
+    for four hours after every deploy.
+    """
+    import subprocess
+    import time
+
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,lstart=,args="], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+
+    found: list[tuple[int, float, str]] = []
+    for line in out.stdout.splitlines():
+        if not any(pat in line for pat in _LONG_LIVED_PROCESSES):
+            continue
+        parts = line.split()
+        # pid + the five lstart tokens + at least one command token
+        if len(parts) < 7:
+            continue
+        try:
+            pid = int(parts[0])
+            start = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+        except (ValueError, OverflowError):
+            continue
+        found.append((pid, start, " ".join(parts[6:])))
+    return found
+
+
+def _runtime_committed_at(runtime) -> int | None:
+    """Committer epoch of the runtime's HEAD, or None if it is not a git checkout.
+
+    Its own function so a test can arrange the deploy time without stubbing
+    `subprocess.run` wholesale — stubbing the process spawner would also silence
+    the `ps` read this check turns on, which is the concept under test.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(runtime), "log", "-1", "--format=%ct", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    try:
+        return int(out.stdout.strip())
+    except ValueError:
+        return None
+
+
+@register_check
+@expensive
+def check_runtime_loaded(config) -> CheckResult | None:
+    """DEPLOYED IS NOT LOADED — the corollary of #473 (techne#491).
+
+    `runtime:revision` asks which revision is on DISK. It reads git HEAD, so a
+    long-running process holding modules imported BEFORE the last deploy renders
+    as perfectly healthy. That is the silhouette `docs/arch/liveness.md` names —
+    a state the check cannot vouch for, rendered as one it can — and it produced
+    a wrong diagnosis when it happened: `techne_reflect_emit` died with
+    `ImportError: cannot import name 'extract_json_array_or_none'` while the
+    symbol sat on disk in both the repo and the runtime, and `rail:reflect` was
+    read as STALE-because-unreflected when it was BROKEN in the only process that
+    could run it.
+
+    THIS IS A CONSERVATIVE STALENESS WARNING, NOT A TEAR DETECTOR, and the
+    difference is measured rather than hedged. On 2026-08-06 the runtime was
+    pulled under a live server — the same operation that tore it originally — and
+    it did NOT tear: reflect_emit then ran on that long-running process, all 5
+    threads, 15 candidates, 0 parse failures. Tearing depends on WHICH modules the
+    process has yet to import and whether the deploy changed them; the unlucky
+    pairing was `reflect.py` importing a symbol newly added to `_resident.py`, not
+    a general property of pulling. So this check REPORTS WHAT IT OBSERVED — this
+    process started before the deployed revision was committed — and never claims
+    the process is torn. Overstating it would cry wolf on every routine deploy,
+    and a warning that cries wolf stops being read, which is how the subsystem
+    this lives in fails.
+
+    SEPARATE CHECK RATHER THAN AN EXTENSION of `runtime:revision`, because the
+    remedy differs: that one says `git -C ~/.techne/runtime pull`, this one says
+    restart the process. A single result cannot carry two remedies, and a remedy
+    that cannot clear its own finding is the never-green defect this module has
+    already paid for twice.
+
+    `@expensive` for the same reason as its sibling: it shells out to `ps`, and
+    `collect_health` runs inside SessionStart on a fail-open path where one
+    overrun drops the entire banner.
+
+    A SHARPER SIGNAL EXISTS AND IS DELIBERATELY NOT BUILT: comparing the mtimes of
+    the files a process has actually loaded (`sys.modules[...].__file__`) against
+    disk measures the thing the failure really depends on. It needs the process to
+    introspect ITSELF, which a check running in a different process cannot do
+    without a new reporting rail on every long-lived consumer. Recorded on #491 as
+    the follow-up if the conservative version proves too noisy in practice.
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    import techne
+
+    runtime = Path(techne.__file__).resolve().parent.parent
+    deployed_at = _runtime_committed_at(runtime)
+    if deployed_at is None:
+        # Same call as the sibling makes: a packaged install has no revision to
+        # compare and that is healthy, not red.
+        return CheckResult(
+            name="runtime:loaded",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail=f"not a git checkout — packaged install at {runtime}",
+            evidence=f"git log -1 --format=%ct in {runtime} did not resolve",
+        )
+
+    procs = _running_techne_processes()
+    if procs is None:
+        return CheckResult(
+            name="runtime:loaded",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.UNKNOWN,
+            detail="could not read the process table",
+            evidence="ps -eo pid=,lstart=,args= failed",
+        )
+    if not procs:
+        return CheckResult(
+            name="runtime:loaded",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.DORMANT,
+            detail="no long-lived techne process running (nothing can hold stale modules)",
+            evidence=f"no process matching {', '.join(_LONG_LIVED_PROCESSES)}",
+        )
+
+    stale = [(pid, start) for pid, start, _cmd in procs if start < deployed_at]
+    when = datetime.fromtimestamp(deployed_at, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    if not stale:
+        return CheckResult(
+            name="runtime:loaded",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.LIVE,
+            detail=f"{len(procs)} long-lived process(es), all started after the deploy ({when})",
+            evidence=f"deployed_at={deployed_at}; "
+            + "; ".join(f"pid {p} start={int(s)}" for p, s, _ in procs),
+        )
+
+    ages = ", ".join(
+        f"pid {pid} ({int((deployed_at - start) / 60)} min before)" for pid, start in stale
+    )
+    return CheckResult(
+        name="runtime:loaded",
+        subsystem="runtime",
+        kind=Kind.FRESHNESS,
+        verdict=Verdict.STALE,
+        detail=(
+            f"{len(stale)} of {len(procs)} long-lived process(es) started BEFORE the deployed "
+            f"revision was committed ({when}) — running code that predates it. "
+            "Whether any is actually torn depends on which modules it has yet to import; "
+            "this reports the ordering, not a tear."
+        ),
+        evidence=f"deployed_at={deployed_at}; {ages}",
+        remedy="restart the techne MCP server (or the session that owns it) to reload the runtime",
+    )
+
+
 @register_check
 def check_maintenance_rails(config) -> list[CheckResult]:
     """reflect / consolidate / dream liveness, from what they actually produced.

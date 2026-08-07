@@ -125,6 +125,30 @@ def _isolate_store_env(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_process_table(monkeypatch):
+    """Pin the host's process list away from `runtime:loaded` (techne#491).
+
+    That check asks whether any LONG-LIVED techne process started before the
+    deployed revision was committed, which it answers by shelling out to `ps`
+    against the real machine. Unpinned, the suite grades the developer's running
+    MCP servers: four `test_cli_doctor` tests went red on a healthy laptop that
+    happened to have two servers older than the last deploy, while CI — where no
+    techne process is running — stayed green. A suite whose verdict depends on
+    what is running on the host is the same host-dependence
+    `_isolate_host_config` and `_isolate_install_root` exist to remove, and
+    `docs/arch/liveness.md` already lists it as a fail-mode.
+
+    Pinned to `[]` — "looked, nothing long-lived running" — which is the DORMANT
+    baseline. Deliberately not `None`, which means "could not look" and maps to
+    UNKNOWN. Tests that exercise the check override it (see
+    `tests/test_runtime_loaded.py`).
+    """
+    from techne.core import checks as checks_mod
+
+    monkeypatch.setattr(checks_mod, "_running_techne_processes", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def _isolate_operator_layer(tmp_path, monkeypatch):
     """Pin the operator-config resolution away from the host (techne#393).
 

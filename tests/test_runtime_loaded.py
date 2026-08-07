@@ -1,0 +1,235 @@
+"""`runtime:loaded` — deployed is not loaded (techne#491).
+
+WHAT IS STUBBED AND WHY. The concept these assertions turn on is the ORDERING
+comparison — did a long-lived process start before the deployed revision was
+committed — and the mapping from that ordering to a verdict. So the two INPUTS
+are arranged (the process list, the deploy timestamp) and the comparison is never
+stubbed. `_running_techne_processes` is exercised for real in
+:class:`TestProcessTableParsing`, against fixed `ps` output rather than the
+host's, so the parser is covered without the suite depending on what happens to
+be running on the machine. (The stub rule from #490 round 2: a stub must not
+redefine the concept the assertion turns on.)
+"""
+
+from __future__ import annotations
+
+import subprocess
+import time
+
+import pytest
+
+from techne.config import Config
+from techne.core import checks as checks_mod
+from techne.core.checks import Verdict, check_runtime_loaded
+from techne.core.checks import _running_techne_processes as _real_scan
+
+# Bound at IMPORT time, deliberately. conftest's autouse `_isolate_process_table`
+# replaces the module attribute so the rest of the suite cannot read the host's
+# process list; this reference was resolved before that patch and therefore still
+# points at the real parser — which is the thing this class exists to test.
+
+# `ps -eo pid=,lstart=,args=` output. Note the DOUBLE space before a single-digit
+# day — that is what ps actually emits and it is exactly what a naive split-on-
+# one-space parser would break on.
+_PS_MACOS = (
+    "26356 Thu Aug  6 15:41:42 2026 /usr/local/bin/python -m techne.mcp_server\n"
+    "64447 Thu Aug  6 10:53:29 2026 /usr/local/bin/python -m techne.mcp_server\n"
+    "  501 Thu Aug  6 09:00:00 2026 /usr/sbin/notifyd\n"
+)
+_PS_LINUX = (
+    "  912 Wed Aug  5 08:15:00 2026 /usr/bin/python3 -m techne.mcp_server\n"
+    " 1044 Wed Aug  5 08:15:01 2026 /bin/sh -c something-else\n"
+)
+
+
+def _epoch(stamp: str) -> float:
+    """Local-time interpretation, matching what `ps` emits and mktime consumes."""
+    return time.mktime(time.strptime(stamp, "%a %b %d %H:%M:%S %Y"))
+
+
+def _fake_ps(monkeypatch, stdout: str, returncode: int = 0):
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["ps", "-eo"]:
+            return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+        raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def _arrange(monkeypatch, procs, deployed_at):
+    monkeypatch.setattr(checks_mod, "_running_techne_processes", lambda: procs)
+    monkeypatch.setattr(checks_mod, "_runtime_committed_at", lambda _r: deployed_at)
+
+
+class TestProcessTableParsing:
+    def test_parses_real_ps_output_and_ignores_everything_else(self, monkeypatch):
+        _fake_ps(monkeypatch, _PS_MACOS)
+
+        procs = _real_scan()
+
+        assert [p for p, _s, _c in procs] == [26356, 64447]
+        assert procs[0][1] == _epoch("Thu Aug  6 15:41:42 2026")
+        assert "techne.mcp_server" in procs[0][2]
+
+    def test_a_single_digit_day_does_not_break_the_split(self, monkeypatch):
+        """`ps` pads to a fixed width, so "Aug  6" carries two spaces."""
+        _fake_ps(monkeypatch, _PS_LINUX)
+
+        procs = _real_scan()
+
+        assert [p for p, _s, _c in procs] == [912]
+
+    def test_an_unreadable_process_table_is_None_not_empty(self, monkeypatch):
+        """None ("could not look") and [] ("looked, nothing there") are different
+        facts and map to different verdicts. Collapsing them would report a
+        failed probe as a clean bill of health — the founding bug of this
+        module."""
+        _fake_ps(monkeypatch, "", returncode=1)
+
+        assert _real_scan() is None
+
+    def test_a_malformed_line_is_skipped_not_fatal(self, monkeypatch):
+        """This runs inside `techne doctor`; one weird row must not take the
+        whole check down."""
+        _fake_ps(monkeypatch, "notapid Thu Aug  6 15:41:42 2026 -m techne.mcp_server\n" + _PS_MACOS)
+
+        procs = _real_scan()
+
+        assert [p for p, _s, _c in procs] == [26356, 64447]
+
+
+class TestVerdicts:
+    def test_a_process_older_than_the_deploy_is_stale_with_a_restart_remedy(self, monkeypatch):
+        deployed = _epoch("Thu Aug  6 22:02:08 2026")
+        _arrange(
+            monkeypatch,
+            [(26356, _epoch("Thu Aug  6 15:41:42 2026"), "python -m techne.mcp_server")],
+            int(deployed),
+        )
+
+        r = check_runtime_loaded(Config())
+
+        assert r.verdict is Verdict.STALE
+        assert "restart" in r.remedy
+        assert "26356" in r.evidence
+
+    def test_the_detail_reports_the_ordering_and_refuses_to_claim_a_tear(self, monkeypatch):
+        """THE LOAD-BEARING WORDING. A runtime pull under a live server was
+        measured NOT tearing it (2026-08-06: reflect_emit then ran clean on that
+        process, 5 threads, 15 candidates). So the ordering over-reports, and the
+        detail must say what was observed, not what it implies. If this check
+        ever claims "torn", it will cry wolf on every routine deploy and stop
+        being read."""
+        deployed = int(_epoch("Thu Aug  6 22:02:08 2026"))
+        _arrange(monkeypatch, [(1, deployed - 600, "python -m techne.mcp_server")], deployed)
+
+        detail = check_runtime_loaded(Config()).detail.lower()
+
+        assert "predates" in detail
+        assert "not a tear" in detail
+        # Ban the CLAIM, not the word. The detail says "whether any is actually
+        # torn depends on which modules it has yet to import", which is the
+        # disclaimer this check exists to make — an earlier version of this
+        # assertion banned the substring and failed on the hedge itself.
+        assert "is torn" not in detail
+        assert "runtime is torn" not in detail
+
+    def test_processes_started_after_the_deploy_are_live(self, monkeypatch):
+        deployed = int(_epoch("Thu Aug  6 22:02:08 2026"))
+        _arrange(monkeypatch, [(1, deployed + 60, "python -m techne.mcp_server")], deployed)
+
+        r = check_runtime_loaded(Config())
+
+        assert r.verdict is Verdict.LIVE
+        assert r.remedy is None
+
+    def test_local_time_is_not_read_as_utc(self, monkeypatch):
+        """Regression pin for the tz footgun named in `_running_techne_processes`.
+
+        `ps` emits LOCAL time and `mktime` consumes it as local. Reading it as UTC
+        instead would shift every process start by the UTC offset and mark a
+        freshly-started process stale for hours after each deploy. A process
+        started one minute AFTER the deploy must be LIVE regardless of the host's
+        timezone.
+        """
+        deployed = int(_epoch("Thu Aug  6 22:02:08 2026"))
+        _arrange(monkeypatch, [(1, deployed + 60, "python -m techne.mcp_server")], deployed)
+
+        assert check_runtime_loaded(Config()).verdict is Verdict.LIVE
+
+    def test_mixed_fleet_counts_only_the_old_ones(self, monkeypatch):
+        deployed = int(_epoch("Thu Aug  6 22:02:08 2026"))
+        _arrange(
+            monkeypatch,
+            [
+                (1, deployed - 600, "python -m techne.mcp_server"),
+                (2, deployed + 600, "python -m techne.mcp_server"),
+            ],
+            deployed,
+        )
+
+        r = check_runtime_loaded(Config())
+
+        assert r.verdict is Verdict.STALE
+        assert "1 of 2" in r.detail
+
+    def test_no_long_lived_process_is_dormant_and_says_why(self, monkeypatch):
+        """Nothing can hold stale modules if nothing is long-lived. DORMANT ties
+        with LIVE, so this stays out of the banner headline while remaining in
+        doctor's table."""
+        _arrange(monkeypatch, [], 1_700_000_000)
+
+        r = check_runtime_loaded(Config())
+
+        assert r.verdict is Verdict.DORMANT
+        assert "no long-lived" in r.detail
+
+    def test_an_unreadable_process_table_is_unknown_never_green(self, monkeypatch):
+        _arrange(monkeypatch, None, 1_700_000_000)
+
+        assert check_runtime_loaded(Config()).verdict is Verdict.UNKNOWN
+
+    def test_a_packaged_install_is_dormant_not_red(self, monkeypatch):
+        """No git checkout means no revision to compare, which is a legitimate
+        healthy state — the same call its sibling `runtime:revision` makes."""
+        _arrange(monkeypatch, [(1, 1.0, "python -m techne.mcp_server")], None)
+
+        r = check_runtime_loaded(Config())
+
+        assert r.verdict is Verdict.DORMANT
+        assert "packaged install" in r.detail
+
+
+class TestItStaysOutOfTheHotPath:
+    def test_marked_expensive_so_the_sessionstart_banner_skips_it(self):
+        """The marker is the mechanism, not the docstring.
+
+        Its sibling `runtime:revision` shipped a docstring ASSERTING this
+        exemption while `collect_health` ran the whole registry unfiltered —
+        six git subprocesses against a 5s hook budget on a fail-open path that
+        drops the entire banner on overrun (#487 review). This check shells out
+        to `ps`, so it inherits the same hazard and must inherit the marker.
+        """
+        assert getattr(check_runtime_loaded, "expensive", False) is True
+
+    def test_cheap_only_omits_it_and_a_full_run_includes_it(self, monkeypatch):
+        """Pins the exemption end-to-end through `run_checks` rather than
+        trusting the attribute alone."""
+        _arrange(monkeypatch, [], 1_700_000_000)
+
+        cheap = {r.name for r in checks_mod.run_checks(Config(), cheap_only=True)}
+        full = {r.name for r in checks_mod.run_checks(Config())}
+
+        assert "runtime:loaded" not in cheap
+        assert "runtime:loaded" in full
+
+
+class TestRegistration:
+    def test_the_check_is_registered(self):
+        """A check that exists but is not registered reports nothing, and an
+        absent check reads as "nothing wrong"."""
+        assert check_runtime_loaded in checks_mod.registered_checks()
+
+    @pytest.mark.parametrize("pattern", ["techne.mcp_server", "techne watch"])
+    def test_the_long_lived_set_names_the_processes_that_can_hold_modules(self, pattern):
+        assert pattern in checks_mod._LONG_LIVED_PROCESSES
