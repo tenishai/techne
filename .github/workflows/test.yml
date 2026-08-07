@@ -4,12 +4,14 @@ name: test
 # The contract job catches breaking renames before cabal/limenal CI fires.
 #
 # All jobs self-hosted (#424, #461) — do not add a hosted one. Hosted jobs here
-# can fail to START: July 2026 billing refusal reported `failure`, the 2026-08-06
-# outage reported `cancelled` at 901s — both with no runner assigned, neither
-# cleared by a rerun. Self-hosted dispatch was unaffected in both (see 764f160).
-# `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it. The hosts
-# are NOT identical — same image and 4 logical cores, but dev02 15GB/24.04 vs
-# prinkle 7GB/26.04 (container capped 8g vs 5g). Calibration below is dev02's.
+# can fail to START: July 2026 billing refusal reported `failure` (probe 764f160,
+# which also showed self-hosted unaffected), the 2026-08-06 outage reported
+# `cancelled` at 901s while the self-hosted legs of the same runs queued and ran
+# on recovery. Neither cleared by a rerun.
+# `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it. Same
+# CONTAINER image on both (FROM ubuntu:24.04) and both hosts are 2 physical /
+# 4 logical cores, so the calibration below transfers. HOST OS and RAM differ
+# (dev02 24.04/15GB cap 8g, prinkle 26.04/7GB cap 5g).
 # Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
@@ -46,8 +48,10 @@ env:
 
 jobs:
   test:
-    # Legs distribute across the pool; scale with more runner containers (see
-    # docker-compose/ci) or more hosts carrying the label.
+    # Legs distribute across the pool. Scale by adding a HOST (safe — its own 2
+    # physical cores). Adding a container to an EXISTING host oversubscribes:
+    # replicas x workers, so 2 replicas x -n 4 = 8 workers on 2 cores, which the
+    # pin does not prevent — lower -n in step if you do that.
     runs-on: [self-hosted, linux, x64, dev02]
     # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
