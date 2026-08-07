@@ -58,6 +58,33 @@ def _fake_ps(monkeypatch, stdout: str, returncode: int = 0):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
 
+@pytest.fixture
+def local_tz():
+    """Set the process timezone for one test and put it back afterwards.
+
+    NOT a sibling "restore" test, which is what this replaced. `tzset()` mutates
+    process-global C state, and under `pytest -n 4` the restoring test can land
+    on a different xdist worker than the mutating one — so it was structurally
+    incapable of doing its job, on top of protecting nothing measurable
+    (deselecting it left the suite green). A mutation cleans up after itself.
+    Deliberately not routed through `monkeypatch.setenv`: fixture teardown is
+    LIFO, so this fixture unwinds BEFORE monkeypatch would restore TZ, and the
+    `tzset()` would then read the still-patched value.
+    """
+    original = os.environ.get("TZ")
+
+    def _set(tz: str) -> None:
+        os.environ["TZ"] = tz
+        time.tzset()
+
+    yield _set
+    if original is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = original
+    time.tzset()
+
+
 def _arrange(monkeypatch, procs, deployed_at, how="landed here"):
     monkeypatch.setattr(checks_mod, "_running_techne_processes", lambda: procs)
     monkeypatch.setattr(
@@ -230,7 +257,7 @@ class TestVerdicts:
         assert r.verdict is Verdict.LIVE
         assert r.remedy is None
 
-    def test_local_time_is_not_read_as_utc(self, monkeypatch):
+    def test_local_time_is_not_read_as_utc(self, monkeypatch, local_tz):
         """Regression pin for the tz footgun named in `_running_techne_processes`.
 
         THE PREVIOUS VERSION OF THIS TEST WAS HOLLOW IN THE WORST WAY: it went
@@ -244,23 +271,16 @@ class TestVerdicts:
 
         So this goes through the REAL parser and PINS THE TIMEZONE rather than
         inheriting the host's, asserting a hardcoded epoch. Under `timegm` the
-        parsed value would be the UTC reading and this fails by 5 hours.
+        parsed value would be the UTC reading and this fails by four hours.
         """
-        monkeypatch.setenv("TZ", "America/New_York")
-        time.tzset()
+        local_tz("America/New_York")
         _fake_ps(monkeypatch, "  912 Thu Aug  6 15:41:42 2026 python -m techne.mcp_server\n")
 
         (_pid, start, _cmd) = _real_scan()[0]
 
         # 2026-08-06 15:41:42 in America/New_York (EDT, UTC-4) == 19:41:42Z.
         assert start == 1786045302.0
-        assert start != 1786030902.0  # the timegm misreading, five hours off
-
-    def test_the_tz_pin_is_restored_for_other_tests(self):
-        """`tzset()` mutates process-global state; monkeypatch.setenv unwinds the
-        env var but the C-level zone only reverts on the next tzset call. Pinned
-        so a future edit cannot leave the suite in EDT."""
-        time.tzset()
+        assert start != 1786030902.0  # the timegm misreading, four hours off (EDT is UTC-4)
 
     def test_mixed_fleet_counts_only_the_old_ones(self, monkeypatch):
         deployed = int(_epoch("Thu Aug  6 22:02:08 2026"))
@@ -338,3 +358,27 @@ class TestRegistration:
     @pytest.mark.parametrize("pattern", ["techne.mcp_server", "techne watch"])
     def test_the_long_lived_set_names_the_processes_that_can_hold_modules(self, pattern):
         assert pattern in checks_mod._LONG_LIVED_PROCESSES
+
+
+class TestTheFormatAssumptionAgainstThisHostsRealPs:
+    def test_lstart_is_five_tokens_this_parser_understands(self):
+        """THE ONE PREMISE NOTHING ELSE COVERS, unverified through two review
+        rounds: every other test feeds fixed `ps` output, so no test had ever
+        seen what a real `ps` emits. procps-ng's `pr_lstart` is `%24.24s` of
+        `ctime()` and POSIX fixes that layout, but neither Prudence nor I could
+        run a Linux `ps` to confirm it — docker was refused in her sandbox.
+
+        This asserts the format against WHATEVER `ps` the suite runs on, so CI's
+        Linux runner covers the case a macOS laptop cannot. Shape only, never
+        which processes exist, so it is host-independent.
+        """
+        out = subprocess.run(["ps", "-eo", "pid=,lstart=,args="], capture_output=True, text=True)
+        if out.returncode != 0:
+            pytest.skip("ps unavailable on this host")
+        rows = [ln.split() for ln in out.stdout.splitlines() if len(ln.split()) >= 7]
+        assert rows, "ps produced no parseable rows at all"
+
+        pid, lstart = rows[0][0], " ".join(rows[0][1:6])
+
+        assert pid.isdigit()
+        time.strptime(lstart, "%a %b %d %H:%M:%S %Y")
