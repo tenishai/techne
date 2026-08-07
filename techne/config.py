@@ -197,7 +197,6 @@ class SearchConfig:
     recency_weight: float = 0.3
     bm25_weight: float = 0.7
     expansion_ratio: int = 2
-    mmr_lambda: float = 0.3
     # Embedding backend override (techne#601/#602). "" = auto-select (model2vec
     # on py3.14+/fastembed-absent, else fastembed) — see core/embeddings.py.
     # Explicit values: "model2vec" or "fastembed".
@@ -693,7 +692,6 @@ class Config:
                 recency_weight=float(s.get("recency_weight", 0.3)),
                 bm25_weight=float(s.get("bm25_weight", 0.7)),
                 expansion_ratio=int(s.get("expansion_ratio", 2)),
-                mmr_lambda=float(s.get("mmr_lambda", 0.3)),
                 embedding_backend=str(s.get("embedding_backend", "")),
                 embedding_model=str(s.get("embedding_model", "")),
                 recall_documents_limit=int(s.get("recall_documents_limit", 3)),
@@ -821,7 +819,6 @@ class Config:
                 "recency_weight": self.search.recency_weight,
                 "bm25_weight": self.search.bm25_weight,
                 "expansion_ratio": self.search.expansion_ratio,
-                "mmr_lambda": self.search.mmr_lambda,
                 # embedding_backend/embedding_model are parsed by _from_dict but
                 # must also be serialized here, else `techne init`'s load→save
                 # round-trip silently drops an operator's backend override — the
