@@ -3,12 +3,18 @@ name: test
 # Techne has no private sibling deps — full suite runs on every push/PR.
 # The contract job catches breaking renames before cabal/limenal CI fires.
 #
-# RUNS ON A SELF-HOSTED RUNNER (dev02), not ubuntu-latest. Why: GitHub-hosted jobs
-# on this org stopped STARTING in July 2026 — "recent account payments have failed
-# or your spending limit needs to be increased", a scheduling refusal that reports
-# as a plain `failure` with no runner assigned. Self-hosted dispatch is unaffected
-# (verified empirically; see the agora write-up). Runner setup lives at
-# /var/servers/gha-runner + /var/servers/docker-compose/ci on dev02.
+# EVERY JOB RUNS SELF-HOSTED, none on ubuntu-latest (#424, and #461 for the last
+# one). Why: GitHub-hosted jobs on this org stopped STARTING in July 2026 —
+# "recent account payments have failed or your spending limit needs to be
+# increased", a scheduling refusal that reports as a plain `failure` with no
+# runner assigned. It recurred on 2026-08-06 during an Actions major outage:
+# arch-cards, then still hosted, was cancelled three times at exactly 901s with
+# zero steps and no runner (verified from the runs API), while the self-hosted
+# legs of the same workflow queued and ran on recovery.
+#
+# `dev02` IS A POOL LABEL, NOT A HOSTNAME — two hosts (dev02, prinkle) carry it
+# since 2026-08-06, and the matrix is observed distributing across both. Runner
+# setup lives at /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
 # actions/setup-python here: the runner is EPHEMERAL, and setup-python would
@@ -44,16 +50,17 @@ env:
 
 jobs:
   test:
-    # NB: there is currently ONE runner, so these matrix legs and eval-vec run
-    # SEQUENTIALLY rather than in parallel — expect ~30min wall-clock for the full
-    # workflow, against ~2min when this ran on GitHub-hosted. Scale by starting
-    # more replicas of the runner container if that becomes the bottleneck.
+    # TWO runners share the `dev02` pool label since 2026-08-06, so these legs
+    # distribute rather than serialise — observed, not assumed: one run put
+    # test(3.12) on dev02 and test(3.13) on prinkle. The old note here said ONE
+    # runner and "~30min wall-clock"; both were true when written and are not
+    # now (longest leg 5m44s). Scale further by starting more replicas.
     runs-on: [self-hosted, linux, x64, dev02]
     # The default is 360 MINUTES. On a hosted runner a hung job was a local
-    # nuisance; with ONE self-hosted runner it is an org-wide CI outage, because
-    # every other job queues behind it (#424 review — Prudence). A full leg is
-    # ~12min on this hardware, so 45 is generous headroom and still bounds the
-    # blast radius at under an hour.
+    # nuisance; on a small self-hosted pool it starves everything queued behind
+    # it (#424 review — Prudence). Two runners soften that without removing it:
+    # a hung job still costs half the capacity. A full leg is ~6-12min on this
+    # hardware, so 45 is generous headroom and bounds the blast radius.
     timeout-minutes: 45
     strategy:
       matrix:
@@ -192,13 +199,16 @@ jobs:
   # runs the gate against the REAL cards, which is the part those tests can't cover.
   # Stdlib-only and deterministic: no pip install, no extras, ~0.3s.
   arch-cards:
-    # MOVED OFF ubuntu-latest (#461), and the reason is AVAILABILITY, NOT COST.
+    # MOVED OFF ubuntu-latest (#461). THE ARGUMENT IS AVAILABILITY, NOT COST.
     #
-    # Cost is a rounding error and must not be cited as the justification: this
-    # job runs in ~7s, and self-hosted is NOT free — since 2026-03-01 GitHub
-    # bills self-hosted usage on private repos at $0.002/min against the same
-    # quota as hosted ($0.008/min). The saving is ~$0.0006 per run. Anyone
-    # revisiting this should weigh availability, not pennies.
+    # Cost is not the justification and should not be cited as one: this job runs
+    # in ~6s, so the difference between runner types is under a cent per run on
+    # any billing model, and on a Free plan the marginal dollar cost is zero
+    # until the monthly allowance is exhausted. (Deliberately no precise rate
+    # here: whether self-hosted usage on private repos draws a per-minute
+    # platform charge is DISPUTED in this repo's own record — see the retired
+    # zz-runner-probe.yml header at 764f160 — and a permanent comment is the
+    # wrong place to settle it.)
     #
     # The real argument: a GitHub-hosted job that is not SCHEDULED never starts
     # and reports as a plain failure with no runner assigned, so this gate turns
@@ -207,21 +217,25 @@ jobs:
     # that is always red trains everyone to skim past red — corroding the single
     # enforcement mechanism this repo has. #461 filed that as hypothetical
     # ("hosted scheduling HAS recovered"); it stopped being hypothetical on
-    # 2026-08-06, when a GitHub Actions major outage cancelled this job three
-    # times at exactly 15m01s with zero steps and no runner.
+    # 2026-08-06, when an Actions major outage cancelled this job three times at
+    # exactly 901s each, zero steps, no runner assigned. Verified from the runs
+    # API, not from memory.
     #
-    # RESIDUAL RISK, accepted and stated: this now depends on OUR hardware, so
-    # if both self-hosted runners are down the gate cannot run at all. That is
-    # materially better than it was when #461 was written — there is a second
-    # runner (prinkle) since 2026-08-06, and the matrix is observed distributing
-    # across both.
+    # RESIDUAL RISK, accepted and stated: the gate now depends on our hardware,
+    # so if both runners are down it cannot run. Note the DEGRADED MODE IS NOT A
+    # PROMPT RED — a job with no available runner sits queued (GitHub expires it
+    # after ~24h), and `timeout-minutes` does not help because it starts counting
+    # only once the job does. So the failure looks like a long grey, not a fast
+    # red. Two independent hosts is materially better than the one #461 assumed,
+    # but a silent grey is its own trap and is worth knowing about.
     #
-    # NOT KEPT AS A HOSTED CANARY: a canary for hosted scheduling belongs in a
-    # workflow_dispatch probe, not wired into every PR's required status. That
-    # is the same reasoning #424 used to keep its probe out of this file.
+    # NOT KEPT AS A HOSTED CANARY: an in-status canary would go red during
+    # exactly the outages this change exists to survive, reproducing the
+    # "trains everyone to skim past red" harm that motivates the move. It is
+    # self-defeating on its own terms, quite apart from the #424 precedent that
+    # a canary belongs in a workflow_dispatch probe.
     runs-on: [self-hosted, linux, x64, dev02]
-    # Same rationale as the matrix job's timeout: on a shared self-hosted runner
-    # a hung job queues everything behind it. This one is ~7s, so 5 is generous.
+    # A hung job here starves the shared pool; this one is ~6s, so 5 is generous.
     timeout-minutes: 5
     steps:
       - name: Checkout techne
@@ -229,16 +243,16 @@ jobs:
         with:
           path: techne
 
-      # No setup-python: the interpreters are baked into the runner image
-      # precisely so workflows can drop that step. Deliberately plain `python3`
-      # rather than the `python3.13` #461 proposed — check_arch_cards.py is
-      # stdlib-only and `from __future__ import annotations` makes it
-      # version-insensitive, so pinning a minor version buys nothing and creates
-      # a per-runner dependency that must be re-verified every time a runner
-      # joins the pool. That is not hypothetical either: `dev02` is a POOL label
-      # shared by both hosts, and prinkle's docker socket needs sudo, so its
-      # interpreters could only be confirmed by reading the Dockerfile that
-      # built the image rather than by querying the running container.
+      # No setup-python: the interpreters are baked into the runner image (see
+      # the file header). `python3.13` rather than a bare `python3` — the script
+      # is stdlib-only and version-insensitive, so the pin buys nothing on the
+      # VERSION axis, but it buys EVIDENCE: this repo has probed the versioned
+      # names on dev02 and prinkle's Dockerfile installs them explicitly, while
+      # nothing here has ever established a bare `python3` on PATH. Baking
+      # python3.12/3.13/3.14 does not entail a `python3` symlink. Pin the name
+      # with evidence behind it. (Prudence, PR #511 — I had switched to `python3`
+      # reasoning the pin was a per-runner dependency, which widened the very
+      # prinkle gap I had just identified.)
       - name: Architecture-card freshness gate
         working-directory: techne
-        run: python3 scripts/check_arch_cards.py
+        run: python3.13 scripts/check_arch_cards.py
