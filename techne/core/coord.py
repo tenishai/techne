@@ -20,9 +20,12 @@ TIMESTAMP column in techne.db.
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +55,63 @@ def _now_iso() -> str:
 #: tagged rather than left to be inferred from shape (techne#446).
 READER_NAME = "name:"
 READER_UUID = "uuid:"
+
+
+def _same_process_pids(recs: list[dict]) -> set[int]:
+    """Which of these sidecars' pids are still the process the sidecar describes?
+
+    Tells a dormant twin (alive, same process) from a corpse whose pid was
+    recycled (alive, different process) — the guard that makes a TTL-free rival
+    check safe instead of restoring #446.
+
+    COMPARE AS EPOCHS: procStart is UTC, `ps -o lstart=` prints local; the two
+    renderings of one instant differ by the UTC offset. ONE ps for all
+    candidates — per-candidate calls cost ~6ms each on the post_tool_use path.
+    Unknown/unparseable -> absent, i.e. pre-#492 behaviour. DST fall-back hour:
+    mktime guesses tm_isdst and can miss by 3600s; fails safe (absent).
+    """
+    # pid -> the procStart(s) claimed for it. A SET, not a scalar: two same-name
+    # sidecars can carry one pid (a corpse whose pid was recycled onto a running
+    # twin), and a dict comprehension keeps only the last write — which can be
+    # the corpse, losing the twin and reinstating #492 for the exact case this
+    # exists to catch.
+    wanted: dict[int, set[str]] = {}
+    for r in recs:
+        if isinstance(r.get("pid"), int) and r["pid"] > 0 and r.get("procStart"):
+            wanted.setdefault(r["pid"], set()).add(r["procStart"])
+    if not wanted:
+        return set()
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in wanted)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if out.returncode != 0:
+        return set()
+
+    same: set[int] = set()
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            pid = int(parts[0])
+            actual = int(time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y")))
+            claims = wanted[pid]
+        except (ValueError, OverflowError, KeyError):
+            continue
+        for claimed in claims:
+            try:
+                if actual == int(calendar.timegm(time.strptime(claimed, "%a %b %d %H:%M:%S %Y"))):
+                    same.add(pid)
+                    break
+            except (ValueError, OverflowError):
+                continue
+    return same
 
 
 def _durable_name(session_id: str, records: list[dict] | None = None) -> str | None:
@@ -91,12 +151,17 @@ def _durable_name(session_id: str, records: list[dict] | None = None) -> str | N
     # re-parse the whole directory, which is the SECOND scan that made the "read
     # the sidecars once" fix untrue on the named path (see :func:`_identity`).
     live_ids = {s["session_id"] for s in live_sessions(records=recs)}
+    same_name = [r for r in recs if r.get("name") == name and r.get("sessionId") != session_id]
+    # Rival = heartbeat-fresh OR dormant-but-running. live_sessions() drops on
+    # updatedAt before checking the pid, so a twin idle past the TTL was
+    # invisible (#492). Do NOT simplify to a pid-only check: a recycled pid on a
+    # lingering sidecar would then demote the name forever, which is #446.
+    dormant = [
+        r for r in same_name if r.get("sessionId") not in live_ids and _pid_alive(r.get("pid"))
+    ]
+    still_running = _same_process_pids(dormant) if dormant else set()
     rivals = [
-        r
-        for r in recs
-        if r.get("name") == name
-        and r.get("sessionId") != session_id
-        and r.get("sessionId") in live_ids
+        r for r in same_name if r.get("sessionId") in live_ids or r.get("pid") in still_running
     ]
     return None if rivals else name
 
@@ -361,9 +426,7 @@ def inbox(
         conn.close()
 
 
-def unread_count(
-    db_path: Path, session_id: str, *, channels: list[str] | None = None
-) -> int:
+def unread_count(db_path: Path, session_id: str, *, channels: list[str] | None = None) -> int:
     """How many unread messages ``session_id`` has. Cheap — for the banner/hook."""
     from techne.core.database import connect
 
@@ -528,9 +591,20 @@ def _git_worktree(cwd: str | None) -> dict | None:
         return None
     try:
         r = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-dir",
-             "--git-common-dir", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=2,
+            [
+                "git",
+                "-C",
+                cwd,
+                "rev-parse",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+                "--abbrev-ref",
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         return None
