@@ -13,6 +13,10 @@ All notable changes to techne are documented here. Format loosely follows
 - **`techne architect reverdict URL --verdict X`** (#428) — correct one investigation's verdict without re-ingesting its pattern block. Leaves `surveyed_at` alone: correcting a judgment is not a re-survey.
 - **`techne architect sweep-legacy-verdicts --before DATE [--apply]`** (#428) — retire pre-#428 auto-assigned verdicts to `unknown`. Dry-run by default and date-scoped, so a genuine post-fix verdict is never clobbered.
 
+### Removed
+
+- **`search.mmr_lambda` config knob** (#420) — it defaulted to 0.3, round-tripped through `config.yaml`, and was never passed to any search function, so every live path ran at `search_fts`'s own 0.0 (MMR off). Setting it was a silent no-op. Removed rather than plumbed: the deterministic eval gates run FTS-only (no `sqlite-vec`), and MMR is a structural no-op without embeddings — `max_sim` is 0, so the score is a monotonic rescale of relevance and the order is unchanged at any λ. So plumbing it would have been an unmeasured retrieval change that the gates cannot see, on installs whose 0.3 was a serialized default nobody chose. Existing configs carrying the key still load; it is ignored, as it was in effect before. The `mmr_lambda=` parameter on `search_fts`/`_mmr_reorder` is unchanged and still tested.
+
 ### Fixed
 
 - **`runtime:loaded` — a long-running process holding pre-deploy modules is no longer reported as healthy** (#491) — `runtime:revision` reads git HEAD from disk, so it rendered a torn MCP server as LIVE while `techne_reflect_emit` died on an `ImportError` for a symbol that was present in both the repo and the runtime. The new check compares each long-lived techne process's start time against the deployed HEAD's committer time and reports STALE with a restart remedy. Deliberately a **conservative staleness warning, not a tear detector**: a runtime pull under a live server was measured NOT tearing it, so the check reports the ordering it observed and explicitly disclaims the inference.
