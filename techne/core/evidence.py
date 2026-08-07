@@ -394,9 +394,28 @@ def _strip_heredoc_bodies(command: str) -> str:
 #: test run — #440 through the front door.
 _SHELL_C_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 
-#: Shell options that take a SEPARATE value. Without these the value reads as a
-#: positional and aborts the scan, losing `bash -o pipefail -c '<script>'`.
-_SHELL_VALUE_OPTS = frozenset({"-o", "+o", "--rcfile", "--init-file"})
+#: Short-option LETTERS that consume the next token as a value. Letters, not
+#: whole tokens, because POSIX getopt says only the LAST letter of a cluster may
+#: take a value — so one rule covers `-o`, `+o`, `-O`, `+O`, `-xo`, `-euo`,
+#: `-euxo` and `-co` at once. A token-based set could not see `-euo pipefail`
+#: (the clustered spelling of an idiom we already handled unclustered), and no
+#: amount of lengthening it would. Verified against bash 5.3.15: `bash -co
+#: pipefail 'echo MARKER'` prints MARKER, i.e. `o` took the value and the script
+#: is the token AFTER it. Keeping the hand-kept part to two letters is the point
+#: — the risk in such a list is proportional to its length. (Prudence, #521 r2.)
+_SHELL_VALUE_LETTERS = frozenset({"o", "O"})
+
+#: Long options taking a separate value. No clustering applies to these.
+_SHELL_VALUE_LONG_OPTS = frozenset({"--rcfile", "--init-file"})
+
+#: A transparent prefix: `env bash -c '<script>'` really does run the script, so
+#: `env` is skipped along with its own options rather than read as the command.
+#: NOT the same as `/usr/bin/env -c '...'`, which is not a shell invocation.
+_ENV_PREFIXES = frozenset({"env"})
+#: `-S`/`--split-string` is deliberately ABSENT: its "value" is the whole rest of
+#: the command line, which shlex has already split for us, so consuming the next
+#: token would swallow the shell itself (`env -S bash -c '<script>'`).
+_ENV_VALUE_OPTS = frozenset({"-u", "--unset", "-C", "--chdir"})
 
 #: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
 #: a command is pathological and the gate stops rather than recursing on input.
@@ -455,6 +474,17 @@ def _shell_c_script(segment: str) -> str | None:
     i = 0
     while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
         i += 1
+    # `env` is transparent: skip it, its options, and any VAR=val it carries.
+    while i < len(tokens) and tokens[i].rsplit("/", 1)[-1] in _ENV_PREFIXES:
+        i += 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t in _ENV_VALUE_OPTS:
+                i += 2
+            elif t.startswith("-") or ("=" in t and not t.startswith("-")):
+                i += 1
+            else:
+                break
     if i >= len(tokens) or tokens[i].rsplit("/", 1)[-1] not in _SHELL_C_WRAPPERS:
         return None
     # `-c`, including clustered SHORT flags containing c (`-lc`, `-ec`, `-cx`).
@@ -466,19 +496,27 @@ def _shell_c_script(segment: str) -> str | None:
     # a script, so a FILE named pytest reads as a suite run. Starvation and
     # invention from one bug. `"c" in t[1:]` rather than endswith, because c need
     # not be last (`bash -cx`).
-    skip_next = False
-    for j in range(i + 1, len(tokens)):
+    j = i + 1
+    while j < len(tokens):
         t = tokens[j]
-        if skip_next:
-            skip_next = False
+        if t in _SHELL_VALUE_LONG_OPTS:
+            j += 2  # its value is not a positional
             continue
-        if t in _SHELL_VALUE_OPTS:
-            skip_next = True  # its value is not a positional; keep scanning
+        if t.startswith("--"):
+            j += 1  # a long option we do not model; it takes no separate value
             continue
-        if t.startswith("-") and t[1:2] != "-" and "c" in t[1:]:
-            return tokens[j + 1] if j + 1 < len(tokens) else None
-        if not t.startswith("-"):
-            return None  # a positional before any -c: not a -c invocation
+        if t[:1] in ("-", "+") and len(t) > 1:
+            cluster = t[1:]
+            # Only the LAST letter of a cluster may consume the next token.
+            takes_value = cluster[-1] in _SHELL_VALUE_LETTERS
+            if "c" in cluster:
+                # The script follows the value when the cluster also took one
+                # (`bash -co pipefail '<script>'`), else it is the next token.
+                k = j + 2 if takes_value else j + 1
+                return tokens[k] if k < len(tokens) else None
+            j += 2 if takes_value else 1
+            continue
+        return None  # a positional before any -c: not a -c invocation
     return None
 
 

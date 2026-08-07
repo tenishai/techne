@@ -959,16 +959,52 @@ class TestSuiteEvidence:
         shells = ["bash", "sh", "zsh", "dash", "ksh", "/bin/bash", "/usr/bin/env"]
         # `-cx` pins that c need not be LAST in the cluster; the long options pin
         # that `--norc` is not a `-c` and that `-o`'s value is not a positional.
-        flags = ["-c", "-lc", "-ec", "-cx", "--norc -c", "-o pipefail -c"]
+        # Each spelling here pinned a real starvation bug found in review. The
+        # clustered value options (-euo) are why the rule is LETTER-based: only
+        # the last letter of a cluster may consume the next token, so a set of
+        # whole tokens could never see `-euo pipefail`.
+        flags = [
+            "-c",
+            "-lc",
+            "-ec",
+            "-cx",
+            "--norc -c",
+            "-o pipefail -c",
+            "-eu -o pipefail -c",
+            "-euo pipefail -c",
+            "-euxo pipefail -c",
+            "-O globstar -c",
+            "+O globstar -c",
+            "+x -c",
+        ]
+        # Transparent prefixes: `env bash -c` really does run the script, unlike
+        # `/usr/bin/env -c`, which is not a shell invocation at all.
+        prefixes = ["", "env ", "env -u FOO ", "CI=1 "]
         quotes = ["'", '"']
         runners = ["pytest -q", "go test ./...", "npm test", "python -m pytest"]
 
-        for shell, flag, q, runner in itertools.product(shells, flags, quotes, runners):
+        for prefix, shell, flag, q, runner in itertools.product(
+            prefixes, shells, flags, quotes, runners
+        ):
             if q in runner:
                 continue
-            command = f"{shell} {flag} {q}{runner}{q}"
-            expected = shell != "/usr/bin/env"  # env is not a shell; must NOT expand
+            command = f"{prefix}{shell} {flag} {q}{runner}{q}"
+            # `/usr/bin/env -c '<script>'` is NOT a shell invocation — env has no
+            # -c. Note this is the only shape the grammar generates for env as a
+            # HEAD; env as a transparent PREFIX is covered by `prefixes` above,
+            # and those must expand.
+            expected = shell != "/usr/bin/env"
             assert _command_runs_tests(command) is expected, command
+
+        # Shapes the grammar could not previously generate, each verified to work
+        # and therefore worth pinning rather than holding by luck (#521 r2 (c)).
+        for command in (
+            "bash -c 'sh -c \"pytest -q\"'",  # nesting; pins _MAX_SHELL_C_DEPTH
+            "bash -c 'cd proj && pytest -q'",  # inner segmentation
+            "bash -c 'echo start; pytest -q'",
+            "bash -co pipefail 'pytest -q'",  # value letter INSIDE the c cluster
+        ):
+            assert _command_runs_tests(command) is True, command
 
     def test_property_a_c_wrapper_never_invents_a_runner(self):
         """The mirror invariant, and the reason `bash` is NOT in the wrapper
