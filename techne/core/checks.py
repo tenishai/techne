@@ -47,9 +47,11 @@ this module exists to catch.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Callable
 
 from techne.config import CLAUDE_CODE
@@ -357,6 +359,7 @@ _SESSION_SCOPED = {"session_start", "session_end", "post_tool_use", "user_prompt
 #: above it, the absence of sessions is itself the finding.
 _NEW_STORE_GRACE = timedelta(days=7)
 
+
 def _declared_outbox_targets(config) -> set[str]:
     """The outbox lanes this install SHOULD be using, resolved from topology.
 
@@ -390,6 +393,7 @@ def _declared_outbox_targets(config) -> set[str]:
         # sink lane is the live one — standalone never registers these.
         targets.add("sink:archivist_knowledge")
     return targets
+
 
 #: How far the newest SESSION may run past a lane's newest enqueue before the
 #: producer is suspect. Measured session-to-enqueue, not wall-clock: these lanes
@@ -549,8 +553,7 @@ def check_hooks(config) -> list[CheckResult]:
                 elif sess is not None and marker < sess:
                     verdict = Verdict.STALE
                     detail = (
-                        f"{note}; a session started at {last_settled_session} "
-                        f"and left no marker"
+                        f"{note}; a session started at {last_settled_session} and left no marker"
                     )
                 else:
                     verdict = Verdict.LIVE
@@ -862,9 +865,7 @@ def check_runtime_revision(config) -> CheckResult | None:
             evidence=f"git rev-parse --abbrev-ref HEAD failed in {runtime}",
         )
     if branch != "main":
-        where = (
-            f"on {branch!r}" if branch != "HEAD" else "at a detached HEAD"
-        )
+        where = f"on {branch!r}" if branch != "HEAD" else "at a detached HEAD"
         if behind:
             distance = f"{behind} commit(s) behind origin/main ({upstream})"
         else:
@@ -879,8 +880,7 @@ def check_runtime_revision(config) -> CheckResult | None:
                 f"{distance}{dirty_suffix}. {freshness}"
             ),
             evidence=(
-                f"HEAD is on {branch!r} in {runtime}; "
-                f"behind={behind} ahead={ahead} vs origin/main"
+                f"HEAD is on {branch!r} in {runtime}; behind={behind} ahead={ahead} vs origin/main"
             ),
         )
 
@@ -1182,6 +1182,267 @@ def check_outbox_targets(config) -> list[CheckResult]:
             )
         )
     return results
+
+
+def _dotted_attr(obj, dotted: str):
+    """Read an EGRESS_KEYS path off a Config. Missing intermediates read as None."""
+    for part in dotted.split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return None
+    return obj
+
+
+#: Governed keys whose VALUE is safe to print. Everything else reports presence
+#: only. DEFAULT-DENY IS THE WHOLE POINT — see :func:`_describe_destination`.
+#:
+#: MEMBERSHIP IS A STRUCTURAL ARGUMENT, NOT A JUDGEMENT CALL, and that is the
+#: property to preserve when adding to it. `standalone` is a bool. The three
+#: model ids cannot carry a credential because the key that would — their
+#: sibling `llm_api_base` — is denied, and a URL carries credentials in its
+#: userinfo (``https://user:pass@host``).
+#:
+#: `archivist_db_path` WAS here and was removed. It is a local path today and a
+#: DSN after techne#87, so it was kept printable behind a `("://", "@")` shape
+#: test — a two-element hand-kept DENY-list living inside an allow-list, i.e.
+#: the discipline of this very constant inverted one layer down. It failed both
+#: ways under execution: libpq keyword/value form
+#: (``host=db password=pa55 user=x``) contains neither substring and printed the
+#: password, while ``model: vertex_ai/claude-3-5-sonnet@20240620`` tripped the
+#: guard and rendered "model set" — the useless string, on the one key where
+#: naming the destination is the entire job. The fix was to DELETE the
+#: heuristic, not sharpen it. (Prudence, PR #508 r5, found while approving.)
+_PRINTABLE_DESTINATIONS = frozenset({"model", "reflect.model", "conflict.model", "standalone"})
+
+
+def _describe_destination(key: str, value, default=None) -> str:
+    """One short operator-facing phrase per departed-from-default key.
+
+    NEVER RENDERS A SECRET, AND THAT IS ENFORCED BY DEFAULT-DENY RATHER THAN BY
+    THIS SENTENCE. An unrecognised key reports presence only; the informative
+    renderings are the explicit exceptions.
+
+    The first version inverted this — four hardcoded safe cases with
+    ``f"{key}={value}"`` as the fallback — and it was a hazard of exactly the
+    shape the derived key list had just been built to remove. The derivation
+    GUARANTEES a new governed key is reported; the deny-list did NOT guarantee it
+    is reported safely, so the next round to add a credential-bearing key (the
+    way `stores` was added) would have printed it into `techne doctor` output
+    with no diff to review. Demonstrated by Prudence on PR #508 r3, simulated
+    against a future `sync.auth` entry: `sync.auth=sk-BRAND-NEW-SECRET`.
+    A forgotten key is now merely uninformative instead of a leak.
+
+    WHERE THIS LANDS — three surfaces, and the third is the one that makes
+    default-deny load-bearing rather than tidy:
+      1. `techne doctor`'s detail column (`cli.py` prints `r.detail` for every
+         verdict), which gets pasted into issues.
+      2. NOT the SessionStart banner — `format_banner` renders check NAMES only,
+         and only for non-live/dormant verdicts, so `detail` reaches it on no
+         path. An earlier revision claimed it did; the conclusion held but the
+         claim was false, written in the round dedicated to removing false
+         claims and contradicting the card in the same commit.
+      3. THE CONSTRAINED AGENT'S OWN CONTEXT. `mcp_server.py` returns
+         `collect_health(config)` verbatim, `health.py` copies `r.detail` into
+         it, and this check carries no `@expensive` marker — so the string
+         reaches the very agent this seam exists to constrain. Nothing leaks
+         today, and that is default-deny earning its keep on a surface no
+         enumeration here had noticed. (Prudence, PR #508 r4.)
+    """
+    if key == "sync":
+        # DERIVED FROM THE DATACLASS, not from a hand-kept name list. The list
+        # version read four fields and SyncConfig has five: `extra`, which
+        # `Config._from_dict` fills with EVERY unrecognised key under `sync:` —
+        # i.e. precisely the catch-all for things this code does not know about.
+        # So `sync: {token: ghp_LIVE_SECRET}` departed from default and rendered
+        # a bare `sync.adapter=noop`, the same "true and useless" string this
+        # renderer was just rewritten to kill, at the one field that catches
+        # everything. Not hypothetical — executed. (Prudence, PR #508 r4.)
+        import dataclasses
+
+        base = default if default is not None else type(value)()
+        departed = [
+            f.name
+            for f in dataclasses.fields(value)
+            if f.name != "adapter" and getattr(value, f.name) != getattr(base, f.name, None)
+        ]
+        suffix = f" (+{', '.join(departed)})" if departed else ""
+        return f"sync.adapter={value.adapter}{suffix}"
+    if key in ("connections", "stores"):
+        return f"{len(value)} {key} entr{'y' if len(value) == 1 else 'ies'}"
+    if key in _PRINTABLE_DESTINATIONS:
+        return f"{key}={value}"
+    return f"{key} set"
+
+
+@register_check
+def check_config_trust(config) -> CheckResult:
+    """Is the file that SELECTS egress writable by the agent it constrains?
+
+    A FAIL_OPEN check. techne's memory-egress surface is closed by default, but
+    ``config.yaml`` chooses that default and lives in the agent's own writable
+    tree — so the control it appears to provide is only as strong as the file
+    permissions nobody was checking (techne#393).
+
+    THE THREE VERDICTS ARE NOT A SEVERITY LADDER, they are three different
+    facts, and conflating them is what made this worth a check rather than a
+    boolean:
+
+    * ``locked``   → LIVE. An operator layer exists and this process cannot
+      rewrite it. The evidence names the owning uid and mode so the claim is
+      re-derivable rather than trusted.
+    * ``unlocked`` → BROKEN. A layer was DEPLOYED and is NOT HOLDING — someone
+      intended a boundary and does not have one. This is the only state that
+      should alarm, and it is the one a naive "is egress closed?" check would
+      have rendered green — because the keys such a check reads (`sync.adapter`,
+      `llm_api_base`) are sitting at their built-in values in exactly that state.
+      Closed-by-accident and closed-by-enforcement are different states and only
+      one of them survives an adversary. (The older wording here said "failing
+      closed means egress IS closed at that moment", which this module's own
+      EGRESS_KEYS note contradicts: `model` defaults to a live destination. The
+      argument survives the rewording; that sentence did not.)
+    * ``absent``   → DORMANT, with the reason named. A single-user install that
+      never deployed a layer is not lying about anything, and DORMANT sorts with
+      LIVE so it stays out of the banner headline. It is still reported, because
+      "no boundary was ever deployed" is exactly the fact an operator planning a
+      multi-agent rollout needs, and silence would read as safety.
+
+    ABSENT IS REPORTED ALONGSIDE WHAT config.yaml ACTUALLY SELECTS. "No operator
+    layer" is benign on an install whose destinations are all at their built-in
+    values and is the whole vulnerability on one that has already set
+    ``sync.adapter`` or ``llm_api_base`` — same verdict, opposite significance,
+    so the detail must distinguish them or the check has not said anything.
+
+    THE PROBE IS LIVE, and does not read ``config.egress_trust``. The first
+    version of this check did, and it was wrong in a way worth recording: a
+    ``Config`` built by direct construction carries no verdict, so the check
+    answered UNKNOWN — a check whose result depends on how its input was
+    CONSTRUCTED is not measuring the subsystem, it is measuring its caller. The
+    question "is a boundary in place" is a property of the filesystem and is
+    answerable directly, on one code path that always runs.
+
+    The recorded verdict is still consulted for ONE thing: whether it disagrees
+    with the live probe. A layer deployed after this process loaded its config
+    is not yet in force here — the running process is still honoring the
+    resolution it made at load time — so reporting the live LOCKED alone would
+    be a false green of exactly the kind this module exists to prevent. The
+    disagreement is its own verdict, with both facts named.
+    """
+    from techne.config import Config, techne_home
+    from techne.security import config_trust
+
+    # Resolved against techne_home() rather than config.data_dir SO THAT IT
+    # MATCHES WHAT Config.load DID. A different home here would manufacture
+    # disagreements out of a lookup difference and report them as drift.
+    verdict = config_trust.evaluate_lock(config_trust.resolve_operator_config(techne_home()))
+    recorded = getattr(config, "egress_trust", None)
+
+    # WHICH TIER is in force is a security fact, not a detail: only
+    # SYSTEM_OPERATOR_CONFIG is unreachable by the agent's environment. THREE-
+    # VALUED, not two — the previous binary split labelled the <techne_home>
+    # tier "env-selected" and then told the operator to defend against
+    # `env -u TECHNE_OPERATOR_CONFIG`, which does nothing to that tier. Its
+    # lever is TECHNE_HOME (config.py:techne_home), and handing someone the
+    # wrong bypass is worse than handing them none. (Prudence, PR #508 r2.)
+    if verdict.path == config_trust.SYSTEM_OPERATOR_CONFIG:
+        tier, tier_lever = "system", None
+    elif (
+        verdict.path is not None
+        and verdict.path
+        == Path(os.environ.get(config_trust.OPERATOR_CONFIG_ENV, "\0")).expanduser()
+    ):
+        tier, tier_lever = "env-var", f"env -u {config_trust.OPERATOR_CONFIG_ENV}"
+    else:
+        tier, tier_lever = "techne-home", "TECHNE_HOME"
+
+    # Which destination keys does this install actually depart from defaults on?
+    # BOTH THE KEY LIST AND THE BASELINE ARE DERIVED — the list from EGRESS_KEYS,
+    # the values from a fresh Config. The previous version derived only the
+    # baseline while hardcoding five of the (then nine) keys, and its comment
+    # claimed drift-proofing it did not have. It then drifted immediately: the
+    # round that added `stores` to the governed set did not add it here, so an
+    # install with a custom store DSN reported "all destinations at defaults" —
+    # the benign string — which is the one thing this line exists not to do.
+    d = Config()
+    live_destinations = [
+        _describe_destination(key, value, _dotted_attr(d, key))
+        for key in config_trust.EGRESS_KEYS
+        if (value := _dotted_attr(config, key)) != _dotted_attr(d, key)
+    ]
+    selected = (
+        ", ".join(live_destinations) if live_destinations else "all destinations at built-in values"
+    )
+
+    path = verdict.path
+    if recorded is not None and recorded.state != verdict.state:
+        return CheckResult(
+            name="config:trust",
+            subsystem="security",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.STALE,
+            evidence=f"loaded as '{recorded.state}', now '{verdict.state}' at {path}",
+            detail=(
+                f"operator layer changed since this config was loaded — this process is "
+                f"still honoring the '{recorded.state}' resolution"
+            ),
+            remedy="restart the techne MCP server / re-run the command to reload config",
+        )
+
+    if verdict.state == config_trust.LOCKED:
+        return CheckResult(
+            name="config:trust",
+            subsystem="security",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.LIVE,
+            evidence=f"{path} [{tier} tier]: {verdict.reason}",
+            detail=(
+                f"egress pinned by operator layer ({selected})"
+                + (
+                    ""
+                    if tier_lever is None
+                    else f" — WARNING: {tier} tier, an agent can bypass it by changing "
+                    f"`{tier_lever}` in its own environment; only "
+                    f"{config_trust.SYSTEM_OPERATOR_CONFIG} is a real lock"
+                )
+            ),
+        )
+
+    if verdict.state == config_trust.UNLOCKED:
+        return CheckResult(
+            name="config:trust",
+            subsystem="security",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.BROKEN,
+            evidence=f"{path}: {verdict.reason}",
+            detail=(
+                "operator layer present but this process could rewrite it — "
+                "egress forced to the BUILT-IN DEFAULT destinations (not silence: "
+                "the default model still routes to its provider), config.yaml ignored "
+                "for egress but preserved on disk"
+            ),
+            remedy=(
+                # The generic chown advice CANNOT clear the euid-0 branch — root
+                # can rewrite anything, so no ownership makes it lockable. A
+                # remedy that cannot clear its own finding is the never-green
+                # defect this module was fixed for once already, so this branches
+                # on the reason. techne's own Dockerfile has no USER directive
+                # and mounts /root/.techne, so the shipped image lands here.
+                "run techne as a non-root user (the Dockerfile has no USER "
+                "directive); a root process can never honor an operator layer"
+                if "euid 0" in verdict.reason
+                else f"chown to an operator uid and chmod 0644: {path} "
+                "(and place it outside the agent's writable tree)"
+            ),
+        )
+
+    return CheckResult(
+        name="config:trust",
+        subsystem="security",
+        kind=Kind.FAIL_OPEN,
+        verdict=Verdict.DORMANT,
+        evidence=f"no operator layer at {config_trust.SYSTEM_OPERATOR_CONFIG}, "
+        f"${config_trust.OPERATOR_CONFIG_ENV}, or <techne_home>/config.operator.yaml",
+        detail=f"egress selected by agent-writable config.yaml ({selected})",
+    )
 
 
 @register_check

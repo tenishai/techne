@@ -1,12 +1,12 @@
 ---
 card: arch-card:techne-coord
-updated: 2026-08-05
+updated: 2026-08-06
 anchor: techne/core/coord.py sha=17a7a4f4f89246362009b1bf560cfc5c7d5fe0e4
 ---
 # coord — inter-session mailbox (techne#376)
 
 WHAT: concurrent Claude Code sessions talk without a human router.
-IDENTITY: self-asserted session_id (CLAUDE_CODE_SESSION_ID); NO token — trust boundary = local machine (anything that writes techne.db can already do anything).
+IDENTITY: self-asserted session_id (CLAUDE_CODE_SESSION_ID); NO token — trust boundary = local machine (anything that writes techne.db can already do anything). ONE NARROW EXCEPTION since techne#393: the keys that select where memory EGRESSES to can be moved out of the agent's reach into an operator-owned layer → docs/arch/config-trust.md. That does not soften the statement above — it carves out the config surface only, and only when the deployment actually gives the agent a different uid.
 ADDRESSING: channel (default 'coord', broadcast) | session_id (direct, delivers even if offline).
 PRESENCE: live_sessions() reads ~/.claude/sessions/<pid>.json; keeps a row only if fresh within a 90-min window (_PRESENCE_FRESH_SECONDS) AND its pid is a live process — reap-on-read via os.kill(pid,0) (techne#380; heartbeat freshness alone advertised dead PIDs as routable, missing/foreign pid fails open). Read-only: never writes/deregisters the roster, so a hard SIGKILL still relies on TTL+reap.
 DELIVERY: push — post_tool_use hook injects unread into next tool call; session-start banner shows unread + who's live.

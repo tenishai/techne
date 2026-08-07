@@ -125,6 +125,30 @@ def _isolate_store_env(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_operator_layer(tmp_path, monkeypatch):
+    """Pin the operator-config resolution away from the host (techne#393).
+
+    ``resolve_operator_config`` checks ``/etc/techne/config.operator.yaml``
+    FIRST and unconditionally — deliberately, because an env-relocatable path
+    would let an agent select the permissive state by editing its own
+    environment. That same property makes it a host input the suite must not
+    read: on a machine where an operator HAS deployed a layer, every test that
+    calls ``Config.load`` would silently resolve egress through it, and the
+    suite's verdict would depend on the developer's deployment.
+
+    Pointed at a path under ``tmp_path`` that is never created, so the baseline
+    is the ``absent`` state. Tests that want a layer set their own (see
+    ``tests/test_config_trust.py``), exactly as with the fixtures around it.
+    """
+    from techne.security import config_trust
+
+    monkeypatch.setattr(
+        config_trust, "SYSTEM_OPERATOR_CONFIG", tmp_path / "_etc" / "config.operator.yaml"
+    )
+    monkeypatch.delenv(config_trust.OPERATOR_CONFIG_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_host_config(tmp_path, monkeypatch):
     from techne.platforms import claude_code
     from techne.platforms.claude_code import hooks as hooks_mod
