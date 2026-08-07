@@ -956,8 +956,10 @@ class TestSuiteEvidence:
 
         from techne.core.evidence import _command_runs_tests
 
-        shells = ["bash", "sh", "zsh", "/bin/bash", "/usr/bin/env"]
-        flags = ["-c", "-lc", "-ec"]
+        shells = ["bash", "sh", "zsh", "dash", "ksh", "/bin/bash", "/usr/bin/env"]
+        # `-cx` pins that c need not be LAST in the cluster; the long options pin
+        # that `--norc` is not a `-c` and that `-o`'s value is not a positional.
+        flags = ["-c", "-lc", "-ec", "-cx", "--norc -c", "-o pipefail -c"]
         quotes = ["'", '"']
         runners = ["pytest -q", "go test ./...", "npm test", "python -m pytest"]
 
@@ -979,7 +981,7 @@ class TestSuiteEvidence:
 
         from techne.core.evidence import _command_runs_tests
 
-        shells = ["bash", "sh", "zsh"]
+        shells = ["bash", "sh", "zsh", "dash", "ksh"]
         # WHAT THIS GUARDS: a `-c` script that merely MENTIONS a runner is not a
         # test run. It does NOT guard the `_TEST_RUNNER_WRAPPERS` exclusion —
         # verified by adding `bash` to that set, under which these cases still
@@ -1005,15 +1007,24 @@ class TestSuiteEvidence:
         `_TEST_RUNNER_WRAPPERS` matches a head whose ARGUMENT is a runner. With
         `bash` in that set, `bash -x pytest.log` would read as a test run. The
         `-c` shapes cannot pin this — `_expand_shell_c` consumes them first — so
-        it takes a bash invocation with no `-c`. Teeth-checked: adding `bash` to
-        the set fails THIS test and no other.
+        it takes a bash invocation with no `-c` AND a BARE runner token, because
+        the wrapper rule scans rest-tokens for exactly that.
+
+        The payload used to be `bash -x pytest.log`, which is False in both
+        worlds (`pytest.log` is not a bare head) — so the only thing that failed
+        under the mutation was the set-membership assertion, a restatement of the
+        implementation that catches a literal edit and nothing arriving at the
+        same place another way. `bash -x pytest` discriminates: False at
+        baseline, True with `bash` in the set. (Prudence, PR #521 — she
+        teeth-checked by neutralising ONLY the membership asserts, and all 91
+        tests still passed.)
         """
         from techne.core.evidence import _TEST_RUNNER_WRAPPERS, _command_runs_tests
 
         assert "bash" not in _TEST_RUNNER_WRAPPERS
         assert "sh" not in _TEST_RUNNER_WRAPPERS
-        assert _command_runs_tests("bash -x pytest.log") is False
-        assert _command_runs_tests("bash run-pytest.sh") is False
+        assert _command_runs_tests("bash -x pytest") is False
+        assert _command_runs_tests("sh -x pytest") is False
 
     def test_the_capture_side_is_untouched_by_the_gate_expansion(self):
         """#445's load-bearing constraint. `_split_bash_segments` is SHARED with

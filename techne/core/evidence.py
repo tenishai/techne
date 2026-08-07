@@ -394,6 +394,10 @@ def _strip_heredoc_bodies(command: str) -> str:
 #: test run — #440 through the front door.
 _SHELL_C_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 
+#: Shell options that take a SEPARATE value. Without these the value reads as a
+#: positional and aborts the scan, losing `bash -o pipefail -c '<script>'`.
+_SHELL_VALUE_OPTS = frozenset({"-o", "+o", "--rcfile", "--init-file"})
+
 #: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
 #: a command is pathological and the gate stops rather than recursing on input.
 _MAX_SHELL_C_DEPTH = 3
@@ -453,11 +457,25 @@ def _shell_c_script(segment: str) -> str | None:
         i += 1
     if i >= len(tokens) or tokens[i].rsplit("/", 1)[-1] not in _SHELL_C_WRAPPERS:
         return None
-    # `-c`, and clustered short flags ending in c (`-lc`, `-ec`). The script is
-    # the token after it.
+    # `-c`, including clustered SHORT flags containing c (`-lc`, `-ec`, `-cx`).
+    #
+    # `t[1:2] != "-"` excludes every --long option, and that guard is load-bearing
+    # twice over: without it `--norc` matches (it ends in "c"), which BOTH loses
+    # `bash --noprofile --norc -c 'pytest -q'` — idiomatic clean-shell in CI and
+    # Makefiles — AND makes `bash --norc pytest` read the following positional as
+    # a script, so a FILE named pytest reads as a suite run. Starvation and
+    # invention from one bug. `"c" in t[1:]` rather than endswith, because c need
+    # not be last (`bash -cx`).
+    skip_next = False
     for j in range(i + 1, len(tokens)):
         t = tokens[j]
-        if t.startswith("-") and t.lstrip("-").endswith("c"):
+        if skip_next:
+            skip_next = False
+            continue
+        if t in _SHELL_VALUE_OPTS:
+            skip_next = True  # its value is not a positional; keep scanning
+            continue
+        if t.startswith("-") and t[1:2] != "-" and "c" in t[1:]:
             return tokens[j + 1] if j + 1 < len(tokens) else None
         if not t.startswith("-"):
             return None  # a positional before any -c: not a -c invocation
