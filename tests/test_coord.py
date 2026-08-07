@@ -137,7 +137,10 @@ def _patch_wt(monkeypatch, sessions, wts):
 def test_collision_same_working_tree(monkeypatch):
     _patch_wt(
         monkeypatch,
-        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/wt/a", "name": "claude_2"}],
+        [
+            {"session_id": "me", "cwd": "/wt/a"},
+            {"session_id": "peer", "cwd": "/wt/a", "name": "claude_2"},
+        ],
         {"/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False}},
     )
     cols = coord.working_tree_collisions("me")
@@ -149,7 +152,10 @@ def test_collision_same_working_tree(monkeypatch):
 def test_collision_feature_work_in_shared_checkout(monkeypatch):
     _patch_wt(
         monkeypatch,
-        [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/shared", "name": "claude_2"}],
+        [
+            {"session_id": "me", "cwd": "/wt/a"},
+            {"session_id": "peer", "cwd": "/shared", "name": "claude_2"},
+        ],
         {
             "/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False},
             "/shared": {"toplevel": "/shared", "branch": "feat/y", "is_primary": True},
@@ -175,7 +181,9 @@ def test_collision_skips_non_git_cwd(monkeypatch):
     _patch_wt(
         monkeypatch,
         [{"session_id": "me", "cwd": "/wt/a"}, {"session_id": "peer", "cwd": "/not/a/repo"}],
-        {"/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False}},  # peer unresolved -> None
+        {
+            "/wt/a": {"toplevel": "/wt/a", "branch": "feat/x", "is_primary": False}
+        },  # peer unresolved -> None
     )
     assert coord.working_tree_collisions("me") == []
 
@@ -418,8 +426,8 @@ def test_pid_alive():
     """techne#380: live self → True; a reaped child pid → False; an unverifiable
     pid fails open (True) so the freshness TTL, not this probe, bounds it."""
     assert coord._pid_alive(os.getpid()) is True
-    assert coord._pid_alive(None) is True   # non-int → fail open
-    assert coord._pid_alive(0) is True      # invalid → fail open
+    assert coord._pid_alive(None) is True  # non-int → fail open
+    assert coord._pid_alive(0) is True  # invalid → fail open
     child = subprocess.Popen(["true"])
     child.wait()  # reaped → pid is now dead
     assert coord._pid_alive(child.pid) is False
@@ -443,9 +451,7 @@ def test_live_sessions_reaps_dead_pid(tmp_path, monkeypatch):
         )
     )
     (sessions / "dead.json").write_text(
-        json.dumps(
-            {"sessionId": "uuid-dead", "name": "d", "pid": dead_pid, "updatedAt": now_ms}
-        )
+        json.dumps({"sessionId": "uuid-dead", "name": "d", "pid": dead_pid, "updatedAt": now_ms})
     )
 
     sids = {s["session_id"] for s in coord.live_sessions()}
@@ -558,9 +564,7 @@ def test_a_null_from_name_is_not_swallowed_by_the_author_filter(db_path, named):
     assert [m["body"] for m in coord.inbox(db_path, A)] == ["from an unnamed sender"]
 
 
-def test_receipts_are_namespaced_so_the_column_says_which_identity_it_holds(
-    db_path, named
-):
+def test_receipts_are_namespaced_so_the_column_says_which_identity_it_holds(db_path, named):
     """Two KINDS of identity in one column; an unprefixed value cannot say which.
 
     ASSERTS THE LITERAL WIRE FORMAT, not `coord.READER_NAME` + name. Written the
@@ -583,15 +587,47 @@ def test_receipts_are_namespaced_so_the_column_says_which_identity_it_holds(
     assert coord.reader_key(B) == f"uuid:{B}"  # the other namespace, also literal
 
 
+def _sidecar(sid, name, *, age_s=0, pid=None, proc_start=None):
+    """A record shaped like a real sidecar. Defaults: heartbeat-fresh, this
+    process's (genuinely live) pid, and that pid's real procStart."""
+    import os
+    import time as _t
+
+    pid = os.getpid() if pid is None else pid
+    return {
+        "sessionId": sid,
+        "name": name,
+        "pid": pid,
+        "updatedAt": _t.time() * 1000 - age_s * 1000,
+        "procStart": _real_proc_start(pid) if proc_start is None else proc_start,
+    }
+
+
+def _real_proc_start(pid):
+    """`procStart` as Claude Code writes it: the kernel's start time, UTC ctime."""
+    import subprocess
+    import time as _t
+
+    out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    local = _t.mktime(_t.strptime(out.stdout.strip(), "%a %b %d %H:%M:%S %Y"))
+    return _t.strftime("%a %b %e %H:%M:%S %Y", _t.gmtime(local))
+
+
 def _live(monkeypatch, records):
-    """Pin BOTH sidecar reads and liveness: _durable_name reads the raw records and
-    intersects them with live_sessions(), so a test must control both or the
-    ambiguity check silently sees nobody."""
-    monkeypatch.setattr(coord, "_session_records", lambda: records)
+    """Roster of genuinely-live sessions: stamps each record fresh, with this
+    process's pid and its real procStart, and leaves `live_sessions` UNPINNED so
+    liveness is COMPUTED.
+
+    It used to pin `live_sessions` to return every record as live — defining the
+    concept the assertions turn on, which is why the suite could not see #492
+    (a twin idle past the TTL is not live by production's definition, and the
+    fixture said it was)."""
     monkeypatch.setattr(
         coord,
-        "live_sessions",
-        lambda **k: [{"session_id": r["sessionId"], "name": r.get("name")} for r in records],
+        "_session_records",
+        lambda: [_sidecar(r["sessionId"], r.get("name")) if "pid" not in r else r for r in records],
     )
 
 
@@ -684,3 +720,60 @@ def test_the_unread_path_reads_the_sidecars_once(db_path, monkeypatch):
     coord.mark_read(db_path, A)
     assert calls["n"] == 1, f"mark_read scanned the sidecars {calls['n']}x"
     assert real is not coord._session_records  # the patch actually took
+
+
+# --- techne#492: a DORMANT twin is invisible to the rival check -------------
+
+
+def _honest(monkeypatch, records):
+    """Pin the ROSTER only. `live_sessions` runs for real, so freshness and pid
+    liveness are computed rather than declared — unlike `_live`, which returns
+    every record as live and is why the suite could not see this bug."""
+    monkeypatch.setattr(coord, "_session_records", lambda: records)
+
+
+_STALE = coord._PRESENCE_FRESH_SECONDS + 60
+
+
+def test_dormant_twin_broadcast_is_not_swallowed(db_path, monkeypatch):
+    """Repro A. A twin idle past the presence TTL is still RUNNING and can still
+    broadcast; it must not be invisible to the active twin's authorship filter."""
+    _honest(
+        monkeypatch,
+        [_sidecar(A, "poe_1", age_s=_STALE), _sidecar(A2, "poe_1")],
+    )
+    coord.send(db_path, A, "claiming branch feat/y", to="coord", from_name="poe_1")
+
+    heard = [m["body"] for m in coord.inbox(db_path, A2)]
+
+    assert heard == ["claiming branch feat/y"]
+
+
+def test_twins_taking_turns_do_not_share_one_receipt_row(db_path, monkeypatch):
+    """Repro B. Windows further apart than the TTL: each twin is the unique
+    name-holder in its own window, so both key receipts to `name:poe_1` and the
+    first reader consumes the message for the other."""
+    recs = [_sidecar(A, "poe_1"), _sidecar(A2, "poe_1", age_s=_STALE)]
+    _honest(monkeypatch, recs)
+    coord.send(db_path, B, "branch claim nobody should miss", to="coord", from_name="poe_2")
+
+    coord.mark_read(db_path, A)  # window 1: A active, A2 dormant
+
+    recs[0]["updatedAt"] -= _STALE * 1000  # window 2: they swap
+    recs[1]["updatedAt"] = __import__("time").time() * 1000
+
+    assert coord.unread_count(db_path, A2) == 1
+
+
+def test_a_recycled_pid_does_not_demote_a_unique_name(db_path, monkeypatch):
+    """The trap the issue warns about: a corpse whose pid got reused must NOT
+    count as a rival, or #446 returns. procStart is what tells them apart."""
+    _honest(
+        monkeypatch,
+        [
+            _sidecar(A, "poe_1"),
+            _sidecar(A2, "poe_1", age_s=_STALE, proc_start="Thu Jan  1 00:00:00 2015"),
+        ],
+    )
+
+    assert coord.reader_key(A) == "name:poe_1"

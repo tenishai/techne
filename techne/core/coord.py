@@ -20,9 +20,12 @@ TIMESTAMP column in techne.db.
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +55,34 @@ def _now_iso() -> str:
 #: tagged rather than left to be inferred from shape (techne#446).
 READER_NAME = "name:"
 READER_UUID = "uuid:"
+
+
+def _is_same_process(rec: dict) -> bool:
+    """Is the process at rec['pid'] the one this sidecar describes? (#492)
+
+    Tells a dormant twin (alive, same process) from a corpse whose pid was
+    recycled (alive, different process). COMPARE AS EPOCHS: procStart is UTC,
+    `ps -o lstart=` prints local — the strings differ by the UTC offset.
+    No procStart -> False, i.e. pre-#492 behaviour.
+    """
+    claimed = rec.get("procStart")
+    pid = rec.get("pid")
+    if not claimed or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if out.returncode != 0 or not out.stdout.strip():
+        return False
+    try:
+        actual = time.mktime(time.strptime(out.stdout.strip(), "%a %b %d %H:%M:%S %Y"))
+        recorded = calendar.timegm(time.strptime(claimed, "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return False
+    return int(actual) == int(recorded)
 
 
 def _durable_name(session_id: str, records: list[dict] | None = None) -> str | None:
@@ -91,12 +122,15 @@ def _durable_name(session_id: str, records: list[dict] | None = None) -> str | N
     # re-parse the whole directory, which is the SECOND scan that made the "read
     # the sidecars once" fix untrue on the named path (see :func:`_identity`).
     live_ids = {s["session_id"] for s in live_sessions(records=recs)}
+    same_name = [r for r in recs if r.get("name") == name and r.get("sessionId") != session_id]
+    # Rival = heartbeat-fresh OR dormant-but-running. live_sessions() drops on
+    # updatedAt before checking the pid, so a twin idle past the TTL was
+    # invisible (#492). Do NOT simplify to a pid-only check: a recycled pid on a
+    # lingering sidecar would then demote the name forever, which is #446.
     rivals = [
         r
-        for r in recs
-        if r.get("name") == name
-        and r.get("sessionId") != session_id
-        and r.get("sessionId") in live_ids
+        for r in same_name
+        if r.get("sessionId") in live_ids or (_pid_alive(r.get("pid")) and _is_same_process(r))
     ]
     return None if rivals else name
 
@@ -361,9 +395,7 @@ def inbox(
         conn.close()
 
 
-def unread_count(
-    db_path: Path, session_id: str, *, channels: list[str] | None = None
-) -> int:
+def unread_count(db_path: Path, session_id: str, *, channels: list[str] | None = None) -> int:
     """How many unread messages ``session_id`` has. Cheap — for the banner/hook."""
     from techne.core.database import connect
 
@@ -528,9 +560,20 @@ def _git_worktree(cwd: str | None) -> dict | None:
         return None
     try:
         r = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--show-toplevel", "--git-dir",
-             "--git-common-dir", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=2,
+            [
+                "git",
+                "-C",
+                cwd,
+                "rev-parse",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+                "--abbrev-ref",
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         return None
