@@ -70,11 +70,15 @@ def _same_process_pids(recs: list[dict]) -> set[int]:
     Unknown/unparseable -> absent, i.e. pre-#492 behaviour. DST fall-back hour:
     mktime guesses tm_isdst and can miss by 3600s; fails safe (absent).
     """
-    wanted = {
-        r["pid"]: r["procStart"]
-        for r in recs
-        if isinstance(r.get("pid"), int) and r["pid"] > 0 and r.get("procStart")
-    }
+    # pid -> the procStart(s) claimed for it. A SET, not a scalar: two same-name
+    # sidecars can carry one pid (a corpse whose pid was recycled onto a running
+    # twin), and a dict comprehension keeps only the last write — which can be
+    # the corpse, losing the twin and reinstating #492 for the exact case this
+    # exists to catch.
+    wanted: dict[int, set[str]] = {}
+    for r in recs:
+        if isinstance(r.get("pid"), int) and r["pid"] > 0 and r.get("procStart"):
+            wanted.setdefault(r["pid"], set()).add(r["procStart"])
     if not wanted:
         return set()
     try:
@@ -96,12 +100,17 @@ def _same_process_pids(recs: list[dict]) -> set[int]:
             continue
         try:
             pid = int(parts[0])
-            actual = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
-            recorded = calendar.timegm(time.strptime(wanted[pid], "%a %b %d %H:%M:%S %Y"))
+            actual = int(time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y")))
+            claims = wanted[pid]
         except (ValueError, OverflowError, KeyError):
             continue
-        if int(actual) == int(recorded):
-            same.add(pid)
+        for claimed in claims:
+            try:
+                if actual == int(calendar.timegm(time.strptime(claimed, "%a %b %d %H:%M:%S %Y"))):
+                    same.add(pid)
+                    break
+            except (ValueError, OverflowError):
+                continue
     return same
 
 
