@@ -1,11 +1,124 @@
 """SQLite database schema and connection management for techne."""
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 23
+
+# THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
+# LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
+# format does not merely look untidy, it makes every range query silently wrong.
+#
+# This matches what SQLite's own CURRENT_TIMESTAMP default produces, which is why
+# it is the target rather than ISO: the majority of rows already carry it and the
+# column defaults to it, so normalising the other direction would mean rewriting
+# the default and every row that used it.
+#
+# UTC, like CURRENT_TIMESTAMP. Verified on the operator's store rather than
+# assumed: `date -u`, CURRENT_TIMESTAMP and the JSONL's Z-suffixed values all
+# agreed. Had they NOT agreed, normalising the FORMAT alone would have baked a
+# timezone skew into 18,327 rows while looking like a clean fix.
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+# The columns the transcript importers write a JSONL timestamp into, and so the
+# only ones that can carry the ISO shape. MEASURED on the operator's store rather
+# than guessed at — the issue speculated that knowledge and threads might share
+# the split, and they do NOT: knowledge.created_at/updated_at (834 rows each),
+# threads.created_at (1,650), outbox.created_at (3,544) and
+# coord_messages.created_at (153) are uniformly space-separated, because every
+# one of them is written by CURRENT_TIMESTAMP or by the house
+# `strftime("%Y-%m-%d %H:%M:%S")` helper. Widening this map on suspicion would
+# make the migration scan tables it has no reason to touch.
+_TIMESTAMP_BACKFILL_COLUMNS = {
+    "observations": ("timestamp", "event_at"),
+    "sessions": ("started_at", "ended_at"),
+}
+
+
+def backfill_timestamp_formats(conn) -> int:
+    """Rewrite non-conforming timestamps in place (#515 step 23).
+
+    Returns the number of rows changed, across every table and column.
+
+    SQL rather than a Python round trip, deliberately: this runs over the whole
+    ledger (21k rows on the operator's store, unbounded in general) and the
+    shapes are fixed and known.
+
+    IDEMPOTENT, and testable as such: a normalised value has no 'T' at position
+    11, so the WHERE clause stops matching after the first pass. That is also the
+    safety — a value that is NOT `YYYY-MM-DDTHH:MM:SS[.fffZ]` is never matched,
+    so an unrecognised shape survives intact rather than being mangled by a blind
+    `substr()`.
+
+    `sessions` is included because the same importer derives a session's bounds
+    from the same JSONL records (4 `started_at` and 2 `ended_at` rows carried the
+    ISO shape). It matters beyond tidiness: #516 resolves a moment to a session
+    with `started_at <= T AND (ended_at IS NULL OR ended_at >= T)`, which is the
+    lexical comparison this bug breaks.
+    """
+    changed = 0
+    for table, columns in _TIMESTAMP_BACKFILL_COLUMNS.items():
+        # A MIGRATION STEP CANNOT ASSUME AN ADDITIVE COLUMN EXISTS YET. `event_at`
+        # is supplied by SCHEMA_SQL via the reconciler, which runs AFTER _migrate
+        # — so on a database migrating up from an old version (the v3 fixtures do
+        # exactly this) the column is genuinely absent here and a bare UPDATE
+        # raises "no such column". Intersect with what is actually present rather
+        # than ordering-by-luck. See the convention note at the top of this module.
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column not in present:
+                continue
+            cur = conn.execute(
+                f"""UPDATE {table}
+                       SET {column} = replace(substr({column}, 1, 19), 'T', ' ')
+                     WHERE {column} IS NOT NULL
+                       AND substr({column}, 11, 1) = 'T'"""
+            )
+            changed += cur.rowcount
+    return changed
+
+
+def normalize_timestamp(value):
+    """Coerce any timestamp we accept from outside into `TIMESTAMP_FORMAT` (#515).
+
+    `observations.timestamp` held THREE shapes, all written concurrently across
+    the whole history: `2026-06-09 23:25:10` (the column default, 18,327 rows),
+    `2026-06-09T14:00:00` (18), and `2026-08-08T00:19:00.965Z` (3,439). Because
+    'T' (0x54) sorts after ' ' (0x20) at position 10, every ISO row compared as
+    LATER than every space-separated row on the same date — ~12% wrong on a live
+    range query, with no error raised.
+
+    NOTE WHAT THIS IMPLIES FOR A NAIVE FIX: replacing 'T' with ' ' is not enough.
+    A row left as `2026-08-08 00:19:00.965Z` is 24 characters and still compares
+    wrong against a 19-character bound. The fractional part and the zone suffix
+    have to go too, which is why this parses rather than substitutes.
+
+    Returns None for None so callers can pass an absent value straight through
+    (the column is nullable and the default fills it). An UNPARSEABLE value is
+    returned UNCHANGED rather than dropped or coerced to now(): inventing a
+    timestamp would fabricate history, and dropping one loses the row's place in
+    it. A future shape shows up as itself in the data instead of as a plausible
+    lie — and `test_normalize_leaves_an_unparseable_value_alone` pins that.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return value
+    try:
+        # fromisoformat handles both separators; Z is not accepted before 3.11,
+        # so map it to the explicit offset rather than relying on the version.
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime(TIMESTAMP_FORMAT)
+
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -910,9 +1023,7 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         ).fetchone()
         if kc_exists:
             _add_column_if_missing(conn, "knowledge_candidates", "faithfulness_ok", "INTEGER")
-            _add_column_if_missing(
-                conn, "knowledge_candidates", "faithfulness_warning", "TEXT"
-            )
+            _add_column_if_missing(conn, "knowledge_candidates", "faithfulness_warning", "TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (13)")
     if from_version < 14 and to_version >= 14:
         # Exactly-once reflect ingest (techne#236). knowledge_candidates had no
@@ -1120,4 +1231,32 @@ END;
                 "WHERE reader_session NOT LIKE 'uuid:%' AND reader_session NOT LIKE 'name:%'"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (21)")
+
+    if from_version < 23 and to_version >= 23:
+        # techne#515: observations.timestamp / .event_at held three formats at
+        # once, written concurrently across the entire history — the column
+        # default (`2026-06-09 23:25:10`), bare ISO, and ISO with fractional
+        # seconds and a Z. TEXT columns compare lexically, so 'T' (0x54) sorting
+        # after ' ' (0x20) made every ISO row read as later than every
+        # space-separated row on the same date. Measured ~12% wrong on a live
+        # range query, silently.
+        #
+        # The writers are fixed at the seven insert sites; this backfills what
+        # they already wrote. Both columns, because event_at carries the same
+        # JSONL value through the same paths.
+        #
+        # DONE IN SQL RATHER THAN PYTHON, deliberately: these are millions of
+        # comparisons on a large store and the shapes are fixed and known.
+        # `substr(...,1,19)` truncates the fraction and zone, and replace() fixes
+        # the separator — both safe because every non-conforming value observed
+        # is `YYYY-MM-DDTHH:MM:SS` with an OPTIONAL `.fffZ` tail. A value that is
+        # not that shape is left alone by the WHERE clause rather than mangled.
+        #
+        # The backfill is a NAMED FUNCTION rather than inline SQL so its
+        # idempotence can be TESTED by calling it twice, instead of asserted in
+        # a comment. `_migrate` itself cannot be re-run (the schema_version
+        # insert is UNIQUE), so an inline version would have carried an
+        # idempotence claim nothing could check.
+        backfill_timestamp_formats(conn)
+        conn.execute("INSERT INTO schema_version (version) VALUES (23)")
     conn.commit()

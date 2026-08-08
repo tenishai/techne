@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from techne.core.database import connect
+from techne.core.database import connect, normalize_timestamp
 from techne.core.redaction import redact_credentials
 from techne.hooks.post_tool_use import summarize
 from techne.platforms.claude_code.paths import claude_projects_dir, project_slug
@@ -84,7 +84,7 @@ def import_transcript(
             cwd = rec.get("cwd")
             if cwd:
                 project_path = cwd
-        ts = rec.get("timestamp")
+        ts = normalize_timestamp(rec.get("timestamp"))
         if ts:
             if not first_ts:
                 first_ts = ts
@@ -154,7 +154,7 @@ def import_transcript(
 
         for rec in records:
             rtype = rec.get("type")
-            ts = rec.get("timestamp")
+            ts = normalize_timestamp(rec.get("timestamp"))
             blocks = content_blocks(rec)
 
             if rtype == "assistant":
@@ -377,7 +377,7 @@ def backfill_uncaptured(
         skipped_existing = 0
         for rec in iter_jsonl_records(path):
             rtype = rec.get("type")
-            ts = rec.get("timestamp")
+            ts = normalize_timestamp(rec.get("timestamp"))
             blocks = content_blocks(rec)
 
             if rtype == "assistant":

@@ -29,7 +29,7 @@ import logging
 import threading
 from pathlib import Path
 
-from techne.core.database import connect
+from techne.core.database import connect, normalize_timestamp
 from techne.core.extension_state import get_state, set_state
 from techne.core.redaction import redact_credentials
 from techne.hooks.post_tool_use import summarize
@@ -173,7 +173,7 @@ def _ingest_records_from_offset(
                     project = Path(rec_cwd).name
 
                 rtype = rec.get("type")
-                ts = rec.get("timestamp")
+                ts = normalize_timestamp(rec.get("timestamp"))
                 blocks = content_blocks(rec)
 
                 if rtype == "assistant":
