@@ -107,48 +107,22 @@ class TestImportCheapness:
         )
 
     def test_fastconfig_pulls_nothing_beyond_its_allowlists_own_closure(self):
-        """The allowlist above governs THIS file; this governs what the file's
-        imports drag in behind them — the transitive half, which no AST can see.
+        """Guards the transitive half the AST cannot see.
 
-        MEASURED AS A DELTA BETWEEN TWO SUBPROCESSES OF THE SAME INTERPRETER, and
-        that framing is the whole correctness of this test:
+        DO NOT derive the baseline from _FASTCONFIG_ALLOWED_IMPORTS, and do not
+        replace this with an in-process `set(sys.modules)` diff. Both look like
+        cleanups and both break it:
+          - in-process: Homebrew's sitecustomize pre-loads `re` + 8 more before
+            the snapshot, so they read as free. Same commit measured 13 here, 26
+            on a uv standalone build. Cross-process cancels it.
+          - derived baseline: grows with every allowlist addition, so the delta
+            stays ~4 forever and the guard goes quiet exactly when someone widens
+            what fastconfig may import. Frozen is the strict choice.
 
-            baseline:  python -c "import os, pathlib"        <- the allowlist
-            target:    python -c "import techne.fastconfig"
+        Baseline is `os, pathlib` — a fixed floor, NOT a mirror of the allowlist.
+        `__future__` is allowed and DOES land in the delta (#522 r3/r4).
 
-        Both sides pay for interpreter startup AND for pathlib's own closure
-        (pathlib -> glob -> re -> enum/functools/collections/...), so all of it
-        cancels. What survives is only what fastconfig adds BEYOND the modules it
-        is already allowed to import.
-
-        THE FIRST VERSION OF THIS TEST WAS CALIBRATED THROUGH A CONTAMINATED
-        BASELINE and would have gone red for most contributors (Prudence, #522).
-        It captured `base = set(sys.modules)` INSIDE one process, after startup.
-        Homebrew ships a sitecustomize.py that imports `re` at startup, dragging
-        in eight more modules; all nine were already resident when `base` was
-        taken, so they were subtracted out and read as FREE. On an interpreter
-        without that file they are charged to fastconfig for real:
-
-            interpreter                       old metric   this delta
-            Homebrew 3.14 (dev box)                   13            4
-            uv python-build-standalone 3.13           26            4   <- both measured
-
-        The old number was not the cost of importing fastconfig; it was the cost
-        MINUS whatever the local interpreter's startup happened to pre-load. A
-        delta is only as clean as its baseline, and a baseline captured inside a
-        running process inherits everything that process already did. Taking the
-        baseline in a SEPARATE process, importing exactly the allowlist, removes
-        the contamination instead of budgeting around it.
-
-        Discrimination, measured the same way (2026-08-08):
-
-            techne.fastconfig                 4   <- today
-            ...plus `import yaml`            13
-            ...plus `import tempfile`        23
-            techne.config                    46   <- the thing this module avoids
-
-        The bound is 8: double today's 4, and still far under 13, the cheapest
-        offender anyone has actually smuggled past a guard.
+        Budget 8 vs today's 4. Offenders: +yaml 13, +tempfile 23, config 46.
         """
 
         def _module_count(stmt: str) -> int:
@@ -166,25 +140,6 @@ class TestImportCheapness:
             assert out.returncode == 0, out.stderr
             return int(out.stdout.strip())
 
-        # A FROZEN LITERAL, not a derivation from _FASTCONFIG_ALLOWED_IMPORTS, and
-        # deliberately so. An earlier comment here claimed it "imports the
-        # allowlist itself", which was false and — worse — invited someone to
-        # "fix" it by generating the baseline from the allowlist. That refactor
-        # would break the guard.
-        #
-        # I asked Prudence whether the frozen baseline could silently loosen if
-        # someone widened the allowlist. MEASURED, THE FEAR IS BACKWARDS: a frozen
-        # baseline makes this test STRICTER, because a new allowlist entry then
-        # spends real budget instead of being subtracted away. Add the module to
-        # the allowlist AND import it in fastconfig, baseline unchanged:
-        #
-        #     sys 4 | re 4 | typing 4 | json 6 | hashlib 7   -> pass (they ARE cheap)
-        #     shutil 12 | dataclasses 20 | tempfile 23       -> FAIL, loudly
-        #
-        # The arithmetic already enforces it; no coupling assertion is needed. A
-        # baseline generated from the allowlist would instead grow to match every
-        # addition, and the delta would stay ~4 forever — the guard would go quiet
-        # exactly when someone widened what fastconfig may import.
         baseline = _module_count("import os, pathlib")
         target = _module_count("import techne.fastconfig")
         delta = target - baseline
