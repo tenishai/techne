@@ -236,3 +236,24 @@ def test_the_two_legs_do_not_share_a_cache_key():
     assert keys["test"] != keys["eval-vec"], (
         f"the two legs cache DIFFERENT backends and must not share a key: {keys}"
     )
+
+
+def test_eval_vec_runs_the_default_suite_not_only_the_gate():
+    """#537: eval-vec is the only job with model2vec (py>=3.14). If it runs only
+    `-m eval_vec`, the model2vec branch of EmbeddingModel.embed() is exercised
+    nowhere — and #536 is a bug in the other branch of that function.
+    """
+    runs = _run_lines("eval-vec")
+    assert "-m eval_vec" in runs, "the eval_vec gate itself must still run"
+    # Split at "pytest" before looking for a marker filter: `python -m pytest`
+    # contains "-m " itself, so scanning the whole line finds the interpreter
+    # flag and concludes every step is filtered.
+    default = [
+        r
+        for r in (str(s.get("run", "")) for s in _job_steps("eval-vec"))
+        if "pytest" in r and "-m " not in r.split("pytest", 1)[1]
+    ]
+    assert default, (
+        "eval-vec must also run the DEFAULT suite (no -m filter), or model2vec is "
+        "installed in a job that never exercises it"
+    )

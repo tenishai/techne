@@ -275,6 +275,16 @@ jobs:
         working-directory: techne
         run: .venv-ci/bin/python -m pytest -m eval_vec -s
 
+      # This is the ONLY job with model2vec: `[vectors]` gates it to py>=3.14
+      # (pyproject.toml:45) and the matrix is 3.12/3.13, which get fastembed. So
+      # without this step the model2vec branch of EmbeddingModel.embed() runs
+      # nowhere — and #536 is a bug in the other branch of that same function
+      # (#537). Runs the DEFAULT suite, not a list of vector files: a hand-kept
+      # list would drift the first time someone adds a vector-touching test.
+      - name: Default suite on the model2vec backend (#537)
+        working-directory: techne
+        run: .venv-ci/bin/python -m pytest -q -rs -n 4
+
   # (#383) Architecture-card freshness. Each card in ARCHITECTURE.md / docs/arch/*.md
   # pins the git blob sha of the seam file(s) it describes; this recomputes them and
   # fails when code drifted from its card — turning "detected staleness" into
