@@ -252,9 +252,7 @@ def _rerank(
         # (no confidence_numeric) receive a neutral 1.0, adding uniformly so
         # ordering among non-knowledge rows is unchanged.
         if confidence_decay_weight > 0:
-            r["_combined"] += confidence_decay_weight * _knowledge_decay_score(
-                r, half_life_days
-            )
+            r["_combined"] += confidence_decay_weight * _knowledge_decay_score(r, half_life_days)
 
     candidates.sort(key=lambda x: -x["_combined"])
 
@@ -855,11 +853,8 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
         import sqlite_vec
     except ImportError:
         return {}
-    if not embeddings_mod.backend_available():
-        # Neither model2vec nor fastembed importable — nothing to embed with.
-        return {}
+    have_backend = embeddings_mod.backend_available()
 
-    model = _get_embedding_model()
     conn = connect(db_path)
     try:
         conn.enable_load_extension(True)
@@ -869,6 +864,32 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
         # Interpreter built without loadable-extension support — degrade gracefully.
         conn.close()
         return {}
+
+    # SWEEP ORPHANS BEFORE THE BACKEND GATE (techne#408). Deleting an embedding
+    # whose parent row is gone is pure SQL: it needs sqlite_vec loaded to touch a
+    # vec0 table, but NOT a model. Gating it behind `backend_available()` would
+    # mean an install with sqlite-vec and no model2vec/fastembed accumulates
+    # orphans forever while `vectors:coverage` reports dangling rows and names
+    # `techne vectors backfill` as the remedy — a check whose remedy provably
+    # does nothing, which is exactly the never-green defect #496 was just fixed
+    # for. Found by running this against an interpreter with sqlite-vec but no
+    # embedding backend; the wiring test failed and the early return was why.
+    try:
+        swept = sum(_purge_orphaned_vec(conn, name) for name in _VEC_PARENT)
+        if swept:
+            conn.commit()
+    except sqlite3.OperationalError:
+        # A vec table present but unreadable (e.g. built at another dim) is not
+        # worth failing a backfill over; the per-table loop below rebuilds it.
+        pass
+
+    if not have_backend:
+        # Neither model2vec nor fastembed importable — nothing to embed with, but
+        # the orphan sweep above has already run.
+        conn.close()
+        return {}
+
+    model = _get_embedding_model()
 
     counts = {"threads": 0, "observations": 0, "knowledge": 0}
 
@@ -899,6 +920,14 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             # search_vec (_VEC_SUPERSEDE_OVERFETCH) is the always-on guard, sound up to
             # that factor of stale neighbours.
             if tbl == "knowledge" and _purge_superseded_knowledge_vec(conn):
+                conn.commit()
+            # techne#408: embeddings whose PARENT ROW IS GONE. Threads rotate
+            # their rowid on INSERT OR REPLACE, so every summary update strands
+            # one; hard-deleted knowledge strands one too. The superseded purge
+            # above cannot reach either, because it selects FROM the parent table
+            # and these rows have no parent. Swept for all three indexes: the
+            # mechanism is per-index, not knowledge-specific.
+            if _purge_orphaned_vec(conn, vec_tbl):
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"
             extra_where = " AND t.superseded_by IS NULL" if tbl == "knowledge" else ""
@@ -971,6 +1000,54 @@ def _purge_superseded_knowledge_vec(conn: sqlite3.Connection) -> int:
         "DELETE FROM knowledge_vec WHERE rowid IN "
         "(SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)"
     )
+    return cur.rowcount
+
+
+# Each vec0 index and the table whose row ids it embeds. Used by the orphan sweep
+# so the relationship is declared ONCE rather than restated at each call site.
+_VEC_PARENT = {
+    "threads_vec": ("threads", "rowid"),
+    "observations_vec": ("observations", "id"),
+    "knowledge_vec": ("knowledge", "id"),
+}
+
+
+def _purge_orphaned_vec(conn: sqlite3.Connection, vec_tbl: str) -> int:
+    """Delete embeddings whose parent row is gone (techne#408). Returns rows removed.
+
+    DISTINCT FROM `_purge_superseded_knowledge_vec`, and the difference is why
+    that one cannot cover this: it deletes
+    ``WHERE rowid IN (SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)``
+    — it selects FROM the parent, so a rowid with NO parent row behind it is
+    never matched. `vectors:coverage` verified exactly that (purge removed 0 of
+    2 in that state) and reports the count without failing, precisely because no
+    remedy existed to clear it. This is that remedy.
+
+    HOW THE ORPHANS ARISE, and it is not one bug:
+    * threads — `thread_orchestrator` updates a summary via INSERT OR REPLACE,
+      which ROTATES the rowid. The new summary is embedded fresh (it reads as
+      missing) and the old rowid's embedding is stranded. Unbounded growth, one
+      row per summary update.
+    * knowledge — a HARD delete (`knowledge.delete`, the pattern cleanup) goes
+      through a plain `connect()`, which cannot touch a vec0 table, so the
+      embedding outlives the row.
+
+    Recall stays CORRECT without this — `search_vec`'s `if row:` guard drops
+    dead-rowid hits after the k-nearest cut — but each orphan can still occupy a
+    top-k ANN slot before that filter runs, which is #168's failure shape bounded
+    by `_VEC_SUPERSEDE_OVERFETCH`. So this is an index-hygiene fix, not a
+    correctness one, and the PR says so rather than overclaiming.
+
+    Lives here, like its sibling, because `backfill_vectors` is the one place
+    sqlite_vec is loaded.
+    """
+    parent, id_col = _VEC_PARENT[vec_tbl]
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (vec_tbl,)
+    ).fetchone()
+    if not exists:
+        return 0
+    cur = conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid NOT IN (SELECT {id_col} FROM {parent})")
     return cur.rowcount
 
 
