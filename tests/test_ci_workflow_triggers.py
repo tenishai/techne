@@ -243,17 +243,32 @@ def test_eval_vec_runs_the_default_suite_not_only_the_gate():
     `-m eval_vec`, the model2vec branch of EmbeddingModel.embed() is exercised
     nowhere — and #536 is a bug in the other branch of that function.
     """
-    runs = _run_lines("eval-vec")
-    assert "-m eval_vec" in runs, "the eval_vec gate itself must still run"
-    # Split at "pytest" before looking for a marker filter: `python -m pytest`
-    # contains "-m " itself, so scanning the whole line finds the interpreter
-    # flag and concludes every step is filtered.
-    default = [
-        r
-        for r in (str(s.get("run", "")) for s in _job_steps("eval-vec"))
-        if "pytest" in r and "-m " not in r.split("pytest", 1)[1]
-    ]
+    import shlex
+
+    assert "-m eval_vec" in _run_lines("eval-vec"), "the eval_vec gate must still run"
+
+    # Tokenised, not substring-scanned. Two earlier versions of this guard were
+    # killed by `run: echo "pytest run removed on purpose"` — a bare `"pytest" in
+    # r` cannot tell an invocation from a sentence mentioning one.
+    default = []
+    for r in (str(s.get("run", "")) for s in _job_steps("eval-vec")):
+        try:
+            tok = shlex.split(r)
+        except ValueError:
+            continue
+        if "pytest" not in tok:
+            continue
+        args = tok[tok.index("pytest") + 1 :]
+        if "-m" in args:
+            continue  # a marker-filtered run, e.g. the eval_vec gate
+        # No positional test paths either: the step's contract is the DEFAULT
+        # suite, and a file list would drift on the next vector-touching test.
+        if any(not a.startswith("-") and ("/" in a or a.endswith(".py")) for a in args):
+            continue
+        default.append(r)
+
     assert default, (
-        "eval-vec must also run the DEFAULT suite (no -m filter), or model2vec is "
-        "installed in a job that never exercises it"
+        "eval-vec must run the DEFAULT suite — pytest invoked with no -m filter and "
+        "no test paths. Without it model2vec is installed in a job that never "
+        "exercises it (#537)."
     )
