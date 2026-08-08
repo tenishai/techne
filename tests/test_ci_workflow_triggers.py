@@ -238,37 +238,67 @@ def test_the_two_legs_do_not_share_a_cache_key():
     )
 
 
+#: pytest args that NARROW what runs. Any of these means it is not the default suite.
+_SELECTORS = {
+    "-m", "-k", "--ignore", "--ignore-glob", "--deselect",
+    "--collect-only", "--co", "--lf", "--last-failed", "--ff",
+}
+#: pytest args that consume the NEXT token, so its value is not a positional.
+_VALUED = {"-n", "-p", "-c", "-o", "--rootdir"}
+
+
+def _pytest_argv(line: str) -> list[str] | None:
+    """argv of a real pytest INVOCATION on this line, else None.
+
+    Parses rather than scans for containment. Three versions of the eval-vec
+    guard asked "does `pytest` appear here" and 9 of 12 mutants survived —
+    including `echo pytest run removed on purpose`, which is the quoted kill with
+    the quotes deleted so shlex yields `pytest` as a token (#532 r4).
+    """
+    import shlex
+
+    try:
+        tok = shlex.split(line, comments=True)
+    except ValueError:
+        return None
+    for i in range(1, len(tok) - 1):  # `<path>/python -m pytest ...`
+        if tok[i] == "-m" and tok[i + 1] == "pytest" and Path(tok[i - 1]).name.startswith("python"):
+            return tok[i + 2 :]
+    if tok and Path(tok[0]).name == "pytest":  # bare `pytest ...`
+        return tok[1:]
+    return None
+
+
+def _is_default_suite(argv: list[str]) -> bool:
+    """True when argv narrows nothing: no selector flag and no positional."""
+    expect_value = False
+    for a in argv:
+        if expect_value:
+            expect_value = False
+            continue
+        if a.split("=", 1)[0] in _SELECTORS:
+            return False
+        if not a.startswith("-"):
+            return False
+        if a in _VALUED:
+            expect_value = True
+    return True
+
+
 def test_eval_vec_runs_the_default_suite_not_only_the_gate():
     """#537: eval-vec is the only job with model2vec (py>=3.14). If it runs only
     `-m eval_vec`, the model2vec branch of EmbeddingModel.embed() is exercised
     nowhere — and #536 is a bug in the other branch of that function.
     """
-    import shlex
-
     assert "-m eval_vec" in _run_lines("eval-vec"), "the eval_vec gate must still run"
-
-    # Tokenised, not substring-scanned. Two earlier versions of this guard were
-    # killed by `run: echo "pytest run removed on purpose"` — a bare `"pytest" in
-    # r` cannot tell an invocation from a sentence mentioning one.
-    default = []
-    for r in (str(s.get("run", "")) for s in _job_steps("eval-vec")):
-        try:
-            tok = shlex.split(r)
-        except ValueError:
-            continue
-        if "pytest" not in tok:
-            continue
-        args = tok[tok.index("pytest") + 1 :]
-        if "-m" in args:
-            continue  # a marker-filtered run, e.g. the eval_vec gate
-        # No positional test paths either: the step's contract is the DEFAULT
-        # suite, and a file list would drift on the next vector-touching test.
-        if any(not a.startswith("-") and ("/" in a or a.endswith(".py")) for a in args):
-            continue
-        default.append(r)
-
-    assert default, (
-        "eval-vec must run the DEFAULT suite — pytest invoked with no -m filter and "
-        "no test paths. Without it model2vec is installed in a job that never "
-        "exercises it (#537)."
+    # Line by line: a `run: |` block would otherwise merge tokens across commands.
+    lines = [
+        ln
+        for s in _job_steps("eval-vec")
+        for ln in str(s.get("run", "")).splitlines()
+    ]
+    argvs = [a for a in (_pytest_argv(ln) for ln in lines) if a is not None]
+    assert any(_is_default_suite(a) for a in argvs), (
+        "eval-vec must run the DEFAULT suite — pytest invoked with no selector "
+        f"flag and no positional. Found invocations: {argvs}"
     )
