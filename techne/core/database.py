@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
     faithfulness_ok INTEGER,          -- NULL|1|0
     faithfulness_warning TEXT         -- NULL when ok or unchecked
 );
+
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
 CREATE INDEX IF NOT EXISTS idx_kc_action_status ON knowledge_candidates(action, status);
@@ -292,6 +293,51 @@ CREATE INDEX IF NOT EXISTS idx_kc_action_status ON knowledge_candidates(action, 
 -- dedup); content is in the key because one prompt yields many distinct candidates.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
     ON knowledge_candidates(prompt_hash, content) WHERE origin = 'reflect';
+
+-- Reflection debt queue (techne#514).
+--
+-- WHY IT EXISTS: session_end COUNTS unreflected work and enqueues nothing. It
+-- even logs "403 obs, 19 threads" — so the runtime KNOWS the debt exists, which
+-- is worse than not knowing, because the instrumentation makes the rail read as
+-- healthy. Reflection therefore survives exactly ONE exit path, the polite one
+-- (crestart asking a session to reflect before it exits). Every impolite exit —
+-- and techne#490 records Remote Control dying after a ~10min network outage as
+-- the NORMAL way a long session ends here — drops its debt silently.
+--
+-- THREAD IDS, NOT RENDERED PROMPTS (Richard's call, 2026-08-07). A stored prompt
+-- embeds a point-in-time snapshot that drifts from the ledger it describes, and
+-- the ledger is what the prompt renders FROM anyway — so re-rendering at drain
+-- time is both cheaper and strictly fresher. The cost is that a thread must stay
+-- reconstructible, which it is: prompts render from observations, which are
+-- never deleted.
+--
+-- DECOUPLES PRODUCER FROM REFLECTOR, which is the actual fix. A peer session
+-- reflecting another's threads is not a workaround — it happened by hand on
+-- 2026-08-07 and worked, because answering a rendered prompt needs the thread's
+-- observations, not the original session's context. `drained_at` is NULLABLE
+-- rather than a status enum: pending is the absence of a drain, so there is no
+-- second source of truth to disagree with the timestamp.
+--
+-- UNIQUE on thread_id alone (not the pair): threads.id is a global TEXT PK, so
+-- the thread is the natural idempotency key — re-running session_end, or a peer
+-- enqueueing the same thread, must not queue it twice.
+-- ON DELETE CASCADE is REQUIRED, not tidiness. Re-detection deletes and
+-- re-inserts a session's whole thread set in one transaction
+-- (`lifecycle.py:387`: DELETE FROM threads WHERE session_id = ?), so a plain
+-- reference makes the queue BLOCK re-detection with a FOREIGN KEY failure. The
+-- test suite caught exactly that. Cascading is also the right SEMANTICS: a
+-- thread that no longer exists cannot be owed reflection, and session_end
+-- re-enqueues whatever the new detection produced.
+CREATE TABLE IF NOT EXISTS reflection_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
+    enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    drained_at TIMESTAMP
+);
+-- Partial index: the only hot query is "what is still pending, oldest first".
+CREATE INDEX IF NOT EXISTS idx_reflection_queue_pending
+    ON reflection_queue(id) WHERE drained_at IS NULL;
 
 -- FTS5 indexes. tokenize='porter unicode61' applies Porter stemming on top of
 -- the unicode61 tokenizer (#77) so morphological variants match: a query for
@@ -1120,4 +1166,15 @@ END;
                 "WHERE reader_session NOT LIKE 'uuid:%' AND reader_session NOT LIKE 'name:%'"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (21)")
+
+    if from_version < 22 and to_version >= 22:
+        # techne#514: the reflection_queue table. NO DDL HERE ON PURPOSE — the
+        # table is purely additive, so _reconcile_tables creates it from
+        # SCHEMA_SQL on connect. This step exists solely to BUMP THE VERSION,
+        # and that bump is the load-bearing part: post-#140 the connect()-time
+        # reconcile is sentinel-gated and skips already-reconciled DBs, so an
+        # additive SCHEMA_SQL change at an UNCHANGED SCHEMA_VERSION reaches new
+        # databases only and silently never reaches existing ones. Every live
+        # store on this machine is an existing one.
+        conn.execute("INSERT INTO schema_version (version) VALUES (22)")
     conn.commit()

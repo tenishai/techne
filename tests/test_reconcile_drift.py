@@ -58,10 +58,11 @@ def test_fresh_db_is_current_version(db):
     conn = connect(db)
     try:
         v = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        # Bumped 20 -> 21 for techne#446's coord-receipt namespacing. The literal
-        # is deliberate: it makes a SCHEMA_VERSION bump fail here so it cannot
-        # pass unnoticed.
-        assert v == SCHEMA_VERSION == 21
+        # Bumped 21 -> 22 for techne#514's reflection_queue. The literal is
+        # deliberate: it makes a SCHEMA_VERSION bump fail here so it cannot pass
+        # unnoticed. It did exactly that job on #514 — this test is one of the
+        # two that caught the bump, and updating it is the acknowledgement.
+        assert v == SCHEMA_VERSION == 22
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"

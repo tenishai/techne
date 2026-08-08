@@ -1158,3 +1158,141 @@ def test_candidates_beyond_max_items_are_counted_as_dropped(tmp_path):
     assert len(r.candidates) == 5
     assert r.failure is None
     assert r.dropped == 3, f"the 3 truncated candidates must be counted, got {r.dropped}"
+
+
+# --- reflection debt queue (techne#514) -----------------------------------
+
+
+class TestReflectionQueue:
+    """session_end must RECORD the debt, not just count it.
+
+    The bug: session_end logged "403 obs, 19 threads" and enqueued nothing, so
+    reflection survived exactly one exit path — the polite one. Two sessions
+    ended four minutes apart on 2026-08-07 with 297 and 403 observations and
+    produced ZERO candidates between them; the only reason one was ever reflected
+    is that a peer noticed by hand.
+    """
+
+    def test_enqueue_records_one_row_per_thread(self, tmp_path):
+        from techne.core.reflect import enqueue_reflection_debt, pending_reflection_queue
+
+        config = _mk_config(tmp_path, enabled=True)
+        session_id, _ = _mk_session_with_obs(config, 5)
+        for n in (1, 2, 3):
+            _save_thread_row(
+                config,
+                session_id,
+                Thread(thread_num=n, label=f"t{n}", summary="s", observation_indices=[0, 1, 2]),
+            )
+
+        assert enqueue_reflection_debt(config.db_path, session_id) == 3
+        pending = pending_reflection_queue(config.db_path)
+        assert len(pending) == 3
+        assert {p["session_id"] for p in pending} == {session_id}
+
+    def test_enqueue_is_idempotent(self, tmp_path):
+        """session_end fires once per TURN, not once per session — so this runs
+        many times against the same threads. Idempotency is enforced by the
+        UNIQUE(thread_id) schema constraint, not by a check-then-insert, so two
+        sessions racing cannot double-queue either.
+        """
+        from techne.core.reflect import enqueue_reflection_debt, pending_reflection_queue
+
+        config = _mk_config(tmp_path, enabled=True)
+        session_id, _ = _mk_session_with_obs(config, 5)
+        _save_thread_row(
+            config,
+            session_id,
+            Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2]),
+        )
+
+        assert enqueue_reflection_debt(config.db_path, session_id) == 1
+        assert enqueue_reflection_debt(config.db_path, session_id) == 0
+        assert enqueue_reflection_debt(config.db_path, session_id) == 0
+        assert len(pending_reflection_queue(config.db_path)) == 1
+
+    def test_queue_surfaces_debt_that_the_recency_heuristic_loses(self, tmp_path):
+        """THE REGRESSION TEST FOR THE ACTUAL BUG, and the reason the queue
+        exists rather than a bigger limit on the old path.
+
+        `pending_reflection` scans the N most-recent sessions and filters AFTER
+        the LIMIT — by its own docstring, "a genuinely-old pending session past
+        that window is intentionally not surfaced." So debt does not merely go
+        unnoticed, it becomes PERMANENTLY invisible once enough sessions follow
+        it. The queue is a ledger of what was owed; it does not care how many
+        sessions came later.
+        """
+        from techne.core.reflect import (
+            enqueue_reflection_debt,
+            pending_reflection,
+            pending_reflection_queue,
+        )
+
+        config = _mk_config(tmp_path, enabled=True)
+        old_session, _ = _mk_session_with_obs(config, 5)
+        _save_thread_row(
+            config,
+            old_session,
+            Thread(thread_num=1, label="old", summary="s", observation_indices=[0, 1, 2]),
+        )
+        enqueue_reflection_debt(config.db_path, old_session)
+
+        # Bury it under newer sessions, past the heuristic's window.
+        for _ in range(8):
+            _mk_session_with_obs(config, 5)
+
+        recent_ids = {p["session_id"] for p in pending_reflection(config, limit=5)}
+        assert old_session not in recent_ids, "precondition: the heuristic has lost it"
+
+        queued_ids = {p["session_id"] for p in pending_reflection_queue(config.db_path)}
+        assert old_session in queued_ids, "the queue must still owe it"
+
+    def test_drain_stamps_once_and_only_once(self, tmp_path):
+        """Drained rows are STAMPED, not deleted — the queue doubles as the
+        record that the debt existed and was paid, which is the evidence #514
+        was filed on. A second drain must not rewrite the first payment.
+        """
+        from techne.core.database import connect
+        from techne.core.reflect import (
+            drain_reflection_queue,
+            enqueue_reflection_debt,
+            pending_reflection_queue,
+        )
+
+        config = _mk_config(tmp_path, enabled=True)
+        session_id, _ = _mk_session_with_obs(config, 5)
+        _save_thread_row(
+            config,
+            session_id,
+            Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2]),
+        )
+        enqueue_reflection_debt(config.db_path, session_id)
+        thread_id = pending_reflection_queue(config.db_path)[0]["thread_id"]
+
+        assert drain_reflection_queue(config.db_path, [thread_id]) == 1
+        assert pending_reflection_queue(config.db_path) == []
+
+        conn = connect(config.db_path)
+        try:
+            first = conn.execute(
+                "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        assert drain_reflection_queue(config.db_path, [thread_id]) == 0, "second drain is a no-op"
+
+        conn = connect(config.db_path)
+        try:
+            still = conn.execute(
+                "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert still == first, "the first payment is the true one"
+
+    def test_drain_of_nothing_is_not_a_query(self, tmp_path):
+        from techne.core.reflect import drain_reflection_queue
+
+        config = _mk_config(tmp_path, enabled=True)
+        assert drain_reflection_queue(config.db_path, []) == 0

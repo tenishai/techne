@@ -176,6 +176,10 @@ def run_session_end(
                 "aged_completed": aged.get("completed", 0),
                 "aged_stale": aged.get("stale", 0),
                 "queued": 0,
+                # The incremental gate skipped detection, so no NEW threads exist
+                # to owe reflection on. Anything already owed stays queued — the
+                # debt lives in the table, not in this return value.
+                "queued_for_reflection": 0,
                 "knowledge_pushed": 0,
                 "reflect": {
                     "threads_considered": 0,
@@ -229,6 +233,20 @@ def run_session_end(
             conn.close()
     else:
         save_threads(threads, session_id, config.db_path, parent_links=parent_links)
+
+    # techne#514: record the reflection debt DURABLY, not just in the log line
+    # below. Until now this function counted threads, printed "N obs, M threads"
+    # and enqueued nothing — so reflection survived only the polite exit path,
+    # and every crash/timeout dropped it silently. Best-effort: a queue-write
+    # failure must never take down teardown, which is the one thing that still
+    # has to persist the session's actual work.
+    queued_for_reflection = 0
+    try:
+        from techne.core.reflect import enqueue_reflection_debt
+
+        queued_for_reflection = enqueue_reflection_debt(config.db_path, session_id)
+    except Exception as e:  # pragma: no cover - defensive, mirrors the reflect path
+        print(f"techne: reflection debt enqueue deferred: {e}", file=sys.stderr)
 
     aged = age_threads(config.db_path, config)
 
@@ -302,6 +320,11 @@ def run_session_end(
         "aged_completed": aged.get("completed", 0),
         "aged_stale": aged.get("stale", 0),
         "queued": queued,
+        # Distinct from "queued" (outbox sync) — this is reflection debt
+        # persisted to reflection_queue (techne#514). Reported so a caller can
+        # tell "nothing was owed" from "something was owed and we dropped it";
+        # before #514 those two were indistinguishable from outside.
+        "queued_for_reflection": queued_for_reflection,
         "knowledge_pushed": knowledge_pushed,
         "reflect": reflect_result,
     }

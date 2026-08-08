@@ -507,7 +507,7 @@ def _run_phases_2_to_9(
     # ------------------------------------------------------------------
     try:
         if config.reflect.enabled:
-            from techne.core.reflect import pending_reflection
+            from techne.core.reflect import pending_reflection, pending_reflection_queue
 
             pend = pending_reflection(config)
             if pend:
@@ -519,6 +519,32 @@ def _run_phases_2_to_9(
                     f"({pend[0]['observations']} observations){extra}. Call "
                     f'techne_reflect_emit(session_id="{sid}"), answer each prompt with '
                     "your own model, then techne_reflect_ingest."
+                )
+                output_parts.append("")
+
+            # techne#514: the DURABLE debt, which the recency heuristic above
+            # structurally cannot see. `pending_reflection` filters after its
+            # LIMIT, so once enough sessions follow, old debt stops being
+            # surfaced forever. Reported separately rather than merged into the
+            # line above, because they answer different questions: that one says
+            # "the last session looks unreflected", this one says "this much work
+            # is ON RECORD as owed, by whoever picks it up".
+            #
+            # WITHOUT THIS BLOCK the queue would be a table nothing reads — the
+            # "mechanism present but not load-bearing" shape (#504) that #514 is
+            # itself an instance of. Enqueueing without a consumer would repeat
+            # the bug in a new place.
+            queued = pending_reflection_queue(config.db_path, limit=50)
+            if queued:
+                owed_sessions = {q["session_id"] for q in queued}
+                oldest = queued[0]
+                output_parts.append(
+                    "\n## techne — reflection debt (queued)\n"
+                    f"> {len(queued)} thread(s) across {len(owed_sessions)} session(s) are "
+                    f"queued for reflection, oldest from {oldest['enqueued_at']}. "
+                    "ANY session can drain these — answering a rendered prompt needs the "
+                    "thread's observations, not the original session's context. Call "
+                    f'techne_reflect_emit(session_id="{oldest["session_id"]}") to start.'
                 )
                 output_parts.append("")
     except Exception as exc:  # noqa: BLE001
