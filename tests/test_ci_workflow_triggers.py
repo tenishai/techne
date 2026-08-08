@@ -70,7 +70,9 @@ def test_every_job_still_lives_in_this_one_workflow():
     what makes someone notice, rather than discovering it from an empty Checks
     tab on a PR that mattered.
     """
-    workflows = sorted(p.name for p in WORKFLOW.parent.glob("*.yml"))
+    # *.y*ml: Actions reads BOTH .yml and .yaml, so a *.yml glob misses half the
+    # filenames a second workflow can have (#532 r2).
+    workflows = sorted(p.name for p in WORKFLOW.parent.glob("*.y*ml"))
     assert workflows == ["test.yml"], (
         f"a second workflow appeared ({workflows}); audit its `on:` block for the "
         "techne#530 base-filter trap before adding it here"
