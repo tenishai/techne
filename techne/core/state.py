@@ -241,6 +241,120 @@ def get_session(db_path: Path, session_id: str) -> dict | None:
         conn.close()
 
 
+# How long a session must be silent before the sweep is willing to call it over.
+# Generous on purpose: the cost of waiting is a NULL that resolves an hour later,
+# and the cost of being wrong is stamping a live session as ended.
+ABANDONED_SESSION_IDLE_HOURS = 6
+
+
+def close_abandoned_sessions(
+    db_path: Path, idle_hours: int = ABANDONED_SESSION_IDLE_HOURS, now: str | None = None
+) -> int:
+    """Stamp `ended_at` for sessions that died without running session_end (#516).
+
+    Returns the number of rows updated.
+
+    WHY THIS IS NEEDED AT ALL: `end_session` is the ONLY writer of `ended_at`,
+    and it runs from `run_session_end`. A session killed, crashed, or dropped by
+    the Remote Control timeout (techne#490) never reaches it. The miss rate is
+    not static — 52% of June sessions have an `ended_at`, 19% of July, 7% of
+    August — so unclean exit is now the common case, and the column was decaying
+    toward useless.
+
+    THE DERIVED VALUE IS LAST KNOWN ACTIVITY, not a guess at when the process
+    died. That is the honest reading of the evidence we have, and it is the value
+    #516 actually wants: the replay index asks "which session was live at T",
+    which last-activity answers correctly for every T inside the session.
+
+    SELF-CORRECTING RATHER THAN ONE-SHOT. A row is updated when `ended_at` is
+    NULL *or* is EARLIER than known activity, so a session that was swept, then
+    resumed, then abandoned again converges instead of keeping a stale stamp. It
+    only ever moves the value forward, so re-running is safe and idempotent once
+    the session is truly quiet.
+
+    THE IDLE WINDOW IS THE WHOLE SAFETY. Without it this would close the session
+    that is currently running, and concurrent peer sessions on the same store
+    (which is the normal case here) would close each other. Keying on silence
+    rather than on "older than the newest session" is what makes it safe with
+    several live sessions.
+
+    Timestamps are normalised in the comparison rather than trusted: `#515`
+    established that the ledger carried three formats, and this must be correct
+    whether or not that backfill has run.
+    """
+    conn = connect(db_path)
+    try:
+        n = close_abandoned_sessions_in_conn(conn, idle_hours=idle_hours, now=now)
+        conn.commit()
+        return n
+    finally:
+        conn.close()
+
+
+def close_abandoned_sessions_in_conn(conn, *, idle_hours: int, now: str | None = None) -> int:
+    """The body of `close_abandoned_sessions`, against a caller's connection.
+
+    Exists so migration step 24 and the live sweep run the SAME statement rather
+    than two copies that can drift — the migration cannot open its own connection
+    (it is mid-transaction on the caller's) and a second hand-written copy of this
+    SQL is exactly the shape that goes stale silently.
+
+    Does NOT commit; the caller owns the transaction.
+    """
+    cutoff = (
+        now
+        if now is not None
+        else conn.execute("SELECT datetime('now', ?)", (f"-{int(idle_hours)} hours",)).fetchone()[0]
+    )
+    # A MIGRATION STEP CANNOT ASSUME ITS TABLES EXIST YET. This runs from step 24,
+    # and `_migrate` executes BEFORE the reconciler creates tables from SCHEMA_SQL
+    # — so on a fixture migrating up from an old version `observations` is
+    # genuinely absent and the query raises "no such table". Second instance of
+    # this trap in one change (the #515 backfill hit it with an additive COLUMN),
+    # which is why it is checked rather than assumed.
+    #
+    # Returning 0 is correct here, not a silent swallow: no observations table
+    # means no activity to derive an end from, and the live sweep at
+    # session_start will do the work once the schema is complete.
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if not {"sessions", "observations"} <= tables:
+        return 0
+
+    # SELECTED FIRST, THEN UPDATED BY ID, rather than one `WITH ... UPDATE`.
+    # SQLite does not report a usable rowcount for that form — it comes back -1 —
+    # so the count this function returns would have been a driver artefact rather
+    # than a fact about the data. Callers (and the tests that assert idempotence)
+    # need a real number, and selecting first also makes the target set
+    # inspectable when something looks wrong.
+    targets = conn.execute(
+        """
+        WITH activity AS (
+            SELECT s.id AS sid,
+                   COALESCE(
+                       MAX(replace(substr(o.timestamp, 1, 19), 'T', ' ')),
+                       replace(substr(s.started_at, 1, 19), 'T', ' ')
+                   ) AS last_seen
+              FROM sessions s
+              LEFT JOIN observations o ON o.session_id = s.id
+             GROUP BY s.id
+        )
+        SELECT s.id, a.last_seen
+          FROM sessions s
+          JOIN activity a ON a.sid = s.id
+         WHERE a.last_seen < ?
+           AND (
+                s.ended_at IS NULL
+             OR replace(substr(s.ended_at, 1, 19), 'T', ' ') < a.last_seen
+           )
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    for sid, last_seen in targets:
+        conn.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (last_seen, sid))
+    return len(targets)
+
+
 def get_active_session(db_path: Path) -> dict | None:
     """Get the most recent session that hasn't ended."""
     conn = connect(db_path)
@@ -374,9 +488,7 @@ def add_observation(
     # redaction fired gives crisp audit semantics: content_hash IS NOT NULL iff
     # something was stripped, and the hash lets a holder of the original prove
     # the exact pre-redaction payload without re-exposing it.
-    content_hash = (
-        hashlib.sha256(content.encode()).hexdigest() if redacted != content else None
-    )
+    content_hash = hashlib.sha256(content.encode()).hexdigest() if redacted != content else None
 
     result = infer(redacted, config)
     tags_str = " ".join(result.tags) if result.tags else None
@@ -715,9 +827,7 @@ def db_stats(db_path: Path) -> dict:
         # instead of an opaque store-level total.
         stats["knowledge_by_type"] = {
             row[0]: row[1]
-            for row in conn.execute(
-                "SELECT type, COUNT(*) FROM knowledge GROUP BY type"
-            ).fetchall()
+            for row in conn.execute("SELECT type, COUNT(*) FROM knowledge GROUP BY type").fetchall()
         }
         stats["outbox"] = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
 

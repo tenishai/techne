@@ -5,7 +5,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 24
 
 # Schema evolution convention — when to bump SCHEMA_VERSION vs. edit SCHEMA_SQL only:
 # See CONTRIBUTING.md for the full decision tree and real examples.
@@ -1120,4 +1120,27 @@ END;
                 "WHERE reader_session NOT LIKE 'uuid:%' AND reader_session NOT LIKE 'name:%'"
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (21)")
+
+    if from_version < 24 and to_version >= 24:
+        # techne#516: sessions.ended_at was 79% NULL and DEGRADING (52% of June
+        # sessions had one, 19% of July, 7% of August), because `end_session` is
+        # its only writer and an unclean exit never reaches it. With ended_at
+        # NULL the interval is open-ended, so "which session was live at T"
+        # matched every session ever started before T — the replay index #516
+        # exists to build could not discriminate at all.
+        #
+        # Backfills the historical NULLs from last known activity. The ongoing
+        # fix is the sweep in core/state.py, wired into session_start; this step
+        # only repairs what the old behaviour already lost.
+        #
+        # idle_hours=0 here, unlike the live sweep: a migration runs once, over
+        # history, and every session in it is by definition finished. The live
+        # sweep's idle window exists to avoid closing a RUNNING session, which is
+        # not a risk for rows that predate this upgrade — except the session
+        # performing the upgrade, which the `< now` bound still excludes because
+        # its own last activity is not in the past.
+        from techne.core.state import close_abandoned_sessions_in_conn
+
+        close_abandoned_sessions_in_conn(conn, idle_hours=0)
+        conn.execute("INSERT INTO schema_version (version) VALUES (24)")
     conn.commit()

@@ -54,9 +54,26 @@ def run_session_start(
     `init_session_for_external_id` for the idempotent wrapper.
     """
     from techne.core.database import init_db
-    from techne.core.state import start_session
+    from techne.core.state import close_abandoned_sessions, start_session
 
     init_db(config.db_path)
+
+    # SELF-HEAL THE REPLAY INDEX (#516). `ended_at` has one writer, run_session_end,
+    # which an unclean exit never reaches — so the column decayed to 7% coverage in
+    # August and no time window could resolve to a session. Sweeping here means the
+    # index repairs itself on ordinary use instead of needing anyone to remember a
+    # maintenance verb, which is the failure mode #514 and #488 are both about.
+    #
+    # Safe to run with peers live: it only touches sessions silent for hours, so a
+    # concurrent session cannot be closed by this one. Failure is non-fatal — a
+    # missing ended_at is the status quo, and it must never cost a session start.
+    try:
+        close_abandoned_sessions(config.db_path)
+    except Exception as e:  # pragma: no cover - defensive
+        import sys
+
+        print(f"techne: abandoned-session sweep failed: {e}", file=sys.stderr)
+
     return start_session(
         config.db_path,
         project_path=project_path or "",
