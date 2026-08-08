@@ -321,13 +321,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
 -- UNIQUE on thread_id alone (not the pair): threads.id is a global TEXT PK, so
 -- the thread is the natural idempotency key — re-running session_end, or a peer
 -- enqueueing the same thread, must not queue it twice.
--- ON DELETE CASCADE is REQUIRED, not tidiness. Re-detection deletes and
--- re-inserts a session's whole thread set in one transaction
--- (`lifecycle.py:387`: DELETE FROM threads WHERE session_id = ?), so a plain
--- reference makes the queue BLOCK re-detection with a FOREIGN KEY failure. The
--- test suite caught exactly that. Cascading is also the right SEMANTICS: a
--- thread that no longer exists cannot be owed reflection, and session_end
--- re-enqueues whatever the new detection produced.
+-- ON DELETE CASCADE is required: re-detection deletes and re-inserts a session's
+-- whole thread set in one transaction (lifecycle.py), so a plain reference makes
+-- the queue BLOCK re-detection with a FOREIGN KEY failure.
+--
+-- IT IS NOT A COMPLETE ANSWER, AND BOTH HALVES OF THE ORIGINAL CLAIM HERE WERE
+-- FALSE (#527 review). The thread does NOT cease to exist — it is re-inserted
+-- with the same id — and session_end does NOT re-run for a redetect ("a
+-- re-analysis, not a re-end"). So every caller that deletes threads must
+-- re-enqueue in the same transaction. run_session_end and redetect_threads both
+-- do. A new one that does not will silently destroy the debt.
 CREATE TABLE IF NOT EXISTS reflection_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),

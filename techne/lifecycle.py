@@ -360,6 +360,7 @@ def redetect_threads(
         boundary_indices_from_segments,
         save_boundaries,
     )
+    from techne.core.reflect import enqueue_reflection_debt
     from techne.core.state import get_observations, set_session_summary
     from techne.core.threads import (
         detect_summarize_with_metadata,
@@ -389,6 +390,12 @@ def redetect_threads(
         if scores and boundary_a_indices is not None:
             save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
         save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
+        # Re-enqueue INSIDE the transaction: the DELETE above cascades
+        # reflection_queue away, and session_end does not re-run for this session
+        # (this is a re-analysis, not a re-end), so without this the debt is gone
+        # permanently — techne#514's own bug through redetect's door.
+        # Drained rows return as pending; the reflect:emitted marker skips them.
+        enqueue_reflection_debt(config.db_path, session_id, conn=conn)
         conn.commit()
     except Exception:
         conn.rollback()

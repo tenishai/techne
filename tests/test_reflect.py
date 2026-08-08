@@ -1296,3 +1296,34 @@ class TestReflectionQueue:
 
         config = _mk_config(tmp_path, enabled=True)
         assert drain_reflection_queue(config.db_path, []) == 0
+
+
+def test_redetect_preserves_reflection_debt(tmp_path):
+    """#527 review, CRITICAL: `techne redetect` deletes a session's threads, the
+    CASCADE takes reflection_queue with them, and session_end does not re-run —
+    so the debt #514 exists to protect was silently destroyed by an ordinary
+    operator command. Every caller that deletes threads must re-enqueue.
+    """
+    from techne.core.reflect import enqueue_reflection_debt, pending_reflection_queue
+    from techne.lifecycle import redetect_threads
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 5)
+    from techne.core.state import add_observation
+
+    for i in range(12):
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+    _save_thread_row(
+        config,
+        session_id,
+        Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2]),
+    )
+    enqueue_reflection_debt(config.db_path, session_id)
+    assert len(pending_reflection_queue(config.db_path)) == 1
+
+    redetect_threads(config, session_id)
+
+    assert pending_reflection_queue(config.db_path), (
+        "redetect destroyed the queued reflection debt — CASCADE fired and nothing "
+        "re-enqueued (#527 review)"
+    )
