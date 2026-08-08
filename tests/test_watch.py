@@ -353,21 +353,49 @@ def test_watch_cmd_exits_ex_config_on_startup_config_error(monkeypatch) -> None:
     assert "watchdog is not installed" in result.output
 
 
-def test_shipped_unit_refuses_to_respawn_on_ex_config() -> None:
-    """The unit half of the contract, derived rather than retyped.
+def _active_directives(body: str) -> dict[str, set[str]]:
+    """Directives systemd would actually ACT ON, mapped to their values.
 
-    Asserting the literal 78 here would be a second copy of the constant that
-    could drift from techne/exit_codes.py without failing. Deriving it means
-    changing EX_CONFIG alone breaks this test, which is the intent.
+    A substring search over the raw file is NOT this, and the difference is the
+    whole point. `#RestartPreventExitStatus=78` is inert to systemd and
+    indistinguishable from the real thing to `in`; and `"...=7" in "...=78"` is
+    true, so a substring check cannot tell one exit code from another that
+    merely starts with it. The first version of this test passed in BOTH of
+    those states while the contract it guards was broken (PR #523 review).
+
+    Values are unioned across repeated assignments, which matches systemd's
+    append-unless-reset behaviour for the list-valued directives asserted on
+    here. This is a test helper, not a systemd parser: it does not implement
+    the empty-value reset, and would need to if a unit ever used one.
+    """
+    out: dict[str, set[str]] = {}
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;[":
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            out.setdefault(key.strip(), set()).update(value.split())
+    return out
+
+
+def test_shipped_unit_refuses_to_respawn_on_ex_config() -> None:
+    """The unit half of the contract, derived AND parsed.
+
+    Deriving the value from techne/exit_codes.py stops the unit's 78 becoming a
+    second copy of the constant. Deriving alone was not enough: the assertion
+    also has to MATCH like systemd does, or the derivation binds nothing. This
+    now fails if the directive is deleted, commented out, given a different
+    code, or if EX_CONFIG changes without the unit following.
     """
     from techne.exit_codes import EX_CONFIG
 
     unit = Path(__file__).resolve().parents[1] / "deploy" / "techne-watch.service"
-    body = unit.read_text()
+    directives = _active_directives(unit.read_text())
 
-    assert f"RestartPreventExitStatus={EX_CONFIG}" in body, (
+    assert str(EX_CONFIG) in directives.get("RestartPreventExitStatus", set()), (
         "the shipped unit does not prevent restart on the code the app exits with; "
         "one half of the contract without the other still crash-loops"
     )
     # The setting is inert unless the unit actually restarts on failure.
-    assert "Restart=on-failure" in body
+    assert "on-failure" in directives.get("Restart", set())
