@@ -22,7 +22,6 @@ from techne.core.embeddings import EmbeddingBackend
 from techne.core.extension_state import set_state
 from techne.core.knowledge import store as store_knowledge
 from techne.core.search import _VEC_BACKEND_STATE_NAME, _ensure_vec_table
-from tests.conftest import fastembed_is_the_live_backend  # techne#536
 
 
 @pytest.fixture
@@ -47,14 +46,6 @@ def _invoke(args, env=None):
 
 
 class TestVectorsBackfill:
-    @pytest.mark.xfail(
-        fastembed_is_the_live_backend(),
-        strict=True,
-        reason="techne#536: EmbeddingModel.embed() passes fastembed output through "
-        "unchanged, so the documented float32 contract (embeddings.py:16/:92) holds "
-        "only on the model2vec path. Deferred from PR #532 so the #535 coverage lands; "
-        "strict=True means fixing #536 turns this red until the marker is removed.",
-    )
     def test_happy_path_embeds_seeded_knowledge_rows(self, cfg):
         """On this py3.14 venv (model2vec + sqlite-vec + numpy installed by
         design), a DB with knowledge rows should actually get embedded —
