@@ -162,7 +162,13 @@ def collect_health(config: Config) -> dict:
     # runs is worth no more than no detector — so liveness rides the surface the
     # operator already sees on every session.
     try:
-        from techne.core.checks import run_checks, summarize, worst
+        from techne.core.checks import deferred_check_names, run_checks, summarize, worst
+
+        # BEFORE run_checks, deliberately: this reads the registry's markers and
+        # cannot fail, so the key is populated even when the run below throws.
+        # Setting it afterwards would drop it on exactly the path where the
+        # reader most needs to know the summary is partial (techne#488).
+        health["checks_deferred"] = deferred_check_names()
 
         # cheap_only: this runs inside the SessionStart hook under
         # `hooks.timeout_s`, and that path is fail-open — one overrun drops the
@@ -298,6 +304,21 @@ def format_banner(health: dict) -> str:
     # something, so a permanent "all good" row would train the eye to skip it.
     # Names the worst offenders rather than a bare count, because "3 stale" sends
     # you hunting while "rail:consolidate, rail:dream" is actionable.
+    # techne#488 — say how many checks were NOT run. `{'dormant': 12}` gives a
+    # reader no way to tell there was ever a thirteenth, and this module's whole
+    # premise is that an absent check reads as "nothing wrong".
+    #
+    # ONLY ON A LINE THAT ALREADY EXISTS. The banner prints no liveness row when
+    # everything is healthy, on purpose — "a permanent 'all good' row would train
+    # the eye to skip it" — so a deferred notice cannot be given its own row
+    # without reversing that call. The unconditional record is the structured
+    # `checks_deferred` key, which every dict consumer (techne_status, the MCP
+    # surface) sees whether or not a warning renders here.
+    deferred = health.get("checks_deferred") or []
+    deferred_note = (
+        f" ({len(deferred)} deferred to `techne doctor`: {', '.join(deferred)})" if deferred else ""
+    )
+
     worst_verdict = health.get("checks_worst")
     if worst_verdict and worst_verdict not in ("live", "dormant"):
         # THE LIVENESS LAYER ITSELF FAILED — a separate case, and previously the
@@ -310,7 +331,9 @@ def format_banner(health: dict) -> str:
         # the operator actually sees. (#469 review 8, issue 2.)
         checks_error = health.get("checks_error")
         if checks_error:
-            lines.append(f"> ⚠️ liveness check FAILED: {checks_error} — `techne doctor`")
+            lines.append(
+                f"> ⚠️ liveness check FAILED: {checks_error} — `techne doctor`{deferred_note}"
+            )
             # `else`, not an early return: this block happens to be last today,
             # so a return loses nothing — but it would silently drop any line
             # appended below it later, on the one path where the operator most
@@ -331,7 +354,9 @@ def format_banner(health: dict) -> str:
             others = len(all_bad) - len(headline)
             tail = f" (+{extra} more)" if extra > 0 else ""
             tail += f", {others} other" if others else ""
-            lines.append(f"> ⚠️ {worst_verdict.upper()}: {named}{tail} — `techne doctor`")
+            lines.append(
+                f"> ⚠️ {worst_verdict.upper()}: {named}{tail} — `techne doctor`{deferred_note}"
+            )
 
     return "\n".join(lines)
 
