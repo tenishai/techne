@@ -838,3 +838,68 @@ def test_a_corpse_does_not_hide_a_twin_that_shares_its_pid(db_path, monkeypatch,
     _honest(monkeypatch, [_sidecar(A, "poe_1"), *order])
 
     assert coord._durable_name(A) is None, "a running twin sharing a corpse's pid is a rival"
+
+
+def test_send_to_a_name_reads_the_sidecars_once(db_path, monkeypatch):
+    """#494: `send(to=<name>)` scanned ~/.claude/sessions TWICE — once in
+    `session_name()` for the outgoing `from_name`, once in `resolve_recipient()`
+    -> `live_sessions()` to map the name to a session_id.
+
+    NOT A DEDUP, a threading change: the two lookups answer DIFFERENT questions
+    ("what is MY name?" vs "who is THAT name?"), so they cannot share a result —
+    only the underlying read. Pins `send(to='coord')` at 1 as the control, since
+    the broadcast path short-circuits `resolve_recipient` and was never the
+    problem.
+    """
+    calls = {"n": 0}
+    now_ms = time.time() * 1000
+    recs = [
+        {"sessionId": A, "name": "poe_1", "updatedAt": now_ms, "pid": os.getpid()},
+        {"sessionId": B, "name": "poe_2", "updatedAt": now_ms, "pid": os.getpid()},
+    ]
+
+    def counting():
+        calls["n"] += 1
+        return recs
+
+    monkeypatch.setattr(coord, "_session_records", counting)
+    monkeypatch.setattr(coord, "_pid_alive", lambda pid: True)
+
+    calls["n"] = 0
+    coord.send(db_path, A, "broadcast", to="coord")
+    assert calls["n"] == 1, f"send(to='coord') scanned {calls['n']}x"
+
+    calls["n"] = 0
+    coord.send(db_path, A, "direct", to="poe_2")
+    assert calls["n"] == 1, f"send(to=<name>) scanned {calls['n']}x"
+
+
+def test_send_still_snapshots_the_RAW_name_not_the_durable_one(db_path, monkeypatch):
+    """The threading must not reach for `_identity()`'s durable name, tempting as
+    it is — that returns None when a rival holds the same name, which would blank
+    `from_name` on a twin's outgoing rows and change the authorship filter's
+    behaviour. `send` snapshots what THIS session is called; that is a different
+    question from what it can be durably keyed as.
+    """
+    now_ms = time.time() * 1000
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [
+            {"sessionId": A, "name": "poe_1", "updatedAt": now_ms, "pid": os.getpid()},
+            {"sessionId": A2, "name": "poe_1", "updatedAt": now_ms, "pid": os.getpid()},
+        ],
+    )
+    monkeypatch.setattr(coord, "_pid_alive", lambda pid: True)
+    assert coord._durable_name(A) is None, "precondition: the name is ambiguous"
+
+    coord.send(db_path, A, "claiming feat/x", to="coord")
+
+    from techne.core.database import connect
+
+    conn = connect(db_path)
+    try:
+        rows = [r[0] for r in conn.execute("SELECT from_name FROM coord_messages")]
+    finally:
+        conn.close()
+    assert rows == ["poe_1"], "from_name must be the raw -n name, not the durable key"
