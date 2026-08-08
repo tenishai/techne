@@ -148,17 +148,30 @@ jobs:
           path: ~/.cache/fastembed
           key: fastembed-${{ matrix.python-version }}-all-MiniLM-L6-v2
 
-      - name: Pre-fetch the fastembed model
+      - name: Pre-fetch the embedding model
         working-directory: techne
-        # Derived from the module, not hardcoded, so it cannot drift from the
-        # default the code actually selects.
-        run: |
-          .venv-ci/bin/python -c "
-          from techne.core.embeddings import _DEFAULT_FASTEMBED_MODEL
-          from fastembed import TextEmbedding
-          TextEmbedding(model_name=_DEFAULT_FASTEMBED_MODEL)
-          print('prefetched', _DEFAULT_FASTEMBED_MODEL)
-          "
+        # CALLS THE PRODUCTION ENTRY POINT, and that is the whole fix. An earlier
+        # version constructed `TextEmbedding(model_name=...)` itself, deriving the
+        # model name from the module but NOT the cache directory — and
+        # `_build_backend` (embeddings.py:231-237) constructs, mkdirs and passes
+        # `cache_dir=~/.cache/fastembed` explicitly. So the pre-fetch warmed
+        # fastembed's default location while the tests read a different one: the
+        # step ran, passed, and bought a second full download per job.
+        #
+        # IT ALSO PRODUCED A FALSE EXPLANATION. The four failures on #535's first
+        # green run were blamed on "the model not being pre-fetched"; the workflow
+        # was in fact BYTE-IDENTICAL between that run and the passing one (`git
+        # diff 0f5f4a2 e00e4c5` touches tests/ only). The only difference was
+        # actions/cache going MISS -> HIT, populated at post-job BY THE TESTS.
+        # Which means the suite was passing on a warm cache and would have gone
+        # red on the first cold one — a python bump, a model rename, or 7-day
+        # eviction — landing on an unrelated PR wearing a JSONDecodeError.
+        #
+        # `_get_embedding_model()` cannot drift from the code under test: same
+        # backend selection (so this is correct on BOTH sides of the 3.14
+        # fastembed/model2vec split), same model, same cache_dir, by construction.
+        # allow_download defaults True, which is what a pre-fetch wants.
+        run: .venv-ci/bin/python -c "from techne.core.embeddings import _get_embedding_model; m = _get_embedding_model(); print('prefetched', m.name)"
 
       - name: Ruff lint
         working-directory: techne
@@ -198,7 +211,14 @@ jobs:
       # does not support.
       - name: Pytest (includes contract assertions)
         working-directory: techne
-        run: .venv-ci/bin/python -m pytest -q -n 4
+        # `-rs` PRINTS THE SKIP REASONS. Without it this leg reports a bare
+        # "N skipped" and nobody can say WHICH — the exact condition that let
+        # #535 hide six files of vector tests for months. A count is not a
+        # report: an unexplained skip reads as "nothing to see" in precisely the
+        # way techne#488 is about. Local runs skip 18 and CI skipped 5, and until
+        # this flag existed there was no way to know whether those five were the
+        # harmless ones.
+        run: .venv-ci/bin/python -m pytest -q -rs -n 4
 
       # (#398) Deterministic eval gates — FTS-only, no vector/LLM deps, ~0.5s.
       # A regression gate that nothing invokes protects nothing (Prudence, #397).

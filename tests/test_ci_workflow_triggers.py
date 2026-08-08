@@ -46,6 +46,13 @@ def test_pull_request_has_no_base_branch_filter():
     pr = on["pull_request"]
     if pr is None:  # `pull_request:` with no options — the shipped form
         return
+    # `branches-ignore` included: GitHub honours BOTH, and forbidding only
+    # `branches` would let the same disarming be reintroduced through the other
+    # spelling — the invariant is "no base filtering", not "not this one key".
+    assert "branches-ignore" not in pr, (
+        "pull_request must not filter on `branches-ignore` either — GitHub honours "
+        f"it identically and it disarms stacked PRs the same way. Found: {pr}"
+    )
     assert "branches" not in pr, (
         "pull_request must NOT filter on `branches`: the filter matches the PR's "
         "BASE, so a stacked PR (base = a feature branch) would match no trigger "
@@ -134,11 +141,48 @@ def test_test_leg_prefetches_the_model_so_tests_do_not_skip_differently():
     delete the pre-fetch and still pass, which converts a silent skip into a
     silent per-job download — a different failure wearing the same green.
     """
-    runs = _run_lines("test")
-    assert "fastembed" in runs.lower(), (
-        "the `test` leg must pre-fetch its embedding model, or the un-skipped "
-        "tests download it on every job — a silent per-job fetch replacing a "
-        "silent skip"
+    # PARSED, NOT SUBSTRING-MATCHED. The previous version was
+    # `assert "fastembed" in runs.lower()`, and Prudence killed it by replacing
+    # the entire pre-fetch body with `run: echo "fastembed pre-fetch removed on
+    # purpose"` — all seven tests passed. That is 7-versus-78 in a new costume,
+    # written by the same person who had spent the night quoting that lesson at
+    # everyone else, under a docstring claiming the opposite.
+    #
+    # The contract is "the leg pre-fetches VIA THE PRODUCTION ENTRY POINT", so
+    # that is what gets asserted: a step whose `run` imports from
+    # techne.core.embeddings and calls _get_embedding_model. Anything that merely
+    # mentions a backend name fails.
+    prefetch = [
+        s
+        for s in _job_steps("test")
+        if "techne.core.embeddings" in str(s.get("run", ""))
+        and "_get_embedding_model" in str(s.get("run", ""))
+    ]
+    assert len(prefetch) == 1, (
+        "the `test` leg must pre-fetch through _get_embedding_model() so backend, "
+        "model AND cache_dir all come from the module under test. Constructing the "
+        "backend inline warms the wrong directory and the tests then download on "
+        f"every job. Matching steps found: {len(prefetch)}"
+    )
+
+
+def test_eval_vec_keeps_force_download_False():
+    """RESTORED after I deleted it, not re-invented (Prudence, #532 r1).
+
+    An earlier commit asserted `force_download=False` appeared in the test leg's
+    run lines. When that leg moved to fastembed — which has no such knob — I
+    replaced the whole test body instead of RE-SCOPING the assertion, and took
+    eval-vec's protection with it as collateral.
+
+    eval-vec still depends on it: model2vec 0.8.2 defaults force_download=True
+    (embeddings.py:271), so without the flag the actions/cache restore above it is
+    dead weight and the model re-downloads every run. That is Prudence's #403
+    finding, and it was unguarded between #532's rewrite and this commit.
+    """
+    runs = _run_lines("eval-vec")
+    assert "force_download=False" in runs, (
+        "eval-vec's model2vec pre-fetch must pass force_download=False, or its "
+        "cache step is dead weight and the model is re-downloaded every run (#403)"
     )
 
 
