@@ -154,8 +154,25 @@ class TestImportCheapness:
             assert out.returncode == 0, out.stderr
             return int(out.stdout.strip())
 
-        # Baseline imports the allowlist itself, so its transitive closure is on
-        # BOTH sides of the subtraction and cannot inflate or deflate the result.
+        # A FROZEN LITERAL, not a derivation from _FASTCONFIG_ALLOWED_IMPORTS, and
+        # deliberately so. An earlier comment here claimed it "imports the
+        # allowlist itself", which was false and — worse — invited someone to
+        # "fix" it by generating the baseline from the allowlist. That refactor
+        # would break the guard.
+        #
+        # I asked Prudence whether the frozen baseline could silently loosen if
+        # someone widened the allowlist. MEASURED, THE FEAR IS BACKWARDS: a frozen
+        # baseline makes this test STRICTER, because a new allowlist entry then
+        # spends real budget instead of being subtracted away. Add the module to
+        # the allowlist AND import it in fastconfig, baseline unchanged:
+        #
+        #     sys 4 | re 4 | typing 4 | json 6 | hashlib 7   -> pass (they ARE cheap)
+        #     shutil 12 | dataclasses 20 | tempfile 23       -> FAIL, loudly
+        #
+        # The arithmetic already enforces it; no coupling assertion is needed. A
+        # baseline generated from the allowlist would instead grow to match every
+        # addition, and the delta would stay ~4 forever — the guard would go quiet
+        # exactly when someone widened what fastconfig may import.
         baseline = _module_count("import os, pathlib")
         target = _module_count("import techne.fastconfig")
         delta = target - baseline
