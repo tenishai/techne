@@ -376,6 +376,136 @@ def purge_pending(db_path: Path, target: str | None = None) -> int:
         conn.close()
 
 
+# The two row sets the sweep acts on, defined ONCE and shared by the preview and
+# the delete. A dry run that computes its own copy of the predicate is worse than
+# no dry run: it reports on a scope the apply path may not share, and the
+# divergence is invisible precisely when it matters. Both take the ledger-target
+# placeholders as their leading parameters.
+_SWEEP_COLLAPSE = """
+    SELECT id, target FROM (
+        SELECT id, target, ROW_NUMBER() OVER (
+            PARTITION BY target, content_hash
+            ORDER BY (status = 'dead') ASC, id DESC
+        ) AS rn
+        FROM outbox
+        WHERE target IN ({ph})
+          AND status != 'pending'
+          AND content_hash IS NOT NULL
+    ) WHERE rn > 1
+"""
+
+_SWEEP_AGED = """
+    SELECT id, target FROM outbox
+     WHERE status = 'synced'
+       AND target NOT IN ({ph})
+       AND created_at < ?
+"""
+
+
+def _sweep_boundary(conn, retain_days: int, cutoff: str | None) -> str:
+    if cutoff is not None:
+        return cutoff
+    return conn.execute("SELECT datetime('now', ?)", (f"-{int(retain_days)} days",)).fetchone()[0]
+
+
+def sweep_preview(db_path: Path, retain_days: int = 7, cutoff: str | None = None) -> dict:
+    """What ``sweep_delivered`` WOULD delete, computed from the same predicates.
+
+    Returns ``{"collapsed": n, "aged_out": n, "by_target": {...}, "retained": n}``.
+    Read-only.
+    """
+    from techne.core.archivist import LEDGER_TARGETS
+
+    conn = connect(db_path)
+    try:
+        ph = ",".join("?" for _ in LEDGER_TARGETS)
+        targets = tuple(LEDGER_TARGETS)
+        boundary = _sweep_boundary(conn, retain_days, cutoff)
+
+        collapse = conn.execute(_SWEEP_COLLAPSE.format(ph=ph), targets).fetchall()
+        aged = conn.execute(_SWEEP_AGED.format(ph=ph), (*targets, boundary)).fetchall()
+
+        by_target: dict[str, int] = {}
+        for _id, target in [*collapse, *aged]:
+            by_target[target] = by_target.get(target, 0) + 1
+
+        total = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+        return {
+            "collapsed": len(collapse),
+            "aged_out": len(aged),
+            "by_target": by_target,
+            "retained": total - len(collapse) - len(aged),
+        }
+    finally:
+        conn.close()
+
+
+def sweep_delivered(
+    db_path: Path, retain_days: int = 7, cutoff: str | None = None
+) -> dict[str, int]:
+    """Bound outbox growth by dropping delivered rows nothing will read again (#518).
+
+    Returns ``{"collapsed": n, "aged_out": n}``. NEVER touches ``pending`` (not yet
+    delivered) or ``dead`` (diagnostic — ``list_dead`` reads them).
+
+    TWO POLICIES, because the lanes differ in kind and the difference is real:
+
+    * LEDGER TARGETS (``archivist.LEDGER_TARGETS``) — COLLAPSE, DO NOT AGE OUT.
+      Their rows are consulted as a dedup ledger, so the SET of content hashes is
+      load-bearing while the LOG is not. Keeps one row per hash and drops the
+      redundant copies, which is why this needs no age condition: a duplicate hash
+      is waste the moment it lands. Historically 126,160 rows -> ~772.
+    * EVERY OTHER TARGET — AGE OUT. Nothing reads these back (verified: the only
+      reader of ``outbox.content_hash`` outside this module is the pre-filter in
+      ``core/archivist.py``), and their rows are unique events rather than repeats
+      of a bounded set, so collapsing reclaims almost nothing and age is the only
+      bound that works.
+
+    Applying either policy to the other lane fails: age-sweeping the ledger breaks
+    the pre-filter, and collapsing observations reclaims ~21% instead of ~99%.
+
+    PREFERS A NON-DEAD SURVIVOR when collapsing. The pre-filter's query excludes
+    ``status = 'dead'``, so keeping a dead row over a synced one with the same hash
+    would drop that hash from the set and re-enqueue it — the exact bug this
+    function exists to avoid, reintroduced by the fix for it.
+
+    *cutoff* overrides the computed age boundary (tests pass an explicit timestamp
+    rather than sleeping). ``outbox.created_at`` is uniformly space-separated, so
+    it is safe to compare lexically here — verified across 128,200 rows; this is
+    NOT true of ``observations.timestamp`` (#515), so do not generalise it.
+    """
+    from techne.core.archivist import LEDGER_TARGETS
+
+    conn = connect(db_path)
+    try:
+        ph = ",".join("?" for _ in LEDGER_TARGETS)
+        targets = tuple(LEDGER_TARGETS)
+        boundary = _sweep_boundary(conn, retain_days, cutoff)
+
+        # Both deletes select through the SHARED predicates above, so the dry run
+        # cannot describe a different row set than the apply.
+        collapsed = conn.execute(
+            f"DELETE FROM outbox WHERE id IN (SELECT id FROM ({_SWEEP_COLLAPSE.format(ph=ph)}))",
+            targets,
+        ).rowcount
+        aged_out = conn.execute(
+            f"DELETE FROM outbox WHERE id IN (SELECT id FROM ({_SWEEP_AGED.format(ph=ph)}))",
+            (*targets, boundary),
+        ).rowcount
+
+        conn.commit()
+        logger.debug(
+            "swept outbox: collapsed=%d aged_out=%d (retain_days=%d, boundary=%s)",
+            collapsed,
+            aged_out,
+            retain_days,
+            boundary,
+        )
+        return {"collapsed": collapsed, "aged_out": aged_out}
+    finally:
+        conn.close()
+
+
 def prune_orphans(db_path: Path) -> int:
     """Mark pending ``sink:`` rows whose sink isn't registered as dead.
 

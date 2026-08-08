@@ -121,6 +121,26 @@ ARCHIVIST_SINK = OutboxSink(
 
 ARCHIVIST_KNOWLEDGE_TARGET = "sink:archivist_knowledge"
 
+# TARGETS WHOSE DELIVERED OUTBOX ROWS ARE LOAD-BEARING STATE, NOT A LOG (#518).
+#
+# `push_knowledge_to_archivist` reads this lane's rows back as a dedup pre-filter
+# (see the query below), so those rows ARE the de-facto export ledger. Retention
+# must preserve the SET of content hashes here; deleting them makes the next
+# teardown re-enqueue the entire knowledge base — correctly, because as far as the
+# pre-filter can tell the rows really are gone.
+#
+# DEMONSTRATED, not theorised: a hand-run sweep of 128,200 rows on 2026-08-07
+# completed at 20:13 and 761 distinct rows re-enqueued at 20:16:01-06.
+#
+# DECLARED HERE, NEXT TO THE CONSUMER, ON PURPOSE. `techne.sync.outbox` imports
+# this rather than carrying its own copy of the target name: a literal typed next
+# to the thing it describes is a copy, not a mechanism, and it drifts the moment
+# either side moves (techne#1022, and the #508 review that found the same shape
+# five times). `test_ledger_targets_covers_every_prefilter` binds this set to the
+# code that actually reads outbox history, so adding a second pre-filter without
+# declaring it fails the suite.
+LEDGER_TARGETS = frozenset({ARCHIVIST_KNOWLEDGE_TARGET})
+
 
 @dataclass
 class KnowledgePayload:
