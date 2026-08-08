@@ -48,7 +48,10 @@ def home(tmp_path: Path, monkeypatch) -> Path:
 #: Adding an entry here is deliberate and should be justified in the PR: the
 #: module's contract is that it imports ONLY what interpreter startup has already
 #: paid for.
-_FASTCONFIG_ALLOWED_IMPORTS = frozenset({"__future__", "os", "pathlib"})
+#: `sys` is permitted and costs nothing: the interpreter has already imported it
+#: before any user code runs, so it can never add to the graph (Prudence, #522
+#: nit 1). `__future__` likewise — a compile-time directive, not a real import.
+_FASTCONFIG_ALLOWED_IMPORTS = frozenset({"__future__", "os", "pathlib", "sys"})
 
 
 class TestImportCheapness:
@@ -91,44 +94,76 @@ class TestImportCheapness:
             "allowlist deliberately, not by accident."
         )
 
-    def test_importing_fastconfig_stays_under_the_module_budget(self):
+    def test_fastconfig_pulls_nothing_beyond_its_allowlists_own_closure(self):
         """The allowlist above governs THIS file; this governs what the file's
         imports drag in behind them — the transitive half, which no AST can see.
 
-        A COUNT, deliberately, not a set of names: enumerating the transitive
-        closure would be a hand-kept list that drifts with every Python release
-        (pathlib's internals alone move between versions), which is the same
-        maintenance trap #489 exists to escape. The count is the quantity the
-        invariant actually cares about, since each module imported is cost paid.
+        MEASURED AS A DELTA BETWEEN TWO SUBPROCESSES OF THE SAME INTERPRETER, and
+        that framing is the whole correctness of this test:
 
-        The bound is measured, not guessed (2026-08-07, CPython 3.14.6):
+            baseline:  python -c "import os, pathlib"        <- the allowlist
+            target:    python -c "import techne.fastconfig"
 
-            import techne.fastconfig            12 top-level modules
-            ...plus `import yaml`               21   <- cheapest known offender
-            ...plus `import tempfile`           31
-            import techne.config                54   <- the thing this avoids
+        Both sides pay for interpreter startup AND for pathlib's own closure
+        (pathlib -> glob -> re -> enum/functools/collections/...), so all of it
+        cancels. What survives is only what fastconfig adds BEYOND the modules it
+        is already allowed to import.
 
-        18 sits clear of today's 12 (headroom for stdlib drift) and well below
-        21, so the cheapest offender anyone has actually smuggled past a guard
-        still trips it.
+        THE FIRST VERSION OF THIS TEST WAS CALIBRATED THROUGH A CONTAMINATED
+        BASELINE and would have gone red for most contributors (Prudence, #522).
+        It captured `base = set(sys.modules)` INSIDE one process, after startup.
+        Homebrew ships a sitecustomize.py that imports `re` at startup, dragging
+        in eight more modules; all nine were already resident when `base` was
+        taken, so they were subtracted out and read as FREE. On an interpreter
+        without that file they are charged to fastconfig for real:
+
+            interpreter                       old metric   this delta
+            Homebrew 3.14 (dev box)                   13            4
+            uv python-build-standalone 3.13           26            4   <- both measured
+
+        The old number was not the cost of importing fastconfig; it was the cost
+        MINUS whatever the local interpreter's startup happened to pre-load. A
+        delta is only as clean as its baseline, and a baseline captured inside a
+        running process inherits everything that process already did. Taking the
+        baseline in a SEPARATE process, importing exactly the allowlist, removes
+        the contamination instead of budgeting around it.
+
+        Discrimination, measured the same way (2026-08-08):
+
+            techne.fastconfig                 4   <- today
+            ...plus `import yaml`            13
+            ...plus `import tempfile`        23
+            techne.config                    46   <- the thing this module avoids
+
+        The bound is 8: double today's 4, and still far under 13, the cheapest
+        offender anyone has actually smuggled past a guard.
         """
-        out = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import sys; base = set(sys.modules); import techne.fastconfig; "
-                "print(len({m.split('.')[0] for m in set(sys.modules) - base}))",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        assert out.returncode == 0, out.stderr
-        count = int(out.stdout.strip())
-        assert count <= 18, (
-            f"importing techne.fastconfig now pulls {count} top-level modules "
-            "(budget 18). Something in the import graph got expensive — that is "
-            "the entire cost this module exists to avoid."
+
+        def _module_count(stmt: str) -> int:
+            out = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import sys\n{stmt}\n"
+                    "print(len({m.split('.')[0] for m in sys.modules}))",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert out.returncode == 0, out.stderr
+            return int(out.stdout.strip())
+
+        # Baseline imports the allowlist itself, so its transitive closure is on
+        # BOTH sides of the subtraction and cannot inflate or deflate the result.
+        baseline = _module_count("import os, pathlib")
+        target = _module_count("import techne.fastconfig")
+        delta = target - baseline
+
+        assert delta <= 8, (
+            f"techne.fastconfig pulls {delta} top-level modules beyond os+pathlib "
+            "(budget 8). Something entered the import graph that the allowlist does "
+            "not account for — that is the entire cost this module exists to avoid."
         )
 
     def test_importing_fastconfig_does_not_pull_yaml(self):
