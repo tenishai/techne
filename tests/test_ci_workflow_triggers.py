@@ -83,3 +83,75 @@ def test_push_filter_is_still_scoped_to_main():
     push fires only on main.
     """
     assert _triggers()["push"] == {"branches": ["main"]}
+
+
+# --- vector coverage in the test leg (techne#535) --------------------------
+
+
+def _job_steps(job: str) -> list[dict]:
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"][job]["steps"]
+
+
+def _run_lines(job: str) -> str:
+    return "\n".join(str(s.get("run", "")) for s in _job_steps(job))
+
+
+def test_test_leg_installs_the_vectors_extra():
+    """#535: without it, vector tests execute NOWHERE.
+
+    This leg runs the whole suite but had no vector backend, so they SKIPPED;
+    `eval-vec` has the backend but runs `-m eval_vec` only, so they were never
+    SELECTED. Six files fell through: test_inference, test_search,
+    test_embeddings, test_cli_vectors, test_checks, test_documents — none carry
+    the marker. A skip that reads as green is worse than a documented gap
+    (#453's argument, applied to the leg that hides it).
+    """
+    # Parsed out of the install SPEC, not matched as a substring of the whole
+    # step. A bare `"vectors" in runs` would pass on an `echo vectors` or a stray
+    # mention and could not tell an installed extra from a named one — poe_3's
+    # #523 finding, where a substring match could not tell 7 from 78 or a comment
+    # from a live directive. The comparison has to be as strict as the contract.
+    import re
+
+    specs = re.findall(r"-e\s+\"?\.\[([a-z0-9,._-]+)\]\"?", _run_lines("test"))
+    assert specs, f"no editable install spec found in the `test` leg: {_run_lines('test')!r}"
+    extras = {e.strip() for spec in specs for e in spec.split(",")}
+    assert "vectors" in extras, (
+        f"the `test` leg installs extras {sorted(extras)} — it must include "
+        "`vectors`, or every vector test silently skips while the job reports green"
+    )
+
+
+def test_test_leg_prefetches_the_model_so_tests_do_not_skip_differently():
+    """The extra alone is NOT the fix, and this is the assertion that says so.
+
+    `backend_available()` only checks IMPORTABILITY, so installing the extra
+    un-skips the tests — and the ones that matter then embed FOR REAL
+    (test_cli_vectors.py:56: "exercises the real backfill_vectors() path, not a
+    mock"). Without the pinned model on disk, each job re-downloads it.
+
+    So the guard binds BOTH halves. Asserting only the extra would let someone
+    delete the pre-fetch and still pass, which converts a silent skip into a
+    silent per-job download — a different failure wearing the same green.
+    """
+    runs = _run_lines("test")
+    assert "potion-base-8M" in runs, "the `test` leg must pre-fetch the pinned model"
+    assert "force_download=False" in runs, (
+        "pre-fetch must pass force_download=False — model2vec 0.8.2 defaults it to "
+        "True (embeddings.py:271), which makes the restored cache dead weight (#403)"
+    )
+
+
+def test_both_vector_legs_share_one_cache_key():
+    """One download serves both jobs. If the keys ever diverge, each leg pays a
+    separate cold fetch on an ephemeral runner where ~/.cache/huggingface dies
+    with the container — the cost this cache exists to avoid.
+    """
+    keys = [
+        s["with"]["key"]
+        for job in ("test", "eval-vec")
+        for s in _job_steps(job)
+        if isinstance(s.get("with"), dict) and "key" in s.get("with", {})
+    ]
+    assert len(keys) == 2, f"expected a cache step in both vector legs, found {keys}"
+    assert keys[0] == keys[1], f"cache keys diverged: {keys}"

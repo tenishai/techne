@@ -107,7 +107,35 @@ jobs:
         working-directory: techne
         # codex extra brings the tree-sitter grammars so the codex extraction tests
         # run (not skip) in CI.
-        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex]"
+        #
+        # `vectors` added for #535: WITHOUT IT, VECTOR TESTS RAN IN NEITHER LEG.
+        # This leg runs everything but had no vector backend, so they SKIPPED;
+        # eval-vec has the backend but runs `-m eval_vec` only, so they were never
+        # SELECTED. Six files fell through the gap — test_inference, test_search,
+        # test_embeddings, test_cli_vectors, test_checks, test_documents — none of
+        # which carry the eval_vec marker. Measured, not estimated.
+        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex,vectors]"
+
+      # THE EXTRA ALONE IS NOT THE FIX, and shipping it alone would have been
+      # #535 again in a new costume: `backend_available()` only tests
+      # IMPORTABILITY, so the extra un-skips the tests — but the ones that matter
+      # then EMBED FOR REAL (test_cli_vectors.py:56 says so in as many words:
+      # "exercises the real backfill_vectors() path, not a mock"), and an
+      # un-cached model means every job on every matrix entry re-downloads it.
+      # model2vec 0.8.2 defaults force_download=True (embeddings.py:271), so
+      # without force_download=False a restored cache is dead weight — that is
+      # Prudence's #403 finding, reused here rather than rediscovered.
+      #
+      # Same cache KEY as the eval-vec job on purpose: one download serves both.
+      - name: Cache the pinned model2vec model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-model2vec-potion-base-8M
+
+      - name: Pre-fetch potion-base-8M into the HF cache
+        working-directory: techne
+        run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
       - name: Ruff lint
         working-directory: techne
