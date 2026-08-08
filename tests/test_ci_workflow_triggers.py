@@ -135,23 +135,58 @@ def test_test_leg_prefetches_the_model_so_tests_do_not_skip_differently():
     silent per-job download — a different failure wearing the same green.
     """
     runs = _run_lines("test")
-    assert "potion-base-8M" in runs, "the `test` leg must pre-fetch the pinned model"
-    assert "force_download=False" in runs, (
-        "pre-fetch must pass force_download=False — model2vec 0.8.2 defaults it to "
-        "True (embeddings.py:271), which makes the restored cache dead weight (#403)"
+    assert "fastembed" in runs.lower(), (
+        "the `test` leg must pre-fetch its embedding model, or the un-skipped "
+        "tests download it on every job — a silent per-job fetch replacing a "
+        "silent skip"
     )
 
 
-def test_both_vector_legs_share_one_cache_key():
-    """One download serves both jobs. If the keys ever diverge, each leg pays a
-    separate cold fetch on an ephemeral runner where ~/.cache/huggingface dies
-    with the container — the cost this cache exists to avoid.
+def test_each_leg_prefetches_the_backend_ITS_python_actually_gets():
+    """THE ONE THAT COST A RED BUILD, so it is pinned rather than remembered.
+
+    `[vectors]` is split at the 3.14 boundary (techne#601, pyproject.toml:38/45):
+    fastembed below, model2vec at-or-above, because onnxruntime has no 3.14
+    wheel. The `test` matrix is 3.12/3.13 -> fastembed. `eval-vec` pins 3.14 ->
+    model2vec.
+
+    Copying eval-vec's model2vec pre-fetch into the test leg looked obviously
+    right and failed instantly with ModuleNotFoundError, because the resolver had
+    installed the OTHER backend. A pre-fetch must name the backend its own
+    interpreter gets.
     """
-    keys = [
-        s["with"]["key"]
+    test_runs = _run_lines("test").lower()
+    evalvec_runs = _run_lines("eval-vec").lower()
+
+    assert "model2vec" not in test_runs, (
+        "the `test` leg (python 3.12/3.13) resolves `[vectors]` to FASTEMBED — "
+        "model2vec is not installed there (pyproject.toml:45 gates it to >=3.14), "
+        "so a model2vec pre-fetch raises ModuleNotFoundError"
+    )
+    assert "model2vec" in evalvec_runs, (
+        "the eval-vec leg pins python 3.14, which gets model2vec; if that changes, "
+        "its pre-fetch and cache key need revisiting too"
+    )
+
+
+def test_the_two_legs_do_not_share_a_cache_key():
+    """Different backends, different artifacts — so DIFFERENT keys, deliberately.
+
+    This asserts the opposite of what an earlier draft of this file asserted, and
+    the reversal is the point: sharing one key was correct only while both legs
+    used model2vec. With fastembed on the matrix, a shared key would let a 3.14
+    model2vec cache satisfy a 3.12 fastembed restore, reporting a cache hit while
+    leaving the real download to happen anyway.
+    """
+    keys = {
+        job: [
+            s["with"]["key"]
+            for s in _job_steps(job)
+            if isinstance(s.get("with"), dict) and "key" in s.get("with", {})
+        ]
         for job in ("test", "eval-vec")
-        for s in _job_steps(job)
-        if isinstance(s.get("with"), dict) and "key" in s.get("with", {})
-    ]
-    assert len(keys) == 2, f"expected a cache step in both vector legs, found {keys}"
-    assert keys[0] == keys[1], f"cache keys diverged: {keys}"
+    }
+    assert keys["test"] and keys["eval-vec"], f"both legs need a cache step, got {keys}"
+    assert keys["test"] != keys["eval-vec"], (
+        f"the two legs cache DIFFERENT backends and must not share a key: {keys}"
+    )

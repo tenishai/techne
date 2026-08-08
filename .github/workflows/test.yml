@@ -126,16 +126,39 @@ jobs:
       # without force_download=False a restored cache is dead weight — that is
       # Prudence's #403 finding, reused here rather than rediscovered.
       #
-      # Same cache KEY as the eval-vec job on purpose: one download serves both.
-      - name: Cache the pinned model2vec model
+      # THE BACKEND HERE IS NOT model2vec, AND ASSUMING IT WAS COST A RED BUILD.
+      # `[vectors]` is SPLIT AT THE 3.14 BOUNDARY (techne#601, pyproject.toml:38/45):
+      #   python <  3.14  -> fastembed   (onnxruntime has no 3.14 wheel)
+      #   python >= 3.14  -> model2vec
+      # This matrix is 3.12/3.13, so it gets FASTEMBED. eval-vec pins 3.14, which
+      # is why the identical model2vec pre-fetch works there and blew up here with
+      # ModuleNotFoundError on the first run of this change.
+      #
+      # So the pre-fetch has to match the backend the resolver actually chose for
+      # this interpreter, not the one the other job uses. Model name from
+      # embeddings.py:72 (_DEFAULT_FASTEMBED_MODEL) rather than retyped — a second
+      # copy of that string would drift the first time the default changes.
+      - name: Cache the fastembed model
         uses: actions/cache@v4
         with:
-          path: ~/.cache/huggingface
-          key: hf-model2vec-potion-base-8M
+          # fastembed caches ONNX weights here, not in ~/.cache/huggingface.
+          # Deliberately a DIFFERENT key from eval-vec's: different backend,
+          # different artifact. Sharing one key would let a 3.14 model2vec cache
+          # satisfy a 3.12 fastembed restore and leave the real download to run.
+          path: ~/.cache/fastembed
+          key: fastembed-${{ matrix.python-version }}-all-MiniLM-L6-v2
 
-      - name: Pre-fetch potion-base-8M into the HF cache
+      - name: Pre-fetch the fastembed model
         working-directory: techne
-        run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
+        # Derived from the module, not hardcoded, so it cannot drift from the
+        # default the code actually selects.
+        run: |
+          .venv-ci/bin/python -c "
+          from techne.core.embeddings import _DEFAULT_FASTEMBED_MODEL
+          from fastembed import TextEmbedding
+          TextEmbedding(model_name=_DEFAULT_FASTEMBED_MODEL)
+          print('prefetched', _DEFAULT_FASTEMBED_MODEL)
+          "
 
       - name: Ruff lint
         working-directory: techne
