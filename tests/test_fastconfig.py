@@ -50,7 +50,19 @@ def home(tmp_path: Path, monkeypatch) -> Path:
 #: paid for.
 #: `sys` is permitted and costs nothing: the interpreter has already imported it
 #: before any user code runs, so it can never add to the graph (Prudence, #522
-#: nit 1). `__future__` likewise — a compile-time directive, not a real import.
+#: nit 1). Verified — it is resident in the baseline, and its marginal delta is 0.
+#:
+#: `__future__` IS DIFFERENT, and an earlier version of this comment said the
+#: opposite — that it was "a compile-time directive, not a real import". FALSE,
+#: measured: `from __future__ import annotations` compiles to real import
+#: bytecode (`IMPORT_NAME __future__`), it is absent from a bare interpreter AND
+#: from the baseline, and present in the target. It is one of the modules in
+#: today's delta and it spends 1 of the budget's 8.
+#:
+#: It stays allowed — `from __future__ import annotations` is repo-wide style and
+#: one module is a fair price — but it is allowed KNOWINGLY, not because it is
+#: free. This also narrows the contract stated above: fastconfig imports only what
+#: startup has paid for, PLUS `__future__`, which is the one deliberate exception.
 _FASTCONFIG_ALLOWED_IMPORTS = frozenset({"__future__", "os", "pathlib", "sys"})
 
 
