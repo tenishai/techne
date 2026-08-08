@@ -48,21 +48,14 @@ def home(tmp_path: Path, monkeypatch) -> Path:
 #: Adding an entry here is deliberate and should be justified in the PR: the
 #: module's contract is that it imports ONLY what interpreter startup has already
 #: paid for.
-#: `sys` is permitted and costs nothing: the interpreter has already imported it
-#: before any user code runs, so it can never add to the graph (Prudence, #522
-#: nit 1). Verified — it is resident in the baseline, and its marginal delta is 0.
+#: `sys` costs nothing — resident before user code runs, marginal delta 0.
 #:
-#: `__future__` IS DIFFERENT, and an earlier version of this comment said the
-#: opposite — that it was "a compile-time directive, not a real import". FALSE,
-#: measured: `from __future__ import annotations` compiles to real import
-#: bytecode (`IMPORT_NAME __future__`), it is absent from a bare interpreter AND
-#: from the baseline, and present in the target. It is one of the modules in
-#: today's delta and it spends 1 of the budget's 8.
-#:
-#: It stays allowed — `from __future__ import annotations` is repo-wide style and
-#: one module is a fair price — but it is allowed KNOWINGLY, not because it is
-#: free. This also narrows the contract stated above: fastconfig imports only what
-#: startup has paid for, PLUS `__future__`, which is the one deliberate exception.
+#: `__future__` DOES cost: `from __future__ import annotations` emits real
+#: IMPORT_NAME bytecode and lands in the delta (#522 r3). It is not the only one —
+#: `pathlib` drags 8 modules behind it against `__future__`'s 1. The admission
+#: rule is not "startup already paid for it" (nothing here satisfies that but os
+#: and sys); it is: whatever you admit, the closure it drags must keep the delta
+#: under 8, which the budget test enforces.
 _FASTCONFIG_ALLOWED_IMPORTS = frozenset({"__future__", "os", "pathlib", "sys"})
 
 
@@ -113,7 +106,7 @@ class TestImportCheapness:
         replace this with an in-process `set(sys.modules)` diff. Both look like
         cleanups and both break it:
           - in-process: Homebrew's sitecustomize pre-loads `re` + 8 more before
-            the snapshot, so they read as free. Same commit measured 13 here, 26
+            the snapshot, so they read as free. Same commit measured ~12 here, 26
             on a uv standalone build. Cross-process cancels it.
           - derived baseline: grows with every allowlist addition, so the delta
             stays ~4 forever and the guard goes quiet exactly when someone widens
