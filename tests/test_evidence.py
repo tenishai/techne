@@ -989,7 +989,15 @@ class TestSuiteEvidence:
         # the grammar rather than in one example because the unclustered form
         # passed while the clustered one starved (r3 finding 1) — the same shape
         # as `-euo pipefail` above, in env's option loop instead of the shell's.
-        prefixes = ["", "env ", "env -u FOO ", "env -iu FOO ", "env -iC /tmp ", "CI=1 "]
+        # `-uCC` / `-iuCC` are the ATTACHED-value spellings: getopt gives the
+        # first value letter the rest of the token, so they consume NOTHING
+        # extra. The last-letter rule read the trailing C as a value letter,
+        # skipped two tokens and ate `bash` (r4 finding 1). `-P` is BSD's
+        # utilpath, which does take the next token.
+        prefixes = [
+            "", "env ", "env -u FOO ", "env -iu FOO ", "env -iC /tmp ",
+            "env -uCC ", "env -iuCC ", "env -P /usr/local/bin ", "CI=1 ",
+        ]
         quotes = ["'", '"']
         runners = ["pytest -q", "go test ./...", "npm test", "python -m pytest"]
 

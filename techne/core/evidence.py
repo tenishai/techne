@@ -441,7 +441,10 @@ _ENV_PREFIXES = frozenset({"env"})
 #: The fully-quoted spelling `env -S 'bash -c pytest'` is a different shape and
 #: is UNSEEN: the whole payload arrives as a single token which is not a shell
 #: name, so `_shell_c_script` returns None. Starvation, not invention (r3 nit 3).
-_ENV_VALUE_LETTERS = frozenset({"u", "C"})
+#: `P` is BSD's `-P utilpath`, verified present on this box: `env -P /usr/bin pwd`
+#: reports "env: pwd: No such file or directory", i.e. -P consumed the path. The
+#: set is already a GNU/BSD union (`-C` is GNU-only and works here), so P belongs.
+_ENV_VALUE_LETTERS = frozenset({"u", "C", "P"})
 #: Long options take a separate value and never cluster. `-uFOO`/`--unset=FOO`
 #: carry theirs attached, so they correctly skip by one.
 _ENV_VALUE_LONG_OPTS = frozenset({"--unset", "--chdir"})
@@ -515,7 +518,32 @@ def _shell_c_script(segment: str) -> str | None:
             if t.startswith("--"):
                 i += 2 if t in _ENV_VALUE_LONG_OPTS else 1
             elif t[:1] == "-" and len(t) > 1:
-                i += 2 if t[-1] in _ENV_VALUE_LETTERS else 1
+                # ENV USES getopt; THE SHELL SCANNER ABOVE DOES NOT. Applying the
+                # shell's rule here was r3 finding 1 recurring a THIRD time in
+                # this one loop, and the two really do differ:
+                #   bash:  `-oc pipefail S` -> `o` eats the NEXT TOKEN from the
+                #          front of the cluster (measured; bash rolls its own).
+                #   env:   `-uCC bash …`    -> `u` takes the REST OF THE TOKEN
+                #          ("CC") as an attached value and eats NOTHING.
+                # Testing only t[-1] read `-uCC`'s trailing C as a value letter
+                # and skipped two tokens, eating `bash`. Starvation, i.e. a false
+                # green. `env -u CC` (unsetting a compiler var) is idiomatic in
+                # build and CI contexts, not exotic.
+                #
+                # getopt's actual rule: at the FIRST value letter, the remainder
+                # of the token is its value if any remains; only a value letter in
+                # LAST position consumes the following token. All six spellings
+                # below were run against the real env before this was written.
+                cluster = t[1:]
+                first_value = next(
+                    (k for k, ch in enumerate(cluster) if ch in _ENV_VALUE_LETTERS), None
+                )
+                if first_value is None:
+                    i += 1  # flags only (`-i`, `-0`)
+                elif first_value == len(cluster) - 1:
+                    i += 2  # `-u CC`, `-iu CC`, `-P /usr/bin` — value is next token
+                else:
+                    i += 1  # `-uCC`, `-uC`, `-iuCC` — value attached in-token
             elif "=" in t and not t.startswith("-"):
                 i += 1
             else:
