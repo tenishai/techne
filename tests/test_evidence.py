@@ -976,10 +976,20 @@ class TestSuiteEvidence:
             "-O globstar -c",
             "+O globstar -c",
             "+x -c",
+            # Value letter NOT last in the cluster, with `c` in the same cluster.
+            # Both shells on this box run these; the last-letter-only rule
+            # returned `pipefail` as the script and starved. Verified against the
+            # real shell, not against the man page, which says otherwise.
+            "-oc pipefail",
+            "-occ pipefail",
         ]
         # Transparent prefixes: `env bash -c` really does run the script, unlike
         # `/usr/bin/env -c`, which is not a shell invocation at all.
-        prefixes = ["", "env ", "env -u FOO ", "CI=1 "]
+        # `env -iu FOO` is the CLUSTERED spelling of `env -i -u FOO`. It is in
+        # the grammar rather than in one example because the unclustered form
+        # passed while the clustered one starved (r3 finding 1) — the same shape
+        # as `-euo pipefail` above, in env's option loop instead of the shell's.
+        prefixes = ["", "env ", "env -u FOO ", "env -iu FOO ", "env -iC /tmp ", "CI=1 "]
         quotes = ["'", '"']
         runners = ["pytest -q", "go test ./...", "npm test", "python -m pytest"]
 

@@ -403,6 +403,20 @@ _SHELL_C_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 #: pipefail 'echo MARKER'` prints MARKER, i.e. `o` took the value and the script
 #: is the token AFTER it. Keeping the hand-kept part to two letters is the point
 #: — the risk in such a list is proportional to its length. (Prudence, #521 r2.)
+#:
+#: CORRECTION TO THAT DERIVATION, measured 2026-08-07 and the reason the scanner
+#: counts value letters instead of testing only the last one. POSIX says only a
+#: cluster's final letter may take a value; REAL BASH DOES NOT CARE. Both shells
+#: on this machine run `-oc pipefail '<script>'`, and `-oc bogusopt` fails with
+#: "bogusopt: invalid option name" — so `o` ate the next token from the FRONT of
+#: the cluster. Measured, not read off a man page:
+#:
+#:   /usr/local/bin/bash 5.3.15 (the DEFAULT shell here)  -oc  -> runs
+#:   /bin/sh, /bin/bash        3.2.57 (Apple)             -oc  -> runs
+#:
+#: r3 nit 2 said bash 5.3 rejects this spelling and filed it as a curiosity of
+#: legacy /bin/sh. It does not, and it is not: under the last-letter rule this
+#: was a live false green on the shell that actually runs here.
 _SHELL_VALUE_LETTERS = frozenset({"o", "O"})
 
 #: Long options taking a separate value. No clustering applies to these.
@@ -412,10 +426,25 @@ _SHELL_VALUE_LONG_OPTS = frozenset({"--rcfile", "--init-file"})
 #: `env` is skipped along with its own options rather than read as the command.
 #: NOT the same as `/usr/bin/env -c '...'`, which is not a shell invocation.
 _ENV_PREFIXES = frozenset({"env"})
-#: `-S`/`--split-string` is deliberately ABSENT: its "value" is the whole rest of
-#: the command line, which shlex has already split for us, so consuming the next
-#: token would swallow the shell itself (`env -S bash -c '<script>'`).
-_ENV_VALUE_OPTS = frozenset({"-u", "--unset", "-C", "--chdir"})
+#: env's own value-taking options, by LETTER for the same reason the shell rule
+#: is: they cluster (`env -iu FOO bash -c …` is `-i` + `-u FOO`), and a
+#: whole-token set cannot see the clustered spelling — `-iu` is not `-u`. That is
+#: r2 finding 1 in a second loop, and it starved identically until r3 caught it.
+#:
+#: `S` is deliberately NOT a value letter: `-S`/`--split-string`'s "value" is the
+#: whole rest of the command line, which shlex has already split for us, so
+#: consuming the next token would swallow the shell itself. Verified: `env -S
+#: bash -c 'echo MARKER'` prints MARKER, because env splits `bash` into a
+#: one-word list and appends the remaining argv — so skipping `-S` by ONE token
+#: lands exactly on the shell.
+#:
+#: The fully-quoted spelling `env -S 'bash -c pytest'` is a different shape and
+#: is UNSEEN: the whole payload arrives as a single token which is not a shell
+#: name, so `_shell_c_script` returns None. Starvation, not invention (r3 nit 3).
+_ENV_VALUE_LETTERS = frozenset({"u", "C"})
+#: Long options take a separate value and never cluster. `-uFOO`/`--unset=FOO`
+#: carry theirs attached, so they correctly skip by one.
+_ENV_VALUE_LONG_OPTS = frozenset({"--unset", "--chdir"})
 
 #: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
 #: a command is pathological and the gate stops rather than recursing on input.
@@ -479,9 +508,15 @@ def _shell_c_script(segment: str) -> str | None:
         i += 1
         while i < len(tokens):
             t = tokens[i]
-            if t in _ENV_VALUE_OPTS:
-                i += 2
-            elif t.startswith("-") or ("=" in t and not t.startswith("-")):
+            # Same LAST-LETTER-OF-THE-CLUSTER rule as the shell scanner above.
+            # A whole-token test misses `-iu FOO` (which is `-i` + `-u FOO`),
+            # skipping by one so FOO reads as the command and the shell is never
+            # reached — starvation, i.e. a false green.
+            if t.startswith("--"):
+                i += 2 if t in _ENV_VALUE_LONG_OPTS else 1
+            elif t[:1] == "-" and len(t) > 1:
+                i += 2 if t[-1] in _ENV_VALUE_LETTERS else 1
+            elif "=" in t and not t.startswith("-"):
                 i += 1
             else:
                 break
@@ -507,14 +542,30 @@ def _shell_c_script(segment: str) -> str | None:
             continue
         if t[:1] in ("-", "+") and len(t) > 1:
             cluster = t[1:]
-            # Only the LAST letter of a cluster may consume the next token.
-            takes_value = cluster[-1] in _SHELL_VALUE_LETTERS
+            # EVERY value letter in the cluster consumes a token, not just the
+            # last one. Measured against the shells on this box rather than
+            # derived, because the derivation was WRONG (r3 nit 2 asserted POSIX
+            # last-letter-only, and that real bash 5.3 rejects the other
+            # spelling — it does not):
+            #
+            #   bash 5.3.15 -oc pipefail 'echo MARKER'  -> prints MARKER
+            #   bash 5.3.15 -oc bogusopt 'echo MARKER'  -> "bogusopt: invalid
+            #                                              option name"
+            #
+            # That error is the proof: `o` consumed the NEXT TOKEN while sitting
+            # first in the cluster, so position is irrelevant. Under the
+            # last-letter rule `bash -oc pipefail 'pytest -q'` returned
+            # `pipefail` as the script — starvation, i.e. a false green, on the
+            # DEFAULT shell of this machine (/usr/local/bin/bash), not on some
+            # legacy /bin/sh nobody invokes.
+            n_values = sum(1 for ch in cluster if ch in _SHELL_VALUE_LETTERS)
             if "c" in cluster:
-                # The script follows the value when the cluster also took one
-                # (`bash -co pipefail '<script>'`), else it is the next token.
-                k = j + 2 if takes_value else j + 1
+                # The script sits after however many values the cluster ate:
+                # `-c` -> next token; `-co pipefail` / `-oc pipefail` -> the one
+                # after that; `-occ pipefail` likewise (verified: prints MARKER).
+                k = j + 1 + n_values
                 return tokens[k] if k < len(tokens) else None
-            j += 2 if takes_value else 1
+            j += 1 + n_values
             continue
         return None  # a positional before any -c: not a -c invocation
     return None
