@@ -18,11 +18,38 @@ name: test
 # actions/setup-python here: the runner is EPHEMERAL, and setup-python would
 # re-download every interpreter on every job rather than reusing a tool cache that
 # does not survive the container.
+# NO `branches:` FILTER ON pull_request, AND THAT ABSENCE IS LOAD-BEARING (#530).
+# The filter matches a PR's BASE, not its head, so `branches: [main]` meant a
+# STACKED PR (base = another feature branch) matched no trigger and got NO CI AT
+# ALL — not the test matrix, not eval-vec, not arch-cards, since all three jobs
+# live in this one file. Measured on #526: zero runs ever created, while every
+# base=main PR open at the same moment ran normally.
+#
+# WHAT MAKES IT DANGEROUS RATHER THAN MERELY MISSING: there is no red X and no
+# skipped row. The Checks tab is EMPTY, which reads identically to "nothing to
+# report" (techne#488's shape, in our own CI config). And branch protection
+# cannot backstop it — required status checks are unavailable on this repo's plan
+# (`gh api .../branches/main/protection` -> 403 "Upgrade to GitHub Pro or make
+# this repository public"), so this trigger is the ONLY mechanism.
+#
+# STACKING IS FORCED BY OUR OWN CONVENTIONS, so this is not an edge case: two PRs
+# touching one card-anchored source file must both bump the same `anchor:` sha in
+# docs/arch/liveness.md, and two migrations must both edit SCHEMA_VERSION — both
+# guaranteed conflicts that stacking is the normal answer to.
+#
+# REJECTED: adding `fix/*`/`feat/*` to the base filter — a hand-maintained list of
+# branch names is a copy of a convention nothing enforces, and it fails silently
+# the first time someone picks a name outside it. That is the trap that produced
+# this issue. Also rejected: documenting "stacked PRs need workflow_dispatch" — a
+# discipline, not a mechanism, failing the same way, by requiring someone to notice.
+#
+# COST, measured before removing it (2026-08-08): a base=main PR gets exactly ONE
+# pull_request run per sha, and `push` fires only on main, so dropping the filter
+# adds runs ONLY for stacked PRs — which today get zero. It doubles nothing.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
