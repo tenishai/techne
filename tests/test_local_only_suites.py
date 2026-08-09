@@ -16,7 +16,6 @@ load-bearing half: these do not run in CI.
 from __future__ import annotations
 
 import re
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -40,25 +39,28 @@ def test_workflows_exist_at_all():
     assert WORKFLOWS, "no workflow files found — the scans below would prove nothing"
 
 
-def _addopts() -> str:
-    """The addopts pytest will ACT ON — parsed, not grepped.
+def _addopts(pytestconfig) -> str:
+    """The addopts pytest is ACTUALLY USING — asked, not parsed.
 
-    Reading the raw file was the same comment-vs-code defect `_executable_text`
-    exists to prevent, twelve lines below, guarding the headline case. Dropping
-    `not probe` from addopts while leaving a comment that mentions it — the edit
-    a person would actually make — passed every assertion here while three
-    `probe` tests entered the default CI job and started spawning real agent
-    sessions on the runner.
+    Three sources have now been wrong here, each one closer than the last.
+    Grepping pyproject.toml's raw text let a comment mentioning `not probe`
+    stand in for the setting. Parsing pyproject.toml fixed that and was STILL
+    wrong: pyproject is only one of five places pytest looks and is not the
+    highest-precedence one — a `pytest.ini` overrides it outright, and the
+    "ignoring pytest config in pyproject.toml" warning is suppressed under
+    `-q`, which is how CI runs. Asking the live config ends the regress: it
+    reports whatever file actually won, and returns a list, so the list-form
+    `addopts = ["-m", "..."]` spelling stops being a false alarm.
     """
-    data = tomllib.loads((REPO / "pyproject.toml").read_bytes().decode())
-    return data["tool"]["pytest"]["ini_options"]["addopts"]
+    return " ".join(pytestconfig.getini("addopts"))
 
 
 @pytest.mark.parametrize("marker", LOCAL_ONLY_MARKERS)
-def test_marker_is_excluded_from_the_default_run(marker):
-    assert f"not {marker}" in _addopts(), (
+def test_marker_is_excluded_from_the_default_run(marker, pytestconfig):
+    assert f"not {marker}" in _addopts(pytestconfig), (
         f"`{marker}` is no longer excluded from the default pytest run, so it now executes "
-        f"in the standard job — ARCHITECTURE.md still calls it local-only"
+        f"in the standard job (config in force: {pytestconfig.inipath}) — "
+        f"ARCHITECTURE.md still calls it local-only"
     )
 
 
