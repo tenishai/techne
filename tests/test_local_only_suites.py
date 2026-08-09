@@ -40,44 +40,60 @@ def test_workflows_exist_at_all():
     assert WORKFLOWS, "no workflow files found — the scans below would prove nothing"
 
 
-def _addopts(pytestconfig) -> str:
-    """The addopts pytest is ACTUALLY USING — asked, not parsed.
+def _effective_markexpr(pytestconfig) -> str:
+    """The marker expression pytest will ACTUALLY SELECT WITH.
 
-    Two simpler implementations were wrong before this one, and BOTH read
-    better than it does — which is why the reasons live here:
-      * grepping pyproject.toml's raw text let a COMMENT mentioning `not probe`
-        stand in for the setting;
-      * parsing pyproject.toml was still wrong, because a `pytest.ini` overrides
-        it outright and the "ignoring pytest config in pyproject.toml" warning
-        is suppressed under `-q`, which is how CI runs — so the failure was
-        silent rather than merely wrong.
+    Four earlier sources were wrong, each reading better than the last:
+      * grepping pyproject.toml's raw text — a COMMENT stood in for the setting;
+      * parsing pyproject.toml — a `pytest.ini` overrides it outright, and the
+        "ignoring pytest config in pyproject.toml" warning is suppressed under
+        `-q`, which is how CI runs, so the failure was SILENT;
+      * `getini("addopts")` — does not see `PYTEST_ADDOPTS` or a command-line
+        `-m`, both of which win. (Observed, not explained: an earlier version of
+        this docstring claimed pytest prepends the env var's args ahead of the
+        ini. That could not be reproduced — repeated `-m` is last-wins, so args
+        landing ahead would LOSE, yet PYTEST_ADDOPTS demonstrably wins. The
+        observable fact stands; the mechanism was a guess and is gone.)
+      * and none of them see IN-PROCESS reconfiguration: a `pytest_configure`
+        hook in a conftest, or a plugin loaded via `-p` / `PYTEST_PLUGINS`, can
+        set `config.option.markexpr = ""` and drop every exclusion while the ini
+        stays pristine. No workflow edit is required, so no static scan can
+        catch it.
 
-    WHERE THIS ANSWER STOPS, which matters more than the history: `getini` does
-    NOT see `PYTEST_ADDOPTS` (pytest prepends the env var's args AHEAD of the
-    ini value, so the ini is never reached) and does not see a command-line
-    `-m`, which beats `addopts` outright. Both route around this function
-    entirely, which is why the workflow-side assertions below exist — they are
-    not belt-and-braces, they cover cases this cannot.
+    `option.markexpr` is the effective expression and was truthful on every one
+    of those routes when measured. It is public API — deliberately not
+    `_pytest.mark.expression`, which would answer selection exactly at the cost
+    of a private-API dependency in a guard meant to still work in a year.
 
-    ALSO RUN-DEPENDENT, in the safe direction: this reads the config of the RUN,
-    so `pytest -o addopts=` or a stray `pytest.ini` at the root makes it fail on
-    a perfectly correct repo. Loud and self-explanatory (the message prints
-    `inipath`), and far cheaper than the false green it replaced.
+    STILL RUN-DEPENDENT, in the safe direction: this reads the run, so
+    `pytest -m probe` (which the card TELLS you to run locally) fails these two
+    assertions. Loud and self-explanatory, and far cheaper than the false green
+    it replaced. The workflow-side assertions below are NOT redundant with this
+    one — a run-side check only sees the run it is in, so a widening confined to
+    a CI step that never collects this file is a static-only catch.
     """
-    return " ".join(pytestconfig.getini("addopts"))
+    return pytestconfig.option.markexpr or ""
 
 
 @pytest.mark.parametrize("marker", LOCAL_ONLY_MARKERS)
 def test_marker_is_excluded_from_the_default_run(marker, pytestconfig):
-    assert f"not {marker}" in _addopts(pytestconfig), (
+    assert f"not {marker}" in _effective_markexpr(pytestconfig), (
         f"`{marker}` is no longer excluded from the default pytest run, so it now executes "
-        f"in the standard job (config in force: {pytestconfig.inipath}) — "
+        f"in the standard job (markexpr in force: {_effective_markexpr(pytestconfig)!r}, "
+        f"config: {pytestconfig.inipath}) — "
         f"ARCHITECTURE.md still calls it local-only"
     )
 
 
 def _executable_text(workflow: Path) -> str:
     """Everything a workflow actually RUNS — `run:` bodies and `env:` values.
+
+    DELIBERATELY NOT CAUGHT, because an honest boundary beats a fragile
+    parser: `sh -c "pytest -m ..."` (nested quoting) and `-m"not slow"` (value
+    attached to the flag; pytest does honour it). Also, an env-var-interpolated
+    interpreter such as `$PY -m pytest -m "not slow"` DOES trip the blessing
+    assertion — safe direction — but reports `pytest` as an unblessed
+    expression too, because the `python` check cannot see through `$PY`.
 
     NOT the raw file. Grepping the text matched `# CLI -m overrides the addopts
     exclusion. eval_llm stays out (needs a key)` — a COMMENT explaining why the
@@ -93,7 +109,13 @@ def _executable_text(workflow: Path) -> str:
         if isinstance(node, dict):
             for key, value in node.items():
                 if key == "run" and isinstance(value, str):
-                    parts.append(value)
+                    # Join `\`-continuations FIRST. shlex raises on a trailing
+                    # backslash, and the old `except ValueError: continue` then
+                    # discarded the whole line — so a long command split across
+                    # lines, which is simply how CI commands are written, hid its
+                    # `-m` from every assertion here including the pre-existing
+                    # marker one. Not an evasion; the normal case.
+                    parts.append(value.replace("\\\n", " "))
                 elif key == "env" and isinstance(value, dict):
                     parts.extend(f"{k}={v}" for k, v in value.items())
                 else:
