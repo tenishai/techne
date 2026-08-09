@@ -369,13 +369,22 @@ def _active_directives(body: str, section: str = "Service") -> dict[str, set[str
     * a later `RestartPreventExitStatus=` — assigning the empty string RESETS
       the list and voids every prior assignment.
 
-    Values are unioned across repeated assignments (systemd appends), except
-    for that empty-value reset, which clears what came before.
+    Repetition follows systemd.syntax(7): a repeated option OVERRIDES the
+    previous setting UNLESS the option is list-valued, in which case values are
+    appended. Unioning everything was wrong for `Restart=`, which takes a single
+    enum — appending `Restart=no` after `Restart=on-failure` left the stale
+    `on-failure` in the set and passed, while systemd reads `no` and the unit
+    never restarts at all, making RestartPreventExitStatus decorative. The
+    empty-value reset is correct for both kinds.
 
     Still a test helper, not a systemd parser: it does not handle line
     continuations, quoting, or `.d/` drop-in directories. Indented directives
     ARE accepted, because systemd accepts them.
     """
+    #: Directives this helper is asserted against that systemd treats as lists.
+    #: Extend when a new list-valued directive is asserted on; anything absent
+    #: is single-valued and last-assignment-wins.
+    list_valued = {"RestartPreventExitStatus"}
     out: dict[str, set[str]] = {}
     current: str | None = None
     for raw in body.splitlines():
@@ -391,10 +400,12 @@ def _active_directives(body: str, section: str = "Service") -> dict[str, set[str
         if not sep:
             continue
         key = key.strip()
-        if value.strip():
+        if not value.strip():
+            out[key] = set()
+        elif key in list_valued:
             out.setdefault(key, set()).update(value.split())
         else:
-            out[key] = set()
+            out[key] = set(value.split())
     return out
 
 
@@ -453,6 +464,10 @@ def test_real_process_exits_ex_config(tmp_path) -> None:
         text=True,
         env=env,
         timeout=120,
+        # PINNED: `python -c` puts cwd at sys.path[0], so an inherited cwd
+        # decides WHICH copy of techne this proves. From the repo root that is
+        # the working tree; from anywhere else it is whatever is importable.
+        cwd=Path(__file__).resolve().parents[1],
     )
 
     assert proc.returncode == EX_CONFIG, (proc.returncode, proc.stderr[-2000:])
