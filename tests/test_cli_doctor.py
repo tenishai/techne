@@ -14,6 +14,7 @@ import pytest
 from click.testing import CliRunner
 
 from techne.cli import main
+from techne.config import HookConfig
 
 
 @pytest.fixture
@@ -538,3 +539,50 @@ def test_an_uninitialised_machine_is_not_told_its_mcp_is_broken(cli_db):
 
     out = CliRunner().invoke(main, ["doctor"]).output
     assert "mcp:registration" not in out, out
+
+
+class TestDoctorOnANeverInitialisedMachine:
+    """The surface #480 is NAMED after, which the r3 behaviour net missed.
+
+    `cli_db` pins `loaded_from` for every other doctor test — correct for those,
+    since they assert about drift and a chosen posture — but it means no doctor
+    test can reach a machine with a store and no config.yaml. That state is
+    reachable in production: `init_session` creates the DB, so wiring the MCP
+    server into Claude Code without ever running `techne init` produces it.
+
+    Both of doctor's advising branches are covered here, because they are
+    separate call sites and the r1 defect was that a call site can bypass the
+    builder without anything noticing.
+    """
+
+    @pytest.fixture
+    def uninitialised(self, cli_db):
+        cli_db.loaded_from = None
+        cli_db.posture.mode = "observe"  # dataclass default, NOT a choice
+        return cli_db
+
+    def test_install_hint_asks_for_auto(self, uninitialised):
+        """cli.py:316 — the branch a never-initialised machine actually hits,
+        since no launcher is installed there."""
+        _write_settings("{}")  # present, but no launcher => not installed
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        assert "not counted" in result.output, result.output
+        assert "--posture auto" in result.output, result.output
+        assert "--posture observe" not in result.output, result.output
+
+    def test_drift_remedy_asks_for_auto(self, uninitialised):
+        """cli.py:307 — the drift `remedy:` line, reached once a launcher is
+        registered but config and settings.json disagree."""
+        from techne.platforms import claude_code
+
+        uninitialised.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(uninitialised)
+        uninitialised.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        assert "remedy:" in result.output, result.output
+        assert "--posture auto" in result.output, result.output
+        assert "--posture observe" not in result.output, result.output
