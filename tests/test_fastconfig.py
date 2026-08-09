@@ -36,26 +36,14 @@ def home(tmp_path: Path, monkeypatch) -> Path:
     return h
 
 
-#: Every module `fastconfig` may import, anywhere in the file. An ALLOWLIST, not
-#: a blocklist, and that inversion is the point of techne#489: the three previous
-#: guards all asked "is this techne (or yaml)?", which is a question about
-#: IDENTITY. The invariant is about COST. Prudence walked two imports past all 22
-#: tests — a deferred `import yaml` inside load_fast() (16.0ms) and a module-level
-#: `import tempfile` (11.9ms) — neither of which is techne, either of which
-#: deletes most of the 55ms benefit while CI stays green. A blocklist can only
-#: ever name the expensive things someone already thought of.
+#: Every module `fastconfig` may import, anywhere in the file. An ALLOWLIST, not a
+#: blocklist (#489): a blocklist can only name the expensive things someone
+#: already thought of, and two imports walked past all 22 tests that way.
 #:
-#: Adding an entry here is deliberate and should be justified in the PR: the
-#: module's contract is that it imports ONLY what interpreter startup has already
-#: paid for.
-#: `sys` costs nothing — resident before user code runs, marginal delta 0.
-#:
-#: `__future__` DOES cost: `from __future__ import annotations` emits real
-#: IMPORT_NAME bytecode and lands in the delta (#522 r3). It is not the only one —
-#: `pathlib` drags 8 modules behind it against `__future__`'s 1. The admission
-#: rule is not "startup already paid for it" (nothing here satisfies that but os
-#: and sys); it is: whatever you admit, the closure it drags must keep the delta
-#: under 8, which the budget test enforces.
+#: ADMISSION RULE: whatever you admit, the closure it drags must keep the budget
+#: test's delta under 8. Measured cost of the current four — os 0, sys 0,
+#: pathlib 8, __future__ 1. Do NOT reach for "only what startup already paid
+#: for": only os and sys satisfy that, and it would reject pathlib.
 _FASTCONFIG_ALLOWED_IMPORTS = frozenset({"__future__", "os", "pathlib", "sys"})
 
 
