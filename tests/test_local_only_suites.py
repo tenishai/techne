@@ -16,6 +16,7 @@ load-bearing half: these do not run in CI.
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -42,15 +43,26 @@ def test_workflows_exist_at_all():
 def _addopts(pytestconfig) -> str:
     """The addopts pytest is ACTUALLY USING — asked, not parsed.
 
-    Three sources have now been wrong here, each one closer than the last.
-    Grepping pyproject.toml's raw text let a comment mentioning `not probe`
-    stand in for the setting. Parsing pyproject.toml fixed that and was STILL
-    wrong: pyproject is only one of five places pytest looks and is not the
-    highest-precedence one — a `pytest.ini` overrides it outright, and the
-    "ignoring pytest config in pyproject.toml" warning is suppressed under
-    `-q`, which is how CI runs. Asking the live config ends the regress: it
-    reports whatever file actually won, and returns a list, so the list-form
-    `addopts = ["-m", "..."]` spelling stops being a false alarm.
+    Two simpler implementations were wrong before this one, and BOTH read
+    better than it does — which is why the reasons live here:
+      * grepping pyproject.toml's raw text let a COMMENT mentioning `not probe`
+        stand in for the setting;
+      * parsing pyproject.toml was still wrong, because a `pytest.ini` overrides
+        it outright and the "ignoring pytest config in pyproject.toml" warning
+        is suppressed under `-q`, which is how CI runs — so the failure was
+        silent rather than merely wrong.
+
+    WHERE THIS ANSWER STOPS, which matters more than the history: `getini` does
+    NOT see `PYTEST_ADDOPTS` (pytest prepends the env var's args AHEAD of the
+    ini value, so the ini is never reached) and does not see a command-line
+    `-m`, which beats `addopts` outright. Both route around this function
+    entirely, which is why the workflow-side assertions below exist — they are
+    not belt-and-braces, they cover cases this cannot.
+
+    ALSO RUN-DEPENDENT, in the safe direction: this reads the config of the RUN,
+    so `pytest -o addopts=` or a stray `pytest.ini` at the root makes it fail on
+    a perfectly correct repo. Loud and self-explanatory (the message prints
+    `inipath`), and far cheaper than the false green it replaced.
     """
     return " ".join(pytestconfig.getini("addopts"))
 
@@ -127,3 +139,64 @@ def test_the_card_still_carries_the_policy():
     assert "DELIBERATELY LOCAL-ONLY" in card
     for token in (*LOCAL_ONLY_MARKERS, "RUN_LSP_INTEGRATION"):
         assert token in card, f"ARCHITECTURE.md no longer names `{token}` as local-only"
+
+
+#: Marker expressions the workflows are deliberately allowed to pass to pytest.
+#: A FOURTH expression is not necessarily wrong — it is a deliberate edit that
+#: should make someone check whether it widens selection, which is the whole
+#: point of tripping here rather than silently allowing it.
+BLESSED_MARKER_EXPRESSIONS = {"eval or eval_gate", "eval_vec"}
+
+
+def _pytest_marker_expressions(workflow: Path) -> list[str]:
+    """`-m` values passed to PYTEST, not `python -m <module>` invocations.
+
+    `python -m pytest` and `python -m ruff` both contain `-m`; neither is a
+    marker expression. Distinguished by the preceding token rather than by
+    pattern-matching the value, because the value is arbitrary text.
+    """
+    found: list[str] = []
+    for line in _executable_text(workflow).splitlines():
+        try:
+            tokens = shlex.split(line)
+        except ValueError:  # unbalanced quotes in a shell line we do not own
+            continue
+        for i, tok in enumerate(tokens):
+            if tok != "-m" or i + 1 >= len(tokens):
+                continue
+            prev = tokens[i - 1] if i else ""
+            if prev.endswith(("python", "python3")) or "python" in Path(prev).name:
+                continue  # `python -m <module>`
+            found.append(tokens[i + 1])
+    return found
+
+
+def test_no_workflow_sets_pytest_addopts():
+    """`PYTEST_ADDOPTS` routes around the ini entirely.
+
+    pytest prepends the env var's args AHEAD of `addopts`, so setting it to
+    `-m "not eval"` drops every other exclusion while `getini` still reports the
+    pristine value. Measured in review: 7 tests the policy says never run
+    entered the run, and all assertions stayed green.
+    """
+    setters = [w.name for w in WORKFLOWS if "PYTEST_ADDOPTS" in _executable_text(w)]
+    assert setters == [], (
+        f"{setters} set PYTEST_ADDOPTS, which overrides addopts before pytest reads it — "
+        f"the local-only exclusions can be dropped there with every assertion here green"
+    )
+
+
+def test_workflow_marker_expressions_are_blessed():
+    """A command-line `-m` beats `addopts` outright.
+
+    `test.yml` says so itself four lines above the job that relies on it. So a
+    workflow running `pytest -m "not slow"` names no local-only marker, trips no
+    other assertion here, and (measured) collects every deselected test.
+    """
+    seen = {expr for w in WORKFLOWS for expr in _pytest_marker_expressions(w)}
+    unexpected = sorted(seen - BLESSED_MARKER_EXPRESSIONS)
+    assert unexpected == [], (
+        f"unblessed pytest marker expression(s) in a workflow: {unexpected}. A CLI `-m` "
+        f"overrides addopts, so this may widen selection past the local-only policy. "
+        f"If it is correct, add it to BLESSED_MARKER_EXPRESSIONS deliberately."
+    )
