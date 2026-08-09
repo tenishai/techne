@@ -1611,3 +1611,55 @@ class TestUnusableBranchGivesAWorkableRemedy:
         block = render_drift_block(cfg)
         assert "Reconcile:" in block, block
         assert "Repair or move aside" not in block, block
+
+
+class TestNeverInitialisedMachineBehaviour:
+    """Behaviour coverage for the #480 case, on every surface that advises.
+
+    PR #525 r3: the spelling guard in test_checks.py is HARDENING, not the fix.
+    A regression can always be written in a spelling no fingerprint anticipates,
+    and the r2 fixture change — giving `cfg` a `loaded_from`, correct in itself —
+    left NO test exercising a machine with no config.yaml. These assert the
+    OUTCOME, so they bite regardless of how a regression is spelled.
+    """
+
+    def _uninitialised(self, cfg):
+        """A machine with a store but no config.yaml — `init_session` creates the
+        DB, so wiring the MCP server up without ever running `techne init`
+        produces exactly this."""
+        cfg.loaded_from = None
+        cfg.posture.mode = "observe"  # the dataclass default, NOT a choice
+        return cfg
+
+    def test_banner_asks_for_auto_when_never_initialised(self, fake_home, cfg):
+        from techne.hooks.session_start import render_drift_block
+
+        cfg = self._uninitialised(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        block = render_drift_block(cfg)
+
+        assert "--posture auto" in block, block
+        assert "--posture observe" not in block, block
+
+    def test_status_asks_for_auto_when_never_initialised(self, fake_home, cfg, monkeypatch):
+        """The surface that gave OPPOSITE advice to doctor before this PR."""
+        from click.testing import CliRunner
+
+        from techne.cli import main
+        from techne.config import Config
+        from techne.core.database import init_db
+
+        cfg = self._uninitialised(cfg)
+        init_db(cfg.db_path).close()
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+        monkeypatch.setattr(Config, "load", classmethod(lambda _cls: cfg))
+
+        result = CliRunner().invoke(main, ["status"])
+
+        assert "--posture auto" in result.output, result.output
+        assert "--posture observe" not in result.output, result.output
