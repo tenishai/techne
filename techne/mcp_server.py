@@ -1602,14 +1602,24 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
             "note": "empty response — nothing to ingest",
         }
 
-    return ingest_reflection_response(
+    thread_id = args.get("thread_id", "")
+    result = ingest_reflection_response(
         config,
         args.get("session_id", ""),
-        args.get("thread_id", ""),
+        thread_id,
         args.get("prompt_hash", ""),
         response,
         model_used=args.get("model_used", "agent-assisted"),
     )
+    # Close the #514 loop here: this is the only point where a thread is known to
+    # have been reflected. Without it nothing ever calls drain_reflection_queue,
+    # the queued-debt banner never clears, and it saturates into noise — the drain
+    # half of the mechanism-present-but-not-load-bearing shape #514 is about.
+    if thread_id:
+        from techne.core.reflect import drain_reflection_queue
+
+        result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
+    return result
 
 
 def _techne_consolidate_emit(args: dict, config: Config) -> dict:

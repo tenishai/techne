@@ -385,17 +385,31 @@ def redetect_threads(
     )
     conn = connect(config.db_path)
     try:
+        prior_drained = {
+            r["thread_id"]: r["drained_at"]
+            for r in conn.execute(
+                "SELECT thread_id, drained_at FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NOT NULL",
+                (session_id,),
+            )
+        }
         conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
         if scores and boundary_a_indices is not None:
             save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
         save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
         # Re-enqueue INSIDE the transaction: the DELETE above cascades
-        # reflection_queue away, and session_end does not re-run for this session
-        # (this is a re-analysis, not a re-end), so without this the debt is gone
-        # permanently — techne#514's own bug through redetect's door.
-        # Drained rows return as pending; the reflect:emitted marker skips them.
+        # reflection_queue away and session_end does not re-run for a redetect,
+        # so without this the debt is lost permanently (#527 r1).
         enqueue_reflection_debt(config.db_path, session_id, conn=conn)
+        # Restore drain stamps for threads that came back with the same id.
+        # Re-enqueueing alone resurrects PAID debt as pending, which re-fires the
+        # banner and makes its "oldest from" age wrong (#527 r2).
+        for tid, drained in prior_drained.items():
+            conn.execute(
+                "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
+                (drained, tid),
+            )
         conn.commit()
     except Exception:
         conn.rollback()

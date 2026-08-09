@@ -1327,3 +1327,78 @@ def test_redetect_preserves_reflection_debt(tmp_path):
         "redetect destroyed the queued reflection debt — CASCADE fired and nothing "
         "re-enqueued (#527 review)"
     )
+
+
+def test_ingest_drains_the_queue_so_the_banner_can_clear(tmp_path):
+    """#527 r1: drain_reflection_queue had NO production caller, so the queued-debt
+    banner grew forever and the action it named ("run techne_reflect_emit")
+    returned count:0 on an already-reflected session. The drain half of #504's
+    shape, inside the PR that refused to ship it.
+    """
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        enqueue_reflection_debt,
+        pending_reflection_queue,
+    )
+    from techne.mcp_server import _techne_reflect_ingest
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 5)
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2, 3, 4])
+    _save_thread_row(config, session_id, thread)
+    enqueue_reflection_debt(config.db_path, session_id)
+    assert len(pending_reflection_queue(config.db_path)) == 1
+
+    batch = emit_reflection_batch(config, session_id, [thread], obs)
+    assert batch, "precondition: emit produced a prompt to answer"
+    item = batch[0]
+    _techne_reflect_ingest(
+        {
+            "session_id": session_id,
+            "thread_id": item["thread_id"],
+            "prompt_hash": item["prompt_hash"],
+            "response": _candidate_array("Drain fact"),
+        },
+        config,
+    )
+
+    assert pending_reflection_queue(config.db_path) == [], (
+        "ingest must drain the queue — otherwise the banner never clears and "
+        "saturates into unconditional noise"
+    )
+
+
+def test_redetect_preserves_a_paid_drain_stamp(tmp_path):
+    """#527 r2: re-enqueueing after redetect resurrected PAID debt as pending.
+
+    Drives redetect TWICE. thread_row_id is content-addressed for
+    heuristic-detected threads, so an unchanged segmentation yields the SAME id
+    on the second pass — which is the case where the drain stamp must survive.
+    (A changed segmentation is a genuinely new thread and SHOULD owe reflection.)
+    """
+    from techne.core.reflect import (
+        drain_reflection_queue,
+        pending_reflection_queue,
+    )
+    from techne.core.state import add_observation
+    from techne.lifecycle import redetect_threads
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 5)
+    for i in range(12):
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+
+    redetect_threads(config, session_id)
+    queued = pending_reflection_queue(config.db_path)
+    assert queued, "precondition: the first redetect enqueued debt"
+    before = {q["thread_id"] for q in queued}
+    drain_reflection_queue(config.db_path, [q["thread_id"] for q in queued])
+    assert pending_reflection_queue(config.db_path) == []
+
+    redetect_threads(config, session_id)
+
+    after = pending_reflection_queue(config.db_path)
+    resurrected = {q["thread_id"] for q in after} & before
+    assert not resurrected, (
+        f"redetect resurrected already-reflected debt as pending: {resurrected} (#527 r2)"
+    )
