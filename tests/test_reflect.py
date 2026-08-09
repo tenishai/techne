@@ -1402,3 +1402,40 @@ def test_redetect_preserves_a_paid_drain_stamp(tmp_path):
     assert not resurrected, (
         f"redetect resurrected already-reflected debt as pending: {resurrected} (#527 r2)"
     )
+
+
+def test_a_parse_failure_does_not_stamp_the_debt_paid(tmp_path):
+    """#527 r3, CRITICAL: the drain fired whenever thread_id was truthy —
+    including the branch whose own comment reads "THE PASS DID NOT HAPPEN"
+    (reflect.py:645). A discarded reflection was stamped paid, permanently,
+    because drain is guarded on drained_at IS NULL.
+    """
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        enqueue_reflection_debt,
+        pending_reflection_queue,
+    )
+    from techne.mcp_server import _techne_reflect_ingest
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 5)
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2, 3, 4])
+    _save_thread_row(config, session_id, thread)
+    enqueue_reflection_debt(config.db_path, session_id)
+    item = emit_reflection_batch(config, session_id, [thread], obs)[0]
+
+    out = _techne_reflect_ingest(
+        {
+            "session_id": session_id,
+            "thread_id": item["thread_id"],
+            "prompt_hash": item["prompt_hash"],
+            "response": "I am sorry, I cannot produce that JSON.",
+        },
+        config,
+    )
+
+    assert out.get("parse_failures") == 1, "precondition: the response did not parse"
+    assert pending_reflection_queue(config.db_path), (
+        "a DISCARDED reflection was stamped paid — the debt is now unrecoverable "
+        "because drain is guarded on drained_at IS NULL (#527 r3)"
+    )

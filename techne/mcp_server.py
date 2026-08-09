@@ -1611,11 +1611,12 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
         response,
         model_used=args.get("model_used", "agent-assisted"),
     )
-    # Close the #514 loop here: this is the only point where a thread is known to
-    # have been reflected. Without it nothing ever calls drain_reflection_queue,
-    # the queued-debt banner never clears, and it saturates into noise — the drain
-    # half of the mechanism-present-but-not-load-bearing shape #514 is about.
-    if thread_id:
+    # Drain ONLY on a pass that actually happened. parse_failures marks the
+    # branch whose own comment reads "THE PASS DID NOT HAPPEN" (reflect.py:645) —
+    # draining there stamps a DISCARDED reflection as paid, permanently, since
+    # drain is guarded on drained_at IS NULL. errors covers the same ground for
+    # any other failure mode.
+    if thread_id and not result.get("parse_failures") and not result.get("errors"):
         from techne.core.reflect import drain_reflection_queue
 
         result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
