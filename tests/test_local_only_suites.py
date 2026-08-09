@@ -196,14 +196,15 @@ def _pytest_marker_expressions(workflow: Path) -> list[str]:
 def test_no_workflow_sets_pytest_addopts():
     """`PYTEST_ADDOPTS` routes around the ini entirely.
 
-    pytest prepends the env var's args AHEAD of `addopts`, so setting it to
-    `-m "not eval"` drops every other exclusion while `getini` still reports the
-    pristine value. Measured in review: 7 tests the policy says never run
-    entered the run, and all assertions stayed green.
+    Setting it to `-m "not eval"` drops every other exclusion while
+    `getini("addopts")` still reports the pristine value. Measured: 7 tests the
+    policy says never run entered the run with every assertion green. The
+    ordering that produces this is NOT stated here — see `_effective_markexpr`,
+    where the same guess was retracted; only the observed behaviour is claimed.
     """
     setters = [w.name for w in WORKFLOWS if "PYTEST_ADDOPTS" in _executable_text(w)]
     assert setters == [], (
-        f"{setters} set PYTEST_ADDOPTS, which overrides addopts before pytest reads it — "
+        f"{setters} set PYTEST_ADDOPTS, which wins over the ini's addopts — "
         f"the local-only exclusions can be dropped there with every assertion here green"
     )
 
