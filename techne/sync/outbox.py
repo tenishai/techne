@@ -394,11 +394,30 @@ _SWEEP_COLLAPSE = """
     ) WHERE rn > 1
 """
 
+# ALWAYS KEEP THE NEWEST ROW PER TARGET — the tombstone that stops a swept lane
+# from presenting as a lane that never existed.
+#
+# `check_outbox_targets` (checks.py:1254-1256) reads outbox history per target:
+#   SELECT target, COUNT(*), MAX(synced_at), SUM(status='pending'), MAX(created_at)
+#   FROM outbox GROUP BY target
+# Empty a quiet lane completely and its target drops out of that GROUP BY, so the
+# check falls into its `_declared_outbox_targets - seen` branch and reports
+# "declared lane has NEVER enqueued anything" — false, and it replaces the very
+# STALE diagnosis (the eight-week-dead thread_summary incident) that check exists
+# to make. The evidence would be destroyed at the exact moment it became
+# actionable, because `retain_days` defaults to 7 and `_PRODUCER_SILENT_AFTER` is
+# also 7 days: STALE fires precisely in the window the sweep had already emptied.
+#
+# One retained row per target keeps COUNT/MAX honest and costs a few hundred bytes.
+# This is cheaper and more robust than coupling the two constants, because it
+# holds for ANY retain_days an operator picks — including the one that motivated
+# them to lower it.
 _SWEEP_AGED = """
     SELECT id, target FROM outbox
      WHERE status = 'synced'
        AND target NOT IN ({ph})
        AND created_at < ?
+       AND id NOT IN (SELECT MAX(id) FROM outbox GROUP BY target)
 """
 
 
@@ -445,8 +464,15 @@ def sweep_delivered(
 ) -> dict[str, int]:
     """Bound outbox growth by dropping delivered rows nothing will read again (#518).
 
-    Returns ``{"collapsed": n, "aged_out": n}``. NEVER touches ``pending`` (not yet
-    delivered) or ``dead`` (diagnostic — ``list_dead`` reads them).
+    Returns ``{"collapsed": n, "aged_out": n}``. NEVER touches ``pending`` — those
+    rows are undelivered work.
+
+    ``dead`` rows are kept by the AGE-OUT (they are diagnostic; ``list_dead``
+    reads them) but a ledger lane's COLLAPSE can remove one: the partition spans
+    statuses, so a dead duplicate of a hash that also has a live row is dropped as
+    redundant. That is intended — the surviving row carries the same hash, which
+    is the only thing the pre-filter reads — but "never touches dead" was too
+    strong, so it is stated precisely rather than reassuringly.
 
     TWO POLICIES, because the lanes differ in kind and the difference is real:
 

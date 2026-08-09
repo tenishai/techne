@@ -324,7 +324,14 @@ def test_ledger_targets_covers_every_prefilter():
     for path in root.rglob("*.py"):
         if path.name == "outbox.py" and path.parent.name == "sync":
             continue  # the module that OWNS the table, not a consumer of its history
-        if re.search(r"content_hash\s+FROM\s+outbox", path.read_text(), re.I):
+        # `content_hash` need not be the LAST column selected. An earlier version
+        # required `content_hash\s+FROM`, so the most ordinary spelling of a new
+        # consumer — `SELECT content_hash, status FROM outbox` — walked straight
+        # past the guard. Not a remote shape: the archivist pre-filter already
+        # predicates on status, so a maintainer adding it to that select list
+        # would have silently disabled the guard protecting the query they were
+        # editing.
+        if re.search(r"content_hash\b[^;]*?\bFROM\s+outbox", path.read_text(), re.I | re.S):
             readers.add(str(path.relative_to(root)))
 
     # ASSERT THE SET, DO NOT SEARCH THE TEXT FOR A DECLARATION. An earlier version
@@ -402,3 +409,55 @@ def test_prune_orphans_leaves_a_registered_lane_alone(tmp_path, monkeypatch):
 def test_ledger_targets_is_not_empty():
     """A silently empty set would make the sweep age out the ledger lane."""
     assert ARCHIVIST_KNOWLEDGE_TARGET in LEDGER_TARGETS
+
+
+def test_age_out_always_leaves_one_row_per_target(config):
+    """A swept lane must never present as a lane that never existed.
+
+    `check_outbox_targets` reads outbox history per target and falls into its
+    `_declared_outbox_targets - seen` branch when a target has no rows at all —
+    reporting "declared lane has NEVER enqueued anything", which is false and
+    which REPLACES the STALE diagnosis that check exists to produce. The two
+    thresholds make it worse than incidental: `retain_days` defaults to 7 and
+    `_PRODUCER_SILENT_AFTER` is also 7 days, so the evidence is destroyed in
+    exactly the window where it becomes actionable.
+    """
+    for i in range(3):
+        enqueue(config.db_path, NON_LEDGER, _tp(f"old{i}"), content_hash=f"h{i}")
+    _set_all(config, status="synced", created_at="2020-01-01 00:00:00")
+
+    result = sweep_delivered(config.db_path, retain_days=0)
+
+    rows = _rows(config, NON_LEDGER)
+    assert result["aged_out"] == 2, "expected all but the newest row to go"
+    assert len(rows) == 1, "the lane was emptied — check_outbox_targets now reads it as never used"
+
+
+def test_a_swept_lane_is_still_visible_to_check_outbox_targets(config):
+    """The property the tombstone exists for, asserted against the real query.
+
+    Pinned against `check_outbox_targets`' own SQL rather than a paraphrase, so
+    this fails if that check's grouping changes shape.
+    """
+    from techne.core.stores import plain_connect
+
+    enqueue(config.db_path, NON_LEDGER, _tp("only"), content_hash="h1")
+    _set_all(config, status="synced", created_at="2020-01-01 00:00:00")
+    sweep_delivered(config.db_path, retain_days=0)
+
+    conn = plain_connect(config.db_path)
+    try:
+        seen = {
+            r[0]
+            for r in conn.execute(
+                "SELECT target, COUNT(*), MAX(synced_at), SUM(status='pending'), "
+                "MAX(created_at) FROM outbox GROUP BY target"
+            )
+        }
+    finally:
+        conn.close()
+
+    assert NON_LEDGER in seen, (
+        "the lane vanished from the check's GROUP BY — it will report "
+        "'declared lane has NEVER enqueued anything'"
+    )
