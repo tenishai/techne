@@ -130,10 +130,14 @@ def render_drift_block(config) -> str:
         # --posture to `auto`, which re-resolves and can silently change posture (and
         # with it whether reflect is advisory). The fix for one silent no-op must not
         # hand the operator another.
-        lines.append(
-            f"> Reconcile: `{init_remedy(config)}` "
-            "(pin --posture — the `auto` default can change it)"
-        )
+        # The parenthetical only applies when the command PINS a posture. On a
+        # never-initialised machine the remedy is `--posture auto` deliberately
+        # (techne#480), and telling that operator to pin instead sends them to
+        # look up `observe` and pin THAT — the demotion this PR exists to stop,
+        # arriving through the advice text rather than the command. Same
+        # discriminator the builder uses, not a second rule.
+        note = " (pin --posture — the `auto` default can change it)"
+        lines.append(f"> Reconcile: `{init_remedy(config)}`{note if config.loaded_from else ''}")
     return "\n".join(lines)
 
 

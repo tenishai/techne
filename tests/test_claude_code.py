@@ -1643,6 +1643,26 @@ class TestNeverInitialisedMachineBehaviour:
 
         assert "--posture auto" in block, block
         assert "--posture observe" not in block, block
+        # AND NOT the pin-your-posture note. It applies only when the command
+        # pins one; beside `--posture auto` it tells the operator to override
+        # the command with their current posture — `observe` — which IS the
+        # #480 demotion, arriving through the advice text. (PR #525 r5 nit 2.)
+        assert "pin --posture" not in block, block
+
+    def test_banner_keeps_the_pin_note_when_a_posture_was_chosen(self, fake_home, cfg):
+        """The note is right where it applies — the case it was written for."""
+        from techne.config import PostureConfig
+        from techne.hooks.session_start import render_drift_block
+
+        cfg.posture = PostureConfig(mode="spool-primary", cc_memory_detected=True)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(cfg)
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        block = render_drift_block(cfg)
+
+        assert "--posture spool-primary" in block, block
+        assert "pin --posture" in block, block
 
     def test_status_asks_for_auto_when_never_initialised(self, fake_home, cfg, monkeypatch):
         """The surface that gave OPPOSITE advice to doctor before this PR."""

@@ -583,6 +583,14 @@ class TestDoctorOnANeverInitialisedMachine:
 
         result = CliRunner().invoke(main, ["doctor"])
 
-        assert "remedy:" in result.output, result.output
-        assert "--posture auto" in result.output, result.output
-        assert "--posture observe" not in result.output, result.output
+        # THE DRIFT LINE SPECIFICALLY. `--posture auto` and `remedy:` both also
+        # appear on the per-check remedy (cli.py:152), so a loose assertion
+        # passes with cli.py:307 regressed to a bare `techne init` — a test
+        # named after a call site has to bite at that call site. The per-check
+        # line is indented further; the drift line starts at two spaces.
+        drift_line = next(
+            ln for ln in result.output.splitlines() if ln.startswith("  remedy: ")
+        )
+        assert drift_line == "  remedy: techne init --platform claude-code --posture auto", (
+            drift_line
+        )
