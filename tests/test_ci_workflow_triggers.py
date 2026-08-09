@@ -261,11 +261,15 @@ def _pytest_argv(line: str) -> list[str] | None:
         tok = shlex.split(line, comments=True)
     except ValueError:
         return None
-    for i in range(1, len(tok) - 1):  # `<path>/python -m pytest ...`
-        if tok[i] == "-m" and tok[i + 1] == "pytest" and Path(tok[i - 1]).name.startswith("python"):
-            return tok[i + 2 :]
-    if tok and Path(tok[0]).name == "pytest":  # bare `pytest ...`
+    if not tok:
+        return None
+    # ANCHORED AT argv[0]. Unanchored, the invocation could be an ARGUMENT of some
+    # other command — `foo --cmd "python -m pytest"` scanned as a real run (#532
+    # r5). The command being invoked is the first token, nothing else.
+    if Path(tok[0]).name == "pytest":  # bare `pytest ...`
         return tok[1:]
+    if Path(tok[0]).name.startswith("python") and tok[1:3] == ["-m", "pytest"]:
+        return tok[3:]
     return None
 
 
