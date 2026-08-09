@@ -353,40 +353,62 @@ def test_watch_cmd_exits_ex_config_on_startup_config_error(monkeypatch) -> None:
     assert "watchdog is not installed" in result.output
 
 
-def _active_directives(body: str) -> dict[str, set[str]]:
-    """Directives systemd would actually ACT ON, mapped to their values.
+def _active_directives(body: str, section: str = "Service") -> dict[str, set[str]]:
+    """Directives systemd would actually ACT ON in `section`, mapped to values.
 
-    A substring search over the raw file is NOT this, and the difference is the
-    whole point. `#RestartPreventExitStatus=78` is inert to systemd and
-    indistinguishable from the real thing to `in`; and `"...=7" in "...=78"` is
-    true, so a substring check cannot tell one exit code from another that
-    merely starts with it. The first version of this test passed in BOTH of
-    those states while the contract it guards was broken (PR #523 review).
+    A substring search over the raw file is NOT this, and neither is a
+    section-blind scan. Four states where the unit is disarmed but a looser
+    check still passes, all found by review on this PR:
 
-    Values are unioned across repeated assignments, which matches systemd's
-    append-unless-reset behaviour for the list-valued directives asserted on
-    here. This is a test helper, not a systemd parser: it does not implement
-    the empty-value reset, and would need to if a unit ever used one.
+    * `#RestartPreventExitStatus=78` — inert to systemd, identical to `in`.
+    * `"...=7" in "...=78"` — a substring cannot tell one exit code from
+      another that merely starts with it.
+    * the directive sitting in `[Unit]` or `[Install]` — `Restart*` are
+      `[Service]`-only per systemd.service(5); elsewhere systemd logs
+      "Unknown key name … ignoring" and respawns exactly as before.
+    * a later `RestartPreventExitStatus=` — assigning the empty string RESETS
+      the list and voids every prior assignment.
+
+    Values are unioned across repeated assignments (systemd appends), except
+    for that empty-value reset, which clears what came before.
+
+    Still a test helper, not a systemd parser: it does not handle line
+    continuations, quoting, or `.d/` drop-in directories. Indented directives
+    ARE accepted, because systemd accepts them.
     """
     out: dict[str, set[str]] = {}
+    current: str | None = None
     for raw in body.splitlines():
         line = raw.strip()
-        if not line or line[0] in "#;[":
+        if not line or line[0] in "#;":
+            continue
+        if line[0] == "[":
+            current = line.strip("[]").strip()
+            continue
+        if current != section:
             continue
         key, sep, value = line.partition("=")
-        if sep:
-            out.setdefault(key.strip(), set()).update(value.split())
+        if not sep:
+            continue
+        key = key.strip()
+        if value.strip():
+            out.setdefault(key, set()).update(value.split())
+        else:
+            out[key] = set()
     return out
 
 
 def test_shipped_unit_refuses_to_respawn_on_ex_config() -> None:
-    """The unit half of the contract, derived AND parsed.
+    """The unit half of the contract, derived AND parsed like systemd reads it.
 
     Deriving the value from techne/exit_codes.py stops the unit's 78 becoming a
     second copy of the constant. Deriving alone was not enough: the assertion
-    also has to MATCH like systemd does, or the derivation binds nothing. This
-    now fails if the directive is deleted, commented out, given a different
-    code, or if EX_CONFIG changes without the unit following.
+    has to MATCH the way systemd matches, or the derivation binds nothing.
+
+    Fails if the directive is deleted, commented out, given a different code,
+    moved out of [Service] into a section where systemd ignores it, voided by a
+    later empty-value reset, or if EX_CONFIG changes without the unit following.
+    An indented directive still passes, because systemd accepts those.
     """
     from techne.exit_codes import EX_CONFIG
 
@@ -399,3 +421,39 @@ def test_shipped_unit_refuses_to_respawn_on_ex_config() -> None:
     )
     # The setting is inert unless the unit actually restarts on failure.
     assert "on-failure" in directives.get("Restart", set())
+
+
+def test_real_process_exits_ex_config(tmp_path) -> None:
+    """The claim the PR body made, now actually shipped as a test.
+
+    Every other test here reads `CliRunner().invoke(...).exit_code`, which is
+    click's own accounting rather than an OS process status. Nothing asserted
+    that the process really LEAVES 78 — which is the only number systemd ever
+    sees. Reviewed as "believed correct by reading, not by running"; this runs
+    it. `watchdog.events` is poisoned in the child so the missing-extra path is
+    reached without uninstalling anything.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from techne.exit_codes import EX_CONFIG
+
+    env = {**os.environ, "TECHNE_HOME": str(tmp_path)}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['watchdog.events'] = None;"
+            " from techne.cli import main; main()",
+            "watch",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+    assert proc.returncode == EX_CONFIG, (proc.returncode, proc.stderr[-2000:])
+    assert "watchdog is not installed" in proc.stderr
