@@ -23,6 +23,22 @@ SCHEMA_VERSION = 23
 # timezone skew into 18,327 rows while looking like a clean fix.
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# VERIFIED AGAINST THE LIVE STORE, all 53 tables, 2026-08-08 — stated as an
+# inventory rather than an unconditional invariant, because the unconditional
+# version was FALSE when written: outbox.synced_at was 100% isoformat.
+#
+#   REPAIRED HERE (step 23): observations.timestamp / .event_at,
+#     sessions.started_at / .ended_at, outbox.synced_at
+#   ALREADY CONFORMING: knowledge.created_at / .updated_at / .last_confirmed_at,
+#     threads.created_at / .updated_at, outbox.created_at,
+#     coord_messages.created_at, coord_reads.read_at, thread_boundaries,
+#     knowledge_candidates, reminders, context_injections, identity.updated_at,
+#     checkpoints, schema_version.applied_at
+#
+# A NEW TIMESTAMP COLUMN BELONGS IN ONE OF THOSE TWO LISTS. Writing it with
+# CURRENT_TIMESTAMP or `strftime(TIMESTAMP_FORMAT)` puts it in the second for
+# free; `datetime.isoformat()` puts it in neither and is how synced_at drifted.
+
 
 # The columns the transcript importers write a JSONL timestamp into, and so the
 # only ones that can carry the ISO shape. MEASURED on the operator's store rather
@@ -36,6 +52,14 @@ TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 _TIMESTAMP_BACKFILL_COLUMNS = {
     "observations": ("timestamp", "event_at"),
     "sessions": ("started_at", "ended_at"),
+    # 100% non-conforming (3,907 of 3,907), written by `datetime.isoformat()` at
+    # three sites in sync/outbox.py — now fixed to use TIMESTAMP_FORMAT. It was
+    # not WRONG (internally uniform, and every reader goes through
+    # `checks._parse_ts` rather than a lexical compare), but the module comment
+    # above declares "the one on-disk timestamp shape", and a column that is
+    # entirely non-conforming makes that sentence false. Making the claim true
+    # beats documenting an exception to it.
+    "outbox": ("synced_at",),
 }
 
 
@@ -76,7 +100,20 @@ def backfill_timestamp_formats(conn) -> int:
                 f"""UPDATE {table}
                        SET {column} = replace(substr({column}, 1, 19), 'T', ' ')
                      WHERE {column} IS NOT NULL
-                       AND substr({column}, 11, 1) = 'T'"""
+                       AND substr({column}, 11, 1) = 'T'
+                       -- REFUSE A NON-UTC OFFSET. substr(1,19) keeps WALL CLOCK
+                       -- and drops the zone, so `...T00:19:00-04:00` would be
+                       -- rewritten as 00:19:00 — a 4-hour skew, the exact failure
+                       -- this migration exists to prevent, introduced by its own
+                       -- remedy. Python's normalize_timestamp() converts properly;
+                       -- SQL cannot, so here it declines instead of guessing.
+                       -- No such row exists today (outbox.synced_at is uniformly
+                       -- +00:00); this keeps that from becoming load-bearing.
+                       AND instr(substr({column}, 20), '-') = 0
+                       AND (
+                            instr(substr({column}, 20), '+') = 0
+                         OR substr({column}, 20) LIKE '%+00:00'
+                       )"""
             )
             changed += cur.rowcount
     return changed

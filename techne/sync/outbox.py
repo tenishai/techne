@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from techne.core.database import connect
+from techne.core.database import TIMESTAMP_FORMAT, connect
 from techne.sync.adapter import OutboxEntry, SyncAdapter
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,7 @@ def flush(db_path: Path, adapter: SyncAdapter) -> tuple[int, int]:
                 f"were in the batch — this violates the PushResult contract"
             )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
         synced_ids = [e.id for e in entries[: result.synced]]
         failed_ids = [e.id for e in entries[result.synced : result.synced + result.failed]]
 
@@ -254,7 +254,7 @@ def _try_deliver_now(db_path: Path, sink, row_id: int, data: dict) -> None:
 
 
 def _update_row_status(db_path: Path, row_id: int, result) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
     conn = connect(db_path)
     try:
         if result.ok:
@@ -286,7 +286,7 @@ def _load_pending_grouped_by_target(conn) -> dict[str, list]:
 
 
 def _mark_synced(conn, row_id: int) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
     conn.execute(
         "UPDATE outbox SET status = 'synced', synced_at = ? WHERE id = ?",
         (now, row_id),

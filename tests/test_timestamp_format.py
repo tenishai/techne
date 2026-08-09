@@ -84,7 +84,7 @@ def test_lexical_order_matches_chronological_order_once_normalised():
     raw = ["2026-08-08T00:19:00.965Z", "2026-08-08 00:21:54", "2026-08-08T00:25:00.100Z"]
     chronological = ["2026-08-08 00:19:00", "2026-08-08 00:21:54", "2026-08-08 00:25:00"]
 
-    assert sorted(raw) != [r for r in raw if True][:0] + sorted(raw, key=normalize_timestamp), (
+    assert sorted(raw) != sorted(raw, key=normalize_timestamp), (
         "precondition: raw lexical order must differ from chronological order"
     )
     assert sorted(normalize_timestamp(r) for r in raw) == chronological
@@ -206,8 +206,13 @@ def test_migration_23_backfills_both_columns(tmp_path):
 
     assert rows[0][0] == "2026-08-08 00:19:00"
     assert rows[0][1] == "2026-08-08 00:18:00"
-    assert rows[1][0] == "2026-08-08 00:21:54", "an already-correct row was rewritten"
-    assert rows[1][1] is None, "a NULL event_at was populated out of nowhere"
+    # These two assert VALUE preservation, which is all they can detect:
+    # substr(NULL) is NULL regardless, so no mutation of the UPDATE makes the
+    # event_at line fire, and a value-preserving rewrite passes the first. The
+    # ROWCOUNT property they used to claim is genuinely covered by the
+    # `changed ==` assertions in the idempotence and sessions tests.
+    assert rows[1][0] == "2026-08-08 00:21:54", "an already-correct row's VALUE changed"
+    assert rows[1][1] is None, "a NULL event_at gained a value"
 
 
 def test_migration_23_is_idempotent(tmp_path):
@@ -299,12 +304,90 @@ def test_backfill_map_does_not_claim_clean_tables():
     """The map is scoped to what the importers actually write.
 
     Measured on the operator's store: knowledge.created_at/updated_at,
-    threads.created_at, outbox.created_at and coord_messages.created_at are
-    uniformly space-separated, because each is written by CURRENT_TIMESTAMP or
-    the house strftime helper. Listing them here would make the migration scan
-    tables it has no reason to touch, and would imply a defect that was measured
-    not to exist.
+    threads.created_at/updated_at, outbox.CREATED_AT and coord_messages.created_at
+    are uniformly space-separated, because each is written by CURRENT_TIMESTAMP or
+    the house strftime helper. Listing them would make the migration scan tables
+    it has no reason to touch and imply a defect measured not to exist.
+
+    `outbox.SYNCED_AT` is in the map for the opposite reason — it was 100%
+    non-conforming (isoformat with fraction and offset), which made the module's
+    "one on-disk shape" claim false.
     """
     from techne.core.database import _TIMESTAMP_BACKFILL_COLUMNS
 
-    assert set(_TIMESTAMP_BACKFILL_COLUMNS) == {"observations", "sessions"}
+    assert set(_TIMESTAMP_BACKFILL_COLUMNS) == {"observations", "sessions", "outbox"}
+
+
+def test_step_23_actually_runs_the_backfill(tmp_path):
+    """The WIRING, not the function.
+
+    Every other backfill test calls `backfill_timestamp_formats` directly, so
+    the call site inside `_migrate` was outside the test boundary: deleting it
+    left the whole suite green while every existing store went unrepaired. That
+    is this PR's own discriminator applied one level up — extracting the named
+    function made idempotence testable and moved the invocation out of cover.
+
+    Drives a REAL v21 -> current upgrade through `connect()`, so it also serves
+    as the only end-to-end proof that `event_at` is repaired on a live upgrade
+    path rather than only by a direct call.
+    """
+    import sqlite3
+
+    db = tmp_path / "t.db"
+    connect(db).close()
+
+    raw = sqlite3.connect(str(db))
+    raw.execute("DELETE FROM schema_version")
+    raw.execute("INSERT INTO schema_version (version) VALUES (21)")
+    raw.execute("INSERT OR IGNORE INTO sessions (id) VALUES ('s')")
+    raw.execute(
+        "INSERT INTO observations (session_id, tool_name, content, tier, timestamp, event_at) "
+        "VALUES ('s','Bash','x','hot','2026-08-08T00:19:00.965Z','2026-08-08T00:18:00.100Z')"
+    )
+    raw.commit()
+    raw.close()
+
+    connect(db).close()  # triggers the guarded migrate 21 -> SCHEMA_VERSION
+
+    post = sqlite3.connect(str(db))
+    try:
+        ts, ea = post.execute("SELECT timestamp, event_at FROM observations").fetchone()
+    finally:
+        post.close()
+
+    assert ts == "2026-08-08 00:19:00", f"step 23 did not backfill timestamp: {ts!r}"
+    assert ea == "2026-08-08 00:18:00", f"step 23 did not backfill event_at: {ea!r}"
+
+
+def test_backfill_refuses_a_non_utc_offset(tmp_path):
+    """SQL truncation keeps WALL CLOCK and drops the zone.
+
+    `...T00:19:00-04:00` rewritten as `00:19:00` is a 4-hour skew — the exact
+    failure this migration exists to prevent, reintroduced by its own remedy.
+    Python's `normalize_timestamp` converts properly; SQL cannot, so it declines.
+    No such row exists today, which is precisely why the guard belongs here
+    before someone widens the map onto a column that has them.
+    """
+    import sqlite3
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    conn = connect(db)
+    try:
+        _seed_session(conn)
+        conn.execute(
+            "INSERT INTO observations (session_id, tool_name, content, tier, timestamp) "
+            "VALUES ('s','Bash','x','hot','2026-08-08T00:19:00-04:00')"
+        )
+        conn.commit()
+        backfill_timestamp_formats(conn)
+        conn.commit()
+        stored = conn.execute("SELECT timestamp FROM observations").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert stored == "2026-08-08T00:19:00-04:00", (
+        "the offset row was truncated to wall clock — that is a 4-hour skew"
+    )
+    # And the Python path, which CAN convert, still does.
+    assert normalize_timestamp("2026-08-08T00:19:00-04:00") == "2026-08-08 04:19:00"
