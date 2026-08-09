@@ -328,13 +328,13 @@ def format_banner(health: dict) -> str:
     # Capped at 3 like the offender list below, whose reasoning applies equally:
     # a long banner line is bad. `techne doctor` is already named in the sentence
     # this suffix attaches to, so it is not repeated here.
-    _shown = ", ".join(deferred[:3])
-    _rest = len(deferred) - 3
-    deferred_note = (
-        f" ({len(deferred)} deferred: {_shown}{f', +{_rest} more' if _rest > 0 else ''})"
-        if deferred
-        else ""
-    )
+    deferred_note = ""
+    if deferred:
+        shown = ", ".join(deferred[:3])
+        rest = len(deferred) - 3
+        deferred_note = (
+            f" ({len(deferred)} deferred: {shown}{f', +{rest} more' if rest > 0 else ''})"
+        )
 
     worst_verdict = health.get("checks_worst")
     if worst_verdict and worst_verdict not in ("live", "dormant"):
