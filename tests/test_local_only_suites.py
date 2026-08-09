@@ -16,13 +16,18 @@ load-bearing half: these do not run in CI.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
-WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))
+#: BOTH suffixes — GitHub Actions honours `.yaml` as well as `.yml`, and a
+#: single `probe.yaml` defeated three of these assertions at once.
+WORKFLOWS = sorted(
+    p for ext in ("*.yml", "*.yaml") for p in (REPO / ".github" / "workflows").glob(ext)
+)
 
 #: Markers the card documents as deliberately uncovered. Kept here rather than
 #: parsed out of the prose: the card is written for humans, and a regex over
@@ -35,10 +40,23 @@ def test_workflows_exist_at_all():
     assert WORKFLOWS, "no workflow files found — the scans below would prove nothing"
 
 
+def _addopts() -> str:
+    """The addopts pytest will ACT ON — parsed, not grepped.
+
+    Reading the raw file was the same comment-vs-code defect `_executable_text`
+    exists to prevent, twelve lines below, guarding the headline case. Dropping
+    `not probe` from addopts while leaving a comment that mentions it — the edit
+    a person would actually make — passed every assertion here while three
+    `probe` tests entered the default CI job and started spawning real agent
+    sessions on the runner.
+    """
+    data = tomllib.loads((REPO / "pyproject.toml").read_bytes().decode())
+    return data["tool"]["pytest"]["ini_options"]["addopts"]
+
+
 @pytest.mark.parametrize("marker", LOCAL_ONLY_MARKERS)
 def test_marker_is_excluded_from_the_default_run(marker):
-    addopts = (REPO / "pyproject.toml").read_text()
-    assert f"not {marker}" in addopts, (
+    assert f"not {marker}" in _addopts(), (
         f"`{marker}` is no longer excluded from the default pytest run, so it now executes "
         f"in the standard job — ARCHITECTURE.md still calls it local-only"
     )
