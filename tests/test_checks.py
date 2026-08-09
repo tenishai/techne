@@ -2065,20 +2065,31 @@ def test_init_remedy_is_the_only_place_the_init_hint_is_spelled():
     `--posture auto` from doctor and `--posture observe` from status, and an
     operator following the second was demoted exactly as #480 describes.
 
-    This guard can actually fail: the literal lives in core/checks.py and the
-    scan covers every OTHER module, so a new hand-spelled hint trips it. (A
+    This guard can actually fail: the hint lives in core/checks.py and the scan
+    covers every OTHER module under techne/, so a hand-spelled hint trips it —
+    interpolated OR hardcoded. Scope: techne/ only; scripts/, integrations/ and
+    deploy/ are outside it (checked clean, but not guarded). (A
     guard whose search space includes the thing that makes it pass cannot
     fail — the trap poe_2 hit on a drift guard the same night.)
     """
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1] / "techne"
-    tell = "--posture {"  # an f-string interpolating a posture into the command
+    # BOTH spellings. The first version tested only `--posture {`, i.e. the
+    # f-string form — which tests the MECHANISM (don't interpolate by hand)
+    # rather than the INVARIANT (don't spell the hint). They come apart exactly
+    # at the literal `techne init --posture observe`, which contains no brace
+    # and is the form the card names as the demoting hazard. Three of the four
+    # routed sites could be regressed to it with the whole suite green.
+    # Keeping both: the brace tell still catches a split spelling like
+    # `"techne init " f"--posture {mode}"` that the literal tell would miss.
+    tells = ("--posture {", "techne init --posture")
+    builder = pathlib.Path("core/checks.py")  # by PATH, not basename
 
     offenders = sorted(
         str(f.relative_to(root))
         for f in root.rglob("*.py")
-        if tell in f.read_text() and f.name != "checks.py"
+        if any(t in f.read_text() for t in tells) and f.relative_to(root) != builder
     )
 
     assert offenders == [], (
