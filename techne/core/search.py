@@ -874,14 +874,25 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
     # does nothing, which is exactly the never-green defect #496 was just fixed
     # for. Found by running this against an interpreter with sqlite-vec but no
     # embedding backend; the wiring test failed and the early return was why.
-    try:
-        swept = sum(_purge_orphaned_vec(conn, name) for name in _VEC_PARENT)
-        if swept:
-            conn.commit()
-    except sqlite3.OperationalError:
-        # A vec table present but unreadable (e.g. built at another dim) is not
-        # worth failing a backfill over; the per-table loop below rebuilds it.
-        pass
+    # PER-TABLE try, not one sum(). A generator inside sum() raises out of the
+    # whole expression, so an unreadable threads_vec would leave observations_vec
+    # and knowledge_vec unswept — and on the no-backend path there is no loop
+    # below to cover for it, so one bad index would silently suppress the other
+    # two. This is the ONLY sweep call site: an earlier version also swept inside
+    # the per-table loop, which made "unwire the purge" an ambiguous mutation —
+    # the in-loop copy alone satisfied the end-to-end test on a machine WITH a
+    # backend, so that test pinned nothing about placement in the environment
+    # that matters.
+    swept = 0
+    for name in _VEC_PARENT:
+        try:
+            swept += _purge_orphaned_vec(conn, name)
+        except sqlite3.OperationalError:
+            # Present but unreadable (e.g. built at another dim). Not worth
+            # failing a backfill over; _ensure_vec_backend_identity rebuilds it.
+            continue
+    if swept:
+        conn.commit()
 
     if not have_backend:
         # Neither model2vec nor fastembed importable — nothing to embed with, but
@@ -920,14 +931,6 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             # search_vec (_VEC_SUPERSEDE_OVERFETCH) is the always-on guard, sound up to
             # that factor of stale neighbours.
             if tbl == "knowledge" and _purge_superseded_knowledge_vec(conn):
-                conn.commit()
-            # techne#408: embeddings whose PARENT ROW IS GONE. Threads rotate
-            # their rowid on INSERT OR REPLACE, so every summary update strands
-            # one; hard-deleted knowledge strands one too. The superseded purge
-            # above cannot reach either, because it selects FROM the parent table
-            # and these rows have no parent. Swept for all three indexes: the
-            # mechanism is per-index, not knowledge-specific.
-            if _purge_orphaned_vec(conn, vec_tbl):
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"
             extra_where = " AND t.superseded_by IS NULL" if tbl == "knowledge" else ""

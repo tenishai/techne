@@ -171,3 +171,55 @@ def test_backfill_sweeps_orphans_end_to_end(db):
         conn.close()
 
     assert left == 0, "backfill_vectors did not sweep the orphan — the purge is not wired in"
+
+
+def test_the_cli_remedy_sweeps_even_with_no_embedding_backend(tmp_path, monkeypatch):
+    """`techne vectors backfill` is the string vectors:coverage hands the operator.
+
+    The hoist inside backfill_vectors was defeated one frame up: the CLI carried
+    the SAME backend_available() gate and `ctx.exit(0)`-ed before the import. On
+    exactly the install the sweep exists for — sqlite-vec present, no model —
+    threads kept stranding embeddings, the doctor kept reporting them, and the
+    only remedy swept nothing. Fixing the function without the caller left the
+    defect in place, just harder to see.
+
+    Exercised through the real CLI, because the wiring is the fix.
+    """
+    from click.testing import CliRunner
+
+    from techne.core import embeddings as embeddings_mod
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
+
+    # The CLI resolves its own db path from TECHNE_HOME — seed THAT store, not a
+    # sibling fixture, or the command sweeps a database the test never inspects.
+    from techne.config import Config
+
+    db = Config.load().db_path
+    init_db(db).close()
+
+    conn = _vec_conn(db)
+    try:
+        _make_vec(conn, "threads_vec")
+        _add_vec_row(conn, "threads_vec", 4242)
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(main, ["vectors", "backfill"])
+    assert result.exit_code == 0, result.output
+
+    conn = _vec_conn(db)
+    try:
+        left = conn.execute(
+            "SELECT COUNT(*) FROM threads_vec WHERE rowid NOT IN (SELECT rowid FROM threads)"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert left == 0, (
+        "the CLI exited before sweeping — the remedy vectors:coverage names still "
+        "does nothing on a no-backend install"
+    )
