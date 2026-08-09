@@ -49,7 +49,18 @@ CREATE TABLE IF NOT EXISTS sessions (
     summary TEXT,
     summary_llm TEXT,
     summary_heuristic TEXT,
-    summary_llm_source TEXT
+    summary_llm_source TEXT,
+    -- HOW ended_at GOT THERE (#516). 'clean' = run_session_end reached; NULL on
+    -- a legacy row predating this column, treated as clean. Anything else
+    -- ('derived') means the session died without running session_end and the
+    -- value is LAST KNOWN ACTIVITY — a lower bound, not the true end.
+    --
+    -- Needed because deriving ended_at changes what the column MEANS, and a row
+    -- could not otherwise tell you which meaning it holds. check_outbox_targets
+    -- depends on the distinction: those lanes are fed AT SESSION END, so only a
+    -- session that actually ENDED is evidence the producer is dead. A crashed
+    -- session never had the opportunity to feed one.
+    ended_at_source TEXT
 );
 
 -- Threads (the unit of continuity)
@@ -910,9 +921,7 @@ def _migrate(conn: sqlite3.Connection, from_version: int, to_version: int):
         ).fetchone()
         if kc_exists:
             _add_column_if_missing(conn, "knowledge_candidates", "faithfulness_ok", "INTEGER")
-            _add_column_if_missing(
-                conn, "knowledge_candidates", "faithfulness_warning", "TEXT"
-            )
+            _add_column_if_missing(conn, "knowledge_candidates", "faithfulness_warning", "TEXT")
         conn.execute("INSERT INTO schema_version (version) VALUES (13)")
     if from_version < 14 and to_version >= 14:
         # Exactly-once reflect ingest (techne#236). knowledge_candidates had no
@@ -1141,6 +1150,24 @@ END;
         # its own last activity is not in the past.
         from techne.core.state import close_abandoned_sessions_in_conn
 
-        close_abandoned_sessions_in_conn(conn, idle_hours=0)
+        # THE NORMAL IDLE WINDOW, not 0. An earlier version passed 0 on the
+        # reasoning that "every session in history is finished" — false whenever
+        # a peer is live, and concurrent sessions are the normal case here.
+        # `connect()` IS the migration trigger, so a post_tool_use hook writing an
+        # observation runs this step with its own session's earlier observations
+        # already in the past: measured, a peer whose last observation was five
+        # seconds old got stamped. History is silent by definition, so the six-hour
+        # window sweeps all of it anyway and costs nothing.
+        # THE STEP MUST ENSURE ITS OWN COLUMN. `ended_at_source` is additive, so
+        # SCHEMA_SQL's copy is created by the RECONCILER — which runs AFTER
+        # _migrate. On a v3 fixture the column is genuinely absent here and the
+        # sweep's UPDATE raises "no such column". THIRD instance of this exact
+        # trap in this milestone (#515 hit it with event_at, then with the
+        # observations table); a migration step owns every precondition it needs.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone():
+            _add_column_if_missing(conn, "sessions", "ended_at_source", "TEXT")
+        close_abandoned_sessions_in_conn(conn)
         conn.execute("INSERT INTO schema_version (version) VALUES (24)")
     conn.commit()

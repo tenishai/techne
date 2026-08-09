@@ -175,7 +175,8 @@ def end_session(
     try:
         llm_src = summary_llm_source if source == "llm" else None
         conn.execute(
-            f"""UPDATE sessions SET ended_at = CURRENT_TIMESTAMP, {column} = ?,
+            f"""UPDATE sessions SET ended_at = CURRENT_TIMESTAMP,
+                    ended_at_source = 'clean', {column} = ?,
                     summary_llm_source = COALESCE(?, summary_llm_source)
                 WHERE id = ?""",
             (redact_credentials(summary) if summary else None, llm_src, session_id),
@@ -291,7 +292,9 @@ def close_abandoned_sessions(
         conn.close()
 
 
-def close_abandoned_sessions_in_conn(conn, *, idle_hours: int, now: str | None = None) -> int:
+def close_abandoned_sessions_in_conn(
+    conn, *, idle_hours: int = ABANDONED_SESSION_IDLE_HOURS, now: str | None = None
+) -> int:
     """The body of `close_abandoned_sessions`, against a caller's connection.
 
     Exists so migration step 24 and the live sweep run the SAME statement rather
@@ -335,7 +338,18 @@ def close_abandoned_sessions_in_conn(conn, *, idle_hours: int, now: str | None =
                        replace(substr(s.started_at, 1, 19), 'T', ' ')
                    ) AS last_seen
               FROM sessions s
-              LEFT JOIN observations o ON o.session_id = s.id
+              LEFT JOIN observations o
+                     ON o.session_id = s.id
+                    -- IGNORE A MALFORMED TIMESTAMP RATHER THAN LET IT WIN THE MAX.
+                    -- MAX() takes the lexically greatest value, so one garbage row
+                    -- ('not-a-timestamp') beats every real one and then never
+                    -- compares < cutoff — dropping the whole session from the
+                    -- target set silently, invisible even in the returned count,
+                    -- with no future sweep able to recover it. This fails SAFE
+                    -- (a NULL, the status quo) but it fails INVISIBLY, so the
+                    -- date-shaped rows are the only ones consulted and a session
+                    -- with nothing usable falls back to started_at via COALESCE.
+                   AND o.timestamp LIKE '____-__-__%'
              GROUP BY s.id
         )
         SELECT s.id, a.last_seen
@@ -350,8 +364,25 @@ def close_abandoned_sessions_in_conn(conn, *, idle_hours: int, now: str | None =
         (cutoff,),
     ).fetchall()
 
+    # Defensive, for the same reason the migration step adds the column: a caller
+    # on a partially-reconciled store must degrade, not raise. The stamp is the
+    # refinement; the ended_at repair is the point.
+    has_source = any(
+        r[1] == "ended_at_source" for r in conn.execute("PRAGMA table_info(sessions)")
+    )
+    stamp = ", ended_at_source = 'derived'" if has_source else ""
+
     for sid, last_seen in targets:
-        conn.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (last_seen, sid))
+        # STAMP THE PROVENANCE. Deriving ended_at changes what the column MEANS —
+        # for a cleanly-ended session it is the true end, for this one it is a
+        # LOWER BOUND (last activity), understating duration by however long the
+        # process lived after its final observation. Without a discriminator a
+        # row cannot say which it holds, and check_outbox_targets would read a
+        # crashed session as evidence its producer is dead.
+        conn.execute(
+            f"UPDATE sessions SET ended_at = ?{stamp} WHERE id = ?",
+            (last_seen, sid),
+        )
     return len(targets)
 
 

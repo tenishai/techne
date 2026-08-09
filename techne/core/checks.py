@@ -1322,8 +1322,20 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # always ≈ now. The predicate `newest > enq + 7d` therefore reduced to
         # `now > enq + 7d`: the wall-clock test this check was written to
         # replace, at 3× the sensitivity. A three-week holiday reproduced it.
+        # CLEANLY-ENDED ONLY (#516). Since ended_at is now DERIVED for sessions
+        # that died unclean, "has an ended_at" no longer means "reached
+        # run_session_end". These lanes are fed AT SESSION END, so a crashed
+        # session never had the OPPORTUNITY to feed one — counting it as evidence
+        # inverts the question above. With 93% of August sessions never reaching
+        # run_session_end, the unfiltered version reports STALE ("producer may be
+        # dead") on a healthy store and points the operator at the sync producer
+        # when the real cause is unclean exits.
+        #
+        # NULL source = a legacy row written before the column existed, when the
+        # only writer WAS end_session — so it is clean by construction.
         srow = conn.execute(
-            "SELECT COUNT(*), MAX(ended_at) FROM sessions WHERE ended_at IS NOT NULL"
+            "SELECT COUNT(*), MAX(ended_at) FROM sessions "
+            "WHERE ended_at IS NOT NULL AND COALESCE(ended_at_source, 'clean') = 'clean'"
         ).fetchone()
     finally:
         conn.close()
