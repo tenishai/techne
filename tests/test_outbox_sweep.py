@@ -324,14 +324,25 @@ def test_ledger_targets_covers_every_prefilter():
     for path in root.rglob("*.py"):
         if path.name == "outbox.py" and path.parent.name == "sync":
             continue  # the module that OWNS the table, not a consumer of its history
-        # `content_hash` need not be the LAST column selected. An earlier version
-        # required `content_hash\s+FROM`, so the most ordinary spelling of a new
-        # consumer — `SELECT content_hash, status FROM outbox` — walked straight
-        # past the guard. Not a remote shape: the archivist pre-filter already
-        # predicates on status, so a maintainer adding it to that select list
-        # would have silently disabled the guard protecting the query they were
-        # editing.
-        if re.search(r"content_hash\b[^;]*?\bFROM\s+outbox", path.read_text(), re.I | re.S):
+        # MATCH EITHER ORDER. Two rounds of this guard were too narrow in
+        # exactly the same way, one axis at a time:
+        #   v1 `content_hash\s+FROM`      — required content_hash LAST in the
+        #                                   select list; `content_hash, status`
+        #                                   evaded it.
+        #   v2 `content_hash ... FROM`    — still required content_hash BEFORE
+        #                                   `FROM outbox`, i.e. in the select
+        #                                   list at all. Every WHERE-clause form
+        #                                   evaded it:
+        #       SELECT 1 FROM outbox WHERE content_hash = ?
+        #       SELECT COUNT(*) FROM outbox WHERE content_hash IN (?, ?)
+        #       SELECT EXISTS(SELECT 1 FROM outbox WHERE content_hash = ?)
+        # The per-hash membership form is arguably the MORE natural way to write
+        # a dedup pre-filter, so that was not an exotic evasion. The class is
+        # "the two tokens co-occur in one statement", not "they appear in this
+        # order", and fixing one axis at a time is how a guard stays evadable
+        # while looking hardened.
+        pattern = r"(content_hash\b[^;]*?\bFROM\s+outbox|\bFROM\s+outbox\b[^;]*?content_hash)"
+        if re.search(pattern, path.read_text(), re.I | re.S):
             readers.add(str(path.relative_to(root)))
 
     # ASSERT THE SET, DO NOT SEARCH THE TEXT FOR A DECLARATION. An earlier version
