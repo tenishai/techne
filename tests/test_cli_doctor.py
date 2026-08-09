@@ -34,7 +34,7 @@ def cli_db(tmp_path, monkeypatch):
     # answer (techne#480). The file is written as well as recorded so the two
     # cannot disagree.
     config_file = tmp_path / "config.yaml"
-    config_file.write_text("platform: claude-code\n")
+    config_file.write_text("platform: claude-code\nposture:\n  mode: observe\n")
     cfg.loaded_from = config_file
     monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
     return cfg

@@ -328,6 +328,17 @@ def init_remedy(config) -> str | None:
         return None
     if config.loaded_from is None:
         # No config.yaml — posture.mode is a default, not an answer.
+        #
+        # RESIDUAL, deliberately not chased: this asks "does a config file
+        # exist", which is a proxy for "did the operator choose a posture".
+        # A hand-written config.yaml with no `posture:` stanza sets
+        # loaded_from while posture.mode is still the dataclass default, so
+        # the original defect survives one level in. Narrow, because save()
+        # always writes a full posture stanza — any machine `techne init`
+        # created is safe, and reaching it needs a hand-rolled config or one
+        # predating the field. Recorded rather than fixed: the honest
+        # discriminator would be "was a posture persisted", which the Config
+        # does not carry today. (PR #525 review, nit 2.)
         return "techne init --platform claude-code --posture auto"
     return f"techne init --platform claude-code --posture {config.posture.mode}"
 

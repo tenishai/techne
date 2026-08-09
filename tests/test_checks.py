@@ -2053,3 +2053,35 @@ def test_a_detached_head_is_not_a_deployment_either(config, tmp_path, monkeypatc
     r = TestRuntimeRevision._check(config, runtime, monkeypatch)
     assert r.verdict is Verdict.DORMANT and r.ok, r.detail
     assert "detached" in r.detail, r.detail
+
+
+def test_init_remedy_is_the_only_place_the_init_hint_is_spelled():
+    """The card's claim, made structural (techne#480, PR #525 review issue 1).
+
+    `docs/arch/liveness.md` asserts "A REMEDY IS BUILT, NEVER SPELLED —
+    init_remedy(config) is the single builder". That was FALSE when the claim
+    was written: `techne status` (cli.py) and the session-start drift banner
+    each interpolated `config.posture.mode` by hand, so the same machine got
+    `--posture auto` from doctor and `--posture observe` from status, and an
+    operator following the second was demoted exactly as #480 describes.
+
+    This guard can actually fail: the literal lives in core/checks.py and the
+    scan covers every OTHER module, so a new hand-spelled hint trips it. (A
+    guard whose search space includes the thing that makes it pass cannot
+    fail — the trap poe_2 hit on a drift guard the same night.)
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "techne"
+    tell = "--posture {"  # an f-string interpolating a posture into the command
+
+    offenders = sorted(
+        str(f.relative_to(root))
+        for f in root.rglob("*.py")
+        if tell in f.read_text() and f.name != "checks.py"
+    )
+
+    assert offenders == [], (
+        "these modules spell the `techne init --posture …` hint by hand instead of "
+        f"calling init_remedy(), so they do not inherit its platform/posture guards: {offenders}"
+    )

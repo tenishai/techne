@@ -71,6 +71,7 @@ def render_drift_block(config) -> str:
 
     if config.platform != CLAUDE_CODE:
         return ""
+    from techne.core.checks import init_remedy
     from techne.platforms.claude_code import check_hook_drift
     from techne.platforms.claude_code.hooks import SETTINGS_PATH
 
@@ -123,17 +124,14 @@ def render_drift_block(config) -> str:
         # unusable shapes init itself raises (e.g. AttributeError on {"hooks": []}).
         # Repair the file first; only then is re-registering meaningful.
         # (Prudence, PR #457.)
-        lines.append(
-            f"> Repair or move aside {SETTINGS_PATH}, then run "
-            f"`techne init --posture {config.posture.mode}`."
-        )
+        lines.append(f"> Repair or move aside {SETTINGS_PATH}, then run `{init_remedy(config)}`.")
     else:
         # Echo the CURRENT posture into the suggested command: `techne init` defaults
         # --posture to `auto`, which re-resolves and can silently change posture (and
         # with it whether reflect is advisory). The fix for one silent no-op must not
         # hand the operator another.
         lines.append(
-            f"> Reconcile: `techne init --posture {config.posture.mode}` "
+            f"> Reconcile: `{init_remedy(config)}` "
             "(pin --posture — the `auto` default can change it)"
         )
     return "\n".join(lines)

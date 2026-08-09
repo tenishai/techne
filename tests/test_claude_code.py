@@ -65,6 +65,15 @@ def cfg(tmp_path):
     c.platform = "claude-code"
     c.hooks = HookConfig(post_tool_use=True)
     c.sync = SyncConfig(adapter="noop")
+    # Stands for an INITIALISED machine — every test here asserts about drift or
+    # a posture the operator chose, none of which exist before `techne init`.
+    # Stubbing a Config without reproducing `load()`'s contract leaves
+    # loaded_from None, i.e. "no config.yaml", where posture.mode is a dataclass
+    # default rather than an answer and the remedy is `--posture auto`
+    # (techne#480). Written as well as recorded so the two cannot disagree.
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("platform: claude-code\nposture:\n  mode: observe\n")
+    c.loaded_from = config_file
     return c
 
 
