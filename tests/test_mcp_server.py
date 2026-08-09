@@ -418,3 +418,25 @@ def test_codex_blast_radius_unresolvable_symbol_returns_error(tmp_path, config, 
     )
     assert resp["result"].get("isError") is not True
     assert "no symbol named" in resp["result"]["content"][0]["text"]
+
+
+def test_status_surfaces_checks_deferred_to_agents(db_path):
+    """The key that actually answers techne#488 for an agent, anchored.
+
+    `_techne_status` returns `collect_health(config)` verbatim today, so the
+    guarantee that the MCP surface carries `checks_deferred` rests on the
+    absence of key projection — true now, and it would break SILENTLY if
+    anyone introduced one. The arch card claims this surface; this pins it.
+    """
+    from techne.core.checks import deferred_check_names
+    from techne.mcp_server import _techne_status
+
+    cfg = Config()
+    cfg.db_path = db_path
+
+    payload = _techne_status({}, cfg)
+
+    assert "checks_deferred" in payload
+    assert payload["checks_deferred"] == deferred_check_names()
+    # The three states an agent must be able to tell apart stay disjoint.
+    assert set(payload["checks_deferred"]).isdisjoint({c["name"] for c in payload["checks"]})

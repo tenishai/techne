@@ -466,10 +466,14 @@ def test_banner_names_the_deferred_checks_on_a_warning_line(config):
 
     banner = format_banner(h)
 
-    assert "1 deferred to `techne doctor`" in banner
-    assert "check_runtime_loaded" in banner
+    assert "1 deferred: check_runtime_loaded" in banner
     # Attached to the existing liveness row, not given a row of its own.
-    assert len([ln for ln in banner.splitlines() if "techne doctor" in ln]) == 1
+    liveness_lines = [ln for ln in banner.splitlines() if "deferred" in ln]
+    assert len(liveness_lines) == 1, banner
+    # OCCURRENCES, not lines: the earlier version counted lines containing the
+    # remedy and so passed happily while one line said `techne doctor` twice
+    # (PR #526 review, nit 5).
+    assert liveness_lines[0].count("techne doctor") == 1, liveness_lines[0]
 
 
 def test_deferred_is_recorded_even_when_the_check_run_fails(config, monkeypatch):
@@ -489,3 +493,52 @@ def test_deferred_is_recorded_even_when_the_check_run_fails(config, monkeypatch)
 
     assert h["checks_error"].startswith("RuntimeError")
     assert h["checks_deferred"], "deferred names were lost on the failure path"
+
+
+def test_checks_deferred_is_none_not_absent_when_the_registry_cannot_be_read(config, monkeypatch):
+    """The import-failure path (PR #526 review, issue 1).
+
+    Setting the key inside the same `try` as the import meant an ImportError
+    left it ABSENT — and a consumer doing `.get("checks_deferred", [])` then
+    reads "nothing was deferred" at the exact moment EVERY check was skipped.
+    `None` says "could not be determined", which is the true answer and is
+    distinguishable from `[]`.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fail_on_checks(name, *a, **kw):
+        if name == "techne.core.checks":
+            raise ImportError("simulated: checks module unavailable")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _fail_on_checks)
+
+    h = collect_health(config)
+
+    assert "checks_deferred" in h, "key vanished — a consumer's .get(...,[]) now lies"
+    assert h["checks_deferred"] is None, h["checks_deferred"]
+    assert h["checks_error"].startswith("ImportError")
+    # And the banner must not claim anything about a registry it could not read.
+    assert "deferred" not in format_banner(h)
+
+
+def test_the_liveness_failed_line_also_carries_the_deferred_note(config):
+    """The other render site, which was untested (PR #526 review, nit 4).
+
+    Deleting the suffix from the `liveness check FAILED` branch left the whole
+    suite green — and that branch is the one the design rationale calls most
+    load-bearing, since it is the path where the summary is most partial.
+    """
+    h = collect_health(config)
+    h["checks"] = []
+    h["checks_worst"] = "unknown"
+    h["checks_summary"] = {"unknown": 1}
+    h["checks_error"] = "RuntimeError: probe exploded"
+    h["checks_deferred"] = ["check_runtime_loaded"]
+
+    banner = format_banner(h)
+
+    assert "liveness check FAILED" in banner
+    assert "1 deferred: check_runtime_loaded" in banner

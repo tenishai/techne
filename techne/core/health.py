@@ -161,14 +161,22 @@ def collect_health(config: Config) -> dict:
     # 17 days after it mattered (techne#452). A detector wired to a command nobody
     # runs is worth no more than no detector — so liveness rides the surface the
     # operator already sees on every session.
+    # OUTSIDE the try below, and with its own guard, so the key EXISTS on every
+    # path. `None` means "could not be determined" and is deliberately distinct
+    # from `[]` ("nothing was deferred"): a consumer doing
+    # `.get("checks_deferred", [])` on an ABSENT key reads "nothing deferred" at
+    # the exact moment every check was skipped — this module's founding bug, in
+    # the code written to remove it. Setting it inside the try covered
+    # run_checks throwing but not the IMPORT throwing (PR #526 review).
     try:
-        from techne.core.checks import deferred_check_names, run_checks, summarize, worst
+        from techne.core.checks import deferred_check_names
 
-        # BEFORE run_checks, deliberately: this reads the registry's markers and
-        # cannot fail, so the key is populated even when the run below throws.
-        # Setting it afterwards would drop it on exactly the path where the
-        # reader most needs to know the summary is partial (techne#488).
         health["checks_deferred"] = deferred_check_names()
+    except Exception:  # noqa: BLE001 — an unreachable registry is a result
+        health["checks_deferred"] = None
+
+    try:
+        from techne.core.checks import run_checks, summarize, worst
 
         # cheap_only: this runs inside the SessionStart hook under
         # `hooks.timeout_s`, and that path is fail-open — one overrun drops the
@@ -314,9 +322,18 @@ def format_banner(health: dict) -> str:
     # without reversing that call. The unconditional record is the structured
     # `checks_deferred` key, which every dict consumer (techne_status, the MCP
     # surface) sees whether or not a warning renders here.
+    # `or []` also absorbs the None ("undetermined") case: no note rather than a
+    # confident claim about a registry we could not read.
     deferred = health.get("checks_deferred") or []
+    # Capped at 3 like the offender list below, whose reasoning applies equally:
+    # a long banner line is bad. `techne doctor` is already named in the sentence
+    # this suffix attaches to, so it is not repeated here.
+    _shown = ", ".join(deferred[:3])
+    _rest = len(deferred) - 3
     deferred_note = (
-        f" ({len(deferred)} deferred to `techne doctor`: {', '.join(deferred)})" if deferred else ""
+        f" ({len(deferred)} deferred: {_shown}{f', +{_rest} more' if _rest > 0 else ''})"
+        if deferred
+        else ""
     )
 
     worst_verdict = health.get("checks_worst")
