@@ -244,7 +244,12 @@ _SELECTORS = {
     "--collect-only", "--co", "--lf", "--last-failed", "--ff",
 }
 #: pytest args that consume the NEXT token, so its value is not a positional.
-_VALUED = {"-n", "-p", "-c", "-o", "--rootdir"}
+#: The long spellings matter as much as the short ones: without `--config-file`
+#: here, `--config-file alt.ini` made its value read as a POSITIONAL, so
+#: _is_default_suite returned False and the line was skipped before any guard
+#: could look at it. The guard did not fail on that mutant, it never ran on it
+#: — the deselection shape in argv form (#532 r7).
+_VALUED = {"-n", "-p", "-c", "-o", "--rootdir", "--config-file", "--override-ini"}
 
 
 def _pytest_argv(line: str) -> list[str] | None:
@@ -324,10 +329,36 @@ def test_no_workflow_env_narrows_pytest_selection():
     not a failure). Anything that narrows selection can narrow the guard out of
     the run.
 
-    So: forbid the two sources a workflow edit can introduce. The rootdir ini is
-    covered run-side by test_local_only_suites._effective_markexpr (#538). In-process
-    reconfiguration — a pytest_configure hook, a -p plugin — is NOT covered by
-    anything here and cannot be; #538's docstring says so too.
+    GOING STATIC DID NOT ESCAPE THAT TRAP — IT CHANGED WHAT IS READ, NOT WHETHER
+    THIS TEST IS SELECTED (#532 r7). Reading the YAML instead of the live config
+    does nothing for a mutant that is IN FORCE while this test would run, because
+    the same narrowing deselects this test too. Measured, workflow-level mutant:
+
+        env: PYTEST_ADDOPTS: "-m eval_vec"  present but NOT in force
+            -> 2 failed, 18 passed          (this guard and #538's sibling fire)
+        the same mutant actually in force, as CI would set it
+            -> 20 deselected, exit 0        (neither guard runs at all)
+
+    SO THE HONEST SCOPE IS SCOPE-DEPENDENT, and it is narrower than "forbid the
+    two sources a workflow edit can introduce":
+      - STEP-scoped env: CAUGHT. It narrows one step; the other pytest steps still
+        run this test unnarrowed, so it fires.
+      - JOB- or WORKFLOW-scoped env: NOT CAUGHT. It narrows every pytest step in
+        the job (or in both jobs), leaving no leg in which this assertion executes.
+        NO IN-SUITE TEST CAN DO BETTER — a guard that lives inside the run cannot
+        survive a mutant that cancels the run. Closing this needs a check outside
+        pytest: a lint step, or a required job whose own invocation is asserted by
+        something that is not pytest.
+    The tell, worth carrying past this file: do not ask "does the assertion catch
+    the mutant", ask "DOES THE ASSERTION STILL RUN under the mutant".
+
+    Also covered here: the rootdir ini, run-side, by
+    test_local_only_suites._effective_markexpr (#538). NOT covered and not
+    coverable statically: in-process reconfiguration via a conftest
+    pytest_configure, which needs no workflow edit at all. A `-p` plugin IS
+    statically visible on the run: line and is now checked by
+    test_the_default_suite_step_names_no_alternate_ini_or_plugin — it was filed
+    here as uncoverable, and that was wrong (#532 r7).
     """
     doc = yaml.safe_load(WORKFLOW.read_text())
     envs = [("workflow", doc.get("env") or {})]
@@ -344,17 +375,87 @@ def test_no_workflow_env_narrows_pytest_selection():
     )
 
 
-def test_the_default_suite_step_names_no_alternate_ini():
+def test_the_test_leg_still_runs_the_default_suite():
+    """The `test` job must keep at least one pytest invocation that narrows nothing.
+
+    THIS EXISTS BECAUSE OF THE GUARD BELOW, not independently of it.
+    `test_the_default_suite_step_names_no_alternate_ini_or_plugin` only inspects
+    lines for which `_is_default_suite` is True, so anything that stops a line
+    being a default-suite run — a positional, a `-k`, an `-m` — makes that guard
+    skip the line rather than fail on it. Silently narrowing the `test` leg would
+    therefore pass every check in this file (eval-vec has had this assertion since
+    #537; the `test` leg never did). A precondition that can be falsified is a way
+    to switch a guard off, so the precondition needs its own guard.
+    """
+    lines = [ln for s in _job_steps("test") for ln in str(s.get("run", "")).splitlines()]
+    argvs = [a for a in (_pytest_argv(ln) for ln in lines) if a is not None]
+    assert any(_is_default_suite(a) for a in argvs), (
+        "the test leg no longer runs the DEFAULT suite — every pytest invocation in it "
+        f"narrows. Found invocations: {argvs}"
+    )
+
+
+def _loads_selection_changing_config(argv: list[str]) -> str | None:
+    """The token by which *argv* points pytest at config that can narrow selection.
+
+    THREE flag families do it without putting a selector in argv, and all three
+    are statically visible on the run: line, so all three are checkable here:
+      -c / --config-file    names an ini whose addopts narrows.
+      -p                    loads a plugin whose pytest_configure can assign
+                            config.option.markexpr outright.
+      -o / --override-ini   sets addopts directly on the command line.
+
+    r7 named -c and -p. -o was found by asking what else reaches ini settings
+    rather than by checking the two that were reported — fixing the instances and
+    not the class is how this file got here twice already.
+
+    EVERY FAMILY HAS AN ATTACHED SPELLING, which is why this is a predicate and
+    not an `in argv` test: `_VALUED` only knows the separated form, so `-calt.ini`
+    and `-pplug` walk through as ordinary flags. Measured — each of these
+    deselects both tests of a two-test file:
+        -c alt.ini      -calt.ini      --config-file alt.ini   --config-file=alt.ini
+        -p plug         -pplug
+        -o addopts=…    --override-ini addopts=…
+    """
+    _EXACT = {"-c", "-p", "-o", "--config-file", "--override-ini"}
+    for a in argv:
+        if a.split("=", 1)[0] in _EXACT:
+            return a
+        # Attached short form. Guarded on `--` so long options cannot match here;
+        # the long spellings are handled above, including their `=` form.
+        if not a.startswith("--") and a.startswith(("-c", "-p", "-o")):
+            return a
+    return None
+
+
+def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
     """`-c other.ini` is inside argv but past the parser: `-c` is in _VALUED so its
     value is skipped unread, and an ini whose addopts narrows selects identically
     (#532 r6, measured: survives the argv guard, produces "1 passed, 1 deselected").
+    `-p` is the same shape and was previously filed as uncoverable; it is not.
+    `-o`/`--override-ini` is a third, found by asking what else reaches ini
+    settings rather than by checking only the two that were reported (#532 r7).
+
+    LINE BY LINE, like test_eval_vec_runs_the_default_suite_not_only_the_gate four
+    functions up. Passing the whole `run:` scalar made this vacuous against a
+    `run: |` block: `_pytest_argv` anchors at tok[0], so a block whose first token
+    is `echo` returns None and the loop `continue`s past the assertion entirely.
+    test.yml already writes two steps as `run: |` blocks, so adding a line above an
+    invocation is an ordinary edit (#532 r7). The requirement was known one test
+    earlier and not carried across — which is the tell for a class fixed in one
+    spot.
     """
     for job in ("test", "eval-vec"):
-        for line in (str(s.get("run", "")) for s in _job_steps(job)):
+        for line in (
+            ln for s in _job_steps(job) for ln in str(s.get("run", "")).splitlines()
+        ):
             argv = _pytest_argv(line)
             if argv is None or not _is_default_suite(argv):
                 continue
-            assert "-c" not in argv and not any(a.startswith("--config-file") for a in argv), (
-                f"the default-suite invocation in {job} names an alternate ini: {argv}. "
-                "Its addopts can narrow selection without changing anything this guard reads."
+            offender = _loads_selection_changing_config(argv)
+            assert offender is None, (
+                f"the default-suite invocation in {job} loads config that can narrow "
+                f"selection ({offender!r} in {argv}). An alternate ini's addopts, or a "
+                "plugin's pytest_configure, changes what runs without changing anything "
+                "the argv guard reads."
             )
