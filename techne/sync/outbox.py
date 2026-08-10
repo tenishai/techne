@@ -418,6 +418,22 @@ _SWEEP_AGED = """
        AND target NOT IN ({ph})
        AND created_at < ?
        AND id NOT IN (SELECT MAX(id) FROM outbox GROUP BY target)
+       -- SECOND TOMBSTONE: the newest SYNCED row per target.
+       -- The first one preserves PRESENCE; it does not preserve SYNC HISTORY,
+       -- and check_outbox_targets reads MAX(synced_at) from the same GROUP BY.
+       -- When a lane has a backlog its newest row is PENDING, so that row takes
+       -- the first tombstone slot and every synced row older than the boundary
+       -- is deleted — leaving MAX(synced_at) NULL. With pending > 0 the check
+       -- falls to temporal_verdict(last_synced, 14d), and temporal_verdict(None)
+       -- is UNOBSERVABLE (checks.py:288-291). So a healthy, actively-draining
+       -- lane reports "never synced".
+       -- Reachable on defaults, not exotic: retain_days=7 and a last successful
+       -- sync 7-14 days old — precisely a lane that has just started backing up.
+       -- Same class as the bug the first tombstone fixes, caught on one axis and
+       -- not the other: an aggregate the check reads, destroyed by retention.
+       AND id NOT IN (
+             SELECT id FROM outbox WHERE status = 'synced'
+              GROUP BY target HAVING synced_at = MAX(synced_at))
 """
 
 
@@ -427,11 +443,58 @@ def _sweep_boundary(conn, retain_days: int, cutoff: str | None) -> str:
     return conn.execute("SELECT datetime('now', ?)", (f"-{int(retain_days)} days",)).fetchone()[0]
 
 
+def delivered_hashes(db_path: Path, target: str) -> set[str]:
+    """The content hashes already enqueued for *target* — the dedup pre-filter (#518).
+
+    THE DECLARED ACCESSOR. Reading enqueue history back makes those rows
+    load-bearing state rather than a log, so the sweep must not age them out.
+    That invariant used to live in a regex over the source tree, and a regex
+    could not hold it: it was blind to a consumer reaching the table THROUGH
+    this module (the idiomatic way, since every other outbox query lives here),
+    and it produced false positives on files that merely mention both tokens —
+    `core/state.py` has a `COUNT(*) FROM outbox` stat with no target and no dedup
+    semantics anywhere near it. Its precision rested on where semicolons happened
+    to fall.
+
+    So the invariant is enforced HERE instead, where it cannot be evaded by
+    spelling: a caller either declares its lane in `LEDGER_TARGETS` or this
+    raises on the first call. A new pre-filter cannot be written that the
+    retention policy does not know about.
+    """
+    from techne.core.archivist import LEDGER_TARGETS
+
+    if target not in LEDGER_TARGETS:
+        raise ValueError(
+            f"{target!r} reads outbox enqueue history but is not in LEDGER_TARGETS. "
+            f"Those rows are a dedup ledger, not a log — the sweep would age them "
+            f"out and the next push would re-enqueue everything. Declare the lane "
+            f"in techne/core/archivist.py, or do not read history back."
+        )
+    conn = connect(db_path)
+    try:
+        return {
+            row[0]
+            for row in conn.execute(
+                "SELECT content_hash FROM outbox WHERE target = ? AND status != 'dead'",
+                (target,),
+            )
+        }
+    finally:
+        conn.close()
+
+
 def sweep_preview(db_path: Path, retain_days: int = 7, cutoff: str | None = None) -> dict:
     """What ``sweep_delivered`` WOULD delete, computed from the same predicates.
 
-    Returns ``{"collapsed": n, "aged_out": n, "by_target": {...}, "retained": n}``.
+    Returns ``{"collapsed", "aged_out", "by_target", "retained", "boundary"}``.
     Read-only.
+
+    ``boundary`` is returned so a caller can pass it BACK to ``sweep_delivered``
+    as *cutoff*. Otherwise each computes ``datetime('now', ...)`` independently
+    and an --apply run uses a boundary a moment later than the dry run the
+    operator read. It cannot matter at day granularity — but the whole design
+    rests on the dry run being unable to describe a different row set than the
+    apply, and threading it makes that unconditional rather than true-in-practice.
     """
     from techne.core.archivist import LEDGER_TARGETS
 
@@ -454,6 +517,7 @@ def sweep_preview(db_path: Path, retain_days: int = 7, cutoff: str | None = None
             "aged_out": len(aged),
             "by_target": by_target,
             "retained": total - len(collapse) - len(aged),
+            "boundary": boundary,
         }
     finally:
         conn.close()

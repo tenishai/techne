@@ -266,7 +266,7 @@ def push_knowledge_to_archivist(config) -> int:
     from techne.core.database import connect
     from techne.core.knowledge import REDIRECTED_TYPES
     from techne.core.knowledge_export import query_live_knowledge
-    from techne.sync.outbox import content_hash_for, enqueue
+    from techne.sync.outbox import content_hash_for, delivered_hashes, enqueue
 
     ensure_registered_for(config)
 
@@ -291,17 +291,11 @@ def push_knowledge_to_archivist(config) -> int:
     # The general shape, worth carrying to any "stop repeating this work" change:
     # AN OUTBOX IS A LOG OF ENQUEUES, NOT A RECORD OF WHAT THE SINK HOLDS, and the
     # redundancy being removed was quietly doubling as a reconcile path.
-    conn = connect(config.db_path)
-    try:
-        already = {
-            row[0]
-            for row in conn.execute(
-                "SELECT content_hash FROM outbox WHERE target = ? AND status != 'dead'",
-                (ARCHIVIST_KNOWLEDGE_TARGET,),
-            )
-        }
-    finally:
-        conn.close()
+    # THROUGH THE DECLARED ACCESSOR, not inlined SQL (#518). delivered_hashes()
+    # raises unless the target is in LEDGER_TARGETS, so a lane whose enqueue
+    # history is read back cannot exist without the retention policy knowing —
+    # the invariant is enforced by the call, not by a regex over the source.
+    already = delivered_hashes(config.db_path, ARCHIVIST_KNOWLEDGE_TARGET)
 
     pushed = 0
     skipped = 0

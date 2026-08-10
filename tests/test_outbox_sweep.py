@@ -12,6 +12,8 @@ that, and it fails against an age-only sweep. Teeth-checked, not assumed.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from techne.core.archivist import (
@@ -303,61 +305,60 @@ def test_preview_does_not_mutate(config):
 # ---- the drift guard --------------------------------------------------------
 
 
-def test_ledger_targets_covers_every_prefilter():
-    """LEDGER_TARGETS must name every target read back as an enqueue ledger.
+def test_reading_enqueue_history_requires_a_declared_lane():
+    """THE INVARIANT, ENFORCED BY THE CALL RATHER THAN BY A REGEX.
 
-    Derived from the source, not from a second hand-typed list: any module
-    outside `sync/outbox.py` that SELECTs content_hash FROM outbox is consulting
-    enqueue history, and its target has to be declared or the sweep will delete
-    state that module depends on.
+    Reading enqueue history back makes those rows load-bearing state, so the
+    sweep must not age them out. Two rounds tried to hold that with a lexical
+    guard over the source tree and it could not:
 
-    Adding such a read without declaring the target fails HERE rather than in
-    production three weeks later.
+      * BLIND TO INDIRECTION — a consumer reaching the table THROUGH
+        sync/outbox.py was invisible, and since every other outbox query in this
+        repo lives there, that is the idiomatic way to write one.
+      * FALSE POSITIVES — `core/state.py` has a `COUNT(*) FROM outbox` stat with
+        no target and no dedup semantics. It was spared only because a `;` fell
+        between the tokens; the guard's precision rested on semicolon placement
+        in unrelated files.
+
+    `delivered_hashes` is now the one way to read that history, and it refuses an
+    undeclared lane. A new pre-filter is either declared or it raises on its
+    first call — no spelling evades that.
     """
-    import re
-    from pathlib import Path
+    from techne.sync.outbox import delivered_hashes
 
-    import techne
+    with pytest.raises(ValueError, match="LEDGER_TARGETS"):
+        delivered_hashes(Path("/nonexistent.db"), "sink:undeclared_lane")
 
-    root = Path(techne.__file__).parent
-    readers = set()
-    for path in root.rglob("*.py"):
-        if path.name == "outbox.py" and path.parent.name == "sync":
-            continue  # the module that OWNS the table, not a consumer of its history
-        # MATCH EITHER ORDER. Two rounds of this guard were too narrow in
-        # exactly the same way, one axis at a time:
-        #   v1 `content_hash\s+FROM`      — required content_hash LAST in the
-        #                                   select list; `content_hash, status`
-        #                                   evaded it.
-        #   v2 `content_hash ... FROM`    — still required content_hash BEFORE
-        #                                   `FROM outbox`, i.e. in the select
-        #                                   list at all. Every WHERE-clause form
-        #                                   evaded it:
-        #       SELECT 1 FROM outbox WHERE content_hash = ?
-        #       SELECT COUNT(*) FROM outbox WHERE content_hash IN (?, ?)
-        #       SELECT EXISTS(SELECT 1 FROM outbox WHERE content_hash = ?)
-        # The per-hash membership form is arguably the MORE natural way to write
-        # a dedup pre-filter, so that was not an exotic evasion. The class is
-        # "the two tokens co-occur in one statement", not "they appear in this
-        # order", and fixing one axis at a time is how a guard stays evadable
-        # while looking hardened.
-        pattern = r"(content_hash\b[^;]*?\bFROM\s+outbox|\bFROM\s+outbox\b[^;]*?content_hash)"
-        if re.search(pattern, path.read_text(), re.I | re.S):
-            readers.add(str(path.relative_to(root)))
 
-    # ASSERT THE SET, DO NOT SEARCH THE TEXT FOR A DECLARATION. An earlier version
-    # of this test checked whether each reader's file MENTIONED a LEDGER_TARGETS
-    # member — which the declaration itself satisfies, so it passed while the
-    # declaration was pointed at a target the pre-filter never queries. It was
-    # hollow, and mutation-testing is what exposed it.
-    #
-    # A new entry here is not necessarily a bug: it means someone added a second
-    # consumer of enqueue history, and its target has to join LEDGER_TARGETS or
-    # the sweep will delete state it depends on. Failing loudly is the point.
-    assert readers == {"core/archivist.py"}, (
-        f"the set of modules reading outbox enqueue history changed: {sorted(readers)}. "
-        f"Add the new reader's target to LEDGER_TARGETS (and cover it in "
-        f"test_sweep_preserves_the_prefilter_set) before updating this assertion."
+def test_the_prefilter_goes_through_the_accessor(config):
+    """The accessor is only a mechanism if the real pre-filter uses it.
+
+    An accessor nobody calls is the shape #504 names — present, correct, and not
+    load-bearing. Asserted by observing the CALL, so it fails if the archivist
+    ever re-inlines the SQL.
+    """
+    from techne.core.knowledge import store
+    from techne.sync import outbox as outbox_mod
+
+    # Patched on the SOURCE module: archivist imports the name inside the
+    # function, so it is resolved at call time and is not an attribute of
+    # archivist itself.
+    calls = []
+    real = outbox_mod.delivered_hashes
+
+    def spy(db_path, target):
+        calls.append(target)
+        return real(db_path, target)
+
+    outbox_mod.delivered_hashes = spy
+    try:
+        store(config.db_path, "a durable fact", type="fact", confidence="high")
+        push_knowledge_to_archivist(config)
+    finally:
+        outbox_mod.delivered_hashes = real
+
+    assert calls == [ARCHIVIST_KNOWLEDGE_TARGET], (
+        f"push_knowledge_to_archivist did not read history through the accessor: {calls}"
     )
 
 
@@ -472,3 +473,58 @@ def test_a_swept_lane_is_still_visible_to_check_outbox_targets(config):
         "the lane vanished from the check's GROUP BY — it will report "
         "'declared lane has NEVER enqueued anything'"
     )
+
+
+def test_a_backed_up_lane_keeps_its_sync_history(config):
+    """The FIRST tombstone preserves presence; it does not preserve MAX(synced_at).
+
+    When a lane has a backlog its newest row is PENDING, so that row takes the
+    presence slot and every synced row older than the boundary is deleted —
+    leaving MAX(synced_at) NULL. check_outbox_targets then falls to
+    temporal_verdict(None), which is UNOBSERVABLE: a healthy, actively-draining
+    lane reporting "never synced". UNOBSERVABLE is reserved for a rail whose
+    telemetry does not exist, and spending it on a healthy lane is the
+    teach-the-operator-to-ignore-the-report failure.
+
+    Asserted against the aggregates the check actually selects, so it fails if
+    retention stops preserving them however the sweep is spelled.
+    """
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(config.db_path)
+    try:
+        # Synced history, all older than the boundary.
+        for i in range(2):
+            conn.execute(
+                "INSERT INTO outbox (target, data_json, content_hash, status, created_at, "
+                "synced_at) VALUES (?, '{}', ?, 'synced', '2026-07-30 00:00:00', ?)",
+                (NON_LEDGER, f"old{i}", "2026-07-31 00:00:00"),
+            )
+        # A newer PENDING row — the backlog. This is what takes the presence slot.
+        conn.execute(
+            "INSERT INTO outbox (target, data_json, content_hash, status, created_at) "
+            "VALUES (?, '{}', 'backlog', 'pending', '2026-08-08 00:00:00')",
+            (NON_LEDGER,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    sweep_delivered(config.db_path, cutoff="2026-08-01 00:00:00")
+
+    conn = plain_connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT target, COUNT(*), MAX(synced_at), SUM(status='pending'), MAX(created_at) "
+            "FROM outbox WHERE target = ? GROUP BY target",
+            (NON_LEDGER,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None, "the lane vanished entirely"
+    assert row[2] == "2026-07-31 00:00:00", (
+        f"MAX(synced_at) is {row[2]!r} — the check will read this lane as never "
+        f"synced and report UNOBSERVABLE on a lane that is actively draining"
+    )
+    assert row[3] == 1, "the pending backlog row was swept"

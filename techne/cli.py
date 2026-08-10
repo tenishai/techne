@@ -147,9 +147,7 @@ def _render_liveness(config) -> tuple[int, int]:
     for r in sorted(results, key=lambda r: (r.ok, r.subsystem, r.name)):
         if not r.ok:
             failing += 1
-        click.echo(
-            f"  {marks[r.verdict]} {r.name:<{width}}  {r.verdict.value:<12} {r.detail}"
-        )
+        click.echo(f"  {marks[r.verdict]} {r.name:<{width}}  {r.verdict.value:<12} {r.detail}")
         if r.remedy:
             click.echo(f"    {' ' * width}    remedy: {r.remedy}")
 
@@ -880,9 +878,7 @@ def knowledge_export(ctx, output, include_superseded):
         click.echo("techne not initialized. Run: techne init")
         return
 
-    result = export_knowledge(
-        config.db_path, output, include_superseded=include_superseded
-    )
+    result = export_knowledge(config.db_path, output, include_superseded=include_superseded)
     total = result["total"]
     scope = "(including superseded)" if include_superseded else "(live only)"
     click.echo(f"Exported {total} {'entry' if total == 1 else 'entries'} {scope} → {output}/")
@@ -962,12 +958,12 @@ def knowledge_archive_scan(ctx, confidence_floor, reaffirmation_window_days, dry
         return
 
     tag = " (dry run — not written)" if dry_run else ""
-    click.echo(f"{'Would archive' if dry_run else 'Archived'} {len(archived)} {'entry' if len(archived) == 1 else 'entries'}{tag}:")
+    click.echo(
+        f"{'Would archive' if dry_run else 'Archived'} {len(archived)} {'entry' if len(archived) == 1 else 'entries'}{tag}:"
+    )
     for entry in archived:
         snippet = entry["content"][:80].replace("\n", " ")
-        click.echo(
-            f"  #{entry['id']}  eff_conf={entry['effective_confidence']:.4f}  {snippet!r}"
-        )
+        click.echo(f"  #{entry['id']}  eff_conf={entry['effective_confidence']:.4f}  {snippet!r}")
 
 
 @knowledge.command("unarchive")
@@ -1108,9 +1104,7 @@ def outbox_prune_orphans(ctx):
 
 
 @outbox.command("sweep")
-@click.option(
-    "--retain-days", default=7, show_default=True, help="Age bound for non-ledger lanes."
-)
+@click.option("--retain-days", default=7, show_default=True, help="Age bound for non-ledger lanes.")
 @click.option("--apply", "apply_", is_flag=True, help="Actually delete (default: dry run).")
 @click.pass_context
 def outbox_sweep(ctx, retain_days, apply_):
@@ -1135,7 +1129,10 @@ def outbox_sweep(ctx, retain_days, apply_):
         click.echo(f"  retained: {preview['retained']} row(s). Re-run with --apply.")
         return
 
-    result = sweep_delivered(config.db_path, retain_days=retain_days)
+    # Reuse the PREVIEW's boundary, so --apply cannot act on a different row set
+    # than the dry run the operator just read.
+    preview = sweep_preview(config.db_path, retain_days=retain_days)
+    result = sweep_delivered(config.db_path, cutoff=preview["boundary"])
     click.echo(
         f"Swept {result['collapsed'] + result['aged_out']} row(s) "
         f"(collapsed {result['collapsed']}, aged out {result['aged_out']})."
@@ -1363,7 +1360,10 @@ def migrate_summaries_cmd(ctx, dry_run: bool):
 
 @main.command()
 @click.option(
-    "--since", "since_days", type=int, default=None,
+    "--since",
+    "since_days",
+    type=int,
+    default=None,
     help="Window to the last N days (default: all-time).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
@@ -1401,9 +1401,7 @@ def audit(ctx, since_days, as_json):
         return
 
     window = f"last {since_days}d" if since_days else "all-time"
-    click.echo(
-        f"techne utilization audit — {window} (N={ledger['total_observations']:,} obs)\n"
-    )
+    click.echo(f"techne utilization audit — {window} (N={ledger['total_observations']:,} obs)\n")
 
     click.echo("INJECTION READ-PATH (context_injections)")
     if not inj:
@@ -1425,11 +1423,13 @@ def audit(ctx, since_days, as_json):
 
     m, cx = ledger["memory"], ledger["codex"]
     mem_ratio = (
-        f"{m['writes_per_read']} writes/read" if m["writes_per_read"] is not None
+        f"{m['writes_per_read']} writes/read"
+        if m["writes_per_read"] is not None
         else "no reads yet"
     )
     codex_ratio = (
-        f"1 query / {cx['edits_per_read']:.0f} edits" if cx["edits_per_read"] is not None
+        f"1 query / {cx['edits_per_read']:.0f} edits"
+        if cx["edits_per_read"] is not None
         else "no codex reads"
     )
     arch = ledger["architect"]
@@ -1454,6 +1454,7 @@ def audit(ctx, since_days, as_json):
         click.echo("  (no codex_edit_rail injections logged yet)")
     else:
         pay = attrib["payload"]
+
         # In this branch injections > 0, so the *_pct fields are non-None; payload
         # pcts can still be None if every injection had an empty payload.
         def _p(v):
@@ -1473,9 +1474,7 @@ def audit(ctx, since_days, as_json):
             f"({_p(attrib['symbol_attributed_pct'])} of all · "
             f"{_p(attrib['symbol_attributed_pct_attributable'])} w/ follow-up)   ← stronger, name-based"
         )
-        click.echo(
-            f"  no edit followed in window     : {attrib['no_edits_in_window']:>3}"
-        )
+        click.echo(f"  no edit followed in window     : {attrib['no_edits_in_window']:>3}")
         click.echo(
             f"  payload: real {_p(pay['real_pct'])} · module-noise {_p(pay['module_pct'])} "
             f"· test {_p(pay['test_pct'])}   (100%-noise injections: {_p(attrib['noise_only_pct'])})"
@@ -1499,9 +1498,7 @@ def prompts():
 
 
 @prompts.command("export")
-@click.option(
-    "--overwrite", is_flag=True, help="Replace existing prompt files (discards edits)."
-)
+@click.option("--overwrite", is_flag=True, help="Replace existing prompt files (discards edits).")
 @click.pass_context
 def prompts_export(ctx, overwrite):
     """Write the built-in maintenance prompts to <data_dir>/prompts/*.md to edit from."""
@@ -2199,10 +2196,10 @@ def reflect_review(ctx, status, limit, show_raw):
         if faith_ok == 0:
             warning = r.get("faithfulness_warning") or "a source claim may have been dropped"
             click.echo(f"  ⚠ FAITHFULNESS WARNING: {warning}")
+            click.echo("    This candidate may drop a load-bearing claim from its source entries.")
             click.echo(
-                "    This candidate may drop a load-bearing claim from its source entries."
+                "    Review carefully before promoting. (Run: techne reflect promote --help)"
             )
-            click.echo("    Review carefully before promoting. (Run: techne reflect promote --help)")
         elif faith_ok == 1:
             click.echo("  ✓ faithfulness: ok")
         # faith_ok IS NULL: unchecked — silently omit so the noise level stays low.
@@ -2329,9 +2326,11 @@ def reflect_ingest(ctx, responses_file):
 @click.option("--by", "decided_by", default="human", help="Who/what decided (audit trail).")
 @click.option("--reason", "decision_reason", default=None, help="Why (audit trail).")
 @click.option(
-    "--force", is_flag=True, default=False,
+    "--force",
+    is_flag=True,
+    default=False,
     help="Override the faithfulness gate for a merge/supersede candidate that was "
-         "flagged unfaithful. Review the FAITHFULNESS WARNING first.",
+    "flagged unfaithful. Review the FAITHFULNESS WARNING first.",
 )
 @click.pass_context
 def reflect_promote(ctx, candidate_id, decided_by, decision_reason, force):
@@ -3022,7 +3021,9 @@ def architect_topic(ctx, name, as_of):
 
 @architect.command("tag")
 @click.argument("pattern_id")
-@click.option("--topic", default=None, help="Set the pattern's topic (problem-solved grouping key).")
+@click.option(
+    "--topic", default=None, help="Set the pattern's topic (problem-solved grouping key)."
+)
 @click.option("--status", default=None, help="Set status directly (active|superseded).")
 @click.option(
     "--superseded-by",
@@ -3186,14 +3187,12 @@ def vectors_backfill(ctx, do_tags, all_tags):
         import sqlite_vec  # noqa: F401
     except ImportError:
         click.echo(
-            "vector search unavailable: no embedding backend installed — "
-            "install techne[vectors]"
+            "vector search unavailable: no embedding backend installed — install techne[vectors]"
         )
         ctx.exit(0)
     if not embeddings_mod.backend_available():
         click.echo(
-            "vector search unavailable: no embedding backend installed — "
-            "install techne[vectors]"
+            "vector search unavailable: no embedding backend installed — install techne[vectors]"
         )
         ctx.exit(0)
 
@@ -3242,8 +3241,7 @@ def vectors_status(ctx):
         click.echo("stored identity stamp: none")
     else:
         click.echo(
-            f"stored identity stamp: {status['stamp']['name']}"
-            f" (dim={status['stamp']['dim']})"
+            f"stored identity stamp: {status['stamp']['name']} (dim={status['stamp']['dim']})"
         )
 
     click.echo("vec table rows:")
@@ -3524,7 +3522,10 @@ def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures):
     _root, db_path = _active_codex_db(config, repo)
     symbol_id = _resolve_codex_symbol_or_exit(db_path, symbol_id)
     raw = reachable(
-        db_path, symbol_id, direction=direction, max_depth=depth,
+        db_path,
+        symbol_id,
+        direction=direction,
+        max_depth=depth,
         exclude_fixtures=not include_fixtures,
     )
     rows = annotate_freshness(db_path, raw)
