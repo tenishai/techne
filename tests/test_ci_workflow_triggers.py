@@ -282,12 +282,20 @@ def _marker_expr(argv: list[str]) -> str | None:
     """The `-m` expression this invocation selects with, else None.
 
     Parsed rather than scanned, and it handles the spellings pytest accepts:
-    `-m X`, `-mX`, `--markexpr X`, `--markexpr=X`. Used to assert a step still
-    runs a specific gate WITHOUT a substring scan over the raw `run:` text, which
-    passes on a commented-out step (#532 r8).
+    `-m X` and `-mX`. THERE IS NO `--markexpr` FLAG — `markexpr` is only the
+    argparse `dest` behind `-m`, and r8/r9 of this PR carried branches for a long
+    form that does not exist. Measured on the pinned pytest 9.1.1: `--markexpr` is
+    absent from `--help` entirely, and `--markexpr alpha`, `--markexpr=alpha` and
+    `--markexpr="not a"` all fail (rc=4, the last degrading to a bogus positional
+    because only a space-free `--x=y` is parsed as an option). Supporting it bought
+    exactly one wrong answer — `-m alpha --markexpr="not alpha"` made this helper
+    report `not alpha` where pytest resolves `alpha` — so the branches are gone
+    (#532 r10). Used to assert a step still runs a specific gate WITHOUT a
+    substring scan over the raw `run:` text, which passes on a commented-out
+    step (#532 r8).
 
-    LAST WINS, NOT FIRST (#532 r9). `--markexpr` is a plain `store` action, so a
-    later `-m` overwrites an earlier one. Returning the first match reported the
+    LAST WINS, NOT FIRST (#532 r9). `-m` is a plain `store` action, so a later
+    `-m` overwrites an earlier one. Returning the first match reported the
     expression pytest is NOT selecting with. Measured on this file:
         pytest … -m eval_vec                      -> 12 deselected
         pytest … -m eval_vec -m "not eval_vec"    -> 12 passed   (the LAST won)
@@ -298,10 +306,8 @@ def _marker_expr(argv: list[str]) -> str | None:
     """
     found = None
     for i, a in enumerate(argv):
-        if a in ("-m", "--markexpr"):
+        if a == "-m":
             found = argv[i + 1] if i + 1 < len(argv) else None
-        elif a.startswith("--markexpr="):
-            found = a.split("=", 1)[1]
         elif a.startswith("-m") and len(a) > 2 and not a.startswith("--"):
             found = a[2:]
     return found
@@ -359,8 +365,13 @@ def test_no_workflow_env_narrows_pytest_selection():
     rootdir ini, and whichever ini `-c` names. Rounds 1-5 hardened the argv PARSE
     and were right each time; this one is not reachable that way, because
     `env: PYTEST_ADDOPTS: "-m eval_vec"` leaves the run: line byte-identical.
-    Not contrived — this workflow already sets tool-changing job-level env
-    at :72-74.
+    Not contrived — this workflow already sets tool-changing env at :72, and it
+    is WORKFLOW-level: :72 sits above `jobs:` at :76, and there is no job-level
+    `env:` block anywhere in the file. r6 called it job-level, which inverted the
+    one distinction this docstring makes load-bearing thirty lines down (#532 r10).
+    The correction sharpens the point rather than softening it: the only existing
+    precedent for setting env here sits in the exact cell the scope table calls
+    GENUINELY NOT CAUGHT.
 
     A RUN-SIDE CHECK CANNOT CLOSE IT AND I TRIED. A test asserting
     option.markexpr matches the ini gets DESELECTED by the very narrowing it
