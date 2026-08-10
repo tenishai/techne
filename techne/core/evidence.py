@@ -721,18 +721,38 @@ def _output_was_bounded(output_text: str) -> bool:
     ``redact_credentials`` runs BEFORE storage and substitutes ``<redacted:tag>``
     for each match, so a legacy row cut at exactly the budget can be stored BELOW
     it and read as authoritative — the bad direction, since an unflagged row can
-    carry a green verdict. A redacted legacy row therefore has an UNKNOWABLE
-    original length, and "we cannot determine it" is a different fact from "it was
-    under budget"; collapsing them is what produced this bug. Treated as bounded.
+    carry a green verdict. A redacted row therefore has an UNKNOWABLE original
+    length, and "we cannot determine it" is a different fact from "it was under
+    budget"; collapsing them is what produced this bug. Treated as bounded.
 
     Deliberately NOT widened by a shrinkage allowance: replacement is shorter than
     the secret by an UNBOUNDED amount, so any constant is a number nobody can
     justify — it would flag more intact rows than this does and still miss the
     large-shrinkage cases.
 
-    Note this reaches only rows ALREADY WRITTEN. Recording boundedness at write
-    time — the issue's preferred fix — is what PR #437's marker already does, and
-    it cannot help a population defined by predating it.
+    THIS BRANCH IS IMPRECISE AND THE COST DOES NOT SELF-HEAL. Both were claimed
+    otherwise in the first version of this fix; both were measured false and the
+    numbers are recorded here so the next reader does not re-derive them.
+
+    * NO AGE DISCRIMINATOR EXISTS, and one cannot: a post-#437 row that was never
+      cut carries no marker either, so it is indistinguishable by content from a
+      legacy cut. The branch therefore fires on MODERN rows too, where
+      ``was_elided`` is already definitive — flagging one of those is a provable
+      false positive, not a conservative read.
+    * BACKFILL REGENERATES IT rather than retiring it. Re-summarising runs
+      ``_preview`` (verbatim, under budget, no marker) and then redaction at the
+      write boundary, which puts the marker back. Backfill retires the legacy-CUT
+      problem and recreates this one, so the affected population is
+      stable-to-growing.
+
+    MEASURED on the live ledger (read-only, 2026-08-10): 14 of 6164 Bash rows
+    flip, lengths 608-1842 with a median of 1384 against a 2000 budget, only ONE
+    within 10% of it, and timestamps running past #437's merge. So roughly one
+    plausible true positive to a dozen false ones, at ZERO verdict changes today.
+    Kept because the direction is safe and the false-green it closes is real, but
+    the precision is poor and a future reader with a better discriminator — a
+    write-time boundedness column, or the row's timestamp — should revisit rather
+    than assume this is settled.
     """
     if was_elided(output_text):
         return True

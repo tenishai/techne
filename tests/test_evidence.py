@@ -1591,18 +1591,30 @@ def test_an_unredacted_short_row_is_still_authoritative():
 
 
 def test_the_marker_matches_what_the_redactor_actually_writes():
-    """Binds the reader's pattern to the writer's format.
+    """Binds the reader's pattern to the writer's format, through REAL output.
 
-    REDACTION_MARKER is derived from the same tag set `redact_credentials`
-    interpolates, and lives in that module. This asserts the derivation holds
-    against real output rather than against the format string.
+    SCOPE, stated because the first version of this test overstated it: the
+    per-tag loop below builds `f"<redacted:{tag}>"`, which IS the format string
+    hardcoded a second time — so it checks the marker knows every TAG, and
+    proves nothing about the format. The binding to the format comes only from
+    the live redactions, so those cover several distinct patterns rather than
+    one. Injecting format drift is caught by the live half, not the loop.
     """
     from techne.core.redaction import _PATTERNS, REDACTION_MARKER, redact_credentials
 
-    for pattern_src, tag in _PATTERNS:
-        del pattern_src
-        produced = f"<redacted:{tag}>"
-        assert REDACTION_MARKER.search(produced), f"marker misses tag {tag!r}"
+    # Real credential-SHAPED inputs, run through the actual redactor. Not real
+    # secrets: each is a synthetic string matching one pattern's shape.
+    live_samples = [
+        "sk-ant-" + "a" * 30,
+        "ghp_" + "b" * 30,
+        "sk-proj-" + "c" * 30,
+    ]
+    for sample in live_samples:
+        produced = redact_credentials(f"prefix {sample} suffix")
+        assert produced != f"prefix {sample} suffix", f"redactor did not match {sample[:12]!r}"
+        assert REDACTION_MARKER.search(produced), produced
 
-    live = redact_credentials("key sk-ant-" + "z" * 40)
-    assert REDACTION_MARKER.search(live), live
+    # Every tag the writer can interpolate is recognised. Format-independent by
+    # construction, which is exactly its limit.
+    for _pattern_src, tag in _PATTERNS:
+        assert REDACTION_MARKER.search(f"<redacted:{tag}>"), f"marker misses tag {tag!r}"
