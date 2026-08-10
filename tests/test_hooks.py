@@ -847,3 +847,98 @@ class TestHookStdinDiagnostics:
         so we DO expect the diagnostic here. This test asserts exit 0 regardless."""
         result = _run_hook_subprocess("techne.hooks.session_end", "")
         assert result.returncode == 0
+
+
+# ---- `env` is a transparent prefix, not a read-only utility (techne#524) ----
+
+
+class TestEnvPrefixIsNotNoise:
+    """`env` heading the read-only set dropped whatever it prefixed.
+
+    `_bash_is_readonly_noise` headed on `env` — which IS legitimately read-only
+    when run alone — and discarded the WHOLE command, so `env … git commit` was
+    dropped as navigation noise. That is the case the filter's own docstring
+    names as the reason its fail-safe direction is CAPTURE: "a missed observation
+    is far cheaper than a silently-dropped commit".
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "env bash -c 'git commit -m x'",
+            "/usr/bin/env bash -c 'git commit -m x'",
+            "env FOO=1 git commit -m x",
+            "env -u X git push",
+            "env bash -c 'pytest -q'",
+            "env -i -u CC make test",
+        ],
+    )
+    def test_a_real_command_behind_env_is_captured(self, command):
+        from techne.hooks.post_tool_use import _bash_is_readonly_noise
+
+        assert _bash_is_readonly_noise(command) is False, command
+
+    @pytest.mark.parametrize("command", ["env", "env -i", "env -u FOO"])
+    def test_env_with_no_command_is_still_noise(self, command):
+        """The case that must NOT regress: bare `env` really does just print the
+        environment, so it stays classified as navigation."""
+        from techne.hooks.post_tool_use import _bash_is_readonly_noise
+
+        assert _bash_is_readonly_noise(command) is True, command
+
+    def test_env_is_the_only_transparent_prefix_in_the_readonly_set(self):
+        """Bounds the fix, and corrects the issue's own guess.
+
+        #524 speculated that other entries are prefixes with the same bug —
+        `nice`, `nohup`, `timeout`, `stdbuf`. Measured: none of them is in the
+        set at all, so none was ever dropped, and `env` is the only member that
+        is a pass-through rather than a terminal utility. If a future edit adds
+        one, this fails and the skip helper needs widening with THAT utility's
+        option grammar — not a generic rule, since each differs and guessing
+        wrong eats the real command.
+        """
+        from techne.hooks.post_tool_use import _READONLY_BASH_HEADS
+
+        assert not _READONLY_BASH_HEADS & {"nice", "nohup", "timeout", "stdbuf", "sudo", "xargs"}
+        assert "env" in _READONLY_BASH_HEADS
+
+    @pytest.mark.parametrize(
+        "command,head",
+        [
+            ("env FOO=1 git commit -m x", "git"),
+            ("env -u CC bash -c pytest", "bash"),
+            ("env -i -u CC make test", "make"),
+            ("env -uCC bash -c pytest", "bash"),   # value ATTACHED — eats nothing
+            ("/usr/bin/env bash -c pytest", "bash"),
+            ("git commit -m x", "git"),            # no prefix at all
+        ],
+    )
+    def test_the_skip_lands_on_the_real_head(self, command, head):
+        """Pins WHICH token the skip resolves to, not merely the capture decision.
+
+        The decision cannot catch over-skipping: eating the real command lands on
+        `commit` or `-m`, neither of which is in the read-only set, so the filter
+        still says "capture" and a starvation bug reads as correct. That is the
+        exact failure poe_1 hit three times on this grammar in techne#445, and my
+        first version of these tests could not see it — a mutation that skipped
+        one token too far left all of them green.
+        """
+        from techne.hooks.post_tool_use import _skip_env_prefix
+
+        tokens = command.split()
+        assert tokens[_skip_env_prefix(tokens)] == head, tokens
+
+    def test_the_gate_sees_a_runner_behind_env_too(self):
+        """BEHAVIOURAL binding between the two sides, not an identity check.
+
+        `evidence.py` used to carry its own copy of this loop (techne#445); the
+        helper now lives here because evidence.py already imports from this
+        module and the reverse would be a cycle. An `is` check on the imported
+        symbol does NOT prove evidence.py still CALLS it — verified: replacing
+        its call site with a no-op leaves such a check green. This asserts the
+        outcome that only the call can produce.
+        """
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("env bash -c 'pytest -q'") is True
+        assert _command_runs_tests("env -u CC bash -c 'pytest -q'") is True

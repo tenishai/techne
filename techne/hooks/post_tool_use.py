@@ -50,6 +50,71 @@ _READONLY_BASH_HEADS = frozenset({
     "du", "df", "ps", "realpath", "basename", "dirname", "readlink",
 })
 
+_ENV_PREFIXES = frozenset({"env"})
+_ENV_VALUE_LETTERS = frozenset({"u", "C", "P"})
+_ENV_VALUE_LONG_OPTS = frozenset({"--unset", "--chdir"})
+
+
+def _skip_env_prefix(tokens: list[str], i: int = 0) -> int:
+    """Index of the real command head, past any transparent ``env`` prefix.
+
+    SHARED BY BOTH SIDES ON PURPOSE. `env` is not a utility whose output is
+    navigation, it is a pass-through: `env FOO=1 git commit` really does commit.
+    The capture filter needs this to avoid dropping a commit as noise
+    (techne#524); the evidence gate needs it to see the shell behind
+    `env bash -c 'pytest -q'` (techne#445). One definition, because the option
+    grammar below is subtle enough that a second copy would drift — and it lives
+    HERE rather than in evidence.py because evidence.py already imports from this
+    module, so the reverse would be a cycle.
+
+    `env` alone, with nothing after it, is left where it is: that really does just
+    print the environment, and the caller classifies it as noise.
+    """
+    # `env` is transparent: skip it, its options, and any VAR=val it carries.
+    while i < len(tokens) and tokens[i].rsplit("/", 1)[-1] in _ENV_PREFIXES:
+        i += 1
+        while i < len(tokens):
+            t = tokens[i]
+            # Same LAST-LETTER-OF-THE-CLUSTER rule as the shell scanner above.
+            # A whole-token test misses `-iu FOO` (which is `-i` + `-u FOO`),
+            # skipping by one so FOO reads as the command and the shell is never
+            # reached — starvation, i.e. a false green.
+            if t.startswith("--"):
+                i += 2 if t in _ENV_VALUE_LONG_OPTS else 1
+            elif t[:1] == "-" and len(t) > 1:
+                # ENV USES getopt; THE SHELL SCANNER ABOVE DOES NOT. Applying the
+                # shell's rule here was r3 finding 1 recurring a THIRD time in
+                # this one loop, and the two really do differ:
+                #   bash:  `-oc pipefail S` -> `o` eats the NEXT TOKEN from the
+                #          front of the cluster (measured; bash rolls its own).
+                #   env:   `-uCC bash …`    -> `u` takes the REST OF THE TOKEN
+                #          ("CC") as an attached value and eats NOTHING.
+                # Testing only t[-1] read `-uCC`'s trailing C as a value letter
+                # and skipped two tokens, eating `bash`. Starvation, i.e. a false
+                # green. `env -u CC` (unsetting a compiler var) is idiomatic in
+                # build and CI contexts, not exotic.
+                #
+                # getopt's actual rule: at the FIRST value letter, the remainder
+                # of the token is its value if any remains; only a value letter in
+                # LAST position consumes the following token. All six spellings
+                # below were run against the real env before this was written.
+                cluster = t[1:]
+                first_value = next(
+                    (k for k, ch in enumerate(cluster) if ch in _ENV_VALUE_LETTERS), None
+                )
+                if first_value is None:
+                    i += 1  # flags only (`-i`, `-0`)
+                elif first_value == len(cluster) - 1:
+                    i += 2  # `-u CC`, `-iu CC`, `-P /usr/bin` — value is next token
+                else:
+                    i += 1  # `-uCC`, `-uC`, `-iuCC` — value attached in-token
+            elif "=" in t and not t.startswith("-"):
+                i += 1
+            else:
+                break
+    return i
+
+
 def _split_bash_segments(command: str) -> list[str]:
     """Split a compound command into top-level segments on shell operators
     (``&&`` ``||`` ``;`` ``|`` ``&`` newline), ignoring operators that appear
@@ -120,12 +185,17 @@ def _bash_is_readonly_noise(command: str) -> bool:
         return False
     for seg in segments:
         tokens = seg.split()
-        # Skip leading `VAR=val` env assignments to find the real command head.
+        # Skip leading `VAR=val` assignments AND any transparent `env` prefix to
+        # find the real command head. Without the `env` skip this headed on `env`
+        # itself — which IS in the read-only set — and dropped the whole command,
+        # so `env … git commit` was silently discarded as navigation noise: the
+        # exact case this filter's fail-safe exists to prevent (techne#524).
         i = 0
         while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
             i += 1
+        i = _skip_env_prefix(tokens, i)
         if i >= len(tokens):
-            continue  # segment was only env assignments — benign
+            continue  # only assignments, or a bare `env` — benign
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. /bin/ls
         if head not in _READONLY_BASH_HEADS:
             return False
