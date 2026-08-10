@@ -730,29 +730,52 @@ def _output_was_bounded(output_text: str) -> bool:
     justify — it would flag more intact rows than this does and still miss the
     large-shrinkage cases.
 
-    THIS BRANCH IS IMPRECISE AND THE COST DOES NOT SELF-HEAL. Both were claimed
-    otherwise in the first version of this fix; both were measured false and the
-    numbers are recorded here so the next reader does not re-derive them.
+    THIS BRANCH IS INERT TODAY, AND THAT — NOT "THE DIRECTION IS SAFE" — IS WHY
+    IT IS CHEAP TO KEEP. Setting the flag only changes a verdict when the SAME
+    row is simultaneously a test-runner command, parseable, failure-free AND
+    redacted. That conjunction has never occurred here: measured over every Bash
+    row in the live ledger, 15 rows flip the flag and ZERO change a verdict. A
+    gate cries wolf by FIRING; this one has not fired at a human yet. Re-check
+    later whether that CONJUNCTION has started occurring — not whether the
+    discriminator got smarter.
 
-    * NO AGE DISCRIMINATOR EXISTS, and one cannot: a post-#437 row that was never
-      cut carries no marker either, so it is indistinguishable by content from a
-      legacy cut. The branch therefore fires on MODERN rows too, where
-      ``was_elided`` is already definitive — flagging one of those is a provable
-      false positive, not a conservative read.
-    * BACKFILL REGENERATES IT rather than retiring it. Re-summarising runs
-      ``_preview`` (verbatim, under budget, no marker) and then redaction at the
-      write boundary, which puts the marker back. Backfill retires the legacy-CUT
-      problem and recreates this one, so the affected population is
-      stable-to-growing.
+    THREE THINGS MAKE IT IMPRECISE. The first two were in the original note; the
+    third dominates the live data and was missing from it:
 
-    MEASURED on the live ledger (read-only, 2026-08-10): 14 of 6164 Bash rows
-    flip, lengths 608-1842 with a median of 1384 against a 2000 budget, only ONE
-    within 10% of it, and timestamps running past #437's merge. So roughly one
-    plausible true positive to a dozen false ones, at ZERO verdict changes today.
-    Kept because the direction is safe and the false-green it closes is real, but
-    the precision is poor and a future reader with a better discriminator — a
-    write-time boundedness column, or the row's timestamp — should revisit rather
-    than assume this is settled.
+    * NO AGE DISCRIMINATOR EXISTS. A post-#437 row that was never cut carries no
+      marker either, so it is indistinguishable by content from a legacy cut.
+    * BACKFILL REGENERATES IT. Re-summarising runs ``_preview`` (verbatim, under
+      budget, no marker) and then redaction at the write boundary, which puts the
+      marker back. Backfill retires the legacy-CUT problem and recreates this one.
+    * THE MARKER CANNOT TELL A TOKEN WE WROTE FROM THE SAME LITERAL TEXT ARRIVING
+      FOR ANY OTHER REASON — and on this ledger that is the common case. Every
+      flipped row inspected is a short, plainly complete output that merely
+      CONTAINS a credential shape: `.env` dumps, a JWT inside a signed URL, a PEM
+      block in a values.yaml. Two are self-referential, i.e. output about
+      redaction itself. None resembles a row cut at the budget.
+
+    MEASURED 2026-08-10, read-only, ON ``_bash_output(content)`` — the string the
+    gate actually reads, NOT the whole observation row. That distinction is not
+    pedantic: measuring the row inflates every length by the ``Ran: …\nOutput: ``
+    prefix, counts a marker in the COMMAND as a flip when it is not one, and
+    misses rows whose row is over budget while their output is under it. Over
+    6195 Bash rows: 15 flips, lengths 290-1989, median 840, three within 10% of
+    the budget. Reproduce with ``_bash_output`` + ``REDACTION_MARKER`` + ``was_elided``.
+
+    NO TRUE-POSITIVE COUNT IS QUOTED, deliberately. Any such estimate would come
+    from proximity-to-budget as a proxy, and the paragraph above rejecting a
+    shrinkage allowance — replacement is shorter by an UNBOUNDED amount — is
+    precisely the argument that this proxy is weak. Length alone cannot identify
+    a true positive; that is the premise of the fix, so quoting a ratio derived
+    from length would contradict it.
+
+    A TIMESTAMP DISCRIMINATOR IS BUILDABLE AND STILL NOT WORTH IT. #515's
+    two-format problem is NOT the blocker: it breaks sub-day lexical ordering at
+    position 10, while all shapes agree on ``YYYY-MM-DD``, so a day-granularity
+    comparison against #437's merge date is sound on the unmigrated ledger. The
+    reason to skip it is that eleven of the fifteen flips PREDATE that date, so
+    the gate would remove four and keep eleven — and against zero verdict changes
+    it buys nothing measurable.
     """
     if was_elided(output_text):
         return True
