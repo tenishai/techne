@@ -1,7 +1,9 @@
 """sessions.ended_at for sessions that died unclean (#516).
 
-`end_session` is the ONLY writer of `ended_at` and it runs from
-`run_session_end`, which a crash, kill, or Remote Control timeout never reaches.
+`end_session` is the only writer that records a CLEAN end, and it runs from
+`run_session_end`, which a crash, kill, or Remote Control timeout never
+reaches. It is NOT the only writer of the column — transcript_import writes
+it too, on two paths, from a transcript's last message.
 Coverage was 52% of June sessions, 19% of July, 7% of August — decaying, not
 static. With `ended_at` NULL the interval is open-ended, so "which session was
 live at T" matched every session ever started before T.
@@ -421,4 +423,54 @@ def test_the_transcript_importer_stamps_derived(tmp_path):
     assert source == "derived", (
         f"imported session has ended_at_source={source!r} — NULL reads as 'clean', "
         f"so it counts as evidence a producer is dead"
+    )
+
+
+def test_the_importer_stamps_derived_on_the_update_path_too(tmp_path):
+    """TWO write paths, and the UPDATE is the ORDINARY LIVE one.
+
+    The INSERT fires only for a session the store has never seen. Every session
+    captured live already has a row, so the import lands on the UPDATE — and that
+    path was guarded in code but exercised by nothing, so reverting it left the
+    suite green. One of two paths covered is the same shape as one of four
+    comments corrected.
+    """
+    import json
+
+    from techne.core.state import start_session
+    from techne.platforms.claude_code import transcript_import
+
+    p = tmp_path / "sess-upd.jsonl"
+    with p.open("w") as fh:
+        for ts in ("2026-08-01T10:00:00.000Z", "2026-08-01T10:30:00.000Z"):
+            fh.write(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": ts,
+                        "message": {"content": [{"type": "text", "text": "x"}]},
+                    }
+                )
+                + "\n"
+            )
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    # The row already exists — this is what live capture leaves behind.
+    start_session(db, session_id="sess-upd")
+
+    transcript_import.import_transcript(db, p)
+
+    conn = connect(db)
+    try:
+        ended, source = conn.execute(
+            "SELECT ended_at, ended_at_source FROM sessions WHERE id = 'sess-upd'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert ended is not None, "the UPDATE path wrote no ended_at; test is vacuous"
+    assert source == "derived", (
+        f"the live import path left ended_at_source={source!r} — NULL reads as "
+        f"'clean', so the session counts as evidence a producer is dead"
     )

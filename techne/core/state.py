@@ -255,7 +255,9 @@ def close_abandoned_sessions(
 
     Returns the number of rows updated.
 
-    WHY THIS IS NEEDED AT ALL: `end_session` is the ONLY writer of `ended_at`,
+    WHY THIS IS NEEDED AT ALL: `end_session` is the only writer that records a
+    CLEAN end (transcript_import also writes `ended_at`, from a transcript's last
+    message, and stamps it 'derived'),
     and it runs from `run_session_end`. A session killed, crashed, or dropped by
     the Remote Control timeout (techne#490) never reaches it. The miss rate is
     not static — 52% of June sessions have an `ended_at`, 19% of July, 7% of
@@ -367,9 +369,7 @@ def close_abandoned_sessions_in_conn(
     # Defensive, for the same reason the migration step adds the column: a caller
     # on a partially-reconciled store must degrade, not raise. The stamp is the
     # refinement; the ended_at repair is the point.
-    has_source = any(
-        r[1] == "ended_at_source" for r in conn.execute("PRAGMA table_info(sessions)")
-    )
+    has_source = any(r[1] == "ended_at_source" for r in conn.execute("PRAGMA table_info(sessions)"))
     stamp = ", ended_at_source = 'derived'" if has_source else ""
 
     for sid, last_seen in targets:
