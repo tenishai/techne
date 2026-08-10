@@ -328,9 +328,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
 -- IT IS NOT A COMPLETE ANSWER, AND BOTH HALVES OF THE ORIGINAL CLAIM HERE WERE
 -- FALSE (#527 review). The thread does NOT cease to exist — it is re-inserted
 -- with the same id — and session_end does NOT re-run for a redetect ("a
--- re-analysis, not a re-end"). So every caller that deletes threads must
--- re-enqueue in the same transaction. run_session_end and redetect_threads both
--- do. A new one that does not will silently destroy the debt.
+-- re-analysis, not a re-end"). So a caller that removes a threads row must
+-- re-enqueue, or it silently destroys the debt.
+--
+-- TWO WAYS A ROW IS REMOVED, and only one of them looks like a delete:
+--   1. An explicit DELETE. `redetect_threads` (lifecycle.py) is the only one,
+--      and it re-enqueues IN THE SAME TRANSACTION (#527 r5), so a failure rolls
+--      the whole redetect back rather than stranding it half-applied.
+--   2. INSERT OR REPLACE, whose conflict resolution deletes the existing row and
+--      fires this CASCADE. OR IGNORE does not. `save_threads` picks between them
+--      on whether the thread has a boundary_signal, so `run_session_end` DOES
+--      drop the debt for legacy threads, and its re-enqueue is a separate
+--      best-effort call after the save. That window is pre-existing and out of
+--      #527's scope, but it is real: nothing re-derives debt for an emittable
+--      thread with no queue row.
+-- Don't take the verb behaviour on trust from this comment — run it:
+-- test_reflect.py::test_the_cascade_fires_on_or_replace_not_only_on_delete.
+-- A new caller doing either without re-enqueueing destroys debt with no error
+-- and no trace. Check both verbs, not just the word DELETE.
 CREATE TABLE IF NOT EXISTS reflection_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),

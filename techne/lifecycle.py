@@ -408,37 +408,37 @@ def redetect_threads(
         # Re-enqueue INSIDE the transaction: the DELETE above cascades
         # reflection_queue away and session_end does not re-run for a redetect,
         # so without this the debt is lost permanently (#527 r1).
+        #
+        # Both the id lookup and the insert must ride THIS conn (#527 r5) —
+        # persisted_thread_id used to open its own and could not see the
+        # uncommitted rows, which is what made an inline enqueue raise a FOREIGN
+        # KEY failure and forced it after the commit. Do not move it back out:
+        # nothing re-derives debt for an emittable thread with no queue row, so
+        # a failure out there is a permanent half-applied redetect, while in
+        # here it rolls back to a state the operator can re-run.
+        enqueue_reflection_debt(
+            config.db_path,
+            session_id,
+            thread_ids=emittable_thread_ids(
+                config, session_id, threads, observations, conn=conn
+            ),
+            conn=conn,
+        )
+        # Re-enqueueing alone resurrects PAID debt as pending, re-firing the
+        # banner and making its "oldest from" age wrong (#527 r2). Same
+        # transaction as the enqueue it corrects: a restore that can fail
+        # separately from the insert it repairs is the r2 regression again.
+        for tid, drained in prior_drained.items():
+            conn.execute(
+                "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
+                (drained, tid),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
-
-    # AFTER the commit, not inside it: emittable_thread_ids resolves ids via
-    # persisted_thread_id, which opens its OWN connection and cannot see rows
-    # still uncommitted in the transaction above — doing this inline raised a
-    # FOREIGN KEY failure. run_session_end already enqueues post-save for the
-    # same reason. The cost is a narrow window where a crash between commit and
-    # here loses the debt; the alternative was a guaranteed failure.
-    enqueue_reflection_debt(
-        config.db_path,
-        session_id,
-        thread_ids=emittable_thread_ids(config, session_id, threads, observations),
-    )
-    # Re-enqueueing alone resurrects PAID debt as pending, re-firing the banner
-    # and making its "oldest from" age wrong (#527 r2).
-    if prior_drained:
-        _c = connect(config.db_path)
-        try:
-            for tid, drained in prior_drained.items():
-                _c.execute(
-                    "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
-                    (drained, tid),
-                )
-            _c.commit()
-        finally:
-            _c.close()
 
     set_session_summary(
         config.db_path,
