@@ -14,6 +14,7 @@ import pytest
 from click.testing import CliRunner
 
 from techne.cli import main
+from techne.config import HookConfig
 
 
 @pytest.fixture
@@ -26,6 +27,16 @@ def cli_db(tmp_path, monkeypatch):
     init_db(db).close()
     cfg = Config()
     cfg.db_path = db
+    # This fixture stands for a machine techne HAS been initialised on — every
+    # test using it asserts about drift, remedies or a posture the operator
+    # chose, none of which exist on a fresh machine. Stubbing load() without
+    # reproducing its contract left loaded_from None, i.e. "no config.yaml",
+    # which is a state where posture.mode is a dataclass default rather than an
+    # answer (techne#480). The file is written as well as recorded so the two
+    # cannot disagree.
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("platform: claude-code\nposture:\n  mode: observe\n")
+    cfg.loaded_from = config_file
     monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
     return cfg
 
@@ -528,3 +539,58 @@ def test_an_uninitialised_machine_is_not_told_its_mcp_is_broken(cli_db):
 
     out = CliRunner().invoke(main, ["doctor"]).output
     assert "mcp:registration" not in out, out
+
+
+class TestDoctorOnANeverInitialisedMachine:
+    """The surface #480 is NAMED after, which the r3 behaviour net missed.
+
+    `cli_db` pins `loaded_from` for every other doctor test — correct for those,
+    since they assert about drift and a chosen posture — but it means no doctor
+    test can reach a machine with a store and no config.yaml. That state is
+    reachable in production: `init_session` creates the DB, so wiring the MCP
+    server into Claude Code without ever running `techne init` produces it.
+
+    Both of doctor's advising branches are covered here, because they are
+    separate call sites and the r1 defect was that a call site can bypass the
+    builder without anything noticing.
+    """
+
+    @pytest.fixture
+    def uninitialised(self, cli_db):
+        cli_db.loaded_from = None
+        cli_db.posture.mode = "observe"  # dataclass default, NOT a choice
+        return cli_db
+
+    def test_install_hint_asks_for_auto(self, uninitialised):
+        """cli.py:316 — the branch a never-initialised machine actually hits,
+        since no launcher is installed there."""
+        _write_settings("{}")  # present, but no launcher => not installed
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        assert "not counted" in result.output, result.output
+        assert "--posture auto" in result.output, result.output
+        assert "--posture observe" not in result.output, result.output
+
+    def test_drift_remedy_asks_for_auto(self, uninitialised):
+        """cli.py:307 — the drift `remedy:` line, reached once a launcher is
+        registered but config and settings.json disagree."""
+        from techne.platforms import claude_code
+
+        uninitialised.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
+        claude_code.register_hooks(uninitialised)
+        uninitialised.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True)
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        # THE DRIFT LINE SPECIFICALLY. `--posture auto` and `remedy:` both also
+        # appear on the per-check remedy (cli.py:152), so a loose assertion
+        # passes with cli.py:307 regressed to a bare `techne init` — a test
+        # named after a call site has to bite at that call site. The per-check
+        # line is indented further; the drift line starts at two spaces.
+        drift_line = next(
+            ln for ln in result.output.splitlines() if ln.startswith("  remedy: ")
+        )
+        assert drift_line == "  remedy: techne init --platform claude-code --posture auto", (
+            drift_line
+        )

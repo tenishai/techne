@@ -59,6 +59,7 @@ def status(ctx):
     # config.yaml but never written to settings.json (init not re-run) — a silent
     # no-op the user has no other way to notice. Surface it here (techne#287).
     if config.platform == CLAUDE_CODE:
+        from techne.core.checks import init_remedy
         from techne.platforms.claude_code import check_hook_drift
 
         drift = check_hook_drift(config)
@@ -84,13 +85,10 @@ def status(ctx):
                 )
                 click.echo(
                     f"  Repair or move aside {SETTINGS_PATH}, then run "
-                    f"'techne init --posture {config.posture.mode}'."
+                    f"'{init_remedy(config)}'."
                 )
             else:
-                click.echo(
-                    f"⚠ Hook registration drift — run "
-                    f"'techne init --posture {config.posture.mode}' to reconcile:"
-                )
+                click.echo(f"⚠ Hook registration drift — run '{init_remedy(config)}' to reconcile:")
             for w in drift:
                 click.echo(f"  {w}")
 
@@ -1650,6 +1648,7 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
             --exclude '**/.git/**' --exclude '**/.venv/**'
     """
     from techne.core.state import start_session
+    from techne.exit_codes import EX_CONFIG, StartupConfigError
     from techne.watch import WatchConfig
     from techne.watch import watch as run_watch
 
@@ -1677,6 +1676,14 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
     )
     try:
         run_watch(wc)
+    except StartupConfigError as exc:
+        # Ordered BEFORE RuntimeError: StartupConfigError subclasses it, and a
+        # broad handler first would swallow the exit contract. Exiting
+        # EX_CONFIG tells the supervisor this failure is not transient, so
+        # `RestartPreventExitStatus=78` in the unit stops the loop on the
+        # FIRST failure instead of respawning forever.
+        click.echo(f"error: {exc}", err=True)
+        ctx.exit(EX_CONFIG)
     except RuntimeError as exc:
         click.echo(f"error: {exc}", err=True)
         ctx.exit(1)

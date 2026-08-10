@@ -108,6 +108,10 @@ class ThreadConfig:
 class HookConfig:
     post_tool_use: bool = True
     capture_bash: bool = False
+    # Default OFF on VOLUME, not maturity (techne#456): Read is far more frequent
+    # than Bash, so capturing it inflates the observation ledger without a
+    # matching gain. Shipped and symmetric with capture_bash — turn it on if you
+    # want the coverage and accept the row count.
     capture_read: bool = False
     # Hard wall-clock budget for any single hook process.  If the hook exceeds
     # this many seconds (SQLite contention, slow LLM call, stalled network) a
@@ -403,6 +407,20 @@ class Config:
     #: verdict never destroys the file it overrules. Empty when nothing is
     #: enforcing (the file is already authoritative) — never serialized itself.
     preserved_egress: dict[str, Any] = field(default_factory=dict)
+    #: The config.yaml this instance was READ FROM, or None when there was no
+    #: file and every value is a built-in default. Set only by :meth:`load`;
+    #: a directly-constructed Config has no file and leaves it None. Never
+    #: serialized by :meth:`save` — like :attr:`egress_trust` it describes a
+    #: resolution, not a setting.
+    #:
+    #: The distinction it exists for: WITHOUT a file, an attribute like
+    #: ``posture.mode`` is a dataclass default rather than a choice anyone
+    #: made, so advice that pins it is preserving nothing. Ask this rather
+    #: than re-statting the filesystem — ``load(path=...)`` can read a config
+    #: that is not ``techne_home()/config.yaml``, and a second, independent
+    #: filesystem question is free to disagree with the one that actually
+    #: produced these values.
+    loaded_from: Path | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -437,6 +455,7 @@ class Config:
         cfg = cls._from_dict(raw, home=home)
         cfg.egress_trust = trust
         cfg.preserved_egress = preserved
+        cfg.loaded_from = path
         cfg._refresh_fast_cache(home=home, source=path, stamp=pre_stamp)
         return cfg
 
