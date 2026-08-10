@@ -371,7 +371,7 @@ def thread_row_id(session_id: str, t: Thread) -> str:
     return f"{session_id}-{t.thread_num}"
 
 
-def persisted_thread_id(db_path, session_id: str, t: Thread) -> str | None:
+def persisted_thread_id(db_path, session_id: str, t: Thread, *, conn=None) -> str | None:
     """Resolve the ACTUAL `threads.id` for a Thread, preferring the persisted row
     over a recomputed hash (techne#106).
 
@@ -383,21 +383,29 @@ def persisted_thread_id(db_path, session_id: str, t: Thread) -> str | None:
     the computed id only if it actually exists; else fall back to the natural key
     `(session_id, thread_num)`; return None if no row is persisted (the caller
     then stores a NULL FK rather than losing the candidate).
+
+    Takes an optional open *conn*, the same `own_conn` idiom `save_threads` and
+    `enqueue_reflection_debt` already use. Without it this was the ONE link in
+    that chain that always opened its own connection, so a caller mid-transaction
+    could not see its own uncommitted rows and every thread read as unpersisted —
+    which is what forced `redetect_threads` to enqueue after its commit (#527 r5).
     """
     from techne.core.database import connect
 
     computed = thread_row_id(session_id, t)
-    conn = connect(db_path)
+    own_conn = conn is None
+    c = connect(db_path) if own_conn else conn
     try:
-        if conn.execute("SELECT 1 FROM threads WHERE id = ?", (computed,)).fetchone():
+        if c.execute("SELECT 1 FROM threads WHERE id = ?", (computed,)).fetchone():
             return computed
-        row = conn.execute(
+        row = c.execute(
             "SELECT id FROM threads WHERE session_id = ? AND thread_num = ?",
             (session_id, t.thread_num),
         ).fetchone()
         return row[0] if row else None
     finally:
-        conn.close()
+        if own_conn:
+            c.close()
 
 
 def save_threads(
