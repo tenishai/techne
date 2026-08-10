@@ -29,11 +29,18 @@ TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 #
 #   REPAIRED HERE (step 23): observations.timestamp / .event_at,
 #     sessions.started_at / .ended_at, outbox.synced_at
-#   ALREADY CONFORMING: knowledge.created_at / .updated_at / .last_confirmed_at,
-#     threads.created_at / .updated_at, outbox.created_at,
-#     coord_messages.created_at, coord_reads.read_at, thread_boundaries,
-#     knowledge_candidates, reminders, context_injections, identity.updated_at,
-#     checkpoints, schema_version.applied_at
+#   ALREADY CONFORMING (CURRENT_TIMESTAMP-defaulted or written by the house
+#     strftime helper, so conforming by construction): knowledge.created_at /
+#     .updated_at / .last_confirmed_at / .event_at, threads.created_at /
+#     .updated_at, outbox.created_at, coord_messages.created_at,
+#     coord_reads.read_at, thread_boundaries, knowledge_candidates,
+#     knowledge_deps.created_at, curated_memory (created_at / updated_at /
+#     last_seen_at), reminders, identity.updated_at, checkpoints,
+#     schema_version.applied_at
+#   NOT IN SCHEMA_SQL AT ALL: context_injections is created lazily by the hook's
+#     own _ensure_columns, so it has no CREATE TABLE here. An earlier version of
+#     this list named it as verified-conforming, which read as a claim about a
+#     table this file does not define.
 #
 # A NEW TIMESTAMP COLUMN BELONGS IN ONE OF THOSE TWO LISTS. Writing it with
 # CURRENT_TIMESTAMP or `strftime(TIMESTAMP_FORMAT)` puts it in the second for
@@ -105,8 +112,14 @@ def backfill_timestamp_formats(conn) -> int:
                        -- An earlier version used substr(...,1,19)+replace and
                        -- therefore had to REFUSE offset-bearing rows, on the
                        -- premise that SQL could not convert them. False: strftime
-                       -- agrees with normalize_timestamp() on every shape,
-                       -- including -04:00 and +05:30. The refusal was machinery
+                       -- agrees with normalize_timestamp() on every shape THIS
+                       -- MIGRATION TOUCHES, including -04:00 and +05:30.
+                       -- NOT a universal, and the counterexample is reachable:
+                       -- '2026-08-08T24:00:00' — Python rolls it to 08-09
+                       -- 00:00:00, SQLite leaves it as 08-08 24:00:00. Neither
+                       -- writer emits hour 24, so nothing diverges today; the
+                       -- claim is narrowed rather than left as a universal that
+                       -- a future writer could falsify. The refusal was machinery
                        -- guarding a limitation that did not exist, and it was
                        -- silent AND permanent — _migrate discards the return
                        -- value and can never re-run, so a refused row stayed

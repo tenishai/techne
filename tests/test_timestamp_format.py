@@ -405,16 +405,22 @@ def test_backfill_does_not_null_out_an_unparseable_value(tmp_path):
     conn = connect(db)
     try:
         _seed_session(conn)
+        # SEEDED INTO event_at, WHICH IS NULLABLE — that is where the failure is
+        # SILENT. `timestamp` is NOT NULL, so under the mutant it raises
+        # IntegrityError instead: real discrimination, but loud, and the comment
+        # above describes the quiet case. event_at / sessions.ended_at /
+        # outbox.synced_at are the columns that would actually go to None.
         for bad in ("2026-13-45T99:99:99", "garbage-value-that-exceeds-19-chars"):
             conn.execute(
-                "INSERT INTO observations (session_id, tool_name, content, tier, timestamp) "
-                "VALUES ('s','Bash','x','hot',?)",
+                "INSERT INTO observations "
+                "(session_id, tool_name, content, tier, timestamp, event_at) "
+                "VALUES ('s','Bash','x','hot','2026-08-08 00:00:00',?)",
                 (bad,),
             )
         conn.commit()
         backfill_timestamp_formats(conn)
         conn.commit()
-        rows = [r[0] for r in conn.execute("SELECT timestamp FROM observations ORDER BY id")]
+        rows = [r[0] for r in conn.execute("SELECT event_at FROM observations ORDER BY id")]
     finally:
         conn.close()
 
