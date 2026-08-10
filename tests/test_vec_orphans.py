@@ -261,6 +261,11 @@ def test_the_cli_does_not_claim_hygiene_ran_when_it_could_not(tmp_path, monkeypa
         f"the CLI claimed hygiene ran when the sweep was never reached: {result.output!r}"
     )
     assert "were swept" not in result.output
+    # AND IT MUST NOT NAME sqlite-vec: on this path it imported fine — the CLI's
+    # own guard just passed — so blaming it sends the operator back to the one
+    # thing they have already ruled out. Honest but wrong is still wrong.
+    assert "sqlite-vec could not be loaded" not in result.output, result.output
+    assert "numpy" in result.output, result.output
 
 
 def test_the_cli_reports_the_swept_count_when_it_did_run(tmp_path, monkeypatch):
@@ -289,3 +294,38 @@ def test_the_cli_reports_the_swept_count_when_it_did_run(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "index hygiene: 1 orphaned embedding(s) swept." in result.output, result.output
+
+
+def test_a_failed_sweep_is_not_reported_as_a_clean_zero(tmp_path, monkeypatch):
+    """`orphans_swept: 0` from a sweep that FAILED on every index must not look
+    like one that found nothing to do.
+
+    The per-table `try` swallows OperationalError, so without a separate count
+    the two states collapse — the same absent-vs-empty problem the KEY's absence
+    exists to avoid, reappearing one level in.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core import embeddings as embeddings_mod
+    from techne.core import search as search_mod
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+
+    import sqlite3 as _sq
+
+    def boom(conn, name):
+        raise _sq.OperationalError(f"{name} unreadable")
+
+    monkeypatch.setattr(search_mod, "_purge_orphaned_vec", boom)
+
+    result = CliRunner().invoke(main, ["vectors", "backfill"])
+
+    assert result.exit_code == 0, result.output
+    assert "INCOMPLETE" in result.output, (
+        f"a sweep that failed on every index reported as a clean zero: {result.output!r}"
+    )

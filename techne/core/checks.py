@@ -1802,11 +1802,18 @@ def check_vector_coverage(config) -> CheckResult:
     cannot touch a vec0 table) is a real defect — but the purge deletes
     ``WHERE rowid IN (SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)``,
     which selects FROM knowledge, so a rowid with no knowledge row behind it is
-    never matched. VERIFIED: purge removed 0 of 2 in that state. Failing here
-    would therefore attach a remedy that cannot clear the finding — recreating
-    the never-green defect this check was just fixed for. It is surfaced in the
-    detail and evidence instead, so it is visible without being unclearable.
-    Owning issue: techne#408 (the same shape on threads_vec).
+    never matched. VERIFIED: purge removed 0 of 2 in that state.
+
+    THAT REASONING EXPIRED WHEN #408 SHIPPED `_purge_orphaned_vec`. There IS a
+    remedy now, so "failing would attach a remedy that cannot clear it" no longer
+    holds. `dangling` is still excluded from `healthy`, but for a different and
+    smaller reason: folding it in changes doctor output on live stores and
+    belongs in its own change. It remains surfaced in the detail and evidence.
+
+    AND THE BIGGER GAP: this counts dangling rows for `knowledge_vec` ONLY.
+    #408's headline mechanism — threads rotating rowid on INSERT OR REPLACE, one
+    stranded embedding per summary update, unbounded — is counted by no check at
+    all. The leak is fixed; its observability is not.
     """
     from techne.core.database import connect
 

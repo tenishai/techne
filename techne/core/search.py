@@ -894,16 +894,21 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
     # backend, so that test pinned nothing about placement in the environment
     # that matters.
     swept = 0
+    sweep_errors = 0
     for name in _VEC_PARENT:
         try:
             swept += _purge_orphaned_vec(conn, name)
         except sqlite3.OperationalError:
             # Present but unreadable (e.g. built at another dim). Not worth
             # failing a backfill over; _ensure_vec_backend_identity rebuilds it.
-            continue
+            # COUNTED, not just swallowed: `orphans_swept: 0` from a sweep that
+            # FAILED on every index is otherwise indistinguishable from one that
+            # found nothing to do, which is the same absent-vs-empty collapse the
+            # ABSENCE of the key exists to avoid.
+            sweep_errors += 1
     if swept:
         conn.commit()
-    counts = {"orphans_swept": swept}
+    counts = {"orphans_swept": swept, "sweep_errors": sweep_errors}
 
     if not have_backend:
         # Neither model2vec nor fastembed importable — nothing to embed with, but

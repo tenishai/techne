@@ -84,8 +84,7 @@ def status(ctx):
                     "every techne hook may be silently not firing:"
                 )
                 click.echo(
-                    f"  Repair or move aside {SETTINGS_PATH}, then run "
-                    f"'{init_remedy(config)}'."
+                    f"  Repair or move aside {SETTINGS_PATH}, then run '{init_remedy(config)}'."
                 )
             else:
                 click.echo(f"⚠ Hook registration drift — run '{init_remedy(config)}' to reconcile:")
@@ -3180,10 +3179,22 @@ def vectors_backfill(ctx, do_tags, all_tags):
         # in the [vectors] extra) or an interpreter that cannot load extensions,
         # the sweep never ran and the message claimed it had. Worse than #496's
         # remedy-that-does-nothing — an operator told it succeeded stops looking.
-        if "orphans_swept" in counts:
-            click.echo(f"index hygiene: {counts['orphans_swept']} orphaned embedding(s) swept.")
+        if "orphans_swept" not in counts:
+            # DO NOT NAME sqlite-vec HERE. On the numpy path it imported fine —
+            # the CLI's own guard just passed — so blaming it sends the operator
+            # to re-check the thing they have already ruled out. numpy is only in
+            # the [vectors] extra, so this is the reachable case.
+            click.echo(
+                "index hygiene did NOT run: the vector toolchain is incomplete "
+                "(needs numpy and a loadable sqlite-vec) — install techne[vectors]."
+            )
+        elif counts.get("sweep_errors"):
+            click.echo(
+                f"index hygiene INCOMPLETE: {counts['sweep_errors']} index(es) unreadable, "
+                f"{counts['orphans_swept']} orphaned embedding(s) swept."
+            )
         else:
-            click.echo("index hygiene did NOT run: sqlite-vec could not be loaded.")
+            click.echo(f"index hygiene: {counts['orphans_swept']} orphaned embedding(s) swept.")
         ctx.exit(0)
 
     click.echo(json.dumps(counts, indent=2))
