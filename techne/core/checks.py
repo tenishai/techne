@@ -1339,7 +1339,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # end_session ('clean'), close_abandoned_sessions ('derived'), and
         # transcript_import ('derived'). "Both" was wrong twice over in a comment
         # whose own subject is a miscounted writer set (#533 r5). The count is
-        # pinned by test_check_outbox_targets_counts_only_cleanly_ended_sessions
+        # pinned by test_check_outbox_targets_ignores_derived_session_ends
         # rather than asserted here, so it cannot rot silently again.
         srow = conn.execute(
             "SELECT COUNT(*), MAX(ended_at) FROM sessions "
