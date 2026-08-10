@@ -1548,3 +1548,73 @@ class TestEvidenceCli:
         assert "Artifacts: (none)" in result.output
         assert "Commits: (none)" in result.output
         assert "unparsed" in result.output
+
+
+# ---- redaction shrinks a legacy row below the length threshold (techne#441) ----
+
+
+def test_redacted_legacy_row_is_treated_as_bounded():
+    """The bug: redaction runs BEFORE storage and CHANGES LENGTH.
+
+    A pre-#437 row was cut at exactly the budget with no marker, so the only
+    signal it is bounded is its length. `redact_credentials` then replaced a
+    long secret with a short `<redacted:tag>` token, so the stored text lands
+    BELOW the budget and reads as a complete record — the bad direction, since
+    an unflagged row can carry a green verdict.
+    """
+    from techne.core.evidence import _output_was_bounded
+    from techne.core.redaction import redact_credentials
+    from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS
+
+    secret = "sk-ant-" + "a" * 120
+    legacy_cut = ("x" * (_PREVIEW_MAX_CHARS - len(secret))) + secret
+    assert len(legacy_cut) == _PREVIEW_MAX_CHARS, "precondition: cut at the budget"
+
+    stored = redact_credentials(legacy_cut)
+    assert len(stored) < _PREVIEW_MAX_CHARS, (
+        "precondition: redaction must SHRINK this row below the budget, or the "
+        "test proves nothing about the length test"
+    )
+
+    assert _output_was_bounded(stored) is True
+
+
+def test_an_unredacted_short_row_is_still_authoritative():
+    """The case that must NOT regress.
+
+    Flagging every short row as bounded would make the gate useless — it would
+    never certify anything. Only redaction makes the length unknowable.
+    """
+    from techne.core.evidence import _output_was_bounded
+
+    assert _output_was_bounded("3 passed in 0.1s") is False
+
+
+def test_the_marker_matches_what_the_redactor_actually_writes():
+    """Binds the reader's pattern to the writer's format, through REAL output.
+
+    SCOPE, stated because the first version of this test overstated it: the
+    per-tag loop below builds `f"<redacted:{tag}>"`, which IS the format string
+    hardcoded a second time — so it checks the marker knows every TAG, and
+    proves nothing about the format. The binding to the format comes only from
+    the live redactions, so those cover several distinct patterns rather than
+    one. Injecting format drift is caught by the live half, not the loop.
+    """
+    from techne.core.redaction import _PATTERNS, REDACTION_MARKER, redact_credentials
+
+    # Real credential-SHAPED inputs, run through the actual redactor. Not real
+    # secrets: each is a synthetic string matching one pattern's shape.
+    live_samples = [
+        "sk-ant-" + "a" * 30,
+        "ghp_" + "b" * 30,
+        "sk-proj-" + "c" * 30,
+    ]
+    for sample in live_samples:
+        produced = redact_credentials(f"prefix {sample} suffix")
+        assert produced != f"prefix {sample} suffix", f"redactor did not match {sample[:12]!r}"
+        assert REDACTION_MARKER.search(produced), produced
+
+    # Every tag the writer can interpolate is recognised. Format-independent by
+    # construction, which is exactly its limit.
+    for _pattern_src, tag in _PATTERNS:
+        assert REDACTION_MARKER.search(f"<redacted:{tag}>"), f"marker misses tag {tag!r}"
