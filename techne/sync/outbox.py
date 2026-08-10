@@ -418,6 +418,23 @@ _SWEEP_AGED = """
        AND target NOT IN ({ph})
        AND created_at < ?
        AND id NOT IN (SELECT MAX(id) FROM outbox GROUP BY target)
+       -- FIRST TOMBSTONE: the newest row per target, whatever its status.
+       -- ITS IN-PACKAGE JUSTIFICATION IS UNREACHABLE, AND THAT IS NOT WHY IT
+       -- STAYS (#528 r6). The earlier argument was that it protects a `synced`
+       -- row carrying a NULL synced_at. No code here can produce that: every
+       -- assignment of status='synced' sets synced_at in the SAME statement
+       -- (outbox.py:156, :262, :291), and database.py:668's backfill is itself
+       -- gated on `synced_at IS NOT NULL`. Grepped exhaustively for
+       -- `status = 'synced'` across techne/ to say that.
+       -- SO THE HONEST REASON IS OUT-OF-BAND WRITES: a manual UPDATE against the
+       -- db, a future migration, a third-party tool. This table is a plain
+       -- SQLite file an operator can and does open. The clause costs one row per
+       -- target and is the only thing standing between such a write and a lane
+       -- that reads as never-synced.
+       -- Pinned by test_the_first_tombstone_survives_an_out_of_band_write, which
+       -- creates exactly that state directly. Mutating this clause to `1=1` left
+       -- the whole suite green before that test existed — a clause defended only
+       -- by an argument, and by an argument that could not happen.
        -- SECOND TOMBSTONE: the newest SYNCED row per target.
        -- The first one preserves PRESENCE; it does not preserve SYNC HISTORY,
        -- and check_outbox_targets reads MAX(synced_at) from the same GROUP BY.

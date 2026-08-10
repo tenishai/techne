@@ -375,7 +375,6 @@ def test_no_undeclared_inlined_prefilter():
       3. OUTSIDE THE PACKAGE — the scan is rooted at the techne package, so
          `scripts/` is invisible. Nothing pre-filter-shaped lives there today.
     """
-    import ast
     from pathlib import Path
 
     import techne
@@ -386,36 +385,13 @@ def test_no_undeclared_inlined_prefilter():
         if path.name == "outbox.py" and path.parent.name == "sync":
             continue  # the module that OWNS the table, not a consumer
         try:
-            tree = ast.parse(path.read_text())
+            # ONE DEFINITION, shared with the precision test below — see
+            # _inlines_prefilter. This loop owns WHICH FILES to scan; it does not
+            # own what counts as an offence.
+            if _inlines_prefilter(path.read_text()):
+                offenders.append(str(path.relative_to(root)))
         except SyntaxError:  # pragma: no cover - not our file to fix
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-                continue
-            # COLLAPSE WHITESPACE FIRST. `FROM  outbox` (aligned SQL) and a table
-            # name on its own line are ordinary formatting, not evasions, and a
-            # substring test is whitespace-exact where the `\bFROM\s+outbox\b`
-            # regex this replaced was not. Narrowing the match to one literal was
-            # right; narrowing it to one SPELLING of the literal was an unmeasured
-            # second narrowing that came along with it (r5 review, finding 1).
-            sql = " ".join(node.value.lower().split())
-            # SPLIT ON `;` — a literal is not a statement. `executescript` is used
-            # in ~15 places here, so DDL and DML sharing one blob is in-idiom, and
-            # skipping the WHOLE literal on `create table` switched the detector
-            # off for every statement beside the schema. Per-fragment keeps the
-            # skip load-bearing (without it core/database.py's SCHEMA_SQL goes red,
-            # verified) while making "one statement" true rather than approximate.
-            inlined = any(
-                "create table" not in stmt
-                and "content_hash" in stmt
-                and "from outbox" in stmt
-                and "target" in stmt
-                and "select" in stmt
-                for stmt in sql.split(";")
-            )
-            if inlined:
-                offenders.append(str(path.relative_to(root)))
-                break
 
     assert offenders == [], (
         f"these modules inline a dedup-shaped outbox query instead of calling "
@@ -426,6 +402,188 @@ def test_no_undeclared_inlined_prefilter():
         f"a non-ledger lane from age-out to collapse-only, i.e. the unbounded "
         f"growth #518 exists to fix."
     )
+
+
+def test_the_first_tombstone_survives_an_out_of_band_write(config):
+    """The `id NOT IN (SELECT MAX(id) ...)` clause has teeth — against the state
+    that actually motivates it.
+
+    #528 r6 showed the clause was untested (mutating it to `1=1` left the whole
+    suite green) AND that its stated justification was unreachable: no code in
+    this package can leave a `synced` row with a NULL synced_at, because every
+    `status='synced'` assignment sets both together.
+
+    That sharpened the finding rather than dissolving it. The clause is worth
+    keeping for OUT-OF-BAND writes — a manual UPDATE, a future migration, a
+    third-party tool against what is, after all, a plain SQLite file — so this
+    test creates exactly that state directly instead of through the API, which is
+    the only way the defended state can arise.
+
+    Without the clause, the lane's last surviving evidence of a sync is deleted
+    and check_outbox_targets reads MAX(synced_at) as NULL: a healthy lane reports
+    never-synced.
+    """
+    from techne.core.database import connect
+    from techne.sync.outbox import sweep_delivered
+
+    conn = connect(config.db_path)
+    # OUT-OF-BAND: status synced, synced_at NULL — unreachable through the API,
+    # which is the point. Old enough that the age sweep wants it.
+    conn.execute(
+        "INSERT INTO outbox (target, data_json, content_hash, status, created_at, synced_at) "
+        "VALUES ('sink:probe', '{}', 'h-old', 'synced', '2020-01-01 00:00:00', NULL)"
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT COUNT(*) FROM outbox WHERE target = 'sink:probe'"
+    ).fetchone()[0]
+    conn.close()
+    assert before == 1, "precondition: the lane has exactly one row"
+
+    sweep_delivered(config.db_path, retain_days=7)
+
+    conn = connect(config.db_path)
+    after = conn.execute(
+        "SELECT COUNT(*) FROM outbox WHERE target = 'sink:probe'"
+    ).fetchone()[0]
+    conn.close()
+    assert after == 1, (
+        "the age sweep deleted a lane's ONLY row. The first tombstone exists to "
+        "keep one row per target so COUNT/MAX stay honest; without it this lane "
+        "now reads as never-synced. Reachable only via an out-of-band write, "
+        "which is exactly what the clause defends against."
+    )
+
+
+def _inlines_prefilter(source: str) -> bool:
+    """THE ONE DEFINITION of "this file inlines a dedup-shaped outbox query".
+
+    Module-level so the guard and its precision test share it. An earlier draft
+    had the precision test re-implement these rules, with a docstring claiming it
+    did not — a second definition is exactly what drifts, and this file's whole
+    subject is a detector whose behaviour nobody could pin down (#528 r6).
+
+    PRECISION, both axes measured against real false positives:
+      - DOCSTRINGS ARE PROSE. A docstring quoting the pre-filter it describes
+        executes nothing. Collected structurally (first statement of a module,
+        class or function) rather than guessed at.
+      - AN AGGREGATE IS A METRIC. `COUNT(DISTINCT content_hash)` answers "how
+        many" and skips nothing; the guard is only about reading hashes BACK to
+        decide what to re-send. checks.py carries a legitimate one already.
+    """
+    import ast
+    import re
+
+    tree = ast.parse(source)
+    docstrings = set()
+    for holder in ast.walk(tree):
+        if isinstance(
+            holder, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            first = holder.body[0] if holder.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                docstrings.add(id(first.value))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in docstrings:
+            continue
+        # COLLAPSE WHITESPACE FIRST (#518 r5 finding 1, preserved through the
+        # #528 r6 rebase). `FROM  outbox` and a table name on its own line are
+        # ordinary formatting, not evasions, and a substring test is
+        # whitespace-exact where the regex it replaced was not.
+        sql = " ".join(node.value.lower().split())
+        # SPLIT ON `;` — a literal is not a statement. executescript is used in
+        # ~15 places here, so DDL and DML sharing one blob is in-idiom; skipping
+        # the WHOLE literal on `create table` switched the detector off for every
+        # other statement in it.
+        for stmt in sql.split(";"):
+            if "create table" in stmt:
+                continue  # a schema blob is DDL, not a pre-filter
+            # AN AGGREGATE IS A METRIC, NOT A PRE-FILTER (#528 r6).
+            aggregated = re.search(
+                r"\b(count|sum|avg|min|max)\s*\(\s*(distinct\s+)?content_hash", stmt
+            )
+            reads_hashes_back = re.search(
+                r"select\s+(distinct\s+)?content_hash\b", stmt
+            ) or re.search(r"content_hash\s*(=|in\b)", stmt)
+            if aggregated and not reads_hashes_back:
+                continue
+            if (
+                "content_hash" in stmt
+                and "from outbox" in stmt
+                and "target" in stmt
+                and "select" in stmt
+            ):
+                return True
+    return False
+
+
+def test_the_inlined_prefilter_guard_does_not_fire_on_prose_or_metrics(tmp_path):
+    """The guard's PRECISION, pinned — it fired on innocent code for three rounds.
+
+    Both cases below were demonstrated against the shipped guard by #528 r6, using
+    throwaway modules dropped into the package. They are checked in here instead,
+    because a false positive that only lives in a review comment comes back: the
+    assertion's own message has told readers to narrow it in exactly these cases
+    since it was written, and nobody did.
+
+    Why it matters beyond tidiness: a guard that cries wolf on a docstring gets
+    narrowed by whoever it blocks next, in a hurry, by someone who does not know
+    which of its four clauses is load-bearing. Precision IS part of a guard
+    working, not a nicety on top of it.
+    """
+    prose = tmp_path / "_probe_prose.py"
+    prose.write_text(
+        '"""Historical note: the pre-filter used to inline its own query:\n\n'
+        "    SELECT content_hash FROM outbox WHERE target = ? AND status != 'dead'\n\n"
+        'That is narration. Nothing here executes SQL at all.\n"""\n'
+    )
+    metric = tmp_path / "_probe_metric.py"
+    metric.write_text(
+        "def distinct_hash_count(conn, target):\n"
+        "    return conn.execute(\n"
+        '        "SELECT COUNT(DISTINCT content_hash) FROM outbox WHERE target = ?",\n'
+        "        (target,),\n"
+        "    ).fetchone()[0]\n"
+    )
+
+    def offends(path):
+        return _inlines_prefilter(path.read_text())
+
+    assert not offends(prose), (
+        "a docstring QUOTING the pre-filter tripped the guard. Prose executes "
+        "nothing; this repo's style is narrative docstrings that quote the code "
+        "they describe, so this fires hardest on the best-documented files."
+    )
+    assert not offends(metric), (
+        "COUNT(DISTINCT content_hash) tripped the guard. An aggregate answers "
+        "'how many' and skips nothing — it is not reading enqueue history back to "
+        "decide what to re-send, which is the only thing this guard is about."
+    )
+
+    # AND THE GUARD MUST STILL BITE — precision that costs recall is a worse bug
+    # than the false positive it fixed. Both real spellings, forward and reverse.
+    real_fwd = tmp_path / "_probe_real_fwd.py"
+    real_fwd.write_text(
+        "def prefilter(conn, target):\n"
+        '    return conn.execute("SELECT content_hash FROM outbox WHERE target = ?", (target,))\n'
+    )
+    real_rev = tmp_path / "_probe_real_rev.py"
+    real_rev.write_text(
+        "def seen(conn, target, h):\n"
+        '    return conn.execute(\n'
+        '        "SELECT 1 FROM outbox WHERE target = ? AND content_hash = ?",\n'
+        '        (target, h),\n    )\n'
+    )
+    assert offends(real_fwd), "the guard stopped catching the forward pre-filter spelling"
+    assert offends(real_rev), "the guard stopped catching the reverse pre-filter spelling"
+
 
 
 def test_the_prefilter_goes_through_the_accessor(config):
