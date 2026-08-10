@@ -77,9 +77,12 @@ def test_run_session_end_full_lifecycle(config, db_path, monkeypatch):
     result = run_session_end(config, session_id)
 
     # Check the returned dict has all expected keys
+    # Exact-set, not superset: this is the library-callable API surface, so a new
+    # key is a deliberate change that must be acknowledged here. It did that job
+    # for techne#514's `queued_for_reflection`.
     assert set(result.keys()) == {
         "threads", "linked", "aged_completed", "aged_stale", "queued",
-        "knowledge_pushed", "reflect",
+        "queued_for_reflection", "knowledge_pushed", "reflect",
     }
     assert isinstance(result["threads"], int)
     assert isinstance(result["linked"], int)

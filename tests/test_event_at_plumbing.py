@@ -32,7 +32,9 @@ def db_path(tmp_path):
 class TestAddObservationEventAt:
     def test_event_at_is_written_when_supplied(self, db_path):
         sid = start_session(db_path)
+        # #515: supplied as ISO (the documented contract), STORED canonical.
         event_ts = "2025-01-01T12:00:00"
+        stored_ts = "2025-01-01 12:00:00"
         add_observation(db_path, sid, "Bash", "ran ls", event_at=event_ts)
 
         conn = connect(db_path)
@@ -44,7 +46,7 @@ class TestAddObservationEventAt:
             conn.close()
 
         assert row is not None
-        assert row["event_at"] == event_ts
+        assert row["event_at"] == stored_ts
 
     def test_event_at_is_null_when_omitted(self, db_path):
         sid = start_session(db_path)
@@ -78,7 +80,8 @@ class TestAddObservationEventAt:
 
         assert len(rows) == 2
         assert rows[0]["tool_name"] == "Read"
-        assert rows[0]["event_at"] == "2024-06-01T00:00:00"
+        # #515: normalised at the write boundary.
+        assert rows[0]["event_at"] == "2024-06-01 00:00:00"
         assert rows[1]["tool_name"] == "Write"
         assert rows[1]["event_at"] is None
 
@@ -161,6 +164,7 @@ class TestSearchFtsEventAt:
         """search_fts observation results include event_at field."""
         sid = start_session(db_path)
         event_ts = "2025-03-15T10:00:00"
+        stored_ts = "2025-03-15 10:00:00"
         add_observation(
             db_path, sid, "Bash",
             "ran git log unique_plumbing_marker_xyzzy",
@@ -180,7 +184,7 @@ class TestSearchFtsEventAt:
 
         results = search_fts(db_path, "unique_plumbing_marker_xyzzy", table="observations", limit=5)
         assert results, "expected at least one result"
-        assert results[0]["event_at"] == event_ts
+        assert results[0]["event_at"] == stored_ts
 
     def test_event_at_none_in_observation_results_when_not_set(self, db_path):
         """search_fts observation results have event_at=None when unset."""
