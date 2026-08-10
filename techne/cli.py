@@ -1650,6 +1650,7 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
             --exclude '**/.git/**' --exclude '**/.venv/**'
     """
     from techne.core.state import start_session
+    from techne.exit_codes import EX_CONFIG, StartupConfigError
     from techne.watch import WatchConfig
     from techne.watch import watch as run_watch
 
@@ -1677,6 +1678,14 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
     )
     try:
         run_watch(wc)
+    except StartupConfigError as exc:
+        # Ordered BEFORE RuntimeError: StartupConfigError subclasses it, and a
+        # broad handler first would swallow the exit contract. Exiting
+        # EX_CONFIG tells the supervisor this failure is not transient, so
+        # `RestartPreventExitStatus=78` in the unit stops the loop on the
+        # FIRST failure instead of respawning forever.
+        click.echo(f"error: {exc}", err=True)
+        ctx.exit(EX_CONFIG)
     except RuntimeError as exc:
         click.echo(f"error: {exc}", err=True)
         ctx.exit(1)

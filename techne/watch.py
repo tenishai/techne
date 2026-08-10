@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from techne.core.state import add_observation
+from techne.exit_codes import StartupConfigError
 
 log = logging.getLogger(__name__)
 
@@ -194,7 +195,13 @@ def watch(
         from watchdog.events import FileSystemEventHandler
         from watchdog.observers import Observer
     except ImportError as exc:
-        raise RuntimeError("watchdog is not installed; run `pip install techne[watch]`") from exc
+        # StartupConfigError, not a bare RuntimeError: a supervised `techne
+        # watch` must exit EX_CONFIG here so systemd stops rather than
+        # respawning every RestartSec forever. Subclasses RuntimeError, so
+        # callers that only catch RuntimeError are unaffected.
+        raise StartupConfigError(
+            "watchdog is not installed; run `pip install techne[watch]`"
+        ) from exc
 
     def ingest(path: Path) -> None:
         if matches(path, config.include_globs, config.exclude_globs):
