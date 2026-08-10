@@ -75,7 +75,13 @@ def _skip_env_prefix(tokens: list[str], i: int = 0) -> int:
         i += 1
         while i < len(tokens):
             t = tokens[i]
-            # Same LAST-LETTER-OF-THE-CLUSTER rule as the shell scanner above.
+            # Cluster options are read by their LAST LETTER — the same shape as
+            # the shell scanner's rule, NOT the same rule; see the block below,
+            # which exists to keep those two apart. (It used to say "as the shell
+            # scanner above". After the helper move that scanner is
+            # `_shell_c_script`'s cluster loop in core/evidence.py, so "above"
+            # pointed at nothing in this file — and worse, it asserted SAME where
+            # the next block asserts DIFFERENT.)
             # A whole-token test misses `-iu FOO` (which is `-i` + `-u FOO`),
             # skipping by one so FOO reads as the command and the shell is never
             # reached — starvation, i.e. a false green.

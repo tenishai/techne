@@ -576,6 +576,20 @@ def _command_runs_tests(command: str) -> bool:
         # Skip leading `VAR=val` env assignments to find the real head.
         while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
             i += 1
+        # ...and the `env` prefix, for the same reason and in the same order as
+        # the other three sites. THE FOURTH CALL SITE (r1 review): the gate saw
+        # `env bash -c 'pytest -q'` only because that routes through
+        # _expand_shell_c -> _shell_c_script, which already called this helper;
+        # the DIRECT form `env pytest -q` fell through here. Not cosmetic — an
+        # unrecognised command hits the `continue` in the row loop below, which
+        # discards the row WHOLE, so its failures never reach `all_failed` and
+        # _row_totals_unreliable is never consulted for it. Measured end-to-end
+        # against a real ledger: `env pytest -q` -> "1 failed, 2619 passed"
+        # alongside a small `pytest tests/test_small.py -q` -> "5 passed" gave
+        # suite_green=True and BACKED the tests_green claim — the 2620-test run
+        # discarded, the 5-test run certifying green. That is the starvation-
+        # shaped false green this file names at 596-599 and techne#438.
+        i = _skip_env_prefix(tokens, i)
         if i >= len(tokens):
             continue
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. .venv/bin/pytest
