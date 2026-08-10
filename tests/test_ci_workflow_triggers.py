@@ -278,6 +278,26 @@ def _pytest_argv(line: str) -> list[str] | None:
     return None
 
 
+def _marker_expr(argv: list[str]) -> str | None:
+    """The `-m` expression this invocation selects with, else None.
+
+    Parsed rather than scanned, and it handles the spellings pytest accepts:
+    `-m X`, `-mX`, `--markexpr X`, `--markexpr=X`. Used to assert a step still
+    runs a specific gate WITHOUT a substring scan over the raw `run:` text, which
+    passes on a commented-out step (#532 r8).
+    """
+    it = iter(range(len(argv)))
+    for i in it:
+        a = argv[i]
+        if a in ("-m", "--markexpr"):
+            return argv[i + 1] if i + 1 < len(argv) else None
+        if a.startswith("--markexpr="):
+            return a.split("=", 1)[1]
+        if a.startswith("-m") and len(a) > 2 and not a.startswith("--"):
+            return a[2:]
+    return None
+
+
 def _is_default_suite(argv: list[str]) -> bool:
     """True when argv narrows nothing: no selector flag and no positional."""
     expect_value = False
@@ -299,7 +319,6 @@ def test_eval_vec_runs_the_default_suite_not_only_the_gate():
     `-m eval_vec`, the model2vec branch of EmbeddingModel.embed() is exercised
     nowhere — and #536 is a bug in the other branch of that function.
     """
-    assert "-m eval_vec" in _run_lines("eval-vec"), "the eval_vec gate must still run"
     # Line by line: a `run: |` block would otherwise merge tokens across commands.
     lines = [
         ln
@@ -307,6 +326,17 @@ def test_eval_vec_runs_the_default_suite_not_only_the_gate():
         for ln in str(s.get("run", "")).splitlines()
     ]
     argvs = [a for a in (_pytest_argv(ln) for ln in lines) if a is not None]
+    # PARSED, not scanned. This assertion used to be `"-m eval_vec" in
+    # _run_lines("eval-vec")` — a substring scan over the joined run: scalars, the
+    # exact form the rest of this file spent four rounds killing, sitting in the
+    # function the hardened idiom is cited from (#532 r8). Measured: it passed with
+    # the gate step commented out inside a `run: |` block, and with r4's kill
+    # (`echo 'pytest -m eval_vec run removed on purpose'`). Commenting a step out
+    # is how people disable CI for an afternoon and forget.
+    assert any(_marker_expr(a) == "eval_vec" for a in argvs), (
+        "the eval_vec gate must still run: no pytest invocation in eval-vec selects "
+        f"`-m eval_vec`. Found invocations: {argvs}"
+    )
     assert any(_is_default_suite(a) for a in argvs), (
         "eval-vec must run the DEFAULT suite — pytest invoked with no selector "
         f"flag and no positional. Found invocations: {argvs}"
@@ -329,26 +359,47 @@ def test_no_workflow_env_narrows_pytest_selection():
     not a failure). Anything that narrows selection can narrow the guard out of
     the run.
 
-    GOING STATIC DID NOT ESCAPE THAT TRAP — IT CHANGED WHAT IS READ, NOT WHETHER
-    THIS TEST IS SELECTED (#532 r7). Reading the YAML instead of the live config
-    does nothing for a mutant that is IN FORCE while this test would run, because
-    the same narrowing deselects this test too. Measured, workflow-level mutant:
+    GOING STATIC DID NOT FULLY ESCAPE THAT TRAP — it changed what is READ, not
+    whether this test is SELECTED. But the residual is much narrower than r7 of
+    this PR claimed, and r7 was wrong twice. Both corrections came from re-measurement
+    (#532 r8 and poe_3), and BOTH ARE RECORDED because the overstated version would
+    have sent someone to fix cells that are already covered.
 
-        env: PYTEST_ADDOPTS: "-m eval_vec"  present but NOT in force
-            -> 2 failed, 18 passed          (this guard and #538's sibling fire)
-        the same mutant actually in force, as CI would set it
-            -> 20 deselected, exit 0        (neither guard runs at all)
+    WHAT ACTUALLY DECIDES IT IS NOT THE SCOPE, IT IS WHETHER THE IN-FORCE SELECTION
+    EXCLUDES THIS FILE. Nothing here carries a marker, so a SELECTING expression
+    drops it and a NEGATING one keeps it. Measured, value in force:
 
-    SO THE HONEST SCOPE IS SCOPE-DEPENDENT, and it is narrower than "forbid the
-    two sources a workflow edit can introduce":
-      - STEP-scoped env: CAUGHT. It narrows one step; the other pytest steps still
-        run this test unnarrowed, so it fires.
-      - JOB- or WORKFLOW-scoped env: NOT CAUGHT. It narrows every pytest step in
-        the job (or in both jobs), leaving no leg in which this assertion executes.
-        NO IN-SUITE TEST CAN DO BETTER — a guard that lives inside the run cannot
-        survive a mutant that cancels the run. Closing this needs a check outside
-        pytest: a lint step, or a required job whose own invocation is asserted by
-        something that is not pytest.
+        PYTEST_ADDOPTS="-m eval_vec"     -> 21 deselected   guard never runs
+        PYTEST_ADDOPTS="-m probe"        -> 21 deselected   guard never runs
+        PYTEST_ADDOPTS="-k zzznomatch"   -> 21 deselected   guard never runs
+        PYTEST_ADDOPTS="-m 'not eval'"   -> 2 failed, 19 passed      CAUGHT
+        (no PYTEST_ADDOPTS)              -> 21 passed
+
+    So the WIDENING case — the one that drops the local-only exclusions, which is
+    what #535 is about — fires this guard. r7 measured only a selecting expression
+    and generalised from it.
+
+    AND FOR A SELECTING EXPRESSION, THE COVERING MECHANISM IS THE OTHER *JOB*, NOT
+    THE OTHER STEPS. r7 said step-scope is caught because "the other pytest steps
+    still run this test unnarrowed". They do not: the `test` leg's only other pytest
+    step is `-m "eval or eval_gate"`, which collects NOTHING from this file
+    (measured: "no tests collected (12 deselected)"). There are exactly two
+    default-suite invocations in the workflow and they are one per job — `test`
+    at :221 and `eval-vec` at :286. So:
+      - STEP-scoped, and JOB-scoped on either job: CAUGHT, by the other job's
+        default-suite step.
+      - WORKFLOW-level `env:` (or the same job-level `env:` added to BOTH jobs,
+        which is two edits): GENUINELY NOT CAUGHT. No in-suite test can do better —
+        a guard living inside the run cannot survive a mutant that cancels the run.
+        Closing that cell needs a check outside pytest's selection: a lint step, or
+        the arch-cards gate.
+
+    THAT COVERAGE IS A DEPENDENCY, NOT LUCK, and it is why the two guards below it
+    matter: it holds only because BOTH jobs run a default suite, and each of those
+    facts is itself pinned — `test_eval_vec_runs_the_default_suite_not_only_the_gate`
+    (#537) and `test_the_test_leg_still_runs_the_default_suite`. Drop either step
+    and the job-scoped cell silently goes uncovered with it.
+
     The tell, worth carrying past this file: do not ask "does the assertion catch
     the mutant", ask "DOES THE ASSERTION STILL RUN under the mutant".
 
@@ -390,8 +441,11 @@ def test_the_test_leg_still_runs_the_default_suite():
     lines = [ln for s in _job_steps("test") for ln in str(s.get("run", "")).splitlines()]
     argvs = [a for a in (_pytest_argv(ln) for ln in lines) if a is not None]
     assert any(_is_default_suite(a) for a in argvs), (
-        "the test leg no longer runs the DEFAULT suite — every pytest invocation in it "
-        f"narrows. Found invocations: {argvs}"
+        "no pytest invocation in the test leg reads as the DEFAULT suite. Either one "
+        "narrows (a selector or a positional), OR one carries a value-taking flag that "
+        "_VALUED does not know, so its VALUE was read as a positional — measured for "
+        "`--durations 10` and `-W ignore::DeprecationWarning`, neither of which narrows "
+        f"anything. Check the argvs before hunting for a narrowing: {argvs}"
     )
 
 
@@ -455,7 +509,10 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
             offender = _loads_selection_changing_config(argv)
             assert offender is None, (
                 f"the default-suite invocation in {job} loads config that can narrow "
-                f"selection ({offender!r} in {argv}). An alternate ini's addopts, or a "
-                "plugin's pytest_configure, changes what runs without changing anything "
-                "the argv guard reads."
+                f"selection ({offender!r} in {argv}). An alternate ini's addopts, an "
+                "-o/--override-ini, or a plugin's pytest_configure changes what runs "
+                "without changing anything the argv guard reads. NOTE: `-p no:<plugin>` "
+                "DISABLES a plugin and cannot narrow selection, so it is rejected "
+                "conservatively rather than because it is dangerous — `no:` and `load:` "
+                "are one flag and this predicate deliberately does not parse the value."
             )
