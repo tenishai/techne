@@ -1331,8 +1331,11 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # dead") on a healthy store and points the operator at the sync producer
         # when the real cause is unclean exits.
         #
-        # NULL source = a legacy row written before the column existed, when the
-        # only writer WAS end_session — so it is clean by construction.
+        # NULL source = a row predating the column. Read as 'clean', which is a
+        # DELIBERATE UNDER-COUNT rather than a proof: transcript_import also wrote
+        # ended_at then (a transcript's LAST MESSAGE, i.e. derived) and set no
+        # source, so some legacy rows read clean when they are derived. Bounded
+        # and historical; both live writers stamp the column now.
         srow = conn.execute(
             "SELECT COUNT(*), MAX(ended_at) FROM sessions "
             "WHERE ended_at IS NOT NULL AND COALESCE(ended_at_source, 'clean') = 'clean'"

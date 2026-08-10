@@ -372,3 +372,53 @@ def test_migration_24_does_not_close_a_live_peer(tmp_path):
         post.close()
 
     assert ended is None, f"the migration closed a session active 5s ago: {ended!r}"
+
+
+def test_the_transcript_importer_stamps_derived(tmp_path):
+    """end_session is NOT the only writer of ended_at.
+
+    transcript_import writes it from the transcript's LAST MESSAGE timestamp —
+    last-activity, the same lower-bound semantics as the sweep's 'derived'. It
+    left the source NULL, and COALESCE(...,'clean') reads NULL as clean, so an
+    imported session counted as evidence a producer was dead: the exact
+    false-STALE this PR exists to prevent, reintroduced through a writer the
+    docstrings said did not exist.
+
+    Four comments asserted "end_session is the only writer" and the code
+    disagreed with all four. Exercised through the real importer.
+    """
+    import json
+
+    from techne.platforms.claude_code import transcript_import
+
+    p = tmp_path / "sess-imp.jsonl"
+    with p.open("w") as fh:
+        for ts in ("2026-08-01T10:00:00.000Z", "2026-08-01T10:30:00.000Z"):
+            fh.write(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": ts,
+                        "message": {"content": [{"type": "text", "text": "x"}]},
+                    }
+                )
+                + "\n"
+            )
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    transcript_import.import_transcript(db, p)
+
+    conn = connect(db)
+    try:
+        ended, source = conn.execute(
+            "SELECT ended_at, ended_at_source FROM sessions WHERE id = 'sess-imp'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert ended is not None, "the importer wrote no ended_at; test is vacuous"
+    assert source == "derived", (
+        f"imported session has ended_at_source={source!r} — NULL reads as 'clean', "
+        f"so it counts as evidence a producer is dead"
+    )

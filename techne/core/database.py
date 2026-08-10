@@ -1133,7 +1133,7 @@ END;
     if from_version < 24 and to_version >= 24:
         # techne#516: sessions.ended_at was 79% NULL and DEGRADING (52% of June
         # sessions had one, 19% of July, 7% of August), because `end_session` is
-        # its only writer and an unclean exit never reaches it. With ended_at
+        # its only CLEAN writer and an unclean exit never reaches it. With ended_at
         # NULL the interval is open-ended, so "which session was live at T"
         # matched every session ever started before T — the replay index #516
         # exists to build could not discriminate at all.

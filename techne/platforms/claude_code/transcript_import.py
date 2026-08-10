@@ -109,10 +109,17 @@ def import_transcript(
         summary_set = False
         if not existing_session:
             conn.execute(
+                # ended_at_source='derived' (#516): last_ts is the transcript's
+                # LAST MESSAGE timestamp — last-activity, the same lower-bound
+                # semantics the sweep records as 'derived'. Leaving it NULL would
+                # read as 'clean' and make an imported session count as evidence
+                # that a producer is dead, which is the false-STALE #516 fixes.
                 """INSERT INTO sessions
-                   (id, started_at, ended_at, project_path, platform, summary_llm)
-                   VALUES (?, ?, ?, ?, 'claude-code', ?)""",
-                (session_id, first_ts, last_ts, project_path, ai_title or None),
+                   (id, started_at, ended_at, ended_at_source, project_path,
+                    platform, summary_llm)
+                   VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE 'derived' END,
+                           ?, 'claude-code', ?)""",
+                (session_id, first_ts, last_ts, last_ts, project_path, ai_title or None),
             )
             summary_set = bool(ai_title)
         else:
@@ -124,9 +131,16 @@ def import_transcript(
                    SET project_path = COALESCE(NULLIF(project_path, ''), ?),
                        started_at = COALESCE(started_at, ?),
                        ended_at = COALESCE(ended_at, ?),
+                       -- Stamp the source ONLY when this statement is the one
+                       -- supplying ended_at. Evaluated against the pre-update
+                       -- row, so a session that already ended cleanly keeps its
+                       -- 'clean'.
+                       ended_at_source = CASE
+                           WHEN ended_at IS NULL AND ? IS NOT NULL THEN 'derived'
+                           ELSE ended_at_source END,
                        summary_llm = COALESCE(?, summary_llm)
                    WHERE id = ?""",
-                (project_path, first_ts, last_ts, ai_title or None, session_id),
+                (project_path, first_ts, last_ts, last_ts, ai_title or None, session_id),
             )
             prior_llm = (existing_session["summary_llm"] or "").strip()
             summary_set = bool(ai_title) and ai_title != prior_llm
