@@ -331,49 +331,73 @@ def test_reading_enqueue_history_requires_a_declared_lane():
 
 
 def test_no_undeclared_inlined_prefilter():
-    """A LEAKY DETECTOR, and labelled as one — not a guarantee.
+    """A DETECTOR WITH THREE NAMED GAPS — not a guarantee, and not one gap.
 
-    `delivered_hashes` enforces the strong half (call it, declare your lane) but
-    cannot see a pre-filter that queries the table directly. r3 retired the old
-    lexical guard for being evadable and thereby traded a leaky detector for
-    NONE — a real regression, even though retiring it was right: a guard whose
-    precision rested on where semicolons fell was not holding the invariant.
+    `delivered_hashes` enforces the strong half (call it, declare your lane).
+    This catches the INLINED form by looking for the content_hash / outbox /
+    target triple INSIDE A SINGLE SQL STRING LITERAL, walked from the AST.
 
-    This is the honest version. It catches the INLINED form — the shape the
-    archivist itself used until r3 — by looking for a dedup-shaped query: the
-    content_hash / outbox / target triple in one statement, either order.
+    WHY PER-LITERAL, after three rounds of regex failed on this:
+      * `[^;]*?` under re.S spans hundreds of unrelated lines, so a file-wide
+        `target` conjunct made `core/state.py` — which has a queue-depth COUNT
+        and a redaction count on `observations`, and reads no enqueue history at
+        all — a FALSE POSITIVE the moment an unrelated observations stat was
+        added. What spared it was `;` characters in unrelated comments. Precision
+        resting on semicolon placement is the exact flaw r3's guard was retired
+        for, restored by its replacement.
+      * The same span made a prose semicolon between the two tokens a working
+        evasion.
+    Bounding the match to one literal removes both: no cross-statement span, so
+    no semicolon luck in either direction.
 
-    WHAT IT MISSES, stated rather than implied: indirection. A consumer calling
-    a helper in sync/outbox.py is invisible here, which is exactly why the
-    accessor exists. Two mechanisms, two coverage gaps, neither pretending to be
-    the other.
+    THE THREE GAPS, named because the previous docstring named one and had three:
+      1. INDIRECTION — a consumer calling a helper in sync/outbox.py. This is why
+         the accessor exists.
+      2. SPLIT OR COMPOSED SQL — `_TABLE = "outbox"` with an f-string, or
+         `cols = "content_hash"` assembled later. The tokens never share a
+         literal. Not exotic: this module builds its own DELETEs with
+         `_SWEEP_COLLAPSE.format(...)`. Lexically out of reach, and saying so is
+         the honest option.
+      3. OUTSIDE THE PACKAGE — the scan is rooted at the techne package, so
+         `scripts/` is invisible. Nothing pre-filter-shaped lives there today.
     """
-    import re
+    import ast
     from pathlib import Path
 
     import techne
 
     root = Path(techne.__file__).parent
-    pattern = re.compile(
-        r"(content_hash\b[^;]*?\bFROM\s+outbox|\bFROM\s+outbox\b[^;]*?content_hash)",
-        re.I | re.S,
-    )
-    offenders = sorted(
-        str(p.relative_to(root))
-        for p in root.rglob("*.py")
-        if not (p.name == "outbox.py" and p.parent.name == "sync")
-        and pattern.search(p.read_text())
-        and "target" in p.read_text()
-    )
+    offenders = []
+    for path in root.rglob("*.py"):
+        if path.name == "outbox.py" and path.parent.name == "sync":
+            continue  # the module that OWNS the table, not a consumer
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:  # pragma: no cover - not our file to fix
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            sql = node.value.lower()
+            if "create table" in sql:
+                continue  # a schema blob is DDL, not a pre-filter
+            if (
+                "content_hash" in sql
+                and "from outbox" in sql
+                and "target" in sql
+                and "select" in sql
+            ):
+                offenders.append(str(path.relative_to(root)))
+                break
 
     assert offenders == [], (
         f"these modules inline a dedup-shaped outbox query instead of calling "
-        f"delivered_hashes: {offenders}. Route the read through the accessor so "
-        f"the lane is declared — or, if it is not reading enqueue history back "
-        f"(a plain COUNT or a status display is not), narrow this assertion "
-        f"rather than adding the target to LEDGER_TARGETS. Adding a non-ledger "
-        f"lane there switches it from age-out to collapse-only, which is the "
-        f"unbounded growth #518 exists to fix."
+        f"delivered_hashes: {sorted(offenders)}. Route the read through the "
+        f"accessor so the lane is declared. If the match is NOT reading enqueue "
+        f"history back (a plain COUNT or a status display is not), narrow this "
+        f"assertion — do NOT add the target to LEDGER_TARGETS, which would switch "
+        f"a non-ledger lane from age-out to collapse-only, i.e. the unbounded "
+        f"growth #518 exists to fix."
     )
 
 

@@ -460,9 +460,12 @@ def delivered_hashes(db_path: Path, target: str) -> set[str]:
     is falsifiable: IF YOU CALL `delivered_hashes`, YOU MUST DECLARE YOUR LANE.
 
     WHAT IT DOES NOT: it cannot stop a pre-filter that queries the table
-    directly. `connect` is freely importable and three modules already do
-    (core/state.py, core/checks.py, core/database.py), so nothing prevents a
-    fourth from inlining the same SELECT with an undeclared target. An earlier
+    directly. `connect` is imported by ~40 modules across the package — most of
+    core — so nothing prevents another from inlining the same SELECT with an
+    undeclared target. (An earlier version of this sentence said "three modules",
+    which invited the reader to picture a small surveyable set; the argument is
+    correct and in fact stronger than that stated it, and core/database.py
+    DEFINES connect rather than importing it.) An earlier
     version of this docstring claimed "a new pre-filter cannot be written that
     the retention policy does not know about" — that was false, and a confident
     sentence over a weaker mechanism is worse than no sentence, because it

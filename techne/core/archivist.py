@@ -266,7 +266,6 @@ def push_knowledge_to_archivist(config) -> int:
        compares against what the SINK holds rather than what we enqueued."""
     if config.standalone:
         return 0
-    from techne.core.database import connect
     from techne.core.knowledge import REDIRECTED_TYPES
     from techne.core.knowledge_export import query_live_knowledge
     from techne.sync.outbox import content_hash_for, delivered_hashes, enqueue
