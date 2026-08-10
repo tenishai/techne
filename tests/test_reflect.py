@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 from unittest.mock import patch
 
 import pytest
@@ -184,6 +185,26 @@ def _save_thread_row(config, session_id: str, thread: Thread) -> None:
         session_id,
         config.db_path,
         parent_links=[(f"{session_id}-{thread.thread_num}", None)],
+    )
+
+
+def _enqueue_as_production_does(config, session_id, threads, observations) -> int:
+    """Seed the reflection queue by the route both production callers take.
+
+    #527 r5: these tests used to call `enqueue_reflection_debt(db_path,
+    session_id)` and lean on a "queue every thread" default. That default is gone
+    — it was the r4 bug wearing a docstring — but the deeper problem was that the
+    regression tests for r1/r2/r3 were seeding by a route production could not
+    take, so they no longer pinned the shape that ships. Going through
+    `emittable_thread_ids` here means a change to the predicate breaks these
+    tests, which is the point of having them.
+    """
+    from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
+
+    return enqueue_reflection_debt(
+        config.db_path,
+        session_id,
+        thread_ids=emittable_thread_ids(config, session_id, threads, observations),
     )
 
 
@@ -1158,3 +1179,404 @@ def test_candidates_beyond_max_items_are_counted_as_dropped(tmp_path):
     assert len(r.candidates) == 5
     assert r.failure is None
     assert r.dropped == 3, f"the 3 truncated candidates must be counted, got {r.dropped}"
+
+
+# --- reflection debt queue (techne#514) -----------------------------------
+
+
+class TestReflectionQueue:
+    """session_end must RECORD the debt, not just count it.
+
+    The bug: session_end logged "403 obs, 19 threads" and enqueued nothing, so
+    reflection survived exactly one exit path — the polite one. Two sessions
+    ended four minutes apart on 2026-08-07 with 297 and 403 observations and
+    produced ZERO candidates between them; the only reason one was ever reflected
+    is that a peer noticed by hand.
+    """
+
+    def test_enqueue_records_one_row_per_thread(self, tmp_path):
+        from techne.core.reflect import pending_reflection_queue
+
+        config = _mk_config(tmp_path, enabled=True)
+        session_id, obs = _mk_session_with_obs(config, 5)
+        threads = [
+            Thread(thread_num=n, label=f"t{n}", summary="s", observation_indices=[0, 1, 2])
+            for n in (1, 2, 3)
+        ]
+        for t in threads:
+            _save_thread_row(config, session_id, t)
+
+        assert _enqueue_as_production_does(config, session_id, threads, obs) == 3
+        pending = pending_reflection_queue(config.db_path)
+        assert len(pending) == 3
+        assert {p["session_id"] for p in pending} == {session_id}
+
+    def test_enqueue_is_idempotent(self, tmp_path):
+        """session_end fires once per TURN, not once per session — so this runs
+        many times against the same threads. Idempotency is enforced by the
+        UNIQUE(thread_id) schema constraint, not by a check-then-insert, so two
+        sessions racing cannot double-queue either.
+        """
+        from techne.core.reflect import pending_reflection_queue
+
+        config = _mk_config(tmp_path, enabled=True)
+        session_id, obs = _mk_session_with_obs(config, 5)
+        thread = Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2])
+        _save_thread_row(config, session_id, thread)
+
+        assert _enqueue_as_production_does(config, session_id, [thread], obs) == 1
+        assert _enqueue_as_production_does(config, session_id, [thread], obs) == 0
+        assert _enqueue_as_production_does(config, session_id, [thread], obs) == 0
+        assert len(pending_reflection_queue(config.db_path)) == 1
+
+    def test_queue_surfaces_debt_that_the_recency_heuristic_loses(self, tmp_path):
+        """THE REGRESSION TEST FOR THE ACTUAL BUG, and the reason the queue
+        exists rather than a bigger limit on the old path.
+
+        `pending_reflection` scans the N most-recent sessions and filters AFTER
+        the LIMIT — by its own docstring, "a genuinely-old pending session past
+        that window is intentionally not surfaced." So debt does not merely go
+        unnoticed, it becomes PERMANENTLY invisible once enough sessions follow
+        it. The queue is a ledger of what was owed; it does not care how many
+        sessions came later.
+        """
+        from techne.core.reflect import (
+            pending_reflection,
+            pending_reflection_queue,
+        )
+
+        config = _mk_config(tmp_path, enabled=True)
+        old_session, obs = _mk_session_with_obs(config, 5)
+        thread = Thread(thread_num=1, label="old", summary="s", observation_indices=[0, 1, 2])
+        _save_thread_row(config, old_session, thread)
+        _enqueue_as_production_does(config, old_session, [thread], obs)
+
+        # Bury it under newer sessions, past the heuristic's window.
+        for _ in range(8):
+            _mk_session_with_obs(config, 5)
+
+        recent_ids = {p["session_id"] for p in pending_reflection(config, limit=5)}
+        assert old_session not in recent_ids, "precondition: the heuristic has lost it"
+
+        queued_ids = {p["session_id"] for p in pending_reflection_queue(config.db_path)}
+        assert old_session in queued_ids, "the queue must still owe it"
+
+    def test_drain_stamps_once_and_only_once(self, tmp_path):
+        """Drained rows are STAMPED, not deleted — the queue doubles as the
+        record that the debt existed and was paid, which is the evidence #514
+        was filed on. A second drain must not rewrite the first payment.
+        """
+        from techne.core.database import connect
+        from techne.core.reflect import (
+            drain_reflection_queue,
+            pending_reflection_queue,
+        )
+
+        config = _mk_config(tmp_path, enabled=True)
+        session_id, obs = _mk_session_with_obs(config, 5)
+        thread = Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2])
+        _save_thread_row(config, session_id, thread)
+        _enqueue_as_production_does(config, session_id, [thread], obs)
+        thread_id = pending_reflection_queue(config.db_path)[0]["thread_id"]
+
+        assert drain_reflection_queue(config.db_path, [thread_id]) == 1
+        assert pending_reflection_queue(config.db_path) == []
+
+        conn = connect(config.db_path)
+        try:
+            first = conn.execute(
+                "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        assert drain_reflection_queue(config.db_path, [thread_id]) == 0, "second drain is a no-op"
+
+        conn = connect(config.db_path)
+        try:
+            still = conn.execute(
+                "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert still == first, "the first payment is the true one"
+
+    def test_drain_of_nothing_is_not_a_query(self, tmp_path):
+        from techne.core.reflect import drain_reflection_queue
+
+        config = _mk_config(tmp_path, enabled=True)
+        assert drain_reflection_queue(config.db_path, []) == 0
+
+
+def test_redetect_preserves_reflection_debt(tmp_path):
+    """#527 review, CRITICAL: `techne redetect` deletes a session's threads, the
+    CASCADE takes reflection_queue with them, and session_end does not re-run —
+    so the debt #514 exists to protect was silently destroyed by an ordinary
+    operator command. Every caller that deletes threads must re-enqueue.
+    """
+    from techne.core.reflect import pending_reflection_queue
+    from techne.lifecycle import redetect_threads
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 5)
+    from techne.core.state import add_observation
+
+    for i in range(12):
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2])
+    _save_thread_row(config, session_id, thread)
+    _enqueue_as_production_does(config, session_id, [thread], obs)
+    assert len(pending_reflection_queue(config.db_path)) == 1
+
+    redetect_threads(config, session_id)
+
+    assert pending_reflection_queue(config.db_path), (
+        "redetect destroyed the queued reflection debt — CASCADE fired and nothing "
+        "re-enqueued (#527 review)"
+    )
+
+
+def test_ingest_drains_the_queue_so_the_banner_can_clear(tmp_path):
+    """#527 r1: drain_reflection_queue had NO production caller, so the queued-debt
+    banner grew forever and the action it named ("run techne_reflect_emit")
+    returned count:0 on an already-reflected session. The drain half of #504's
+    shape, inside the PR that refused to ship it.
+    """
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        pending_reflection_queue,
+    )
+    from techne.mcp_server import _techne_reflect_ingest
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 5)
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2, 3, 4])
+    _save_thread_row(config, session_id, thread)
+    _enqueue_as_production_does(config, session_id, [thread], obs)
+    assert len(pending_reflection_queue(config.db_path)) == 1
+
+    batch = emit_reflection_batch(config, session_id, [thread], obs)
+    assert batch, "precondition: emit produced a prompt to answer"
+    item = batch[0]
+    _techne_reflect_ingest(
+        {
+            "session_id": session_id,
+            "thread_id": item["thread_id"],
+            "prompt_hash": item["prompt_hash"],
+            "response": _candidate_array("Drain fact"),
+        },
+        config,
+    )
+
+    assert pending_reflection_queue(config.db_path) == [], (
+        "ingest must drain the queue — otherwise the banner never clears and "
+        "saturates into unconditional noise"
+    )
+
+
+def test_redetect_preserves_a_paid_drain_stamp(tmp_path):
+    """#527 r2: re-enqueueing after redetect resurrected PAID debt as pending.
+
+    Drives redetect TWICE. thread_row_id is content-addressed for
+    heuristic-detected threads, so an unchanged segmentation yields the SAME id
+    on the second pass — which is the case where the drain stamp must survive.
+    (A changed segmentation is a genuinely new thread and SHOULD owe reflection.)
+    """
+    from techne.core.reflect import (
+        drain_reflection_queue,
+        pending_reflection_queue,
+    )
+    from techne.core.state import add_observation
+    from techne.lifecycle import redetect_threads
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 5)
+    for i in range(12):
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+
+    redetect_threads(config, session_id)
+    queued = pending_reflection_queue(config.db_path)
+    assert queued, "precondition: the first redetect enqueued debt"
+    before = {q["thread_id"] for q in queued}
+    drain_reflection_queue(config.db_path, [q["thread_id"] for q in queued])
+    assert pending_reflection_queue(config.db_path) == []
+
+    redetect_threads(config, session_id)
+
+    after = pending_reflection_queue(config.db_path)
+    resurrected = {q["thread_id"] for q in after} & before
+    assert not resurrected, (
+        f"redetect resurrected already-reflected debt as pending: {resurrected} (#527 r2)"
+    )
+
+
+def test_the_cascade_fires_on_or_replace_not_only_on_delete(tmp_path):
+    """`INSERT OR REPLACE` on threads.id removes the row and fires the
+    reflection_queue CASCADE; `INSERT OR IGNORE` does not.
+
+    database.py's schema comment tells the next implementer that a caller which
+    removes a threads row must re-enqueue — and "removes" is not only DELETE.
+    OR REPLACE resolves the conflict by deleting the existing row first, and
+    save_threads picks its verb by whether the thread has a boundary_signal, so
+    the two paths differ. That comment used to carry these numbers as prose; a
+    measured number in a comment is a cached result with no invalidation
+    (techne#541), so it is pinned here instead and the comment points at it.
+    """
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 5)
+
+    def _seed_one_queued_thread(conn):
+        conn.execute(
+            "INSERT INTO threads (id, session_id, thread_num, label, summary, status) "
+            "VALUES ('tid', ?, 1, 'l', 's', 'active')",
+            (session_id,),
+        )
+        conn.execute(
+            "INSERT INTO reflection_queue (session_id, thread_id) VALUES (?, 'tid')",
+            (session_id,),
+        )
+        conn.commit()
+
+    def _queue_rows_after(verb: str) -> int:
+        conn = connect(config.db_path)
+        try:
+            conn.execute("DELETE FROM reflection_queue")
+            conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
+            conn.commit()
+            _seed_one_queued_thread(conn)
+            assert conn.execute("SELECT COUNT(*) FROM reflection_queue").fetchone()[0] == 1
+            conn.execute(
+                f"{verb} INTO threads (id, session_id, thread_num, label, summary, status) "
+                "VALUES ('tid', ?, 1, 'l2', 's2', 'active')",
+                (session_id,),
+            )
+            conn.commit()
+            return conn.execute("SELECT COUNT(*) FROM reflection_queue").fetchone()[0]
+        finally:
+            conn.close()
+
+    assert _queue_rows_after("INSERT OR REPLACE") == 0, (
+        "OR REPLACE must be treated as a row removal — it fires the CASCADE, so a "
+        "caller using it has to re-enqueue exactly as a DELETE caller does"
+    )
+    assert _queue_rows_after("INSERT OR IGNORE") == 1, (
+        "OR IGNORE leaves the row in place, so the queued debt survives"
+    )
+
+
+def test_a_failed_enqueue_rolls_the_whole_redetect_back(tmp_path, monkeypatch):
+    """#527 r5: the enqueue is INSIDE redetect's transaction, so a failure there
+    leaves NO half-applied redetect.
+
+    While the enqueue sat after the commit, a raise from it (a locked database is
+    plausible — this repo deliberately supports concurrent peer sessions) left
+    the threads committed, the debt unqueued, any paid drain stamps unrestored
+    and set_session_summary never reached. That state is unrecoverable in
+    practice: nothing anywhere re-derives debt for a thread that is emittable but
+    has no queue row, so the loss is permanent unless an operator happens to run
+    redetect again.
+
+    The discriminator is the QUEUE, not the exception. Under the old ordering the
+    DELETE had already committed, so the CASCADE had taken the queue with it and
+    nothing put it back; under this one the rollback restores it.
+    """
+    import techne.core.reflect as reflect_mod
+    from techne.core.reflect import pending_reflection_queue
+    from techne.core.state import add_observation
+    from techne.lifecycle import redetect_threads
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, _ = _mk_session_with_obs(config, 5)
+    for i in range(12):
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+
+    redetect_threads(config, session_id)
+    before = {q["thread_id"] for q in pending_reflection_queue(config.db_path)}
+    assert before, "precondition: the first redetect queued debt"
+
+    def _explode(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(reflect_mod, "enqueue_reflection_debt", _explode)
+    with pytest.raises(sqlite3.OperationalError):
+        redetect_threads(config, session_id)
+
+    after = {q["thread_id"] for q in pending_reflection_queue(config.db_path)}
+    assert after == before, (
+        "a failed enqueue left the redetect half-applied: the DELETE committed and "
+        "the CASCADE took the debt with it (#527 r5)"
+    )
+
+
+def test_a_parse_failure_does_not_stamp_the_debt_paid(tmp_path):
+    """#527 r3, CRITICAL: the drain fired whenever thread_id was truthy —
+    including the branch whose own comment reads "THE PASS DID NOT HAPPEN"
+    (reflect.py:645). A discarded reflection was stamped paid, permanently,
+    because drain is guarded on drained_at IS NULL.
+    """
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        pending_reflection_queue,
+    )
+    from techne.mcp_server import _techne_reflect_ingest
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 5)
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=[0, 1, 2, 3, 4])
+    _save_thread_row(config, session_id, thread)
+    _enqueue_as_production_does(config, session_id, [thread], obs)
+    item = emit_reflection_batch(config, session_id, [thread], obs)[0]
+
+    out = _techne_reflect_ingest(
+        {
+            "session_id": session_id,
+            "thread_id": item["thread_id"],
+            "prompt_hash": item["prompt_hash"],
+            "response": "I am sorry, I cannot produce that JSON.",
+        },
+        config,
+    )
+
+    assert out.get("parse_failures") == 1, "precondition: the response did not parse"
+    assert pending_reflection_queue(config.db_path), (
+        "a DISCARDED reflection was stamped paid — the debt is now unrecoverable "
+        "because drain is guarded on drained_at IS NULL (#527 r3)"
+    )
+
+
+def test_sub_threshold_threads_are_not_queued(tmp_path):
+    """#527 r4: enqueue queued EVERY thread while emit skips any under
+    min_observations_per_thread, so sub-threshold threads were queued, never
+    emittable, and therefore never drainable — the banner accumulated rows
+    nothing could clear.
+
+    Uses the PRODUCTION default (8), not _mk_config's 3. The helper's lower value
+    is why the suite could not see this.
+    """
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        emittable_thread_ids,
+        enqueue_reflection_debt,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    config.reflect.min_observations_per_thread = 8  # production default
+    session_id, obs = _mk_session_with_obs(config, 5)  # only 5 — below it
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=list(range(5)))
+    _save_thread_row(config, session_id, thread)
+
+    assert emit_reflection_batch(config, session_id, [thread], obs) == [], (
+        "precondition: emit produces no prompt for a sub-threshold thread"
+    )
+
+    enqueue_reflection_debt(
+        config.db_path,
+        session_id,
+        thread_ids=emittable_thread_ids(config, session_id, [thread], obs),
+    )
+
+    assert pending_reflection_queue(config.db_path) == [], (
+        "a thread emit will never produce a prompt for must not be queued — it "
+        "could never be drained (#527 r4)"
+    )

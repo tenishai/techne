@@ -18,11 +18,38 @@ name: test
 # actions/setup-python here: the runner is EPHEMERAL, and setup-python would
 # re-download every interpreter on every job rather than reusing a tool cache that
 # does not survive the container.
+# NO `branches:` FILTER ON pull_request, AND THAT ABSENCE IS LOAD-BEARING (#530).
+# The filter matches a PR's BASE, not its head, so `branches: [main]` meant a
+# STACKED PR (base = another feature branch) matched no trigger and got NO CI AT
+# ALL — not the test matrix, not eval-vec, not arch-cards, since all three jobs
+# live in this one file. Measured on #526: zero runs ever created, while every
+# base=main PR open at the same moment ran normally.
+#
+# WHAT MAKES IT DANGEROUS RATHER THAN MERELY MISSING: there is no red X and no
+# skipped row. The Checks tab is EMPTY, which reads identically to "nothing to
+# report" (techne#488's shape, in our own CI config). And branch protection
+# cannot backstop it — required status checks are unavailable on this repo's plan
+# (`gh api .../branches/main/protection` -> 403 "Upgrade to GitHub Pro or make
+# this repository public"), so this trigger is the ONLY mechanism.
+#
+# STACKING IS FORCED BY OUR OWN CONVENTIONS, so this is not an edge case: two PRs
+# touching one card-anchored source file must both bump the same `anchor:` sha in
+# docs/arch/liveness.md, and two migrations must both edit SCHEMA_VERSION — both
+# guaranteed conflicts that stacking is the normal answer to.
+#
+# REJECTED: adding `fix/*`/`feat/*` to the base filter — a hand-maintained list of
+# branch names is a copy of a convention nothing enforces, and it fails silently
+# the first time someone picks a name outside it. That is the trap that produced
+# this issue. Also rejected: documenting "stacked PRs need workflow_dispatch" — a
+# discipline, not a mechanism, failing the same way, by requiring someone to notice.
+#
+# COST, measured before removing it (2026-08-08): a base=main PR gets exactly ONE
+# pull_request run per sha, and `push` fires only on main, so dropping the filter
+# adds runs ONLY for stacked PRs — which today get zero. It doubles nothing.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -80,7 +107,71 @@ jobs:
         working-directory: techne
         # codex extra brings the tree-sitter grammars so the codex extraction tests
         # run (not skip) in CI.
-        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex]"
+        #
+        # `vectors` added for #535: WITHOUT IT, VECTOR TESTS RAN IN NEITHER LEG.
+        # This leg runs everything but had no vector backend, so they SKIPPED;
+        # eval-vec has the backend but runs `-m eval_vec` only, so they were never
+        # SELECTED. Six files fell through the gap — test_inference, test_search,
+        # test_embeddings, test_cli_vectors, test_checks, test_documents — none of
+        # which carry the eval_vec marker. Measured, not estimated.
+        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex,vectors]"
+
+      # THE EXTRA ALONE IS NOT THE FIX, and shipping it alone would have been
+      # #535 again in a new costume: `backend_available()` only tests
+      # IMPORTABILITY, so the extra un-skips the tests — but the ones that matter
+      # then EMBED FOR REAL (test_cli_vectors.py:56 says so in as many words:
+      # "exercises the real backfill_vectors() path, not a mock"), and an
+      # un-cached model means every job on every matrix entry re-downloads it.
+      # model2vec 0.8.2 defaults force_download=True (embeddings.py:271), so
+      # without force_download=False a restored cache is dead weight — that is
+      # Prudence's #403 finding, reused here rather than rediscovered.
+      #
+      # THE BACKEND HERE IS NOT model2vec, AND ASSUMING IT WAS COST A RED BUILD.
+      # `[vectors]` is SPLIT AT THE 3.14 BOUNDARY (techne#601, pyproject.toml:38/45):
+      #   python <  3.14  -> fastembed   (onnxruntime has no 3.14 wheel)
+      #   python >= 3.14  -> model2vec
+      # This matrix is 3.12/3.13, so it gets FASTEMBED. eval-vec pins 3.14, which
+      # is why the identical model2vec pre-fetch works there and blew up here with
+      # ModuleNotFoundError on the first run of this change.
+      #
+      # So the pre-fetch has to match the backend the resolver actually chose for
+      # this interpreter, not the one the other job uses. Model name from
+      # embeddings.py:72 (_DEFAULT_FASTEMBED_MODEL) rather than retyped — a second
+      # copy of that string would drift the first time the default changes.
+      - name: Cache the fastembed model
+        uses: actions/cache@v4
+        with:
+          # fastembed caches ONNX weights here, not in ~/.cache/huggingface.
+          # Deliberately a DIFFERENT key from eval-vec's: different backend,
+          # different artifact. Sharing one key would let a 3.14 model2vec cache
+          # satisfy a 3.12 fastembed restore and leave the real download to run.
+          path: ~/.cache/fastembed
+          key: fastembed-${{ matrix.python-version }}-all-MiniLM-L6-v2
+
+      - name: Pre-fetch the embedding model
+        working-directory: techne
+        # CALLS THE PRODUCTION ENTRY POINT, and that is the whole fix. An earlier
+        # version constructed `TextEmbedding(model_name=...)` itself, deriving the
+        # model name from the module but NOT the cache directory — and
+        # `_build_backend` (embeddings.py:231-237) constructs, mkdirs and passes
+        # `cache_dir=~/.cache/fastembed` explicitly. So the pre-fetch warmed
+        # fastembed's default location while the tests read a different one: the
+        # step ran, passed, and bought a second full download per job.
+        #
+        # IT ALSO PRODUCED A FALSE EXPLANATION. The four failures on #535's first
+        # green run were blamed on "the model not being pre-fetched"; the workflow
+        # was in fact BYTE-IDENTICAL between that run and the passing one (`git
+        # diff 0f5f4a2 e00e4c5` touches tests/ only). The only difference was
+        # actions/cache going MISS -> HIT, populated at post-job BY THE TESTS.
+        # Which means the suite was passing on a warm cache and would have gone
+        # red on the first cold one — a python bump, a model rename, or 7-day
+        # eviction — landing on an unrelated PR wearing a JSONDecodeError.
+        #
+        # `_get_embedding_model()` cannot drift from the code under test: same
+        # backend selection (so this is correct on BOTH sides of the 3.14
+        # fastembed/model2vec split), same model, same cache_dir, by construction.
+        # allow_download defaults True, which is what a pre-fetch wants.
+        run: .venv-ci/bin/python -c "from techne.core.embeddings import _get_embedding_model; m = _get_embedding_model(); print('prefetched', m.name)"
 
       - name: Ruff lint
         working-directory: techne
@@ -120,7 +211,14 @@ jobs:
       # does not support.
       - name: Pytest (includes contract assertions)
         working-directory: techne
-        run: .venv-ci/bin/python -m pytest -q -n 4
+        # `-rs` PRINTS THE SKIP REASONS. Without it this leg reports a bare
+        # "N skipped" and nobody can say WHICH — the exact condition that let
+        # #535 hide six files of vector tests for months. A count is not a
+        # report: an unexplained skip reads as "nothing to see" in precisely the
+        # way techne#488 is about. Local runs skip 18 and CI skipped 5, and until
+        # this flag existed there was no way to know whether those five were the
+        # harmless ones.
+        run: .venv-ci/bin/python -m pytest -q -rs -n 4
 
       # (#398) Deterministic eval gates — FTS-only, no vector/LLM deps, ~0.5s.
       # A regression gate that nothing invokes protects nothing (Prudence, #397).
@@ -176,6 +274,16 @@ jobs:
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
         run: .venv-ci/bin/python -m pytest -m eval_vec -s
+
+      # This is the ONLY job with model2vec: `[vectors]` gates it to py>=3.14
+      # (pyproject.toml:45) and the matrix is 3.12/3.13, which get fastembed. So
+      # without this step the model2vec branch of EmbeddingModel.embed() runs
+      # nowhere — and #536 is a bug in the other branch of that same function
+      # (#537). Runs the DEFAULT suite, not a list of vector files: a hand-kept
+      # list would drift the first time someone adds a vector-touching test.
+      - name: Default suite on the model2vec backend (#537)
+        working-directory: techne
+        run: .venv-ci/bin/python -m pytest -q -rs -n 4
 
   # (#383) Architecture-card freshness. Each card in ARCHITECTURE.md / docs/arch/*.md
   # pins the git blob sha of the seam file(s) it describes; this recomputes them and

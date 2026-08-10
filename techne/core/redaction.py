@@ -92,6 +92,17 @@ _PATTERNS: list[tuple[str, str]] = [
 
 _COMPILED: list[tuple[re.Pattern[str], str]] = [(re.compile(pat), tag) for pat, tag in _PATTERNS]
 
+#: Matches a token this module WROTE. Derived from the same tag set the writer
+#: interpolates, so the two cannot drift — a reader that hardcoded the shape
+#: would be a second copy of a format only this file owns.
+#:
+#: Consumers need it because redaction happens BEFORE storage and CHANGES
+#: LENGTH: any inference from a stored string's size has to know whether this
+#: ran (techne#441).
+REDACTION_MARKER: re.Pattern[str] = re.compile(
+    "<redacted:(?:%s)>" % "|".join(sorted({re.escape(tag) for _, tag in _PATTERNS}))
+)
+
 
 def redact_credentials(text: str) -> str:
     """Replace credential-shaped strings in *text* with <redacted:type> tokens.
