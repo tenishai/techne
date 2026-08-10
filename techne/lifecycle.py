@@ -242,9 +242,16 @@ def run_session_end(
     # has to persist the session's actual work.
     queued_for_reflection = 0
     try:
-        from techne.core.reflect import enqueue_reflection_debt
+        from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
 
-        queued_for_reflection = enqueue_reflection_debt(config.db_path, session_id)
+        # Only threads emit will actually produce a prompt for. Queueing every
+        # thread left sub-threshold ones queued, never emittable and therefore
+        # never drainable (#527 r4).
+        queued_for_reflection = enqueue_reflection_debt(
+            config.db_path,
+            session_id,
+            thread_ids=emittable_thread_ids(config, session_id, threads, observations),
+        )
     except Exception as e:  # pragma: no cover - defensive, mirrors the reflect path
         print(f"techne: reflection debt enqueue deferred: {e}", file=sys.stderr)
 
@@ -360,7 +367,7 @@ def redetect_threads(
         boundary_indices_from_segments,
         save_boundaries,
     )
-    from techne.core.reflect import enqueue_reflection_debt
+    from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
     from techne.core.state import get_observations, set_session_summary
     from techne.core.threads import (
         detect_summarize_with_metadata,
@@ -401,21 +408,38 @@ def redetect_threads(
         # Re-enqueue INSIDE the transaction: the DELETE above cascades
         # reflection_queue away and session_end does not re-run for a redetect,
         # so without this the debt is lost permanently (#527 r1).
-        enqueue_reflection_debt(config.db_path, session_id, conn=conn)
-        # Restore drain stamps for threads that came back with the same id.
-        # Re-enqueueing alone resurrects PAID debt as pending, which re-fires the
-        # banner and makes its "oldest from" age wrong (#527 r2).
-        for tid, drained in prior_drained.items():
-            conn.execute(
-                "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
-                (drained, tid),
-            )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+    # AFTER the commit, not inside it: emittable_thread_ids resolves ids via
+    # persisted_thread_id, which opens its OWN connection and cannot see rows
+    # still uncommitted in the transaction above — doing this inline raised a
+    # FOREIGN KEY failure. run_session_end already enqueues post-save for the
+    # same reason. The cost is a narrow window where a crash between commit and
+    # here loses the debt; the alternative was a guaranteed failure.
+    enqueue_reflection_debt(
+        config.db_path,
+        session_id,
+        thread_ids=emittable_thread_ids(config, session_id, threads, observations),
+    )
+    # Re-enqueueing alone resurrects PAID debt as pending, re-firing the banner
+    # and making its "oldest from" age wrong (#527 r2).
+    if prior_drained:
+        _c = connect(config.db_path)
+        try:
+            for tid, drained in prior_drained.items():
+                _c.execute(
+                    "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
+                    (drained, tid),
+                )
+            _c.commit()
+        finally:
+            _c.close()
+
     set_session_summary(
         config.db_path,
         session_id,

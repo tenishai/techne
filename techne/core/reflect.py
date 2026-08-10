@@ -461,7 +461,34 @@ def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
         conn.close()
 
 
-def enqueue_reflection_debt(db_path: Path, session_id: str, *, conn=None) -> int:
+def emittable_thread_ids(
+    config: Config, session_id: str, threads: list[Thread], observations: list[dict]
+) -> list[str]:
+    """Persisted ids of the threads emit will actually produce a prompt for.
+
+    THE SINGLE SOURCE OF TRUTH for "is this thread owed reflection". enqueue used
+    to queue every thread while emit skipped any under
+    min_observations_per_thread (default 8), so sub-threshold threads were queued,
+    never emittable, and therefore never drainable — the banner accumulated rows
+    nothing could clear (#527 r4). The threads table has no observation linkage,
+    so the predicate cannot be expressed in SQL; both callers must come here.
+    """
+    obs_by_thread = _bucket_observations(threads, observations)
+    from techne.core.thread_orchestrator import persisted_thread_id
+
+    ids: list[str] = []
+    for t in threads:
+        if len(obs_by_thread.get(t.thread_num, [])) < config.reflect.min_observations_per_thread:
+            continue
+        tid = persisted_thread_id(config.db_path, session_id, t)
+        if tid:
+            ids.append(tid)
+    return ids
+
+
+def enqueue_reflection_debt(
+    db_path: Path, session_id: str, *, thread_ids: list[str] | None = None, conn=None
+) -> int:
     """Durably record that *session_id*'s threads are owed reflection (techne#514).
 
     THE GAP THIS CLOSES: `session_end` counted the debt and enqueued nothing. It
@@ -491,11 +518,21 @@ def enqueue_reflection_debt(db_path: Path, session_id: str, *, conn=None) -> int
     own_conn = conn is None
     c = connect(db_path) if own_conn else conn
     try:
-        cur = c.execute(
-            """INSERT OR IGNORE INTO reflection_queue (session_id, thread_id)
-                 SELECT session_id, id FROM threads WHERE session_id = ?""",
-            (session_id,),
-        )
+        if thread_ids is None:
+            # No caller-supplied set: queue every thread. Kept for callers that
+            # have no observation list to apply the threshold with.
+            cur = c.execute(
+                """INSERT OR IGNORE INTO reflection_queue (session_id, thread_id)
+                     SELECT session_id, id FROM threads WHERE session_id = ?""",
+                (session_id,),
+            )
+        elif thread_ids:
+            cur = c.executemany(
+                "INSERT OR IGNORE INTO reflection_queue (session_id, thread_id) VALUES (?, ?)",
+                [(session_id, t) for t in thread_ids],
+            )
+        else:
+            return 0
         if own_conn:
             c.commit()
         return cur.rowcount or 0

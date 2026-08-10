@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-reflect-pipeline
 updated: 2026-08-07
-anchor: techne/core/reflect.py sha=840a00803602808f6b94f1e7683c33218ec38356
+anchor: techne/core/reflect.py sha=34500a76f1a01127d18f132e364a28b8f2cdcd43
 anchor: techne/core/sleepdream.py sha=7ce4df8e9da1353e9a6edec3e205d75f13bf409f
 ---
 # reflect / consolidate / dream — self-maintenance
@@ -10,7 +10,9 @@ SEAM: resident-model emit/ingest (techne#19) — self-maintenance runs on the AG
 TRIGGER (techne#514): reflection debt is DURABLY QUEUED, not re-derived from recency. session_end enqueues one reflection_queue row per thread (THREAD IDS, re-rendered at drain time — a stored prompt would embed a snapshot that drifts from the ledger it renders from). Before #514 session_end COUNTED the debt and enqueued nothing, so reflection survived only the polite exit path; every crash/timeout dropped it silently. The queue DECOUPLES producer from reflector: any session can drain another's threads, because answering a rendered prompt needs the thread's observations, not the original session's context.
 PIECES:
 - reflect.py: per fresh thread → proposes durable facts/decisions/procedures/identity claims (candidates, human-reviewed).
-- reflect.py queue trio (#514): enqueue_reflection_debt (session_end, INSERT OR IGNORE on the UNIQUE thread_id — idempotent by schema, so per-turn firing and racing peers both no-op) / pending_reflection_queue (SessionStart nudge reads it) / drain_reflection_queue (STAMPS drained_at, never deletes — the queue is the record that the debt existed and was paid).
+- reflect.py queue quartet (#514): emittable_thread_ids (THE predicate for "is this thread owed reflection" — enqueue and emit MUST both come here; the threads table has no observation linkage so it cannot be expressed in SQL) / enqueue_reflection_debt (session_end and redetect, INSERT OR IGNORE on the UNIQUE thread_id — idempotent by schema) / pending_reflection_queue (SessionStart nudge reads it) / drain_reflection_queue (called from _techne_reflect_ingest, STAMPS drained_at, never deletes).
+- Drain fires ONLY on a pass that happened: gated on `not parse_failures and not errors`. The parse-failure branch is the one whose comment reads "THE PASS DID NOT HAPPEN"; draining there stamps a DISCARDED reflection as paid, permanently, since drain is guarded on `drained_at IS NULL`.
+- Enqueue after COMMIT, never inside the transaction: emittable_thread_ids resolves via persisted_thread_id, which opens its own connection and cannot see uncommitted rows. Inline it raises a FOREIGN KEY failure.
 - sleepdream.py (techne#108):
   - consolidate (sleep): find dup/overlapping live knowledge — Tier0 exact content_fingerprint buckets | Tier1 FTS self-sim top-neighbor | Tier2 vector dup-band (deferred) → action='merge'.
   - dream (recombine): non-obvious A+B→C across a shared-tag group → action='add', origin='dream', confidence='low' (abstention-first; most groups yield nothing).

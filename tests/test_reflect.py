@@ -1439,3 +1439,41 @@ def test_a_parse_failure_does_not_stamp_the_debt_paid(tmp_path):
         "a DISCARDED reflection was stamped paid — the debt is now unrecoverable "
         "because drain is guarded on drained_at IS NULL (#527 r3)"
     )
+
+
+def test_sub_threshold_threads_are_not_queued(tmp_path):
+    """#527 r4: enqueue queued EVERY thread while emit skips any under
+    min_observations_per_thread, so sub-threshold threads were queued, never
+    emittable, and therefore never drainable — the banner accumulated rows
+    nothing could clear.
+
+    Uses the PRODUCTION default (8), not _mk_config's 3. The helper's lower value
+    is why the suite could not see this.
+    """
+    from techne.core.reflect import (
+        emit_reflection_batch,
+        emittable_thread_ids,
+        enqueue_reflection_debt,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    config.reflect.min_observations_per_thread = 8  # production default
+    session_id, obs = _mk_session_with_obs(config, 5)  # only 5 — below it
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=list(range(5)))
+    _save_thread_row(config, session_id, thread)
+
+    assert emit_reflection_batch(config, session_id, [thread], obs) == [], (
+        "precondition: emit produces no prompt for a sub-threshold thread"
+    )
+
+    enqueue_reflection_debt(
+        config.db_path,
+        session_id,
+        thread_ids=emittable_thread_ids(config, session_id, [thread], obs),
+    )
+
+    assert pending_reflection_queue(config.db_path) == [], (
+        "a thread emit will never produce a prompt for must not be queued — it "
+        "could never be drained (#527 r4)"
+    )
