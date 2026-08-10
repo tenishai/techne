@@ -940,5 +940,17 @@ class TestEnvPrefixIsNotNoise:
         """
         from techne.core.evidence import _command_runs_tests
 
+        # THE bash -c FORMS DO NOT REACH THE NEW CALL SITE (#544 r2). They route
+        # through _expand_shell_c -> _shell_c_script, which calls _skip_env_prefix
+        # itself (pre-existing) and hands back the inner "pytest -q" — so by the
+        # time the segment loop runs, the `env` head is already gone and the call
+        # there is a no-op. Call-shaped but inert: the line executes and cannot
+        # fail. Deleting it left the ENTIRE suite green.
         assert _command_runs_tests("env bash -c 'pytest -q'") is True
         assert _command_runs_tests("env -u CC bash -c 'pytest -q'") is True
+
+        # THESE are the direct-exec forms, with no `bash -c` to route around the
+        # loop, so they are the only ones that exercise the added call site.
+        assert _command_runs_tests("env pytest -q") is True
+        assert _command_runs_tests("env -u CC pytest -q") is True
+        assert _command_runs_tests("/usr/bin/env pytest -q") is True

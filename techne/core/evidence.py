@@ -423,30 +423,6 @@ _SHELL_VALUE_LETTERS = frozenset({"o", "O"})
 #: Long options taking a separate value. No clustering applies to these.
 _SHELL_VALUE_LONG_OPTS = frozenset({"--rcfile", "--init-file"})
 
-#: A transparent prefix: `env bash -c '<script>'` really does run the script, so
-#: `env` is skipped along with its own options rather than read as the command.
-#: NOT the same as `/usr/bin/env -c '...'`, which is not a shell invocation.
-#: env's own value-taking options, by LETTER for the same reason the shell rule
-#: is: they cluster (`env -iu FOO bash -c …` is `-i` + `-u FOO`), and a
-#: whole-token set cannot see the clustered spelling — `-iu` is not `-u`. That is
-#: r2 finding 1 in a second loop, and it starved identically until r3 caught it.
-#:
-#: `S` is deliberately NOT a value letter: `-S`/`--split-string`'s "value" is the
-#: whole rest of the command line, which shlex has already split for us, so
-#: consuming the next token would swallow the shell itself. Verified: `env -S
-#: bash -c 'echo MARKER'` prints MARKER, because env splits `bash` into a
-#: one-word list and appends the remaining argv — so skipping `-S` by ONE token
-#: lands exactly on the shell.
-#:
-#: The fully-quoted spelling `env -S 'bash -c pytest'` is a different shape and
-#: is UNSEEN: the whole payload arrives as a single token which is not a shell
-#: name, so `_shell_c_script` returns None. Starvation, not invention (r3 nit 3).
-#: `P` is BSD's `-P utilpath`, verified present on this box: `env -P /usr/bin pwd`
-#: reports "env: pwd: No such file or directory", i.e. -P consumed the path. The
-#: set is already a GNU/BSD union (`-C` is GNU-only and works here), so P belongs.
-#: Long options take a separate value and never cluster. `-uFOO`/`--unset=FOO`
-#: carry theirs attached, so they correctly skip by one.
-
 #: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
 #: a command is pathological and the gate stops rather than recursing on input.
 _MAX_SHELL_C_DEPTH = 3
