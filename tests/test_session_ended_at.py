@@ -244,8 +244,13 @@ def test_migration_24_backfills_history(tmp_path):
     on a fresh DB (schema_version is UNIQUE and init_db already stamped it) —
     the same constraint noted at tests/test_audit.py:304.
 
-    idle_hours=0 mirrors the step: every session in history is finished, and the
-    `< now` bound still excludes the session performing the upgrade.
+    idle_hours=0 here is THIS TEST'S choice, and it does NOT mirror the step — the
+    step passes the default six-hour window. An earlier version of this docstring
+    claimed it mirrored, which was the same retracted reasoning the migration
+    comment carried (#533 r5): "every session in history is finished" is false
+    whenever a peer is live, and concurrent sessions are the normal case here.
+    0 is used here only to make the fixture's sessions sweepable without backdating
+    them; the six-hour behaviour is the step's, and is covered separately.
     """
     from techne.core.state import close_abandoned_sessions_in_conn
 
@@ -473,4 +478,60 @@ def test_the_importer_stamps_derived_on_the_update_path_too(tmp_path):
     assert source == "derived", (
         f"the live import path left ended_at_source={source!r} — NULL reads as "
         f"'clean', so the session counts as evidence a producer is dead"
+    )
+
+
+def test_check_outbox_targets_ignores_derived_session_ends(tmp_path):
+    """The `ended_at_source` filter in check_outbox_targets has teeth.
+
+    #533 r3/r4/r5 all reported the same gap: NOTHING tested this filter. Deleting
+    `AND COALESCE(ended_at_source, 'clean') = 'clean'` left the whole
+    checks/session/doctor suite green at 123 passed.
+
+    THIS CALLS THE PRODUCTION FUNCTION, NOT A COPY OF ITS SQL. My first attempt
+    re-asserted the query in the test, which would have stayed green with the
+    filter deleted from checks.py — a reimplementation is a second definition, and
+    that is the defect class this PR is about.
+
+    THE SCENARIO IS THE ONE WHERE THE FILTER DECIDES THE VERDICT. `check_outbox_targets`
+    reports STALE when sessions have ended more than _PRODUCER_SILENT_AFTER (7d)
+    after the lane's last enqueue — "sessions have run and did not feed this lane".
+    Here the only late-ending session died UNCLEAN, so it is not evidence a producer
+    reached run_session_end and skipped the lane. With the filter: LIVE. Without it:
+    STALE on a healthy store, which is exactly the false alarm #516 introduced the
+    column to prevent, since 93% of August sessions never reach run_session_end.
+    """
+    from techne.config import Config
+    from techne.core.checks import Verdict, check_outbox_targets
+    from techne.core.database import connect
+
+    config = Config()
+    config.db_path = tmp_path / "t.db"
+    conn = connect(config.db_path)
+    conn.execute(
+        "INSERT INTO outbox (target, data_json, content_hash, status, created_at, synced_at) "
+        "VALUES ('sink:archivist', '{}', 'h1', 'synced', ?, ?)",
+        ("2026-08-01 09:00:00", "2026-08-01 09:00:00"),
+    )
+    # Reached run_session_end, BEFORE the last enqueue -> no evidence of a dead producer.
+    conn.execute(
+        "INSERT INTO sessions (id, started_at, ended_at, ended_at_source) "
+        "VALUES ('s-clean', '2026-08-01 07:00:00', '2026-08-01 08:00:00', 'clean')"
+    )
+    # Died unclean, swept, ending WELL past the 7-day silence threshold.
+    conn.execute(
+        "INSERT INTO sessions (id, started_at, ended_at, ended_at_source) "
+        "VALUES ('s-derived', '2026-08-02 10:00:00', '2026-09-01 23:00:00', 'derived')"
+    )
+    conn.commit()
+    conn.close()
+
+    results = check_outbox_targets(config)
+    arch = [r for r in results if "archivist" in str(r.name)]
+    assert arch, f"expected an archivist lane result, got {[r.name for r in results]}"
+    assert arch[0].verdict is not Verdict.STALE, (
+        "a DERIVED session end was counted as evidence that a producer ran and "
+        "failed to feed this lane. Only a session that actually reached "
+        "run_session_end is that evidence — close_abandoned_sessions and "
+        f"transcript_import both stamp 'derived'. Got {arch[0].verdict}: {arch[0].detail}"
     )

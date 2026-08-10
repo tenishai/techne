@@ -58,9 +58,15 @@ def run_session_start(
 
     init_db(config.db_path)
 
-    # SELF-HEAL THE REPLAY INDEX (#516). `ended_at` has one writer, run_session_end,
-    # which an unclean exit never reaches — so the column decayed to 7% coverage in
-    # August and no time window could resolve to a session. Sweeping here means the
+    # SELF-HEAL THE REPLAY INDEX (#516). `ended_at` has THREE writers: end_session
+    # (state.py, stamps 'clean'), this sweep (stamps 'derived'), and
+    # transcript_import (stamps 'derived'). Only the first is reached by a clean
+    # exit, which an unclean one never gets to — so the column decayed to 7%
+    # coverage in August and no time window could resolve to a session.
+    # An earlier version of this comment said "one writer, run_session_end", while
+    # calling a second one TEN LINES BELOW (#533 r5). The whole subject of this
+    # PR is a miscounted writer set; do not re-narrow it without grepping by
+    # EFFECT — INSERT, UPDATE, INSERT OR REPLACE — not by function name. Sweeping here means the
     # index repairs itself on ordinary use instead of needing anyone to remember a
     # maintenance verb, which is the failure mode #514 and #488 are both about.
     #

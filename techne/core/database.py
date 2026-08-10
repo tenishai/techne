@@ -1410,12 +1410,6 @@ END;
         # fix is the sweep in core/state.py, wired into session_start; this step
         # only repairs what the old behaviour already lost.
         #
-        # idle_hours=0 here, unlike the live sweep: a migration runs once, over
-        # history, and every session in it is by definition finished. The live
-        # sweep's idle window exists to avoid closing a RUNNING session, which is
-        # not a risk for rows that predate this upgrade — except the session
-        # performing the upgrade, which the `< now` bound still excludes because
-        # its own last activity is not in the past.
         from techne.core.state import close_abandoned_sessions_in_conn
 
         # THE NORMAL IDLE WINDOW, not 0. An earlier version passed 0 on the

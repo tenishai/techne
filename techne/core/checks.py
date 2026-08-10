@@ -1335,7 +1335,12 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # DELIBERATE UNDER-COUNT rather than a proof: transcript_import also wrote
         # ended_at then (a transcript's LAST MESSAGE, i.e. derived) and set no
         # source, so some legacy rows read clean when they are derived. Bounded
-        # and historical; both live writers stamp the column now.
+        # and historical; all THREE live writers stamp the column now —
+        # end_session ('clean'), close_abandoned_sessions ('derived'), and
+        # transcript_import ('derived'). "Both" was wrong twice over in a comment
+        # whose own subject is a miscounted writer set (#533 r5). The count is
+        # pinned by test_check_outbox_targets_counts_only_cleanly_ended_sessions
+        # rather than asserted here, so it cannot rot silently again.
         srow = conn.execute(
             "SELECT COUNT(*), MAX(ended_at) FROM sessions "
             "WHERE ended_at IS NOT NULL AND COALESCE(ended_at_source, 'clean') = 'clean'"
