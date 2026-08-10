@@ -201,6 +201,25 @@ def test_no_workflow_sets_pytest_addopts():
     policy says never run entered the run with every assertion green. The
     ordering that produces this is NOT stated here — see `_effective_markexpr`,
     where the same guess was retracted; only the observed behaviour is claimed.
+
+    THIS GUARD CANNOT FIRE IN ITS OWN WORST CASE, and the reason is circular: a
+    `PYTEST_ADDOPTS` whose marker expression SELECTS the local-only suites
+    necessarily DESELECTS this file, because these tests carry no markers.
+    Measured with the value actually IN FORCE, not merely present in a workflow:
+
+        PYTEST_ADDOPTS="-m 'not eval'"  -> guard RUNS and FAILS (caught)
+        PYTEST_ADDOPTS="-m probe"       -> 3 probe tests collected (policy
+                                           violated) AND guard 9 deselected
+        PYTEST_ADDOPTS="-k <no match>"  -> guard 9 deselected
+
+    So the WIDENING case that merely drops other exclusions is caught; the blind
+    spot is a value selecting `probe`/`eval_llm` directly — exactly the state
+    this assertion exists to detect. Marking these tests cannot close it:
+    matching `-m probe` would require carrying the `probe` marker, which would
+    make them local-only too. Closing it needs a check running OUTSIDE pytest's
+    selection (a CI step, or the arch-cards gate); out of scope here and stated
+    rather than left to be discovered. (Blind spot found by poe_1; the
+    measurements above are mine.)
     """
     setters = [w.name for w in WORKFLOWS if "PYTEST_ADDOPTS" in _executable_text(w)]
     assert setters == [], (
