@@ -26,6 +26,7 @@ from pathlib import Path
 
 # The gate reads bounded projections of tool output, so it needs the writer's
 # budget and marker to tell a complete record from a cut one (techne#438).
+from techne.core.redaction import REDACTION_MARKER
 from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, was_elided
 
 # Tool names that are NOT agent deeds — meta-records or user-side events.
@@ -715,8 +716,29 @@ def _output_was_bounded(output_text: str) -> bool:
     output that is genuinely complete at exactly the budget is misread as bounded;
     that costs a verdict of ``unverifiable`` instead of ``backed``, which is the
     direction this whole class of bug should fail in.
+
+    THE LENGTH TEST IS ONLY SOUND WHEN THE STORED TEXT IS THE CUT TEXT (techne#441).
+    ``redact_credentials`` runs BEFORE storage and substitutes ``<redacted:tag>``
+    for each match, so a legacy row cut at exactly the budget can be stored BELOW
+    it and read as authoritative — the bad direction, since an unflagged row can
+    carry a green verdict. A redacted legacy row therefore has an UNKNOWABLE
+    original length, and "we cannot determine it" is a different fact from "it was
+    under budget"; collapsing them is what produced this bug. Treated as bounded.
+
+    Deliberately NOT widened by a shrinkage allowance: replacement is shorter than
+    the secret by an UNBOUNDED amount, so any constant is a number nobody can
+    justify — it would flag more intact rows than this does and still miss the
+    large-shrinkage cases.
+
+    Note this reaches only rows ALREADY WRITTEN. Recording boundedness at write
+    time — the issue's preferred fix — is what PR #437's marker already does, and
+    it cannot help a population defined by predating it.
     """
-    return was_elided(output_text) or len(output_text) >= _PREVIEW_MAX_CHARS
+    if was_elided(output_text):
+        return True
+    if len(output_text) >= _PREVIEW_MAX_CHARS:
+        return True
+    return REDACTION_MARKER.search(output_text) is not None
 
 
 def _parse_test_output(text: str) -> tuple[int | None, int | None, int | None]:

@@ -1548,3 +1548,61 @@ class TestEvidenceCli:
         assert "Artifacts: (none)" in result.output
         assert "Commits: (none)" in result.output
         assert "unparsed" in result.output
+
+
+# ---- redaction shrinks a legacy row below the length threshold (techne#441) ----
+
+
+def test_redacted_legacy_row_is_treated_as_bounded():
+    """The bug: redaction runs BEFORE storage and CHANGES LENGTH.
+
+    A pre-#437 row was cut at exactly the budget with no marker, so the only
+    signal it is bounded is its length. `redact_credentials` then replaced a
+    long secret with a short `<redacted:tag>` token, so the stored text lands
+    BELOW the budget and reads as a complete record — the bad direction, since
+    an unflagged row can carry a green verdict.
+    """
+    from techne.core.evidence import _output_was_bounded
+    from techne.core.redaction import redact_credentials
+    from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS
+
+    secret = "sk-ant-" + "a" * 120
+    legacy_cut = ("x" * (_PREVIEW_MAX_CHARS - len(secret))) + secret
+    assert len(legacy_cut) == _PREVIEW_MAX_CHARS, "precondition: cut at the budget"
+
+    stored = redact_credentials(legacy_cut)
+    assert len(stored) < _PREVIEW_MAX_CHARS, (
+        "precondition: redaction must SHRINK this row below the budget, or the "
+        "test proves nothing about the length test"
+    )
+
+    assert _output_was_bounded(stored) is True
+
+
+def test_an_unredacted_short_row_is_still_authoritative():
+    """The case that must NOT regress.
+
+    Flagging every short row as bounded would make the gate useless — it would
+    never certify anything. Only redaction makes the length unknowable.
+    """
+    from techne.core.evidence import _output_was_bounded
+
+    assert _output_was_bounded("3 passed in 0.1s") is False
+
+
+def test_the_marker_matches_what_the_redactor_actually_writes():
+    """Binds the reader's pattern to the writer's format.
+
+    REDACTION_MARKER is derived from the same tag set `redact_credentials`
+    interpolates, and lives in that module. This asserts the derivation holds
+    against real output rather than against the format string.
+    """
+    from techne.core.redaction import _PATTERNS, REDACTION_MARKER, redact_credentials
+
+    for pattern_src, tag in _PATTERNS:
+        del pattern_src
+        produced = f"<redacted:{tag}>"
+        assert REDACTION_MARKER.search(produced), f"marker misses tag {tag!r}"
+
+    live = redact_credentials("key sk-ant-" + "z" * 40)
+    assert REDACTION_MARKER.search(live), live
