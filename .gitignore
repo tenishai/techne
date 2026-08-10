@@ -20,3 +20,6 @@ htmlcov/
 # Runtime logs (e.g. MCP server logs swept in by accident)
 *.log
 uv.lock
+
+# macOS Finder metadata — never belongs in the repo (PR #526 review)
+.DS_Store

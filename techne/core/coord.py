@@ -218,7 +218,7 @@ def reader_key(session_id: str) -> str:
     return _identity(session_id)[1]
 
 
-def resolve_recipient(to: str) -> str:
+def resolve_recipient(to: str, records: list[dict] | None = None) -> str:
     """Resolve a send target to the value stored in ``recipient`` (techne#376 phase 2).
 
     Resolution order:
@@ -234,10 +234,13 @@ def resolve_recipient(to: str) -> str:
     mistyped name like 'claude2' for 'claude_2' would otherwise vanish silently — this
     repo's "No Silent Failures" rule.) Newest-active session wins a name tie (first
     match over the activity-sorted list), which is only reachable via duplicate -n names.
+
+    ``records`` lets a caller that already read the sidecars hand them in (#494);
+    it must be the COMPLETE unfiltered set, since `live_sessions` is the filter.
     """
     if to == DEFAULT_CHANNEL:
         return to
-    for s in live_sessions():
+    for s in live_sessions(records=records):
         if s.get("name") == to:
             return s["session_id"]
     if _SESSION_ID_RE.match(to):
@@ -280,9 +283,18 @@ def send(
     """
     from techne.core.database import connect
 
+    # ONE sidecar read for both lookups (#494). They answer DIFFERENT questions —
+    # "what is MY name?" vs "who is THAT name?" — so this threads the read, it
+    # does not share a result. Skipped entirely when neither needs it.
+    records = None
+    if from_name is None or to != DEFAULT_CHANNEL:
+        records = _session_records()
     if from_name is None:
-        from_name = session_name(from_session)
-    recipient = resolve_recipient(to)  # channel passthrough, or name-alias -> session_id
+        from_name = session_name(from_session, records)
+    # NOT _identity()'s durable name: that is None when a rival holds the same
+    # name, which would blank from_name on a twin's rows and change the
+    # authorship filter. send snapshots what this session IS CALLED.
+    recipient = resolve_recipient(to, records)  # channel passthrough, or name -> session_id
     conn = connect(db_path)
     try:
         if reply_to is not None and thread_id is None:
@@ -498,10 +510,13 @@ def _session_records() -> list[dict]:
     return out
 
 
-def session_name(session_id: str) -> str | None:
+def session_name(session_id: str, records: list[dict] | None = None) -> str | None:
     """The display name (the CLI ``-n`` name, e.g. 'claude_1') for a session_id,
-    read from its sidecar. None if unknown."""
-    for rec in _session_records():
+    read from its sidecar. None if unknown.
+
+    ``records`` lets a caller that already read the sidecars hand them in (#494).
+    """
+    for rec in _session_records() if records is None else records:
         if rec.get("sessionId") == session_id:
             return rec.get("name")
     return None

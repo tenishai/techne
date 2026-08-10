@@ -446,6 +446,7 @@ CREATE TABLE IF NOT EXISTS knowledge_candidates (
     faithfulness_ok INTEGER,          -- NULL|1|0
     faithfulness_warning TEXT         -- NULL when ok or unchecked
 );
+
 CREATE INDEX IF NOT EXISTS idx_kc_status ON knowledge_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_kc_session ON knowledge_candidates(source_session_id);
 CREATE INDEX IF NOT EXISTS idx_kc_action_status ON knowledge_candidates(action, status);
@@ -459,6 +460,69 @@ CREATE INDEX IF NOT EXISTS idx_kc_action_status ON knowledge_candidates(action, 
 -- dedup); content is in the key because one prompt yields many distinct candidates.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
     ON knowledge_candidates(prompt_hash, content) WHERE origin = 'reflect';
+
+-- Reflection debt queue (techne#514).
+--
+-- WHY IT EXISTS: session_end COUNTS unreflected work and enqueues nothing. It
+-- even logs "403 obs, 19 threads" — so the runtime KNOWS the debt exists, which
+-- is worse than not knowing, because the instrumentation makes the rail read as
+-- healthy. Reflection therefore survives exactly ONE exit path, the polite one
+-- (crestart asking a session to reflect before it exits). Every impolite exit —
+-- and techne#490 records Remote Control dying after a ~10min network outage as
+-- the NORMAL way a long session ends here — drops its debt silently.
+--
+-- THREAD IDS, NOT RENDERED PROMPTS (Richard's call, 2026-08-07). A stored prompt
+-- embeds a point-in-time snapshot that drifts from the ledger it describes, and
+-- the ledger is what the prompt renders FROM anyway — so re-rendering at drain
+-- time is both cheaper and strictly fresher. The cost is that a thread must stay
+-- reconstructible, which it is: prompts render from observations, which are
+-- never deleted.
+--
+-- DECOUPLES PRODUCER FROM REFLECTOR, which is the actual fix. A peer session
+-- reflecting another's threads is not a workaround — it happened by hand on
+-- 2026-08-07 and worked, because answering a rendered prompt needs the thread's
+-- observations, not the original session's context. `drained_at` is NULLABLE
+-- rather than a status enum: pending is the absence of a drain, so there is no
+-- second source of truth to disagree with the timestamp.
+--
+-- UNIQUE on thread_id alone (not the pair): threads.id is a global TEXT PK, so
+-- the thread is the natural idempotency key — re-running session_end, or a peer
+-- enqueueing the same thread, must not queue it twice.
+-- ON DELETE CASCADE is required: re-detection deletes and re-inserts a session's
+-- whole thread set in one transaction (lifecycle.py), so a plain reference makes
+-- the queue BLOCK re-detection with a FOREIGN KEY failure.
+--
+-- IT IS NOT A COMPLETE ANSWER, AND BOTH HALVES OF THE ORIGINAL CLAIM HERE WERE
+-- FALSE (#527 review). The thread does NOT cease to exist — it is re-inserted
+-- with the same id — and session_end does NOT re-run for a redetect ("a
+-- re-analysis, not a re-end"). So a caller that removes a threads row must
+-- re-enqueue, or it silently destroys the debt.
+--
+-- TWO WAYS A ROW IS REMOVED, and only one of them looks like a delete:
+--   1. An explicit DELETE. `redetect_threads` (lifecycle.py) is the only one,
+--      and it re-enqueues IN THE SAME TRANSACTION (#527 r5), so a failure rolls
+--      the whole redetect back rather than stranding it half-applied.
+--   2. INSERT OR REPLACE, whose conflict resolution deletes the existing row and
+--      fires this CASCADE. OR IGNORE does not. `save_threads` picks between them
+--      on whether the thread has a boundary_signal, so `run_session_end` DOES
+--      drop the debt for legacy threads, and its re-enqueue is a separate
+--      best-effort call after the save. That window is pre-existing and out of
+--      #527's scope, but it is real: nothing re-derives debt for an emittable
+--      thread with no queue row.
+-- Don't take the verb behaviour on trust from this comment — run it:
+-- test_reflect.py::test_the_cascade_fires_on_or_replace_not_only_on_delete.
+-- A new caller doing either without re-enqueueing destroys debt with no error
+-- and no trace. Check both verbs, not just the word DELETE.
+CREATE TABLE IF NOT EXISTS reflection_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id) ON DELETE CASCADE,
+    enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    drained_at TIMESTAMP
+);
+-- Partial index: the only hot query is "what is still pending, oldest first".
+CREATE INDEX IF NOT EXISTS idx_reflection_queue_pending
+    ON reflection_queue(id) WHERE drained_at IS NULL;
 
 -- FTS5 indexes. tokenize='porter unicode61' applies Porter stemming on top of
 -- the unicode61 tokenizer (#77) so morphological variants match: a query for
@@ -1286,6 +1350,16 @@ END;
             )
         conn.execute("INSERT INTO schema_version (version) VALUES (21)")
 
+    if from_version < 22 and to_version >= 22:
+        # techne#514: the reflection_queue table. NO DDL HERE ON PURPOSE — the
+        # table is purely additive, so _reconcile_tables creates it from
+        # SCHEMA_SQL on connect. This step exists solely to BUMP THE VERSION,
+        # and that bump is the load-bearing part: post-#140 the connect()-time
+        # reconcile is sentinel-gated and skips already-reconciled DBs, so an
+        # additive SCHEMA_SQL change at an UNCHANGED SCHEMA_VERSION reaches new
+        # databases only and silently never reaches existing ones. Every live
+        # store on this machine is an existing one.
+        conn.execute("INSERT INTO schema_version (version) VALUES (22)")
     if from_version < 23 and to_version >= 23:
         # techne#515: observations.timestamp / .event_at held three formats at
         # once, written concurrently across the entire history — the column

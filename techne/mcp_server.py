@@ -1602,14 +1602,25 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
             "note": "empty response — nothing to ingest",
         }
 
-    return ingest_reflection_response(
+    thread_id = args.get("thread_id", "")
+    result = ingest_reflection_response(
         config,
         args.get("session_id", ""),
-        args.get("thread_id", ""),
+        thread_id,
         args.get("prompt_hash", ""),
         response,
         model_used=args.get("model_used", "agent-assisted"),
     )
+    # Drain ONLY on a pass that actually happened. parse_failures marks the
+    # branch whose own comment reads "THE PASS DID NOT HAPPEN" (reflect.py:645) —
+    # draining there stamps a DISCARDED reflection as paid, permanently, since
+    # drain is guarded on drained_at IS NULL. errors covers the same ground for
+    # any other failure mode.
+    if thread_id and not result.get("parse_failures") and not result.get("errors"):
+        from techne.core.reflect import drain_reflection_queue
+
+        result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
+    return result
 
 
 def _techne_consolidate_emit(args: dict, config: Config) -> dict:

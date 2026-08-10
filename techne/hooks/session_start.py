@@ -71,6 +71,7 @@ def render_drift_block(config) -> str:
 
     if config.platform != CLAUDE_CODE:
         return ""
+    from techne.core.checks import init_remedy
     from techne.platforms.claude_code import check_hook_drift
     from techne.platforms.claude_code.hooks import SETTINGS_PATH
 
@@ -123,19 +124,20 @@ def render_drift_block(config) -> str:
         # unusable shapes init itself raises (e.g. AttributeError on {"hooks": []}).
         # Repair the file first; only then is re-registering meaningful.
         # (Prudence, PR #457.)
-        lines.append(
-            f"> Repair or move aside {SETTINGS_PATH}, then run "
-            f"`techne init --posture {config.posture.mode}`."
-        )
+        lines.append(f"> Repair or move aside {SETTINGS_PATH}, then run `{init_remedy(config)}`.")
     else:
         # Echo the CURRENT posture into the suggested command: `techne init` defaults
         # --posture to `auto`, which re-resolves and can silently change posture (and
         # with it whether reflect is advisory). The fix for one silent no-op must not
         # hand the operator another.
-        lines.append(
-            f"> Reconcile: `techne init --posture {config.posture.mode}` "
-            "(pin --posture — the `auto` default can change it)"
-        )
+        # The parenthetical only applies when the command PINS a posture. On a
+        # never-initialised machine the remedy is `--posture auto` deliberately
+        # (techne#480), and telling that operator to pin instead sends them to
+        # look up `observe` and pin THAT — the demotion this PR exists to stop,
+        # arriving through the advice text rather than the command. Same
+        # discriminator the builder uses, not a second rule.
+        note = " (pin --posture — the `auto` default can change it)"
+        lines.append(f"> Reconcile: `{init_remedy(config)}`{note if config.loaded_from else ''}")
     return "\n".join(lines)
 
 
@@ -507,7 +509,7 @@ def _run_phases_2_to_9(
     # ------------------------------------------------------------------
     try:
         if config.reflect.enabled:
-            from techne.core.reflect import pending_reflection
+            from techne.core.reflect import pending_reflection, pending_reflection_queue
 
             pend = pending_reflection(config)
             if pend:
@@ -519,6 +521,32 @@ def _run_phases_2_to_9(
                     f"({pend[0]['observations']} observations){extra}. Call "
                     f'techne_reflect_emit(session_id="{sid}"), answer each prompt with '
                     "your own model, then techne_reflect_ingest."
+                )
+                output_parts.append("")
+
+            # techne#514: the DURABLE debt, which the recency heuristic above
+            # structurally cannot see. `pending_reflection` filters after its
+            # LIMIT, so once enough sessions follow, old debt stops being
+            # surfaced forever. Reported separately rather than merged into the
+            # line above, because they answer different questions: that one says
+            # "the last session looks unreflected", this one says "this much work
+            # is ON RECORD as owed, by whoever picks it up".
+            #
+            # WITHOUT THIS BLOCK the queue would be a table nothing reads — the
+            # "mechanism present but not load-bearing" shape (#504) that #514 is
+            # itself an instance of. Enqueueing without a consumer would repeat
+            # the bug in a new place.
+            queued = pending_reflection_queue(config.db_path, limit=50)
+            if queued:
+                owed_sessions = {q["session_id"] for q in queued}
+                oldest = queued[0]
+                output_parts.append(
+                    "\n## techne — reflection debt (queued)\n"
+                    f"> {len(queued)} thread(s) across {len(owed_sessions)} session(s) are "
+                    f"queued for reflection, oldest from {oldest['enqueued_at']}. "
+                    "ANY session can drain these — answering a rendered prompt needs the "
+                    "thread's observations, not the original session's context. Call "
+                    f'techne_reflect_emit(session_id="{oldest["session_id"]}") to start.'
                 )
                 output_parts.append("")
     except Exception as exc:  # noqa: BLE001

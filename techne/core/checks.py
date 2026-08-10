@@ -176,6 +176,32 @@ def registered_checks() -> list[CheckFn]:
     return list(_REGISTRY)
 
 
+def deferred_check_names() -> list[str]:
+    """Checks that ``run_checks(cheap_only=True)`` will SKIP (techne#488).
+
+    The banner omits these, and this module's founding rule is that an absent
+    check reads as "nothing wrong". The omission is bounded and deliberate (see
+    :func:`run_checks`); what is removable is the SILENCE, so a caller can say
+    how many checks it did not run instead of leaving the reader to infer a
+    total from a number that never mentions one.
+
+    Costs nothing: reads the registry's own markers, spawns no subprocess, and
+    is the reason this is a separate function rather than a synthetic result.
+    A placeholder ``UNKNOWN`` CheckResult was the obvious alternative and is
+    WRONG — ``health.py`` ranks verdicts through :func:`worst`, so an UNKNOWN
+    would pin a permanent ⚠️ on every banner for checks that were never run.
+    Deferred-ness is not a verdict and must not be ranked as one.
+
+    NAMES ARE FUNCTION NAMES (``check_runtime_loaded``), not the
+    ``subsystem:name`` labels doctor prints (``runtime:loaded``). Those labels
+    live on a ``CheckResult``, and a deferred check has produced none — that is
+    what deferred means. Deriving one from the other would be a guess about a
+    naming convention nothing enforces, and declaring it on the decorator would
+    be a second copy free to drift from the check's own return value.
+    """
+    return [fn.__name__ for fn in _REGISTRY if getattr(fn, "expensive", False)]
+
+
 def expensive(fn: CheckFn) -> CheckFn:
     """Mark a check as too costly for the SessionStart hot path.
 
@@ -309,9 +335,37 @@ def init_remedy(config) -> str | None:
     ``spool-primary`` who follows doctor's own advice is DEMOTED globally (init
     resolves the flag, rebuilds PostureConfig and SAVES it), with reflect flipped
     out of advisory — because the health check told them to.
+
+    NOTHING TO PRESERVE IS NOT THE SAME AS A PRESERVED DEFAULT (techne#480). The
+    posture guard protects a choice the operator already made. On a machine that
+    has used Claude Code but has NEVER run ``techne init`` there is no config
+    file, so ``config.posture.mode`` is the dataclass default ``observe`` — not a
+    choice. Pinning it there does the very thing the guard exists to prevent, one
+    case over: it suppresses the auto-detection that would have found
+    ``spool-primary`` from the CC memory sitting on disk, and freezes a first
+    install into the weakest posture. With no file, ``--posture auto`` IS the
+    honest value; auto-detection is the correct behaviour on a first install and
+    the only reason to pin is to protect an existing answer.
+
+    Still ONE BUILDER: this is a condition inside it, not a second remedy string
+    at a call site, so every surface keeps inheriting both guards.
     """
     if config.platform != CLAUDE_CODE:
         return None
+    if config.loaded_from is None:
+        # No config.yaml — posture.mode is a default, not an answer.
+        #
+        # RESIDUAL, deliberately not chased: this asks "does a config file
+        # exist", which is a proxy for "did the operator choose a posture".
+        # A hand-written config.yaml with no `posture:` stanza sets
+        # loaded_from while posture.mode is still the dataclass default, so
+        # the original defect survives one level in. Narrow, because save()
+        # always writes a full posture stanza — any machine `techne init`
+        # created is safe, and reaching it needs a hand-rolled config or one
+        # predating the field. Recorded rather than fixed: the honest
+        # discriminator would be "was a posture persisted", which the Config
+        # does not carry today. (PR #525 review, nit 2.)
+        return "techne init --platform claude-code --posture auto"
     return f"techne init --platform claude-code --posture {config.posture.mode}"
 
 
