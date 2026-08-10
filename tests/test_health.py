@@ -410,3 +410,135 @@ class TestBannerLiveness:
         assert h["checks_worst"] == "unknown"
         assert h["checks_error"] == "TypeError: unhashable type: 'list'"
         assert "liveness check FAILED" in format_banner(h)
+
+
+# ---- deferred checks: say what the banner did NOT run (techne#488) ---------
+
+
+def test_deferred_check_names_are_exactly_the_expensive_ones():
+    from techne.core.checks import deferred_check_names, registered_checks
+
+    expected = [fn.__name__ for fn in registered_checks() if getattr(fn, "expensive", False)]
+    assert deferred_check_names() == expected
+    # Without this the test passes vacuously the day the last @expensive marker
+    # is removed, and goes on "proving" the feature works with nothing in it.
+    assert expected, "no @expensive check is registered — this assertion would prove nothing"
+
+
+def test_collect_health_records_what_the_cheap_run_skipped(config):
+    """The structured key, which is populated whether or not a warning renders."""
+    from techne.core.checks import deferred_check_names
+
+    h = collect_health(config)
+
+    assert h["checks_deferred"] == deferred_check_names()
+    # The whole point: the summary counts only what ran, so the reader needs an
+    # independent statement of what did not.
+    assert set(h["checks_deferred"]).isdisjoint({c["name"] for c in h["checks"]})
+
+
+def test_deferred_never_becomes_a_verdict(config):
+    """The rejected design, pinned so nobody re-adds it.
+
+    A synthetic UNKNOWN placeholder for the skipped check was the obvious
+    option. `health.py` ranks verdicts through `worst()`, so it would pin a
+    permanent ⚠️ on every banner for checks that were never run — a cure worse
+    than the disease. Deferred-ness is not a verdict.
+    """
+    h = collect_health(config)
+
+    assert h["checks_deferred"], "fixture must actually defer something"
+    assert "unknown" not in h["checks_summary"]
+    assert h["checks_worst"] in ("live", "dormant", None), h["checks_worst"]
+    # And the banner stays quiet: deferral alone is not a warning.
+    assert "⚠️" not in format_banner(h)
+
+
+def test_banner_names_the_deferred_checks_on_a_warning_line(config):
+    # Built from a real payload rather than a hand-written dict: format_banner
+    # reads keys this test does not care about, and hand-maintaining that shape
+    # makes the test fail for reasons unrelated to what it asserts.
+    h = collect_health(config)
+    h["checks"] = [{"name": "rail:reflect", "verdict": "stale"}]
+    h["checks_worst"] = "stale"
+    h["checks_summary"] = {"stale": 1}
+    h["checks_deferred"] = ["check_runtime_loaded"]
+
+    banner = format_banner(h)
+
+    assert "1 deferred: check_runtime_loaded" in banner
+    # Attached to the existing liveness row, not given a row of its own.
+    liveness_lines = [ln for ln in banner.splitlines() if "deferred" in ln]
+    assert len(liveness_lines) == 1, banner
+    # OCCURRENCES, not lines: the earlier version counted lines containing the
+    # remedy and so passed happily while one line said `techne doctor` twice
+    # (PR #526 review, nit 5).
+    assert liveness_lines[0].count("techne doctor") == 1, liveness_lines[0]
+
+
+def test_deferred_is_recorded_even_when_the_check_run_fails(config, monkeypatch):
+    """Populated BEFORE run_checks, on purpose.
+
+    The failure path is exactly where a reader most needs to know the summary is
+    partial; setting the key afterwards would drop it there.
+    """
+    import techne.core.checks as checks_mod
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(checks_mod, "run_checks", _boom)
+
+    h = collect_health(config)
+
+    assert h["checks_error"].startswith("RuntimeError")
+    assert h["checks_deferred"], "deferred names were lost on the failure path"
+
+
+def test_checks_deferred_is_none_not_absent_when_the_registry_cannot_be_read(config, monkeypatch):
+    """The import-failure path (PR #526 review, issue 1).
+
+    Setting the key inside the same `try` as the import meant an ImportError
+    left it ABSENT — and a consumer doing `.get("checks_deferred", [])` then
+    reads "nothing was deferred" at the exact moment EVERY check was skipped.
+    `None` says "could not be determined", which is the true answer and is
+    distinguishable from `[]`.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fail_on_checks(name, *a, **kw):
+        if name == "techne.core.checks":
+            raise ImportError("simulated: checks module unavailable")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _fail_on_checks)
+
+    h = collect_health(config)
+
+    assert "checks_deferred" in h, "key vanished — a consumer's .get(...,[]) now lies"
+    assert h["checks_deferred"] is None, h["checks_deferred"]
+    assert h["checks_error"].startswith("ImportError")
+    # And the banner must not claim anything about a registry it could not read.
+    assert "deferred" not in format_banner(h)
+
+
+def test_the_liveness_failed_line_also_carries_the_deferred_note(config):
+    """The other render site, which was untested (PR #526 review, nit 4).
+
+    Deleting the suffix from the `liveness check FAILED` branch left the whole
+    suite green — and that branch is the one the design rationale calls most
+    load-bearing, since it is the path where the summary is most partial.
+    """
+    h = collect_health(config)
+    h["checks"] = []
+    h["checks_worst"] = "unknown"
+    h["checks_summary"] = {"unknown": 1}
+    h["checks_error"] = "RuntimeError: probe exploded"
+    h["checks_deferred"] = ["check_runtime_loaded"]
+
+    banner = format_banner(h)
+
+    assert "liveness check FAILED" in banner
+    assert "1 deferred: check_runtime_loaded" in banner

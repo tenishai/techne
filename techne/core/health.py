@@ -161,6 +161,20 @@ def collect_health(config: Config) -> dict:
     # 17 days after it mattered (techne#452). A detector wired to a command nobody
     # runs is worth no more than no detector — so liveness rides the surface the
     # operator already sees on every session.
+    # OUTSIDE the try below, and with its own guard, so the key EXISTS on every
+    # path. `None` means "could not be determined" and is deliberately distinct
+    # from `[]` ("nothing was deferred"): a consumer doing
+    # `.get("checks_deferred", [])` on an ABSENT key reads "nothing deferred" at
+    # the exact moment every check was skipped — this module's founding bug, in
+    # the code written to remove it. Setting it inside the try covered
+    # run_checks throwing but not the IMPORT throwing (PR #526 review).
+    try:
+        from techne.core.checks import deferred_check_names
+
+        health["checks_deferred"] = deferred_check_names()
+    except Exception:  # noqa: BLE001 — an unreachable registry is a result
+        health["checks_deferred"] = None
+
     try:
         from techne.core.checks import run_checks, summarize, worst
 
@@ -298,6 +312,30 @@ def format_banner(health: dict) -> str:
     # something, so a permanent "all good" row would train the eye to skip it.
     # Names the worst offenders rather than a bare count, because "3 stale" sends
     # you hunting while "rail:consolidate, rail:dream" is actionable.
+    # techne#488 — say how many checks were NOT run. `{'dormant': 12}` gives a
+    # reader no way to tell there was ever a thirteenth, and this module's whole
+    # premise is that an absent check reads as "nothing wrong".
+    #
+    # ONLY ON A LINE THAT ALREADY EXISTS. The banner prints no liveness row when
+    # everything is healthy, on purpose — "a permanent 'all good' row would train
+    # the eye to skip it" — so a deferred notice cannot be given its own row
+    # without reversing that call. The unconditional record is the structured
+    # `checks_deferred` key, which every dict consumer (techne_status, the MCP
+    # surface) sees whether or not a warning renders here.
+    # `or []` also absorbs the None ("undetermined") case: no note rather than a
+    # confident claim about a registry we could not read.
+    deferred = health.get("checks_deferred") or []
+    # Capped at 3 like the offender list below, whose reasoning applies equally:
+    # a long banner line is bad. `techne doctor` is already named in the sentence
+    # this suffix attaches to, so it is not repeated here.
+    deferred_note = ""
+    if deferred:
+        shown = ", ".join(deferred[:3])
+        rest = len(deferred) - 3
+        deferred_note = (
+            f" ({len(deferred)} deferred: {shown}{f', +{rest} more' if rest > 0 else ''})"
+        )
+
     worst_verdict = health.get("checks_worst")
     if worst_verdict and worst_verdict not in ("live", "dormant"):
         # THE LIVENESS LAYER ITSELF FAILED — a separate case, and previously the
@@ -310,7 +348,9 @@ def format_banner(health: dict) -> str:
         # the operator actually sees. (#469 review 8, issue 2.)
         checks_error = health.get("checks_error")
         if checks_error:
-            lines.append(f"> ⚠️ liveness check FAILED: {checks_error} — `techne doctor`")
+            lines.append(
+                f"> ⚠️ liveness check FAILED: {checks_error} — `techne doctor`{deferred_note}"
+            )
             # `else`, not an early return: this block happens to be last today,
             # so a return loses nothing — but it would silently drop any line
             # appended below it later, on the one path where the operator most
@@ -331,7 +371,9 @@ def format_banner(health: dict) -> str:
             others = len(all_bad) - len(headline)
             tail = f" (+{extra} more)" if extra > 0 else ""
             tail += f", {others} other" if others else ""
-            lines.append(f"> ⚠️ {worst_verdict.upper()}: {named}{tail} — `techne doctor`")
+            lines.append(
+                f"> ⚠️ {worst_verdict.upper()}: {named}{tail} — `techne doctor`{deferred_note}"
+            )
 
     return "\n".join(lines)
 
