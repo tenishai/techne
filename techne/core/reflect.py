@@ -461,6 +461,160 @@ def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
         conn.close()
 
 
+def emittable_thread_ids(
+    config: Config,
+    session_id: str,
+    threads: list[Thread],
+    observations: list[dict],
+    *,
+    conn=None,
+) -> list[str]:
+    """Persisted ids of the threads emit will actually produce a prompt for.
+
+    THE SINGLE SOURCE OF TRUTH for "is this thread owed reflection". enqueue used
+    to queue every thread while emit skipped any under
+    min_observations_per_thread (default 8), so sub-threshold threads were queued,
+    never emittable, and therefore never drainable — the banner accumulated rows
+    nothing could clear (#527 r4). The threads table has no observation linkage,
+    so the predicate cannot be expressed in SQL; both callers must come here.
+
+    Pass an open *conn* when calling from inside a transaction that has just
+    written the threads: the id lookup must see those uncommitted rows or every
+    thread resolves to None and the caller queues nothing (#527 r5).
+    """
+    obs_by_thread = _bucket_observations(threads, observations)
+    from techne.core.thread_orchestrator import persisted_thread_id
+
+    ids: list[str] = []
+    for t in threads:
+        if len(obs_by_thread.get(t.thread_num, [])) < config.reflect.min_observations_per_thread:
+            continue
+        tid = persisted_thread_id(config.db_path, session_id, t, conn=conn)
+        if tid:
+            ids.append(tid)
+    return ids
+
+
+def enqueue_reflection_debt(
+    db_path: Path, session_id: str, *, thread_ids: list[str], conn=None
+) -> int:
+    """Durably record that *session_id*'s threads are owed reflection (techne#514).
+
+    THE GAP THIS CLOSES: `session_end` counted the debt and enqueued nothing. It
+    even logged "403 obs, 19 threads", so the runtime KNEW — which is worse than
+    not knowing, because the instrumentation made the rail read as healthy while
+    the work evaporated. Reflection survived exactly one exit path, the polite
+    one, and the impolite exits are the common case here (techne#490: Remote
+    Control exits after a ~10min network outage).
+
+    THREAD IDS, NOT RENDERED PROMPTS. A stored prompt embeds a snapshot that
+    drifts from the ledger it describes; the drainer re-renders from
+    observations, which are append-only and never deleted.
+
+    IDEMPOTENT BY THE SCHEMA, not by a check-then-insert: `thread_id` is UNIQUE,
+    so INSERT OR IGNORE makes re-running session_end (it fires once per turn) and
+    a peer enqueueing the same thread both no-ops. No read-modify-write, so two
+    sessions racing cannot double-queue.
+
+    *thread_ids* IS REQUIRED, and the "queue every thread in this session" branch
+    that used to stand in for it is GONE (#527 r5). It had no production caller
+    left after r4 — both callers pass `emittable_thread_ids` — but its comment
+    ("kept for callers that have no observation list") read as a sanctioned
+    option, and its behaviour was precisely the r4 bug: queueing sub-threshold
+    threads that emit will never produce a prompt for, so they can never be
+    drained and the banner accumulates rows nothing can clear. A default that
+    reintroduces a fixed bug is worse than no default. If you have no observation
+    list, you cannot apply the threshold, and you are not in a position to say
+    what is owed — get the observations.
+
+    Does NOT filter on whether a thread was already reflected: the drainer
+    re-checks the `reflect:emitted:` marker, which is the existing
+    self-correcting cursor, and duplicating that here would let the two disagree.
+    The emittability threshold is a different question and is applied by the
+    caller, because it needs observations this function does not have.
+
+    Returns the number of rows newly queued. Takes an optional open *conn* so the
+    caller can fold this into its own transaction.
+    """
+    if not thread_ids:
+        return 0
+    own_conn = conn is None
+    c = connect(db_path) if own_conn else conn
+    try:
+        cur = c.executemany(
+            "INSERT OR IGNORE INTO reflection_queue (session_id, thread_id) VALUES (?, ?)",
+            [(session_id, t) for t in thread_ids],
+        )
+        if own_conn:
+            c.commit()
+        return cur.rowcount or 0
+    finally:
+        if own_conn:
+            c.close()
+
+
+def pending_reflection_queue(db_path: Path, *, limit: int = 20) -> list[dict]:
+    """Threads owed reflection, oldest first, across ALL sessions (techne#514).
+
+    The queue-backed counterpart to `pending_reflection`, and the reason #514
+    exists: that function scans the `limit` most-recent sessions and filters
+    AFTER the LIMIT, so — by its own docstring — "a genuinely-old pending session
+    past that window is intentionally not surfaced". Debt that ages out of the
+    window becomes permanently invisible. This reads the ledger of what was
+    actually owed instead of re-deriving it from recency.
+
+    Returns [{queue_id, session_id, thread_id, enqueued_at}]. Empty when clear.
+    """
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT id, session_id, thread_id, enqueued_at
+                 FROM reflection_queue
+                WHERE drained_at IS NULL
+             ORDER BY id
+                LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "queue_id": r["id"],
+                "session_id": r["session_id"],
+                "thread_id": r["thread_id"],
+                "enqueued_at": r["enqueued_at"],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def drain_reflection_queue(db_path: Path, thread_ids: list[str]) -> int:
+    """Mark *thread_ids* reflected. Returns rows affected.
+
+    Stamps `drained_at` rather than deleting: the queue doubles as the record of
+    what reflection debt EXISTED and when it was paid, which is the evidence
+    #514 was filed on. A deleted row cannot show that the rail worked.
+
+    Guarded on `drained_at IS NULL` so a second drain of the same thread does not
+    rewrite the original timestamp — the first payment is the true one.
+    """
+    if not thread_ids:
+        return 0
+    conn = connect(db_path)
+    try:
+        placeholders = ",".join("?" * len(thread_ids))
+        cur = conn.execute(
+            f"""UPDATE reflection_queue
+                   SET drained_at = CURRENT_TIMESTAMP
+                 WHERE drained_at IS NULL AND thread_id IN ({placeholders})""",
+            thread_ids,
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
 def emit_reflection_batch(
     config: Config,
     session_id: str,

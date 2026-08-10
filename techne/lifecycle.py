@@ -176,6 +176,10 @@ def run_session_end(
                 "aged_completed": aged.get("completed", 0),
                 "aged_stale": aged.get("stale", 0),
                 "queued": 0,
+                # The incremental gate skipped detection, so no NEW threads exist
+                # to owe reflection on. Anything already owed stays queued — the
+                # debt lives in the table, not in this return value.
+                "queued_for_reflection": 0,
                 "knowledge_pushed": 0,
                 "reflect": {
                     "threads_considered": 0,
@@ -229,6 +233,27 @@ def run_session_end(
             conn.close()
     else:
         save_threads(threads, session_id, config.db_path, parent_links=parent_links)
+
+    # techne#514: record the reflection debt DURABLY, not just in the log line
+    # below. Until now this function counted threads, printed "N obs, M threads"
+    # and enqueued nothing — so reflection survived only the polite exit path,
+    # and every crash/timeout dropped it silently. Best-effort: a queue-write
+    # failure must never take down teardown, which is the one thing that still
+    # has to persist the session's actual work.
+    queued_for_reflection = 0
+    try:
+        from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
+
+        # Only threads emit will actually produce a prompt for. Queueing every
+        # thread left sub-threshold ones queued, never emittable and therefore
+        # never drainable (#527 r4).
+        queued_for_reflection = enqueue_reflection_debt(
+            config.db_path,
+            session_id,
+            thread_ids=emittable_thread_ids(config, session_id, threads, observations),
+        )
+    except Exception as e:  # pragma: no cover - defensive, mirrors the reflect path
+        print(f"techne: reflection debt enqueue deferred: {e}", file=sys.stderr)
 
     aged = age_threads(config.db_path, config)
 
@@ -302,6 +327,11 @@ def run_session_end(
         "aged_completed": aged.get("completed", 0),
         "aged_stale": aged.get("stale", 0),
         "queued": queued,
+        # Distinct from "queued" (outbox sync) — this is reflection debt
+        # persisted to reflection_queue (techne#514). Reported so a caller can
+        # tell "nothing was owed" from "something was owed and we dropped it";
+        # before #514 those two were indistinguishable from outside.
+        "queued_for_reflection": queued_for_reflection,
         "knowledge_pushed": knowledge_pushed,
         "reflect": reflect_result,
     }
@@ -337,6 +367,7 @@ def redetect_threads(
         boundary_indices_from_segments,
         save_boundaries,
     )
+    from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
     from techne.core.state import get_observations, set_session_summary
     from techne.core.threads import (
         detect_summarize_with_metadata,
@@ -361,17 +392,54 @@ def redetect_threads(
     )
     conn = connect(config.db_path)
     try:
+        prior_drained = {
+            r["thread_id"]: r["drained_at"]
+            for r in conn.execute(
+                "SELECT thread_id, drained_at FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NOT NULL",
+                (session_id,),
+            )
+        }
         conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
         if scores and boundary_a_indices is not None:
             save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
         save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
+        # Re-enqueue INSIDE the transaction: the DELETE above cascades
+        # reflection_queue away and session_end does not re-run for a redetect,
+        # so without this the debt is lost permanently (#527 r1).
+        #
+        # Both the id lookup and the insert must ride THIS conn (#527 r5) —
+        # persisted_thread_id used to open its own and could not see the
+        # uncommitted rows, which is what made an inline enqueue raise a FOREIGN
+        # KEY failure and forced it after the commit. Do not move it back out:
+        # nothing re-derives debt for an emittable thread with no queue row, so
+        # a failure out there is a permanent half-applied redetect, while in
+        # here it rolls back to a state the operator can re-run.
+        enqueue_reflection_debt(
+            config.db_path,
+            session_id,
+            thread_ids=emittable_thread_ids(
+                config, session_id, threads, observations, conn=conn
+            ),
+            conn=conn,
+        )
+        # Re-enqueueing alone resurrects PAID debt as pending, re-firing the
+        # banner and making its "oldest from" age wrong (#527 r2). Same
+        # transaction as the enqueue it corrects: a restore that can fail
+        # separately from the insert it repairs is the r2 regression again.
+        for tid, drained in prior_drained.items():
+            conn.execute(
+                "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
+                (drained, tid),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
     set_session_summary(
         config.db_path,
         session_id,
