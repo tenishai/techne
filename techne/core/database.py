@@ -6,7 +6,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
 # LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
@@ -216,7 +216,18 @@ CREATE TABLE IF NOT EXISTS sessions (
     summary TEXT,
     summary_llm TEXT,
     summary_heuristic TEXT,
-    summary_llm_source TEXT
+    summary_llm_source TEXT,
+    -- HOW ended_at GOT THERE (#516). 'clean' = run_session_end reached; NULL on
+    -- a legacy row predating this column, treated as clean. Anything else
+    -- ('derived') means the session died without running session_end and the
+    -- value is LAST KNOWN ACTIVITY — a lower bound, not the true end.
+    --
+    -- Needed because deriving ended_at changes what the column MEANS, and a row
+    -- could not otherwise tell you which meaning it holds. check_outbox_targets
+    -- depends on the distinction: those lanes are fed AT SESSION END, so only a
+    -- session that actually ENDED is evidence the producer is dead. A crashed
+    -- session never had the opportunity to feed one.
+    ended_at_source TEXT
 );
 
 -- Threads (the unit of continuity)
@@ -1387,4 +1398,38 @@ END;
         # idempotence claim nothing could check.
         backfill_timestamp_formats(conn)
         conn.execute("INSERT INTO schema_version (version) VALUES (23)")
+    if from_version < 24 and to_version >= 24:
+        # techne#516: sessions.ended_at was 79% NULL and DEGRADING (52% of June
+        # sessions had one, 19% of July, 7% of August), because `end_session` is
+        # its only CLEAN writer and an unclean exit never reaches it. With ended_at
+        # NULL the interval is open-ended, so "which session was live at T"
+        # matched every session ever started before T — the replay index #516
+        # exists to build could not discriminate at all.
+        #
+        # Backfills the historical NULLs from last known activity. The ongoing
+        # fix is the sweep in core/state.py, wired into session_start; this step
+        # only repairs what the old behaviour already lost.
+        #
+        from techne.core.state import close_abandoned_sessions_in_conn
+
+        # THE NORMAL IDLE WINDOW, not 0. An earlier version passed 0 on the
+        # reasoning that "every session in history is finished" — false whenever
+        # a peer is live, and concurrent sessions are the normal case here.
+        # `connect()` IS the migration trigger, so a post_tool_use hook writing an
+        # observation runs this step with its own session's earlier observations
+        # already in the past: measured, a peer whose last observation was five
+        # seconds old got stamped. History is silent by definition, so the six-hour
+        # window sweeps all of it anyway and costs nothing.
+        # THE STEP MUST ENSURE ITS OWN COLUMN. `ended_at_source` is additive, so
+        # SCHEMA_SQL's copy is created by the RECONCILER — which runs AFTER
+        # _migrate. On a v3 fixture the column is genuinely absent here and the
+        # sweep's UPDATE raises "no such column". THIRD instance of this exact
+        # trap in this milestone (#515 hit it with event_at, then with the
+        # observations table); a migration step owns every precondition it needs.
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone():
+            _add_column_if_missing(conn, "sessions", "ended_at_source", "TEXT")
+        close_abandoned_sessions_in_conn(conn)
+        conn.execute("INSERT INTO schema_version (version) VALUES (24)")
     conn.commit()

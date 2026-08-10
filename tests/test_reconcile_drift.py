@@ -58,13 +58,14 @@ def test_fresh_db_is_current_version(db):
     conn = connect(db)
     try:
         v = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        # Bumped 21 -> 23. TWO steps land between: 22 is techne#514's
-        # reflection_queue (PR #527, merged), 23 is techne#515's timestamp-format
-        # backfill. The literal is deliberate: it makes a SCHEMA_VERSION bump fail
-        # here so it cannot pass unnoticed. It did exactly that job on #514 — this
-        # test is one of the two that caught that bump, and updating it is the
-        # acknowledgement, not a formality.
-        assert v == SCHEMA_VERSION == 23
+        # Bumped 21 -> 24. THREE steps land between: 22 is techne#514's
+        # reflection_queue (PR #527), 23 is techne#515's timestamp-format backfill
+        # (PR #531), 24 is techne#516's ended_at backfill. The literal is
+        # deliberate: it makes a SCHEMA_VERSION bump fail here so it cannot pass
+        # unnoticed. It did exactly that job on #514 — this test is one of the two
+        # that caught that bump, and updating it is the acknowledgement, not a
+        # formality.
+        assert v == SCHEMA_VERSION == 24
         # Fresh DB already has the correct (tags/kind) triggers.
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='observations_ai'"
