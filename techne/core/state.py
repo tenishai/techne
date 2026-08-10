@@ -5,7 +5,7 @@ import re
 import uuid
 from pathlib import Path
 
-from techne.core.database import connect
+from techne.core.database import connect, normalize_timestamp
 from techne.core.redaction import redact_credentials
 
 # Heuristic-summary detectors.
@@ -374,12 +374,19 @@ def add_observation(
     # redaction fired gives crisp audit semantics: content_hash IS NOT NULL iff
     # something was stripped, and the hash lets a holder of the original prove
     # the exact pre-redaction payload without re-exposing it.
-    content_hash = (
-        hashlib.sha256(content.encode()).hexdigest() if redacted != content else None
-    )
+    content_hash = hashlib.sha256(content.encode()).hexdigest() if redacted != content else None
 
     result = infer(redacted, config)
     tags_str = " ".join(result.tags) if result.tags else None
+
+    # NORMALISE AT THE PUBLIC BOUNDARY (#515). event_at is caller-supplied, and
+    # both surfaces ASK for the shape migration 023 exists to eliminate — the MCP
+    # tool schema (mcp_server.py) and the CLI flag both say "ISO-8601 event time".
+    # The four transcript-importer sites normalised; this one did not, so a
+    # documented API path re-introduced the ISO shape into a column this migration
+    # repairs, and _migrate can never re-run to clean it up. Invisible in a census
+    # of existing rows because event_at is usually NULL on live capture.
+    event_at = normalize_timestamp(event_at)
 
     conn = connect(db_path)
     try:
@@ -715,9 +722,7 @@ def db_stats(db_path: Path) -> dict:
         # instead of an opaque store-level total.
         stats["knowledge_by_type"] = {
             row[0]: row[1]
-            for row in conn.execute(
-                "SELECT type, COUNT(*) FROM knowledge GROUP BY type"
-            ).fetchall()
+            for row in conn.execute("SELECT type, COUNT(*) FROM knowledge GROUP BY type").fetchall()
         }
         stats["outbox"] = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
 
