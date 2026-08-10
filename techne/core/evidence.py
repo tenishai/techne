@@ -730,52 +730,65 @@ def _output_was_bounded(output_text: str) -> bool:
     justify — it would flag more intact rows than this does and still miss the
     large-shrinkage cases.
 
-    THIS BRANCH IS INERT TODAY, AND THAT — NOT "THE DIRECTION IS SAFE" — IS WHY
-    IT IS CHEAP TO KEEP. Setting the flag only changes a verdict when the SAME
-    row is simultaneously a test-runner command, parseable, failure-free AND
-    redacted. That conjunction has never occurred here: measured over every Bash
-    row in the live ledger, 15 rows flip the flag and ZERO change a verdict. A
-    gate cries wolf by FIRING; this one has not fired at a human yet. Re-check
-    later whether that CONJUNCTION has started occurring — not whether the
-    discriminator got smarter.
+    IT HAS NOT FIRED YET, AND THAT RESTS ON ONE LEG, NOT FOUR. Setting the flag
+    only changes a verdict when a row is simultaneously a test-runner command,
+    parseable, failure-free AND redacted — but the first three are ORDINARY, not
+    rare: 475 rows on this ledger satisfy them, 469 of those short and unmarked
+    so the redaction clause ALONE decides. They are what a green suite run looks
+    like. So nothing has fired because credential-shaped text happens to be
+    absent from green runner output — a fact about content, not about structure.
 
-    THREE THINGS MAKE IT IMPRECISE. The first two were in the original note; the
-    third dominates the live data and was missing from it:
+    THE TRIGGER IS ALREADY HERE. One of the fifteen flips is a cabal pytest run
+    over `test_secrets_endpoint.py` that satisfies runs-tests AND redacted, and
+    is inert only because the invocation piped through `grep … | head -12`, which
+    stripped the `N passed` line and failed the parseable leg. Delete the pipe and
+    all four hold. A 75-character passing run that echoes one config line first is
+    enough to flip a plainly complete row to `unverifiable`.
+
+    SO RE-MEASURE THE NEAR MISS, NOT THE CONJUNCTION. An earlier version of this
+    note said to re-check "whether the conjunction has started occurring", which
+    is unexecutable: when it fires a verdict quietly becomes `unverifiable` — no
+    alarm, no counter, nobody told. It read as a safeguard and functioned as a
+    comment. The near-miss population is observable today and moves smoothly:
+    re-measure those 469 alongside the flip count, and if credential-shaped
+    strings start appearing in green runner output at all, REPLACE the length
+    test rather than re-justify it.
+
+    THREE THINGS MAKE IT IMPRECISE, and the third dominates the live data:
 
     * NO AGE DISCRIMINATOR EXISTS. A post-#437 row that was never cut carries no
       marker either, so it is indistinguishable by content from a legacy cut.
     * BACKFILL REGENERATES IT. Re-summarising runs ``_preview`` (verbatim, under
-      budget, no marker) and then redaction at the write boundary, which puts the
-      marker back. Backfill retires the legacy-CUT problem and recreates this one.
-    * THE MARKER CANNOT TELL A TOKEN WE WROTE FROM THE SAME LITERAL TEXT ARRIVING
-      FOR ANY OTHER REASON — and on this ledger that is the common case. Every
-      flipped row inspected is a short, plainly complete output that merely
-      CONTAINS a credential shape: `.env` dumps, a JWT inside a signed URL, a PEM
-      block in a values.yaml. Two are self-referential, i.e. output about
-      redaction itself. None resembles a row cut at the budget.
+      budget, no marker) then redaction, which puts the marker back.
+    * THE MARKER CANNOT TELL A TOKEN WE WROTE FROM THE SAME LITERAL ARRIVING FOR
+      ANY OTHER REASON. Every flipped row inspected is a short, complete output
+      that merely CONTAINS a credential shape — `.env` dumps, a JWT in a signed
+      URL, a PEM block in a values.yaml, two of them output ABOUT redaction.
 
-    MEASURED 2026-08-10, read-only, ON ``_bash_output(content)`` — the string the
-    gate actually reads, NOT the whole observation row. That distinction is not
-    pedantic: measuring the row inflates every length by the ``Ran: …\nOutput: ``
-    prefix, counts a marker in the COMMAND as a flip when it is not one, and
-    misses rows whose row is over budget while their output is under it. Over
-    6195 Bash rows: 15 flips, lengths 290-1989, median 840, three within 10% of
-    the budget. Reproduce with ``_bash_output`` + ``REDACTION_MARKER`` + ``was_elided``.
+    MEASURED 2026-08-10 (read-only; the ledger grows, so treat counts as as-of)
+    over 6195 Bash rows, on ``_bash_output(content)`` — the string the gate reads,
+    NOT the whole observation row. Measuring the row inflates lengths by the
+    ``Ran: …\nOutput: `` prefix, counts a marker in the COMMAND as a flip, and
+    misses rows whose row exceeds the budget while their output does not. Result:
+    15 flips, lengths 290-1989, median 840, three within 10% of the budget.
+    REPRODUCE with ``_bash_output`` + ``was_elided`` + ``len(...) < _PREVIEW_MAX_CHARS``
+    + ``REDACTION_MARKER``. All four: the length clause is not optional, and
+    omitting it yields 16 rather than 15, because a flip is only a flip when the
+    clauses above it did not already return True.
 
-    NO TRUE-POSITIVE COUNT IS QUOTED, deliberately. Any such estimate would come
-    from proximity-to-budget as a proxy, and the paragraph above rejecting a
-    shrinkage allowance — replacement is shorter by an UNBOUNDED amount — is
-    precisely the argument that this proxy is weak. Length alone cannot identify
-    a true positive; that is the premise of the fix, so quoting a ratio derived
-    from length would contradict it.
+    NO TRUE-POSITIVE COUNT IS QUOTED. Any estimate would come from
+    proximity-to-budget, and the paragraph above rejecting a shrinkage allowance
+    — shorter by an UNBOUNDED amount — is exactly the argument that this proxy is
+    weak. Length cannot identify a true positive; that is the premise of the fix.
 
-    A TIMESTAMP DISCRIMINATOR IS BUILDABLE AND STILL NOT WORTH IT. #515's
-    two-format problem is NOT the blocker: it breaks sub-day lexical ordering at
-    position 10, while all shapes agree on ``YYYY-MM-DD``, so a day-granularity
-    comparison against #437's merge date is sound on the unmigrated ledger. The
-    reason to skip it is that eleven of the fifteen flips PREDATE that date, so
-    the gate would remove four and keep eleven — and against zero verdict changes
-    it buys nothing measurable.
+    A TIMESTAMP DISCRIMINATOR IS NOT SOUND AT DAY GRANULARITY, and this dataset
+    contains the counterexample. #437 merged at 2026-08-01T20:22:17Z; against
+    that INSTANT the split is 12 before / 3 after, and one flip lands at
+    19:00:51Z ON THE MERGE DAY, where a date comparison yields a coin-toss
+    between ``<`` and ``<=`` rather than an answer. (#515's two-format problem is
+    a separate and lesser issue here — it breaks sub-day ordering at position 10
+    — but three of the fifteen timestamps carry no zone at all.) The gate would
+    remove three of fifteen. Not built.
     """
     if was_elided(output_text):
         return True
