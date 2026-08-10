@@ -273,3 +273,202 @@ def test_watch_loop_with_polling_observer(tmp_path, db_path, session_id) -> None
     # we rely on the test exiting (daemon thread). For clean shutdown, the
     # watch() public API takes signal handlers — we passed install=False so
     # signals are not wired. The polling observer will be GC'd with the thread.
+
+
+# ---- EX_CONFIG exit contract (techne#498) ---------------------------------
+#
+# A missing `[watch]` extra is a configuration error, not a transient fault.
+# Before #498 it surfaced as a generic exit 1, so a systemd unit with
+# Restart=on-failure respawned it every 5s forever. These assert BOTH halves
+# of the contract: the process emits EX_CONFIG, and the shipped unit tells the
+# supervisor not to respawn on it.
+
+
+def test_watch_raises_startup_config_error_when_watchdog_missing(
+    monkeypatch, tmp_path, db_path, session_id
+) -> None:
+    """The missing-extra path must be distinguishable at the exit boundary.
+
+    Guards the regression directly: a bare RuntimeError here is
+    indistinguishable from a runtime fault, which is what produced the
+    crash-loop.
+    """
+    import sys
+
+    from techne.exit_codes import StartupConfigError
+
+    # None in sys.modules makes `from watchdog.events import ...` raise
+    # ImportError, simulating an install without the [watch] extra without
+    # having to uninstall anything.
+    monkeypatch.setitem(sys.modules, "watchdog.events", None)
+
+    from techne.watch import watch
+
+    config = WatchConfig(
+        db_path=db_path,
+        paths=[tmp_path],
+        session_id=session_id,
+        include_globs=["*.txt"],
+        debounce_ms=50,
+        resync_interval_seconds=3600,
+    )
+
+    with pytest.raises(StartupConfigError, match=r"pip install techne\[watch\]"):
+        watch(config, install_signal_handlers=False)
+
+
+def test_startup_config_error_stays_a_runtime_error() -> None:
+    """The compatibility half of the change.
+
+    StartupConfigError was introduced under an existing `except RuntimeError`
+    handler. If it ever stops subclassing RuntimeError, callers that only
+    catch RuntimeError start leaking it — silently, since nothing else asserts
+    the relationship.
+    """
+    from techne.exit_codes import StartupConfigError
+
+    assert issubclass(StartupConfigError, RuntimeError)
+
+
+def test_watch_cmd_exits_ex_config_on_startup_config_error(monkeypatch) -> None:
+    """`techne watch` must exit 78, not 1, so the supervisor can act on it."""
+    from click.testing import CliRunner
+
+    import techne.watch as watch_mod
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.exit_codes import EX_CONFIG, StartupConfigError
+
+    init_db(Config.load().db_path)
+
+    def _boom(*_args, **_kwargs):
+        raise StartupConfigError("watchdog is not installed; run `pip install techne[watch]`")
+
+    monkeypatch.setattr(watch_mod, "watch", _boom)
+
+    result = CliRunner().invoke(main, ["watch", "."])
+
+    assert result.exit_code == EX_CONFIG, result.output
+    assert "watchdog is not installed" in result.output
+
+
+def _active_directives(body: str, section: str = "Service") -> dict[str, set[str]]:
+    """Directives systemd would actually ACT ON in `section`, mapped to values.
+
+    A substring search over the raw file is NOT this, and neither is a
+    section-blind scan. Four states where the unit is disarmed but a looser
+    check still passes, all found by review on this PR:
+
+    * `#RestartPreventExitStatus=78` — inert to systemd, identical to `in`.
+    * `"...=7" in "...=78"` — a substring cannot tell one exit code from
+      another that merely starts with it.
+    * the directive sitting in `[Unit]` or `[Install]` — `Restart*` are
+      `[Service]`-only per systemd.service(5); elsewhere systemd logs
+      "Unknown key name … ignoring" and respawns exactly as before.
+    * a later `RestartPreventExitStatus=` — assigning the empty string RESETS
+      the list and voids every prior assignment.
+
+    Repetition follows systemd.syntax(7): a repeated option OVERRIDES the
+    previous setting UNLESS the option is list-valued, in which case values are
+    appended. Unioning everything was wrong for `Restart=`, which takes a single
+    enum — appending `Restart=no` after `Restart=on-failure` left the stale
+    `on-failure` in the set and passed, while systemd reads `no` and the unit
+    never restarts at all, making RestartPreventExitStatus decorative. The
+    empty-value reset is correct for both kinds.
+
+    Still a test helper, not a systemd parser: it does not handle line
+    continuations, quoting, or `.d/` drop-in directories. Indented directives
+    ARE accepted, because systemd accepts them.
+    """
+    #: Directives this helper is asserted against that systemd treats as lists.
+    #: Extend when a new list-valued directive is asserted on; anything absent
+    #: is single-valued and last-assignment-wins.
+    list_valued = {"RestartPreventExitStatus"}
+    out: dict[str, set[str]] = {}
+    current: str | None = None
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line[0] == "[":
+            current = line.strip("[]").strip()
+            continue
+        if current != section:
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if not value.strip():
+            out[key] = set()
+        elif key in list_valued:
+            out.setdefault(key, set()).update(value.split())
+        else:
+            out[key] = set(value.split())
+    return out
+
+
+def test_shipped_unit_refuses_to_respawn_on_ex_config() -> None:
+    """The unit half of the contract, derived AND parsed like systemd reads it.
+
+    Deriving the value from techne/exit_codes.py stops the unit's 78 becoming a
+    second copy of the constant. Deriving alone was not enough: the assertion
+    has to MATCH the way systemd matches, or the derivation binds nothing.
+
+    Fails if the directive is deleted, commented out, given a different code,
+    moved out of [Service] into a section where systemd ignores it, voided by a
+    later empty-value reset, or if EX_CONFIG changes without the unit following.
+    An indented directive still passes, because systemd accepts those.
+    """
+    from techne.exit_codes import EX_CONFIG
+
+    unit = Path(__file__).resolve().parents[1] / "deploy" / "techne-watch.service"
+    directives = _active_directives(unit.read_text())
+
+    assert str(EX_CONFIG) in directives.get("RestartPreventExitStatus", set()), (
+        "the shipped unit does not prevent restart on the code the app exits with; "
+        "one half of the contract without the other still crash-loops"
+    )
+    # The setting is inert unless the unit actually restarts on failure.
+    assert "on-failure" in directives.get("Restart", set())
+
+
+def test_real_process_exits_ex_config(tmp_path) -> None:
+    """The claim the PR body made, now actually shipped as a test.
+
+    Every other test here reads `CliRunner().invoke(...).exit_code`, which is
+    click's own accounting rather than an OS process status. Nothing asserted
+    that the process really LEAVES 78 — which is the only number systemd ever
+    sees. Reviewed as "believed correct by reading, not by running"; this runs
+    it. `watchdog.events` is poisoned in the child so the missing-extra path is
+    reached without uninstalling anything.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from techne.exit_codes import EX_CONFIG
+
+    env = {**os.environ, "TECHNE_HOME": str(tmp_path)}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['watchdog.events'] = None;"
+            " from techne.cli import main; main()",
+            "watch",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        # PINNED: `python -c` puts cwd at sys.path[0], so an inherited cwd
+        # decides WHICH copy of techne this proves. From the repo root that is
+        # the working tree; from anywhere else it is whatever is importable.
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    assert proc.returncode == EX_CONFIG, (proc.returncode, proc.stderr[-2000:])
+    assert "watchdog is not installed" in proc.stderr
