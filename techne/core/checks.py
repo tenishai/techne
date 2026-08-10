@@ -1870,7 +1870,17 @@ def check_vector_coverage(config) -> CheckResult:
         detail += f", {dangling} dangling vector(s) with no knowledge row (techne#408)"
     if not (missing or stale or orphans) and superseded:
         detail += f" ({superseded} superseded, correctly excluded)"
-    # `dangling` deliberately absent — no remedy clears it; see the docstring.
+    # `dangling` still absent from `healthy`, but NOT for the old reason — #408
+    # shipped the remedy, so "no remedy clears it" is false as of that PR. Left
+    # non-failing deliberately: flipping it changes doctor output on live stores
+    # and belongs in its own change, not smuggled into the PR that made it
+    # possible. It IS surfaced in the detail, so the operator sees the symptom
+    # and now has `techne vectors backfill` to act on.
+    #
+    # KNOWN GAP, and it is the bigger one: this counts dangling rows for
+    # knowledge_vec ONLY. #408's headline mechanism — threads rotating rowid on
+    # INSERT OR REPLACE, one stranded embedding per summary update, unbounded —
+    # is counted by no check at all. The leak is fixed; its observability is not.
     healthy = missing == 0 and stale == 0 and orphans == 0
     return CheckResult(
         name="vectors:coverage",

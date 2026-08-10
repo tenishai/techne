@@ -847,11 +847,21 @@ def search(
 
 
 def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
-    """Embed un-embedded rows. Returns counts of newly embedded items."""
+    """Embed un-embedded rows. Returns counts of newly embedded items.
+
+    `orphans_swept` is present ONLY when the sweep actually ran (#408). Its
+    ABSENCE means the function returned before reaching it — no numpy, no
+    sqlite_vec, or an interpreter that cannot load extensions — and a caller must
+    not report hygiene as having happened. An empty dict is ambiguous across
+    three different outcomes; the key is the discriminator.
+    """
     try:
         import numpy as np
         import sqlite_vec
     except ImportError:
+        # numpy is only in the [vectors] extra, so `pip install techne` +
+        # `pip install sqlite-vec` lands here with the CLI's own import guard
+        # satisfied. No sweep runs; say nothing rather than claim it did.
         return {}
     have_backend = embeddings_mod.backend_available()
 
@@ -893,16 +903,17 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             continue
     if swept:
         conn.commit()
+    counts = {"orphans_swept": swept}
 
     if not have_backend:
         # Neither model2vec nor fastembed importable — nothing to embed with, but
-        # the orphan sweep above has already run.
+        # the orphan sweep above HAS run, and the key says so.
         conn.close()
-        return {}
+        return counts
 
     model = _get_embedding_model()
 
-    counts = {"threads": 0, "observations": 0, "knowledge": 0}
+    counts.update({"threads": 0, "observations": 0, "knowledge": 0})
 
     try:
         # techne#601/#602: detect a backend/model swap (e.g. upgrading to py3.14,

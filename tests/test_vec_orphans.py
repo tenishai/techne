@@ -187,8 +187,8 @@ def test_the_cli_remedy_sweeps_even_with_no_embedding_backend(tmp_path, monkeypa
     """
     from click.testing import CliRunner
 
-    from techne.core import embeddings as embeddings_mod
     from techne.cli import main
+    from techne.core import embeddings as embeddings_mod
 
     monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
     monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
@@ -223,3 +223,69 @@ def test_the_cli_remedy_sweeps_even_with_no_embedding_backend(tmp_path, monkeypa
         "the CLI exited before sweeping — the remedy vectors:coverage names still "
         "does nothing on a no-backend install"
     )
+
+
+def test_the_cli_does_not_claim_hygiene_ran_when_it_could_not(tmp_path, monkeypatch):
+    """backfill_vectors returns {} for THREE outcomes and the CLI cannot tell
+    them apart, so the old message asserted the good one.
+
+    numpy lives only in the [vectors] extra, so `pip install techne` followed by
+    `pip install sqlite-vec` — a SMALLER step than the hand-built venv this PR
+    already assumes — satisfies the CLI's own import guard and returns at
+    backfill_vectors' first line, sweeping nothing. Same for an interpreter that
+    cannot load extensions, which the code's own comment names as real.
+
+    Reporting success there is worse than #496's remedy-that-does-nothing: an
+    operator told it succeeded stops looking.
+    """
+    import sys
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core import embeddings as embeddings_mod
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+
+    # numpy unimportable, sqlite_vec still importable — the CLI's guard passes.
+    monkeypatch.setitem(sys.modules, "numpy", None)
+
+    result = CliRunner().invoke(main, ["vectors", "backfill"])
+
+    assert result.exit_code == 0, result.output
+    assert "did NOT run" in result.output, (
+        f"the CLI claimed hygiene ran when the sweep was never reached: {result.output!r}"
+    )
+    assert "were swept" not in result.output
+
+
+def test_the_cli_reports_the_swept_count_when_it_did_run(tmp_path, monkeypatch):
+    """The honest line is also the useful one: a count tells the operator
+    something, where the old sentence only reassured."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core import embeddings as embeddings_mod
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+
+    conn = _vec_conn(cfg.db_path)
+    try:
+        _make_vec(conn, "threads_vec")
+        _add_vec_row(conn, "threads_vec", 5150)
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(main, ["vectors", "backfill"])
+
+    assert result.exit_code == 0, result.output
+    assert "index hygiene: 1 orphaned embedding(s) swept." in result.output, result.output

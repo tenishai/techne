@@ -3174,7 +3174,16 @@ def vectors_backfill(ctx, do_tags, all_tags):
         click.echo(
             "vector search unavailable: no embedding backend installed — install techne[vectors]"
         )
-        click.echo("index hygiene still ran: orphaned embeddings were swept.")
+        # REPORT WHAT ACTUALLY HAPPENED. backfill_vectors returns {} for three
+        # different outcomes and this caller cannot tell them apart, so the old
+        # unconditional line asserted the good one: with numpy absent (it is only
+        # in the [vectors] extra) or an interpreter that cannot load extensions,
+        # the sweep never ran and the message claimed it had. Worse than #496's
+        # remedy-that-does-nothing — an operator told it succeeded stops looking.
+        if "orphans_swept" in counts:
+            click.echo(f"index hygiene: {counts['orphans_swept']} orphaned embedding(s) swept.")
+        else:
+            click.echo("index hygiene did NOT run: sqlite-vec could not be loaded.")
         ctx.exit(0)
 
     click.echo(json.dumps(counts, indent=2))
