@@ -335,7 +335,9 @@ def test_no_undeclared_inlined_prefilter():
 
     `delivered_hashes` enforces the strong half (call it, declare your lane).
     This catches the INLINED form by looking for the content_hash / outbox /
-    target triple INSIDE A SINGLE SQL STRING LITERAL, walked from the AST.
+    target triple INSIDE A SINGLE SQL STATEMENT — string literals walked from
+    the AST, whitespace collapsed, then split on `;` so a statement is the unit
+    rather than a whole literal.
 
     WHY PER-LITERAL, after three rounds of regex failed on this:
       * `[^;]*?` under re.S spans hundreds of unrelated lines, so a file-wide
@@ -347,10 +349,22 @@ def test_no_undeclared_inlined_prefilter():
         for, restored by its replacement.
       * The same span made a prose semicolon between the two tokens a working
         evasion.
-    Bounding the match to one literal removes both: no cross-statement span, so
-    no semicolon luck in either direction.
+    Bounding the match to one statement removes both: no cross-statement span,
+    so no semicolon luck in either direction.
 
-    THE THREE GAPS, named because the previous docstring named one and had three:
+    AND THE FIRST CUT OF THAT FIX NARROWED TWO THINGS AT ONCE, ONE OF THEM
+    UNMEASURED (r5 review, finding 1 — the same shape this docstring exists to
+    stop). Moving to per-literal ALSO turned `\\bFROM\\s+outbox\\b` into the
+    substring `"from outbox"` and skipped a literal wholesale on `create table`.
+    Both quietly lost coverage the regex had: `FROM  outbox` (aligned SQL) and a
+    table name on the next line walked past, and a DDL+DML blob — `executescript`
+    is used in ~15 places here — switched the detector off for every statement
+    beside the schema. Measured against the retired regex, three probes regressed.
+    Hence the whitespace collapse and the `;` split above: a change of altitude
+    needs the same before-and-after as anything else.
+
+    THE THREE GAPS, named because the previous docstring named one and had three,
+    and re-measured after the fix above rather than re-asserted:
       1. INDIRECTION — a consumer calling a helper in sync/outbox.py. This is why
          the accessor exists.
       2. SPLIT OR COMPOSED SQL — `_TABLE = "outbox"` with an f-string, or
@@ -378,15 +392,28 @@ def test_no_undeclared_inlined_prefilter():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                 continue
-            sql = node.value.lower()
-            if "create table" in sql:
-                continue  # a schema blob is DDL, not a pre-filter
-            if (
-                "content_hash" in sql
-                and "from outbox" in sql
-                and "target" in sql
-                and "select" in sql
-            ):
+            # COLLAPSE WHITESPACE FIRST. `FROM  outbox` (aligned SQL) and a table
+            # name on its own line are ordinary formatting, not evasions, and a
+            # substring test is whitespace-exact where the `\bFROM\s+outbox\b`
+            # regex this replaced was not. Narrowing the match to one literal was
+            # right; narrowing it to one SPELLING of the literal was an unmeasured
+            # second narrowing that came along with it (r5 review, finding 1).
+            sql = " ".join(node.value.lower().split())
+            # SPLIT ON `;` — a literal is not a statement. `executescript` is used
+            # in ~15 places here, so DDL and DML sharing one blob is in-idiom, and
+            # skipping the WHOLE literal on `create table` switched the detector
+            # off for every statement beside the schema. Per-fragment keeps the
+            # skip load-bearing (without it core/database.py's SCHEMA_SQL goes red,
+            # verified) while making "one statement" true rather than approximate.
+            inlined = any(
+                "create table" not in stmt
+                and "content_hash" in stmt
+                and "from outbox" in stmt
+                and "target" in stmt
+                and "select" in stmt
+                for stmt in sql.split(";")
+            )
+            if inlined:
                 offenders.append(str(path.relative_to(root)))
                 break
 
@@ -564,12 +591,21 @@ def test_a_backed_up_lane_keeps_its_sync_history(config):
 
     conn = plain_connect(config.db_path)
     try:
-        # Synced history, all older than the boundary.
-        for i in range(2):
+        # Synced history, all older than the boundary. DISTINCT `synced_at`, with
+        # the NEWEST on the LOWER id — deliberately, and it is the whole point of
+        # the fixture (r4 nit, r5 finding 2). With both rows sharing a timestamp
+        # the assertion below cannot tell "kept the max-synced_at row" from "kept
+        # an arbitrary synced row", and the plausible simplification
+        #   AND id NOT IN (SELECT MAX(id) FROM outbox WHERE status='synced' GROUP BY target)
+        # left the whole file green. Ordering max-synced_at against max-id is what
+        # makes MAX(id) and MAX(synced_at) disagree, so the mutant now fails.
+        # Understating the max by 6 days is not cosmetic: the check reads it
+        # against a 14-day interval, so a large enough gap flips LIVE -> STALE.
+        for i, synced_at in enumerate(("2026-07-31 00:00:00", "2026-07-25 00:00:00")):
             conn.execute(
                 "INSERT INTO outbox (target, data_json, content_hash, status, created_at, "
                 "synced_at) VALUES (?, '{}', ?, 'synced', '2026-07-30 00:00:00', ?)",
-                (NON_LEDGER, f"old{i}", "2026-07-31 00:00:00"),
+                (NON_LEDGER, f"old{i}", synced_at),
             )
         # A newer PENDING row — the backlog. This is what takes the presence slot.
         conn.execute(

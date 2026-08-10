@@ -558,6 +558,19 @@ def sweep_delivered(
       load-bearing while the LOG is not. Keeps one row per hash and drops the
       redundant copies, which is why this needs no age condition: a duplicate hash
       is waste the moment it lands. Historically 126,160 rows -> ~772.
+
+      READ THE NUMBERS IN THIS MODULE AS DATED OBSERVATIONS, NOT AS CONSTANTS.
+      Three different totals appear across this PR's surfaces — 126,160 here,
+      128,200 at `archivist.py:132` and below, 130,266 in #518's title — and they
+      are NOT the same measurement of different populations. I could not
+      reconcile them and did not invent a reconciliation: they are consistent
+      with one growing table sampled on three days, and the distinct-hash
+      figures beside them (~772 vs 761) move in the opposite direction to the
+      totals, which no single-population story explains. The state they describe
+      is GONE — a hand-run sweep on 2026-08-07 took the table down, and the live
+      store today holds 5,303 outbox rows (838 on this ledger lane), re-derived
+      through `sweep_preview` on a copy. Do not subtract these from each other,
+      and do not treat any of them as a current fact about the store.
     * EVERY OTHER TARGET — AGE OUT. Nothing reads these back (verified: the only
       reader of ``outbox.content_hash`` outside this module is the pre-filter in
       ``core/archivist.py``), and their rows are unique events rather than repeats

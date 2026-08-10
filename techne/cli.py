@@ -1130,9 +1130,19 @@ def outbox_sweep(ctx, retain_days, apply_):
         return
 
     # Reuse the PREVIEW's boundary, so --apply cannot act on a different row set
-    # than the dry run the operator just read.
+    # than THIS PROCESS's dry run. Deliberately not "the dry run the operator just
+    # read" — that ran in a separate process and its boundary is gone; the rows
+    # can differ. sweep_preview's docstring is careful about this and the comment
+    # here was not (r5 nit 3).
+    #
+    # `retain_days` is threaded even though `cutoff` wins, so the two arguments
+    # cannot disagree: the debug line inside sweep_delivered reports its own
+    # `retain_days`, and it read the 7 default under `--retain-days 30` — the one
+    # place an operator looks to confirm what they asked for.
     preview = sweep_preview(config.db_path, retain_days=retain_days)
-    result = sweep_delivered(config.db_path, cutoff=preview["boundary"])
+    result = sweep_delivered(
+        config.db_path, retain_days=retain_days, cutoff=preview["boundary"]
+    )
     click.echo(
         f"Swept {result['collapsed'] + result['aged_out']} row(s) "
         f"(collapsed {result['collapsed']}, aged out {result['aged_out']})."
