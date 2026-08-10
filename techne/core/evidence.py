@@ -219,11 +219,29 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
 # commit message that says "2209 passed" certified a green suite with no test run
 # (8 rows), and `ruff check` printing "Found 181 errors" turned a green window red
 # (29 rows) — the false-accusation direction techne#105 exists to prevent.
-_TEST_RUNNER_HEADS = frozenset({
-    "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "jasmine",
-    "ava", "karma", "rspec", "minitest", "phpunit", "behat", "ctest", "bats",
-    "gotestsum", "nextest", "unittest",
-})
+_TEST_RUNNER_HEADS = frozenset(
+    {
+        "pytest",
+        "py.test",
+        "tox",
+        "nox",
+        "jest",
+        "vitest",
+        "mocha",
+        "jasmine",
+        "ava",
+        "karma",
+        "rspec",
+        "minitest",
+        "phpunit",
+        "behat",
+        "ctest",
+        "bats",
+        "gotestsum",
+        "nextest",
+        "unittest",
+    }
+)
 
 # Heads that run tests only under a specific subcommand — `go test`, not `go build`.
 _TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
@@ -256,10 +274,24 @@ _TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
 
 # Interpreters and task runners that invoke a real runner as an argument:
 # `python -m pytest`, `uv run pytest`, `poetry run pytest`.
-_TEST_RUNNER_WRAPPERS = frozenset({
-    "python", "python3", "py", "uv", "poetry", "pdm", "hatch", "pipenv", "rye", "npx",
-    "bundle", "pipx", "pdm", "just",
-})
+_TEST_RUNNER_WRAPPERS = frozenset(
+    {
+        "python",
+        "python3",
+        "py",
+        "uv",
+        "poetry",
+        "pdm",
+        "hatch",
+        "pipenv",
+        "rye",
+        "npx",
+        "bundle",
+        "pipx",
+        "pdm",
+        "just",
+    }
+)
 
 # Modules a `-m` flag can name to mean "run the suite".
 _TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
@@ -356,6 +388,217 @@ def _strip_heredoc_bodies(command: str) -> str:
     return "\n".join(kept)
 
 
+#: Shells whose ``-c`` argument is a nested script the gate must look inside.
+#: NOT added to `_TEST_RUNNER_WRAPPERS`: that set matches a head whose ARGUMENT
+#: is a runner, so `bash` there would make `bash -c 'echo 12 passed'` read as a
+#: test run — #440 through the front door.
+_SHELL_C_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+#: Short-option LETTERS that consume the next token as a value. Letters, not
+#: whole tokens, because POSIX getopt says only the LAST letter of a cluster may
+#: take a value — so one rule covers `-o`, `+o`, `-O`, `+O`, `-xo`, `-euo`,
+#: `-euxo` and `-co` at once. A token-based set could not see `-euo pipefail`
+#: (the clustered spelling of an idiom we already handled unclustered), and no
+#: amount of lengthening it would. Verified against bash 5.3.15: `bash -co
+#: pipefail 'echo MARKER'` prints MARKER, i.e. `o` took the value and the script
+#: is the token AFTER it. Keeping the hand-kept part to two letters is the point
+#: — the risk in such a list is proportional to its length. (Prudence, #521 r2.)
+#:
+#: CORRECTION TO THAT DERIVATION, measured 2026-08-07 and the reason the scanner
+#: counts value letters instead of testing only the last one. POSIX says only a
+#: cluster's final letter may take a value; REAL BASH DOES NOT CARE. Both shells
+#: on this machine run `-oc pipefail '<script>'`, and `-oc bogusopt` fails with
+#: "bogusopt: invalid option name" — so `o` ate the next token from the FRONT of
+#: the cluster. Measured, not read off a man page:
+#:
+#:   /usr/local/bin/bash 5.3.15 (the DEFAULT shell here)  -oc  -> runs
+#:   /bin/sh, /bin/bash        3.2.57 (Apple)             -oc  -> runs
+#:
+#: r3 nit 2 said bash 5.3 rejects this spelling and filed it as a curiosity of
+#: legacy /bin/sh. It does not, and it is not: under the last-letter rule this
+#: was a live false green on the shell that actually runs here.
+_SHELL_VALUE_LETTERS = frozenset({"o", "O"})
+
+#: Long options taking a separate value. No clustering applies to these.
+_SHELL_VALUE_LONG_OPTS = frozenset({"--rcfile", "--init-file"})
+
+#: A transparent prefix: `env bash -c '<script>'` really does run the script, so
+#: `env` is skipped along with its own options rather than read as the command.
+#: NOT the same as `/usr/bin/env -c '...'`, which is not a shell invocation.
+_ENV_PREFIXES = frozenset({"env"})
+#: env's own value-taking options, by LETTER for the same reason the shell rule
+#: is: they cluster (`env -iu FOO bash -c …` is `-i` + `-u FOO`), and a
+#: whole-token set cannot see the clustered spelling — `-iu` is not `-u`. That is
+#: r2 finding 1 in a second loop, and it starved identically until r3 caught it.
+#:
+#: `S` is deliberately NOT a value letter: `-S`/`--split-string`'s "value" is the
+#: whole rest of the command line, which shlex has already split for us, so
+#: consuming the next token would swallow the shell itself. Verified: `env -S
+#: bash -c 'echo MARKER'` prints MARKER, because env splits `bash` into a
+#: one-word list and appends the remaining argv — so skipping `-S` by ONE token
+#: lands exactly on the shell.
+#:
+#: The fully-quoted spelling `env -S 'bash -c pytest'` is a different shape and
+#: is UNSEEN: the whole payload arrives as a single token which is not a shell
+#: name, so `_shell_c_script` returns None. Starvation, not invention (r3 nit 3).
+#: `P` is BSD's `-P utilpath`, verified present on this box: `env -P /usr/bin pwd`
+#: reports "env: pwd: No such file or directory", i.e. -P consumed the path. The
+#: set is already a GNU/BSD union (`-C` is GNU-only and works here), so P belongs.
+_ENV_VALUE_LETTERS = frozenset({"u", "C", "P"})
+#: Long options take a separate value and never cluster. `-uFOO`/`--unset=FOO`
+#: carry theirs attached, so they correctly skip by one.
+_ENV_VALUE_LONG_OPTS = frozenset({"--unset", "--chdir"})
+
+#: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
+#: a command is pathological and the gate stops rather than recursing on input.
+_MAX_SHELL_C_DEPTH = 3
+
+
+def _expand_shell_c(segments: list[str], depth: int = 0) -> list[str]:
+    """Replace ``bash -c '<script>'`` segments with the script's own segments.
+
+    GATE-SIDE ONLY, and that placement is the whole design (techne#445). The
+    splitter is SHARED with the capture-time noise filter, and the two want
+    opposite things from a `-c` wrapper:
+
+      gate         `bash -c 'pytest -q'` unseen -> the row raises no
+                   `totals_unreliable` flag, so an intact run elsewhere in the
+                   window certifies the whole thing green. Starvation IS a false
+                   green here (techne#438).
+      noise filter `bash -c 'ls'` currently heads on `bash`, which is not
+                   read-only, so it CAPTURES. Expanding it there would head on
+                   `ls` and DROP it — flipping False->True, i.e. LESS capture,
+                   against that filter's documented fail-safe. Measured both
+                   before choosing: the heredoc precedent (#444 r2) does not
+                   transfer, because it only ever added segments.
+
+    So the shared splitter keeps its semantics exactly and the gate expands
+    afterwards.
+    """
+    if depth >= _MAX_SHELL_C_DEPTH:
+        return segments
+    out: list[str] = []
+    for seg in segments:
+        script = _shell_c_script(seg)
+        if script is None:
+            out.append(seg)
+            continue
+        from techne.hooks.post_tool_use import _split_bash_segments
+
+        inner = _split_bash_segments(_strip_heredoc_bodies(script))
+        out.extend(_expand_shell_c(inner, depth + 1))
+    return out
+
+
+def _shell_c_script(segment: str) -> str | None:
+    """The script argument of a ``<shell> -c <script>`` segment, else None.
+
+    Uses `shlex` so the quoting that HID the runner is what now reveals it: the
+    script arrives already unquoted. A segment shlex cannot parse (unbalanced
+    quotes, which heredoc bodies produce) is left alone rather than guessed at.
+    """
+    import shlex
+
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return None
+    i = 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+        i += 1
+    # `env` is transparent: skip it, its options, and any VAR=val it carries.
+    while i < len(tokens) and tokens[i].rsplit("/", 1)[-1] in _ENV_PREFIXES:
+        i += 1
+        while i < len(tokens):
+            t = tokens[i]
+            # Same LAST-LETTER-OF-THE-CLUSTER rule as the shell scanner above.
+            # A whole-token test misses `-iu FOO` (which is `-i` + `-u FOO`),
+            # skipping by one so FOO reads as the command and the shell is never
+            # reached — starvation, i.e. a false green.
+            if t.startswith("--"):
+                i += 2 if t in _ENV_VALUE_LONG_OPTS else 1
+            elif t[:1] == "-" and len(t) > 1:
+                # ENV USES getopt; THE SHELL SCANNER ABOVE DOES NOT. Applying the
+                # shell's rule here was r3 finding 1 recurring a THIRD time in
+                # this one loop, and the two really do differ:
+                #   bash:  `-oc pipefail S` -> `o` eats the NEXT TOKEN from the
+                #          front of the cluster (measured; bash rolls its own).
+                #   env:   `-uCC bash …`    -> `u` takes the REST OF THE TOKEN
+                #          ("CC") as an attached value and eats NOTHING.
+                # Testing only t[-1] read `-uCC`'s trailing C as a value letter
+                # and skipped two tokens, eating `bash`. Starvation, i.e. a false
+                # green. `env -u CC` (unsetting a compiler var) is idiomatic in
+                # build and CI contexts, not exotic.
+                #
+                # getopt's actual rule: at the FIRST value letter, the remainder
+                # of the token is its value if any remains; only a value letter in
+                # LAST position consumes the following token. All six spellings
+                # below were run against the real env before this was written.
+                cluster = t[1:]
+                first_value = next(
+                    (k for k, ch in enumerate(cluster) if ch in _ENV_VALUE_LETTERS), None
+                )
+                if first_value is None:
+                    i += 1  # flags only (`-i`, `-0`)
+                elif first_value == len(cluster) - 1:
+                    i += 2  # `-u CC`, `-iu CC`, `-P /usr/bin` — value is next token
+                else:
+                    i += 1  # `-uCC`, `-uC`, `-iuCC` — value attached in-token
+            elif "=" in t and not t.startswith("-"):
+                i += 1
+            else:
+                break
+    if i >= len(tokens) or tokens[i].rsplit("/", 1)[-1] not in _SHELL_C_WRAPPERS:
+        return None
+    # `-c`, including clustered SHORT flags containing c (`-lc`, `-ec`, `-cx`).
+    #
+    # `t[1:2] != "-"` excludes every --long option, and that guard is load-bearing
+    # twice over: without it `--norc` matches (it ends in "c"), which BOTH loses
+    # `bash --noprofile --norc -c 'pytest -q'` — idiomatic clean-shell in CI and
+    # Makefiles — AND makes `bash --norc pytest` read the following positional as
+    # a script, so a FILE named pytest reads as a suite run. Starvation and
+    # invention from one bug. `"c" in t[1:]` rather than endswith, because c need
+    # not be last (`bash -cx`).
+    j = i + 1
+    while j < len(tokens):
+        t = tokens[j]
+        if t in _SHELL_VALUE_LONG_OPTS:
+            j += 2  # its value is not a positional
+            continue
+        if t.startswith("--"):
+            j += 1  # a long option we do not model; it takes no separate value
+            continue
+        if t[:1] in ("-", "+") and len(t) > 1:
+            cluster = t[1:]
+            # EVERY value letter in the cluster consumes a token, not just the
+            # last one. Measured against the shells on this box rather than
+            # derived, because the derivation was WRONG (r3 nit 2 asserted POSIX
+            # last-letter-only, and that real bash 5.3 rejects the other
+            # spelling — it does not):
+            #
+            #   bash 5.3.15 -oc pipefail 'echo MARKER'  -> prints MARKER
+            #   bash 5.3.15 -oc bogusopt 'echo MARKER'  -> "bogusopt: invalid
+            #                                              option name"
+            #
+            # That error is the proof: `o` consumed the NEXT TOKEN while sitting
+            # first in the cluster, so position is irrelevant. Under the
+            # last-letter rule `bash -oc pipefail 'pytest -q'` returned
+            # `pipefail` as the script — starvation, i.e. a false green, on the
+            # DEFAULT shell of this machine (/usr/local/bin/bash), not on some
+            # legacy /bin/sh nobody invokes.
+            n_values = sum(1 for ch in cluster if ch in _SHELL_VALUE_LETTERS)
+            if "c" in cluster:
+                # The script sits after however many values the cluster ate:
+                # `-c` -> next token; `-co pipefail` / `-oc pipefail` -> the one
+                # after that; `-occ pipefail` likewise (verified: prints MARKER).
+                k = j + 1 + n_values
+                return tokens[k] if k < len(tokens) else None
+            j += 1 + n_values
+            continue
+        return None  # a positional before any -c: not a -c invocation
+    return None
+
+
 def _command_runs_tests(command: str) -> bool:
     """True when some segment of `command` actually invokes a test runner.
 
@@ -369,7 +612,8 @@ def _command_runs_tests(command: str) -> bool:
     """
     from techne.hooks.post_tool_use import _split_bash_segments
 
-    for segment in _split_bash_segments(_strip_heredoc_bodies(command)):
+    segments = _split_bash_segments(_strip_heredoc_bodies(command))
+    for segment in _expand_shell_c(segments):
         tokens = segment.split()
         i = 0
         # Skip leading `VAR=val` env assignments to find the real head.
