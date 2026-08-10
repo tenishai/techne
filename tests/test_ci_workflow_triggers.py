@@ -306,3 +306,55 @@ def test_eval_vec_runs_the_default_suite_not_only_the_gate():
         "eval-vec must run the DEFAULT suite — pytest invoked with no selector "
         f"flag and no positional. Found invocations: {argvs}"
     )
+
+
+def test_no_workflow_env_narrows_pytest_selection():
+    """The fourteenth way, closed where it is actually closeable (#532 r6).
+
+    pytest assembles selection from FOUR places — argv, PYTEST_ADDOPTS, the
+    rootdir ini, and whichever ini `-c` names. Rounds 1-5 hardened the argv PARSE
+    and were right each time; this one is not reachable that way, because
+    `env: PYTEST_ADDOPTS: "-m eval_vec"` leaves the run: line byte-identical.
+    Not contrived — this workflow already sets tool-changing job-level env
+    at :72-74.
+
+    A RUN-SIDE CHECK CANNOT CLOSE IT AND I TRIED. A test asserting
+    option.markexpr matches the ini gets DESELECTED by the very narrowing it
+    exists to catch (measured: PYTEST_ADDOPTS="-m eval_vec" -> "10 deselected",
+    not a failure). Anything that narrows selection can narrow the guard out of
+    the run.
+
+    So: forbid the two sources a workflow edit can introduce. The rootdir ini is
+    covered run-side by test_local_only_suites._effective_markexpr (#538). In-process
+    reconfiguration — a pytest_configure hook, a -p plugin — is NOT covered by
+    anything here and cannot be; #538's docstring says so too.
+    """
+    doc = yaml.safe_load(WORKFLOW.read_text())
+    envs = [("workflow", doc.get("env") or {})]
+    for name, job in doc["jobs"].items():
+        envs.append((name, job.get("env") or {}))
+        for st in job.get("steps") or []:
+            envs.append((f"{name}/step", st.get("env") or {}))
+
+    offenders = [(where, e["PYTEST_ADDOPTS"]) for where, e in envs if "PYTEST_ADDOPTS" in e]
+    assert not offenders, (
+        f"PYTEST_ADDOPTS set in the workflow ({offenders}) — it overrides the ini and "
+        "wins over it, so a step whose run: line looks like a default-suite run can be "
+        "silently narrowed. That is #535's shape past the guard written to prevent it."
+    )
+
+
+def test_the_default_suite_step_names_no_alternate_ini():
+    """`-c other.ini` is inside argv but past the parser: `-c` is in _VALUED so its
+    value is skipped unread, and an ini whose addopts narrows selects identically
+    (#532 r6, measured: survives the argv guard, produces "1 passed, 1 deselected").
+    """
+    for job in ("test", "eval-vec"):
+        for line in (str(s.get("run", "")) for s in _job_steps(job)):
+            argv = _pytest_argv(line)
+            if argv is None or not _is_default_suite(argv):
+                continue
+            assert "-c" not in argv and not any(a.startswith("--config-file") for a in argv), (
+                f"the default-suite invocation in {job} names an alternate ini: {argv}. "
+                "Its addopts can narrow selection without changing anything this guard reads."
+            )
