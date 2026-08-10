@@ -136,9 +136,12 @@ ARCHIVIST_KNOWLEDGE_TARGET = "sink:archivist_knowledge"
 # this rather than carrying its own copy of the target name: a literal typed next
 # to the thing it describes is a copy, not a mechanism, and it drifts the moment
 # either side moves (techne#1022, and the #508 review that found the same shape
-# five times). `test_ledger_targets_covers_every_prefilter` binds this set to the
-# code that actually reads outbox history, so adding a second pre-filter without
-# declaring it fails the suite.
+# five times). `sync.outbox.delivered_hashes` is what BINDS this set: it refuses a
+# target that is not in it, so any caller that reads enqueue history through the
+# accessor must declare its lane. That is the enforceable half — a pre-filter
+# that queries the table directly, without the accessor, is NOT prevented by
+# anything here (see delivered_hashes' docstring for what it does and does not
+# guarantee).
 LEDGER_TARGETS = frozenset({ARCHIVIST_KNOWLEDGE_TARGET})
 
 

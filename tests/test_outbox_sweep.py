@@ -330,6 +330,53 @@ def test_reading_enqueue_history_requires_a_declared_lane():
         delivered_hashes(Path("/nonexistent.db"), "sink:undeclared_lane")
 
 
+def test_no_undeclared_inlined_prefilter():
+    """A LEAKY DETECTOR, and labelled as one — not a guarantee.
+
+    `delivered_hashes` enforces the strong half (call it, declare your lane) but
+    cannot see a pre-filter that queries the table directly. r3 retired the old
+    lexical guard for being evadable and thereby traded a leaky detector for
+    NONE — a real regression, even though retiring it was right: a guard whose
+    precision rested on where semicolons fell was not holding the invariant.
+
+    This is the honest version. It catches the INLINED form — the shape the
+    archivist itself used until r3 — by looking for a dedup-shaped query: the
+    content_hash / outbox / target triple in one statement, either order.
+
+    WHAT IT MISSES, stated rather than implied: indirection. A consumer calling
+    a helper in sync/outbox.py is invisible here, which is exactly why the
+    accessor exists. Two mechanisms, two coverage gaps, neither pretending to be
+    the other.
+    """
+    import re
+    from pathlib import Path
+
+    import techne
+
+    root = Path(techne.__file__).parent
+    pattern = re.compile(
+        r"(content_hash\b[^;]*?\bFROM\s+outbox|\bFROM\s+outbox\b[^;]*?content_hash)",
+        re.I | re.S,
+    )
+    offenders = sorted(
+        str(p.relative_to(root))
+        for p in root.rglob("*.py")
+        if not (p.name == "outbox.py" and p.parent.name == "sync")
+        and pattern.search(p.read_text())
+        and "target" in p.read_text()
+    )
+
+    assert offenders == [], (
+        f"these modules inline a dedup-shaped outbox query instead of calling "
+        f"delivered_hashes: {offenders}. Route the read through the accessor so "
+        f"the lane is declared — or, if it is not reading enqueue history back "
+        f"(a plain COUNT or a status display is not), narrow this assertion "
+        f"rather than adding the target to LEDGER_TARGETS. Adding a non-ledger "
+        f"lane there switches it from age-out to collapse-only, which is the "
+        f"unbounded growth #518 exists to fix."
+    )
+
+
 def test_the_prefilter_goes_through_the_accessor(config):
     """The accessor is only a mechanism if the real pre-filter uses it.
 

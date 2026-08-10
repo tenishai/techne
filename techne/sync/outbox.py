@@ -456,10 +456,20 @@ def delivered_hashes(db_path: Path, target: str) -> set[str]:
     semantics anywhere near it. Its precision rested on where semicolons happened
     to fall.
 
-    So the invariant is enforced HERE instead, where it cannot be evaded by
-    spelling: a caller either declares its lane in `LEDGER_TARGETS` or this
-    raises on the first call. A new pre-filter cannot be written that the
-    retention policy does not know about.
+    So the enforceable half lives HERE instead. WHAT THIS GUARANTEES, stated so it
+    is falsifiable: IF YOU CALL `delivered_hashes`, YOU MUST DECLARE YOUR LANE.
+
+    WHAT IT DOES NOT: it cannot stop a pre-filter that queries the table
+    directly. `connect` is freely importable and three modules already do
+    (core/state.py, core/checks.py, core/database.py), so nothing prevents a
+    fourth from inlining the same SELECT with an undeclared target. An earlier
+    version of this docstring claimed "a new pre-filter cannot be written that
+    the retention policy does not know about" — that was false, and a confident
+    sentence over a weaker mechanism is worse than no sentence, because it
+    recruits the next reader into trusting a guarantee that is not there.
+
+    `test_no_undeclared_inlined_prefilter` is a leaky detector for the inlined
+    case, and says so; between them they cover the two ways this gets written.
     """
     from techne.core.archivist import LEDGER_TARGETS
 
