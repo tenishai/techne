@@ -26,6 +26,7 @@ from pathlib import Path
 
 # The gate reads bounded projections of tool output, so it needs the writer's
 # budget and marker to tell a complete record from a cut one (techne#438).
+from techne.core.redaction import REDACTION_MARKER
 from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, was_elided
 
 # Tool names that are NOT agent deeds — meta-records or user-side events.
@@ -715,8 +716,99 @@ def _output_was_bounded(output_text: str) -> bool:
     output that is genuinely complete at exactly the budget is misread as bounded;
     that costs a verdict of ``unverifiable`` instead of ``backed``, which is the
     direction this whole class of bug should fail in.
+
+    THE LENGTH TEST IS ONLY SOUND WHEN THE STORED TEXT IS THE CUT TEXT (techne#441).
+    ``redact_credentials`` runs BEFORE storage and substitutes ``<redacted:tag>``
+    for each match, so a legacy row cut at exactly the budget can be stored BELOW
+    it and read as authoritative — the bad direction, since an unflagged row can
+    carry a green verdict. A redacted row therefore has an UNKNOWABLE original
+    length, and "we cannot determine it" is a different fact from "it was under
+    budget"; collapsing them is what produced this bug. Treated as bounded.
+
+    Deliberately NOT widened by a shrinkage allowance: replacement is shorter than
+    the secret by an UNBOUNDED amount, so any constant is a number nobody can
+    justify — it would flag more intact rows than this does and still miss the
+    large-shrinkage cases.
+
+    IT HAS NOT FIRED YET, AND THAT RESTS ON ONE LEG, NOT FOUR. Setting the flag
+    only changes a verdict when a row is simultaneously a test-runner command,
+    parseable, failure-free AND redacted — but the first three are ORDINARY, not
+    rare: 413 rows satisfy them, 408 of those short and unmarked so the redaction
+    clause ALONE decides. They are what a green suite run looks like. Nothing has
+    fired because credential-shaped text happens to be absent from green runner
+    output — a fact about CONTENT, not about structure.
+
+    THAT PREDICATE, STATED so the number is reproducible: for each Bash row take
+    ``_bash_output(content)``; take the command as ``content.partition(_BASH_OUTPUT_MARKER)[0]``
+    minus its ``Ran: `` prefix — the SAME extraction the caller uses, not a
+    hand-rolled split, which is what produced an earlier and irreproducible 475;
+    require ``_command_runs_tests(command)``, ``_parse_test_output`` returning any
+    non-None, and neither failures nor errors above zero. Those are exactly the
+    clauses ``_row_totals_unreliable`` applies BEFORE it consults this function.
+
+    CREDENTIAL-SHAPED TEXT DOES REACH RUNNER OUTPUT HERE — ONE ROW TODAY. That is
+    the honest form of the argument. An earlier version of this note claimed a
+    cabal ``test_secrets_endpoint.py`` row was "inert only because a grep stripped
+    the summary line — delete the pipe and all four legs hold". FALSE: that row's
+    stored output is a pytest TRACEBACK, so it is a FAILING run, and the leg that
+    disarms it is FAILURE-FREE, which no edit to the pipe can cross. Under ``-q`` a
+    passing run through that row's own filter keeps nothing at all. Reaching the
+    conjunction needs a different run — one that passes — not one keystroke.
+
+    SO WATCH THE INTERSECTION, NOT THE STOCK. Re-measuring the 408 is the wrong
+    instruction: it is a stock that grows monotonically as the repo acquires
+    tests, every member already known NOT to be redacted, so it moves while the
+    risk does not — a watchdog barking at your own suite getting bigger. The
+    observable that moves only when the hazard moves is RUNNER ROWS WHOSE OUTPUT
+    CARRIES THE MARKER, regardless of parseability or outcome. That is 1 today.
+    If it climbs, REPLACE the length test rather than re-justify it.
+
+    (An even earlier version said to re-check "whether the conjunction has started
+    occurring". Unexecutable: when it fires a verdict quietly becomes
+    ``unverifiable`` — no alarm, no counter, nobody told. It read as a safeguard
+    and functioned as a comment.)
+
+    THREE THINGS MAKE IT IMPRECISE, and the third dominates the live data:
+
+    * NO AGE DISCRIMINATOR EXISTS. A post-#437 row that was never cut carries no
+      marker either, so it is indistinguishable by content from a legacy cut.
+    * BACKFILL REGENERATES IT. Re-summarising runs ``_preview`` (verbatim, under
+      budget, no marker) then redaction, which puts the marker back.
+    * THE MARKER CANNOT TELL A TOKEN WE WROTE FROM THE SAME LITERAL ARRIVING FOR
+      ANY OTHER REASON. Every flipped row inspected is a short, complete output
+      that merely CONTAINS a credential shape — `.env` dumps, a JWT in a signed
+      URL, a PEM block in a values.yaml, two of them output ABOUT redaction.
+
+    MEASURED 2026-08-10 (read-only; the ledger grows, so treat counts as as-of)
+    over 6195 Bash rows, on ``_bash_output(content)`` — the string the gate reads,
+    NOT the whole observation row. Measuring the row inflates lengths by the
+    ``Ran: …\nOutput: `` prefix, counts a marker in the COMMAND as a flip, and
+    misses rows whose row exceeds the budget while their output does not. Result:
+    15 flips, lengths 290-1989, median 840, three within 10% of the budget.
+    REPRODUCE with ``_bash_output`` + ``was_elided`` + ``len(...) < _PREVIEW_MAX_CHARS``
+    + ``REDACTION_MARKER``. All four: the length clause is not optional, and
+    omitting it yields 16 rather than 15, because a flip is only a flip when the
+    clauses above it did not already return True.
+
+    NO TRUE-POSITIVE COUNT IS QUOTED. Any estimate would come from
+    proximity-to-budget, and the paragraph above rejecting a shrinkage allowance
+    — shorter by an UNBOUNDED amount — is exactly the argument that this proxy is
+    weak. Length cannot identify a true positive; that is the premise of the fix.
+
+    A TIMESTAMP DISCRIMINATOR IS NOT SOUND AT DAY GRANULARITY, and this dataset
+    contains the counterexample. #437 merged at 2026-08-01T20:22:17Z; against
+    that INSTANT the split is 12 before / 3 after, and one flip lands at
+    19:00:51Z ON THE MERGE DAY, where a date comparison yields a coin-toss
+    between ``<`` and ``<=`` rather than an answer. (#515's two-format problem is
+    a separate and lesser issue here — it breaks sub-day ordering at position 10
+    — but three of the fifteen timestamps carry no zone at all.) The gate would
+    remove three of fifteen. Not built.
     """
-    return was_elided(output_text) or len(output_text) >= _PREVIEW_MAX_CHARS
+    if was_elided(output_text):
+        return True
+    if len(output_text) >= _PREVIEW_MAX_CHARS:
+        return True
+    return REDACTION_MARKER.search(output_text) is not None
 
 
 def _parse_test_output(text: str) -> tuple[int | None, int | None, int | None]:
