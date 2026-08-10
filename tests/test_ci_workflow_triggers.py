@@ -285,17 +285,26 @@ def _marker_expr(argv: list[str]) -> str | None:
     `-m X`, `-mX`, `--markexpr X`, `--markexpr=X`. Used to assert a step still
     runs a specific gate WITHOUT a substring scan over the raw `run:` text, which
     passes on a commented-out step (#532 r8).
+
+    LAST WINS, NOT FIRST (#532 r9). `--markexpr` is a plain `store` action, so a
+    later `-m` overwrites an earlier one. Returning the first match reported the
+    expression pytest is NOT selecting with. Measured on this file:
+        pytest … -m eval_vec                      -> 12 deselected
+        pytest … -m eval_vec -m "not eval_vec"    -> 12 passed   (the LAST won)
+    So a gate line edited to `-m eval_vec -m "not eval_vec"` runs zero eval_vec
+    tests, goes green, and a first-match helper asserts the gate still runs —
+    the r8 substring-scan defect one layer in, with the literal `-m eval_vec`
+    sitting on the line being exactly what makes it read as compliance.
     """
-    it = iter(range(len(argv)))
-    for i in it:
-        a = argv[i]
+    found = None
+    for i, a in enumerate(argv):
         if a in ("-m", "--markexpr"):
-            return argv[i + 1] if i + 1 < len(argv) else None
-        if a.startswith("--markexpr="):
-            return a.split("=", 1)[1]
-        if a.startswith("-m") and len(a) > 2 and not a.startswith("--"):
-            return a[2:]
-    return None
+            found = argv[i + 1] if i + 1 < len(argv) else None
+        elif a.startswith("--markexpr="):
+            found = a.split("=", 1)[1]
+        elif a.startswith("-m") and len(a) > 2 and not a.startswith("--"):
+            found = a[2:]
+    return found
 
 
 def _is_default_suite(argv: list[str]) -> bool:
@@ -369,10 +378,19 @@ def test_no_workflow_env_narrows_pytest_selection():
     EXCLUDES THIS FILE. Nothing here carries a marker, so a SELECTING expression
     drops it and a NEGATING one keeps it. Measured, value in force:
 
+    Counts below are for `pytest tests/test_ci_workflow_triggers.py
+    tests/test_local_only_suites.py`. THE SETUP IS PART OF THE NUMBER (#532 r9):
+    the first three rows only need the value IN FORCE, but the CAUGHT row also
+    needs the `env:` actually written into test.yml, because two of the tests it
+    trips READ THE WORKFLOW. Both spellings measured, and they differ:
+
         PYTEST_ADDOPTS="-m eval_vec"     -> 21 deselected   guard never runs
         PYTEST_ADDOPTS="-m probe"        -> 21 deselected   guard never runs
         PYTEST_ADDOPTS="-k zzznomatch"   -> 21 deselected   guard never runs
-        PYTEST_ADDOPTS="-m 'not eval'"   -> 2 failed, 19 passed      CAUGHT
+        PYTEST_ADDOPTS="-m 'not eval'", in force only
+                                         -> 2 failed, 19 passed      CAUGHT
+        the same, ALSO injected into test.yml (the real mutant)
+                                         -> 4 failed, 17 passed      CAUGHT
         (no PYTEST_ADDOPTS)              -> 21 passed
 
     So the WIDENING case — the one that drops the local-only exclusions, which is
