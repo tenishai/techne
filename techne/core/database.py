@@ -98,22 +98,26 @@ def backfill_timestamp_formats(conn) -> int:
                 continue
             cur = conn.execute(
                 f"""UPDATE {table}
-                       SET {column} = replace(substr({column}, 1, 19), 'T', ' ')
+                       SET {column} = strftime('%Y-%m-%d %H:%M:%S', {column})
                      WHERE {column} IS NOT NULL
                        AND substr({column}, 11, 1) = 'T'
-                       -- REFUSE A NON-UTC OFFSET. substr(1,19) keeps WALL CLOCK
-                       -- and drops the zone, so `...T00:19:00-04:00` would be
-                       -- rewritten as 00:19:00 — a 4-hour skew, the exact failure
-                       -- this migration exists to prevent, introduced by its own
-                       -- remedy. Python's normalize_timestamp() converts properly;
-                       -- SQL cannot, so here it declines instead of guessing.
-                       -- No such row exists today (outbox.synced_at is uniformly
-                       -- +00:00); this keeps that from becoming load-bearing.
-                       AND instr(substr({column}, 20), '-') = 0
-                       AND (
-                            instr(substr({column}, 20), '+') = 0
-                         OR substr({column}, 20) LIKE '%+00:00'
-                       )"""
+                       -- strftime CONVERTS an offset to UTC; it does not truncate.
+                       -- An earlier version used substr(...,1,19)+replace and
+                       -- therefore had to REFUSE offset-bearing rows, on the
+                       -- premise that SQL could not convert them. False: strftime
+                       -- agrees with normalize_timestamp() on every shape,
+                       -- including -04:00 and +05:30. The refusal was machinery
+                       -- guarding a limitation that did not exist, and it was
+                       -- silent AND permanent — _migrate discards the return
+                       -- value and can never re-run, so a refused row stayed
+                       -- non-conforming forever in a column whose whole purpose
+                       -- is lexical ordering.
+                       -- THIS GUARD IS LOAD-BEARING: strftime returns NULL on an
+                       -- unparseable value ('not a timestamp', '2026-13-45T…'),
+                       -- so without it the UPDATE would NULL those rows out —
+                       -- worse than leaving them alone. With it, "an unrecognised
+                       -- shape survives intact" still holds.
+                       AND strftime('%Y-%m-%d %H:%M:%S', {column}) IS NOT NULL"""
             )
             changed += cur.rowcount
     return changed

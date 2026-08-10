@@ -359,17 +359,17 @@ def test_step_23_actually_runs_the_backfill(tmp_path):
     assert ea == "2026-08-08 00:18:00", f"step 23 did not backfill event_at: {ea!r}"
 
 
-def test_backfill_refuses_a_non_utc_offset(tmp_path):
-    """SQL truncation keeps WALL CLOCK and drops the zone.
+def test_backfill_converts_a_non_utc_offset(tmp_path):
+    """SQL CONVERTS the offset; it does not truncate, and must not refuse.
 
-    `...T00:19:00-04:00` rewritten as `00:19:00` is a 4-hour skew — the exact
-    failure this migration exists to prevent, reintroduced by its own remedy.
-    Python's `normalize_timestamp` converts properly; SQL cannot, so it declines.
-    No such row exists today, which is precisely why the guard belongs here
-    before someone widens the map onto a column that has them.
+    An earlier version used substr(...,1,19)+replace, which keeps WALL CLOCK and
+    drops the zone, so it had to REFUSE offset-bearing rows. That rested on
+    "Python can convert, SQL cannot" — false: strftime agrees with
+    normalize_timestamp on every shape, including -04:00 and +05:30. The refusal
+    was also silent AND permanent: _migrate discards the return value and can
+    never re-run, so a refused row stayed non-conforming forever in a column that
+    exists to sort lexically.
     """
-    import sqlite3
-
     db = tmp_path / "t.db"
     init_db(db).close()
     conn = connect(db)
@@ -386,8 +386,78 @@ def test_backfill_refuses_a_non_utc_offset(tmp_path):
     finally:
         conn.close()
 
-    assert stored == "2026-08-08T00:19:00-04:00", (
-        "the offset row was truncated to wall clock — that is a 4-hour skew"
+    assert stored == "2026-08-08 04:19:00", f"offset not converted to UTC: {stored!r}"
+    assert stored == normalize_timestamp("2026-08-08T00:19:00-04:00"), (
+        "the SQL backfill and normalize_timestamp disagree on this shape"
     )
-    # And the Python path, which CAN convert, still does.
-    assert normalize_timestamp("2026-08-08T00:19:00-04:00") == "2026-08-08 04:19:00"
+
+
+def test_backfill_does_not_null_out_an_unparseable_value(tmp_path):
+    """The strftime IS NOT NULL guard is load-bearing.
+
+    strftime returns NULL on 'not a timestamp' and on '2026-13-45T99:99:99'
+    (both checked), so without the guard the UPDATE would NULL those rows out —
+    strictly worse than leaving them alone, because it destroys the row's place
+    in the ledger rather than merely failing to improve it.
+    """
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    conn = connect(db)
+    try:
+        _seed_session(conn)
+        for bad in ("2026-13-45T99:99:99", "garbage-value-that-exceeds-19-chars"):
+            conn.execute(
+                "INSERT INTO observations (session_id, tool_name, content, tier, timestamp) "
+                "VALUES ('s','Bash','x','hot',?)",
+                (bad,),
+            )
+        conn.commit()
+        backfill_timestamp_formats(conn)
+        conn.commit()
+        rows = [r[0] for r in conn.execute("SELECT timestamp FROM observations ORDER BY id")]
+    finally:
+        conn.close()
+
+    assert rows == ["2026-13-45T99:99:99", "garbage-value-that-exceeds-19-chars"], (
+        f"an unparseable value was nulled out or rewritten: {rows}"
+    )
+
+
+def test_the_documented_api_path_stores_the_canonical_shape(tmp_path, monkeypatch):
+    """event_at is CALLER-SUPPLIED, and both public surfaces ask for ISO-8601.
+
+    The MCP tool schema and the `--event-at` CLI flag both document it as
+    "ISO-8601 event time" — the exact shape migration 023 exists to eliminate.
+    The four transcript-importer sites normalised; this one did not, so a
+    supported path re-introduced the defect into a column this migration
+    repairs. It is invisible in a census of existing rows because event_at is
+    usually NULL on live capture, so it only appears when a caller supplies it,
+    and `_migrate` can never re-run to clean it up.
+
+    Exercised through `record_observation`, not by calling the normaliser.
+    """
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    from techne.config import Config
+    from techne.core.state import record_observation, start_session
+
+    cfg = Config.load()
+    init_db(cfg.db_path).close()
+    sid = start_session(cfg.db_path)
+
+    # record_observation takes the CONFIG, and everything after content is
+    # keyword-only — this is the shape the MCP tool and the CLI call.
+    record_observation(cfg, sid, "ran a thing", tool_name="Bash", event_at="2026-08-08T00:19:00Z")
+
+    conn = connect(cfg.db_path)
+    try:
+        stored = conn.execute(
+            "SELECT event_at FROM observations WHERE session_id = ?", (sid,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert stored == "2026-08-08 00:19:00", (
+        f"the documented API stored {stored!r} — a 00:19 ISO row sorts ABOVE a "
+        f"23:00 canonical row on the same date, so health.py's "
+        f"MAX(COALESCE(event_at, timestamp)) reads it as the latest activity"
+    )
