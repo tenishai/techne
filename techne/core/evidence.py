@@ -733,26 +733,40 @@ def _output_was_bounded(output_text: str) -> bool:
     IT HAS NOT FIRED YET, AND THAT RESTS ON ONE LEG, NOT FOUR. Setting the flag
     only changes a verdict when a row is simultaneously a test-runner command,
     parseable, failure-free AND redacted — but the first three are ORDINARY, not
-    rare: 475 rows on this ledger satisfy them, 469 of those short and unmarked
-    so the redaction clause ALONE decides. They are what a green suite run looks
-    like. So nothing has fired because credential-shaped text happens to be
-    absent from green runner output — a fact about content, not about structure.
+    rare: 413 rows satisfy them, 408 of those short and unmarked so the redaction
+    clause ALONE decides. They are what a green suite run looks like. Nothing has
+    fired because credential-shaped text happens to be absent from green runner
+    output — a fact about CONTENT, not about structure.
 
-    THE TRIGGER IS ALREADY HERE. One of the fifteen flips is a cabal pytest run
-    over `test_secrets_endpoint.py` that satisfies runs-tests AND redacted, and
-    is inert only because the invocation piped through `grep … | head -12`, which
-    stripped the `N passed` line and failed the parseable leg. Delete the pipe and
-    all four hold. A 75-character passing run that echoes one config line first is
-    enough to flip a plainly complete row to `unverifiable`.
+    THAT PREDICATE, STATED so the number is reproducible: for each Bash row take
+    ``_bash_output(content)``; take the command as ``content.partition(_BASH_OUTPUT_MARKER)[0]``
+    minus its ``Ran: `` prefix — the SAME extraction the caller uses, not a
+    hand-rolled split, which is what produced an earlier and irreproducible 475;
+    require ``_command_runs_tests(command)``, ``_parse_test_output`` returning any
+    non-None, and neither failures nor errors above zero. Those are exactly the
+    clauses ``_row_totals_unreliable`` applies BEFORE it consults this function.
 
-    SO RE-MEASURE THE NEAR MISS, NOT THE CONJUNCTION. An earlier version of this
-    note said to re-check "whether the conjunction has started occurring", which
-    is unexecutable: when it fires a verdict quietly becomes `unverifiable` — no
-    alarm, no counter, nobody told. It read as a safeguard and functioned as a
-    comment. The near-miss population is observable today and moves smoothly:
-    re-measure those 469 alongside the flip count, and if credential-shaped
-    strings start appearing in green runner output at all, REPLACE the length
-    test rather than re-justify it.
+    CREDENTIAL-SHAPED TEXT DOES REACH RUNNER OUTPUT HERE — ONE ROW TODAY. That is
+    the honest form of the argument. An earlier version of this note claimed a
+    cabal ``test_secrets_endpoint.py`` row was "inert only because a grep stripped
+    the summary line — delete the pipe and all four legs hold". FALSE: that row's
+    stored output is a pytest TRACEBACK, so it is a FAILING run, and the leg that
+    disarms it is FAILURE-FREE, which no edit to the pipe can cross. Under ``-q`` a
+    passing run through that row's own filter keeps nothing at all. Reaching the
+    conjunction needs a different run — one that passes — not one keystroke.
+
+    SO WATCH THE INTERSECTION, NOT THE STOCK. Re-measuring the 408 is the wrong
+    instruction: it is a stock that grows monotonically as the repo acquires
+    tests, every member already known NOT to be redacted, so it moves while the
+    risk does not — a watchdog barking at your own suite getting bigger. The
+    observable that moves only when the hazard moves is RUNNER ROWS WHOSE OUTPUT
+    CARRIES THE MARKER, regardless of parseability or outcome. That is 1 today.
+    If it climbs, REPLACE the length test rather than re-justify it.
+
+    (An even earlier version said to re-check "whether the conjunction has started
+    occurring". Unexecutable: when it fires a verdict quietly becomes
+    ``unverifiable`` — no alarm, no counter, nobody told. It read as a safeguard
+    and functioned as a comment.)
 
     THREE THINGS MAKE IT IMPRECISE, and the third dominates the live data:
 
