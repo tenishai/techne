@@ -576,7 +576,7 @@ class TestNoFalseGreens:
         assert "1 stale (edited since embedding)" in cov.detail
         assert cov.remedy == "techne vectors backfill"
 
-    def test_a_dangling_vector_is_reported_but_carries_no_remedy(self, config):
+    def test_a_dangling_vector_is_reported_in_the_detail_not_the_verdict(self, config):
         """The mutation that survived the whole suite (#497 review, finding 1).
 
         Reverting `embedded` to a raw `COUNT(*) FROM knowledge_vec_rowids` passed
@@ -585,12 +585,27 @@ class TestNoFalseGreens:
         which is reachable: `knowledge.delete()` and the pattern cleanup both
         delete through a plain `connect()`, which cannot touch a vec0 table.
 
-        AND IT MUST NOT FAIL THE CHECK. The purge deletes `WHERE rowid IN (SELECT
-        id FROM knowledge WHERE superseded_by IS NOT NULL)` — it selects FROM
-        knowledge, so a rowid with no row behind it is never matched (verified:
-        purge removed 0 of 2). Failing here would attach a remedy that cannot
-        clear the finding, which is precisely the never-green defect #496 fixed.
-        Visible in the detail, absent from the verdict.
+        AND IT MUST NOT FAIL THE CHECK — but NOT for the reason this docstring
+        gave until #408. The original reason was that no remedy existed:
+        `_purge_superseded_knowledge_vec` deletes `WHERE rowid IN (SELECT id FROM
+        knowledge WHERE superseded_by IS NOT NULL)`, which selects FROM knowledge,
+        so a rowid with no row behind it was never matched (verified: purge
+        removed 0 of 2), and failing would have attached a remedy that could not
+        clear the finding — the never-green defect #496 fixed.
+
+        THAT REASON EXPIRED. #408 shipped `_purge_orphaned_vec`, which deletes
+        `WHERE rowid NOT IN (SELECT id FROM knowledge)` — the same predicate and
+        the same population the `dangling` count uses — so the remedy now clears
+        this finding exactly (executed through the real functions: dangling=1 ->
+        backfill_vectors -> {'orphans_swept': 1} -> dangling=0). The assertions
+        below did not change, which is the point worth flagging: they pass under
+        both the true and the false explanation, so nothing here would ever have
+        prompted a reader to notice the premise had rotted.
+
+        THE CURRENT REASON, smaller and different: folding `dangling` into the
+        verdict changes `techne doctor` output on live stores and belongs in its
+        own change. Visible in the detail, absent from the verdict — for now, by
+        choice, not because it is unremediable.
         """
         from techne.core.database import connect
         from techne.core.knowledge import store
@@ -611,7 +626,11 @@ class TestNoFalseGreens:
 
         cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
         # The live population is whole, so the check is GREEN...
-        assert cov.verdict is Verdict.LIVE, f"dangling must not create an unclearable red: {cov}"
+        assert cov.verdict is Verdict.LIVE, (
+            f"dangling is reported in the detail, not the verdict — flipping it is a "
+            f"deliberate follow-up (it moves doctor output on live stores), NOT a "
+            f"claim that #408's purge cannot clear it: {cov}"
+        )
         assert cov.remedy is None
         # ...but the dangling vector is NOT swallowed.
         assert "1 dangling vector(s) with no knowledge row" in cov.detail
@@ -907,14 +926,60 @@ class TestInitRemedy:
         cfg.platform = "opencode"
         assert init_remedy(cfg) is None
 
-    def test_remedy_carries_the_operators_posture_not_a_literal(self):
+    def test_remedy_carries_the_operators_posture_not_a_literal(self, tmp_path):
+        """An ESTABLISHED posture is preserved verbatim.
+
+        `loaded_from` is what makes spool-primary a choice rather than an
+        accident of the dataclass: without a config.yaml there is nothing to
+        preserve, and this test would be asserting that we pin a default
+        (techne#480).
+        """
+        from techne.config import Config
+        from techne.core.checks import init_remedy
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("platform: claude-code\nposture:\n  mode: spool-primary\n")
+
+        cfg = Config()
+        cfg.platform = "claude-code"
+        cfg.posture.mode = "spool-primary"
+        cfg.loaded_from = config_file
+        assert init_remedy(cfg) == "techne init --platform claude-code --posture spool-primary"
+
+    def test_remedy_asks_for_auto_when_the_machine_was_never_initialised(self):
+        """techne#480 — the neighbouring case the posture guard was over-applied to.
+
+        No config.yaml means posture.mode is the dataclass default `observe`,
+        not a preserved answer. Pinning it there suppresses the auto-detection
+        that would have found spool-primary from the CC memory on disk, and
+        freezes a first install into the weakest posture — doing the exact
+        harm the guard exists to prevent, one case over.
+        """
         from techne.config import Config
         from techne.core.checks import init_remedy
 
         cfg = Config()
         cfg.platform = "claude-code"
-        cfg.posture.mode = "spool-primary"
-        assert init_remedy(cfg) == "techne init --platform claude-code --posture spool-primary"
+        assert cfg.loaded_from is None, "a directly-constructed Config has no file"
+        assert cfg.posture.mode == "observe", "the default this must NOT pin"
+
+        assert init_remedy(cfg) == "techne init --platform claude-code --posture auto"
+
+    def test_never_initialised_still_inherits_the_platform_guard(self):
+        """The new branch must not become a second surface that skips a guard.
+
+        init_remedy has ONE builder precisely so a new case cannot be added
+        without inheriting both guards (#469 review 7, critical 2). The
+        never-initialised branch is inside it, so an off-platform machine still
+        gets no remedy at all.
+        """
+        from techne.config import Config
+        from techne.core.checks import init_remedy
+
+        cfg = Config()
+        cfg.platform = "opencode"
+        assert cfg.loaded_from is None
+        assert init_remedy(cfg) is None
 
     def test_healthy_hooks_carry_no_remedy(self, tmp_path):
         """The verdict gate, which was unpinned.
@@ -2007,3 +2072,46 @@ def test_a_detached_head_is_not_a_deployment_either(config, tmp_path, monkeypatc
     r = TestRuntimeRevision._check(config, runtime, monkeypatch)
     assert r.verdict is Verdict.DORMANT and r.ok, r.detail
     assert "detached" in r.detail, r.detail
+
+
+def test_init_remedy_is_the_only_place_the_init_hint_is_spelled():
+    """The card's claim, made structural (techne#480, PR #525 review issue 1).
+
+    `docs/arch/liveness.md` asserts "A REMEDY IS BUILT, NEVER SPELLED —
+    init_remedy(config) is the single builder". That was FALSE when the claim
+    was written: `techne status` (cli.py) and the session-start drift banner
+    each interpolated `config.posture.mode` by hand, so the same machine got
+    `--posture auto` from doctor and `--posture observe` from status, and an
+    operator following the second was demoted exactly as #480 describes.
+
+    This guard can actually fail: the hint lives in core/checks.py and the scan
+    covers every OTHER module under techne/, so a hand-spelled hint trips it —
+    interpolated OR hardcoded. Scope: techne/ only; scripts/, integrations/ and
+    deploy/ are outside it (checked clean, but not guarded). (A
+    guard whose search space includes the thing that makes it pass cannot
+    fail — the trap poe_2 hit on a drift guard the same night.)
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "techne"
+    # BOTH spellings. The first version tested only `--posture {`, i.e. the
+    # f-string form — which tests the MECHANISM (don't interpolate by hand)
+    # rather than the INVARIANT (don't spell the hint). They come apart exactly
+    # at the literal `techne init --posture observe`, which contains no brace
+    # and is the form the card names as the demoting hazard. Three of the four
+    # routed sites could be regressed to it with the whole suite green.
+    # Keeping both: the brace tell still catches a split spelling like
+    # `"techne init " f"--posture {mode}"` that the literal tell would miss.
+    tells = ("--posture {", "techne init --posture")
+    builder = pathlib.Path("core/checks.py")  # by PATH, not basename
+
+    offenders = sorted(
+        str(f.relative_to(root))
+        for f in root.rglob("*.py")
+        if any(t in f.read_text() for t in tells) and f.relative_to(root) != builder
+    )
+
+    assert offenders == [], (
+        "these modules spell the `techne init --posture …` hint by hand instead of "
+        f"calling init_remedy(), so they do not inherit its platform/posture guards: {offenders}"
+    )

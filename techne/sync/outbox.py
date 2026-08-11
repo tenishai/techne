@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from techne.core.database import connect
+from techne.core.database import TIMESTAMP_FORMAT, connect
 from techne.sync.adapter import OutboxEntry, SyncAdapter
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,7 @@ def flush(db_path: Path, adapter: SyncAdapter) -> tuple[int, int]:
                 f"were in the batch — this violates the PushResult contract"
             )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
         synced_ids = [e.id for e in entries[: result.synced]]
         failed_ids = [e.id for e in entries[result.synced : result.synced + result.failed]]
 
@@ -254,7 +254,7 @@ def _try_deliver_now(db_path: Path, sink, row_id: int, data: dict) -> None:
 
 
 def _update_row_status(db_path: Path, row_id: int, result) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
     conn = connect(db_path)
     try:
         if result.ok:
@@ -286,7 +286,7 @@ def _load_pending_grouped_by_target(conn) -> dict[str, list]:
 
 
 def _mark_synced(conn, row_id: int) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
     conn.execute(
         "UPDATE outbox SET status = 'synced', synced_at = ? WHERE id = ?",
         (now, row_id),
@@ -448,9 +448,25 @@ _SWEEP_AGED = """
        -- sync 7-14 days old — precisely a lane that has just started backing up.
        -- Same class as the bug the first tombstone fixes, caught on one axis and
        -- not the other: an aggregate the check reads, destroyed by retention.
+       -- TIE-BROKEN BY id, and that is load-bearing (#528 r7, found by #531).
+       -- This was `GROUP BY target HAVING synced_at = MAX(synced_at)`, which is
+       -- ambiguous when two rows share a synced_at: SQLite then returns an
+       -- ARBITRARY row's id, and it returned the OLDER one — protecting the row
+       -- the sweep should remove and leaving the newest unprotected.
+       -- It never showed up because `synced_at` used to be written with
+       -- .isoformat(), whose MICROSECONDS made ties practically impossible. #531
+       -- normalised every timestamp to second precision, so two rows synced in
+       -- the same second now collide routinely — and they do, because a drain
+       -- stamps a whole batch with one `now`. The clause was depending on
+       -- precision it never declared, supplied by a different module.
        AND id NOT IN (
-             SELECT id FROM outbox WHERE status = 'synced'
-              GROUP BY target HAVING synced_at = MAX(synced_at))
+             SELECT o.id FROM outbox o
+              WHERE o.status = 'synced'
+                AND NOT EXISTS (
+                      SELECT 1 FROM outbox n
+                       WHERE n.target = o.target AND n.status = 'synced'
+                         AND (n.synced_at > o.synced_at
+                              OR (n.synced_at = o.synced_at AND n.id > o.id))))
 """
 
 

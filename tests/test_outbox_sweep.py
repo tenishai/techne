@@ -425,6 +425,52 @@ def test_no_undeclared_inlined_prefilter():
     )
 
 
+def test_the_second_tombstone_keeps_the_NEWEST_row_when_synced_at_ties(config):
+    """Two rows synced in the SAME SECOND must not protect the older one.
+
+    #528 r7, and the bug only became reachable when #531 landed. The clause was
+    `GROUP BY target HAVING synced_at = MAX(synced_at)`, which is ambiguous on a
+    tie — SQLite returns an arbitrary row's id, and it returned the OLDER one, so
+    the sweep protected the row it should delete and left the newest unprotected.
+
+    IT PASSED FOR MONTHS ON PRECISION IT NEVER DECLARED. `synced_at` was written
+    with `.isoformat()`, whose microseconds made ties practically impossible.
+    #531 normalised every on-disk timestamp to second precision and the tie became
+    routine — a drain stamps a whole batch with one `now`, so same-second pairs are
+    the normal case, not a corner.
+
+    Ties are constructed directly here rather than by racing two drains: the point
+    is the SQL's behaviour on equal values, and a timing-dependent test of a
+    timing-dependent bug pins nothing.
+    """
+    from techne.core.stores import plain_connect
+    from techne.sync.outbox import sweep_delivered
+
+    same = "2026-01-01 00:00:00"
+    conn = plain_connect(config.db_path)
+    for hid, created in (("h-older", "2020-01-01 00:00:00"), ("h-newer", "2020-01-02 00:00:00")):
+        conn.execute(
+            "INSERT INTO outbox (target, data_json, content_hash, status, created_at, synced_at) "
+            "VALUES (?, '{}', ?, 'synced', ?, ?)",
+            (NON_LEDGER, hid, created, same),
+        )
+    conn.commit()
+    conn.close()
+
+    sweep_delivered(config.db_path, cutoff="2021-01-01 00:00:00")
+
+    conn = plain_connect(config.db_path)
+    survivors = {r[0] for r in conn.execute(
+        "SELECT content_hash FROM outbox WHERE target = ?", (NON_LEDGER,)
+    )}
+    conn.close()
+    assert survivors == {"h-newer"}, (
+        "on a synced_at tie the sweep must keep the row with the greater id — the "
+        "NEWEST. Keeping the older one both destroys the lane's freshest sync "
+        f"evidence and leaves the stale row behind. Survivors: {survivors}"
+    )
+
+
 def test_the_first_tombstone_survives_an_out_of_band_write(config):
     """The `id NOT IN (SELECT MAX(id) ...)` clause has teeth — against the state
     that actually motivates it.

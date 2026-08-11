@@ -26,7 +26,8 @@ from pathlib import Path
 
 # The gate reads bounded projections of tool output, so it needs the writer's
 # budget and marker to tell a complete record from a cut one (techne#438).
-from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, was_elided
+from techne.core.redaction import REDACTION_MARKER
+from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, _skip_env_prefix, was_elided
 
 # Tool names that are NOT agent deeds — meta-records or user-side events.
 #
@@ -219,11 +220,29 @@ def _row_totals_unreliable(output_text: str, p: int | None, f: int | None, e: in
 # commit message that says "2209 passed" certified a green suite with no test run
 # (8 rows), and `ruff check` printing "Found 181 errors" turned a green window red
 # (29 rows) — the false-accusation direction techne#105 exists to prevent.
-_TEST_RUNNER_HEADS = frozenset({
-    "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "jasmine",
-    "ava", "karma", "rspec", "minitest", "phpunit", "behat", "ctest", "bats",
-    "gotestsum", "nextest", "unittest",
-})
+_TEST_RUNNER_HEADS = frozenset(
+    {
+        "pytest",
+        "py.test",
+        "tox",
+        "nox",
+        "jest",
+        "vitest",
+        "mocha",
+        "jasmine",
+        "ava",
+        "karma",
+        "rspec",
+        "minitest",
+        "phpunit",
+        "behat",
+        "ctest",
+        "bats",
+        "gotestsum",
+        "nextest",
+        "unittest",
+    }
+)
 
 # Heads that run tests only under a specific subcommand — `go test`, not `go build`.
 _TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
@@ -256,10 +275,24 @@ _TEST_RUNNER_SUBCOMMANDS: dict[str, frozenset[str]] = {
 
 # Interpreters and task runners that invoke a real runner as an argument:
 # `python -m pytest`, `uv run pytest`, `poetry run pytest`.
-_TEST_RUNNER_WRAPPERS = frozenset({
-    "python", "python3", "py", "uv", "poetry", "pdm", "hatch", "pipenv", "rye", "npx",
-    "bundle", "pipx", "pdm", "just",
-})
+_TEST_RUNNER_WRAPPERS = frozenset(
+    {
+        "python",
+        "python3",
+        "py",
+        "uv",
+        "poetry",
+        "pdm",
+        "hatch",
+        "pipenv",
+        "rye",
+        "npx",
+        "bundle",
+        "pipx",
+        "pdm",
+        "just",
+    }
+)
 
 # Modules a `-m` flag can name to mean "run the suite".
 _TEST_MODULES = frozenset({"pytest", "unittest", "nox", "tox"})
@@ -356,6 +389,149 @@ def _strip_heredoc_bodies(command: str) -> str:
     return "\n".join(kept)
 
 
+#: Shells whose ``-c`` argument is a nested script the gate must look inside.
+#: NOT added to `_TEST_RUNNER_WRAPPERS`: that set matches a head whose ARGUMENT
+#: is a runner, so `bash` there would make `bash -c 'echo 12 passed'` read as a
+#: test run — #440 through the front door.
+_SHELL_C_WRAPPERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+#: Short-option LETTERS that consume the next token as a value. Letters, not
+#: whole tokens, because POSIX getopt says only the LAST letter of a cluster may
+#: take a value — so one rule covers `-o`, `+o`, `-O`, `+O`, `-xo`, `-euo`,
+#: `-euxo` and `-co` at once. A token-based set could not see `-euo pipefail`
+#: (the clustered spelling of an idiom we already handled unclustered), and no
+#: amount of lengthening it would. Verified against bash 5.3.15: `bash -co
+#: pipefail 'echo MARKER'` prints MARKER, i.e. `o` took the value and the script
+#: is the token AFTER it. Keeping the hand-kept part to two letters is the point
+#: — the risk in such a list is proportional to its length. (Prudence, #521 r2.)
+#:
+#: CORRECTION TO THAT DERIVATION, measured 2026-08-07 and the reason the scanner
+#: counts value letters instead of testing only the last one. POSIX says only a
+#: cluster's final letter may take a value; REAL BASH DOES NOT CARE. Both shells
+#: on this machine run `-oc pipefail '<script>'`, and `-oc bogusopt` fails with
+#: "bogusopt: invalid option name" — so `o` ate the next token from the FRONT of
+#: the cluster. Measured, not read off a man page:
+#:
+#:   /usr/local/bin/bash 5.3.15 (the DEFAULT shell here)  -oc  -> runs
+#:   /bin/sh, /bin/bash        3.2.57 (Apple)             -oc  -> runs
+#:
+#: r3 nit 2 said bash 5.3 rejects this spelling and filed it as a curiosity of
+#: legacy /bin/sh. It does not, and it is not: under the last-letter rule this
+#: was a live false green on the shell that actually runs here.
+_SHELL_VALUE_LETTERS = frozenset({"o", "O"})
+
+#: Long options taking a separate value. No clustering applies to these.
+_SHELL_VALUE_LONG_OPTS = frozenset({"--rcfile", "--init-file"})
+
+#: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
+#: a command is pathological and the gate stops rather than recursing on input.
+_MAX_SHELL_C_DEPTH = 3
+
+
+def _expand_shell_c(segments: list[str], depth: int = 0) -> list[str]:
+    """Replace ``bash -c '<script>'`` segments with the script's own segments.
+
+    GATE-SIDE ONLY, and that placement is the whole design (techne#445). The
+    splitter is SHARED with the capture-time noise filter, and the two want
+    opposite things from a `-c` wrapper:
+
+      gate         `bash -c 'pytest -q'` unseen -> the row raises no
+                   `totals_unreliable` flag, so an intact run elsewhere in the
+                   window certifies the whole thing green. Starvation IS a false
+                   green here (techne#438).
+      noise filter `bash -c 'ls'` currently heads on `bash`, which is not
+                   read-only, so it CAPTURES. Expanding it there would head on
+                   `ls` and DROP it — flipping False->True, i.e. LESS capture,
+                   against that filter's documented fail-safe. Measured both
+                   before choosing: the heredoc precedent (#444 r2) does not
+                   transfer, because it only ever added segments.
+
+    So the shared splitter keeps its semantics exactly and the gate expands
+    afterwards.
+    """
+    if depth >= _MAX_SHELL_C_DEPTH:
+        return segments
+    out: list[str] = []
+    for seg in segments:
+        script = _shell_c_script(seg)
+        if script is None:
+            out.append(seg)
+            continue
+        from techne.hooks.post_tool_use import _split_bash_segments
+
+        inner = _split_bash_segments(_strip_heredoc_bodies(script))
+        out.extend(_expand_shell_c(inner, depth + 1))
+    return out
+
+
+def _shell_c_script(segment: str) -> str | None:
+    """The script argument of a ``<shell> -c <script>`` segment, else None.
+
+    Uses `shlex` so the quoting that HID the runner is what now reveals it: the
+    script arrives already unquoted. A segment shlex cannot parse (unbalanced
+    quotes, which heredoc bodies produce) is left alone rather than guessed at.
+    """
+    import shlex
+
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return None
+    i = 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+        i += 1
+    i = _skip_env_prefix(tokens, i)
+    if i >= len(tokens) or tokens[i].rsplit("/", 1)[-1] not in _SHELL_C_WRAPPERS:
+        return None
+    # `-c`, including clustered SHORT flags containing c (`-lc`, `-ec`, `-cx`).
+    #
+    # `t[1:2] != "-"` excludes every --long option, and that guard is load-bearing
+    # twice over: without it `--norc` matches (it ends in "c"), which BOTH loses
+    # `bash --noprofile --norc -c 'pytest -q'` — idiomatic clean-shell in CI and
+    # Makefiles — AND makes `bash --norc pytest` read the following positional as
+    # a script, so a FILE named pytest reads as a suite run. Starvation and
+    # invention from one bug. `"c" in t[1:]` rather than endswith, because c need
+    # not be last (`bash -cx`).
+    j = i + 1
+    while j < len(tokens):
+        t = tokens[j]
+        if t in _SHELL_VALUE_LONG_OPTS:
+            j += 2  # its value is not a positional
+            continue
+        if t.startswith("--"):
+            j += 1  # a long option we do not model; it takes no separate value
+            continue
+        if t[:1] in ("-", "+") and len(t) > 1:
+            cluster = t[1:]
+            # EVERY value letter in the cluster consumes a token, not just the
+            # last one. Measured against the shells on this box rather than
+            # derived, because the derivation was WRONG (r3 nit 2 asserted POSIX
+            # last-letter-only, and that real bash 5.3 rejects the other
+            # spelling — it does not):
+            #
+            #   bash 5.3.15 -oc pipefail 'echo MARKER'  -> prints MARKER
+            #   bash 5.3.15 -oc bogusopt 'echo MARKER'  -> "bogusopt: invalid
+            #                                              option name"
+            #
+            # That error is the proof: `o` consumed the NEXT TOKEN while sitting
+            # first in the cluster, so position is irrelevant. Under the
+            # last-letter rule `bash -oc pipefail 'pytest -q'` returned
+            # `pipefail` as the script — starvation, i.e. a false green, on the
+            # DEFAULT shell of this machine (/usr/local/bin/bash), not on some
+            # legacy /bin/sh nobody invokes.
+            n_values = sum(1 for ch in cluster if ch in _SHELL_VALUE_LETTERS)
+            if "c" in cluster:
+                # The script sits after however many values the cluster ate:
+                # `-c` -> next token; `-co pipefail` / `-oc pipefail` -> the one
+                # after that; `-occ pipefail` likewise (verified: prints MARKER).
+                k = j + 1 + n_values
+                return tokens[k] if k < len(tokens) else None
+            j += 1 + n_values
+            continue
+        return None  # a positional before any -c: not a -c invocation
+    return None
+
+
 def _command_runs_tests(command: str) -> bool:
     """True when some segment of `command` actually invokes a test runner.
 
@@ -369,12 +545,27 @@ def _command_runs_tests(command: str) -> bool:
     """
     from techne.hooks.post_tool_use import _split_bash_segments
 
-    for segment in _split_bash_segments(_strip_heredoc_bodies(command)):
+    segments = _split_bash_segments(_strip_heredoc_bodies(command))
+    for segment in _expand_shell_c(segments):
         tokens = segment.split()
         i = 0
         # Skip leading `VAR=val` env assignments to find the real head.
         while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
             i += 1
+        # ...and the `env` prefix, for the same reason and in the same order as
+        # the other three sites. THE FOURTH CALL SITE (r1 review): the gate saw
+        # `env bash -c 'pytest -q'` only because that routes through
+        # _expand_shell_c -> _shell_c_script, which already called this helper;
+        # the DIRECT form `env pytest -q` fell through here. Not cosmetic — an
+        # unrecognised command hits the `continue` in the row loop below, which
+        # discards the row WHOLE, so its failures never reach `all_failed` and
+        # _row_totals_unreliable is never consulted for it. Measured end-to-end
+        # against a real ledger: `env pytest -q` -> "1 failed, 2619 passed"
+        # alongside a small `pytest tests/test_small.py -q` -> "5 passed" gave
+        # suite_green=True and BACKED the tests_green claim — the 2620-test run
+        # discarded, the 5-test run certifying green. That is the starvation-
+        # shaped false green this file names at 596-599 and techne#438.
+        i = _skip_env_prefix(tokens, i)
         if i >= len(tokens):
             continue
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. .venv/bin/pytest
@@ -471,8 +662,99 @@ def _output_was_bounded(output_text: str) -> bool:
     output that is genuinely complete at exactly the budget is misread as bounded;
     that costs a verdict of ``unverifiable`` instead of ``backed``, which is the
     direction this whole class of bug should fail in.
+
+    THE LENGTH TEST IS ONLY SOUND WHEN THE STORED TEXT IS THE CUT TEXT (techne#441).
+    ``redact_credentials`` runs BEFORE storage and substitutes ``<redacted:tag>``
+    for each match, so a legacy row cut at exactly the budget can be stored BELOW
+    it and read as authoritative — the bad direction, since an unflagged row can
+    carry a green verdict. A redacted row therefore has an UNKNOWABLE original
+    length, and "we cannot determine it" is a different fact from "it was under
+    budget"; collapsing them is what produced this bug. Treated as bounded.
+
+    Deliberately NOT widened by a shrinkage allowance: replacement is shorter than
+    the secret by an UNBOUNDED amount, so any constant is a number nobody can
+    justify — it would flag more intact rows than this does and still miss the
+    large-shrinkage cases.
+
+    IT HAS NOT FIRED YET, AND THAT RESTS ON ONE LEG, NOT FOUR. Setting the flag
+    only changes a verdict when a row is simultaneously a test-runner command,
+    parseable, failure-free AND redacted — but the first three are ORDINARY, not
+    rare: 413 rows satisfy them, 408 of those short and unmarked so the redaction
+    clause ALONE decides. They are what a green suite run looks like. Nothing has
+    fired because credential-shaped text happens to be absent from green runner
+    output — a fact about CONTENT, not about structure.
+
+    THAT PREDICATE, STATED so the number is reproducible: for each Bash row take
+    ``_bash_output(content)``; take the command as ``content.partition(_BASH_OUTPUT_MARKER)[0]``
+    minus its ``Ran: `` prefix — the SAME extraction the caller uses, not a
+    hand-rolled split, which is what produced an earlier and irreproducible 475;
+    require ``_command_runs_tests(command)``, ``_parse_test_output`` returning any
+    non-None, and neither failures nor errors above zero. Those are exactly the
+    clauses ``_row_totals_unreliable`` applies BEFORE it consults this function.
+
+    CREDENTIAL-SHAPED TEXT DOES REACH RUNNER OUTPUT HERE — ONE ROW TODAY. That is
+    the honest form of the argument. An earlier version of this note claimed a
+    cabal ``test_secrets_endpoint.py`` row was "inert only because a grep stripped
+    the summary line — delete the pipe and all four legs hold". FALSE: that row's
+    stored output is a pytest TRACEBACK, so it is a FAILING run, and the leg that
+    disarms it is FAILURE-FREE, which no edit to the pipe can cross. Under ``-q`` a
+    passing run through that row's own filter keeps nothing at all. Reaching the
+    conjunction needs a different run — one that passes — not one keystroke.
+
+    SO WATCH THE INTERSECTION, NOT THE STOCK. Re-measuring the 408 is the wrong
+    instruction: it is a stock that grows monotonically as the repo acquires
+    tests, every member already known NOT to be redacted, so it moves while the
+    risk does not — a watchdog barking at your own suite getting bigger. The
+    observable that moves only when the hazard moves is RUNNER ROWS WHOSE OUTPUT
+    CARRIES THE MARKER, regardless of parseability or outcome. That is 1 today.
+    If it climbs, REPLACE the length test rather than re-justify it.
+
+    (An even earlier version said to re-check "whether the conjunction has started
+    occurring". Unexecutable: when it fires a verdict quietly becomes
+    ``unverifiable`` — no alarm, no counter, nobody told. It read as a safeguard
+    and functioned as a comment.)
+
+    THREE THINGS MAKE IT IMPRECISE, and the third dominates the live data:
+
+    * NO AGE DISCRIMINATOR EXISTS. A post-#437 row that was never cut carries no
+      marker either, so it is indistinguishable by content from a legacy cut.
+    * BACKFILL REGENERATES IT. Re-summarising runs ``_preview`` (verbatim, under
+      budget, no marker) then redaction, which puts the marker back.
+    * THE MARKER CANNOT TELL A TOKEN WE WROTE FROM THE SAME LITERAL ARRIVING FOR
+      ANY OTHER REASON. Every flipped row inspected is a short, complete output
+      that merely CONTAINS a credential shape — `.env` dumps, a JWT in a signed
+      URL, a PEM block in a values.yaml, two of them output ABOUT redaction.
+
+    MEASURED 2026-08-10 (read-only; the ledger grows, so treat counts as as-of)
+    over 6195 Bash rows, on ``_bash_output(content)`` — the string the gate reads,
+    NOT the whole observation row. Measuring the row inflates lengths by the
+    ``Ran: …\nOutput: `` prefix, counts a marker in the COMMAND as a flip, and
+    misses rows whose row exceeds the budget while their output does not. Result:
+    15 flips, lengths 290-1989, median 840, three within 10% of the budget.
+    REPRODUCE with ``_bash_output`` + ``was_elided`` + ``len(...) < _PREVIEW_MAX_CHARS``
+    + ``REDACTION_MARKER``. All four: the length clause is not optional, and
+    omitting it yields 16 rather than 15, because a flip is only a flip when the
+    clauses above it did not already return True.
+
+    NO TRUE-POSITIVE COUNT IS QUOTED. Any estimate would come from
+    proximity-to-budget, and the paragraph above rejecting a shrinkage allowance
+    — shorter by an UNBOUNDED amount — is exactly the argument that this proxy is
+    weak. Length cannot identify a true positive; that is the premise of the fix.
+
+    A TIMESTAMP DISCRIMINATOR IS NOT SOUND AT DAY GRANULARITY, and this dataset
+    contains the counterexample. #437 merged at 2026-08-01T20:22:17Z; against
+    that INSTANT the split is 12 before / 3 after, and one flip lands at
+    19:00:51Z ON THE MERGE DAY, where a date comparison yields a coin-toss
+    between ``<`` and ``<=`` rather than an answer. (#515's two-format problem is
+    a separate and lesser issue here — it breaks sub-day ordering at position 10
+    — but three of the fifteen timestamps carry no zone at all.) The gate would
+    remove three of fifteen. Not built.
     """
-    return was_elided(output_text) or len(output_text) >= _PREVIEW_MAX_CHARS
+    if was_elided(output_text):
+        return True
+    if len(output_text) >= _PREVIEW_MAX_CHARS:
+        return True
+    return REDACTION_MARKER.search(output_text) is not None
 
 
 def _parse_test_output(text: str) -> tuple[int | None, int | None, int | None]:

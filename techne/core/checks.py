@@ -176,6 +176,32 @@ def registered_checks() -> list[CheckFn]:
     return list(_REGISTRY)
 
 
+def deferred_check_names() -> list[str]:
+    """Checks that ``run_checks(cheap_only=True)`` will SKIP (techne#488).
+
+    The banner omits these, and this module's founding rule is that an absent
+    check reads as "nothing wrong". The omission is bounded and deliberate (see
+    :func:`run_checks`); what is removable is the SILENCE, so a caller can say
+    how many checks it did not run instead of leaving the reader to infer a
+    total from a number that never mentions one.
+
+    Costs nothing: reads the registry's own markers, spawns no subprocess, and
+    is the reason this is a separate function rather than a synthetic result.
+    A placeholder ``UNKNOWN`` CheckResult was the obvious alternative and is
+    WRONG — ``health.py`` ranks verdicts through :func:`worst`, so an UNKNOWN
+    would pin a permanent ⚠️ on every banner for checks that were never run.
+    Deferred-ness is not a verdict and must not be ranked as one.
+
+    NAMES ARE FUNCTION NAMES (``check_runtime_loaded``), not the
+    ``subsystem:name`` labels doctor prints (``runtime:loaded``). Those labels
+    live on a ``CheckResult``, and a deferred check has produced none — that is
+    what deferred means. Deriving one from the other would be a guess about a
+    naming convention nothing enforces, and declaring it on the decorator would
+    be a second copy free to drift from the check's own return value.
+    """
+    return [fn.__name__ for fn in _REGISTRY if getattr(fn, "expensive", False)]
+
+
 def expensive(fn: CheckFn) -> CheckFn:
     """Mark a check as too costly for the SessionStart hot path.
 
@@ -309,9 +335,37 @@ def init_remedy(config) -> str | None:
     ``spool-primary`` who follows doctor's own advice is DEMOTED globally (init
     resolves the flag, rebuilds PostureConfig and SAVES it), with reflect flipped
     out of advisory — because the health check told them to.
+
+    NOTHING TO PRESERVE IS NOT THE SAME AS A PRESERVED DEFAULT (techne#480). The
+    posture guard protects a choice the operator already made. On a machine that
+    has used Claude Code but has NEVER run ``techne init`` there is no config
+    file, so ``config.posture.mode`` is the dataclass default ``observe`` — not a
+    choice. Pinning it there does the very thing the guard exists to prevent, one
+    case over: it suppresses the auto-detection that would have found
+    ``spool-primary`` from the CC memory sitting on disk, and freezes a first
+    install into the weakest posture. With no file, ``--posture auto`` IS the
+    honest value; auto-detection is the correct behaviour on a first install and
+    the only reason to pin is to protect an existing answer.
+
+    Still ONE BUILDER: this is a condition inside it, not a second remedy string
+    at a call site, so every surface keeps inheriting both guards.
     """
     if config.platform != CLAUDE_CODE:
         return None
+    if config.loaded_from is None:
+        # No config.yaml — posture.mode is a default, not an answer.
+        #
+        # RESIDUAL, deliberately not chased: this asks "does a config file
+        # exist", which is a proxy for "did the operator choose a posture".
+        # A hand-written config.yaml with no `posture:` stanza sets
+        # loaded_from while posture.mode is still the dataclass default, so
+        # the original defect survives one level in. Narrow, because save()
+        # always writes a full posture stanza — any machine `techne init`
+        # created is safe, and reaching it needs a hand-rolled config or one
+        # predating the field. Recorded rather than fixed: the honest
+        # discriminator would be "was a posture persisted", which the Config
+        # does not carry today. (PR #525 review, nit 2.)
+        return "techne init --platform claude-code --posture auto"
     return f"techne init --platform claude-code --posture {config.posture.mode}"
 
 
@@ -1268,8 +1322,28 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # always ≈ now. The predicate `newest > enq + 7d` therefore reduced to
         # `now > enq + 7d`: the wall-clock test this check was written to
         # replace, at 3× the sensitivity. A three-week holiday reproduced it.
+        # CLEANLY-ENDED ONLY (#516). Since ended_at is now DERIVED for sessions
+        # that died unclean, "has an ended_at" no longer means "reached
+        # run_session_end". These lanes are fed AT SESSION END, so a crashed
+        # session never had the OPPORTUNITY to feed one — counting it as evidence
+        # inverts the question above. With 93% of August sessions never reaching
+        # run_session_end, the unfiltered version reports STALE ("producer may be
+        # dead") on a healthy store and points the operator at the sync producer
+        # when the real cause is unclean exits.
+        #
+        # NULL source = a row predating the column. Read as 'clean', which is a
+        # DELIBERATE UNDER-COUNT rather than a proof: transcript_import also wrote
+        # ended_at then (a transcript's LAST MESSAGE, i.e. derived) and set no
+        # source, so some legacy rows read clean when they are derived. Bounded
+        # and historical; all THREE live writers stamp the column now —
+        # end_session ('clean'), close_abandoned_sessions ('derived'), and
+        # transcript_import ('derived'). "Both" was wrong twice over in a comment
+        # whose own subject is a miscounted writer set (#533 r5). The count is
+        # pinned by test_check_outbox_targets_ignores_derived_session_ends
+        # rather than asserted here, so it cannot rot silently again.
         srow = conn.execute(
-            "SELECT COUNT(*), MAX(ended_at) FROM sessions WHERE ended_at IS NOT NULL"
+            "SELECT COUNT(*), MAX(ended_at) FROM sessions "
+            "WHERE ended_at IS NOT NULL AND COALESCE(ended_at_source, 'clean') = 'clean'"
         ).fetchone()
     finally:
         conn.close()
@@ -1748,11 +1822,18 @@ def check_vector_coverage(config) -> CheckResult:
     cannot touch a vec0 table) is a real defect — but the purge deletes
     ``WHERE rowid IN (SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)``,
     which selects FROM knowledge, so a rowid with no knowledge row behind it is
-    never matched. VERIFIED: purge removed 0 of 2 in that state. Failing here
-    would therefore attach a remedy that cannot clear the finding — recreating
-    the never-green defect this check was just fixed for. It is surfaced in the
-    detail and evidence instead, so it is visible without being unclearable.
-    Owning issue: techne#408 (the same shape on threads_vec).
+    never matched. VERIFIED: purge removed 0 of 2 in that state.
+
+    THAT REASONING EXPIRED WHEN #408 SHIPPED `_purge_orphaned_vec`. There IS a
+    remedy now, so "failing would attach a remedy that cannot clear it" no longer
+    holds. `dangling` is still excluded from `healthy`, but for a different and
+    smaller reason: folding it in changes doctor output on live stores and
+    belongs in its own change. It remains surfaced in the detail and evidence.
+
+    AND THE BIGGER GAP: this counts dangling rows for `knowledge_vec` ONLY.
+    #408's headline mechanism — threads rotating rowid on INSERT OR REPLACE, one
+    stranded embedding per summary update, unbounded — is counted by no check at
+    all. The leak is fixed; its observability is not.
     """
     from techne.core.database import connect
 
@@ -1816,7 +1897,17 @@ def check_vector_coverage(config) -> CheckResult:
         detail += f", {dangling} dangling vector(s) with no knowledge row (techne#408)"
     if not (missing or stale or orphans) and superseded:
         detail += f" ({superseded} superseded, correctly excluded)"
-    # `dangling` deliberately absent — no remedy clears it; see the docstring.
+    # `dangling` still absent from `healthy`, but NOT for the old reason — #408
+    # shipped the remedy, so "no remedy clears it" is false as of that PR. Left
+    # non-failing deliberately: flipping it changes doctor output on live stores
+    # and belongs in its own change, not smuggled into the PR that made it
+    # possible. It IS surfaced in the detail, so the operator sees the symptom
+    # and now has `techne vectors backfill` to act on.
+    #
+    # KNOWN GAP, and it is the bigger one: this counts dangling rows for
+    # knowledge_vec ONLY. #408's headline mechanism — threads rotating rowid on
+    # INSERT OR REPLACE, one stranded embedding per summary update, unbounded —
+    # is counted by no check at all. The leak is fixed; its observability is not.
     healthy = missing == 0 and stale == 0 and orphans == 0
     return CheckResult(
         name="vectors:coverage",

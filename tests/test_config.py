@@ -450,3 +450,56 @@ def test_save_does_not_reintroduce_the_removed_knob(tmp_path, monkeypatch):
     Config.load().save()
 
     assert "mmr_lambda" not in (tmp_path / "config.yaml").read_text()
+
+
+# ---- loaded_from: did these values come from a file? (techne#480) ----------
+
+
+def test_load_records_the_file_it_read(tmp_path, monkeypatch):
+    """`loaded_from` is the contract callers use to tell a CHOICE from a DEFAULT."""
+    from techne.config import Config
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("platform: claude-code\n")
+
+    cfg = Config.load()
+
+    assert cfg.loaded_from == config_file
+
+
+def test_load_leaves_loaded_from_none_when_there_is_no_config_file(tmp_path, monkeypatch):
+    """The never-initialised machine, which is the whole point of the field.
+
+    Every value on this Config is a built-in default. Anything that reads an
+    attribute here and treats it as an operator's answer is wrong.
+    """
+    from techne.config import Config
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    assert not (tmp_path / "config.yaml").exists()
+
+    cfg = Config.load()
+
+    assert cfg.loaded_from is None
+    assert cfg.posture.mode == "observe"
+
+
+def test_loaded_from_is_never_written_into_config_yaml(tmp_path, monkeypatch):
+    """It describes a resolution, not a setting — same rule as egress_trust.
+
+    Serializing it would put a path into the agent-writable file that a later
+    load could read back as evidence about its own provenance.
+    """
+    import yaml
+
+    from techne.config import Config
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    out = tmp_path / "config.yaml"
+
+    cfg = Config()
+    cfg.loaded_from = tmp_path / "somewhere-else.yaml"
+    cfg.save(out)
+
+    assert "loaded_from" not in yaml.safe_load(out.read_text())

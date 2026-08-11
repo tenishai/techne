@@ -147,8 +147,9 @@ def test_imports_tool_calls_and_prompts(db_path, transcript):
         sess = conn.execute("SELECT * FROM sessions WHERE id='sess-fixture'").fetchone()
         assert sess is not None
         assert sess["project_path"] == "/some/project"
-        assert sess["started_at"].startswith("2026-06-01T10:00:00")
-        assert sess["ended_at"].startswith("2026-06-01T10:00:12")
+        # #515: the importer now normalises to the canonical space-separated shape.
+        assert sess["started_at"].startswith("2026-06-01 10:00:00")
+        assert sess["ended_at"].startswith("2026-06-01 10:00:12")
 
         rows = conn.execute(
             "SELECT tool_name, content, timestamp FROM observations "
@@ -759,8 +760,9 @@ def test_event_at_populated_from_transcript_timestamp(db_path, tmp_path):
         tool_row = next(r for r in rows if r["tool_name"] == "Bash")
         prompt_row = next(r for r in rows if r["tool_name"] == "UserPrompt")
         # Tool event_at = assistant ts (tu["ts"]), prompt event_at = user record ts.
-        assert "2026-06-01T10:00:01" in tool_row["event_at"]
-        assert "2026-06-01T10:00:05" in prompt_row["event_at"]
+        # #515: stored in the canonical shape, not the JSONL's ISO form.
+        assert "2026-06-01 10:00:01" in tool_row["event_at"]
+        assert "2026-06-01 10:00:05" in prompt_row["event_at"]
     finally:
         conn.close()
 

@@ -59,6 +59,7 @@ def status(ctx):
     # config.yaml but never written to settings.json (init not re-run) — a silent
     # no-op the user has no other way to notice. Surface it here (techne#287).
     if config.platform == CLAUDE_CODE:
+        from techne.core.checks import init_remedy
         from techne.platforms.claude_code import check_hook_drift
 
         drift = check_hook_drift(config)
@@ -83,14 +84,10 @@ def status(ctx):
                     "every techne hook may be silently not firing:"
                 )
                 click.echo(
-                    f"  Repair or move aside {SETTINGS_PATH}, then run "
-                    f"'techne init --posture {config.posture.mode}'."
+                    f"  Repair or move aside {SETTINGS_PATH}, then run '{init_remedy(config)}'."
                 )
             else:
-                click.echo(
-                    f"⚠ Hook registration drift — run "
-                    f"'techne init --posture {config.posture.mode}' to reconcile:"
-                )
+                click.echo(f"⚠ Hook registration drift — run '{init_remedy(config)}' to reconcile:")
             for w in drift:
                 click.echo(f"  {w}")
 
@@ -1699,6 +1696,7 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
             --exclude '**/.git/**' --exclude '**/.venv/**'
     """
     from techne.core.state import start_session
+    from techne.exit_codes import EX_CONFIG, StartupConfigError
     from techne.watch import WatchConfig
     from techne.watch import watch as run_watch
 
@@ -1726,6 +1724,14 @@ def watch_cmd(ctx, paths, include, exclude, debounce_ms, resync_hours):
     )
     try:
         run_watch(wc)
+    except StartupConfigError as exc:
+        # Ordered BEFORE RuntimeError: StartupConfigError subclasses it, and a
+        # broad handler first would swallow the exit contract. Exiting
+        # EX_CONFIG tells the supervisor this failure is not transient, so
+        # `RestartPreventExitStatus=78` in the unit stops the loop on the
+        # FIRST failure instead of respawning forever.
+        click.echo(f"error: {exc}", err=True)
+        ctx.exit(EX_CONFIG)
     except RuntimeError as exc:
         click.echo(f"error: {exc}", err=True)
         ctx.exit(1)
@@ -3200,15 +3206,50 @@ def vectors_backfill(ctx, do_tags, all_tags):
             "vector search unavailable: no embedding backend installed — install techne[vectors]"
         )
         ctx.exit(0)
+    # NO backend_available() GATE HERE (#408). This command is the string
+    # `vectors:coverage` hands the operator as its remedy, and an early exit made
+    # that remedy do nothing on exactly the install the orphan sweep exists for:
+    # sqlite-vec present, no model. Threads keep rotating rowids and stranding
+    # embeddings whether or not a backend exists, so the doctor kept reporting
+    # dangling rows with no way to clear them. Hoisting the sweep inside
+    # backfill_vectors was not enough — a duplicate gate one frame up defeated it.
+    #
+    # backfill_vectors owns the decision now: it sweeps first (pure SQL, needs the
+    # extension not a model) and then returns {} if it cannot embed. The CLI keeps
+    # only the sqlite_vec import guard above, which is the one thing it genuinely
+    # has to check to print a useful message.
+    from techne.core.search import backfill_vectors
+
+    counts = backfill_vectors(config.db_path)
+
     if not embeddings_mod.backend_available():
         click.echo(
             "vector search unavailable: no embedding backend installed — install techne[vectors]"
         )
+        # REPORT WHAT ACTUALLY HAPPENED. backfill_vectors returns {} for three
+        # different outcomes and this caller cannot tell them apart, so the old
+        # unconditional line asserted the good one: with numpy absent (it is only
+        # in the [vectors] extra) or an interpreter that cannot load extensions,
+        # the sweep never ran and the message claimed it had. Worse than #496's
+        # remedy-that-does-nothing — an operator told it succeeded stops looking.
+        if "orphans_swept" not in counts:
+            # DO NOT NAME sqlite-vec HERE. On the numpy path it imported fine —
+            # the CLI's own guard just passed — so blaming it sends the operator
+            # to re-check the thing they have already ruled out. numpy is only in
+            # the [vectors] extra, so this is the reachable case.
+            click.echo(
+                "index hygiene did NOT run: the vector toolchain is incomplete "
+                "(needs numpy and a loadable sqlite-vec) — install techne[vectors]."
+            )
+        elif counts.get("sweep_errors"):
+            click.echo(
+                f"index hygiene INCOMPLETE: {counts['sweep_errors']} index(es) unreadable, "
+                f"{counts['orphans_swept']} orphaned embedding(s) swept."
+            )
+        else:
+            click.echo(f"index hygiene: {counts['orphans_swept']} orphaned embedding(s) swept.")
         ctx.exit(0)
 
-    from techne.core.search import backfill_vectors
-
-    counts = backfill_vectors(config.db_path)
     click.echo(json.dumps(counts, indent=2))
 
     if do_tags:

@@ -418,3 +418,59 @@ def test_codex_blast_radius_unresolvable_symbol_returns_error(tmp_path, config, 
     )
     assert resp["result"].get("isError") is not True
     assert "no symbol named" in resp["result"]["content"][0]["text"]
+
+
+def test_status_surfaces_checks_deferred_to_agents(db_path):
+    """The key that actually answers techne#488 for an agent, anchored.
+
+    `_techne_status` returns `collect_health(config)` verbatim today, so the
+    guarantee that the MCP surface carries `checks_deferred` rests on the
+    absence of key projection — true now, and it would break SILENTLY if
+    anyone introduced one. The arch card claims this surface; this pins it.
+    """
+    from techne.core.checks import deferred_check_names
+    from techne.mcp_server import _techne_status
+
+    cfg = Config()
+    cfg.db_path = db_path
+
+    payload = _techne_status({}, cfg)
+
+    assert "checks_deferred" in payload
+    assert payload["checks_deferred"] == deferred_check_names()
+    # The three states an agent must be able to tell apart stay disjoint.
+    assert set(payload["checks_deferred"]).isdisjoint({c["name"] for c in payload["checks"]})
+
+
+def test_status_keeps_checks_deferred_when_it_is_none(db_path, monkeypatch):
+    """The case a key-dropping projection actually removes.
+
+    The test above only exercises a NON-EMPTY list, and the projection its
+    sibling docstring warns about — `{k: v for k, v in ... if v is not None}` —
+    is invisible to that shape. Reviewed and reproduced: with that projection
+    added to `_techne_status`, the list-shaped test still passed. `None` is
+    exactly the value such a filter eats, and it is the value that means "the
+    registry could not be read", so dropping it puts a consumer's
+    `.get("checks_deferred", [])` back to reading "nothing was deferred" at the
+    moment every check was skipped — this PR's founding bug, on the surface the
+    arch card claims for it.
+    """
+    import builtins
+
+    from techne.mcp_server import _techne_status
+
+    real_import = builtins.__import__
+
+    def _fail_on_checks(name, *a, **kw):
+        if name == "techne.core.checks":
+            raise ImportError("simulated: checks module unavailable")
+        return real_import(name, *a, **kw)
+
+    cfg = Config()
+    cfg.db_path = db_path
+    monkeypatch.setattr(builtins, "__import__", _fail_on_checks)
+
+    payload = _techne_status({}, cfg)
+
+    assert "checks_deferred" in payload, "key vanished on the MCP surface"
+    assert payload["checks_deferred"] is None
