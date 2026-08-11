@@ -252,9 +252,7 @@ def _rerank(
         # (no confidence_numeric) receive a neutral 1.0, adding uniformly so
         # ordering among non-knowledge rows is unchanged.
         if confidence_decay_weight > 0:
-            r["_combined"] += confidence_decay_weight * _knowledge_decay_score(
-                r, half_life_days
-            )
+            r["_combined"] += confidence_decay_weight * _knowledge_decay_score(r, half_life_days)
 
     candidates.sort(key=lambda x: -x["_combined"])
 
@@ -849,17 +847,24 @@ def search(
 
 
 def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
-    """Embed un-embedded rows. Returns counts of newly embedded items."""
+    """Embed un-embedded rows. Returns counts of newly embedded items.
+
+    `orphans_swept` is present ONLY when the sweep actually ran (#408). Its
+    ABSENCE means the function returned before reaching it — no numpy, no
+    sqlite_vec, or an interpreter that cannot load extensions — and a caller must
+    not report hygiene as having happened. An empty dict is ambiguous across
+    three different outcomes; the key is the discriminator.
+    """
     try:
         import numpy as np
         import sqlite_vec
     except ImportError:
+        # numpy is only in the [vectors] extra, so `pip install techne` +
+        # `pip install sqlite-vec` lands here with the CLI's own import guard
+        # satisfied. No sweep runs; say nothing rather than claim it did.
         return {}
-    if not embeddings_mod.backend_available():
-        # Neither model2vec nor fastembed importable — nothing to embed with.
-        return {}
+    have_backend = embeddings_mod.backend_available()
 
-    model = _get_embedding_model()
     conn = connect(db_path)
     try:
         conn.enable_load_extension(True)
@@ -870,7 +875,50 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
         conn.close()
         return {}
 
-    counts = {"threads": 0, "observations": 0, "knowledge": 0}
+    # SWEEP ORPHANS BEFORE THE BACKEND GATE (techne#408). Deleting an embedding
+    # whose parent row is gone is pure SQL: it needs sqlite_vec loaded to touch a
+    # vec0 table, but NOT a model. Gating it behind `backend_available()` would
+    # mean an install with sqlite-vec and no model2vec/fastembed accumulates
+    # orphans forever while `vectors:coverage` reports dangling rows and names
+    # `techne vectors backfill` as the remedy — a check whose remedy provably
+    # does nothing, which is exactly the never-green defect #496 was just fixed
+    # for. Found by running this against an interpreter with sqlite-vec but no
+    # embedding backend; the wiring test failed and the early return was why.
+    # PER-TABLE try, not one sum(). A generator inside sum() raises out of the
+    # whole expression, so an unreadable threads_vec would leave observations_vec
+    # and knowledge_vec unswept — and on the no-backend path there is no loop
+    # below to cover for it, so one bad index would silently suppress the other
+    # two. This is the ONLY sweep call site: an earlier version also swept inside
+    # the per-table loop, which made "unwire the purge" an ambiguous mutation —
+    # the in-loop copy alone satisfied the end-to-end test on a machine WITH a
+    # backend, so that test pinned nothing about placement in the environment
+    # that matters.
+    swept = 0
+    sweep_errors = 0
+    for name in _VEC_PARENT:
+        try:
+            swept += _purge_orphaned_vec(conn, name)
+        except sqlite3.OperationalError:
+            # Present but unreadable (e.g. built at another dim). Not worth
+            # failing a backfill over; _ensure_vec_backend_identity rebuilds it.
+            # COUNTED, not just swallowed: `orphans_swept: 0` from a sweep that
+            # FAILED on every index is otherwise indistinguishable from one that
+            # found nothing to do, which is the same absent-vs-empty collapse the
+            # ABSENCE of the key exists to avoid.
+            sweep_errors += 1
+    if swept:
+        conn.commit()
+    counts = {"orphans_swept": swept, "sweep_errors": sweep_errors}
+
+    if not have_backend:
+        # Neither model2vec nor fastembed importable — nothing to embed with, but
+        # the orphan sweep above HAS run, and the key says so.
+        conn.close()
+        return counts
+
+    model = _get_embedding_model()
+
+    counts.update({"threads": 0, "observations": 0, "knowledge": 0})
 
     try:
         # techne#601/#602: detect a backend/model swap (e.g. upgrading to py3.14,
@@ -971,6 +1019,54 @@ def _purge_superseded_knowledge_vec(conn: sqlite3.Connection) -> int:
         "DELETE FROM knowledge_vec WHERE rowid IN "
         "(SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)"
     )
+    return cur.rowcount
+
+
+# Each vec0 index and the table whose row ids it embeds. Used by the orphan sweep
+# so the relationship is declared ONCE rather than restated at each call site.
+_VEC_PARENT = {
+    "threads_vec": ("threads", "rowid"),
+    "observations_vec": ("observations", "id"),
+    "knowledge_vec": ("knowledge", "id"),
+}
+
+
+def _purge_orphaned_vec(conn: sqlite3.Connection, vec_tbl: str) -> int:
+    """Delete embeddings whose parent row is gone (techne#408). Returns rows removed.
+
+    DISTINCT FROM `_purge_superseded_knowledge_vec`, and the difference is why
+    that one cannot cover this: it deletes
+    ``WHERE rowid IN (SELECT id FROM knowledge WHERE superseded_by IS NOT NULL)``
+    — it selects FROM the parent, so a rowid with NO parent row behind it is
+    never matched. `vectors:coverage` verified exactly that (purge removed 0 of
+    2 in that state) and reports the count without failing, precisely because no
+    remedy existed to clear it. This is that remedy.
+
+    HOW THE ORPHANS ARISE, and it is not one bug:
+    * threads — `thread_orchestrator` updates a summary via INSERT OR REPLACE,
+      which ROTATES the rowid. The new summary is embedded fresh (it reads as
+      missing) and the old rowid's embedding is stranded. Unbounded growth, one
+      row per summary update.
+    * knowledge — a HARD delete (`knowledge.delete`, the pattern cleanup) goes
+      through a plain `connect()`, which cannot touch a vec0 table, so the
+      embedding outlives the row.
+
+    Recall stays CORRECT without this — `search_vec`'s `if row:` guard drops
+    dead-rowid hits after the k-nearest cut — but each orphan can still occupy a
+    top-k ANN slot before that filter runs, which is #168's failure shape bounded
+    by `_VEC_SUPERSEDE_OVERFETCH`. So this is an index-hygiene fix, not a
+    correctness one, and the PR says so rather than overclaiming.
+
+    Lives here, like its sibling, because `backfill_vectors` is the one place
+    sqlite_vec is loaded.
+    """
+    parent, id_col = _VEC_PARENT[vec_tbl]
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (vec_tbl,)
+    ).fetchone()
+    if not exists:
+        return 0
+    cur = conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid NOT IN (SELECT {id_col} FROM {parent})")
     return cur.rowcount
 
 
