@@ -331,7 +331,17 @@ def test_reading_enqueue_history_requires_a_declared_lane():
 
 
 def test_no_undeclared_inlined_prefilter():
-    """A DETECTOR WITH THREE NAMED GAPS — not a guarantee, and not one gap.
+    """A DETECTOR WITH KNOWN GAPS (not exhaustive — see below).
+
+    THE HEADING NO LONGER CARRIES A NUMBER, and that is the finding, not a
+    formatting preference. It read "ONE NAMED GAP", then "THREE NAMED GAPS", and
+    the count has now been proven wrong in three consecutive rounds: r5 found
+    unnamed RECALL regressions under it, r6 found two unnamed PRECISION false
+    positives under it, and r7 found that r6's own precision fix opened a fourth.
+    The mechanism survived every round; only the count kept failing. A number in
+    a heading is a completeness claim about a lexical net over a language that
+    can always express the same query one more way — so the list grows and the
+    heading stops promising it is finished (#528 r7, asked for in r5 and r6 too).
 
     `delivered_hashes` enforces the strong half (call it, declare your lane).
     This catches the INLINED form by looking for the content_hash / outbox /
@@ -363,8 +373,8 @@ def test_no_undeclared_inlined_prefilter():
     Hence the whitespace collapse and the `;` split above: a change of altitude
     needs the same before-and-after as anything else.
 
-    THE THREE GAPS, named because the previous docstring named one and had three,
-    and re-measured after the fix above rather than re-asserted:
+    THE GAPS KNOWN TODAY, re-measured after the fix above rather than re-asserted.
+    Ordered by how likely they are to be hit here, not by how clever they are:
       1. INDIRECTION — a consumer calling a helper in sync/outbox.py. This is why
          the accessor exists.
       2. SPLIT OR COMPOSED SQL — `_TABLE = "outbox"` with an f-string, or
@@ -374,6 +384,17 @@ def test_no_undeclared_inlined_prefilter():
          the honest option.
       3. OUTSIDE THE PACKAGE — the scan is rooted at the techne package, so
          `scripts/` is invisible. Nothing pre-filter-shaped lives there today.
+      4. A DOCSTRING READ BACK AND EXECUTED — a function whose docstring IS the
+         query (`SELECT content_hash FROM outbox WHERE target = ?`), run via
+         `fn.__doc__`.
+         The precision fix skips strings in docstring POSITION, and Python does
+         not distinguish prose from a string a function later executes. Verified
+         as a WORKING pre-filter, not a lexical curiosity: probe built a table,
+         enqueued a row, and got the hash back (#528 r7).
+         DELIBERATELY NOT CHASED. `.__doc__`-as-SQL has zero precedent in ~40
+         modules here, where gap 2 is idiomatic — and more AST cleverness is the
+         unwinnable game three earlier rounds already played on this detector.
+         Named so it is a known limit rather than a surprise.
     """
     from pathlib import Path
 
