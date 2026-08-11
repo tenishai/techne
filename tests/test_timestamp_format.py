@@ -5,7 +5,8 @@ the ordering primitive. It held three shapes at once — the column default
 (`2026-06-09 23:25:10`, 18,327 rows), bare ISO (18), and ISO with fractional
 seconds and a Z (3,439) — all written concurrently across the whole history.
 Because 'T' (0x54) sorts after ' ' (0x20) at position 10, every ISO row compared
-as LATER than every space-separated row on the same date: ~12% wrong on a live
+as LATER than every space-separated row on the same date: 782 returned where 770
+were correct, 12 phantom rows (~1.5%), on a live
 range query, with nothing raised.
 
 THE GUARD HERE EXERCISES THE REAL WRITERS. A test that asserts "no 'T' in the

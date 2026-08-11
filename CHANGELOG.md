@@ -70,7 +70,8 @@ that has run any of them will not re-run it.
 - **One on-disk timestamp shape** (#515) — `observations.timestamp` held three formats
   written concurrently across the whole history. TEXT columns compare lexically, so `T`
   (0x54) sorted after `' '` (0x20) and every ISO row read as later than every space-separated
-  row on the same date: ~12% of a live range query wrong, silently. Backfilled, and every
+  row on the same date. Measured on the live store: a range query returned 782 rows where
+  770 were correct — 12 phantom rows, ~1.5%, silently. Backfilled, and every
   writer normalises at the boundary — including the public `event_at` parameter, which the
   MCP tool schema and `--event-at` flag both document as ISO-8601, i.e. the contract *asked*
   for the shape being eliminated.
@@ -138,11 +139,15 @@ that has run any of them will not re-run it.
 ### Documentation
 
 - **Three suites are documented as deliberately local-only, and the claim is testable**
-  (#453, #456, #537, #546) — `probe`, `eval_llm` and the two `RUN_LSP_INTEGRATION`-gated LSP
+  (#453, #456, #546; part of #537, which stays OPEN) — `probe`, `eval_llm` and the two
+  `RUN_LSP_INTEGRATION`-gated LSP
   tests each need a toolchain CI does not carry, and each would SKIP rather than fail if
   wired up naively, buying a green result that means less than it looks.
   `tests/test_local_only_suites.py` fails if repo and policy drift apart in either direction.
-  Also records why `hooks.capture_read` is off: volume, not maturity.
+  Also records why `hooks.capture_read` is off: volume, not maturity. **#537 is only half
+  closed and deliberately stays open**: its LSP-documentation half is addressed here, but
+  its other half — the `model2vec` backend branch being exercised by no CI leg — is
+  untouched by this release.
 - **Cold-storage tier proposal** (#405) — graduate aged knowledge to Librarian documents.
 - The arch-card freshness gate is wired into CI (#383).
 
