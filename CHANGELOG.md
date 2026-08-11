@@ -5,6 +5,164 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-11
+
+The milestone where the memory rails got their integrity checked, the evidence gate learned
+to read the commands operators actually type, and CI started telling the truth about what it
+ran. 39 issues closed. Three of the fixes below were only reachable *because* another fix in
+this same release landed first — those interactions are called out where they matter.
+
+**Upgrading:** schema goes 21 → 24 in three steps, applied automatically on first `connect()`.
+Step 22 creates `reflection_queue`, 23 normalises every on-disk timestamp to one shape, 24
+derives `ended_at` for sessions that died unclean. The steps are ordered and gated; a store
+that has run any of them will not re-run it.
+
+### Added
+
+- **Durable reflection debt** (#514) — `session_end` counted the debt, logged "403 obs, 19
+  threads", and enqueued nothing, so reflection survived exactly one exit path: the polite
+  one. Every crash, kill or Remote Control timeout dropped it silently, and the
+  instrumentation made the rail read as healthy while the work evaporated. One
+  `reflection_queue` row per *emittable* thread now records what is owed, and the
+  SessionStart banner reads that ledger instead of re-deriving from recency — so debt that
+  ages past the recency window is no longer permanently invisible. Idempotent by schema
+  (`UNIQUE(thread_id)`), so two sessions racing cannot double-queue.
+
+- **Subsystem liveness — `techne doctor`** (#468 steps 1–2, #469, #487, #491) — "is techne
+  installed" and "is techne WORKING" are different questions and only the first had an
+  answer. Each check reports LIVE / DORMANT / STALE / UNOBSERVABLE **with a remedy the
+  operator can act on**; a verdict nobody can clear teaches people to ignore the check, so
+  UNOBSERVABLE is reserved for a rail that *should* be emitting and isn't, never one
+  correctly idle. Includes `runtime:loaded`, which compares a long-lived process's start time
+  against the deployed HEAD — a conservative staleness warning, not a tear detector, and it
+  says so.
+
+- **Operator-owned config layer for egress-selecting keys** (#393) — see README
+  §"Operator-owned config". Honoured only while provably not writable by the process reading
+  it; a writable layer **fails closed** to built-in defaults rather than deferring to
+  `config.yaml`. Installs that deploy no layer are unaffected.
+
+- **`techne architect ingest --verdict`, `reverdict`, `sweep-legacy-verdicts`** (#428) —
+  record the operator's actual judgment (`skip` / `skip-with-flag` / `patterns-only` /
+  `full-eval`) instead of a hardcoded constant. `reverdict` leaves `surveyed_at` alone:
+  correcting a judgment is not a re-survey.
+
+- **Retrieval-correctness gates** (#385, #399, #398/#403) — a regression gate for retrieval,
+  a hybrid/vector gate, and deterministic eval legs per PR plus a py3.14 `eval-vec` job.
+
+- **Per-hit retrieval provenance** (#413) and **capture / per-turn-recall rail
+  instrumentation** (#479) — recorded in `context_injections`, so "is what we inject
+  worthwhile?" becomes answerable from data rather than argued.
+
+- **Banner honesty** (#488, #452/#457) — deferred (expensive) checks are named rather than
+  silently omitted, and hook-registration drift is surfaced at session start.
+
+### Fixed
+
+- **Outbox retention that preserves the dedup ledger** (#518, #484) — 130,266 synced rows
+  were never pruned. The obvious fix is the dangerous one: synced rows on the
+  `archivist_knowledge` lane **are** the de-facto export ledger (the content-hash pre-filter
+  reads them), so deleting them re-enqueues the entire knowledge base on the next sweep. That
+  lane is now *collapsed* to one row per hash; the plain `archivist` lane ages out. Two
+  tombstones keep one row per target so `COUNT`/`MAX(synced_at)` stay honest and a healthy
+  lane cannot report "never synced".
+
+- **One on-disk timestamp shape** (#515) — `observations.timestamp` held three formats
+  written concurrently across the whole history. TEXT columns compare lexically, so `T`
+  (0x54) sorted after `' '` (0x20) and every ISO row read as later than every space-separated
+  row on the same date. Measured on the live store: a range query returned 782 rows where
+  770 were correct — 12 phantom rows, ~1.5%, silently. Backfilled, and every
+  writer normalises at the boundary — including the public `event_at` parameter, which the
+  MCP tool schema and `--event-at` flag both document as ISO-8601, i.e. the contract *asked*
+  for the shape being eliminated.
+
+- **`sessions.ended_at` for sessions that died unclean** (#516) — 79% NULL and degrading
+  (52% of June, 19% of July, 7% of August). With `ended_at` NULL the interval is open-ended,
+  so "which session was live at T" matched every session ever started before T. Derived from
+  last activity, with `ended_at_source` ('clean' | 'derived') as the discriminator — because
+  after this change "has an ended_at" no longer means "ended cleanly", and counting derived
+  ends would report a healthy store as STALE.
+
+- **`env` is a transparent prefix, not a read-only utility** (#524) — `env` headed the
+  read-only set, so `env … git commit` was dropped as navigation noise and, worse, an
+  unrecognised command discarded the whole ledger row: a real 2,620-test run with one failure
+  was thrown away while a 5-test run certified the suite green and *backed* a `tests_green`
+  claim.
+
+- **The evidence gate reads what actually ran** (#437, #439, #444, #445, #441) — keeps the
+  tail of tool output so verdicts survive capture; stops reading a missing failure count as
+  zero failures; reads totals only from commands that really run tests; sees through
+  `bash -c` without changing what is captured; and treats a redacted legacy row as bounded,
+  since `<redacted:…>` can shrink a row below the length threshold and an unflagged truncated
+  row can otherwise contribute to a green verdict.
+
+- **Vector hygiene** (#408, #382) — `threads_vec` accumulated one orphaned embedding per
+  summary update, unbounded, because threads rotate rowid on `INSERT OR REPLACE`; and
+  content-edited rows are re-embedded via a `vec_stale` flag instead of silently keeping a
+  stale vector. `vectors:coverage` also stopped counting a population its remedy could not
+  act on (#496).
+
+- **CI ran fewer tests than it appeared to** (#530, #535) — a stacked PR got **no CI at
+  all**, and six vector-dependent files ran in **neither** leg: they skipped in the job that
+  would select them and were deselected in the job that could run them. Both closed, with
+  static guards against the workflow edits that would silently reintroduce either.
+
+- **`techne watch` no longer crash-loops forever on a missing `[watch]` extra** (#498) — a
+  configuration error was being retried as though transient, every 5 seconds, forever. Exits
+  78 (`EX_CONFIG`); the shipped unit sets `RestartPreventExitStatus=78`. **Both halves are
+  required** — either alone still loops.
+
+- **Coordination** (#492, #494, #446, #380) — a DORMANT twin is now a rival for the name;
+  `send(to=<name>)` reads the sidecars once; read receipts key on the durable identity rather
+  than the per-launch UUID; dead PIDs are reaped from `live_sessions`.
+
+- **`fastconfig` import guards are a cost allowlist, not a techne blocklist** (#489) — the
+  guard enumerated modules that must not be imported, which cannot catch a new expensive one.
+
+- Also: atomic liveness guard on knowledge supersede/retire (#390); codex OR-fallback for
+  multi-term symbol search (#392); vec-first union replacing RRF fusion (#401); archivist no
+  longer enqueues redirected types into a lane that rejects them (#450); real git-worktree
+  detection instead of a path convention (#434); interpreter validated before being baked
+  into `~/.claude` (#458); MCP server registered through the self-healing launcher (#370); a
+  discarded reflection no longer reports as a successful empty one (#465); `techne doctor`
+  asks for `--posture auto` on a machine that was never initialised (#480).
+
+### Performance
+
+- **Hook fast path — 100ms → 50ms per hook** (#470) — stdlib-only config read.
+- **Archivist stops re-enqueuing the whole knowledge base every teardown** (#475).
+- **Suite runs under `pytest-xdist` — 654s → 317s of runner time** (#463), with isolation
+  dirs carved out of `tmp_path` rather than `mktemp` (#466), and the suite no longer writes
+  into the operator's live store (#477).
+- **CI moved onto the self-hosted pool** (#424, #461).
+
+### Documentation
+
+- **Three suites are documented as deliberately local-only, and the claim is testable**
+  (#453, #456, #546; part of #537, which stays OPEN) — `probe`, `eval_llm` and the two
+  `RUN_LSP_INTEGRATION`-gated LSP
+  tests each need a toolchain CI does not carry, and each would SKIP rather than fail if
+  wired up naively, buying a green result that means less than it looks.
+  `tests/test_local_only_suites.py` fails if repo and policy drift apart in either direction.
+  Also records why `hooks.capture_read` is off: volume, not maturity. **#537 is only half
+  closed and deliberately stays open**: its LSP-documentation half is addressed here, but
+  its other half — the `model2vec` backend branch being exercised by no CI leg — is
+  untouched by this release.
+- **Cold-storage tier proposal** (#405) — graduate aged knowledge to Librarian documents.
+- The arch-card freshness gate is wired into CI (#383).
+
+### Removed
+
+- **`search.mmr_lambda` config knob** (#420) — it defaulted to 0.3, round-tripped through
+  `config.yaml`, and was never passed to any search function, so every live path ran at 0.0
+  (MMR off) and setting it was a silent no-op. Removed rather than plumbed: turning it on
+  would have been an unmeasured retrieval change on installs whose 0.3 was a serialized
+  default nobody chose. Existing configs carrying the key still load; it is ignored, as it
+  was in effect before.
+
+<details>
+<summary>Earlier detail from this cycle, kept verbatim</summary>
+
 ### Added
 
 - **Operator-owned config layer for egress-selecting keys** (#393) — the keys that choose where memory can GO (`sync`, `connections`, `llm_api_base`, `llm_api_key`, `model`, `reflect.model`, `conflict.model`, `archivist_db_path`, `standalone`, `stores`) can now be pinned in a `config.operator.yaml` that techne honors only while the file is provably not writable by the process reading it. Resolved from `/etc/techne/config.operator.yaml` → `$TECHNE_OPERATOR_CONFIG` → `<techne_home>/config.operator.yaml`, gated once in `Config.load()`. A layer that exists but is writable by us FAILS CLOSED to the built-in default destinations rather than deferring to `config.yaml` — and `config.yaml` keeps its own values on disk either way, so an enforcing layer never destroys the file it overrules. Only `/etc/techne/config.operator.yaml` is a real lock; the other two tiers are conveniences an agent can bypass from its own environment — `$TECHNE_OPERATOR_CONFIG` with `env -u`, and the `<techne_home>` tier via `TECHNE_HOME` — and the check names the tier in force together with the lever that actually applies to it. **Operators pinning a layer must declare the WHOLE set** — an omitted key reverts to its built-in value rather than falling back to `config.yaml`. Watch `stores` in particular: an omitted store DSN does not error, it opens a new empty database at `<data_dir>/<domain>.db`, so domain memory looks intact and is not. **Installs with no operator layer are unaffected** — `config.yaml` keeps full authority, and the new `config:trust` check reports that state rather than implying a boundary nobody deployed.
@@ -28,6 +186,8 @@ All notable changes to techne are documented here. Format loosely follows
 - **`runtime:loaded` — a long-running process holding pre-deploy modules is no longer reported as healthy** (#491) — `runtime:revision` reads git HEAD from disk, so it rendered a torn MCP server as LIVE while `techne_reflect_emit` died on an `ImportError` for a symbol that was present in both the repo and the runtime. The new check compares each long-lived techne process's start time against the deployed HEAD's committer time and reports STALE with a restart remedy. Deliberately a **conservative staleness warning, not a tear detector**: a runtime pull under a live server was measured NOT tearing it, so the check reports the ordering it observed and explicitly disclaims the inference.
 
 - **The investigation verdict is no longer hardcoded** (#428) — `ingest_patterns_md` wrote `full-eval` for any URL group carrying patterns and `skip-with-flag` for a no-lift bullet, and the CLI could not set one, so the column recorded *whether the markdown had patterns* rather than a judgment and `patterns-only` was unreachable by any code path. The live corpus had 202 `full-eval` / 70 `skip-with-flag` / 0 `patterns-only` against 19 eval docs on disk. Verdicts are now validated against a vocabulary, and an ingest that does not state one records `patterns-only` (the documented modal outcome) instead of `full-eval`.
+
+</details>
 
 ## [0.12.0] — 2026-07-24
 
