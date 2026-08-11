@@ -576,7 +576,7 @@ class TestNoFalseGreens:
         assert "1 stale (edited since embedding)" in cov.detail
         assert cov.remedy == "techne vectors backfill"
 
-    def test_a_dangling_vector_is_reported_but_carries_no_remedy(self, config):
+    def test_a_dangling_vector_is_reported_in_the_detail_not_the_verdict(self, config):
         """The mutation that survived the whole suite (#497 review, finding 1).
 
         Reverting `embedded` to a raw `COUNT(*) FROM knowledge_vec_rowids` passed
@@ -585,12 +585,27 @@ class TestNoFalseGreens:
         which is reachable: `knowledge.delete()` and the pattern cleanup both
         delete through a plain `connect()`, which cannot touch a vec0 table.
 
-        AND IT MUST NOT FAIL THE CHECK. The purge deletes `WHERE rowid IN (SELECT
-        id FROM knowledge WHERE superseded_by IS NOT NULL)` — it selects FROM
-        knowledge, so a rowid with no row behind it is never matched (verified:
-        purge removed 0 of 2). Failing here would attach a remedy that cannot
-        clear the finding, which is precisely the never-green defect #496 fixed.
-        Visible in the detail, absent from the verdict.
+        AND IT MUST NOT FAIL THE CHECK — but NOT for the reason this docstring
+        gave until #408. The original reason was that no remedy existed:
+        `_purge_superseded_knowledge_vec` deletes `WHERE rowid IN (SELECT id FROM
+        knowledge WHERE superseded_by IS NOT NULL)`, which selects FROM knowledge,
+        so a rowid with no row behind it was never matched (verified: purge
+        removed 0 of 2), and failing would have attached a remedy that could not
+        clear the finding — the never-green defect #496 fixed.
+
+        THAT REASON EXPIRED. #408 shipped `_purge_orphaned_vec`, which deletes
+        `WHERE rowid NOT IN (SELECT id FROM knowledge)` — the same predicate and
+        the same population the `dangling` count uses — so the remedy now clears
+        this finding exactly (executed through the real functions: dangling=1 ->
+        backfill_vectors -> {'orphans_swept': 1} -> dangling=0). The assertions
+        below did not change, which is the point worth flagging: they pass under
+        both the true and the false explanation, so nothing here would ever have
+        prompted a reader to notice the premise had rotted.
+
+        THE CURRENT REASON, smaller and different: folding `dangling` into the
+        verdict changes `techne doctor` output on live stores and belongs in its
+        own change. Visible in the detail, absent from the verdict — for now, by
+        choice, not because it is unremediable.
         """
         from techne.core.database import connect
         from techne.core.knowledge import store
@@ -611,7 +626,11 @@ class TestNoFalseGreens:
 
         cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
         # The live population is whole, so the check is GREEN...
-        assert cov.verdict is Verdict.LIVE, f"dangling must not create an unclearable red: {cov}"
+        assert cov.verdict is Verdict.LIVE, (
+            f"dangling is reported in the detail, not the verdict — flipping it is a "
+            f"deliberate follow-up (it moves doctor output on live stores), NOT a "
+            f"claim that #408's purge cannot clear it: {cov}"
+        )
         assert cov.remedy is None
         # ...but the dangling vector is NOT swallowed.
         assert "1 dangling vector(s) with no knowledge row" in cov.detail
