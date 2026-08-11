@@ -376,6 +376,285 @@ def purge_pending(db_path: Path, target: str | None = None) -> int:
         conn.close()
 
 
+# The two row sets the sweep acts on, defined ONCE and shared by the preview and
+# the delete. A dry run that computes its own copy of the predicate is worse than
+# no dry run: it reports on a scope the apply path may not share, and the
+# divergence is invisible precisely when it matters. Both take the ledger-target
+# placeholders as their leading parameters.
+_SWEEP_COLLAPSE = """
+    SELECT id, target FROM (
+        SELECT id, target, ROW_NUMBER() OVER (
+            PARTITION BY target, content_hash
+            ORDER BY (status = 'dead') ASC, id DESC
+        ) AS rn
+        FROM outbox
+        WHERE target IN ({ph})
+          AND status != 'pending'
+          AND content_hash IS NOT NULL
+    ) WHERE rn > 1
+"""
+
+# ALWAYS KEEP THE NEWEST ROW PER TARGET — the tombstone that stops a swept lane
+# from presenting as a lane that never existed.
+#
+# `check_outbox_targets` (checks.py:1254-1256) reads outbox history per target:
+#   SELECT target, COUNT(*), MAX(synced_at), SUM(status='pending'), MAX(created_at)
+#   FROM outbox GROUP BY target
+# Empty a quiet lane completely and its target drops out of that GROUP BY, so the
+# check falls into its `_declared_outbox_targets - seen` branch and reports
+# "declared lane has NEVER enqueued anything" — false, and it replaces the very
+# STALE diagnosis (the eight-week-dead thread_summary incident) that check exists
+# to make. The evidence would be destroyed at the exact moment it became
+# actionable, because `retain_days` defaults to 7 and `_PRODUCER_SILENT_AFTER` is
+# also 7 days: STALE fires precisely in the window the sweep had already emptied.
+#
+# One retained row per target keeps COUNT/MAX honest and costs a few hundred bytes.
+# This is cheaper and more robust than coupling the two constants, because it
+# holds for ANY retain_days an operator picks — including the one that motivated
+# them to lower it.
+_SWEEP_AGED = """
+    SELECT id, target FROM outbox
+     WHERE status = 'synced'
+       AND target NOT IN ({ph})
+       AND created_at < ?
+       AND id NOT IN (SELECT MAX(id) FROM outbox GROUP BY target)
+       -- FIRST TOMBSTONE: the newest row per target, whatever its status.
+       -- ITS IN-PACKAGE JUSTIFICATION IS UNREACHABLE, AND THAT IS NOT WHY IT
+       -- STAYS (#528 r6). The earlier argument was that it protects a `synced`
+       -- row carrying a NULL synced_at. No code here can produce that: every
+       -- assignment of status='synced' sets synced_at in the SAME statement
+       -- (outbox.py:156, :262, :291), and database.py:668's backfill is itself
+       -- gated on `synced_at IS NOT NULL`. Grepped exhaustively for
+       -- `status = 'synced'` across techne/ to say that.
+       -- SO THE HONEST REASON IS OUT-OF-BAND WRITES: a manual UPDATE against the
+       -- db, a future migration, a third-party tool. This table is a plain
+       -- SQLite file an operator can and does open. The clause costs one row per
+       -- target and is the only thing standing between such a write and a lane
+       -- that reads as never-synced.
+       -- Pinned by test_the_first_tombstone_survives_an_out_of_band_write, which
+       -- creates exactly that state directly. Mutating this clause to `1=1` left
+       -- the whole suite green before that test existed — a clause defended only
+       -- by an argument, and by an argument that could not happen.
+       -- SECOND TOMBSTONE: the newest SYNCED row per target.
+       -- The first one preserves PRESENCE; it does not preserve SYNC HISTORY,
+       -- and check_outbox_targets reads MAX(synced_at) from the same GROUP BY.
+       -- When a lane has a backlog its newest row is PENDING, so that row takes
+       -- the first tombstone slot and every synced row older than the boundary
+       -- is deleted — leaving MAX(synced_at) NULL. With pending > 0 the check
+       -- falls to temporal_verdict(last_synced, 14d), and temporal_verdict(None)
+       -- is UNOBSERVABLE (checks.py:288-291). So a healthy, actively-draining
+       -- lane reports "never synced".
+       -- Reachable on defaults, not exotic: retain_days=7 and a last successful
+       -- sync 7-14 days old — precisely a lane that has just started backing up.
+       -- Same class as the bug the first tombstone fixes, caught on one axis and
+       -- not the other: an aggregate the check reads, destroyed by retention.
+       -- TIE-BROKEN BY id, and that is load-bearing (#528 r7, found by #531).
+       -- This was `GROUP BY target HAVING synced_at = MAX(synced_at)`, which is
+       -- ambiguous when two rows share a synced_at: SQLite then returns an
+       -- ARBITRARY row's id, and it returned the OLDER one — protecting the row
+       -- the sweep should remove and leaving the newest unprotected.
+       -- It never showed up because `synced_at` used to be written with
+       -- .isoformat(), whose MICROSECONDS made ties practically impossible. #531
+       -- normalised every timestamp to second precision, so two rows synced in
+       -- the same second now collide routinely — and they do, because a drain
+       -- stamps a whole batch with one `now`. The clause was depending on
+       -- precision it never declared, supplied by a different module.
+       AND id NOT IN (
+             SELECT o.id FROM outbox o
+              WHERE o.status = 'synced'
+                AND NOT EXISTS (
+                      SELECT 1 FROM outbox n
+                       WHERE n.target = o.target AND n.status = 'synced'
+                         AND (n.synced_at > o.synced_at
+                              OR (n.synced_at = o.synced_at AND n.id > o.id))))
+"""
+
+
+def _sweep_boundary(conn, retain_days: int, cutoff: str | None) -> str:
+    if cutoff is not None:
+        return cutoff
+    return conn.execute("SELECT datetime('now', ?)", (f"-{int(retain_days)} days",)).fetchone()[0]
+
+
+def delivered_hashes(db_path: Path, target: str) -> set[str]:
+    """The content hashes already enqueued for *target* — the dedup pre-filter (#518).
+
+    THE DECLARED ACCESSOR. Reading enqueue history back makes those rows
+    load-bearing state rather than a log, so the sweep must not age them out.
+    That invariant used to live in a regex over the source tree, and a regex
+    could not hold it: it was blind to a consumer reaching the table THROUGH
+    this module (the idiomatic way, since every other outbox query lives here),
+    and it produced false positives on files that merely mention both tokens —
+    `core/state.py` has a `COUNT(*) FROM outbox` stat with no target and no dedup
+    semantics anywhere near it. Its precision rested on where semicolons happened
+    to fall.
+
+    So the enforceable half lives HERE instead. WHAT THIS GUARANTEES, stated so it
+    is falsifiable: IF YOU CALL `delivered_hashes`, YOU MUST DECLARE YOUR LANE.
+
+    WHAT IT DOES NOT: it cannot stop a pre-filter that queries the table
+    directly. `connect` is imported by ~40 modules across the package — most of
+    core — so nothing prevents another from inlining the same SELECT with an
+    undeclared target. (An earlier version of this sentence said "three modules",
+    which invited the reader to picture a small surveyable set; the argument is
+    correct and in fact stronger than that stated it, and core/database.py
+    DEFINES connect rather than importing it.) An earlier
+    version of this docstring claimed "a new pre-filter cannot be written that
+    the retention policy does not know about" — that was false, and a confident
+    sentence over a weaker mechanism is worse than no sentence, because it
+    recruits the next reader into trusting a guarantee that is not there.
+
+    `test_no_undeclared_inlined_prefilter` is a leaky detector for the inlined
+    case, and says so; between them they cover the two ways this gets written.
+    """
+    from techne.core.archivist import LEDGER_TARGETS
+
+    if target not in LEDGER_TARGETS:
+        raise ValueError(
+            f"{target!r} reads outbox enqueue history but is not in LEDGER_TARGETS. "
+            f"Those rows are a dedup ledger, not a log — the sweep would age them "
+            f"out and the next push would re-enqueue everything. Declare the lane "
+            f"in techne/core/archivist.py, or do not read history back."
+        )
+    conn = connect(db_path)
+    try:
+        return {
+            row[0]
+            for row in conn.execute(
+                "SELECT content_hash FROM outbox WHERE target = ? AND status != 'dead'",
+                (target,),
+            )
+        }
+    finally:
+        conn.close()
+
+
+def sweep_preview(db_path: Path, retain_days: int = 7, cutoff: str | None = None) -> dict:
+    """What ``sweep_delivered`` WOULD delete, computed from the same predicates.
+
+    Returns ``{"collapsed", "aged_out", "by_target", "retained", "boundary"}``.
+    Read-only.
+
+    ``boundary`` is returned so a caller can pass it BACK to ``sweep_delivered``
+    as *cutoff*. Otherwise each computes ``datetime('now', ...)`` independently
+    and an --apply run uses a boundary a moment later than the dry run the
+    operator read. It cannot matter at day granularity — but the whole design
+    rests on the dry run being unable to describe a different row set than the
+    apply, and threading it makes that unconditional rather than true-in-practice.
+    """
+    from techne.core.archivist import LEDGER_TARGETS
+
+    conn = connect(db_path)
+    try:
+        ph = ",".join("?" for _ in LEDGER_TARGETS)
+        targets = tuple(LEDGER_TARGETS)
+        boundary = _sweep_boundary(conn, retain_days, cutoff)
+
+        collapse = conn.execute(_SWEEP_COLLAPSE.format(ph=ph), targets).fetchall()
+        aged = conn.execute(_SWEEP_AGED.format(ph=ph), (*targets, boundary)).fetchall()
+
+        by_target: dict[str, int] = {}
+        for _id, target in [*collapse, *aged]:
+            by_target[target] = by_target.get(target, 0) + 1
+
+        total = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+        return {
+            "collapsed": len(collapse),
+            "aged_out": len(aged),
+            "by_target": by_target,
+            "retained": total - len(collapse) - len(aged),
+            "boundary": boundary,
+        }
+    finally:
+        conn.close()
+
+
+def sweep_delivered(
+    db_path: Path, retain_days: int = 7, cutoff: str | None = None
+) -> dict[str, int]:
+    """Bound outbox growth by dropping delivered rows nothing will read again (#518).
+
+    Returns ``{"collapsed": n, "aged_out": n}``. NEVER touches ``pending`` — those
+    rows are undelivered work.
+
+    ``dead`` rows are kept by the AGE-OUT (they are diagnostic; ``list_dead``
+    reads them) but a ledger lane's COLLAPSE can remove one: the partition spans
+    statuses, so a dead duplicate of a hash that also has a live row is dropped as
+    redundant. That is intended — the surviving row carries the same hash, which
+    is the only thing the pre-filter reads — but "never touches dead" was too
+    strong, so it is stated precisely rather than reassuringly.
+
+    TWO POLICIES, because the lanes differ in kind and the difference is real:
+
+    * LEDGER TARGETS (``archivist.LEDGER_TARGETS``) — COLLAPSE, DO NOT AGE OUT.
+      Their rows are consulted as a dedup ledger, so the SET of content hashes is
+      load-bearing while the LOG is not. Keeps one row per hash and drops the
+      redundant copies, which is why this needs no age condition: a duplicate hash
+      is waste the moment it lands. Historically 126,160 rows -> ~772.
+
+      READ THE NUMBERS IN THIS MODULE AS DATED OBSERVATIONS, NOT AS CONSTANTS.
+      Three different totals appear across this PR's surfaces — 126,160 here,
+      128,200 at `archivist.py:132` and below, 130,266 in #518's title — and they
+      are NOT the same measurement of different populations. I could not
+      reconcile them and did not invent a reconciliation: they are consistent
+      with one growing table sampled on three days, and the distinct-hash
+      figures beside them (~772 vs 761) move in the opposite direction to the
+      totals, which no single-population story explains. The state they describe
+      is GONE — a hand-run sweep on 2026-08-07 took the table down, and the live
+      store today holds 5,303 outbox rows (838 on this ledger lane), re-derived
+      through `sweep_preview` on a copy. Do not subtract these from each other,
+      and do not treat any of them as a current fact about the store.
+    * EVERY OTHER TARGET — AGE OUT. Nothing reads these back (verified: the only
+      reader of ``outbox.content_hash`` outside this module is the pre-filter in
+      ``core/archivist.py``), and their rows are unique events rather than repeats
+      of a bounded set, so collapsing reclaims almost nothing and age is the only
+      bound that works.
+
+    Applying either policy to the other lane fails: age-sweeping the ledger breaks
+    the pre-filter, and collapsing observations reclaims ~21% instead of ~99%.
+
+    PREFERS A NON-DEAD SURVIVOR when collapsing. The pre-filter's query excludes
+    ``status = 'dead'``, so keeping a dead row over a synced one with the same hash
+    would drop that hash from the set and re-enqueue it — the exact bug this
+    function exists to avoid, reintroduced by the fix for it.
+
+    *cutoff* overrides the computed age boundary (tests pass an explicit timestamp
+    rather than sleeping). ``outbox.created_at`` is uniformly space-separated, so
+    it is safe to compare lexically here — verified across 128,200 rows; this is
+    NOT true of ``observations.timestamp`` (#515), so do not generalise it.
+    """
+    from techne.core.archivist import LEDGER_TARGETS
+
+    conn = connect(db_path)
+    try:
+        ph = ",".join("?" for _ in LEDGER_TARGETS)
+        targets = tuple(LEDGER_TARGETS)
+        boundary = _sweep_boundary(conn, retain_days, cutoff)
+
+        # Both deletes select through the SHARED predicates above, so the dry run
+        # cannot describe a different row set than the apply.
+        collapsed = conn.execute(
+            f"DELETE FROM outbox WHERE id IN (SELECT id FROM ({_SWEEP_COLLAPSE.format(ph=ph)}))",
+            targets,
+        ).rowcount
+        aged_out = conn.execute(
+            f"DELETE FROM outbox WHERE id IN (SELECT id FROM ({_SWEEP_AGED.format(ph=ph)}))",
+            (*targets, boundary),
+        ).rowcount
+
+        conn.commit()
+        logger.debug(
+            "swept outbox: collapsed=%d aged_out=%d (retain_days=%d, boundary=%s)",
+            collapsed,
+            aged_out,
+            retain_days,
+            boundary,
+        )
+        return {"collapsed": collapsed, "aged_out": aged_out}
+    finally:
+        conn.close()
+
+
 def prune_orphans(db_path: Path) -> int:
     """Mark pending ``sink:`` rows whose sink isn't registered as dead.
 

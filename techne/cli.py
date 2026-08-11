@@ -1087,10 +1087,63 @@ def outbox_flush_sinks(ctx):
 def outbox_prune_orphans(ctx):
     """Mark pending rows for unregistered targets as dead."""
     config = ctx.obj["config"]
+    from techne.core.archivist import ensure_registered_for
     from techne.sync.outbox import prune_orphans
 
+    # REGISTER FIRST, exactly as flush-sinks above does (#484). Sinks are
+    # per-process state: in a fresh CLI process there are none, so every
+    # sink:archivist_knowledge row looks like a row for an unregistered target and
+    # prune_orphans marks the whole live backlog dead. The command's help is
+    # accurate — the defect was that a registered lane presented as unregistered.
+    ensure_registered_for(config)
     pruned = prune_orphans(config.db_path)
     click.echo(f"Pruned {pruned} orphan row(s).")
+
+
+@outbox.command("sweep")
+@click.option("--retain-days", default=7, show_default=True, help="Age bound for non-ledger lanes.")
+@click.option("--apply", "apply_", is_flag=True, help="Actually delete (default: dry run).")
+@click.pass_context
+def outbox_sweep(ctx, retain_days, apply_):
+    """Drop delivered rows nothing will read again (#518).
+
+    Collapses ledger lanes to one row per content hash and ages out the rest.
+    Never touches pending or dead rows. DRY RUN BY DEFAULT — pass --apply.
+    """
+    config = ctx.obj["config"]
+    from techne.sync.outbox import sweep_delivered, sweep_preview
+
+    if not apply_:
+        preview = sweep_preview(config.db_path, retain_days=retain_days)
+        # PRINT THE SCOPE, NOT JUST A COUNT. A dry run that reports only a total
+        # looks equally correct whether the scope is right or has swallowed
+        # everything — Prudence's Critical on #432's sweep-legacy-verdicts.
+        click.echo(f"Dry run (retain_days={retain_days}). Would delete:")
+        click.echo(f"  collapse (ledger lanes): {preview['collapsed']} redundant row(s)")
+        click.echo(f"  age out (other lanes):   {preview['aged_out']} row(s)")
+        for target, n in sorted(preview["by_target"].items()):
+            click.echo(f"    {target}: {n}")
+        click.echo(f"  retained: {preview['retained']} row(s). Re-run with --apply.")
+        return
+
+    # Reuse the PREVIEW's boundary, so --apply cannot act on a different row set
+    # than THIS PROCESS's dry run. Deliberately not "the dry run the operator just
+    # read" — that ran in a separate process and its boundary is gone; the rows
+    # can differ. sweep_preview's docstring is careful about this and the comment
+    # here was not (r5 nit 3).
+    #
+    # `retain_days` is threaded even though `cutoff` wins, so the two arguments
+    # cannot disagree: the debug line inside sweep_delivered reports its own
+    # `retain_days`, and it read the 7 default under `--retain-days 30` — the one
+    # place an operator looks to confirm what they asked for.
+    preview = sweep_preview(config.db_path, retain_days=retain_days)
+    result = sweep_delivered(
+        config.db_path, retain_days=retain_days, cutoff=preview["boundary"]
+    )
+    click.echo(
+        f"Swept {result['collapsed'] + result['aged_out']} row(s) "
+        f"(collapsed {result['collapsed']}, aged out {result['aged_out']})."
+    )
 
 
 @outbox.command("purge")
