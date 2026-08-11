@@ -121,6 +121,29 @@ ARCHIVIST_SINK = OutboxSink(
 
 ARCHIVIST_KNOWLEDGE_TARGET = "sink:archivist_knowledge"
 
+# TARGETS WHOSE DELIVERED OUTBOX ROWS ARE LOAD-BEARING STATE, NOT A LOG (#518).
+#
+# `push_knowledge_to_archivist` reads this lane's rows back as a dedup pre-filter
+# (see the query below), so those rows ARE the de-facto export ledger. Retention
+# must preserve the SET of content hashes here; deleting them makes the next
+# teardown re-enqueue the entire knowledge base — correctly, because as far as the
+# pre-filter can tell the rows really are gone.
+#
+# DEMONSTRATED, not theorised: a hand-run sweep of 128,200 rows on 2026-08-07
+# completed at 20:13 and 761 distinct rows re-enqueued at 20:16:01-06.
+#
+# DECLARED HERE, NEXT TO THE CONSUMER, ON PURPOSE. `techne.sync.outbox` imports
+# this rather than carrying its own copy of the target name: a literal typed next
+# to the thing it describes is a copy, not a mechanism, and it drifts the moment
+# either side moves (techne#1022, and the #508 review that found the same shape
+# five times). `sync.outbox.delivered_hashes` is what BINDS this set: it refuses a
+# target that is not in it, so any caller that reads enqueue history through the
+# accessor must declare its lane. That is the enforceable half — a pre-filter
+# that queries the table directly, without the accessor, is NOT prevented by
+# anything here (see delivered_hashes' docstring for what it does and does not
+# guarantee).
+LEDGER_TARGETS = frozenset({ARCHIVIST_KNOWLEDGE_TARGET})
+
 
 @dataclass
 class KnowledgePayload:
@@ -243,10 +266,9 @@ def push_knowledge_to_archivist(config) -> int:
        compares against what the SINK holds rather than what we enqueued."""
     if config.standalone:
         return 0
-    from techne.core.database import connect
     from techne.core.knowledge import REDIRECTED_TYPES
     from techne.core.knowledge_export import query_live_knowledge
-    from techne.sync.outbox import content_hash_for, enqueue
+    from techne.sync.outbox import content_hash_for, delivered_hashes, enqueue
 
     ensure_registered_for(config)
 
@@ -271,17 +293,11 @@ def push_knowledge_to_archivist(config) -> int:
     # The general shape, worth carrying to any "stop repeating this work" change:
     # AN OUTBOX IS A LOG OF ENQUEUES, NOT A RECORD OF WHAT THE SINK HOLDS, and the
     # redundancy being removed was quietly doubling as a reconcile path.
-    conn = connect(config.db_path)
-    try:
-        already = {
-            row[0]
-            for row in conn.execute(
-                "SELECT content_hash FROM outbox WHERE target = ? AND status != 'dead'",
-                (ARCHIVIST_KNOWLEDGE_TARGET,),
-            )
-        }
-    finally:
-        conn.close()
+    # THROUGH THE DECLARED ACCESSOR, not inlined SQL (#518). delivered_hashes()
+    # raises unless the target is in LEDGER_TARGETS, so a lane whose enqueue
+    # history is read back cannot exist without the retention policy knowing —
+    # the invariant is enforced by the call, not by a regex over the source.
+    already = delivered_hashes(config.db_path, ARCHIVIST_KNOWLEDGE_TARGET)
 
     pushed = 0
     skipped = 0
