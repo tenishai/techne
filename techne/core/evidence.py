@@ -27,7 +27,7 @@ from pathlib import Path
 # The gate reads bounded projections of tool output, so it needs the writer's
 # budget and marker to tell a complete record from a cut one (techne#438).
 from techne.core.redaction import REDACTION_MARKER
-from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, was_elided
+from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, _skip_env_prefix, was_elided
 
 # Tool names that are NOT agent deeds — meta-records or user-side events.
 #
@@ -423,33 +423,6 @@ _SHELL_VALUE_LETTERS = frozenset({"o", "O"})
 #: Long options taking a separate value. No clustering applies to these.
 _SHELL_VALUE_LONG_OPTS = frozenset({"--rcfile", "--init-file"})
 
-#: A transparent prefix: `env bash -c '<script>'` really does run the script, so
-#: `env` is skipped along with its own options rather than read as the command.
-#: NOT the same as `/usr/bin/env -c '...'`, which is not a shell invocation.
-_ENV_PREFIXES = frozenset({"env"})
-#: env's own value-taking options, by LETTER for the same reason the shell rule
-#: is: they cluster (`env -iu FOO bash -c …` is `-i` + `-u FOO`), and a
-#: whole-token set cannot see the clustered spelling — `-iu` is not `-u`. That is
-#: r2 finding 1 in a second loop, and it starved identically until r3 caught it.
-#:
-#: `S` is deliberately NOT a value letter: `-S`/`--split-string`'s "value" is the
-#: whole rest of the command line, which shlex has already split for us, so
-#: consuming the next token would swallow the shell itself. Verified: `env -S
-#: bash -c 'echo MARKER'` prints MARKER, because env splits `bash` into a
-#: one-word list and appends the remaining argv — so skipping `-S` by ONE token
-#: lands exactly on the shell.
-#:
-#: The fully-quoted spelling `env -S 'bash -c pytest'` is a different shape and
-#: is UNSEEN: the whole payload arrives as a single token which is not a shell
-#: name, so `_shell_c_script` returns None. Starvation, not invention (r3 nit 3).
-#: `P` is BSD's `-P utilpath`, verified present on this box: `env -P /usr/bin pwd`
-#: reports "env: pwd: No such file or directory", i.e. -P consumed the path. The
-#: set is already a GNU/BSD union (`-C` is GNU-only and works here), so P belongs.
-_ENV_VALUE_LETTERS = frozenset({"u", "C", "P"})
-#: Long options take a separate value and never cluster. `-uFOO`/`--unset=FOO`
-#: carry theirs attached, so they correctly skip by one.
-_ENV_VALUE_LONG_OPTS = frozenset({"--unset", "--chdir"})
-
 #: Bound on `-c` nesting. Depth 2 covers `bash -c 'sh -c "pytest"'`; beyond that
 #: a command is pathological and the gate stops rather than recursing on input.
 _MAX_SHELL_C_DEPTH = 3
@@ -507,48 +480,7 @@ def _shell_c_script(segment: str) -> str | None:
     i = 0
     while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
         i += 1
-    # `env` is transparent: skip it, its options, and any VAR=val it carries.
-    while i < len(tokens) and tokens[i].rsplit("/", 1)[-1] in _ENV_PREFIXES:
-        i += 1
-        while i < len(tokens):
-            t = tokens[i]
-            # Same LAST-LETTER-OF-THE-CLUSTER rule as the shell scanner above.
-            # A whole-token test misses `-iu FOO` (which is `-i` + `-u FOO`),
-            # skipping by one so FOO reads as the command and the shell is never
-            # reached — starvation, i.e. a false green.
-            if t.startswith("--"):
-                i += 2 if t in _ENV_VALUE_LONG_OPTS else 1
-            elif t[:1] == "-" and len(t) > 1:
-                # ENV USES getopt; THE SHELL SCANNER ABOVE DOES NOT. Applying the
-                # shell's rule here was r3 finding 1 recurring a THIRD time in
-                # this one loop, and the two really do differ:
-                #   bash:  `-oc pipefail S` -> `o` eats the NEXT TOKEN from the
-                #          front of the cluster (measured; bash rolls its own).
-                #   env:   `-uCC bash …`    -> `u` takes the REST OF THE TOKEN
-                #          ("CC") as an attached value and eats NOTHING.
-                # Testing only t[-1] read `-uCC`'s trailing C as a value letter
-                # and skipped two tokens, eating `bash`. Starvation, i.e. a false
-                # green. `env -u CC` (unsetting a compiler var) is idiomatic in
-                # build and CI contexts, not exotic.
-                #
-                # getopt's actual rule: at the FIRST value letter, the remainder
-                # of the token is its value if any remains; only a value letter in
-                # LAST position consumes the following token. All six spellings
-                # below were run against the real env before this was written.
-                cluster = t[1:]
-                first_value = next(
-                    (k for k, ch in enumerate(cluster) if ch in _ENV_VALUE_LETTERS), None
-                )
-                if first_value is None:
-                    i += 1  # flags only (`-i`, `-0`)
-                elif first_value == len(cluster) - 1:
-                    i += 2  # `-u CC`, `-iu CC`, `-P /usr/bin` — value is next token
-                else:
-                    i += 1  # `-uCC`, `-uC`, `-iuCC` — value attached in-token
-            elif "=" in t and not t.startswith("-"):
-                i += 1
-            else:
-                break
+    i = _skip_env_prefix(tokens, i)
     if i >= len(tokens) or tokens[i].rsplit("/", 1)[-1] not in _SHELL_C_WRAPPERS:
         return None
     # `-c`, including clustered SHORT flags containing c (`-lc`, `-ec`, `-cx`).
@@ -620,6 +552,20 @@ def _command_runs_tests(command: str) -> bool:
         # Skip leading `VAR=val` env assignments to find the real head.
         while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
             i += 1
+        # ...and the `env` prefix, for the same reason and in the same order as
+        # the other three sites. THE FOURTH CALL SITE (r1 review): the gate saw
+        # `env bash -c 'pytest -q'` only because that routes through
+        # _expand_shell_c -> _shell_c_script, which already called this helper;
+        # the DIRECT form `env pytest -q` fell through here. Not cosmetic — an
+        # unrecognised command hits the `continue` in the row loop below, which
+        # discards the row WHOLE, so its failures never reach `all_failed` and
+        # _row_totals_unreliable is never consulted for it. Measured end-to-end
+        # against a real ledger: `env pytest -q` -> "1 failed, 2619 passed"
+        # alongside a small `pytest tests/test_small.py -q` -> "5 passed" gave
+        # suite_green=True and BACKED the tests_green claim — the 2620-test run
+        # discarded, the 5-test run certifying green. That is the starvation-
+        # shaped false green this file names at 596-599 and techne#438.
+        i = _skip_env_prefix(tokens, i)
         if i >= len(tokens):
             continue
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. .venv/bin/pytest
