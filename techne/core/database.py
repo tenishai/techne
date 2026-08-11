@@ -143,7 +143,8 @@ def normalize_timestamp(value):
     the whole history: `2026-06-09 23:25:10` (the column default, 18,327 rows),
     `2026-06-09T14:00:00` (18), and `2026-08-08T00:19:00.965Z` (3,439). Because
     'T' (0x54) sorts after ' ' (0x20) at position 10, every ISO row compared as
-    LATER than every space-separated row on the same date — ~12% wrong on a live
+    LATER than every space-separated row on the same date — 782 returned where 770
+    were correct, 12 phantom rows (~1.5%), on a live
     range query, with no error raised.
 
     NOTE WHAT THIS IMPLIES FOR A NAIVE FIX: replacing 'T' with ' ' is not enough.
@@ -1377,7 +1378,8 @@ END;
         # default (`2026-06-09 23:25:10`), bare ISO, and ISO with fractional
         # seconds and a Z. TEXT columns compare lexically, so 'T' (0x54) sorting
         # after ' ' (0x20) made every ISO row read as later than every
-        # space-separated row on the same date. Measured ~12% wrong on a live
+        # space-separated row on the same date. Measured on the live store: 782
+        # returned where 770 were correct — 12 phantom rows, ~1.5%, on a live
         # range query, silently.
         #
         # The writers are fixed at the seven insert sites; this backfills what

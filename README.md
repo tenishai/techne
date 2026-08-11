@@ -23,7 +23,7 @@ techne init
 > across interpreter changes:
 >
 > ```bash
-> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.12.0"
+> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.13.0"
 > techne init
 > ```
 >
@@ -90,7 +90,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
-`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.12.0"`.
+`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.13.0"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 
@@ -264,6 +264,12 @@ techne context [--project-path PATH] [--limit N]
                                            # client's system prompt (e.g. opencode transform)
 
 # Memory hygiene (reflect · evidence · claims — no API key; uses your own model)
+#
+# REFLECTION DEBT IS DURABLY QUEUED as of 0.13.0. session_end used to COUNT the debt and
+# enqueue nothing, so reflection survived only the polite exit path and every crash or
+# timeout dropped it silently. One reflection_queue row per emittable thread now records
+# what is owed; the SessionStart banner reads that ledger instead of re-deriving it from
+# recency, so debt that ages out of the recency window is no longer permanently invisible.
 techne reflect                             # show pending / promoted / discarded candidate counts
 techne reflect review [--status pending|promoted|discarded|all] [--limit N]
 techne reflect emit [--session ID] [--limit N] [-o FILE]
@@ -307,6 +313,17 @@ techne restore BACKUP_DIR [--yes] [--no-pre-backup]
                                            # the full set before touching any live file
 
 # Diagnostics
+techne doctor                              # subsystem liveness — is techne actually WORKING,
+                                           # not just installed. Each check reports LIVE /
+                                           # DORMANT / STALE / UNOBSERVABLE with a remedy you
+                                           # can act on. A check that cannot say what to do
+                                           # about a failure is a bug, not a warning.
+techne watch                               # exits 78 (EX_CONFIG) on a startup precondition
+                                           # restarting cannot fix — e.g. a missing [watch]
+                                           # extra. The shipped systemd unit sets
+                                           # RestartPreventExitStatus=78, so it stops on the
+                                           # FIRST failure instead of respawning forever.
+                                           # BOTH halves are required; either alone loops.
 techne probe [--runtime claude-code|opencode] [--mode off-test|pull|differential]
                                            # differential-canary memory-attribution probe (#94):
                                            # seeds a canary, spawns a fresh session, checks
@@ -327,7 +344,17 @@ techne library migrate-store               # one-time: move documents techne.db 
 
 # Architect (architect.db) — the architectural-patterns corpus
 techne architect                           # pattern / investigation counts
-techne architect ingest PATTERNS_MD        # seed from an architectural-patterns.md corpus
+techne architect ingest PATTERNS_MD [--verdict skip|skip-with-flag|patterns-only|full-eval]
+                                           # seed from an architectural-patterns.md corpus.
+                                           # --verdict records YOUR judgment of the
+                                           # investigation; omitted, it records
+                                           # 'patterns-only' (the modal outcome).
+techne architect reverdict URL --verdict X # correct one investigation's verdict without
+                                           # re-ingesting. Leaves surveyed_at alone:
+                                           # correcting a judgment is not a re-survey.
+techne architect sweep-legacy-verdicts --before DATE [--apply]
+                                           # retire pre-#428 auto-assigned verdicts to
+                                           # 'unknown'. Dry-run by default, date-scoped.
 techne architect search QUERY
 techne architect show PATTERN_ID
 techne architect export [-o FILE]          # regenerate shareable architectural-patterns.md
@@ -366,6 +393,12 @@ Personal `techne.db` deliberately stays raw-SQLite and local-only. techne is **S
 ## Configuration
 
 Lives at `~/.techne/config.yaml`. Example:
+
+> **Operators: there is a second, higher-authority layer for the keys that decide where
+> memory can GO.** See [Operator-owned config](#operator-owned-config-egress-selecting-keys)
+> below before deploying techne somewhere the agent should not be able to redirect its own
+> egress. Installs that do not deploy one are unaffected — `config.yaml` keeps full
+> authority.
 
 ```yaml
 db_path: ~/.techne/techne.db
@@ -417,6 +450,33 @@ sync:
 ```
 
 ---
+
+### Operator-owned config (egress-selecting keys)
+
+The keys that choose **where memory can go** — `sync`, `connections`, `llm_api_base`,
+`llm_api_key`, `model`, `reflect.model`, `conflict.model`, `archivist_db_path`,
+`standalone`, `stores` — can be pinned in a `config.operator.yaml` that techne honors **only
+while the file is provably not writable by the process reading it**. Resolved in order:
+
+```
+/etc/techne/config.operator.yaml     # the only real lock
+$TECHNE_OPERATOR_CONFIG              # convenience; an agent can bypass with `env -u`
+<techne_home>/config.operator.yaml   # convenience; bypassable via TECHNE_HOME
+```
+
+A layer that exists but **is writable by us fails CLOSED** to the built-in defaults rather
+than deferring to `config.yaml`. `config.yaml` keeps its own values on disk either way — an
+enforcing layer never destroys the file it overrules. `techne doctor`'s `config:trust` check
+names the tier in force and the lever that actually applies to it.
+
+> **Pin the WHOLE set or not at all.** An omitted key reverts to its **built-in** value; it
+> does not fall back to `config.yaml`. Watch `stores` especially: an omitted store DSN does
+> not error — it opens a new empty database at `<data_dir>/<domain>.db`, so domain memory
+> *looks* intact and is not.
+
+**Removed in 0.13.0:** `search.mmr_lambda`. It round-tripped through `config.yaml` and was
+never passed to any search function, so setting it was a silent no-op. Existing configs
+carrying the key still load; it is ignored, as it was in effect before.
 
 ## Model use — the agent's own model by default
 
