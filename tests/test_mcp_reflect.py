@@ -216,12 +216,71 @@ def test_emit_ingest_round_trip(config):
     assert cands[0]["content"] == "Use JWT for service auth"
 
 
-def test_ingest_empty_response_is_noop(config):
+def test_ingest_empty_response_is_a_discarded_pass_not_a_noop(config):
+    """An empty response is a reflection that DIDN'T HAPPEN, and must report as one.
+
+    This surface used to short-circuit whitespace with {"note": "nothing to
+    ingest"} and no `errors` key, while the core it wraps calls the identical
+    input `parse_failures=1, errors=1` ("empty response"). That erased #465's
+    whole distinction at the boundary agents actually use (techne#485).
+    """
     counts = _techne_reflect_ingest(
         {"session_id": "s", "thread_id": "t", "response": "  "}, config
     )
+    assert counts["parse_failures"] == 1
+    assert counts["errors"] == 1
     assert counts["candidates_written"] == 0
     assert list_candidates(config.db_path, status="all") == []
+
+
+def test_ingest_unparseable_response_surfaces_the_failure(config):
+    """Prose instead of the JSON array — the realistic failure, not an exotic one."""
+    counts = _techne_reflect_ingest(
+        {"session_id": "s", "thread_id": "t", "response": "I didn't find anything worth saving."},
+        config,
+    )
+    assert counts["parse_failures"] == 1
+    assert counts["errors"] == 1
+    assert counts["candidates_written"] == 0
+
+
+def test_ingest_counts_shape_is_the_core_shape(config):
+    """Every key of new_ingest_counts() reaches the MCP surface, on both paths.
+
+    The anti-drift assertion. A fourth hand-written copy of this dict lived here;
+    a key added upstream silently never arrived, which is exactly how the CLI copy
+    came to crash with KeyError through 2,383 passing tests (techne#465/#485).
+    """
+    from techne.core.reflect import new_ingest_counts
+
+    expected = set(new_ingest_counts())
+    discarded = _techne_reflect_ingest(
+        {"session_id": "s", "thread_id": "t", "response": ""}, config
+    )
+    assert expected <= set(discarded)
+
+    _seed(config, "sess-shape")
+    item = _techne_reflect_emit({"session_id": "sess-shape"}, config)["batch"][0]
+    good = _techne_reflect_ingest(
+        {
+            "session_id": "sess-shape",
+            "thread_id": item["thread_id"],
+            "prompt_hash": item["prompt_hash"],
+            "response": _CANNED,
+        },
+        config,
+    )
+    assert expected <= set(good)
+
+
+def test_ingest_discarded_pass_does_not_drain_reflection_debt(config):
+    """Draining on a discarded pass would stamp it paid permanently (drain is
+    guarded on drained_at IS NULL), so a thrown-away reflection could never be
+    retried."""
+    counts = _techne_reflect_ingest(
+        {"session_id": "s", "thread_id": "t", "response": "  "}, config
+    )
+    assert "reflection_debt_drained" not in counts
 
 
 def test_ingest_tolerates_inlined_array(config):
