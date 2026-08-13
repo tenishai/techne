@@ -15,6 +15,7 @@ from techne.core.utilization import (
     edit_rail_attribution,
     injection_utilization,
     read_write_ledger,
+    recall_attribution,
 )
 from techne.hooks._injection_log import log_context_injection
 
@@ -637,3 +638,208 @@ def test_bool_distance_is_not_logged_as_a_vec_score(tmp_path):
     got = _provenance(p)
     assert got["native"] == [None]
     assert got["kinds"] == [None], "a True distance must not become vec_distance 1.0"
+
+
+# ---- recall_attribution (techne#329 step 1's deferred join) -----------------
+
+
+def _stamp_last(db, table, ts):
+    """Force the most recently inserted row's timestamp (both tables default now)."""
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db)
+    conn.execute(
+        f"UPDATE {table} SET timestamp = ? WHERE id = (SELECT MAX(id) FROM {table})", (ts,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _kinject(db, ts, ids, *, source="per_turn_recall", session="s1"):
+    """Log a knowledge-rail injection of `ids` (knowledge row ids) at `ts`."""
+    log_context_injection(
+        db, source=source, session_id=session, trigger="t",
+        rows=[{"id": i} for i in ids], injected_text="x" * 20,
+    )
+    _stamp_last(db, "context_injections", ts)
+
+
+def _act(db, ts, content, *, tool="Bash", session="s1"):
+    """Record an arbitrary tool observation carrying `content` at `ts`."""
+    add_observation(db, session, tool, content)
+    _stamp_last(db, "observations", ts)
+
+
+def test_recall_attribution_empty_db(db):
+    r = recall_attribution(db)
+    assert r["injections"] == 0
+    assert r["cited_in_window_pct"] is None
+    assert r["items"] == []
+    assert r["per_source"]["per_turn_recall"]["injections"] == 0
+
+
+def test_recall_attribution_credits_citation_in_window(db):
+    _kinject(db, "2026-01-01 12:00:00", [237, 812])
+    _act(db, "2026-01-01 12:00:30", "as techne#237 says, do the thing")
+    r = recall_attribution(db)
+    assert r["injections"] == 1
+    assert r["cited_in_window"] == 1
+    assert r["cited_in_window_pct"] == 100.0
+    assert r["cited_in_session"] == 1
+
+
+def test_recall_attribution_ignores_uninjected_id(db):
+    # Citing some OTHER knowledge id is not evidence this injection was used.
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    _act(db, "2026-01-01 12:00:30", "unrelated: techne#999")
+    r = recall_attribution(db)
+    assert r["cited_in_window"] == 0
+    assert r["cited_in_session"] == 0
+
+
+def test_recall_attribution_matches_both_spellings_and_brackets(db):
+    _kinject(db, "2026-01-01 12:00:00", [956])
+    _act(db, "2026-01-01 12:00:10", "CORRECTION to knowledge#956 — see ⟦techne#956⟧")
+    assert recall_attribution(db)["cited_in_window"] == 1
+
+
+def test_recall_attribution_echo_tool_cannot_credit(db):
+    # techne_recall's captured Output contains the ids it RETURNED — crediting
+    # that would be the store citing itself.
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    _act(db, "2026-01-01 12:00:30", "Output: techne#237",
+         tool="mcp__techne__techne_recall")
+    r = recall_attribution(db)
+    assert r["cited_in_window"] == 0
+    assert r["cited_in_session"] == 0
+
+
+def test_recall_attribution_echo_tool_still_consumes_a_window_slot(db):
+    # An echo tool is a real action: it can't earn credit, but it does push a
+    # later genuine citation out of a 1-action window.
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    _act(db, "2026-01-01 12:00:10", "Output: techne#237",
+         tool="mcp__techne__techne_recall")
+    _act(db, "2026-01-01 12:00:20", "now I use techne#237")
+    assert recall_attribution(db, next_actions=1)["cited_in_window"] == 0
+    assert recall_attribution(db, next_actions=2)["cited_in_window"] == 1
+
+
+def test_recall_attribution_window_vs_session_ceiling(db):
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    _act(db, "2026-01-01 12:00:30", "warm-up, no ids here")
+    _act(db, "2026-01-01 13:00:00", "much later: techne#237")
+    r = recall_attribution(db, window_minutes=10.0)
+    assert r["cited_in_window"] == 0
+    assert r["cited_in_session"] == 1  # ceiling catches what the window drops
+
+
+def test_recall_attribution_next_actions_cap(db):
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    for i in range(3):
+        _act(db, f"2026-01-01 12:00:0{i + 1}", "filler")
+    _act(db, "2026-01-01 12:00:05", "techne#237")
+    assert recall_attribution(db, next_actions=3)["cited_in_window"] == 0
+    assert recall_attribution(db, next_actions=5)["cited_in_window"] == 1
+
+
+def test_recall_attribution_only_counts_actions_after_the_injection(db):
+    _act(db, "2026-01-01 11:59:00", "techne#237 mentioned BEFORE the injection")
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    r = recall_attribution(db)
+    assert r["cited_in_window"] == 0
+    assert r["cited_in_session"] == 0
+
+
+def test_recall_attribution_unobserved_session_is_excluded_not_scored(db):
+    # A session the ledger never captured can't show a citation either way. It
+    # must not land in the attributable denominator as a "miss" (the live corpus
+    # is dominated by these for session_start).
+    ensure_session(db, "s2")
+    _kinject(db, "2026-01-01 12:00:00", [237], source="session_start", session="s2")
+    r = recall_attribution(db)
+    assert r["injections"] == 1
+    assert r["unobserved_sessions"] == 1
+    assert r["no_actions_in_window"] == 0
+    assert r["attributable"] == 0
+    assert r["cited_in_window_pct_attributable"] is None
+    assert r["per_source"]["session_start"]["unobserved_session"] == 1
+
+
+def test_recall_attribution_in_ledger_but_nothing_in_window_is_a_real_miss(db):
+    # Distinct from the unobserved case: the session IS captured, actions exist,
+    # they just fall outside the window. That IS a miss and stays in the base.
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    _act(db, "2026-01-01 14:00:00", "way outside the window")
+    r = recall_attribution(db)
+    assert r["unobserved_sessions"] == 0
+    assert r["no_actions_in_window"] == 1
+    assert r["attributable"] == 0
+
+
+def test_recall_attribution_attributable_denominator(db):
+    # Two injections: one with a following action (attributable, cited), one into
+    # an unobserved session. The *_attributable rate must use only the former.
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    _act(db, "2026-01-01 12:00:10", "techne#237")
+    ensure_session(db, "s2")
+    _kinject(db, "2026-01-01 12:00:00", [237], session="s2")
+    r = recall_attribution(db)
+    assert r["injections"] == 2
+    assert r["attributable"] == 1
+    assert r["cited_in_window_pct"] == 50.0
+    assert r["cited_in_window_pct_attributable"] == 100.0
+
+
+def test_recall_attribution_per_item_table(db):
+    _kinject(db, "2026-01-01 12:00:00", [237, 812])
+    _act(db, "2026-01-01 12:00:10", "techne#237")
+    _kinject(db, "2026-01-01 12:10:00", [812])
+    by_id = {r["id"]: r for r in recall_attribution(db)["items"]}
+    assert by_id[237]["encounters"] == 1
+    assert by_id[237]["cited_in_session"] == 1
+    assert by_id[812]["encounters"] == 2          # shown twice…
+    assert by_id[812]["cited_in_session"] == 0    # …never named
+    assert by_id[812]["sessions"] == 1
+    r = recall_attribution(db)
+    assert r["items_injected"] == 2
+    assert r["items_never_cited"] == 1
+    assert r["items_never_cited_pct"] == 50.0
+
+
+def test_recall_attribution_items_sorted_by_encounters(db):
+    for _ in range(3):
+        _kinject(db, "2026-01-01 12:00:00", [812])
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    ids = [r["id"] for r in recall_attribution(db)["items"]]
+    assert ids == [812, 237]
+
+
+def test_recall_attribution_ignores_codex_style_string_ids(db):
+    # codex_edit_rail writes symbol-id STRINGS into the same column. If such a
+    # source is passed explicitly it must degrade to "no citable ids", not raise.
+    log_context_injection(
+        db, source="codex_edit_rail", session_id="s1", trigger="sym",
+        rows=[{"id": "techne/foo.py::bar::function::10"}], injected_text="x",
+    )
+    _stamp_last(db, "context_injections", "2026-01-01 12:00:00")
+    _act(db, "2026-01-01 12:00:10", "techne#237")
+    r = recall_attribution(db, sources=("codex_edit_rail",))
+    assert r["injections"] == 1
+    assert r["cited_in_window"] == 0
+    assert r["items"] == []
+
+
+def test_recall_attribution_tz_aware_timestamp_no_crash(db):
+    # Transcript-imported observations carry tz-AWARE ISO times; mixing them with
+    # naive stored times used to raise TypeError (techne#374).
+    _kinject(db, "2026-01-01 12:00:00", [237])
+    _act(db, "2026-01-01T12:00:30Z", "techne#237")
+    r = recall_attribution(db)  # no TypeError
+    assert r["cited_in_window"] == 1
+
+
+def test_recall_attribution_since_days_windows_injections(db):
+    _kinject(db, "2026-01-01 12:00:00", [237])  # far in the past
+    assert recall_attribution(db, since_days=7)["injections"] == 0
+    assert recall_attribution(db)["injections"] == 1
