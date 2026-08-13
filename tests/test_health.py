@@ -741,6 +741,57 @@ class TestRevisionInfo:
         assert info["remote_revision"] == "bbbbbbb", "the comparison is still reported"
         assert info["remote_ref_age_days"] is not None, "caveat data on every branch"
 
+    def test_detached_head_is_recorded_as_HEAD_not_none(self, tmp_path):
+        """_revision_info must DETECT detachment, not just render it.
+
+        The banner-level test for this passes `branch="HEAD"` in, so it cannot
+        see a detection bug here — mutation proved it: deleting this branch of
+        the logic left the whole suite green until this test existed.
+        """
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "HEAD").write_text("abc1234" + "0" * 33 + "\n")  # raw sha = detached
+        (git / "refs" / "remotes" / "origin" / "main").write_text("bbbbbbb" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["branch"] == "HEAD", "detached must match doctor's convention"
+        assert info["revision"] == "abc1234", "HEAD read fine — nothing unreadable"
+
+    def test_unreadable_head_leaves_branch_none(self, tmp_path):
+        """The ONLY state that earns UNVERIFIED."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        (root / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True)
+        info = _revision_info(root / "techne")
+        assert info["branch"] is None
+        assert info["drifted"] is None
+
+    def test_no_loose_origin_ref_leaves_the_age_unknown(self, tmp_path):
+        """No honest mtime exists for a packed-only ref, so the age must stay None.
+
+        Guards the removed FETCH_HEAD fallback: that file's mtime is last-FETCH,
+        which reads younger than last-moved and would falsely reassure.
+        """
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
+        (git / "packed-refs").write_text(
+            f"{'bbbbbbb' + '0' * 33} refs/remotes/origin/main\n"
+        )
+        (git / "FETCH_HEAD").write_text("whatever\n")  # must NOT be used
+
+        info = _revision_info(root / "techne")
+        assert info["remote_revision"] == "bbbbbbb", "packed ref still resolves"
+        assert info["remote_ref_age_days"] is None, "no loose ref = no honest age"
+
     def test_the_checkout_this_suite_runs_from_is_actually_readable(self):
         """The gap every synthetic fixture missed.
 
@@ -828,7 +879,29 @@ class TestFreshnessCaveat:
 
     def test_unreadable_head_is_unverified_not_a_healthy_checkout(self):
         """No branch → cannot tell a deployment from a working checkout."""
+        # branch=None now means HEAD itself would not read — the only state
+        # that earns UNVERIFIED, since detached is handled as off-main.
         b = format_banner(self._h(branch=None, drifted=None, revision=None))
         assert "⚠️" in b
         assert "UNVERIFIED" in b
         assert "None" not in b, "no literal None on an operator-facing line"
+
+    def test_detached_head_is_off_main_not_unverified(self):
+        """Every review worktree is detached — warning there is the failure this
+        change exists to prevent, and doctor calls the same state healthy."""
+        b = format_banner(self._h(branch="HEAD", drifted=None, remote_revision="0cc44f6"))
+        assert "⚠️" not in b, "a detached checkout is not a defect"
+        assert "UNVERIFIED" not in b, "HEAD read fine; nothing was unreadable"
+        assert "on a detached HEAD (not a deployment" in b
+        assert "differs from origin/main 0cc44f6" in b
+
+    def test_off_main_at_the_same_sha_says_level_not_differs(self):
+        """A branch freshly cut from an up-to-date main, before its first commit —
+        which is exactly when a SessionStart banner greets you. The earlier
+        wording printed the same sha on both sides of the word "differs"."""
+        b = format_banner(
+            self._h(branch="refs/heads/feat", drifted=None,
+                    revision="abc1234", remote_revision="abc1234")
+        )
+        assert "level with origin/main abc1234" in b
+        assert "differs" not in b

@@ -156,7 +156,20 @@ def _revision_info(package_path: Path) -> dict:
         raw_head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         raw_head = ""
-    info["branch"] = raw_head[5:].strip() if raw_head.startswith("ref: ") else None
+    # A DETACHED HEAD IS OFF-MAIN, NOT UNREADABLE. When HEAD holds a raw sha it
+    # read perfectly well — it just names no branch — so it must take the
+    # off-main path, not UNVERIFIED. Recorded as the literal "HEAD" to match
+    # check_runtime_revision's convention (`git rev-parse --abbrev-ref HEAD`
+    # returns "HEAD" when detached), because that check reports DORMANT/healthy
+    # for this state and the two surfaces must not contradict. Every review
+    # worktree is detached, so warning here fires on exactly the topology the
+    # review tooling runs in — the "trains you to ignore it" failure this whole
+    # change exists to prevent. `branch` stays None ONLY when HEAD is genuinely
+    # unreadable, which is the only state that deserves UNVERIFIED.
+    if raw_head.startswith("ref: "):
+        info["branch"] = raw_head[5:].strip()
+    elif raw_head:
+        info["branch"] = "HEAD"
     tracks_main = info["branch"] == "refs/heads/main"
 
     head = _read_ref(git_dir, common_dir, "HEAD")
@@ -170,16 +183,23 @@ def _revision_info(package_path: Path) -> dict:
     # diverted — and docs/arch/liveness.md records the invariant that a working
     # checkout still STATES how far behind it is, because "on a peer's branch,
     # behind the merge" IS the #473 incident.
-    ref_path = common_dir / "refs" / "remotes" / "origin" / "main"
-    for candidate in (ref_path, common_dir / "FETCH_HEAD"):
-        try:
-            age = datetime.now(timezone.utc) - datetime.fromtimestamp(
-                candidate.stat().st_mtime, tz=timezone.utc
-            )
-            info["remote_ref_age_days"] = max(age.days, 0)
-            break
-        except OSError:
-            continue
+    # ONLY the loose ref's mtime, deliberately — no FETCH_HEAD fallback. The ref's
+    # mtime is when origin/main last MOVED, exactly the quantity
+    # check_runtime_revision reports from the reflog (measured identical here:
+    # both 14:37:01). FETCH_HEAD measures the last fetch, a different quantity —
+    # 15:05:36 in the same repo, 28 minutes later, because a fetch that moves
+    # nothing still rewrites it. Reported under the same label it reads YOUNGER
+    # than the truth, i.e. more reassuring, which is the wrong direction for a
+    # staleness caveat. When the ref is packed-only there is no honest mtime, so
+    # the age is left None and the banner says so.
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+            (common_dir / "refs" / "remotes" / "origin" / "main").stat().st_mtime,
+            tz=timezone.utc,
+        )
+        info["remote_ref_age_days"] = max(age.days, 0)
+    except OSError:
+        pass
 
     if not tracks_main:
         # Deliberately off main, so being unlevel with main is not a defect — but
@@ -436,8 +456,18 @@ def format_banner(health: dict) -> str:
         # Gated on `branch` BEFORE `drifted` so the data model does not need a
         # false `drifted=False` to route the renderer here.
         healthy = True
-        short = branch.removeprefix("refs/heads/")
-        cmp = f"differs from origin/main {_remote}" if _remote else "no origin/main ref"
+        short = "a detached HEAD" if branch == "HEAD" else branch.removeprefix("refs/heads/")
+        # ACTUALLY COMPARE. An earlier revision said "differs from origin/main"
+        # without ever comparing the shas, so a branch freshly cut from an
+        # up-to-date main — before its first commit, which is exactly when a
+        # SessionStart banner greets you — printed the same sha on both sides of
+        # the word "differs". doctor says "level with origin/main" for this.
+        if not _remote:
+            cmp = "no origin/main ref"
+        elif rev == _remote:
+            cmp = f"level with origin/main {_remote}"
+        else:
+            cmp = f"differs from origin/main {_remote}"
         build_note = f"checkout {rev} · on {short} (not a deployment; {cmp}{fetched})"
     elif drifted is False:
         healthy = True
