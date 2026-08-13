@@ -91,6 +91,72 @@ def test_search_patterns_blank_query_returns_empty(db):
     assert search_patterns(db, "\\") == []
 
 
+def test_search_patterns_or_fallback_on_empty_and_pass(db):
+    """#557: a problem-phrased query must not AND-miss a pattern that answers it.
+
+    The corpus is queried in problem language but titled metaphorically, so under
+    FTS5 implicit-AND every term must appear or the caller is told "no patterns"
+    while an on-point pattern sits in the store.
+    """
+    inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="patterns-only")
+    add_pattern(
+        db,
+        investigation_id=inv,
+        name="Two-gate alerting: relative tier AND absolute floor",
+        source_url="u",
+        body=(
+            "An alert fires only when a file clears a repo-relative tier AND trips an "
+            "absolute factor, so a healthy repo can return no findings at all."
+        ),
+    )
+
+    # "stop" appears nowhere in the corpus. A single-term query takes no fallback
+    # (build_or_fts_query returns "" for <2 terms), so this empty result proves the
+    # term is genuinely absent — and therefore that the ANDed multi-term query below
+    # cannot match, which is what the pre-#557 caller saw as "no patterns matched".
+    assert search_patterns(db, "stop") == []
+
+    hits = search_patterns(db, "how do I stop an alert firing when the repo is healthy")
+    assert hits, "OR fallback should recover a pattern the AND pass misses"
+    assert hits[0]["name"].startswith("Two-gate alerting")
+
+
+def test_search_patterns_or_fallback_does_not_disturb_a_matching_and_query(db):
+    """#557: the fallback fires only on an empty AND pass — a working query is unchanged.
+
+    This is the no-regression half: adding the fallback must not widen results for
+    queries that already resolve, or precise searches would silently get noisier.
+    """
+    inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="patterns-only")
+    add_pattern(
+        db,
+        investigation_id=inv,
+        name="Quarantine-fence untrusted content",
+        source_url="u",
+        body="Preserve, do not drop; defuse, do not trust.",
+    )
+    add_pattern(
+        db,
+        investigation_id=inv,
+        name="Unrelated durable execution runtime",
+        source_url="u2",
+        body="Swap the runtime without changing agent code.",
+    )
+
+    # Both terms present in exactly one pattern → the AND pass succeeds, so the
+    # OR fallback must never run and pull in the "untrusted"-less second pattern.
+    hits = search_patterns(db, "quarantine untrusted")
+    assert len(hits) == 1
+    assert hits[0]["name"] == "Quarantine-fence untrusted content"
+
+
+def test_search_patterns_single_term_does_not_re_query(db):
+    """#557: build_or_fts_query returns "" for <2 terms — a miss stays a miss."""
+    inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="patterns-only")
+    add_pattern(db, investigation_id=inv, name="P", source_url="u", body="some body text")
+    assert search_patterns(db, "nonexistentterm") == []
+
+
 def test_ingest_patterns_md(db):
     md = """---
 name: architectural-patterns
