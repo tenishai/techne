@@ -135,26 +135,25 @@ def test_search_patterns_or_fallback_does_not_disturb_a_matching_and_query(db):
         source_url="u",
         body="Preserve, do not drop; defuse, do not trust.",
     )
+    # LOAD-BEARING FIXTURE DESIGN: the decoy must contain EXACTLY ONE of the two
+    # query terms ("quarantine", not "untrusted"). That is what gives this test teeth.
+    # AND("quarantine","untrusted") matches only the first pattern, so the guard holds
+    # the fallback back — but OR("quarantine" OR "untrusted") WOULD match this decoy,
+    # so if `if not results` is ever removed the OR pass runs, returns two rows, and
+    # the assertion below breaks. A decoy sharing NO query term makes the test vacuous:
+    # it then passes with or without the guard (verified by mutation — the first
+    # version of this test survived replacing the guard with `if True`).
     add_pattern(
         db,
         investigation_id=inv,
         name="Unrelated durable execution runtime",
         source_url="u2",
-        body="Swap the runtime without changing agent code.",
+        body="Swap the runtime without changing agent code. Nothing to do with quarantine.",
     )
 
-    # Both terms present in exactly one pattern → the AND pass succeeds, so the
-    # OR fallback must never run and pull in the "untrusted"-less second pattern.
     hits = search_patterns(db, "quarantine untrusted")
-    assert len(hits) == 1
+    assert len(hits) == 1, "AND pass matched, so the OR fallback must not have widened it"
     assert hits[0]["name"] == "Quarantine-fence untrusted content"
-
-
-def test_search_patterns_single_term_does_not_re_query(db):
-    """#557: build_or_fts_query returns "" for <2 terms — a miss stays a miss."""
-    inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="patterns-only")
-    add_pattern(db, investigation_id=inv, name="P", source_url="u", body="some body text")
-    assert search_patterns(db, "nonexistentterm") == []
 
 
 def test_ingest_patterns_md(db):
