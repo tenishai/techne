@@ -1618,3 +1618,103 @@ def test_the_marker_matches_what_the_redactor_actually_writes():
     # construction, which is exactly its limit.
     for _pattern_src, tag in _PATTERNS:
         assert REDACTION_MARKER.search(f"<redacted:{tag}>"), f"marker misses tag {tag!r}"
+
+
+# ---- techne#541: the length test's pressure, probed rather than narrated ------
+
+
+class TestProbeLengthTestPressure:
+    """`probe_length_test_pressure` replaces a prose predicate that rotted.
+
+    The value of these tests is NOT the numbers — the live ledger's counts change
+    with every run. It is that the probe's clauses stay bolted to the ones the
+    gate actually applies. Every error during #441's five review rounds came from
+    re-implementing a step the gate already owns; a probe that drifts the same way
+    is a comment with a return type.
+    """
+
+    @staticmethod
+    def _bash(db_path, session, command, output):
+        from techne.core.evidence import _BASH_OUTPUT_MARKER
+
+        _insert_obs(db_path, session, "Bash", f"Ran: {command}{_BASH_OUTPUT_MARKER}{output}")
+
+    def test_empty_ledger_is_all_zeroes_not_a_crash(self, db_path):
+        from techne.core.evidence import probe_length_test_pressure
+
+        assert set(probe_length_test_pressure(db_path).values()) == {0}
+
+    def test_counts_the_conjunction_the_gate_actually_applies(self, db_path):
+        from techne.core.evidence import probe_length_test_pressure
+
+        _insert_session(db_path, "s")
+        # runner + parseable + failure-free + short + unmarked → the ordinary
+        # green run whose verdict the redaction clause ALONE decides.
+        self._bash(db_path, "s", "pytest -q", "12 passed in 0.4s")
+        # runner + parseable but FAILING → excluded by the failure-free clause.
+        self._bash(db_path, "s", "pytest -q", "1 failed, 3 passed in 0.4s")
+        # runner but UNPARSEABLE → excluded before the length test is consulted.
+        self._bash(db_path, "s", "pytest -q", "collecting ...")
+        # not a runner at all, and names one only inside a quoted argument —
+        # the substring-vs-command-head distinction (techne#440).
+        self._bash(db_path, "s", 'git commit -m "fix the pytest flake"', "12 passed in 0.4s")
+
+        c = probe_length_test_pressure(db_path)
+        assert c["bash_rows"] == 4
+        assert c["runner_rows"] == 3
+        assert c["conjunction_rows"] == 1
+        assert c["decided_by_redaction_alone"] == 1
+
+    def test_marker_carrying_runner_rows_ignores_parseability_and_outcome(self, db_path):
+        """The watch-observable counts runner rows carrying the marker, PERIOD.
+
+        Scoping it to the conjunction would make it move with the suite's size —
+        the stock this docstring argues against watching.
+        """
+        from techne.core.evidence import probe_length_test_pressure
+
+        _insert_session(db_path, "s")
+        self._bash(db_path, "s", "pytest -q", "12 passed, key <redacted:aws-access-key> in 0.4s")
+        self._bash(db_path, "s", "pytest -q", "1 failed <redacted:bearer>")  # failing
+        self._bash(db_path, "s", "pytest -q", "collecting <redacted:jwt>")  # unparseable
+        self._bash(db_path, "s", "ls -la", "<redacted:sk>")  # not a runner
+
+        c = probe_length_test_pressure(db_path)
+        assert c["marker_carrying_runner_rows"] == 3
+        assert c["runner_rows"] == 3
+
+    def test_flips_require_all_four_clauses(self, db_path):
+        """A flip is only a flip when the clauses ABOVE the redaction test did not
+        already return True — which is why dropping the length clause inflates it."""
+        from techne.core.evidence import probe_length_test_pressure
+        from techne.hooks.post_tool_use import _PREVIEW_ELISION_MARK, _PREVIEW_MAX_CHARS
+
+        _insert_session(db_path, "s")
+        self._bash(db_path, "s", "pytest -q", "12 passed <redacted:bearer>")  # FLIP
+        # already elided → the first clause returns True, so redaction decides nothing
+        elided = f"12 passed\n… [4096{_PREVIEW_ELISION_MARK}<redacted:bearer>"
+        self._bash(db_path, "s", "pytest -q", elided)
+        # at/over budget → the length clause already returned True
+        self._bash(db_path, "s", "pytest -q", "x" * _PREVIEW_MAX_CHARS + " <redacted:bearer>")
+        self._bash(db_path, "s", "pytest -q", "12 passed in 0.4s")  # no marker
+
+        assert probe_length_test_pressure(db_path)["flips"] == 1
+
+    def test_flips_read_the_output_not_the_whole_row(self, db_path):
+        """Measuring the row counts a marker in the COMMAND as a flip. It isn't
+        one: the gate only ever reads `_bash_output(content)`."""
+        from techne.core.evidence import probe_length_test_pressure
+
+        _insert_session(db_path, "s")
+        self._bash(db_path, "s", "pytest -q --token=<redacted:bearer>", "12 passed in 0.4s")
+        c = probe_length_test_pressure(db_path)
+        assert c["flips"] == 0
+        assert c["marker_carrying_runner_rows"] == 0
+
+    def test_ignores_rows_that_are_not_bash_output(self, db_path):
+        from techne.core.evidence import probe_length_test_pressure
+
+        _insert_session(db_path, "s")
+        _insert_obs(db_path, "s", "Edit", "Edited: a.py\nChange: x → y")
+        _insert_obs(db_path, "s", "Bash", "Ran: pytest -q")  # no Output section
+        assert probe_length_test_pressure(db_path)["bash_rows"] == 0
