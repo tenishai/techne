@@ -1,5 +1,7 @@
 """Tests for the health summary + login banner (#76)."""
 
+from pathlib import Path
+
 import pytest
 
 from techne.config import Config
@@ -30,6 +32,7 @@ def _healthy_build() -> dict:
         "remote_revision": "abc1234",
         "drifted": False,
         "remote_ref_age_days": 0,
+        "branch": "refs/heads/main",
     }
 
 
@@ -605,7 +608,7 @@ class TestRevisionInfo:
 
         info = _revision_info(tmp_path / "lib" / "site-packages" / "techne")
         assert info["build"] == "installed"
-        assert info["drifted"] is False
+        assert info["drifted"] is None, "installed currency is unknown, not verified-level"
         assert info["revision"] is None
 
     def test_checkout_reads_head_and_origin_main_without_a_subprocess(self, tmp_path):
@@ -688,13 +691,13 @@ class TestRevisionInfo:
         common = main / ".git"
         (common / "refs" / "remotes" / "origin").mkdir(parents=True)
         (common / "refs" / "heads").mkdir(parents=True)
-        (common / "refs" / "heads" / "feat").write_text("e7b7c86" + "0" * 33 + "\n")
+        (common / "refs" / "heads" / "main").write_text("e7b7c86" + "0" * 33 + "\n")
         (common / "refs" / "remotes" / "origin" / "main").write_text("0cc44f6" + "0" * 33 + "\n")
 
         wt_git = common / "worktrees" / "wt1"
         wt_git.mkdir(parents=True)
         # HEAD is per-worktree; the branch ref it names lives in the common dir.
-        (wt_git / "HEAD").write_text("ref: refs/heads/feat\n")
+        (wt_git / "HEAD").write_text("ref: refs/heads/main\n")
         (wt_git / "commondir").write_text("../..\n")
 
         root = tmp_path / "wt1"
@@ -706,3 +709,81 @@ class TestRevisionInfo:
         assert info["revision"] == "e7b7c86", "HEAD must resolve through the common dir"
         assert info["remote_revision"] == "0cc44f6"
         assert info["drifted"] is True
+
+    def test_off_main_reports_the_branch_and_does_not_warn(self, tmp_path):
+        """CI and every dev worktree sit off main and are SUPPOSED to differ.
+
+        The first implementation compared any checkout to origin/main, so it went
+        red on this PR's own CI run — a relative check with no absolute floor
+        always has a worst item, which is how a signal becomes noise. Only a
+        checkout ON main is claiming to be a deployment. Mirrors the same rule in
+        checks.check_runtime_revision, which learned it the same way.
+        """
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/feat/thing\n")
+        (git / "refs" / "heads" / "feat").mkdir(parents=True, exist_ok=True)
+        (git / "refs" / "heads" / "feat" / "thing").write_text("aaaaaaa" + "0" * 33 + "\n")
+        (git / "refs" / "remotes" / "origin" / "main").write_text("bbbbbbb" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["branch"] == "refs/heads/feat/thing"
+        assert info["drifted"] is False, "off main is not a drift defect"
+
+    def test_the_checkout_this_suite_runs_from_is_actually_readable(self):
+        """The gap every synthetic fixture missed.
+
+        All the tmp_path repos above would pass against a broken implementation
+        AND a correct one — none observes the topology the code really runs in.
+        That is why the `.git`-as-file worktree bug survived them and was caught
+        only incidentally. Asserts the answer is USABLE here, and deliberately
+        does NOT assert `drifted`, which legitimately varies with the branch.
+        """
+        import techne
+        from techne.core.health import _revision_info
+
+        info = _revision_info(Path(techne.__file__).resolve().parent)
+        assert info["build"] == "checkout", "the suite runs from a source checkout"
+        assert info["revision"] is not None, "must resolve a revision here"
+        assert len(info["revision"]) == 7
+
+
+class TestFreshnessCaveat:
+    """The caveat must never silently vanish — the surviving mutant in review."""
+
+    def _h(self, **over):
+        base = {
+            "db_ok": True, "version": "0.13.0", "package_path": "/x/techne",
+            "observations": 0, "threads": 0, "active_threads": 0, "knowledge": 0,
+            "pending_outbox": 0, "sync_adapter": "noop", "last_session": "—",
+            "db_path": "/x", "build": "checkout", "revision": "abc1234",
+            "remote_revision": "abc1234", "drifted": False,
+            "branch": "refs/heads/main", "remote_ref_age_days": 0,
+        }
+        base.update(over)
+        return base
+
+    def test_caveat_present_even_when_the_fetch_is_zero_days_old(self):
+        """`age == 0` is falsy: a truthiness test drops the caveat on the
+        freshest case, which is also the false-green case."""
+        assert "local ref fetched 0d ago" in format_banner(self._h())
+
+    def test_caveat_present_on_the_matching_case(self):
+        banner = format_banner(self._h(remote_ref_age_days=21))
+        assert "matches origin/main" in banner
+        assert "local ref fetched 21d ago" in banner, (
+            "'matches' is the FALSE-GREEN case — a 3-week-old ref reads as level"
+        )
+
+    def test_caveat_present_on_the_drifted_case(self):
+        banner = format_banner(
+            self._h(remote_revision="0cc44f6", drifted=True, remote_ref_age_days=3)
+        )
+        assert "BEHIND/DIVERGED" in banner and "local ref fetched 3d ago" in banner
+
+    def test_unknown_fetch_age_says_so(self):
+        assert "fetch age unknown" in format_banner(self._h(remote_ref_age_days=None))

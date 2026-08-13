@@ -106,9 +106,20 @@ def _revision_info(package_path: Path) -> dict:
     For a checkout the honest identifier is the revision.
 
     Returns ``build`` plus, for a checkout, ``revision`` / ``remote_revision`` /
-    ``drifted`` / ``remote_ref_age_days``. ``drifted`` is None when the remote
-    ref cannot be read at all — "I could not check" is reported as itself rather
-    than collapsing into "current".
+    ``branch`` / ``drifted`` / ``remote_ref_age_days``. ``drifted`` is None when
+    currency could not be established — "I could not check" is reported as itself
+    rather than collapsing into "current".
+
+    SIBLING: :func:`techne.core.checks.check_runtime_revision` answers the same
+    question for ``techne doctor`` using git subprocesses, and is marked
+    ``@expensive`` precisely so the SessionStart banner does NOT pay for it — six
+    subprocesses against a 5s hook budget. That exemption is why the banner had
+    no revision signal at all and drift ran unnoticed for six days (#568). This
+    is the cheap file-read substrate for the same question, and it deliberately
+    mirrors that check's hard-won semantics rather than inventing new ones: only
+    ``main`` counts as a deployment, and the freshness caveat goes on every
+    branch. Keep the two in agreement — a user-visible surface that contradicts
+    ``doctor`` is worse than one that stays quiet.
     """
     info: dict = {
         "build": "installed" if "site-packages" in str(package_path) else "checkout",
@@ -116,11 +127,15 @@ def _revision_info(package_path: Path) -> dict:
         "remote_revision": None,
         "drifted": None,
         "remote_ref_age_days": None,
+        "branch": None,
     }
     if info["build"] == "installed":
-        # A non-editable install cannot drift from its own metadata, so the
-        # version string is a sufficient identifier and there is nothing to read.
-        info["drifted"] = False
+        # drifted stays None, NOT False. The banner warns here ("may lag repo
+        # HEAD") because currency cannot be checked locally without a reference
+        # version — so the payload must say "unknown" too. False would claim we
+        # checked and it is level, which is the opposite of what the banner says
+        # and would let a consumer of the payload draw the reassuring conclusion
+        # the banner refuses to draw.
         return info
 
     root = package_path.parent
@@ -130,10 +145,29 @@ def _revision_info(package_path: Path) -> dict:
         # revision is genuinely unknowable. Leave drifted=None.
         return info
 
+    # Which branch HEAD names decides whether "behind main" is even a defect.
+    # A feature branch, a PR merge-ref or a detached CI checkout is SUPPOSED to
+    # differ from main; warning there fires on every branch and every PR, which
+    # is a relative check with no absolute floor — it always has a "worst" item
+    # and so trains you to ignore it. Only a checkout that is itself ON main is
+    # claiming to track main, and only that claim can be broken. The deployed
+    # runtime is exactly that case (#473 pins it to main); dev worktrees are not.
+    try:
+        raw_head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        raw_head = ""
+    info["branch"] = raw_head[5:].strip() if raw_head.startswith("ref: ") else None
+    tracks_main = info["branch"] == "refs/heads/main"
+
     head = _read_ref(git_dir, common_dir, "HEAD")
     remote = _read_ref(git_dir, common_dir, "refs/remotes/origin/main")
     info["revision"] = head[:7] if head else None
     info["remote_revision"] = remote[:7] if remote else None
+    if not tracks_main:
+        # Deliberately off main. Report the revision; make no currency claim,
+        # and do not warn — there is nothing here that is wrong.
+        info["drifted"] = False
+        return info
     if head and remote:
         info["drifted"] = head != remote
         ref_path = common_dir / "refs" / "remotes" / "origin" / "main"
@@ -347,6 +381,16 @@ def format_banner(health: dict) -> str:
     build = health.get("build", "checkout")
     drifted = health.get("drifted")
     rev = health.get("revision")
+    # THE FRESHNESS CAVEAT GOES ON EVERY BRANCH, not just the stale one — ported
+    # from check_runtime_revision, which learned it the hard way: "matches
+    # origin/main" is the FALSE-GREEN case, because the comparison is against a
+    # LOCAL ref that is only as fresh as the last fetch. A ref fetched three weeks
+    # ago reads as level when main has moved. Note `age == 0` is falsy, so this
+    # must test for None, not truthiness, or the caveat silently disappears on
+    # the freshest case.
+    _age = health.get("remote_ref_age_days")
+    fetched = f", local ref fetched {_age}d ago" if _age is not None else ", fetch age unknown"
+
     if build == "installed":
         # UNCHANGED from the pre-#568 contract, deliberately. An installed copy
         # still cannot be checked for currency locally — there is no reference
@@ -356,16 +400,20 @@ def format_banner(health: dict) -> str:
         # this PR must not shrink warning coverage while widening it elsewhere.
         healthy = False
         build_note = "installed — may lag repo HEAD"
+    elif drifted is False and health.get("branch") != "refs/heads/main":
+        # Deliberately off main — a feature branch, worktree or CI checkout. It is
+        # SUPPOSED to differ, so state what it is and make no currency claim.
+        healthy = True
+        short = (health.get("branch") or "").removeprefix("refs/heads/") or "detached"
+        build_note = f"checkout {rev} · on {short} (not a deployment)"
     elif drifted is False:
         healthy = True
-        age = health.get("remote_ref_age_days")
-        stamp = f", fetched {age}d ago" if age else ""
-        build_note = f"checkout {rev} · matches origin/main{stamp}"
+        build_note = f"checkout {rev} · matches origin/main{fetched}"
     elif drifted is True:
         healthy = False
         build_note = (
             f"checkout {rev} · BEHIND/DIVERGED from origin/main "
-            f"{health.get('remote_revision')} — merged ≠ deployed, "
+            f"{health.get('remote_revision')}{fetched} — merged ≠ deployed, "
             f"run: git -C {Path(health['package_path']).parent} pull"
         )
     else:
