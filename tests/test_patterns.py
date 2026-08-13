@@ -151,6 +151,11 @@ def test_search_patterns_or_fallback_does_not_disturb_a_matching_and_query(db):
         body="Swap the runtime without changing agent code. Nothing to do with quarantine.",
     )
 
+    # The invariant above, made executable so a reworded fixture cannot silently
+    # re-vacuate this test: both patterns must share the term "quarantine". If the
+    # decoy stops matching it, this fails here rather than passing hollowly below.
+    assert len(search_patterns(db, "quarantine")) == 2, "decoy must share one query term"
+
     hits = search_patterns(db, "quarantine untrusted")
     assert len(hits) == 1, "AND pass matched, so the OR fallback must not have widened it"
     assert hits[0]["name"] == "Quarantine-fence untrusted content"
