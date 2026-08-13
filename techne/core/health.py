@@ -63,7 +63,7 @@ def _git_dirs(root: Path) -> tuple[Path | None, Path | None]:
     return git_dir, common
 
 
-def _read_ref(git_dir: Path, common_dir: Path, rel: str) -> str | None:
+def _read_ref(git_dir: Path, common_dir: Path, rel: str, _depth: int = 0) -> str | None:
     """Read a sha for ``rel``, following symrefs, across both git dirs.
 
     Plain file reads only. :func:`collect_health` runs inside the SessionStart
@@ -71,13 +71,20 @@ def _read_ref(git_dir: Path, common_dir: Path, rel: str) -> str | None:
     session start — the constraint the old heuristic cited as its reason for
     guessing instead of looking.
     """
+    # Bound the symref chain exactly as git does (its own limit is 5). A cycle
+    # (HEAD -> refs/heads/loop -> refs/heads/loop) would otherwise recurse until
+    # the stack blows; session_start catches it, so the banner degrades rather
+    # than taking the hook down, but a corrupt repo should read as unknown here
+    # rather than raise at all.
+    if _depth >= 5:
+        return None
     for base in (git_dir, common_dir):
         try:
             raw = (base / rel).read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             continue
         if raw.startswith("ref: "):
-            return _read_ref(git_dir, common_dir, raw[5:].strip())
+            return _read_ref(git_dir, common_dir, raw[5:].strip(), _depth + 1)
         if raw:
             return raw
     # Never-loose refs (a fresh clone keeps origin/main here) live in packed-refs,
@@ -420,15 +427,13 @@ def format_banner(health: dict) -> str:
     # must test for None, not truthiness, or the caveat silently disappears on
     # the freshest case.
     #
-    # "last moved", NOT "fetched": the mtime of refs/remotes/origin/main is when
-    # the ref last CHANGED, which is the same quantity check_runtime_revision
-    # reports from the ref's reflog. Measured in this repo: the ref's mtime and
-    # FETCH_HEAD's differed by 28 minutes, so a fetch that moves nothing does not
-    # touch the ref — the proxy errs safe (it can only read OLDER than the true
-    # last fetch, overstating staleness, never falsely reassuring), but calling it
-    # "fetched" would be a claim the file cannot support. The FETCH_HEAD fallback
-    # below measures true last-fetch, a different quantity, so one honest label
-    # has to cover both: "last moved" is the conservative one.
+    # "last moved", NOT "fetched", and the label is now exact rather than a
+    # compromise. The only source is the loose ref's mtime (see _revision_info —
+    # the FETCH_HEAD fallback was removed), and that is when origin/main last
+    # CHANGED, which is precisely the quantity check_runtime_revision reports from
+    # the ref's reflog: measured identical in this repo, both 14:37:01. "fetched"
+    # would be wrong for it — a fetch that moves nothing rewrites FETCH_HEAD but
+    # not the ref (15:05:36 vs 14:37:01 here, 28 minutes apart).
     _age = health.get("remote_ref_age_days")
     fetched = (
         f", local ref last moved {_age}d ago" if _age is not None else ", ref age unknown"
@@ -463,6 +468,14 @@ def format_banner(health: dict) -> str:
         # SessionStart banner greets you — printed the same sha on both sides of
         # the word "differs". doctor says "level with origin/main" for this.
         if not _remote:
+            # KNOWN, DELIBERATE DISAGREEMENT WITH doctor. A single-branch clone
+            # (`git clone --branch feat --single-branch`) genuinely has no
+            # origin/main, and check_runtime_revision returns UNKNOWN there —
+            # its `upstream is None` guard sits BEFORE its branch gate. Off-main
+            # is the deliberately-quiet path and the text states the absence
+            # outright, so green is the right call for a one-line banner; the
+            # disagreement is recorded here rather than left for the next reader
+            # to discover as a contradiction.
             cmp = "no origin/main ref"
         elif rev == _remote:
             cmp = f"level with origin/main {_remote}"
@@ -471,7 +484,7 @@ def format_banner(health: dict) -> str:
         build_note = f"checkout {rev} · on {short} (not a deployment; {cmp}{fetched})"
     elif drifted is False:
         healthy = True
-        build_note = f"checkout {rev} · matches origin/main{fetched}"
+        build_note = f"checkout {rev} · level with origin/main{fetched}"
     elif drifted is True:
         # NOT "behind" — a sha comparison cannot tell behind from ahead, and on
         # main-and-AHEAD (unpushed commits) `doctor` reports LIVE while a bare

@@ -64,7 +64,7 @@ def test_banner_healthy_when_checkout_matches_origin_main(config):
     banner = format_banner(h)
     # leads with a blank line so the heading clears Claude Code's systemMessage chrome
     assert banner.startswith("\n## techne ✅")
-    assert "matches origin/main" in banner
+    assert "level with origin/main" in banner
     assert "abc1234" in banner  # the revision, not just the version
     assert "obs ·" in banner
     assert "threads" in banner
@@ -832,7 +832,7 @@ class TestFreshnessCaveat:
 
     def test_caveat_present_on_the_matching_case(self):
         banner = format_banner(self._h(remote_ref_age_days=21))
-        assert "matches origin/main" in banner
+        assert "level with origin/main" in banner
         assert "local ref last moved 21d ago" in banner, (
             "'matches' is the FALSE-GREEN case — a 3-week-old ref reads as level"
         )
@@ -905,3 +905,29 @@ class TestFreshnessCaveat:
         )
         assert "level with origin/main abc1234" in b
         assert "differs" not in b
+
+    def test_off_main_with_no_origin_ref_states_the_absence(self):
+        """A single-branch clone genuinely has no origin/main.
+
+        The only rendering branch in this change that had no test at all. Green
+        is deliberate here — off-main is the quiet path — but the absence must be
+        stated outright, not implied by silence. Note doctor returns UNKNOWN for
+        this; the disagreement is documented at the call site.
+        """
+        b = format_banner(self._h(branch="refs/heads/feat", drifted=None, remote_revision=None))
+        assert "no origin/main ref" in b
+        assert "⚠️" not in b
+
+    def test_symref_cycle_reads_unknown_rather_than_raising(self, tmp_path):
+        """A corrupt repo must read as unknown, not exhaust the stack."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/loop\n")
+        (git / "refs" / "heads" / "loop").write_text("ref: refs/heads/loop\n")
+
+        info = _revision_info(root / "techne")  # must not raise RecursionError
+        assert info["revision"] is None
+        assert info["drifted"] is None
