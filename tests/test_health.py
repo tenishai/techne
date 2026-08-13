@@ -70,7 +70,7 @@ def test_banner_healthy_when_checkout_matches_origin_main(config):
     assert "threads" in banner
 
 
-def test_banner_warns_when_the_checkout_is_behind_origin_main(config):
+def test_banner_warns_when_the_checkout_diverges_from_origin_main(config):
     """#568: the failure this whole change exists for.
 
     ~/.techne/runtime is an editable checkout that advances only on a manual
@@ -83,9 +83,11 @@ def test_banner_warns_when_the_checkout_is_behind_origin_main(config):
     banner = format_banner(h)
     assert "⚠️" in banner
     assert "e7b7c86" in banner and "0cc44f6" in banner
-    assert "BEHIND/DIVERGED" in banner
-    # the remedy is in the banner, not just the diagnosis
-    assert "git -C" in banner and "pull" in banner
+    assert "DIVERGED" in banner
+    # Not "BEHIND": a sha comparison cannot tell behind from ahead, and doctor
+    # calls ahead-of-main healthy. The remedy must resolve either direction.
+    assert "BEHIND" not in banner
+    assert "git -C" in banner and "status -sb" in banner
     # and the reassuring word must be gone
     assert "· live" not in banner
 
@@ -732,7 +734,12 @@ class TestRevisionInfo:
 
         info = _revision_info(root / "techne")
         assert info["branch"] == "refs/heads/feat/thing"
-        assert info["drifted"] is False, "off main is not a drift defect"
+        # None, not False: the shas here genuinely differ, so False would be an
+        # affirmatively wrong claim — and collect_health also feeds techne_status,
+        # where a consumer would read it as the reassurance the banner declines.
+        assert info["drifted"] is None, "off main is unknown currency, not verified-level"
+        assert info["remote_revision"] == "bbbbbbb", "the comparison is still reported"
+        assert info["remote_ref_age_days"] is not None, "caveat data on every branch"
 
     def test_the_checkout_this_suite_runs_from_is_actually_readable(self):
         """The gap every synthetic fixture missed.
@@ -770,12 +777,12 @@ class TestFreshnessCaveat:
     def test_caveat_present_even_when_the_fetch_is_zero_days_old(self):
         """`age == 0` is falsy: a truthiness test drops the caveat on the
         freshest case, which is also the false-green case."""
-        assert "local ref fetched 0d ago" in format_banner(self._h())
+        assert "local ref last moved 0d ago" in format_banner(self._h())
 
     def test_caveat_present_on_the_matching_case(self):
         banner = format_banner(self._h(remote_ref_age_days=21))
         assert "matches origin/main" in banner
-        assert "local ref fetched 21d ago" in banner, (
+        assert "local ref last moved 21d ago" in banner, (
             "'matches' is the FALSE-GREEN case — a 3-week-old ref reads as level"
         )
 
@@ -783,7 +790,45 @@ class TestFreshnessCaveat:
         banner = format_banner(
             self._h(remote_revision="0cc44f6", drifted=True, remote_ref_age_days=3)
         )
-        assert "BEHIND/DIVERGED" in banner and "local ref fetched 3d ago" in banner
+        assert "DIVERGED" in banner and "local ref last moved 3d ago" in banner
 
     def test_unknown_fetch_age_says_so(self):
-        assert "fetch age unknown" in format_banner(self._h(remote_ref_age_days=None))
+        assert "ref age unknown" in format_banner(self._h(remote_ref_age_days=None))
+
+    def test_off_main_still_states_the_comparison(self):
+        """docs/arch/liveness.md: a working checkout STILL states how far behind.
+
+        Reporting off-main green with no number reproduced the #473 incident
+        inside its own fix — a worktree parked on a peer's branch 200 commits
+        behind main rendered identically to a current one.
+        """
+        b = format_banner(
+            self._h(branch="refs/heads/feat", drifted=None, remote_revision="bbbbbbb")
+        )
+        assert "⚠️" not in b, "off main is not a defect"
+        assert "on feat (not a deployment" in b
+        assert "differs from origin/main bbbbbbb" in b, "must state the comparison"
+        assert "local ref last moved" in b, "caveat on every branch, including this one"
+
+    def test_diverged_remedy_can_clear_its_own_finding(self):
+        """On main and AHEAD, `git pull` cannot clear the warning — only push can.
+
+        `doctor` calls ahead-of-main LIVE. A sha comparison cannot tell ahead from
+        behind, so the banner must not claim a direction it cannot prove, and must
+        not prescribe a one-directional remedy. checks.py: "a remedy that cannot
+        clear its own finding is the never-green defect this module has already
+        paid for twice."
+        """
+        b = format_banner(self._h(drifted=True, remote_revision="0cc44f6"))
+        assert "⚠️" in b
+        assert "BEHIND" not in b, "cannot prove direction from a sha comparison"
+        assert "DIVERGED from origin/main 0cc44f6" in b
+        assert "status -sb" in b, "remedy must resolve either direction"
+        assert "pull" not in b, "a bare pull cannot clear an ahead-of-main finding"
+
+    def test_unreadable_head_is_unverified_not_a_healthy_checkout(self):
+        """No branch → cannot tell a deployment from a working checkout."""
+        b = format_banner(self._h(branch=None, drifted=None, revision=None))
+        assert "⚠️" in b
+        assert "UNVERIFIED" in b
+        assert "None" not in b, "no literal None on an operator-facing line"

@@ -163,23 +163,34 @@ def _revision_info(package_path: Path) -> dict:
     remote = _read_ref(git_dir, common_dir, "refs/remotes/origin/main")
     info["revision"] = head[:7] if head else None
     info["remote_revision"] = remote[:7] if remote else None
+
+    # The age is computed for EVERY checkout, on or off main. An earlier revision
+    # returned before this point when off main, so the caveat this module insists
+    # goes "on every branch" was absent from exactly the branches the gate
+    # diverted — and docs/arch/liveness.md records the invariant that a working
+    # checkout still STATES how far behind it is, because "on a peer's branch,
+    # behind the merge" IS the #473 incident.
+    ref_path = common_dir / "refs" / "remotes" / "origin" / "main"
+    for candidate in (ref_path, common_dir / "FETCH_HEAD"):
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+                candidate.stat().st_mtime, tz=timezone.utc
+            )
+            info["remote_ref_age_days"] = max(age.days, 0)
+            break
+        except OSError:
+            continue
+
     if not tracks_main:
-        # Deliberately off main. Report the revision; make no currency claim,
-        # and do not warn — there is nothing here that is wrong.
-        info["drifted"] = False
+        # Deliberately off main, so being unlevel with main is not a defect — but
+        # `drifted` stays None, NOT False. False would assert we checked and it is
+        # level, which is affirmatively wrong whenever the shas differ, and this
+        # payload also feeds the MCP `techne_status` surface where a consumer
+        # would read it as the reassurance the banner declines to give. Same rule
+        # this function already applies to `installed`.
         return info
     if head and remote:
         info["drifted"] = head != remote
-        ref_path = common_dir / "refs" / "remotes" / "origin" / "main"
-        for candidate in (ref_path, common_dir / "FETCH_HEAD"):
-            try:
-                age = datetime.now(timezone.utc) - datetime.fromtimestamp(
-                    candidate.stat().st_mtime, tz=timezone.utc
-                )
-                info["remote_ref_age_days"] = max(age.days, 0)
-                break
-            except OSError:
-                continue
     return info
 
 
@@ -388,8 +399,22 @@ def format_banner(health: dict) -> str:
     # ago reads as level when main has moved. Note `age == 0` is falsy, so this
     # must test for None, not truthiness, or the caveat silently disappears on
     # the freshest case.
+    #
+    # "last moved", NOT "fetched": the mtime of refs/remotes/origin/main is when
+    # the ref last CHANGED, which is the same quantity check_runtime_revision
+    # reports from the ref's reflog. Measured in this repo: the ref's mtime and
+    # FETCH_HEAD's differed by 28 minutes, so a fetch that moves nothing does not
+    # touch the ref — the proxy errs safe (it can only read OLDER than the true
+    # last fetch, overstating staleness, never falsely reassuring), but calling it
+    # "fetched" would be a claim the file cannot support. The FETCH_HEAD fallback
+    # below measures true last-fetch, a different quantity, so one honest label
+    # has to cover both: "last moved" is the conservative one.
     _age = health.get("remote_ref_age_days")
-    fetched = f", local ref fetched {_age}d ago" if _age is not None else ", fetch age unknown"
+    fetched = (
+        f", local ref last moved {_age}d ago" if _age is not None else ", ref age unknown"
+    )
+    _remote = health.get("remote_revision")
+    branch = health.get("branch")
 
     if build == "installed":
         # UNCHANGED from the pre-#568 contract, deliberately. An installed copy
@@ -400,25 +425,43 @@ def format_banner(health: dict) -> str:
         # this PR must not shrink warning coverage while widening it elsewhere.
         healthy = False
         build_note = "installed — may lag repo HEAD"
-    elif drifted is False and health.get("branch") != "refs/heads/main":
-        # Deliberately off main — a feature branch, worktree or CI checkout. It is
-        # SUPPOSED to differ, so state what it is and make no currency claim.
+    elif branch and branch != "refs/heads/main":
+        # Deliberately off main — a feature branch, worktree or CI checkout, which
+        # is SUPPOSED to differ, so this stays healthy. But it STILL STATES the
+        # comparison: docs/arch/liveness.md records that a working checkout must
+        # say how far behind it is, because "on a peer's branch, behind the merge"
+        # IS the #473 incident, and reporting it green with no number reproduced
+        # that bug inside its own fix. Exact distance needs an object walk we
+        # cannot do from file reads; the sha comparison is the cheap honest half.
+        # Gated on `branch` BEFORE `drifted` so the data model does not need a
+        # false `drifted=False` to route the renderer here.
         healthy = True
-        short = (health.get("branch") or "").removeprefix("refs/heads/") or "detached"
-        build_note = f"checkout {rev} · on {short} (not a deployment)"
+        short = branch.removeprefix("refs/heads/")
+        cmp = f"differs from origin/main {_remote}" if _remote else "no origin/main ref"
+        build_note = f"checkout {rev} · on {short} (not a deployment; {cmp}{fetched})"
     elif drifted is False:
         healthy = True
         build_note = f"checkout {rev} · matches origin/main{fetched}"
     elif drifted is True:
+        # NOT "behind" — a sha comparison cannot tell behind from ahead, and on
+        # main-and-AHEAD (unpushed commits) `doctor` reports LIVE while a bare
+        # `pull` would not clear this line. A remedy that cannot clear its own
+        # finding is the never-green defect checks.py has already paid for twice,
+        # so this names only what it can prove and prescribes a command that
+        # resolves either direction.
         healthy = False
         build_note = (
-            f"checkout {rev} · BEHIND/DIVERGED from origin/main "
-            f"{health.get('remote_revision')}{fetched} — merged ≠ deployed, "
-            f"run: git -C {Path(health['package_path']).parent} pull"
+            f"checkout {rev} · DIVERGED from origin/main {_remote}{fetched} — "
+            f"merged ≠ deployed; check which way: "
+            f"git -C {Path(health['package_path']).parent} status -sb"
         )
     else:
+        # Includes the unreadable-HEAD case: without a branch this cannot tell a
+        # deployment from a working checkout, so it must not assert either.
         healthy = False
-        build_note = f"checkout {rev or '?'} · revision UNVERIFIED (no origin/main ref)"
+        build_note = (
+            f"checkout {rev or '?'} · revision UNVERIFIED (branch or origin/main unreadable)"
+        )
 
     # The headline mark must also reflect SUBSYSTEM liveness (techne#468).
     # Otherwise the banner renders ✅ while listing a failing subsystem two lines
