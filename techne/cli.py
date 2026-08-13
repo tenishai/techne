@@ -1379,19 +1379,22 @@ def audit(ctx, since_days, as_json):
     """Utilization audit (techne#329): injection read-path + ledger read/write ratios.
 
     Two descriptive panels — which injection sources fire and at what token cost,
-    and the read-vs-write balance per memory domain. Attribution ("was the
-    injected item actually used") is out of scope here — see techne#105.
+    and the read-vs-write balance per memory domain — plus two attribution panels
+    ("was the injected item actually used"), one per rail family. Neither is
+    causation; the true counterfactual is techne#105.
     """
     config = ctx.obj["config"]
     from techne.core.utilization import (
         edit_rail_attribution,
         injection_utilization,
         read_write_ledger,
+        recall_attribution,
     )
 
     inj = injection_utilization(config.db_path, since_days=since_days)
     ledger = read_write_ledger(config.db_path, since_days=since_days)
     attrib = edit_rail_attribution(config.db_path, since_days=since_days)
+    recall = recall_attribution(config.db_path, since_days=since_days)
 
     if as_json:
         click.echo(
@@ -1401,6 +1404,7 @@ def audit(ctx, since_days, as_json):
                     "injection": inj,
                     "ledger": ledger,
                     "edit_rail_attribution": attrib,
+                    "recall_attribution": recall,
                 },
                 indent=2,
             )
@@ -1487,9 +1491,61 @@ def audit(ctx, since_days, as_json):
             f"· test {_p(pay['test_pct'])}   (100%-noise injections: {_p(attrib['noise_only_pct'])})"
         )
     click.echo("")
+
+    # Knowledge-rail citation-attribution (techne#329 step 1's deferred join).
+    click.echo("RECALL ATTRIBUTION (" + " + ".join(recall["sources"]) + ")")
+    if not recall["injections"]:
+        click.echo("  (no knowledge-rail injections logged yet)")
+    else:
+
+        def _q(v):
+            return f"{v:g}%" if v is not None else "—"
+
+        click.echo(
+            f"  window: next {recall['next_actions']} actions ≤ "
+            f"{recall['window_minutes']:g} min · N={recall['injections']} injections"
+        )
+        click.echo(
+            f"  an injected id CITED in window : {recall['cited_in_window']:>4} "
+            f"({_q(recall['cited_in_window_pct'])} of all · "
+            f"{_q(recall['cited_in_window_pct_attributable'])} of those w/ a follow-up action)"
+        )
+        click.echo(
+            f"  …cited anywhere later in session: {recall['cited_in_session']:>4} "
+            f"({_q(recall['cited_in_session_pct'])})   ← ceiling, over-credits"
+        )
+        click.echo(f"  no action followed in window   : {recall['no_actions_in_window']:>4}")
+        # Ledger-blind ≠ ignored (the librarian distinction, again): a session the
+        # ledger never captured can't show a citation either way, so it is excluded
+        # from the attributable base rather than scored as a miss.
+        click.echo(
+            f"  session not in ledger (excluded): {recall['unobserved_sessions']:>4}"
+            "   ← unmeasurable, not ignored"
+        )
+        for src, s in recall["per_source"].items():
+            if not s["injections"]:
+                continue
+            click.echo(
+                f"    {src:18} N={s['injections']:>4}  "
+                f"window {s['cited_in_window']:>3} · session {s['cited_in_session']:>3} "
+                f"· blind {s['unobserved_session']:>3}"
+            )
+        click.echo(
+            f"  items injected: {recall['items_injected']} · "
+            f"never cited: {recall['items_never_cited']} "
+            f"({_q(recall['items_never_cited_pct'])})"
+        )
+        top = [r for r in recall["items"] if r["cited_in_session"] == 0][:5]
+        if top:
+            worst = ", ".join(f"#{r['id']}×{r['encounters']}" for r in top)
+            click.echo(f"  most-shown, never cited: {worst}")
+    click.echo("")
     click.echo(
-        "Attribution above is PROXIMITY (tight window), not causation — the true "
-        'counterfactual ("used vs would-have-anyway") is techne#105.'
+        "Both attribution panels are PROXY, not causation, and biased in OPPOSITE "
+        "directions: the edit rail's is PROXIMITY (over-credits — the edit may have "
+        "happened anyway); recall's is CITATION (under-credits — memory is usually "
+        'used without naming an id). The counterfactual ("would it have happened '
+        'WITHOUT the injection") is techne#105.'
     )
 
 
