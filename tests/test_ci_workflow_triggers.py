@@ -79,8 +79,9 @@ def test_every_job_still_lives_in_this_one_workflow():
     )
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    assert set(jobs) == {"test", "eval-vec", "arch-cards"}, (
-        f"job set changed: {sorted(jobs)}. All three ride this one trigger."
+    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr"}, (
+        f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
+        "a new job must also pick a side of the techne#556 trust split."
     )
 
 
@@ -545,3 +546,114 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
                 "conservatively rather than because it is dangerous — `no:` and `load:` "
                 "are one flag and this predicate deliberately does not parse the value."
             )
+
+
+# ---- techne#556: fork PRs must never reach the self-hosted pool ---------------
+
+# The one guard expression, spelled once. Self-hosted jobs are compared against it
+# EXACTLY rather than fuzzily ("does the `if` mention fork?"), because the realistic
+# regression here is not a missing guard — it is a SUBTLY DIFFERENT one. Dropping
+# the `github.event_name` clause, or writing `head.repo.full_name != github.repository`
+# (null on `push`, so it sends pushes to the wrong runner), both read correct and
+# both fail open. An exact match makes a reviewer justify any change to it.
+FORK_GUARD = (
+    "${{ !(github.event_name == 'pull_request' "
+    "&& github.event.pull_request.head.repo.fork) }}"
+)
+FORK_ONLY = (
+    "${{ github.event_name == 'pull_request' "
+    "&& github.event.pull_request.head.repo.fork }}"
+)
+
+
+def _jobs() -> dict:
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"]
+
+
+def _is_self_hosted(runs_on) -> bool:
+    """True when a `runs-on` targets the self-hosted pool, in either YAML spelling.
+
+    `runs-on` accepts a bare string, a list of labels, or a mapping with `labels:`
+    / `group:`. Checking only the list form would let the same exposure return
+    through a spelling this repo does not use today.
+    """
+    if isinstance(runs_on, str):
+        return "self-hosted" in runs_on
+    if isinstance(runs_on, list):
+        return "self-hosted" in runs_on
+    if isinstance(runs_on, dict):
+        labels = runs_on.get("labels") or []
+        if isinstance(labels, str):
+            labels = [labels]
+        return "self-hosted" in labels or bool(runs_on.get("group"))
+    return False
+
+
+def test_no_fork_reachable_job_runs_on_self_hosted():
+    """THE INVARIANT (techne#556). `pull_request:` is unfiltered, so it fires for
+    FORK PRs; a self-hosted job reachable from one is arbitrary attacker code on
+    dev02 the moment this repo goes public.
+
+    WHY THIS IS A TEST AND NOT A COMMENT — the same reason as the trigger above,
+    and here there is evidence: this finding was raised against TWO jobs in a
+    2026-07-30 audit, re-verified unfixed on 07-31, and had grown to THREE by
+    08-12. A new job inherits `runs-on` from its neighbour and does not inherit the
+    guard, and nothing failed when it didn't. Now something does.
+    """
+    offenders = {
+        name: job.get("if")
+        for name, job in _jobs().items()
+        if _is_self_hosted(job.get("runs-on")) and job.get("if") != FORK_GUARD
+    }
+    assert not offenders, (
+        "every self-hosted job must carry the exact techne#556 fork guard.\n"
+        f"expected: {FORK_GUARD}\n"
+        f"offending jobs (name -> its `if`): {offenders}\n"
+        "A fork PR reaching dev02 is RCE on a persistent host that also stores "
+        "runner paths in this file."
+    )
+
+
+def test_fork_prs_still_get_ci_on_a_hosted_runner():
+    """The other half. Guarding the self-hosted jobs without providing a hosted
+    path would leave a fork PR with an EMPTY Checks tab — techne#530's failure
+    exactly, where "no run" is indistinguishable from "nothing to report". A
+    security fix that silently stops testing outside contributions has traded one
+    invisible failure for another.
+    """
+    hosted_fork_jobs = {
+        name
+        for name, job in _jobs().items()
+        if not _is_self_hosted(job.get("runs-on")) and job.get("if") == FORK_ONLY
+    }
+    assert hosted_fork_jobs, (
+        "no job serves fork PRs on a hosted runner, so a fork PR would get zero "
+        f"checks. Expected some job with `if: {FORK_ONLY}` on a hosted `runs-on`."
+    )
+
+
+def test_the_two_guards_are_complements_not_overlaps():
+    """No job may match BOTH sides, and the fork-only job must not be self-hosted.
+
+    Belt-and-braces on the pair above: if the two expressions ever drift apart, a
+    job could satisfy both (running fork code on dev02) or neither (silently never
+    running at all).
+    """
+    for name, job in _jobs().items():
+        cond = job.get("if")
+        if cond == FORK_ONLY:
+            assert not _is_self_hosted(job.get("runs-on")), (
+                f"job {name!r} runs ONLY on fork PRs but targets the self-hosted "
+                "pool — that is precisely the exposure, inverted"
+            )
+    assert FORK_GUARD != FORK_ONLY
+    # Every job carries one of the two, so none is accidentally unguarded.
+    unclassified = {
+        name: job.get("if")
+        for name, job in _jobs().items()
+        if job.get("if") not in (FORK_GUARD, FORK_ONLY)
+    }
+    assert not unclassified, (
+        f"jobs with neither trust-split guard: {unclassified}. Pick a side — "
+        "self-hosted jobs take FORK_GUARD, hosted fork jobs take FORK_ONLY."
+    )

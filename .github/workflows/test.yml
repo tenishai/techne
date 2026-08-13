@@ -3,21 +3,27 @@ name: test
 # Techne has no private sibling deps — full suite runs on every push/PR.
 # The contract job catches breaking renames before cabal/limenal CI fires.
 #
-# All jobs self-hosted (#424, #461) — do not add a hosted one. Hosted jobs here
-# can fail to START: July 2026 billing refusal reported `failure` (probe 764f160,
-# which also showed self-hosted unaffected), the 2026-08-06 outage reported
-# `cancelled` at 901s while the self-hosted legs of the same runs queued and ran
-# on recovery. Neither cleared by a rerun.
+# Every job on the TRUSTED path is self-hosted (#424, #461) — do not add a hosted
+# one there. Hosted jobs here can fail to START: July 2026 billing refusal reported
+# `failure` (probe 764f160, which also showed self-hosted unaffected), the
+# 2026-08-06 outage reported `cancelled` at 901s while the self-hosted legs of the
+# same runs queued and ran on recovery. Neither cleared by a rerun.
+#
+# THE ONE EXCEPTION IS `fork-pr`, AND IT IS A SECURITY BOUNDARY, NOT A REGRESSION
+# (#556): fork PRs must not execute on dev02, so they are routed to a hosted runner
+# and accept the scheduling risk above. See the trust-split block below `env:`.
 # `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it. Same
 # CONTAINER image on both (FROM ubuntu:24.04), both hosts 2 physical / 4 logical
 # cores, and both containers cpus:"3" — so the -n 4 calibration transfers. HOST
 # OS and RAM differ (dev02 24.04/15GB cap 8g, prinkle 26.04/7GB cap 5g).
 # Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
 #
-# The runner image bakes python 3.12/3.13/3.14 + uv, so there is deliberately NO
-# actions/setup-python here: the runner is EPHEMERAL, and setup-python would
-# re-download every interpreter on every job rather than reusing a tool cache that
-# does not survive the container.
+# The runner image bakes python 3.12/3.13/3.14 + uv, so the self-hosted jobs
+# deliberately use NO actions/setup-python: the runner is EPHEMERAL, and
+# setup-python would re-download every interpreter on every job rather than reusing
+# a tool cache that does not survive the container. `fork-pr` DOES use it, because a
+# hosted runner bakes in neither uv nor the matrix interpreters — the reasoning
+# above is about this image, not a blanket ban (#556).
 # NO `branches:` FILTER ON pull_request, AND THAT ABSENCE IS LOAD-BEARING (#530).
 # The filter matches a PR's BASE, not its head, so `branches: [main]` meant a
 # STACKED PR (base = another feature branch) matched no trigger and got NO CI AT
@@ -73,6 +79,27 @@ env:
   UV_PYTHON_PREFERENCE: only-system
   UV_PYTHON_DOWNLOADS: never
 
+# TRUST SPLIT (#556). `pull_request:` above is deliberately unfiltered, so it fires
+# for FORK PRs too. Combined with `runs-on: [self-hosted, ...]` that is arbitrary
+# attacker code on dev02 the moment this repo goes public — GitHub's own guidance
+# is "only use self-hosted runners with private repositories". This file also
+# documents runner paths (/var/servers/gha-runner, /var/servers/docker-compose/ci),
+# so the blast radius is not hypothetical.
+#
+# So: every self-hosted job carries the SAME fork guard, and fork PRs are served by
+# `fork-pr` on a GitHub-hosted runner instead. Non-fork PRs and `push` on main are
+# unchanged — which keeps the measured cost decision behind the self-hosted pool
+# (#461) intact rather than undoing it.
+#
+# THE GUARD IS REPEATED THREE TIMES AND THAT IS A HAZARD, not a style choice: this
+# finding was first raised against TWO jobs on 2026-07-30 and had grown to THREE by
+# 2026-08-12, because a new job inherits the runner and not the guard. GitHub
+# Actions has no anchor/alias support to define it once, so the invariant is
+# enforced in the suite instead — tests/test_ci_workflow_triggers.py asserts that NO
+# fork-reachable job targets a self-hosted runner. Add a self-hosted job without the
+# guard and that test fails. Do not delete it in favour of a comment; a comment is
+# what let this regrow twice.
+
 jobs:
   test:
     # Legs distribute across the pool. Scale by adding a HOST (safe — its own 2
@@ -80,6 +107,7 @@ jobs:
     # replicas x workers, so 2 replicas x -n 4 = 8 workers on 2 cores, which the
     # pin does not prevent — lower -n in step if you do that.
     runs-on: [self-hosted, linux, x64, dev02]
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
     # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
     strategy:
@@ -233,6 +261,8 @@ jobs:
   # stay fast and dep-free.
   eval-vec:
     runs-on: [self-hosted, linux, x64, dev02]
+    # Fork guard (#556) — see the block above `jobs:`.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
     # Observed at ~30s on the runner; 20 bounds a hang without being tight.
     timeout-minutes: 20
     steps:
@@ -307,6 +337,12 @@ jobs:
     # case — it counts from job START (the 901s deaths above ran under the
     # default 360min).
     runs-on: [self-hosted, linux, x64, dev02]
+    # Fork guard (#556) — see the block above `jobs:`. NOTE this does NOT undo
+    # #461's "do not move back to ubuntu-latest": the non-fork path, which is
+    # every push and every in-repo PR, still runs here. Only fork PRs are routed
+    # away, and for those the scheduling risk #461 describes is the lesser of two
+    # evils against arbitrary code execution on dev02.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
     timeout-minutes: 5
     steps:
       - name: Checkout techne
@@ -321,3 +357,76 @@ jobs:
       - name: Architecture-card freshness gate
         working-directory: techne
         run: python3.13 scripts/check_arch_cards.py
+
+  # THE OTHER HALF OF THE TRUST SPLIT (#556). Fork PRs are skipped by every
+  # self-hosted job above, so without this they would get an EMPTY Checks tab —
+  # which is the exact failure #530 fought: nothing in CI can report a run that
+  # never started, and an empty tab reads as "nothing to report" rather than
+  # "unverified". A security fix that silently stops testing outside contributions
+  # trades one invisible failure for another.
+  #
+  # Runs on GitHub-hosted, so fork code never touches dev02.
+  fork-pr:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.13']
+      fail-fast: false
+
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@v4
+        with:
+          path: techne
+
+      # The self-hosted image bakes in both uv and the interpreters; a hosted
+      # runner has neither at the matrix versions, so they are provided here.
+      # setup-python puts the interpreter on PATH as a SYSTEM interpreter, which
+      # is what keeps the workflow-level `UV_PYTHON_PREFERENCE: only-system` +
+      # `UV_PYTHON_DOWNLOADS: never` pin meaningful rather than merely inert: uv
+      # still may not fetch a managed build of its own, so the leg cannot quietly
+      # test an interpreter nobody chose.
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Create venv on Python ${{ matrix.python-version }}
+        working-directory: techne
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv-ci
+          .venv-ci/bin/python -V
+
+      - name: Install
+        working-directory: techne
+        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex,vectors]"
+
+      # Same flags as the self-hosted leg, and for the same reasons: `-rs` so a
+      # skip is reported rather than counted, `-n 4` to match what was measured.
+      - name: Pytest (includes contract assertions)
+        working-directory: techne
+        run: .venv-ci/bin/python -m pytest -q -rs -n 4
+
+      - name: Deterministic eval gates (#68 recall, #385 retrieval-correctness)
+        working-directory: techne
+        run: .venv-ci/bin/python -m pytest -m "eval or eval_gate"
+
+      # NOT REPRODUCED HERE, deliberately, and this list is the honest cost of the
+      # split rather than an oversight:
+      #   - eval-vec  — needs Python 3.14 plus a warm model2vec cache. Hosted
+      #                 images ship neither, and `UV_PYTHON_DOWNLOADS: never`
+      #                 (correctly) forbids fetching one.
+      #   - arch-cards — invokes `python3.13` by versioned name against a runner
+      #                 image proven to carry it; that is a property of the
+      #                 self-hosted image, not of ubuntu-latest.
+      # A fork PR therefore gets the full suite and the deterministic gates, but
+      # NOT the vector gate or the card-freshness gate. Both still run on every
+      # push to main, so nothing merges unverified — a fork PR is simply verified
+      # less completely than an in-repo one, which is the trade the trust boundary
+      # buys. Widening it means re-platforming those two gates: worth its own issue,
+      # not worth blocking a security fix behind.
