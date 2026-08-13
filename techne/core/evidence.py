@@ -679,18 +679,21 @@ def _output_was_bounded(output_text: str) -> bool:
     IT HAS NOT FIRED YET, AND THAT RESTS ON ONE LEG, NOT FOUR. Setting the flag
     only changes a verdict when a row is simultaneously a test-runner command,
     parseable, failure-free AND redacted — but the first three are ORDINARY, not
-    rare: 413 rows satisfy them, 408 of those short and unmarked so the redaction
-    clause ALONE decides. They are what a green suite run looks like. Nothing has
-    fired because credential-shaped text happens to be absent from green runner
-    output — a fact about CONTENT, not about structure.
+    rare: they are what a green suite run looks like, and the redaction clause
+    ALONE decides for nearly all of them. Nothing has fired because
+    credential-shaped text happens to be absent from green runner output — a fact
+    about CONTENT, not about structure.
 
-    THAT PREDICATE, STATED so the number is reproducible: for each Bash row take
-    ``_bash_output(content)``; take the command as ``content.partition(_BASH_OUTPUT_MARKER)[0]``
-    minus its ``Ran: `` prefix — the SAME extraction the caller uses, not a
-    hand-rolled split, which is what produced an earlier and irreproducible 475;
-    require ``_command_runs_tests(command)``, ``_parse_test_output`` returning any
-    non-None, and neither failures nor errors above zero. Those are exactly the
-    clauses ``_row_totals_unreliable`` applies BEFORE it consults this function.
+    THAT PREDICATE IS EXECUTABLE — ``probe_length_test_pressure(db_path)``, at the
+    foot of this module. RUN IT; DO NOT RE-DERIVE IT (techne#541). Every count it
+    reports comes from the same helpers this gate calls, so there is no second
+    implementation to drift from the first. That drift is not hypothetical: prose
+    versions of this predicate were hand-rolled twice during review — measuring
+    ``content`` where the gate reads ``_bash_output(content)``, and re-splitting
+    ``Ran: `` instead of partitioning on ``_BASH_OUTPUT_MARKER`` — and both
+    produced numbers that did not reproduce (an irreproducible 475 among them).
+    The probe's clauses are exactly the ones ``_row_totals_unreliable`` applies
+    BEFORE it consults this function.
 
     CREDENTIAL-SHAPED TEXT DOES REACH RUNNER OUTPUT HERE — ONE ROW TODAY. That is
     the honest form of the argument. An earlier version of this note claimed a
@@ -701,13 +704,21 @@ def _output_was_bounded(output_text: str) -> bool:
     passing run through that row's own filter keeps nothing at all. Reaching the
     conjunction needs a different run — one that passes — not one keystroke.
 
-    SO WATCH THE INTERSECTION, NOT THE STOCK. Re-measuring the 408 is the wrong
-    instruction: it is a stock that grows monotonically as the repo acquires
+    SO WATCH THE INTERSECTION, NOT THE STOCK. Re-measuring the conjunction is the
+    wrong instruction: it is a stock that grows monotonically as the repo acquires
     tests, every member already known NOT to be redacted, so it moves while the
     risk does not — a watchdog barking at your own suite getting bigger. The
-    observable that moves only when the hazard moves is RUNNER ROWS WHOSE OUTPUT
-    CARRIES THE MARKER, regardless of parseability or outcome. That is 1 today.
-    If it climbs, REPLACE the length test rather than re-justify it.
+    observable that moves only when the hazard moves is
+    ``marker_carrying_runner_rows``: runner rows whose output carries the marker,
+    regardless of parseability or outcome. If it climbs, REPLACE the length test
+    rather than re-justify it.
+
+    THE PROBE HAS NOW DEMONSTRATED THAT ARGUMENT RATHER THAN ASSERTED IT. Between
+    the 2026-08-10 hand measurement and a 2026-08-13 run, the stock grew with the
+    suite (conjunction 413 → 493) while ``marker_carrying_runner_rows`` stayed at
+    1. Exactly the predicted behaviour, and the reason to watch the second number
+    and not the first — but read those figures as an illustration of the shape,
+    not as a fact to maintain. The current values come from running the probe.
 
     (An even earlier version said to re-check "whether the conjunction has started
     occurring". Unexecutable: when it fires a verdict quietly becomes
@@ -725,16 +736,18 @@ def _output_was_bounded(output_text: str) -> bool:
       that merely CONTAINS a credential shape — `.env` dumps, a JWT in a signed
       URL, a PEM block in a values.yaml, two of them output ABOUT redaction.
 
-    MEASURED 2026-08-10 (read-only; the ledger grows, so treat counts as as-of)
-    over 6195 Bash rows, on ``_bash_output(content)`` — the string the gate reads,
-    NOT the whole observation row. Measuring the row inflates lengths by the
+    THE FLIP COUNT IS ``probe_length_test_pressure``'s ``flips``, and the WHY of
+    its construction is the part worth keeping in prose: it measures
+    ``_bash_output(content)`` — the string the gate reads — NOT the whole
+    observation row. Measuring the row inflates lengths by the
     ``Ran: …\nOutput: `` prefix, counts a marker in the COMMAND as a flip, and
-    misses rows whose row exceeds the budget while their output does not. Result:
-    15 flips, lengths 290-1989, median 840, three within 10% of the budget.
-    REPRODUCE with ``_bash_output`` + ``was_elided`` + ``len(...) < _PREVIEW_MAX_CHARS``
-    + ``REDACTION_MARKER``. All four: the length clause is not optional, and
-    omitting it yields 16 rather than 15, because a flip is only a flip when the
-    clauses above it did not already return True.
+    misses rows whose row exceeds the budget while their output does not. All four
+    clauses participate (``was_elided`` + ``len(...) < _PREVIEW_MAX_CHARS`` +
+    ``REDACTION_MARKER``, over ``_bash_output``); the length clause is NOT
+    optional, because a flip is only a flip when the clauses above it did not
+    already return True — dropping it inflates the count. Observed shape at the
+    2026-08-10 measurement: lengths 290-1989, median 840, three within 10% of the
+    budget.
 
     NO TRUE-POSITIVE COUNT IS QUOTED. Any estimate would come from
     proximity-to-budget, and the paragraph above rejecting a shrinkage allowance
@@ -1154,3 +1167,109 @@ def check_claims(claims: list[dict], evidence: Evidence) -> list[dict]:
         verdicts.append({"claim": claim, "status": status, "detail": detail})
 
     return verdicts
+
+
+# ---- techne#541: the length test's pressure, as a probe rather than prose ----
+
+
+def probe_length_test_pressure(db_path: Path) -> dict:
+    """Measure the population `_output_was_bounded`'s length clause rests on.
+
+    THE POINT OF THIS FUNCTION IS THAT NOBODY RE-DERIVES ITS NUMBERS BY HAND.
+    `_output_was_bounded`'s note carried its figures in prose, and every error in
+    five review rounds was the same shape: a predicate stated in words that a
+    reader then hand-rolled to check. Twice a step the gate already owns was
+    reimplemented instead of called — measuring `content` where the gate reads
+    `_bash_output(content)`, and hand-rolling the `Ran: ` split — and both
+    produced numbers that did not reproduce (techne#441 r5, techne#541).
+
+    So every clause here calls the SAME helper the gate calls. There is no
+    second implementation of the extraction to drift from the first.
+
+    Returns, over the ledger's Bash rows:
+
+    ``bash_rows``
+        Rows examined.
+    ``runner_rows``
+        Command actually invokes a test runner (`_command_runs_tests` on the
+        command head, never a substring — `git commit -m "fix the pytest flake"`
+        is not a runner row).
+    ``conjunction_rows``
+        Runner + parseable + failure-free. The three clauses
+        `_row_totals_unreliable` applies BEFORE consulting `_output_was_bounded`.
+        These are ORDINARY — they are what a green suite run looks like.
+    ``decided_by_redaction_alone``
+        Of those, the ones short and unmarked, so the redaction clause alone
+        decides the verdict.
+    ``marker_carrying_runner_rows``
+        **THE OBSERVABLE TO WATCH.** Runner rows whose output carries the
+        redaction marker, regardless of parseability or outcome. Re-measuring
+        ``conjunction_rows`` is the wrong instruction — it is a stock that grows
+        monotonically as the repo acquires tests, every member already known NOT
+        to be redacted, so it moves while the risk does not. This one moves only
+        when the hazard moves. **If it climbs, REPLACE the length test rather
+        than re-justify it.**
+    ``flips``
+        Rows where the redaction clause alone flips the verdict — elision-free,
+        under budget, marker present. All four clauses matter: dropping the
+        length clause inflates this, because a flip is only a flip when the
+        clauses above it did not already return True.
+
+    Read-only. The ledger grows, so every count is as-of, which is exactly why
+    this is a function and not a comment.
+    """
+    from techne.core.stores import plain_connect
+
+    counts = dict.fromkeys(
+        (
+            "bash_rows",
+            "runner_rows",
+            "conjunction_rows",
+            "decided_by_redaction_alone",
+            "marker_carrying_runner_rows",
+            "flips",
+        ),
+        0,
+    )
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT content FROM observations WHERE tool_name = 'Bash'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for (content,) in ((r["content"],) for r in rows):
+        output_text = _bash_output(content or "")
+        if output_text is None:
+            continue
+        counts["bash_rows"] += 1
+
+        marked = REDACTION_MARKER.search(output_text) is not None
+        short = len(output_text) < _PREVIEW_MAX_CHARS
+        if not was_elided(output_text) and short and marked:
+            counts["flips"] += 1
+
+        # The command, extracted the way the CALLER extracts it, character for
+        # character — hand-rolling this split is what produced the earlier
+        # irreproducible 475. (`_skip_env_prefix` is deliberately NOT applied here:
+        # it lives inside `_command_runs_tests`, and applying it again would be a
+        # second implementation of a step the gate already owns.)
+        ran = (content or "").partition(_BASH_OUTPUT_MARKER)[0]
+        command = ran[len("Ran: ") :] if ran.startswith("Ran: ") else ran
+        if not _command_runs_tests(command):
+            continue
+        counts["runner_rows"] += 1
+        if marked:
+            counts["marker_carrying_runner_rows"] += 1
+
+        p, f, e = _parse_test_output(output_text)
+        if p is None and f is None and e is None:
+            continue
+        if (f or 0) > 0 or (e or 0) > 0:
+            continue
+        counts["conjunction_rows"] += 1
+        if short and not marked:
+            counts["decided_by_redaction_alone"] += 1
+
+    return counts
