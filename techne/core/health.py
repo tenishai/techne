@@ -31,6 +31,124 @@ def _parse_ts(ts: str):
     return None
 
 
+def _git_dirs(root: Path) -> tuple[Path | None, Path | None]:
+    """Resolve ``(git_dir, common_dir)`` for a checkout OR a linked worktree.
+
+    In a plain clone ``.git`` is a directory and the two are the same. In a git
+    **worktree** ``.git`` is a FILE holding ``gitdir: <main>/.git/worktrees/<n>``,
+    and only HEAD is per-worktree — ``refs/`` and ``packed-refs`` live in the
+    shared common dir named by that gitdir's ``commondir``. Worktree-per-session
+    is the standing dev topology here (techne#743), so treating ``.git``-as-file
+    as "not a checkout" would report every dev session's revision as unknowable.
+    """
+    dot = root / ".git"
+    if dot.is_dir():
+        return dot, dot
+    try:
+        raw = dot.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None, None
+    if not raw.startswith("gitdir:"):
+        return None, None
+    git_dir = Path(raw.split(":", 1)[1].strip())
+    if not git_dir.is_absolute():
+        git_dir = (root / git_dir).resolve()
+    common = git_dir
+    try:
+        c = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+        cp = Path(c)
+        common = cp if cp.is_absolute() else (git_dir / cp).resolve()
+    except OSError:
+        pass
+    return git_dir, common
+
+
+def _read_ref(git_dir: Path, common_dir: Path, rel: str) -> str | None:
+    """Read a sha for ``rel``, following symrefs, across both git dirs.
+
+    Plain file reads only. :func:`collect_health` runs inside the SessionStart
+    hook, so shelling out to ``git`` here would put subprocess latency on every
+    session start — the constraint the old heuristic cited as its reason for
+    guessing instead of looking.
+    """
+    for base in (git_dir, common_dir):
+        try:
+            raw = (base / rel).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if raw.startswith("ref: "):
+            return _read_ref(git_dir, common_dir, raw[5:].strip())
+        if raw:
+            return raw
+    # Never-loose refs (a fresh clone keeps origin/main here) live in packed-refs,
+    # which is always in the common dir.
+    try:
+        for line in (
+            (common_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
+        ).splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[1].strip() == rel:
+                return parts[0].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _revision_info(package_path: Path) -> dict:
+    """Identify the code that is actually imported, not the version it claims.
+
+    ``__version__`` comes from ``importlib.metadata``, which for an *editable*
+    install is stamped once at ``pip install -e`` time and never moves when the
+    checkout does — measured four days apart on this machine (#568). So the
+    version string identifies the code only for a real, non-editable install.
+    For a checkout the honest identifier is the revision.
+
+    Returns ``build`` plus, for a checkout, ``revision`` / ``remote_revision`` /
+    ``drifted`` / ``remote_ref_age_days``. ``drifted`` is None when the remote
+    ref cannot be read at all — "I could not check" is reported as itself rather
+    than collapsing into "current".
+    """
+    info: dict = {
+        "build": "installed" if "site-packages" in str(package_path) else "checkout",
+        "revision": None,
+        "remote_revision": None,
+        "drifted": None,
+        "remote_ref_age_days": None,
+    }
+    if info["build"] == "installed":
+        # A non-editable install cannot drift from its own metadata, so the
+        # version string is a sufficient identifier and there is nothing to read.
+        info["drifted"] = False
+        return info
+
+    root = package_path.parent
+    git_dir, common_dir = _git_dirs(root)
+    if git_dir is None or common_dir is None:
+        # A source tree that is not a checkout (vendored, extracted sdist): the
+        # revision is genuinely unknowable. Leave drifted=None.
+        return info
+
+    head = _read_ref(git_dir, common_dir, "HEAD")
+    remote = _read_ref(git_dir, common_dir, "refs/remotes/origin/main")
+    info["revision"] = head[:7] if head else None
+    info["remote_revision"] = remote[:7] if remote else None
+    if head and remote:
+        info["drifted"] = head != remote
+        ref_path = common_dir / "refs" / "remotes" / "origin" / "main"
+        for candidate in (ref_path, common_dir / "FETCH_HEAD"):
+            try:
+                age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+                    candidate.stat().st_mtime, tz=timezone.utc
+                )
+                info["remote_ref_age_days"] = max(age.days, 0)
+                break
+            except OSError:
+                continue
+    return info
+
+
 def collect_health(config: Config) -> dict:
     """Assemble the full health/status payload.
 
@@ -59,11 +177,13 @@ def collect_health(config: Config) -> dict:
         "package_path": package_path,
         "db_path": str(config.db_path),
         "sync_adapter": config.sync.adapter,
-        # "live" = running from an editable checkout (package_path is the repo
-        # working tree). "installed" = a site-packages/pipx copy that can lag
-        # repo HEAD — the exact editable-venv-vs-pipx drift trap. Heuristic, but
-        # cheap: no git subprocess in a hot startup hook.
-        "build": "installed" if "site-packages" in package_path else "live",
+        # build/revision/drift (#568). The old two-state heuristic read
+        # "not site-packages" as "live", meaning tracks-HEAD-so-it-is-fresh.
+        # The #473 runtime split broke that: ~/.techne/runtime is an editable
+        # checkout that advances ONLY on a manual `git pull`, so it rendered
+        # `live` — i.e. healthy — while 23 commits and 6 days behind main.
+        # Now the revision is read rather than inferred; see _revision_info.
+        **_revision_info(Path(package_path)),
         # Hook health fields (techne#95) — populated below when DB is reachable.
         "hook_last_run": None,
         "hook_last_error": None,
@@ -219,11 +339,38 @@ def format_banner(health: dict) -> str:
             f"{health.get('error', 'unknown error')}"
         )
 
-    build = health["build"]
-    # ✅ only when running live code; an installed copy gets a ⚠️ so the
-    # version-drift trap is visible at a glance.
-    healthy = build == "live"
-    build_note = "live" if healthy else "installed — may lag repo HEAD"
+    # Build/revision line (#568). The rule this replaces was
+    # `healthy = build == "live"`, where "live" meant only "not site-packages".
+    # A checkout that nobody pulls is exactly as stale as a lagging install, so
+    # currency is now decided by the REVISION, never by the install kind — and a
+    # revision we could not read reports as unverified rather than as fine.
+    build = health.get("build", "checkout")
+    drifted = health.get("drifted")
+    rev = health.get("revision")
+    if build == "installed":
+        # UNCHANGED from the pre-#568 contract, deliberately. An installed copy
+        # still cannot be checked for currency locally — there is no reference
+        # version to compare against without a network call — so it keeps its
+        # honest "I cannot verify this" warning. Downgrading it belongs with the
+        # latest-release comparison that would make the check real, not here:
+        # this PR must not shrink warning coverage while widening it elsewhere.
+        healthy = False
+        build_note = "installed — may lag repo HEAD"
+    elif drifted is False:
+        healthy = True
+        age = health.get("remote_ref_age_days")
+        stamp = f", fetched {age}d ago" if age else ""
+        build_note = f"checkout {rev} · matches origin/main{stamp}"
+    elif drifted is True:
+        healthy = False
+        build_note = (
+            f"checkout {rev} · BEHIND/DIVERGED from origin/main "
+            f"{health.get('remote_revision')} — merged ≠ deployed, "
+            f"run: git -C {Path(health['package_path']).parent} pull"
+        )
+    else:
+        healthy = False
+        build_note = f"checkout {rev or '?'} · revision UNVERIFIED (no origin/main ref)"
 
     # The headline mark must also reflect SUBSYSTEM liveness (techne#468).
     # Otherwise the banner renders ✅ while listing a failing subsystem two lines

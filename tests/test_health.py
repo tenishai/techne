@@ -15,6 +15,24 @@ def config(tmp_path):
     return cfg
 
 
+def _healthy_build() -> dict:
+    """The neutral "the build itself is fine" baseline, for tests about something else.
+
+    Pre-#568 that was `build="live"`, which meant only "not site-packages" and so
+    read as healthy even when the checkout was months behind. Currency is now
+    decided by the revision, so a healthy baseline has to state that the revision
+    matches origin/main — an assignment to `build` alone no longer says anything
+    about freshness.
+    """
+    return {
+        "build": "checkout",
+        "revision": "abc1234",
+        "remote_revision": "abc1234",
+        "drifted": False,
+        "remote_ref_age_days": 0,
+    }
+
+
 def test_collect_health_db_ok(config):
     h = collect_health(config)
     assert h["db_ok"] is True
@@ -37,15 +55,50 @@ def test_collect_health_db_unreachable(tmp_path):
     assert h["version"]
 
 
-def test_banner_healthy_live(config):
+def test_banner_healthy_when_checkout_matches_origin_main(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     banner = format_banner(h)
     # leads with a blank line so the heading clears Claude Code's systemMessage chrome
     assert banner.startswith("\n## techne ✅")
-    assert "live" in banner
+    assert "matches origin/main" in banner
+    assert "abc1234" in banner  # the revision, not just the version
     assert "obs ·" in banner
     assert "threads" in banner
+
+
+def test_banner_warns_when_the_checkout_is_behind_origin_main(config):
+    """#568: the failure this whole change exists for.
+
+    ~/.techne/runtime is an editable checkout that advances only on a manual
+    pull. Pre-#568 that rendered `v0.12.0 · live` with a ✅-eligible mark while
+    23 commits behind main, and the word "live" is what said "nothing to see".
+    """
+    h = collect_health(config)
+    h.update(_healthy_build())
+    h.update({"revision": "e7b7c86", "remote_revision": "0cc44f6", "drifted": True})
+    banner = format_banner(h)
+    assert "⚠️" in banner
+    assert "e7b7c86" in banner and "0cc44f6" in banner
+    assert "BEHIND/DIVERGED" in banner
+    # the remedy is in the banner, not just the diagnosis
+    assert "git -C" in banner and "pull" in banner
+    # and the reassuring word must be gone
+    assert "· live" not in banner
+
+
+def test_banner_reports_an_unreadable_revision_as_unverified_not_healthy(config):
+    """A revision we could not read must not collapse into "current".
+
+    Mirrors the typed-non-answer discipline: "I could not check" and "I checked
+    and it is fine" are different states and must not render the same.
+    """
+    h = collect_health(config)
+    h.update(_healthy_build())
+    h.update({"remote_revision": None, "drifted": None})
+    banner = format_banner(h)
+    assert "⚠️" in banner
+    assert "UNVERIFIED" in banner
 
 
 def test_banner_installed_build_warns(config):
@@ -67,7 +120,7 @@ def test_banner_db_unreachable(config):
 
 def test_banner_outbox_noop_no_warning(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     h["pending_outbox"] = 1189
     h["sync_adapter"] = "noop"
     banner = format_banner(h)
@@ -79,7 +132,7 @@ def test_banner_outbox_noop_no_warning(config):
 
 def test_banner_outbox_real_adapter_warns(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     h["pending_outbox"] = 5
     h["sync_adapter"] = "http"
     banner = format_banner(h)
@@ -89,7 +142,7 @@ def test_banner_outbox_real_adapter_warns(config):
 
 def test_banner_no_outbox_line_when_empty(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     h["pending_outbox"] = 0
     banner = format_banner(h)
     assert "outbox" not in banner
@@ -100,7 +153,7 @@ def test_banner_no_outbox_line_when_empty(config):
 
 def _healthy_h(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     return h
 
 
@@ -325,7 +378,7 @@ class TestBannerLiveness:
 
     def test_headline_mark_reflects_a_failing_subsystem(self, config):
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks_worst"] = "stale"
         h["checks"] = [
             {"name": "rail:consolidate", "verdict": "stale"},
@@ -343,7 +396,7 @@ class TestBannerLiveness:
         """DORMANT means correctly idle, not broken — it must not flip the mark
         or emit a verdict line, or the banner trains the eye to skip it."""
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks_worst"] = "dormant"
         h["checks"] = [{"name": "rail:dream", "verdict": "dormant"}]
         banner = format_banner(h)
@@ -353,7 +406,7 @@ class TestBannerLiveness:
     def test_absent_liveness_data_leaves_the_mark_alone(self, config):
         """No checks key at all (an older payload) must not manufacture a warning."""
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h.pop("checks_worst", None)
         h.pop("checks", None)
         assert format_banner(h).startswith("\n## techne ✅")
@@ -362,7 +415,7 @@ class TestBannerLiveness:
         """Listing a STALE rail under an UNOBSERVABLE label mislabels it; the
         others are counted, not named."""
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks_worst"] = "unobservable"
         h["checks"] = [
             {"name": "hook:pre_compact", "verdict": "unobservable"},
@@ -382,7 +435,7 @@ class TestBannerLiveness:
         in the repository. (#469 review 8, issue 2.)
         """
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks"] = []
         h["checks_worst"] = "unknown"
         h["checks_error"] = "TypeError: unhashable type: 'list'"
@@ -542,3 +595,114 @@ def test_the_liveness_failed_line_also_carries_the_deferred_note(config):
 
     assert "liveness check FAILED" in banner
     assert "1 deferred: check_runtime_loaded" in banner
+
+
+class TestRevisionInfo:
+    """#568: identify the code that is imported, not the version it claims."""
+
+    def test_site_packages_is_installed_and_reads_no_refs(self, tmp_path):
+        from techne.core.health import _revision_info
+
+        info = _revision_info(tmp_path / "lib" / "site-packages" / "techne")
+        assert info["build"] == "installed"
+        assert info["drifted"] is False
+        assert info["revision"] is None
+
+    def test_checkout_reads_head_and_origin_main_without_a_subprocess(self, tmp_path):
+        """collect_health runs in the SessionStart hook — no git subprocess."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("e7b7c86" + "0" * 33 + "\n")
+        (git / "refs" / "remotes" / "origin" / "main").write_text("0cc44f6" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["build"] == "checkout"
+        assert info["revision"] == "e7b7c86"
+        assert info["remote_revision"] == "0cc44f6"
+        assert info["drifted"] is True
+
+    def test_matching_head_and_remote_is_not_drifted(self, tmp_path):
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "refs" / "heads").mkdir(parents=True)
+        sha = "abc1234" + "0" * 33
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text(sha + "\n")
+        (git / "refs" / "remotes" / "origin" / "main").write_text(sha + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["drifted"] is False
+        assert info["revision"] == "abc1234"
+
+    def test_missing_origin_ref_reports_unknown_not_current(self, tmp_path):
+        """The load-bearing case: absence of a remote ref must not read as 'fine'."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["drifted"] is None, "unknown must not collapse to False"
+        assert info["revision"] == "abc1234"
+
+    def test_packed_refs_fallback(self, tmp_path):
+        """A freshly cloned repo keeps origin/main in packed-refs, not as a loose file."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
+        (git / "packed-refs").write_text(
+            "# pack-refs with: peeled fully-peeled sorted\n"
+            f"{'0cc44f6' + '0' * 33} refs/remotes/origin/main\n"
+        )
+
+        info = _revision_info(root / "techne")
+        assert info["remote_revision"] == "0cc44f6"
+        assert info["drifted"] is True
+
+    def test_linked_worktree_resolves_via_gitdir_and_commondir(self, tmp_path):
+        """`.git` as a FILE is a worktree, not "not a checkout".
+
+        Worktree-per-session is the standing dev topology (techne#743). Treating
+        a `.git` file as unknowable reported every dev session's revision as
+        UNVERIFIED — caught by test_deferred_never_becomes_a_verdict, which runs
+        format_banner on a real payload from inside this very worktree.
+        """
+        from techne.core.health import _revision_info
+
+        main = tmp_path / "main"
+        common = main / ".git"
+        (common / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (common / "refs" / "heads").mkdir(parents=True)
+        (common / "refs" / "heads" / "feat").write_text("e7b7c86" + "0" * 33 + "\n")
+        (common / "refs" / "remotes" / "origin" / "main").write_text("0cc44f6" + "0" * 33 + "\n")
+
+        wt_git = common / "worktrees" / "wt1"
+        wt_git.mkdir(parents=True)
+        # HEAD is per-worktree; the branch ref it names lives in the common dir.
+        (wt_git / "HEAD").write_text("ref: refs/heads/feat\n")
+        (wt_git / "commondir").write_text("../..\n")
+
+        root = tmp_path / "wt1"
+        root.mkdir()
+        (root / ".git").write_text(f"gitdir: {wt_git}\n")
+
+        info = _revision_info(root / "techne")
+        assert info["build"] == "checkout"
+        assert info["revision"] == "e7b7c86", "HEAD must resolve through the common dir"
+        assert info["remote_revision"] == "0cc44f6"
+        assert info["drifted"] is True
