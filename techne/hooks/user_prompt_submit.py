@@ -92,6 +92,76 @@ _SEED_NUDGE = (
 )
 
 
+# PULL-ONLY MEANS PULL-ONLY ON EVERY PUSH RAIL, NOT JUST SESSION_START (techne#561).
+#
+# `PULL_ONLY_TYPES` was enforced in exactly ONE place — egress.py, the
+# session_start selector — and its own comment scoped itself to "never
+# auto-injected into session-start context". This rail post-dates it and calls
+# `search()` directly, which applies no type filter, so pull-only rows have been
+# arriving on a push path the constant never covered: `pattern` and
+# `document_card` both.
+#
+# `pattern` is the flat-out leak. It belongs in the Architect store;
+# REDIRECTED_TYPES records that rows written to techne.db "leaked team patterns
+# into personal recall (recall doesn't filter by type)", and `store()` rejects new
+# ones — but legacy rows survive on un-cleaned installs, which is exactly why
+# PULL_ONLY_TYPES still lists the type.
+#
+# `document_card` is the decided half (Richard, 2026-08-13). The case for keeping
+# arch cards here was that a query-driven per-turn rail IS the "pull at the moment
+# of need" #383 and techne#945 wanted. What decided it against: `_build_context`
+# truncates every row to 200 chars, and an arch card's value is its FULL body —
+# that is the entire premise of the gist-plus-pointer design. A 200-char slice
+# chosen by embedding similarity is a pointer at best, and at worst it is the
+# #539 hazard in miniature: prose that vouches for a seam nobody re-read. The
+# right delivery already has a design — #449's edit-fired rail, exact path match
+# via `anchor:` lines, no topic guessing.
+#
+# So this set is now PULL_ONLY_TYPES exactly, and is imported rather than
+# restated: a second copy is how the first one came to be scoped to one rail.
+#
+# Filtered HERE rather than inside `search()` so the PULL path — techne_recall /
+# techne_search — keeps returning these rows, which is the whole point of
+# "pull-only". Trade-off: dropping post-search can return fewer than
+# `per_turn_recall_limit` rows. That shrink is already visible in
+# context_injections (hit_count vs k_requested, techne#413) and is preferable to
+# re-ranking to backfill, which would change what the rail selects.
+
+
+def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
+    """Drop rows whose knowledge.type is push-excluded, by looking the type UP.
+
+    THE ROW'S OWN ``type`` FIELD CANNOT BE USED. ``search()`` sets ``type`` to the
+    SOURCE TABLE ("knowledge"), not to the knowledge row's ``type`` column — which
+    is also why every line this rail renders reads ``[knowledge]`` regardless of
+    what it actually is, and therefore why a `pattern` row riding this rail was
+    indistinguishable from a fact at a glance (techne#561, follow-up #566).
+
+    One primary-key lookup over the ids just returned. Raising here degrades the
+    whole recall to nothing via the caller's handler — failing CLOSED, which is the
+    right direction for a filter whose job is to keep rows out.
+    """
+    ids = [r.get("id") for r in rows if r.get("id") is not None]
+    if not ids:
+        return rows
+    from techne.core.knowledge import PULL_ONLY_TYPES
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db_path)
+    try:
+        placeholders = ",".join("?" * len(ids))
+        excluded = {
+            row[0]
+            for row in conn.execute(
+                f"SELECT id, type FROM knowledge WHERE id IN ({placeholders})", ids
+            )
+            if row[1] in PULL_ONLY_TYPES
+        }
+    finally:
+        conn.close()
+    return [r for r in rows if r.get("id") not in excluded]
+
+
 def _build_context(rows: list[dict]) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 
@@ -196,6 +266,7 @@ def main() -> None:
                     limit=config.hooks.per_turn_recall_limit,
                     include_archived=False,
                 )
+                rows = _drop_pull_only(config.db_path, rows)
             recall_block = _build_context(rows) if rows else ""
             if recall_block:
                 blocks.append(recall_block)
