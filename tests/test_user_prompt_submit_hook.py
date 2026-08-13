@@ -348,17 +348,31 @@ def test_filtered_row_is_not_logged_as_injected(home, monkeypatch, capsys):
     assert rows[0]["hit_count"] == len(ids)
 
 
-def test_document_card_still_rides_the_per_turn_rail(home, monkeypatch, capsys):
-    """PINS THE UNDECIDED HALF OF techne#561 so it changes only on purpose.
+def test_document_card_is_not_pushed(home, monkeypatch, capsys):
+    """Arch cards are pull-only on THIS rail too (techne#561, decided 2026-08-13).
 
-    Whether an arch card belongs on a query-driven per-turn rail is a live design
-    question — it is arguably the "pull at the moment of need" that #383 and
-    techne#945 wanted, and arguably the startup flood relocated. This test asserts
-    TODAY'S behaviour, not a preference: if that decision lands the other way, this
-    test is meant to fail and be deleted in the same change.
+    This replaces a test that pinned the opposite behaviour while the question was
+    open. What decided it: `_build_context` truncates every row to 200 chars, and
+    an arch card's value is its full body — a 200-char slice chosen by embedding
+    similarity is a pointer at best. #449's edit-fired rail, matching on `anchor:`
+    paths exactly, is the delivery mechanism cards are supposed to get.
     """
     _write_config(home, per_turn_recall=True)
     _seed_raw("Postgres was chosen over MongoDB for join semantics.", "document_card")
     out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
-    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert "join semantics" in ctx  # search() labels every row [knowledge]; match on content
+    assert out.strip() == "", f"an arch card must not be pushed: {out!r}"
+
+
+def test_push_filter_is_pull_only_types_itself(home, monkeypatch, capsys):
+    """The rail excludes exactly PULL_ONLY_TYPES — not a second, drifting copy.
+
+    A restated subset is how the original constant came to be enforced on one rail
+    only; this asserts the hook shares the definition rather than mirroring it.
+    """
+    from techne.core.knowledge import PULL_ONLY_TYPES
+
+    _write_config(home, per_turn_recall=True)
+    for i, ktype in enumerate(PULL_ONLY_TYPES):
+        _seed_raw(f"Postgres join semantics note {i}.", ktype)
+    out = _run(monkeypatch, capsys, {"prompt": "postgres join semantics"})
+    assert out.strip() == "", f"no PULL_ONLY_TYPES row may be pushed: {out!r}"
