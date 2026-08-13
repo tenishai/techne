@@ -271,3 +271,94 @@ def test_non_dict_json_emits_nothing(home, monkeypatch, capsys):
         user_prompt_submit.main()
     assert exc.value.code == 0
     assert capsys.readouterr().out == ""
+
+
+# ---- techne#561: pull-only types must not ride the PUSH rail ----------------
+
+
+def _seed_raw(content: str, ktype: str) -> int:
+    """Insert a knowledge row of ANY type, bypassing store()'s validation.
+
+    `store()` rejects `pattern` outright (REDIRECTED_TYPES, techne#137) — which is
+    the point: the rows that matter here are LEGACY ones that predate that gate and
+    survive on un-cleaned installs, exactly the population PULL_ONLY_TYPES still
+    lists `pattern` for. They cannot be created through the public API.
+    """
+    import sqlite3
+
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    db_path = Config.load().db_path
+    init_db(db_path)  # store() creates the schema lazily; a raw INSERT must not rely on that
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO knowledge (content, type, confidence) VALUES (?, ?, ?)",
+            (content, ktype, "high"),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def test_pull_only_pattern_row_is_not_pushed(home, monkeypatch, capsys):
+    """A legacy `pattern` row must never be auto-injected by the per-turn rail.
+
+    Fail-without-fix: this rail calls search() directly and search() applies no
+    type filter, so before techne#561 the pattern row rode straight into context —
+    the leak REDIRECTED_TYPES describes ("leaked team patterns into personal
+    recall"), on a push path PULL_ONLY_TYPES' egress-only enforcement never saw.
+    """
+    _write_config(home, per_turn_recall=True)
+    _seed_raw("Postgres was chosen over MongoDB for join semantics.", "pattern")
+    out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
+    assert out.strip() == "", f"a pull-only row must not be pushed: {out!r}"
+
+
+def test_pull_only_filter_does_not_starve_a_normal_recall(home, monkeypatch, capsys):
+    """The filter drops ONLY pull-only rows — a matching fact still injects."""
+    _write_config(home, per_turn_recall=True)
+    _seed_raw("Postgres was chosen over MongoDB for join semantics.", "pattern")
+    _seed("Postgres connection pooling is handled by pgbouncer.",
+          type="fact", tags="storage", confidence="high")
+    out = _run(monkeypatch, capsys, {"prompt": "postgres pooling"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "pgbouncer" in ctx
+    assert "join semantics" not in ctx  # search() labels every row [knowledge], so match on content
+
+
+def test_filtered_row_is_not_logged_as_injected(home, monkeypatch, capsys):
+    """context_injections must record what was INJECTED, not what was retrieved.
+
+    Otherwise the #560 attribution panel would credit encounters that never
+    reached the agent, and hit_count would overstate the token cost.
+    """
+    _write_config(home, per_turn_recall=True)
+    pid = _seed_raw("Postgres was chosen over MongoDB for join semantics.", "pattern")
+    _seed("Postgres connection pooling is handled by pgbouncer.",
+          type="fact", tags="storage", confidence="high")
+    _run(monkeypatch, capsys, {"prompt": "postgres pooling", "session_id": "s-561"})
+
+    rows = _injection_log_rows("per_turn_recall")
+    assert len(rows) == 1
+    ids = json.loads(rows[0]["hit_ids"])
+    assert pid not in ids
+    assert rows[0]["hit_count"] == len(ids)
+
+
+def test_document_card_still_rides_the_per_turn_rail(home, monkeypatch, capsys):
+    """PINS THE UNDECIDED HALF OF techne#561 so it changes only on purpose.
+
+    Whether an arch card belongs on a query-driven per-turn rail is a live design
+    question — it is arguably the "pull at the moment of need" that #383 and
+    techne#945 wanted, and arguably the startup flood relocated. This test asserts
+    TODAY'S behaviour, not a preference: if that decision lands the other way, this
+    test is meant to fail and be deleted in the same change.
+    """
+    _write_config(home, per_turn_recall=True)
+    _seed_raw("Postgres was chosen over MongoDB for join semantics.", "document_card")
+    out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "join semantics" in ctx  # search() labels every row [knowledge]; match on content

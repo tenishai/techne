@@ -92,6 +92,69 @@ _SEED_NUDGE = (
 )
 
 
+# Types this PUSH rail must not inject (techne#561).
+#
+# `PULL_ONLY_TYPES` in core/knowledge.py is the real list, but it is enforced in
+# exactly ONE place — egress.py, the session_start selector — and its own comment
+# scopes itself to "never auto-injected into session-start context". This rail
+# post-dates it and calls `search()` directly, which applies no type filter, so
+# pull-only rows have been arriving on a push path the constant never covered.
+#
+# `pattern` is the unambiguous half and the only one fixed here. It lives in the
+# Architect store; REDIRECTED_TYPES records that rows written to techne.db
+# "leaked team patterns into personal recall (recall doesn't filter by type)",
+# and `store()` rejects new ones — but legacy rows survive on un-cleaned installs,
+# which is exactly why PULL_ONLY_TYPES still lists it. Auto-injecting those is the
+# leak the write-time invariant was built to stop.
+#
+# `document_card` is DELIBERATELY NOT HERE. Whether an arch card belongs on a
+# query-driven per-turn rail is a live design question (#561): it is arguably the
+# "pull at the moment of need" that #383/techne#945 wanted, and it is also
+# arguably the startup flood relocated. Adding it is a one-line change once that
+# is settled; guessing now would silently decide it.
+#
+# Filtered here rather than inside `search()` so the PULL path — techne_recall /
+# techne_search — keeps returning these rows, which is the whole point of
+# "pull-only". Trade-off: dropping post-search can return fewer than
+# `per_turn_recall_limit` rows. That shrink is already visible in
+# context_injections (hit_count vs k_requested, techne#413) and is preferable to
+# re-ranking to backfill, which would change what the rail selects.
+_PUSH_EXCLUDED_TYPES = frozenset({"pattern", "document"})
+
+
+def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
+    """Drop rows whose knowledge.type is push-excluded, by looking the type UP.
+
+    THE ROW'S OWN ``type`` FIELD CANNOT BE USED. ``search()`` sets ``type`` to the
+    SOURCE TABLE ("knowledge"), not to the knowledge row's ``type`` column — which
+    is also why every line this rail renders reads ``[knowledge]`` regardless of
+    what it actually is, and therefore why a `pattern` row riding this rail was
+    indistinguishable from a fact at a glance (techne#561).
+
+    One primary-key lookup over the ids just returned. Raising here degrades the
+    whole recall to nothing via the caller's handler — failing CLOSED, which is the
+    right direction for a filter whose job is to keep rows out.
+    """
+    ids = [r.get("id") for r in rows if r.get("id") is not None]
+    if not ids:
+        return rows
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db_path)
+    try:
+        placeholders = ",".join("?" * len(ids))
+        excluded = {
+            row[0]
+            for row in conn.execute(
+                f"SELECT id, type FROM knowledge WHERE id IN ({placeholders})", ids
+            )
+            if row[1] in _PUSH_EXCLUDED_TYPES
+        }
+    finally:
+        conn.close()
+    return [r for r in rows if r.get("id") not in excluded]
+
+
 def _build_context(rows: list[dict]) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 
@@ -196,6 +259,7 @@ def main() -> None:
                     limit=config.hooks.per_turn_recall_limit,
                     include_archived=False,
                 )
+                rows = _drop_pull_only(config.db_path, rows)
             recall_block = _build_context(rows) if rows else ""
             if recall_block:
                 blocks.append(recall_block)
