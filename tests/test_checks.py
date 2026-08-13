@@ -1421,6 +1421,15 @@ class TestCoreRailsAreInstrumented:
         from techne.hooks import post_tool_use
 
         config.hooks.post_tool_use = True
+        # A GENEROUS BUDGET, ON PURPOSE (techne#543). At the default 5.0s this
+        # assertion measured the RUNNER, not the hook: under `-n 4` on a shared
+        # CI box the capture genuinely exceeded the budget, the rail correctly
+        # recorded `failed`, and this line correctly failed — a red check that
+        # was true about the machine and false about the code. Observed
+        # 2026-08-10 in run 31390208451, where the sibling `test (3.13)` leg
+        # passed the same test on the same sha. The over-budget arm is pinned
+        # deterministically by the test below instead of by CI's mood.
+        config.hooks.timeout_s = 60.0
         self._seed_session(config)
         code = self._run_hook(
             post_tool_use,
@@ -1437,6 +1446,57 @@ class TestCoreRailsAreInstrumented:
         marker = self._marker(config, "post_tool_use")
         assert marker.get("outcome") == "ok", marker
         assert marker.get("ts")
+
+    def test_post_tool_use_records_an_over_budget_capture_as_failed(
+        self, config, monkeypatch, tmp_path
+    ):
+        """The other arm of the same mechanism, pinned without a wall clock.
+
+        A capture that runs out of budget is a DROPPED observation and must read
+        BROKEN rather than vanish. The sibling test above used to assert this
+        arm by accident, whenever CI was slow enough — which made a real signal
+        indistinguishable from runner contention (techne#543). Raising the exact
+        exception the budget produces tests the hook's handling of it, at no
+        wall-clock cost and with no dependence on how loaded the box is.
+        """
+        from techne.hooks import post_tool_use
+        from techne.hooks._timeout import HookTimeout
+
+        config.hooks.post_tool_use = True
+        self._seed_session(config)
+
+        def _blows_the_budget(*_a, **_k):
+            raise HookTimeout("post_tool_use:capture timed out after 5.0s")
+
+        # capture_tool_use is imported INSIDE the guarded block, so patch it at
+        # its source module rather than on the hook.
+        monkeypatch.setattr("techne.lifecycle.capture_tool_use", _blows_the_budget)
+
+        code = self._run_hook(
+            post_tool_use,
+            {
+                "session_id": "s1",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(tmp_path / "a.py")},
+                "tool_response": "ok",
+            },
+            config,
+            monkeypatch,
+        )
+        assert code == 0 or code is None, "a dropped capture must not fail the tool call"
+        marker = self._marker(config, "post_tool_use")
+        assert marker.get("outcome") == "failed", marker
+        # The error detail lands under its own key, not inside last_run.
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state
+
+        conn = connect(config.db_path)
+        try:
+            err = get_state(conn, "hook:post_tool_use:last_error") or {}
+        finally:
+            conn.close()
+        assert err.get("stage") == "capture", err
+        assert "timed out" in err.get("msg", ""), err
 
     def test_post_tool_use_records_a_filtered_call_as_a_noop_not_silence(
         self, config, monkeypatch
