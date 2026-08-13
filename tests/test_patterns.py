@@ -91,6 +91,76 @@ def test_search_patterns_blank_query_returns_empty(db):
     assert search_patterns(db, "\\") == []
 
 
+def test_search_patterns_or_fallback_on_empty_and_pass(db):
+    """#557: a problem-phrased query must not AND-miss a pattern that answers it.
+
+    The corpus is queried in problem language but titled metaphorically, so under
+    FTS5 implicit-AND every term must appear or the caller is told "no patterns"
+    while an on-point pattern sits in the store.
+    """
+    inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="patterns-only")
+    add_pattern(
+        db,
+        investigation_id=inv,
+        name="Two-gate alerting: relative tier AND absolute floor",
+        source_url="u",
+        body=(
+            "An alert fires only when a file clears a repo-relative tier AND trips an "
+            "absolute factor, so a healthy repo can return no findings at all."
+        ),
+    )
+
+    # "stop" appears nowhere in the corpus. A single-term query takes no fallback
+    # (build_or_fts_query returns "" for <2 terms), so this empty result proves the
+    # term is genuinely absent — and therefore that the ANDed multi-term query below
+    # cannot match, which is what the pre-#557 caller saw as "no patterns matched".
+    assert search_patterns(db, "stop") == []
+
+    hits = search_patterns(db, "how do I stop an alert firing when the repo is healthy")
+    assert hits, "OR fallback should recover a pattern the AND pass misses"
+    assert hits[0]["name"].startswith("Two-gate alerting")
+
+
+def test_search_patterns_or_fallback_does_not_disturb_a_matching_and_query(db):
+    """#557: the fallback fires only on an empty AND pass — a working query is unchanged.
+
+    This is the no-regression half: adding the fallback must not widen results for
+    queries that already resolve, or precise searches would silently get noisier.
+    """
+    inv = upsert_investigation(db, url="u", surveyed_at="d", verdict="patterns-only")
+    add_pattern(
+        db,
+        investigation_id=inv,
+        name="Quarantine-fence untrusted content",
+        source_url="u",
+        body="Preserve, do not drop; defuse, do not trust.",
+    )
+    # LOAD-BEARING FIXTURE DESIGN: the decoy must contain EXACTLY ONE of the two
+    # query terms ("quarantine", not "untrusted"). That is what gives this test teeth.
+    # AND("quarantine","untrusted") matches only the first pattern, so the guard holds
+    # the fallback back — but OR("quarantine" OR "untrusted") WOULD match this decoy,
+    # so if `if not results` is ever removed the OR pass runs, returns two rows, and
+    # the assertion below breaks. A decoy sharing NO query term makes the test vacuous:
+    # it then passes with or without the guard (verified by mutation — the first
+    # version of this test survived replacing the guard with `if True`).
+    add_pattern(
+        db,
+        investigation_id=inv,
+        name="Unrelated durable execution runtime",
+        source_url="u2",
+        body="Swap the runtime without changing agent code. Nothing to do with quarantine.",
+    )
+
+    # The invariant above, made executable so a reworded fixture cannot silently
+    # re-vacuate this test: both patterns must share the term "quarantine". If the
+    # decoy stops matching it, this fails here rather than passing hollowly below.
+    assert len(search_patterns(db, "quarantine")) == 2, "decoy must share one query term"
+
+    hits = search_patterns(db, "quarantine untrusted")
+    assert len(hits) == 1, "AND pass matched, so the OR fallback must not have widened it"
+    assert hits[0]["name"] == "Quarantine-fence untrusted content"
+
+
 def test_ingest_patterns_md(db):
     md = """---
 name: architectural-patterns
