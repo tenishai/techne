@@ -1594,14 +1594,15 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
     response = args.get("response", "")
     if not isinstance(response, str):
         response = json.dumps(response) if response else ""
-    if not response.strip():
-        return {
-            "candidates_proposed": 0,
-            "candidates_written": 0,
-            "candidates_promoted": 0,
-            "note": "empty response — nothing to ingest",
-        }
 
+    # NO PRE-JUDGING THE INPUT HERE (techne#485). This surface used to short-circuit
+    # a whitespace/empty response with {"note": "nothing to ingest"} and no `errors`
+    # key — while the core it wraps calls that identical input `parse_failures=1,
+    # errors=1` ("empty response"). That erased the exact distinction #465 exists to
+    # draw — A DISCARDED REFLECTION IS NOT AN EMPTY ONE — at the boundary the agent
+    # actually talks through. Hand every response to the core and report what it
+    # reports; the counts shape then comes from new_ingest_counts() upstream and
+    # cannot drift from this call site again.
     thread_id = args.get("thread_id", "")
     result = ingest_reflection_response(
         config,
