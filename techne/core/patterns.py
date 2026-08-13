@@ -735,22 +735,50 @@ def investigations_for_url(db_path: Path, url: str) -> list[dict]:
 
 
 def search_patterns(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
-    """FTS over active patterns (name + body)."""
-    from techne.core.search import prepare_fts_query
+    """FTS over active patterns (name + body), with an OR fallback on an empty AND pass.
+
+    The corpus is queried in problem language ("resume work after a crash without
+    losing the task") while patterns are titled metaphorically ("Rebuild-not-reference
+    handle across durable-workflow step boundaries"). Under FTS5 implicit-AND every
+    term must appear, so a natural-language question matches nothing and the empty
+    result reads as "we have no pattern for this" while a directly on-point one sits
+    in the store. Measured on the 477-pattern corpus (#557): 1/15 problem-phrased
+    queries found their target, 14/15 returned zero; with this fallback, 14/15 and
+    zero empties.
+
+    Same #70 empty-result fallback that :func:`techne.core.search` and
+    :func:`techne.core.codegraph.search_symbols` already apply — this was the one
+    FTS caller that never got it. The fallback fires ONLY when the AND pass returns
+    nothing, so a query that already resolves is returned unchanged.
+    """
+    from techne.core.search import build_or_fts_query, prepare_fts_query
 
     fts = prepare_fts_query(query)  # None when empty/all-punctuation → MATCH '' crash (#143)
     if fts is None:
         return []
     conn = plain_connect(db_path)
     try:
-        rows = conn.execute(
-            """SELECT p.id, p.name, p.source_url, p.body, p.confidence, bm25(patterns_fts) AS rank
-               FROM patterns_fts f JOIN patterns p ON p.rowid = f.rowid
-               WHERE patterns_fts MATCH ? AND p.status = 'active'
-               ORDER BY rank LIMIT ?""",
-            (fts, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+
+        def _match(match_str: str) -> list[dict]:
+            rows = conn.execute(
+                """SELECT p.id, p.name, p.source_url, p.body, p.confidence,
+                          bm25(patterns_fts) AS rank
+                   FROM patterns_fts f JOIN patterns p ON p.rowid = f.rowid
+                   WHERE patterns_fts MATCH ? AND p.status = 'active'
+                   ORDER BY rank LIMIT ?""",
+                (match_str, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        results = _match(fts)
+        if not results:
+            # The AND pass matched nothing — retry as OR-of-terms so a multi-term
+            # question returns the ranked union rather than a false "no patterns".
+            # build_or_fts_query returns "" for <2 terms (AND==OR → no re-query).
+            or_query = build_or_fts_query(query)
+            if or_query:
+                results = _match(or_query)
+        return results
     finally:
         conn.close()
 
