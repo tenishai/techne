@@ -1,5 +1,7 @@
 """Tests for the health summary + login banner (#76)."""
 
+from pathlib import Path
+
 import pytest
 
 from techne.config import Config
@@ -13,6 +15,25 @@ def config(tmp_path):
     cfg.db_path = tmp_path / "techne.db"
     init_db(cfg.db_path).close()
     return cfg
+
+
+def _healthy_build() -> dict:
+    """The neutral "the build itself is fine" baseline, for tests about something else.
+
+    Pre-#568 that was `build="live"`, which meant only "not site-packages" and so
+    read as healthy even when the checkout was months behind. Currency is now
+    decided by the revision, so a healthy baseline has to state that the revision
+    matches origin/main — an assignment to `build` alone no longer says anything
+    about freshness.
+    """
+    return {
+        "build": "checkout",
+        "revision": "abc1234",
+        "remote_revision": "abc1234",
+        "drifted": False,
+        "remote_ref_age_days": 0,
+        "branch": "refs/heads/main",
+    }
 
 
 def test_collect_health_db_ok(config):
@@ -37,15 +58,52 @@ def test_collect_health_db_unreachable(tmp_path):
     assert h["version"]
 
 
-def test_banner_healthy_live(config):
+def test_banner_healthy_when_checkout_matches_origin_main(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     banner = format_banner(h)
     # leads with a blank line so the heading clears Claude Code's systemMessage chrome
     assert banner.startswith("\n## techne ✅")
-    assert "live" in banner
+    assert "level with origin/main" in banner
+    assert "abc1234" in banner  # the revision, not just the version
     assert "obs ·" in banner
     assert "threads" in banner
+
+
+def test_banner_warns_when_the_checkout_diverges_from_origin_main(config):
+    """#568: the failure this whole change exists for.
+
+    ~/.techne/runtime is an editable checkout that advances only on a manual
+    pull. Pre-#568 that rendered `v0.12.0 · live` with a ✅-eligible mark while
+    23 commits behind main, and the word "live" is what said "nothing to see".
+    """
+    h = collect_health(config)
+    h.update(_healthy_build())
+    h.update({"revision": "e7b7c86", "remote_revision": "0cc44f6", "drifted": True})
+    banner = format_banner(h)
+    assert "⚠️" in banner
+    assert "e7b7c86" in banner and "0cc44f6" in banner
+    assert "DIVERGED" in banner
+    # Not "BEHIND": a sha comparison cannot tell behind from ahead, and doctor
+    # calls ahead-of-main healthy. The remedy must resolve either direction.
+    assert "BEHIND" not in banner
+    assert "git -C" in banner and "status -sb" in banner
+    # and the reassuring word must be gone
+    assert "· live" not in banner
+
+
+def test_banner_reports_an_unreadable_revision_as_unverified_not_healthy(config):
+    """A revision we could not read must not collapse into "current".
+
+    Mirrors the typed-non-answer discipline: "I could not check" and "I checked
+    and it is fine" are different states and must not render the same.
+    """
+    h = collect_health(config)
+    h.update(_healthy_build())
+    h.update({"remote_revision": None, "drifted": None})
+    banner = format_banner(h)
+    assert "⚠️" in banner
+    assert "UNVERIFIED" in banner
 
 
 def test_banner_installed_build_warns(config):
@@ -67,7 +125,7 @@ def test_banner_db_unreachable(config):
 
 def test_banner_outbox_noop_no_warning(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     h["pending_outbox"] = 1189
     h["sync_adapter"] = "noop"
     banner = format_banner(h)
@@ -79,7 +137,7 @@ def test_banner_outbox_noop_no_warning(config):
 
 def test_banner_outbox_real_adapter_warns(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     h["pending_outbox"] = 5
     h["sync_adapter"] = "http"
     banner = format_banner(h)
@@ -89,7 +147,7 @@ def test_banner_outbox_real_adapter_warns(config):
 
 def test_banner_no_outbox_line_when_empty(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     h["pending_outbox"] = 0
     banner = format_banner(h)
     assert "outbox" not in banner
@@ -100,7 +158,7 @@ def test_banner_no_outbox_line_when_empty(config):
 
 def _healthy_h(config):
     h = collect_health(config)
-    h["build"] = "live"
+    h.update(_healthy_build())
     return h
 
 
@@ -325,7 +383,7 @@ class TestBannerLiveness:
 
     def test_headline_mark_reflects_a_failing_subsystem(self, config):
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks_worst"] = "stale"
         h["checks"] = [
             {"name": "rail:consolidate", "verdict": "stale"},
@@ -343,7 +401,7 @@ class TestBannerLiveness:
         """DORMANT means correctly idle, not broken — it must not flip the mark
         or emit a verdict line, or the banner trains the eye to skip it."""
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks_worst"] = "dormant"
         h["checks"] = [{"name": "rail:dream", "verdict": "dormant"}]
         banner = format_banner(h)
@@ -353,7 +411,7 @@ class TestBannerLiveness:
     def test_absent_liveness_data_leaves_the_mark_alone(self, config):
         """No checks key at all (an older payload) must not manufacture a warning."""
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h.pop("checks_worst", None)
         h.pop("checks", None)
         assert format_banner(h).startswith("\n## techne ✅")
@@ -362,7 +420,7 @@ class TestBannerLiveness:
         """Listing a STALE rail under an UNOBSERVABLE label mislabels it; the
         others are counted, not named."""
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks_worst"] = "unobservable"
         h["checks"] = [
             {"name": "hook:pre_compact", "verdict": "unobservable"},
@@ -382,7 +440,7 @@ class TestBannerLiveness:
         in the repository. (#469 review 8, issue 2.)
         """
         h = collect_health(config)
-        h["build"] = "live"
+        h.update(_healthy_build())
         h["checks"] = []
         h["checks_worst"] = "unknown"
         h["checks_error"] = "TypeError: unhashable type: 'list'"
@@ -542,3 +600,334 @@ def test_the_liveness_failed_line_also_carries_the_deferred_note(config):
 
     assert "liveness check FAILED" in banner
     assert "1 deferred: check_runtime_loaded" in banner
+
+
+class TestRevisionInfo:
+    """#568: identify the code that is imported, not the version it claims."""
+
+    def test_site_packages_is_installed_and_reads_no_refs(self, tmp_path):
+        from techne.core.health import _revision_info
+
+        info = _revision_info(tmp_path / "lib" / "site-packages" / "techne")
+        assert info["build"] == "installed"
+        assert info["drifted"] is None, "installed currency is unknown, not verified-level"
+        assert info["revision"] is None
+
+    def test_checkout_reads_head_and_origin_main_without_a_subprocess(self, tmp_path):
+        """collect_health runs in the SessionStart hook — no git subprocess."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("e7b7c86" + "0" * 33 + "\n")
+        (git / "refs" / "remotes" / "origin" / "main").write_text("0cc44f6" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["build"] == "checkout"
+        assert info["revision"] == "e7b7c86"
+        assert info["remote_revision"] == "0cc44f6"
+        assert info["drifted"] is True
+
+    def test_matching_head_and_remote_is_not_drifted(self, tmp_path):
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "refs" / "heads").mkdir(parents=True)
+        sha = "abc1234" + "0" * 33
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text(sha + "\n")
+        (git / "refs" / "remotes" / "origin" / "main").write_text(sha + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["drifted"] is False
+        assert info["revision"] == "abc1234"
+
+    def test_missing_origin_ref_reports_unknown_not_current(self, tmp_path):
+        """The load-bearing case: absence of a remote ref must not read as 'fine'."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["drifted"] is None, "unknown must not collapse to False"
+        assert info["revision"] == "abc1234"
+
+    def test_packed_refs_fallback(self, tmp_path):
+        """A freshly cloned repo keeps origin/main in packed-refs, not as a loose file."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
+        (git / "packed-refs").write_text(
+            "# pack-refs with: peeled fully-peeled sorted\n"
+            f"{'0cc44f6' + '0' * 33} refs/remotes/origin/main\n"
+        )
+
+        info = _revision_info(root / "techne")
+        assert info["remote_revision"] == "0cc44f6"
+        assert info["drifted"] is True
+
+    def test_linked_worktree_resolves_via_gitdir_and_commondir(self, tmp_path):
+        """`.git` as a FILE is a worktree, not "not a checkout".
+
+        Worktree-per-session is the standing dev topology (techne#743). Treating
+        a `.git` file as unknowable reported every dev session's revision as
+        UNVERIFIED — caught by test_deferred_never_becomes_a_verdict, which runs
+        format_banner on a real payload from inside this very worktree.
+        """
+        from techne.core.health import _revision_info
+
+        main = tmp_path / "main"
+        common = main / ".git"
+        (common / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (common / "refs" / "heads").mkdir(parents=True)
+        (common / "refs" / "heads" / "main").write_text("e7b7c86" + "0" * 33 + "\n")
+        (common / "refs" / "remotes" / "origin" / "main").write_text("0cc44f6" + "0" * 33 + "\n")
+
+        wt_git = common / "worktrees" / "wt1"
+        wt_git.mkdir(parents=True)
+        # HEAD is per-worktree; the branch ref it names lives in the common dir.
+        (wt_git / "HEAD").write_text("ref: refs/heads/main\n")
+        (wt_git / "commondir").write_text("../..\n")
+
+        root = tmp_path / "wt1"
+        root.mkdir()
+        (root / ".git").write_text(f"gitdir: {wt_git}\n")
+
+        info = _revision_info(root / "techne")
+        assert info["build"] == "checkout"
+        assert info["revision"] == "e7b7c86", "HEAD must resolve through the common dir"
+        assert info["remote_revision"] == "0cc44f6"
+        assert info["drifted"] is True
+
+    def test_off_main_reports_the_branch_and_does_not_warn(self, tmp_path):
+        """CI and every dev worktree sit off main and are SUPPOSED to differ.
+
+        The first implementation compared any checkout to origin/main, so it went
+        red on this PR's own CI run — a relative check with no absolute floor
+        always has a worst item, which is how a signal becomes noise. Only a
+        checkout ON main is claiming to be a deployment. Mirrors the same rule in
+        checks.check_runtime_revision, which learned it the same way.
+        """
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/feat/thing\n")
+        (git / "refs" / "heads" / "feat").mkdir(parents=True, exist_ok=True)
+        (git / "refs" / "heads" / "feat" / "thing").write_text("aaaaaaa" + "0" * 33 + "\n")
+        (git / "refs" / "remotes" / "origin" / "main").write_text("bbbbbbb" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["branch"] == "refs/heads/feat/thing"
+        # None, not False: the shas here genuinely differ, so False would be an
+        # affirmatively wrong claim — and collect_health also feeds techne_status,
+        # where a consumer would read it as the reassurance the banner declines.
+        assert info["drifted"] is None, "off main is unknown currency, not verified-level"
+        assert info["remote_revision"] == "bbbbbbb", "the comparison is still reported"
+        assert info["remote_ref_age_days"] is not None, "caveat data on every branch"
+
+    def test_detached_head_is_recorded_as_HEAD_not_none(self, tmp_path):
+        """_revision_info must DETECT detachment, not just render it.
+
+        The banner-level test for this passes `branch="HEAD"` in, so it cannot
+        see a detection bug here — mutation proved it: deleting this branch of
+        the logic left the whole suite green until this test existed.
+        """
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (git / "HEAD").write_text("abc1234" + "0" * 33 + "\n")  # raw sha = detached
+        (git / "refs" / "remotes" / "origin" / "main").write_text("bbbbbbb" + "0" * 33 + "\n")
+
+        info = _revision_info(root / "techne")
+        assert info["branch"] == "HEAD", "detached must match doctor's convention"
+        assert info["revision"] == "abc1234", "HEAD read fine — nothing unreadable"
+
+    def test_unreadable_head_leaves_branch_none(self, tmp_path):
+        """The ONLY state that earns UNVERIFIED."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        (root / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True)
+        info = _revision_info(root / "techne")
+        assert info["branch"] is None
+        assert info["drifted"] is None
+
+    def test_no_loose_origin_ref_leaves_the_age_unknown(self, tmp_path):
+        """No honest mtime exists for a packed-only ref, so the age must stay None.
+
+        Guards the removed FETCH_HEAD fallback: that file's mtime is last-FETCH,
+        which reads younger than last-moved and would falsely reassure.
+        """
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
+        (git / "packed-refs").write_text(
+            f"{'bbbbbbb' + '0' * 33} refs/remotes/origin/main\n"
+        )
+        (git / "FETCH_HEAD").write_text("whatever\n")  # must NOT be used
+
+        info = _revision_info(root / "techne")
+        assert info["remote_revision"] == "bbbbbbb", "packed ref still resolves"
+        assert info["remote_ref_age_days"] is None, "no loose ref = no honest age"
+
+    def test_the_checkout_this_suite_runs_from_is_actually_readable(self):
+        """The gap every synthetic fixture missed.
+
+        All the tmp_path repos above would pass against a broken implementation
+        AND a correct one — none observes the topology the code really runs in.
+        That is why the `.git`-as-file worktree bug survived them and was caught
+        only incidentally. Asserts the answer is USABLE here, and deliberately
+        does NOT assert `drifted`, which legitimately varies with the branch.
+        """
+        import techne
+        from techne.core.health import _revision_info
+
+        info = _revision_info(Path(techne.__file__).resolve().parent)
+        assert info["build"] == "checkout", "the suite runs from a source checkout"
+        assert info["revision"] is not None, "must resolve a revision here"
+        assert len(info["revision"]) == 7
+
+
+class TestFreshnessCaveat:
+    """The caveat must never silently vanish — the surviving mutant in review."""
+
+    def _h(self, **over):
+        base = {
+            "db_ok": True, "version": "0.13.0", "package_path": "/x/techne",
+            "observations": 0, "threads": 0, "active_threads": 0, "knowledge": 0,
+            "pending_outbox": 0, "sync_adapter": "noop", "last_session": "—",
+            "db_path": "/x", "build": "checkout", "revision": "abc1234",
+            "remote_revision": "abc1234", "drifted": False,
+            "branch": "refs/heads/main", "remote_ref_age_days": 0,
+        }
+        base.update(over)
+        return base
+
+    def test_caveat_present_even_when_the_fetch_is_zero_days_old(self):
+        """`age == 0` is falsy: a truthiness test drops the caveat on the
+        freshest case, which is also the false-green case."""
+        assert "local ref last moved 0d ago" in format_banner(self._h())
+
+    def test_caveat_present_on_the_matching_case(self):
+        banner = format_banner(self._h(remote_ref_age_days=21))
+        assert "level with origin/main" in banner
+        assert "local ref last moved 21d ago" in banner, (
+            "'matches' is the FALSE-GREEN case — a 3-week-old ref reads as level"
+        )
+
+    def test_caveat_present_on_the_drifted_case(self):
+        banner = format_banner(
+            self._h(remote_revision="0cc44f6", drifted=True, remote_ref_age_days=3)
+        )
+        assert "DIVERGED" in banner and "local ref last moved 3d ago" in banner
+
+    def test_unknown_fetch_age_says_so(self):
+        assert "ref age unknown" in format_banner(self._h(remote_ref_age_days=None))
+
+    def test_off_main_still_states_the_comparison(self):
+        """docs/arch/liveness.md: a working checkout STILL states how far behind.
+
+        Reporting off-main green with no number reproduced the #473 incident
+        inside its own fix — a worktree parked on a peer's branch 200 commits
+        behind main rendered identically to a current one.
+        """
+        b = format_banner(
+            self._h(branch="refs/heads/feat", drifted=None, remote_revision="bbbbbbb")
+        )
+        assert "⚠️" not in b, "off main is not a defect"
+        assert "on feat (not a deployment" in b
+        assert "differs from origin/main bbbbbbb" in b, "must state the comparison"
+        assert "local ref last moved" in b, "caveat on every branch, including this one"
+
+    def test_diverged_remedy_can_clear_its_own_finding(self):
+        """On main and AHEAD, `git pull` cannot clear the warning — only push can.
+
+        `doctor` calls ahead-of-main LIVE. A sha comparison cannot tell ahead from
+        behind, so the banner must not claim a direction it cannot prove, and must
+        not prescribe a one-directional remedy. checks.py: "a remedy that cannot
+        clear its own finding is the never-green defect this module has already
+        paid for twice."
+        """
+        b = format_banner(self._h(drifted=True, remote_revision="0cc44f6"))
+        assert "⚠️" in b
+        assert "BEHIND" not in b, "cannot prove direction from a sha comparison"
+        assert "DIVERGED from origin/main 0cc44f6" in b
+        assert "status -sb" in b, "remedy must resolve either direction"
+        assert "pull" not in b, "a bare pull cannot clear an ahead-of-main finding"
+
+    def test_unreadable_head_is_unverified_not_a_healthy_checkout(self):
+        """No branch → cannot tell a deployment from a working checkout."""
+        # branch=None now means HEAD itself would not read — the only state
+        # that earns UNVERIFIED, since detached is handled as off-main.
+        b = format_banner(self._h(branch=None, drifted=None, revision=None))
+        assert "⚠️" in b
+        assert "UNVERIFIED" in b
+        assert "None" not in b, "no literal None on an operator-facing line"
+
+    def test_detached_head_is_off_main_not_unverified(self):
+        """Every review worktree is detached — warning there is the failure this
+        change exists to prevent, and doctor calls the same state healthy."""
+        b = format_banner(self._h(branch="HEAD", drifted=None, remote_revision="0cc44f6"))
+        assert "⚠️" not in b, "a detached checkout is not a defect"
+        assert "UNVERIFIED" not in b, "HEAD read fine; nothing was unreadable"
+        assert "on a detached HEAD (not a deployment" in b
+        assert "differs from origin/main 0cc44f6" in b
+
+    def test_off_main_at_the_same_sha_says_level_not_differs(self):
+        """A branch freshly cut from an up-to-date main, before its first commit —
+        which is exactly when a SessionStart banner greets you. The earlier
+        wording printed the same sha on both sides of the word "differs"."""
+        b = format_banner(
+            self._h(branch="refs/heads/feat", drifted=None,
+                    revision="abc1234", remote_revision="abc1234")
+        )
+        assert "level with origin/main abc1234" in b
+        assert "differs" not in b
+
+    def test_off_main_with_no_origin_ref_states_the_absence(self):
+        """A single-branch clone genuinely has no origin/main.
+
+        The only rendering branch in this change that had no test at all. Green
+        is deliberate here — off-main is the quiet path — but the absence must be
+        stated outright, not implied by silence. Note doctor returns UNKNOWN for
+        this; the disagreement is documented at the call site.
+        """
+        b = format_banner(self._h(branch="refs/heads/feat", drifted=None, remote_revision=None))
+        assert "no origin/main ref" in b
+        assert "⚠️" not in b
+
+    def test_symref_cycle_reads_unknown_rather_than_raising(self, tmp_path):
+        """A corrupt repo must read as unknown, not exhaust the stack."""
+        from techne.core.health import _revision_info
+
+        root = tmp_path / "repo"
+        git = root / ".git"
+        (git / "refs" / "heads").mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/loop\n")
+        (git / "refs" / "heads" / "loop").write_text("ref: refs/heads/loop\n")
+
+        info = _revision_info(root / "techne")  # must not raise RecursionError
+        assert info["revision"] is None
+        assert info["drifted"] is None
