@@ -24,6 +24,7 @@ Design contract (load-bearing — see techne#136):
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import sys
@@ -62,6 +63,51 @@ user_version_io = VersionIO(
 
 # --- backup -----------------------------------------------------------------
 
+# Both knobs are module constants with env overrides rather than config.yaml
+# entries: migrator.py deliberately imports nothing from techne (see the module
+# docstring — it is the low-level seam other stores reuse), so reaching for
+# Config here would introduce the cycle that separation exists to avoid.
+
+#: Reuse an existing backup for the same (from_v, to_v) if it is younger than
+#: this. A FAILING migration retries on every hook invocation, and each retry
+#: used to copy the whole database first — measured at 12 full copies of one
+#: v18→v19 transition (#574), 11 of them from attempts that never wrote a
+#: version row. Within the window the earlier backup is also the BETTER rollback
+#: point: it predates every failed attempt, so it cannot contain partially
+#: migrated state. Beyond the window a fresh copy is taken, because the live DB
+#: has moved on and restoring a stale snapshot would discard real work.
+BACKUP_REUSE_WINDOW_S = int(os.environ.get("TECHNE_BACKUP_REUSE_WINDOW_S", "3600"))
+
+#: How many backups to keep per database. One is written per migration RUN (not
+#: per step), so this is "the last N upgrade events". Nothing pruned these
+#: before: 1.4 GB had accumulated here, oldest 6 weeks (#574).
+BACKUP_KEEP = int(os.environ.get("TECHNE_BACKUP_KEEP", "3"))
+
+
+def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> list[Path]:
+    """Delete all but the newest ``keep`` backups for ``stem``. Returns the deleted.
+
+    ``protect`` is never removed even if ``keep`` is 0 — deleting the backup the
+    caller is about to rely on would be the failure this whole mechanism exists
+    to prevent. Failures to unlink are swallowed deliberately: a migration must
+    not die because housekeeping could not remove a file.
+    """
+    found = sorted(
+        (p for p in backup_dir.glob(f"{stem}-v*.db.bak") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    deleted: list[Path] = []
+    for stale in found[max(keep, 0) :]:
+        if stale == protect:
+            continue
+        try:
+            stale.unlink()
+            deleted.append(stale)
+        except OSError:
+            continue
+    return deleted
+
 
 def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -> Path | None:
     """Snapshot the DB to ``<dir>/backups/`` before a migration rewrites it.
@@ -70,18 +116,48 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     (a plain file copy can miss un-checkpointed WAL frames). Returns the backup
     path, or ``None`` when there's nothing worth saving (absent/empty DB).
     Migrations are forward-only, so this backup is the rollback path (#78).
+
+    Two bounds on growth (#574), because a backup that fills the disk stops being
+    a safety net: a recent backup for the SAME transition is reused rather than
+    re-copied, and older backups beyond :data:`BACKUP_KEEP` are pruned. Both
+    announce on stderr — this module already narrates the migration there, and a
+    deletion the operator cannot see is worse than one they can.
     """
     if not db_path.exists() or db_path.stat().st_size == 0:
         return None
     backup_dir = db_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Reuse before copying. Same transition, still fresh → the existing file is
+    # both cheaper and a strictly better rollback point (it predates any failed
+    # attempt, so it holds no partially-migrated state).
+    prefix = f"{db_path.stem}-v{from_v}-to-v{to_v}-"
+    now = datetime.now().timestamp()
+    for existing in sorted(
+        backup_dir.glob(f"{prefix}*.db.bak"), key=lambda p: p.stat().st_mtime, reverse=True
+    ):
+        if now - existing.stat().st_mtime <= BACKUP_REUSE_WINDOW_S:
+            print(
+                f"[techne] reusing backup for v{from_v}→v{to_v}: {existing.name}",
+                file=sys.stderr,
+            )
+            return existing
+        break  # newest is already too old; the rest are older still
+
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = backup_dir / f"{db_path.stem}-v{from_v}-to-v{to_v}-{ts}.db.bak"
+    backup = backup_dir / f"{prefix}{ts}.db.bak"
     dest = sqlite3.connect(str(backup))
     try:
         conn.backup(dest)
     finally:
         dest.close()
+
+    pruned = _prune_backups(backup_dir, db_path.stem, BACKUP_KEEP, protect=backup)
+    if pruned:
+        print(
+            f"[techne] pruned {len(pruned)} old backup(s), keeping {BACKUP_KEEP}",
+            file=sys.stderr,
+        )
     return backup
 
 
