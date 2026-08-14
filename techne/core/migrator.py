@@ -87,13 +87,23 @@ BACKUP_KEEP = int(os.environ.get("TECHNE_BACKUP_KEEP", "3"))
 def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> list[Path]:
     """Delete all but the newest ``keep`` backups for ``stem``. Returns the deleted.
 
+    KNOWN RESIDUAL (#574 review): a future-dated file sorts newest here and so
+    occupies a keep slot, evicting a genuine recent backup. The reuse clamp does
+    not fix this half. Left deliberately — treating future mtimes as junk risks
+    deleting a real backup written under clock skew, which is the worse error.
+
     ``protect`` is never removed even if ``keep`` is 0 — deleting the backup the
     caller is about to rely on would be the failure this whole mechanism exists
     to prevent. Failures to unlink are swallowed deliberately: a migration must
     not die because housekeeping could not remove a file.
     """
     found = sorted(
-        (p for p in backup_dir.glob(f"{stem}-v*.db.bak") if p.is_file()),
+        # SHAPE match, not prefix match. `{stem}-v*` also matches a sibling store
+        # whose own name starts with "<stem>-v" — a domain called `techne-vault`
+        # had its backups deleted by `techne`'s prune. Domains are
+        # user-configurable strings (config.stores), so requiring digits either
+        # side of "-to-v" is what actually scopes this to one store.
+        (p for p in backup_dir.glob(f"{stem}-v[0-9]*-to-v[0-9]*-*.db.bak") if p.is_file()),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -133,10 +143,24 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     # attempt, so it holds no partially-migrated state).
     prefix = f"{db_path.stem}-v{from_v}-to-v{to_v}-"
     now = datetime.now().timestamp()
+    # is_file() BEFORE stat(), matching _prune_backups ten lines up. That
+    # asymmetry was a real defect: is_file() returns False for a dangling
+    # symlink where .stat() RAISES, and nothing between here and connect()
+    # catches it — so one dangling symlink in backups/ meant the store would not
+    # open at all. A generator also re-stats lazily, so a file removed between
+    # the glob and the sort cannot abort the migration either.
     for existing in sorted(
-        backup_dir.glob(f"{prefix}*.db.bak"), key=lambda p: p.stat().st_mtime, reverse=True
+        (q for q in backup_dir.glob(f"{prefix}*.db.bak") if q.is_file()),
+        key=lambda q: q.stat().st_mtime,
+        reverse=True,
     ):
-        if now - existing.stat().st_mtime <= BACKUP_REUSE_WINDOW_S:
+        # 0 <= age, not just age <= WINDOW. A future mtime makes the difference
+        # NEGATIVE, which satisfies an upper bound at any magnitude — so a
+        # future-dated file would be reused FOREVER, silently disabling the very
+        # staleness guard this window exists to provide. Clock skew on a restored
+        # or synced directory is enough to produce one.
+        age = now - existing.stat().st_mtime
+        if 0 <= age <= BACKUP_REUSE_WINDOW_S:
             print(
                 f"[techne] reusing backup for v{from_v}→v{to_v}: {existing.name}",
                 file=sys.stderr,

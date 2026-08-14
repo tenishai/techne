@@ -2692,3 +2692,63 @@ class TestBackupGrowthBounds:
         m.backup_db(c, p, 2, 3)
 
         assert other.exists(), "a sibling store's backups must not be pruned"
+
+    def test_a_dangling_symlink_in_backups_does_not_break_the_store(self, tmp_path):
+        """#574 review: this was worse than the bug being fixed.
+
+        The reuse glob stat()ed every match with no is_file() guard, while
+        _prune_backups ten lines up had one. .stat() RAISES on a dangling
+        symlink where is_file() returns False, and nothing between backup_db and
+        connect() catches it — so one dangling symlink meant the store would not
+        open at all.
+        """
+        from techne.core.migrator import backup_db
+
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+        (d / "techne-v18-to-v19-20260101-000000.db.bak").symlink_to(tmp_path / "gone.db")
+
+        assert backup_db(c, p, 18, 19) is not None, "a dangling symlink must not raise"
+
+    def test_a_future_dated_backup_is_not_reused_forever(self, tmp_path):
+        """#574 review: `now - mtime <= WINDOW` is satisfied at ANY magnitude when
+        mtime is in the future, because the difference goes negative — silently
+        disabling the staleness guard the window exists to provide."""
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        first = m.backup_db(c, p, 18, 19)
+        assert first is not None
+        ahead = first.stat().st_mtime + 365 * 24 * 3600  # a year in the future
+        os.utime(first, (ahead, ahead))
+
+        again = m.backup_db(c, p, 18, 19)
+        assert again is not None
+        assert again.stat().st_mtime != ahead, "a future-dated backup must not be reused"
+
+    def test_prune_does_not_reach_a_sibling_store_with_a_similar_name(self, tmp_path):
+        """#574 review: `{stem}-v*` is a PREFIX match, so `techne`'s prune deleted
+        `techne-vault`'s backups. Domains are user-configurable strings."""
+        from techne.core.migrator import _prune_backups
+
+        d = tmp_path / "backups"
+        d.mkdir()
+        mine, sibling = [], d / "techne-vault-v1-to-v2-20260101-000000.db.bak"
+        sibling.write_text("not mine")
+        # MUST be the OLDEST, or this test is hollow: left at "now" the sibling
+        # sorts newest, occupies the keep slot, and survives even under the
+        # prefix glob — which is exactly how it passed against the bug. Mutation
+        # caught it.
+        os.utime(sibling, (1_699_000_000, 1_699_000_000))
+        for i, (frm, to) in enumerate(((1, 2), (2, 3), (3, 4))):
+            f = d / f"techne-v{frm}-to-v{to}-2026010{i + 1}-000000.db.bak"
+            f.write_text("x")
+            os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
+            mine.append(f)
+
+        _prune_backups(d, "techne", keep=1, protect=mine[-1])
+
+        assert sibling.exists(), "a sibling store's backups must not be pruned"
+        assert mine[-1].exists()
+        assert not mine[0].exists()
