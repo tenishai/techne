@@ -862,3 +862,75 @@ class TestTheDetailNeverLeaksACredential:
         detail = self._detail(Config.load())
 
         assert "model=vertex_ai/claude-3-5-sonnet@20240620" in detail
+
+
+# --- techne#509: every Config field must be classified -----------------------
+
+
+def _config_field_names() -> list[str]:
+    """Top-level `Config` field names, from the dataclass itself.
+
+    Read via `dataclasses.fields` rather than parsed or hand-listed: a snapshot
+    of names in the test would be a second copy of the surface, drifting exactly
+    when the guard needs to be right.
+    """
+    import dataclasses
+
+    from techne.config import Config
+
+    return [f.name for f in dataclasses.fields(Config)]
+
+
+def test_every_config_field_is_classified_as_destination_or_not():
+    """THE INVARIANT (techne#509). A new destination-selecting field added to
+    `Config` with no line in `EGRESS_KEYS` is a key the operator layer silently
+    does not govern — no diff to review, no red test. That is how `stores` stayed
+    ungoverned until round 2 of #508's review caught it by eye.
+
+    `EGRESS_KEYS` genuinely cannot be derived (see the comment above
+    `_NOT_A_DESTINATION`), so this does not try to. It enforces the weaker,
+    achievable property: that SOMEBODY MADE THE CALL. Adding a field now costs one
+    line in one of two tuples instead of being allowed to pass in silence.
+    """
+    from techne.security import config_trust
+
+    # A dotted key like "reflect.model" governs part of the `reflect` field, so the
+    # top-level name counts as classified by its prefix.
+    governed = {k.split(".", 1)[0] for k in config_trust.EGRESS_KEYS}
+    declined = set(config_trust._NOT_A_DESTINATION)
+
+    unclassified = [f for f in _config_field_names() if f not in governed and f not in declined]
+    assert not unclassified, (
+        f"Config fields with no destination judgment: {unclassified}. "
+        "Add each to techne/security/config_trust.py — EGRESS_KEYS if it selects "
+        "a destination for memory (a path, DSN, endpoint, model route or sink "
+        "toggle), otherwise _NOT_A_DESTINATION with the reason. Silence here means "
+        "the operator layer does not govern it."
+    )
+
+
+def test_the_two_tuples_do_not_overlap():
+    """A name in both would make the record self-contradicting, and the runtime
+    would quietly follow EGRESS_KEYS while the comment claimed otherwise."""
+    from techne.security import config_trust
+
+    governed = {k.split(".", 1)[0] for k in config_trust.EGRESS_KEYS}
+    both = governed & set(config_trust._NOT_A_DESTINATION)
+    assert not both, f"classified as both destination and not: {sorted(both)}"
+
+
+def test_every_egress_key_still_names_a_real_config_field():
+    """The other direction: a key that no longer matches a field governs nothing.
+
+    A rename of `archivist_db_path` would leave EGRESS_KEYS pointing at a field
+    that does not exist — the gate would still look complete and would pin
+    nothing, which is #504's shape (mechanism present, not load-bearing).
+    """
+    from techne.security import config_trust
+
+    known = set(_config_field_names())
+    orphans = [k for k in config_trust.EGRESS_KEYS if k.split(".", 1)[0] not in known]
+    assert not orphans, (
+        f"EGRESS_KEYS entries naming no Config field: {orphans} — a renamed or "
+        "removed field leaves the gate pinning nothing while still looking complete."
+    )
