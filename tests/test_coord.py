@@ -343,12 +343,86 @@ def test_mcp_send_requires_body(db_path):
         _techne_send({"session_id": A}, _config(db_path))
 
 
+def _fake_live(monkeypatch, *session_ids, raises=False):
+    """Pin what Claude Code's presence registry reports.
+
+    `live_sessions` reads the REAL `~/.claude/sessions/*.json`, so without this the
+    #573 check below is a function of whatever happens to be running on the machine
+    that ran the suite — the caller's own sessions would be live, the fabricated test
+    ids would not, and the assertion would flip depending on the box. Patched at
+    `techne.core.coord.live_sessions` because `_resolve_session_id` imports it inside
+    the function body, so the attribute is resolved at call time.
+    """
+
+    def fake(*a, **k):
+        if raises:
+            raise OSError("registry unreadable")
+        return [{"session_id": s} for s in session_ids]
+
+    monkeypatch.setattr("techne.core.coord.live_sessions", fake)
+
+
 def test_mcp_identity_from_env(db_path, monkeypatch):
+    """The happy path: env id IS live, so the fallback is used unchanged."""
     from techne.mcp_server import _techne_send
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, A)
     sent = _techne_send({"body": "env-identity"}, _config(db_path))  # no session_id arg
     assert sent["from_session"] == A
+
+
+def test_mcp_refuses_a_stale_env_identity(db_path, monkeypatch):
+    """techne#573. The server outlives the session that launched it and `os.environ`
+    is frozen at process start, so the env id can name a session that ended days ago.
+    Attributing to it is silent and durable; refusing costs one retry."""
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, B)  # someone IS live — just not us
+    with pytest.raises(ValueError, match="573"):
+        _techne_send({"body": "should not send"}, _config(db_path))
+
+
+def test_mcp_could_not_check_is_not_checked_and_false(db_path, monkeypatch):
+    """An EMPTY registry means presence is not visible, not that we are dead.
+
+    Failing closed here would take the whole coord bus down on any box where
+    `~/.claude/sessions` is absent — a partner driving techne from another client,
+    or a headless run. Absence of evidence is not evidence of absence.
+    """
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch)  # registry yields nothing at all
+    sent = _techne_send({"body": "still sends"}, _config(db_path))
+    assert sent["from_session"] == A
+
+
+def test_mcp_unreadable_registry_does_not_block(db_path, monkeypatch):
+    """Same argument as the empty case, for a registry that raises rather than
+    returns nothing. Presence is best-effort; it must not become a hard dependency
+    of being able to speak at all."""
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, raises=True)
+    sent = _techne_send({"body": "still sends"}, _config(db_path))
+    assert sent["from_session"] == A
+
+
+def test_mcp_explicit_session_id_is_never_liveness_checked(db_path, monkeypatch):
+    """A passed session_id is a self-assertion and already took precedence. A session
+    too new to appear in the registry must still be able to speak, so the check binds
+    ONLY the env fallback — the path that can be silently wrong."""
+    from techne.mcp_server import _techne_send
+
+    unlisted = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, B)  # neither A (env) nor `unlisted` (passed) is live
+    sent = _techne_send({"body": "explicit wins", "session_id": unlisted}, _config(db_path))
+    # The env path would have raised on A; the passed id is used unchecked.
+    assert sent["from_session"] == unlisted
 
 
 # ---------------------------------------------------------------------------

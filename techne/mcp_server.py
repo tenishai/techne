@@ -208,12 +208,63 @@ def _techne_status(args: dict, config: Config) -> dict:
 
 def _resolve_session_id(args: dict) -> str | None:
     """Identity for the coordination mailbox (techne#376): the caller's self-asserted
-    session_id, else the MCP server's own CLAUDE_CODE_SESSION_ID env — the server is
-    spawned per-session by Claude Code, so its env carries this session's id. No
-    token: the local techne.db is the whole trust boundary."""
+    session_id, else the MCP server's own CLAUDE_CODE_SESSION_ID env. No token: the
+    local techne.db is the whole trust boundary.
+
+    THE ENV FALLBACK RESTED ON A PREMISE THAT IS FALSE (techne#573). This docstring
+    used to say "the server is spawned per-session by Claude Code, so its env carries
+    this session's id." It is not. The server is long-lived and outlives the session
+    that launched it — measured 2026-08-14, two mcp_server processes started Aug 7
+    12:24 and 14:03 were still serving sessions started days later. `os.environ` is
+    frozen at PROCESS start, so the fallback returns whichever session happened to
+    spawn the server, forever. Every coord message from one session that day was
+    signed with the id of a session that had wound down six days earlier, and a peer
+    then propagated that wrong id because it "verified" it against the corrupted bus.
+
+    So the fallback is now CHECKED: if the env id is not among the sessions Claude
+    Code currently considers live, we raise rather than attribute silently. Wrong
+    attribution is worse than a refusal here — a refusal is recoverable in one retry
+    (the caller passes `session_id`, which an agent always has), whereas a bad
+    attribution is durable, invisible, and poisons `coord_messages` and anything that
+    reads it.
+
+    "COULD NOT CHECK" IS NOT "CHECKED AND FALSE". If `live_sessions()` yields nothing
+    at all — unreadable registry, no live sessions recorded — we cannot distinguish a
+    stale id from a working one, so we do NOT block. Absence of evidence is not
+    evidence of absence, and failing closed on an unreadable registry would take the
+    whole coord bus down on a machine where presence simply is not visible.
+
+    A caller-supplied `session_id` is NOT checked: that is a self-assertion, it
+    already took precedence, and a session too new to appear in the registry must
+    still be able to speak.
+    """
     import os
 
-    return args.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    asserted = args.get("session_id")
+    if asserted:
+        return asserted
+
+    env_sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not env_sid:
+        return None
+
+    from techne.core.coord import live_sessions
+
+    try:
+        live = {s["session_id"] for s in live_sessions()}
+    except Exception:  # noqa: BLE001 — presence is best-effort; see "could not check"
+        return env_sid
+
+    if live and env_sid not in live:
+        raise ValueError(
+            "techne#573: this MCP server's CLAUDE_CODE_SESSION_ID is "
+            f"{env_sid!r}, which is not a live session — the server outlived the "
+            "session that launched it and its env is frozen at process start. "
+            "Pass an explicit 'session_id' (your own), or restart the server so it "
+            "re-captures the environment. Refusing rather than attributing this "
+            "call to a session that has ended."
+        )
+    return env_sid
 
 
 def _techne_send(args: dict, config: Config) -> dict:
