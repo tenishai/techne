@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-config-trust
-updated: 2026-08-06
-anchor: techne/security/config_trust.py sha=fdb53e6aecc752a6e42b8ef108c42802296f03b2
+updated: 2026-08-14
+anchor: techne/security/config_trust.py sha=66c6878d553786f6f8b688156a4584ea87517664
 ---
 # config-trust — operator-vs-agent boundary over egress-selecting config (techne#393)
 
@@ -14,6 +14,8 @@ STATES:
   absent   — no layer → unchanged behavior, config.yaml keeps full authority, `config:trust` reports it.
 LOCK PREDICATE (`evaluate_lock`, all must hold): regular file, not a symlink; `st_uid != euid`; not group/world-writable; not writable via ACL/group; and NO ancestor directory writable by us.
 EGRESS_KEYS (the governed set): `sync`, `connections`, `llm_api_base`, `llm_api_key`, `model`, `reflect.model`, `conflict.model`, `archivist_db_path`, `standalone`, `stores`. EXPIRY CONDITION: the set is correct today partly by accident of scope — store DSNs are SQLite-only (`load_store` raises otherwise, techne#135). techne#87 (postgres stores) makes a DSN a network destination and obliges a revisit.
+COMPLETENESS (techne#509): the set cannot be DERIVED — the field surface disproves every candidate signal (`archivist_db_path` is a destination, `db_path` is not; `standalone: bool` is, `staleness_hours: int` is not; `sync` is, `search` is not; `stores: dict` is, `preserved_egress: dict` is not), so no type or naming rule separates them. What IS enforced is that the judgment was made: `_NOT_A_DESTINATION` holds the complement, and `tests/test_config_trust.py` fails if any top-level `Config` field appears in neither, if one appears in both, or if an `EGRESS_KEYS` entry names no field at all (that last is #504's shape — a gate that looks complete and pins nothing). `_NOT_A_DESTINATION` is a record of review with NO runtime effect; moving a name between the two tuples is the change with teeth.
+OPEN, ARGUED BOTH WAYS: `sources` is currently in the complement, but `sources.claude_code_transcripts.paths` is a list of arbitrary paths whose CONTENTS become observations — and the rationale admitting `connections` ("opened read-only, so this is ingestion rather than exfiltration — included anyway because a chosen input is a chosen trust source") applies to it verbatim. It stays out only because widening the gate changes enforcement (a locked layer would begin dropping agent-supplied source paths), which deserves its own review rather than riding in on a test change.
 CONSUMERS: techne/config.py (`Config.load`, `Config.save`); techne/core/checks.py `check_config_trust` (subsystem `security`, kind FAIL_OPEN).
 
 INVARIANTS:
