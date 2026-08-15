@@ -88,9 +88,10 @@ def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> lis
     """Delete all but the newest ``keep`` backups for ``stem``. Returns the deleted.
 
     KNOWN RESIDUAL (#574 review): a future-dated file sorts newest here and so
-    occupies a keep slot, evicting a genuine recent backup. The reuse clamp does
-    not fix this half. Left deliberately — treating future mtimes as junk risks
-    deleting a real backup written under clock skew, which is the worse error.
+    occupies a keep slot, evicting a genuine recent backup. It costs a SLOT only
+    — backup_db skips skewed candidates rather than stopping at them, so reuse
+    still works. Left deliberately: treating future mtimes as junk risks deleting
+    a real backup written under clock skew, which is the worse error.
 
     ``protect`` is never removed even if ``keep`` is 0 — deleting the backup the
     caller is about to rely on would be the failure this whole mechanism exists
@@ -102,7 +103,11 @@ def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> lis
         # whose own name starts with "<stem>-v" — a domain called `techne-vault`
         # had its backups deleted by `techne`'s prune. Domains are
         # user-configurable strings (config.stores), so requiring digits either
-        # side of "-to-v" is what actually scopes this to one store.
+        # side of "-to-v" narrows it sharply. NOT airtight: a store literally
+        # named `techne-v2` produces `techne-v2-v1-to-v2-*.db.bak`, which still
+        # matches `techne`'s glob. Filename-shape scoping cannot fully separate
+        # stores whose names collide by construction; doing that properly means
+        # a per-store subdirectory, which is a bigger change than this fix.
         (p for p in backup_dir.glob(f"{stem}-v[0-9]*-to-v[0-9]*-*.db.bak") if p.is_file()),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
@@ -154,19 +159,34 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
         key=lambda q: q.stat().st_mtime,
         reverse=True,
     ):
-        # 0 <= age, not just age <= WINDOW. A future mtime makes the difference
-        # NEGATIVE, which satisfies an upper bound at any magnitude — so a
-        # future-dated file would be reused FOREVER, silently disabling the very
-        # staleness guard this window exists to provide. Clock skew on a restored
-        # or synced directory is enough to produce one.
+        # Three-way, and the ordering of the branches is the whole point.
+        #
+        # A future mtime makes `now - mtime` NEGATIVE, which satisfies an upper
+        # bound at any magnitude — so `age <= WINDOW` alone reuses a skewed file
+        # FOREVER. But clamping to `0 <= age <= WINDOW` and falling through to
+        # the break is the opposite failure: a future-dated file sorts NEWEST,
+        # fails the lower bound, and the break then hides every valid in-window
+        # backup behind it — so one skewed file permanently disables reuse and
+        # restores the 12-copy behaviour this exists to prevent.
+        #
+        # `continue` on skew keeps the early-exit for the genuinely-stale case
+        # while letting the scan step past it. Note the two residuals compound if
+        # you get this wrong: prune keeps the skewed file (it sorts newest and
+        # holds a keep slot), and a retained skewed file would keep reuse off.
         age = now - existing.stat().st_mtime
-        if 0 <= age <= BACKUP_REUSE_WINDOW_S:
+        if age < 0:
+            continue  # clock skew — older candidates may still be valid
+        if age <= BACKUP_REUSE_WINDOW_S:
             print(
                 f"[techne] reusing backup for v{from_v}→v{to_v}: {existing.name}",
                 file=sys.stderr,
             )
             return existing
-        break  # newest is already too old; the rest are older still
+        # Pure optimisation, and deliberately NOT pinned by a test: with valid
+        # mtimes, if the newest candidate is out of window every older one is
+        # too, so removing this changes cost and not outcome. Mutation confirms
+        # it survives the suite — that is correct here rather than a gap.
+        break
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = backup_dir / f"{prefix}{ts}.db.bak"

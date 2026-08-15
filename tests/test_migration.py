@@ -2747,8 +2747,68 @@ class TestBackupGrowthBounds:
             os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
             mine.append(f)
 
-        _prune_backups(d, "techne", keep=1, protect=mine[-1])
+        # keep=0, not 1: at keep=1 `protect` IS found[0], so it never enters the
+        # delete slice and `mine[-1].exists()` cannot fail — it reads as coverage
+        # of the protect branch while never reaching it. At keep=0 the branch is
+        # the only thing keeping it alive.
+        _prune_backups(d, "techne", keep=0, protect=mine[-1])
 
         assert sibling.exists(), "a sibling store's backups must not be pruned"
-        assert mine[-1].exists()
+        assert mine[-1].exists(), "protect= must survive keep=0"
         assert not mine[0].exists()
+
+    def test_a_skewed_backup_does_not_hide_a_valid_one_behind_it(self, tmp_path):
+        """#574 review round 2 — the regression the CLAMP introduced.
+
+        Every other reuse test has exactly ONE candidate in the directory, so
+        neither the sort order nor the `break` is observable. With two
+        candidates: a future-dated file sorts NEWEST, and if the scan `break`s
+        on it instead of `continue`-ing, the perfectly good in-window backup
+        behind it is never seen — one clock-skewed file permanently restores the
+        12-copy behaviour this PR exists to prevent.
+
+        This single test pins three things nothing else did: `reverse=True` on
+        the sort, the skew skip, and the `break`.
+        """
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        good = m.backup_db(c, p, 18, 19)
+        assert good is not None
+        # valid: inside the window, but not the newest
+        recent = good.stat().st_mtime - 60
+        os.utime(good, (recent, recent))
+        # and a skewed file that sorts ahead of it
+        skewed = good.parent / "techne-v18-to-v19-20991231-235959.db.bak"
+        skewed.write_text("clock skew")
+        ahead = good.stat().st_mtime + 365 * 24 * 3600
+        os.utime(skewed, (ahead, ahead))
+
+        again = m.backup_db(c, p, 18, 19)
+        assert again == good, f"the in-window backup must still be reused, got {again.name}"
+        assert again.stat().st_mtime == recent, "reuse must not rewrite the file"
+
+    def test_the_newest_in_window_backup_is_the_one_reused(self, tmp_path):
+        """Pins `reverse=True`, which nothing else observed.
+
+        Every other reuse test has a single valid candidate, so sort order is
+        invisible — removing `reverse=True` survived the whole suite. With TWO
+        in-window backups the choice becomes observable, and it matters: the
+        newest is the closest snapshot to the DB's current state, so restoring it
+        discards the least work.
+        """
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        first = m.backup_db(c, p, 18, 19)
+        assert first is not None
+
+        older = first.parent / "techne-v18-to-v19-20260101-000000.db.bak"
+        older.write_text("older but still in window")
+        newer_t = first.stat().st_mtime - 60
+        older_t = first.stat().st_mtime - 600
+        os.utime(first, (newer_t, newer_t))
+        os.utime(older, (older_t, older_t))
+
+        again = m.backup_db(c, p, 18, 19)
+        assert again == first, f"the NEWEST in-window backup must win, got {again.name}"
