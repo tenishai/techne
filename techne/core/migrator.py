@@ -97,6 +97,13 @@ def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> lis
     caller is about to rely on would be the failure this whole mechanism exists
     to prevent. Failures to unlink are swallowed deliberately: a migration must
     not die because housekeeping could not remove a file.
+
+    A file that does NOT match the shape below is never pruned, and that is
+    deliberate rather than an oversight to fix later: it was not produced by
+    this naming scheme, so the pruner cannot know what it is or whether anything
+    depends on it, and refusing to delete it is the right default for
+    destructive code. The cost is that such a file is immortal, which is
+    acceptable while nothing is still *producing* unmatched names.
     """
     found = sorted(
         # SHAPE match, not prefix match. `{stem}-v*` also matches a sibling store
@@ -137,6 +144,13 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     re-copied, and older backups beyond :data:`BACKUP_KEEP` are pruned. Both
     announce on stderr — this module already narrates the migration there, and a
     deletion the operator cannot see is worse than one they can.
+
+    Reuse cannot mask partial progress, and the reason is subtle enough to state
+    here rather than leave in a commit message: the caller reads ``from_v``
+    under the migration lock, so if any step succeeded, ``from_v`` has advanced
+    and the ``(from_v, to_v)`` key changes — which forces a fresh copy. Reuse
+    therefore happens only when *no* version row was written, which is exactly
+    the case where the earlier file is the better rollback point.
     """
     if not db_path.exists() or db_path.stat().st_size == 0:
         return None
@@ -198,8 +212,14 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
 
     pruned = _prune_backups(backup_dir, db_path.stem, BACKUP_KEEP, protect=backup)
     if pruned:
+        # NAME them. A bare count is visible but not useful: an operator reading
+        # "pruned 1 old backup(s)" cannot tell whether it took the one they were
+        # about to restore from. This is the rollback path, so the line is worth
+        # its length — and a long one only happens on the first prune of a
+        # directory that was never pruned before.
         print(
-            f"[techne] pruned {len(pruned)} old backup(s), keeping {BACKUP_KEEP}",
+            f"[techne] pruned {len(pruned)} old backup(s), keeping {BACKUP_KEEP}: "
+            + ", ".join(q.name for q in pruned),
             file=sys.stderr,
         )
     return backup

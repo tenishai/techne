@@ -2594,6 +2594,71 @@ class TestBackupGrowthBounds:
         assert a != b
         assert len(list((tmp_path / "backups").glob("*.db.bak"))) == 2
 
+    def test_reuse_is_scoped_to_the_TARGET_version_too(self, tmp_path):
+        """Vary ONE axis. The test above moves from_v and to_v together, so it
+        pins only the from_v half of the key — dropping to_v from the prefix
+        entirely leaves it green.
+
+        The shape is reachable: to_v is SCHEMA_VERSION, so a v18->v19 that is
+        still failing after the operator upgrades techne becomes v18->v24. Same
+        from_v, different target, and a different rollback point."""
+        from techne.core.migrator import backup_db
+
+        p, c = self._db(tmp_path)
+        near = backup_db(c, p, 18, 19)
+        far = backup_db(c, p, 18, 24)
+
+        assert near is not None and far is not None
+        assert near != far, "a different TARGET must not reuse the v18 backup"
+        assert len(list((tmp_path / "backups").glob("*.db.bak"))) == 2
+
+    def test_pruning_announces_itself_on_stderr(self, tmp_path, monkeypatch, capsys):
+        """The stated requirement is that a deletion the operator cannot see is
+        worse than one they can. Without this the whole print can be deleted
+        with the suite green."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 1)
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 0)
+        p, c = self._db(tmp_path)
+
+        m.backup_db(c, p, 1, 2)
+        capsys.readouterr()
+        m.backup_db(c, p, 2, 3)
+
+        err = capsys.readouterr().err
+        assert "techne-v1-to-v2" in err, f"the pruned file must be named: {err!r}"
+
+    def test_a_negative_keep_still_protects_the_new_backup(self, tmp_path, monkeypatch):
+        """max(keep, 0) — TECHNE_BACKUP_KEEP is read from the environment, so a
+        negative value is reachable, and found[-1:] would keep the WRONG end of
+        the list: everything except the single oldest file.
+
+        TWO unprotected files must be present at a SINGLE prune, which is why
+        they are seeded rather than made by repeated backup_db calls: backup_db
+        prunes on every invocation, so only one unprotected file ever
+        accumulates, and found[-1:] and found[0:] delete the same thing at every
+        step. The mutant is equivalent until something can be stranded in the
+        middle of the list."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", -1)
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 0)
+        p, c = self._db(tmp_path)
+
+        d = tmp_path / "backups"
+        d.mkdir()
+        for i, (frm, to) in enumerate(((1, 2), (2, 3))):
+            f = d / f"techne-v{frm}-to-v{to}-2026010{i + 1}-000000.db.bak"
+            f.write_text("x")
+            os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
+
+        b = m.backup_db(c, p, 3, 4)
+
+        assert b is not None and b.exists(), "protect= must survive a negative keep"
+        remaining = sorted(q.name for q in d.glob("*.db.bak"))
+        assert remaining == [b.name], f"keep=-1 must behave as keep=0, got {remaining}"
+
     def test_a_stale_backup_is_not_reused(self, tmp_path, monkeypatch):
         """Beyond the window the live DB has moved on — restoring the old snapshot
         would discard real work, so take a fresh copy."""
