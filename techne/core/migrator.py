@@ -269,6 +269,24 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     # The rename is stronger than a size check because it also keeps a partial
     # out of the pruner: it can neither be reused nor consume a keep slot, and
     # no new predicate has to stay correct.
+    # SWEEP DEAD PARTIALS FIRST. The rename keeps a failed copy out of the reuse
+    # glob and out of the keep slots — verified — but it also makes it IMMORTAL,
+    # because nothing matches `*.db.bak.partial`. In a PR whose subject is
+    # bounding growth, that would have replaced one unbounded class with another:
+    # the failure mode here is a copy that dies repeatedly, which is exactly the
+    # 12x retry loop this change exists for.
+    #
+    # Age-bounded rather than unconditional, because a partial younger than the
+    # window may belong to a copy still in flight. The migration lock serialises
+    # hooks, but nothing stops an operator running a second process by hand.
+    # Failures are swallowed: housekeeping must not kill a migration.
+    for dead in backup_dir.glob(f"{prefix}*.db.bak.partial"):
+        try:
+            if dead.is_file() and (now - dead.stat().st_mtime) > BACKUP_REUSE_WINDOW_S:
+                dead.unlink()
+        except OSError:
+            continue
+
     partial = backup_dir / f"{prefix}{ts}.db.bak.partial"
     dest = sqlite3.connect(str(partial))
     try:

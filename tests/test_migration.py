@@ -2628,6 +2628,32 @@ class TestBackupGrowthBounds:
             "a successful copy must leave no .partial behind"
         )
 
+    def test_a_dead_partial_is_swept_and_a_live_one_is_not(self, tmp_path, monkeypatch):
+        """The atomic rename keeps a failed copy out of the reuse glob and out of the
+        keep slots — but nothing matches `*.db.bak.partial`, so it was immortal. In a
+        change whose subject is bounding growth that swaps one unbounded class for
+        another, and the failure mode is a copy dying REPEATEDLY, which is the retry
+        loop this PR exists for. Found by probing the fix rather than by review."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 3600)
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+
+        dead = d / "techne-v18-to-v19-20260101-000000.db.bak.partial"
+        dead.write_bytes(b"")
+        os.utime(dead, (1_700_000_000, 1_700_000_000))  # far older than the window
+
+        live = d / "techne-v18-to-v19-20260102-000000.db.bak.partial"
+        live.write_bytes(b"")  # mtime now — could be a copy still in flight
+
+        got = m.backup_db(c, p, 18, 19)
+
+        assert got is not None and got.suffix == ".bak"
+        assert not dead.exists(), "a dead partial was not swept"
+        assert live.exists(), "a partial inside the window may be an in-flight copy"
+
     def test_the_reuse_path_also_prunes(self, tmp_path, monkeypatch):
         """`return existing` short-circuited the function and the prune call sits
         after the copy — so in the exact incident this PR was written for (twelve
