@@ -657,3 +657,84 @@ def test_the_two_guards_are_complements_not_overlaps():
         f"jobs with neither trust-split guard: {unclassified}. Pick a side — "
         "self-hosted jobs take FORK_GUARD, hosted fork jobs take FORK_ONLY."
     )
+
+
+# ---- techne#556: the guard must name properties GitHub actually sends ---------
+
+PAYLOAD_SHAPE = Path(__file__).parent / "fixtures" / "github" / "pull_request_payload_shape.json"
+
+
+def _payload_shape() -> dict:
+    import json
+
+    return json.loads(PAYLOAD_SHAPE.read_text())
+
+
+def _referenced_payload_paths() -> set[str]:
+    """Every `github.event.pull_request.<path>` the WORKFLOW's `if:` expressions read.
+
+    READ FROM THE WORKFLOW, NOT FROM `FORK_GUARD`/`FORK_ONLY`. That is the entire
+    point of this test: the constants above are strings the TEST supplies, so a
+    rename applied consistently to both the workflow and the constants leaves an
+    exact-match assertion comparing two mutated values and agreeing. This function
+    deliberately never touches them.
+    """
+    import re
+
+    paths: set[str] = set()
+    for job in _jobs().values():
+        cond = job.get("if")
+        if isinstance(cond, str):
+            paths.update(re.findall(r"github\.event\.pull_request\.([A-Za-z0-9_.]+)", cond))
+    return paths
+
+
+def test_the_fork_guard_reads_properties_github_actually_sends():
+    """THE TEETH THE EXACT-MATCH TESTS CANNOT HAVE (techne#570 review).
+
+    A missing property in a GitHub Actions expression yields **null**, not an error.
+    So `!(github.event_name == 'pull_request' && <missing>)` is `!(null)` — TRUE
+    unconditionally — and every self-hosted job runs for fork PRs, while the
+    fork-only job's condition is null and it NEVER fires. techne#556 and techne#530
+    defeated at once, silently.
+
+    MEASURED, and this is why this test exists: renaming `head.repo.fork` to
+    `head.repo.is_fork` in the workflow AND in both constants above gave 15 PASSED,
+    identical to baseline. The exact-match assertions could not tell a working guard
+    from a typo'd one, because both sides of their comparison came from this file.
+    Verified against the live API the same day: `head.repo` HAS `fork` and has no
+    `is_fork` — it resolves to null.
+
+    So this anchors the property names to something the test does not author: the
+    key structure of a real payload, captured from the API (see the fixture's
+    `_provenance`). A guard naming a property GitHub does not send now fails here
+    even if every string in this file was renamed to match it.
+    """
+    shape = _payload_shape()
+    referenced = _referenced_payload_paths()
+    assert referenced, (
+        "no github.event.pull_request.* property found in any job's `if:`. Either the "
+        "trust split was removed, or it is now expressed in a form this test cannot "
+        "see — which would make the guard unverified rather than verified."
+    )
+
+    unknown = {}
+    for path in sorted(referenced):
+        node = shape
+        for segment in path.split("."):
+            if not isinstance(node, dict) or segment not in node:
+                unknown[path] = segment
+                break
+            node = node[segment]
+
+    assert not unknown, (
+        f"the workflow's fork guard reads properties GitHub does not send "
+        f"(path -> first missing segment): {unknown}\n"
+        "A missing property yields NULL, not an error, so the guard silently "
+        "evaluates to a constant: self-hosted jobs run for fork PRs (techne#556) AND "
+        "the fork-only job never fires (techne#530).\n"
+        f"Known properties come from {PAYLOAD_SHAPE.name}, captured from a real "
+        "payload. If GitHub genuinely added or renamed a field, refresh the fixture "
+        "with the command in its `_provenance` — do NOT edit it by hand to make this "
+        "pass, which would restore exactly the blindness this test removes."
+    )
