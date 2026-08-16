@@ -2624,8 +2624,42 @@ class TestBackupGrowthBounds:
         # their backup.
         good = m.backup_db(c, p, 18, 19)
         assert good is not None and good.stat().st_size > 0
-        assert not list((tmp_path / "backups").glob("*.partial")), (
-            "a successful copy must leave no .partial behind"
+        # NOT asserting the .partial is gone here. It held only because the failed
+        # and successful calls landed in the same wall-clock second, so the retry
+        # reopened the SAME partial name and renamed it away — the assertion read
+        # as "the mechanism cleans up" and pinned "the clock did not tick"
+        # (agents#578 r3). Cleanup is `_sweep_partials`, and its own test owns it.
+
+    def test_the_reused_backup_is_protected_from_its_own_prune(self, tmp_path, monkeypatch):
+        """`protect=existing` on the reuse path was unpinned: every other test has the
+        reused file also sorting newest, so protect never bore weight there. It bears
+        it the moment a future-dated file holds a keep slot — the residual
+        `_prune_backups` already documents. At keep=1 the skewed file is found[0], so
+        the file being RETURNED lands in the delete slice: announced as the rollback
+        point and deleted in the same breath, with backup_db returning a path that no
+        longer exists. Two documented residuals composing into a live one.
+        (Prudence, PR #578 r3, the seventh mutant.)"""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 1)
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+
+        existing = d / "techne-v18-to-v19-20260101-000000.db.bak"
+        existing.write_text("x")  # mtime now — in window, so reuse fires
+
+        skewed = d / "techne-v18-to-v19-20260102-000000.db.bak"
+        skewed.write_text("x")
+        ahead = time.time() + 86_400
+        os.utime(skewed, (ahead, ahead))  # sorts newest, holds the keep slot
+
+        got = m.backup_db(c, p, 18, 19)
+
+        assert got == existing, "precondition: this test must exercise the reuse path"
+        assert got.exists(), (
+            "the reused backup was pruned by its own call — announced as the "
+            "rollback point and deleted in the same breath"
         )
 
     def test_a_dead_partial_is_swept_and_a_live_one_is_not(self, tmp_path, monkeypatch):
@@ -2636,12 +2670,14 @@ class TestBackupGrowthBounds:
         loop this PR exists for. Found by probing the fix rather than by review."""
         import techne.core.migrator as m
 
-        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 3600)
+        monkeypatch.setattr(m, "BACKUP_PARTIAL_TTL_S", 300)
         p, c = self._db(tmp_path)
         d = tmp_path / "backups"
         d.mkdir()
 
-        dead = d / "techne-v18-to-v19-20260101-000000.db.bak.partial"
+        # A DIFFERENT transition from the one being run, because the first sweep
+        # was scoped to the current prefix and left every other one immortal.
+        dead = d / "techne-v3-to-v4-20260101-000000.db.bak.partial"
         dead.write_bytes(b"")
         os.utime(dead, (1_700_000_000, 1_700_000_000))  # far older than the window
 
@@ -2706,6 +2742,33 @@ class TestBackupGrowthBounds:
             "a bracket in the stem became a character class and deleted another "
             f"store's backups: {[v.name for v in victims if not v.exists()]}"
         )
+
+    def test_a_bracket_stem_is_written_literally_and_still_reuses(self, tmp_path):
+        """The bracket test above drives `_prune_backups` directly, and that function
+        escapes its own argument, so it cannot see this: `backup_db` used ONE string
+        as both a glob pattern and the literal name on disk. With `glob.escape`
+        applied, stem `data[ab]` wrote `data[[]ab]-…` and the next call's pattern
+        matched `data[ab]-…`, a name nothing produces — so neither reuse nor prune
+        fired, silently, for exactly the stems the escape protects. The defect lived
+        in the gap between that unit test and this one. (Prudence, PR #578 r3.)"""
+        import techne.core.migrator as m
+
+        p = tmp_path / "data[ab].db"
+        c = sqlite3.connect(p)
+        c.execute("CREATE TABLE t (x)")
+        c.commit()
+
+        first = m.backup_db(c, p, 1, 2)
+        assert first is not None
+        assert first.name.startswith("data[ab]-v1-to-v2-"), (
+            f"the escape leaked into the written name: {first.name}"
+        )
+
+        aged = first.stat().st_mtime - 5
+        os.utime(first, (aged, aged))
+        again = m.backup_db(c, p, 1, 2)
+        assert again is not None
+        assert again.stat().st_mtime == aged, "reuse did not fire for a bracketed stem"
 
     def test_the_break_is_sound_only_while_the_sort_key_is_the_age_key(self, tmp_path):
         """The `break` is a pure optimisation ONLY because the sort key and the age

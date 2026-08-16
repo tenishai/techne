@@ -106,6 +106,12 @@ BACKUP_REUSE_WINDOW_S = _env_int("TECHNE_BACKUP_REUSE_WINDOW_S", 3600)
 #: before: 1.4 GB had accumulated here, oldest 6 weeks (#574).
 BACKUP_KEEP = _env_int("TECHNE_BACKUP_KEEP", 3)
 
+#: How long a `.db.bak.partial` may live before it is treated as an orphan
+#: rather than a copy in flight. Deliberately much shorter than the reuse window:
+#: a copy either completes or dies quickly, and an hour of accumulation during a
+#: retry loop is the growth this module exists to bound.
+BACKUP_PARTIAL_TTL_S = _env_int("TECHNE_BACKUP_PARTIAL_TTL_S", 300)
+
 
 def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> list[Path]:
     """Delete all but the newest ``keep`` backups for ``stem``. Returns the deleted.
@@ -158,6 +164,38 @@ def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> lis
     return deleted
 
 
+def _sweep_partials(backup_dir: Path, stem: str, ttl_s: int) -> list[Path]:
+    """Reclaim `.db.bak.partial` orphans for one database, across ALL transitions.
+
+    Lives here rather than in `backup_db` because this is where the naming scheme
+    already lives, and because it must be scoped by STEM rather than by
+    transition: an orphan from a v18->v19 attempt is invisible to a later
+    v19->v20 run, so a per-transition sweep leaves it immortal (agents#578 r3).
+
+    The rename in `backup_db` keeps a failed copy out of the reuse glob and out
+    of the keep slots — both verified — at the cost of making it invisible to the
+    pruner too. In a change whose subject is bounding growth that converts
+    dangerous-but-bounded litter into safe-but-unbounded litter, on the exact
+    precondition the docstring below names: the disk fills BECAUSE backups
+    accumulated.
+
+    TTL rather than unconditional, because a young partial may belong to a copy
+    still in flight. The migration lock serialises hooks, but nothing stops an
+    operator running a second process by hand. Failures are swallowed:
+    housekeeping must not kill a migration.
+    """
+    swept: list[Path] = []
+    now = datetime.now().timestamp()
+    for dead in backup_dir.glob(f"{_glob.escape(stem)}-v[0-9]*-to-v[0-9]*-*.db.bak.partial"):
+        try:
+            if dead.is_file() and (now - dead.stat().st_mtime) > ttl_s:
+                dead.unlink()
+                swept.append(dead)
+        except OSError:
+            continue
+    return swept
+
+
 def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -> Path | None:
     """Snapshot the DB to ``<dir>/backups/`` before a migration rewrites it.
 
@@ -184,10 +222,25 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     backup_dir = db_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
+    # BEFORE the copy, and unconditionally. `_prune_backups` is called only after
+    # a successful reuse match or a successful replace — so if `conn.backup()`
+    # raises, neither runs, and on a full disk each attempt adds another orphan
+    # while the reclamation that would free space never executes (agents#578 r3).
+    _sweep_partials(backup_dir, db_path.stem, BACKUP_PARTIAL_TTL_S)
+
     # Reuse before copying. Same transition, still fresh → the existing file is
     # both cheaper and a strictly better rollback point (it predates any failed
     # attempt, so it holds no partially-migrated state).
-    prefix = f"{_glob.escape(db_path.stem)}-v{from_v}-to-v{to_v}-"
+    # TWO STRINGS, BECAUSE THERE ARE TWO JOBS. `glob.escape` is an identity on
+    # ordinary stems only by luck: for a stem containing `*`, `?` or `[` it
+    # REWRITES THE BYTES, and one string was being used both as a glob PATTERN
+    # and as the literal NAME written to disk. Measured: stem `data[ab]` wrote
+    # `data[[]ab]-v1-to-v2-….db.bak`, and the next call's pattern then matched the
+    # literal `data[ab]-…` — a name nothing produces. Neither reuse nor prune
+    # fired, silently, for exactly the stems the escape was added to protect
+    # (agents#578 r3). My r3 nit fix introduced this.
+    prefix = f"{db_path.stem}-v{from_v}-to-v{to_v}-"                      # names
+    pattern = f"{_glob.escape(db_path.stem)}-v{from_v}-to-v{to_v}-"       # globs
     now = datetime.now().timestamp()
     # is_file() BEFORE stat(), matching _prune_backups ten lines up. That
     # asymmetry was a real defect: is_file() returns False for a dangling
@@ -196,7 +249,7 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     # open at all. A generator also re-stats lazily, so a file removed between
     # the glob and the sort cannot abort the migration either.
     for existing in sorted(
-        (q for q in backup_dir.glob(f"{prefix}*.db.bak") if q.is_file()),
+        (q for q in backup_dir.glob(f"{pattern}*.db.bak") if q.is_file()),
         key=lambda q: q.stat().st_mtime,
         reverse=True,
     ):
@@ -269,24 +322,6 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     # The rename is stronger than a size check because it also keeps a partial
     # out of the pruner: it can neither be reused nor consume a keep slot, and
     # no new predicate has to stay correct.
-    # SWEEP DEAD PARTIALS FIRST. The rename keeps a failed copy out of the reuse
-    # glob and out of the keep slots — verified — but it also makes it IMMORTAL,
-    # because nothing matches `*.db.bak.partial`. In a PR whose subject is
-    # bounding growth, that would have replaced one unbounded class with another:
-    # the failure mode here is a copy that dies repeatedly, which is exactly the
-    # 12x retry loop this change exists for.
-    #
-    # Age-bounded rather than unconditional, because a partial younger than the
-    # window may belong to a copy still in flight. The migration lock serialises
-    # hooks, but nothing stops an operator running a second process by hand.
-    # Failures are swallowed: housekeeping must not kill a migration.
-    for dead in backup_dir.glob(f"{prefix}*.db.bak.partial"):
-        try:
-            if dead.is_file() and (now - dead.stat().st_mtime) > BACKUP_REUSE_WINDOW_S:
-                dead.unlink()
-        except OSError:
-            continue
-
     partial = backup_dir / f"{prefix}{ts}.db.bak.partial"
     dest = sqlite3.connect(str(partial))
     try:
