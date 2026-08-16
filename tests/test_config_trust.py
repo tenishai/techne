@@ -20,6 +20,7 @@ reports the patch (techne#981).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 
@@ -919,10 +920,15 @@ def test_the_two_tuples_do_not_overlap():
     assert not both, f"classified as both destination and not: {sorted(both)}"
 
 
-def _resolve_egress_key(key: str) -> str | None:
+def _resolve_egress_key(key: str, root: object = None) -> str | None:
     """Walk a dotted EGRESS_KEYS entry through the real dataclass structure.
 
-    Returns None when the key resolves, else the segment that broke it.
+    Returns None when the key resolves, else the segment that broke it. `root`
+    defaults to `Config` and exists so the tests below can exercise the walker's
+    own edge cases against synthetic dataclasses — the real `Config` has no field
+    in the shapes limits 2 and 3 describe, so without it those branches would be
+    unreachable from the suite and pin nothing (#582 round 2 measured exactly
+    that: mutating the UNVERIFIABLE branch away left the suite byte-identical).
 
     EVERY segment is resolved, not just the head. The runtime traverses the whole
     path (`_pop`/`_get`/`_set` recurse), so a check that stops at the head accepts
@@ -930,6 +936,22 @@ def _resolve_egress_key(key: str) -> str | None:
     governs nothing while the tuple still looks complete, which is the #504 shape
     this test exists to catch. Measured in #582's review: renaming
     `ConflictConfig.model` -> `llm_model` left the suite byte-identically green.
+
+    THIS CHECKS THE DATACLASS SURFACE, AND THE GATE ACTS ON THE YAML SURFACE.
+    They are INDEPENDENT and coincide only by convention: `Config.load` maps YAML
+    to fields through hardcoded string literals (`c.get("model", ...)` at
+    config.py:763), so renaming a field AND its loader kwarg while the YAML key
+    stays put leaves the gate working while this check reports an orphan. The
+    reverse is worse and is why the message below does not say "rename the entry
+    to match the field": doing that yields `conflict.llm_model`, which #582's
+    review MEASURED as test-green / gate-broken / agent's value surviving — this
+    guard's remedy manufacturing the very shape it exists to catch.
+
+    So this is a PROXY for the property that matters, not the property itself.
+    It is kept because the surfaces do coincide today and drift between them is
+    rarer than a plain rename, but a sound check would have to derive the keys
+    the loader actually reads. Tracked in techne#586; do not read a pass here as
+    "the gate governs this key".
 
     Raises `_Unverifiable` when a segment remains but the owner is no longer a
     dataclass (e.g. a `dict[str, ...]` whose keys are runtime data). Static
@@ -941,23 +963,84 @@ def _resolve_egress_key(key: str) -> str | None:
 
     from techne.config import Config
 
-    owner: object = Config
+    owner: object = Config if root is None else root
     for segment in key.split("."):
         if not dataclasses.is_dataclass(owner):
             raise _Unverifiable(key, segment)
         if segment not in {f.name for f in dataclasses.fields(owner)}:
             return segment
         hint = typing.get_type_hints(owner)[segment]
-        # `X | None` on a nested config would otherwise stop the walk one level
-        # short and report a false orphan.
-        args = [a for a in typing.get_args(hint) if a is not type(None)]
-        owner = args[0] if len(args) == 1 else hint
+        # Unwrap `X | None` ONLY — otherwise a nested optional config stops the walk
+        # one level short and reports a false orphan.
+        #
+        # THE UNWRAP IS CONDITIONED ON A None HAVING BEEN STRIPPED, not on arity.
+        # `len(args) == 1` alone unwraps ANY single-argument generic, so
+        # `list[StoreSpec]` resolved to `StoreSpec` and the walk continued as though
+        # a list were a dataclass — silently, unlike the _Unverifiable path. Found in
+        # #582's round-2 review; verified: list[StoreSpec] has 1 arg and no NoneType,
+        # so it now falls through to _Unverifiable, which is the honest answer since
+        # `_get`/`_pop` cannot traverse a list either.
+        args = typing.get_args(hint)
+        non_none = [a for a in args if a is not type(None)]
+        owner = non_none[0] if len(non_none) == 1 and len(non_none) < len(args) else hint
     return None
 
 
 class _Unverifiable(Exception):
     def __init__(self, key: str, segment: str) -> None:
         super().__init__(f"{key!r} (at {segment!r})")
+
+
+@dataclasses.dataclass
+class _WalkerLeaf:
+    value: str = ""
+
+
+@dataclasses.dataclass
+class _WalkerRoot:
+    """Synthetic root for the walker's edge cases. MODULE SCOPE ON PURPOSE:
+    `get_type_hints` resolves annotations against the defining module's globals, so
+    a dataclass declared inside a test function raises NameError on its own field
+    types."""
+
+    optional: _WalkerLeaf | None = None  # must STILL unwrap — not a limit
+    listed: list[_WalkerLeaf] = dataclasses.field(default_factory=list)  # limit 3
+    mapped: dict[str, _WalkerLeaf] = dataclasses.field(default_factory=dict)  # limit 2
+    plain: _WalkerLeaf = dataclasses.field(default_factory=_WalkerLeaf)
+
+
+def test_the_resolver_reports_its_own_blind_spots_instead_of_guessing():
+    """PINS LIMITS 2 AND 3 of the orphan walker (docs/arch/config-trust.md).
+
+    Both are unreachable through the real `Config`, which is why round 2 of #582's
+    review could mutate the UNVERIFIABLE branch away and see a byte-identical green
+    suite. A guard with no live case pins nothing — so these drive the walker
+    directly, through `root`.
+
+    LIMIT 3 IS THE ONE THAT USED TO FAIL SILENTLY. The unwrap was `args[0] if
+    len(args) == 1`, which unwraps ANY single-argument generic, so a `list[Leaf]`
+    resolved to `Leaf` and the walk continued as though a list were a dataclass.
+    `_get`/`_pop` cannot traverse a list either, so the honest answer is
+    UNVERIFIABLE, not a confident resolution.
+    """
+    Root = _WalkerRoot
+
+    # The unwrap that must KEEP working — otherwise limit 3's fix would have been
+    # bought by breaking optional nested configs, and this pair is what tells the
+    # two apart.
+    assert _resolve_egress_key("optional.value", root=Root) is None
+    assert _resolve_egress_key("plain.value", root=Root) is None
+
+    # A real miss is still reported as a miss, not swallowed as unverifiable.
+    assert _resolve_egress_key("plain.gone", root=Root) == "gone"
+
+    # Limit 3: a list is NOT a dataclass, and saying so is the fix.
+    with pytest.raises(_Unverifiable):
+        _resolve_egress_key("listed.value", root=Root)
+
+    # Limit 2: a dict keyed by runtime data cannot be settled statically.
+    with pytest.raises(_Unverifiable):
+        _resolve_egress_key("mapped.value", root=Root)
 
 
 def test_every_egress_key_still_names_a_real_config_field():
@@ -983,7 +1066,16 @@ def test_every_egress_key_still_names_a_real_config_field():
     assert not orphans, (
         f"EGRESS_KEYS entries naming no Config field (key -> missing segment): {orphans} "
         "— a renamed or removed field leaves the gate pinning nothing while still "
-        "looking complete. Rename the entry to match, or drop it."
+        "looking complete.\n"
+        "DO NOT simply rename the entry to match the new FIELD name. EGRESS_KEYS "
+        "addresses the YAML surface (`_pop`/`_get` walk the raw dict), and "
+        "`Config.load` maps YAML to fields through hardcoded literals, so the two "
+        "can differ. Renaming the entry to a field the YAML does not use was "
+        "MEASURED in #582's review as: this test green, the gate broken, the "
+        "agent's value surviving a locked operator layer.\n"
+        "Instead: find what `Config.load` reads for this value (grep the loader for "
+        "the enclosing block) and make the entry name THAT key. If the YAML key is "
+        "genuinely gone, drop the entry. See techne#586."
     )
     assert not unverifiable, (
         f"EGRESS_KEYS entries this test cannot statically resolve: {unverifiable}. "
