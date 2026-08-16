@@ -155,8 +155,8 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     # It is left OUT of EGRESS_KEYS deliberately and only because widening a
     # security gate changes enforcement (a locked operator layer would start
     # dropping agent-supplied source paths), and that blast radius deserves its
-    # own review rather than arriving as a side effect of adding a test. Filed
-    # separately. If that review says "destination", this line moves up.
+    # own review rather than arriving as a side effect of adding a test. Filed as
+    # techne#585. If that review says "destination", this line moves up.
     "sources",
 )
 

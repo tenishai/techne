@@ -919,6 +919,47 @@ def test_the_two_tuples_do_not_overlap():
     assert not both, f"classified as both destination and not: {sorted(both)}"
 
 
+def _resolve_egress_key(key: str) -> str | None:
+    """Walk a dotted EGRESS_KEYS entry through the real dataclass structure.
+
+    Returns None when the key resolves, else the segment that broke it.
+
+    EVERY segment is resolved, not just the head. The runtime traverses the whole
+    path (`_pop`/`_get`/`_set` recurse), so a check that stops at the head accepts
+    `conflict.model` after `ConflictConfig.model` has been renamed — the key then
+    governs nothing while the tuple still looks complete, which is the #504 shape
+    this test exists to catch. Measured in #582's review: renaming
+    `ConflictConfig.model` -> `llm_model` left the suite byte-identically green.
+
+    Raises `_Unverifiable` when a segment remains but the owner is no longer a
+    dataclass (e.g. a `dict[str, ...]` whose keys are runtime data). Static
+    resolution genuinely cannot settle those, and the caller reports them as such
+    rather than counting them either way — a test that cannot see should say so.
+    """
+    import dataclasses
+    import typing
+
+    from techne.config import Config
+
+    owner: object = Config
+    for segment in key.split("."):
+        if not dataclasses.is_dataclass(owner):
+            raise _Unverifiable(key, segment)
+        if segment not in {f.name for f in dataclasses.fields(owner)}:
+            return segment
+        hint = typing.get_type_hints(owner)[segment]
+        # `X | None` on a nested config would otherwise stop the walk one level
+        # short and report a false orphan.
+        args = [a for a in typing.get_args(hint) if a is not type(None)]
+        owner = args[0] if len(args) == 1 else hint
+    return None
+
+
+class _Unverifiable(Exception):
+    def __init__(self, key: str, segment: str) -> None:
+        super().__init__(f"{key!r} (at {segment!r})")
+
+
 def test_every_egress_key_still_names_a_real_config_field():
     """The other direction: a key that no longer matches a field governs nothing.
 
@@ -928,9 +969,26 @@ def test_every_egress_key_still_names_a_real_config_field():
     """
     from techne.security import config_trust
 
-    known = set(_config_field_names())
-    orphans = [k for k in config_trust.EGRESS_KEYS if k.split(".", 1)[0] not in known]
+    orphans: dict[str, str] = {}
+    unverifiable: list[str] = []
+    for key in config_trust.EGRESS_KEYS:
+        try:
+            broken_at = _resolve_egress_key(key)
+        except _Unverifiable as exc:
+            unverifiable.append(str(exc))
+            continue
+        if broken_at is not None:
+            orphans[key] = broken_at
+
     assert not orphans, (
-        f"EGRESS_KEYS entries naming no Config field: {orphans} — a renamed or "
-        "removed field leaves the gate pinning nothing while still looking complete."
+        f"EGRESS_KEYS entries naming no Config field (key -> missing segment): {orphans} "
+        "— a renamed or removed field leaves the gate pinning nothing while still "
+        "looking complete. Rename the entry to match, or drop it."
+    )
+    assert not unverifiable, (
+        f"EGRESS_KEYS entries this test cannot statically resolve: {unverifiable}. "
+        "A segment under a non-dataclass container (a dict keyed by runtime data) "
+        "cannot be checked against the surface, so the orphan guard does not cover "
+        "it. Either pin the container itself instead of a path through it, or add a "
+        "test that exercises the traversal against a real loaded config."
     )
