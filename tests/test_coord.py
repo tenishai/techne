@@ -343,12 +343,232 @@ def test_mcp_send_requires_body(db_path):
         _techne_send({"session_id": A}, _config(db_path))
 
 
+def _fake_live(monkeypatch, *session_ids, raises=False, heartbeat=True):
+    """Pin the RAW SIDECAR ROSTER — not the presence verdict computed from it.
+
+    The registry reads the REAL `~/.claude/sessions/*.json`, so without this the #573
+    check below is a function of whatever happens to be running on the box that ran
+    the suite — the caller's own sessions would be present, the fabricated test ids
+    would not, and the assertion would flip per machine.
+
+    PATCHED AT `_session_records`, THE INPUT, DELIBERATELY. An earlier cut of this
+    helper pinned `live_sessions` itself, i.e. defined the very concept the
+    assertions turn on — the same trap `_live` below documents, and the reason the
+    suite could not see #492. Patching the roster leaves presence COMPUTED, so these
+    tests exercise the real predicate including its pid probe.
+
+    `heartbeat=False` writes `updatedAt: None`, which is the shape Claude Code
+    actually produces for a headless `entrypoint: "sdk-cli"` session. That is not a
+    hypothetical: it is what every agent persona on this machine looks like, and it
+    is what made the first cut of this guard inert (techne#581 review).
+    """
+    import os
+    import time as _t
+
+    if raises:
+        # Patched ONE LAYER UP, at the boundary `_resolve_session_id` actually wraps.
+        # Production's `_session_records` swallows per-file OSError and returns [], so
+        # a RAISING roster is not a state it can produce — modelling it there would be
+        # a fixture inventing a failure mode instead of exercising the real one. It
+        # also broke unrelated consumers: `coord.send` reads the roster to snapshot the
+        # sender's name, so a raising roster failed the send rather than the check.
+        def boom(*a, **k):
+            raise OSError("registry unreadable")
+
+        monkeypatch.setattr(coord, "present_session_ids", boom)
+        return
+
+    def fake_records():
+        return [
+            {
+                "sessionId": s,
+                "name": None,
+                "pid": os.getpid(),  # genuinely live, so the pid probe is real
+                "updatedAt": (_t.time() * 1000 if heartbeat else None),
+            }
+            for s in session_ids
+        ]
+
+    monkeypatch.setattr(coord, "_session_records", fake_records)
+
+
 def test_mcp_identity_from_env(db_path, monkeypatch):
+    """The happy path: env id IS present, so the fallback is used unchanged.
+
+    IT CANNOT DETECT A MISSING GUARD — with no guard at all the env id comes back too,
+    which is why it survived six of #581 round 2's mutants. But it is NOT untestable,
+    and an earlier docstring here said "nothing to see", which invites deletion of the
+    one test that pins the other direction: INVERTING the guard condition kills it.
+
+    That direction is the more costly one by this module's own argument — a guard that
+    over-fires refuses a session that is genuinely working, while the fail-open it
+    cannot see costs only the pre-#573 silent behaviour. So this is the over-firing
+    pin; the refusal tests below are the under-firing ones. (techne#581 round 3.)
+    """
     from techne.mcp_server import _techne_send
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, A)
     sent = _techne_send({"body": "env-identity"}, _config(db_path))  # no session_id arg
     assert sent["from_session"] == A
+
+
+def test_mcp_refuses_a_stale_env_identity(db_path, monkeypatch):
+    """techne#573. The server outlives the session that launched it and `os.environ`
+    is frozen at process start, so the env id can name a session that ended days ago.
+    Attributing to it is silent and durable; refusing costs one retry."""
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, B)  # someone IS live — just not us
+    with pytest.raises(ValueError, match="573"):
+        _techne_send({"body": "should not send"}, _config(db_path))
+
+
+def test_presence_sees_a_headless_session_that_live_sessions_cannot(monkeypatch):
+    """THE DIVERGENCE, PINNED (techne#581 review). Claude Code writes the `updatedAt`
+    heartbeat only for `entrypoint: "cli"` sessions; a headless `claude -p` run —
+    every agent persona — writes a sidecar with a live pid and `updatedAt: null`.
+
+    So `live_sessions` reports NOTHING on a box running only agents, which is why
+    using it as an existence test made the #573 guard permanently inert there.
+    `present_session_ids` answers the other question and sees them.
+
+    This asserts BOTH directions on the SAME roster. A one-sided assertion would
+    still pass if someone quietly routed presence back through `live_sessions`.
+    """
+    _fake_live(monkeypatch, A, heartbeat=False)
+
+    assert coord.present_session_ids() == {A}
+    assert coord.live_sessions() == []
+
+
+def test_presence_survives_a_pid_too_large_for_a_c_int(monkeypatch):
+    """`OverflowError` is NOT an `OSError`, so `os.kill(2**31, 0)` escaped
+    `_pid_alive`'s handler and propagated out of the presence check.
+
+    Pre-existing in the primitive, but NEWLY REACHABLE: `live_sessions`'s TTL used to
+    discard a sidecar like this before the pid was ever probed, and presence dropped
+    that TTL. Fails open — an unrepresentable pid is unverifiable, not dead — which is
+    the rule `_pid_alive` already states for ambiguity.
+    """
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": A, "pid": 2**31, "updatedAt": None}],
+    )
+    assert coord.present_session_ids() == {A}  # must not raise
+
+
+def test_one_poisoned_sidecar_does_not_disable_the_whole_guard(db_path, monkeypatch):
+    """WHAT THE OverflowError FIX ACTUALLY BUYS — bigger than "one record misreads".
+
+    `_resolve_session_id` wraps the presence lookup in `except Exception: return
+    env_sid`. So before the fix, a SINGLE unprobeable pid anywhere in the sessions
+    directory made `present_session_ids()` raise, the handler swallowed it, and the
+    #573 guard was silently disabled for EVERY caller — not just for the poisoned
+    record. One junk sidecar, whole guard off, no signal.
+
+    Here B is live and A (the env id) is not, so the guard must refuse. The poisoned
+    record is a bystander. Reverting the handler to `except OSError` gives DID NOT
+    RAISE ValueError.
+    """
+    import os
+
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [
+            {"sessionId": "poisoned", "pid": 2**31, "updatedAt": None},
+            {"sessionId": B, "pid": os.getpid(), "updatedAt": None},
+        ],
+    )
+    with pytest.raises(ValueError, match="573"):
+        _techne_send({"body": "should not send"}, _config(db_path))
+
+
+def test_presence_refuses_a_session_whose_pid_is_dead(monkeypatch):
+    """Presence drops the heartbeat requirement, NOT the liveness one. A sidecar left
+    behind by a session that ended must not count — that corpse is exactly what the
+    #573 guard exists to refuse, and it is what sailed through when the guard was
+    inert."""
+    import os
+
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": A, "pid": 2**31 - 1, "updatedAt": None}],
+    )
+    assert coord.present_session_ids() == set()
+
+    # ...and the same roster with a live pid IS present, so the assertion above is
+    # discriminating on pid rather than on something incidental to the fixture.
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": A, "pid": os.getpid(), "updatedAt": None}],
+    )
+    assert coord.present_session_ids() == {A}
+
+
+def test_mcp_refuses_a_stale_env_identity_on_a_headless_box(db_path, monkeypatch):
+    """TEETH FOR THE #581 FIX. Same refusal as the test above, but on a roster of
+    HEARTBEAT-LESS sessions — the agent-only box.
+
+    Against the first cut of this guard (which asked `live_sessions`) this test
+    FAILS: that roster yields [], the `if live and ...` precondition is unsatisfied,
+    and the stale id is attributed silently. Verified failing before the fix.
+    """
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, B, heartbeat=False)  # a headless peer is up — not us
+    with pytest.raises(ValueError, match="573"):
+        _techne_send({"body": "should not send"}, _config(db_path))
+
+
+def test_mcp_could_not_check_is_not_checked_and_false(db_path, monkeypatch):
+    """An EMPTY registry means presence is not visible, not that we are dead.
+
+    Failing closed here would take the whole coord bus down on any box where
+    `~/.claude/sessions` is absent — a partner driving techne from another client,
+    or a headless run. Absence of evidence is not evidence of absence.
+    """
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch)  # registry yields nothing at all
+    sent = _techne_send({"body": "still sends"}, _config(db_path))
+    assert sent["from_session"] == A
+
+
+def test_mcp_unreadable_registry_does_not_block(db_path, monkeypatch):
+    """Same argument as the empty case, for a registry that raises rather than
+    returns nothing. Presence is best-effort; it must not become a hard dependency
+    of being able to speak at all."""
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, raises=True)
+    sent = _techne_send({"body": "still sends"}, _config(db_path))
+    assert sent["from_session"] == A
+
+
+def test_mcp_explicit_session_id_is_never_liveness_checked(db_path, monkeypatch):
+    """A passed session_id is a self-assertion and already took precedence. A session
+    too new to appear in the registry must still be able to speak, so the check binds
+    ONLY the env fallback — the path that can be silently wrong."""
+    from techne.mcp_server import _techne_send
+
+    unlisted = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    _fake_live(monkeypatch, B)  # neither A (env) nor `unlisted` (passed) is live
+    sent = _techne_send({"body": "explicit wins", "session_id": unlisted}, _config(db_path))
+    # The env path would have raised on A; the passed id is used unchecked.
+    assert sent["from_session"] == unlisted
 
 
 # ---------------------------------------------------------------------------

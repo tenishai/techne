@@ -538,8 +538,17 @@ def _pid_alive(pid: object) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except OSError:
-        return True  # PermissionError (alive, not ours) or anything odd → fail open
+    except (OSError, OverflowError):
+        # PermissionError (alive, not ours) or anything odd → fail open.
+        # OverflowError is NOT an OSError: a pid >= 2**31 does not fit a C int and
+        # os.kill raises before probing anything. This was ALWAYS reachable, not newly
+        # so — live_sessions checks the TTL BEFORE calling here (see the ordering the
+        # _durable_name comment above already relies on), so a FRESH sidecar with such
+        # a pid always raised; only STALE ones were discarded first. present_session_ids
+        # widened the door rather than opening it (techne#581 round 3 corrected the
+        # opposite claim). Fail open, per "never reap on ambiguity" above — an
+        # unprobeable pid is unverifiable, not dead.
+        return True
     return True
 
 
@@ -590,6 +599,82 @@ def live_sessions(
         )
     live.sort(key=lambda r: r["updated_at_ms"], reverse=True)
     return live
+
+
+def present_session_ids(records: list[dict] | None = None) -> set[str]:
+    """Session ids observably present on this host — WITH OR WITHOUT a heartbeat.
+
+    DELIBERATELY NOT :func:`live_sessions`, and the difference is not cosmetic.
+    ``live_sessions`` requires a FRESH ``updatedAt``, which Claude Code writes only
+    for ``entrypoint: "cli"`` (interactive) sessions. A headless ``claude -p`` run
+    (``entrypoint: "sdk-cli"`` — every agent persona on this box) writes a sidecar
+    with a valid pid and ``updatedAt: null``, so ``live_sessions`` scores it 0 and
+    drops it. Measured 2026-08-16 in an agent's own config dir: ``_session_records``
+    returned 3 while ``live_sessions`` returned ``[]``, permanently. Any caller using
+    ``live_sessions`` as an EXISTENCE test is therefore blind to every agent on the
+    machine (found in techne#581's review).
+
+    THE TWO ANSWER DIFFERENT QUESTIONS, so both are kept:
+      ``live_sessions``      — "who can I route to?" Freshness matters, because
+                               delivering to a session that stopped reading is a
+                               silent drop.
+      ``present_session_ids`` — "does this id name a session that exists right now?"
+                               A pid is observable when a heartbeat is absent.
+
+    Presence = the sidecar exists AND its pid is alive. Both predicates come from
+    the same primitives ``live_sessions`` uses (:func:`_session_records`,
+    :func:`_pid_alive`) rather than a second copy of the pid logic — a
+    reimplementation is a second definition and it will differ.
+
+    THIS IS TTL-FREE **AND** PID-ONLY, which is the combination :func:`_durable_name`
+    explicitly warns against above ("do NOT simplify to a pid-only check") — it pays
+    for ``_same_process_pids`` (a ``procStart`` match) precisely because a recycled
+    pid on a lingering sidecar would otherwise read as alive. That warning applies
+    here too, and this function accepts the weaker claim rather than escaping it.
+
+    SO A WOUND-DOWN SESSION CAN STILL BE REPORTED PRESENT. The enumeration below is
+    phrased by WHAT THE PROBE DOES rather than by what the pid looks like, because
+    every shape-based version of it has been wrong: three revisions of this docstring
+    claimed "the one way", then four ways, and each time a case fell outside the
+    categories — the last one introduced by the very commit that fixed the previous
+    miss (techne#581 rounds 2 and 3).
+      1. THE PROBE CANNOT RUN — ``_pid_alive`` returns True because it has nothing to
+         go on. Covers a MISSING pid, a NON-INTEGER pid, and a pid too large for a C
+         int (>= 2**31, where ``os.kill`` raises OverflowError before probing
+         anything). Unverifiable is not dead, so all of these fail open;
+      2. THE PROBE IS SKIPPED — ``pid: 0`` or a negative pid take the ``pid <= 0``
+         short-circuit. These ARE integers, which is what a "non-integer" framing kept
+         missing;
+      3. THE PROBE RUNS AND IS WRONG — a RECYCLED pid, live and owned by an unrelated
+         process. Nothing about the value gives it away. ``_same_process_pids`` is the
+         existing remedy; see below for why it is not called here;
+      4. NOTHING BOUNDS ANY OF THE ABOVE, because there is no TTL here the way
+         ``live_sessions`` has one.
+    1-3 ARE EXHAUSTIVE BY CONSTRUCTION, which is the whole reason for phrasing them by
+    outcome: ``_pid_alive`` returns True from exactly three places — the
+    ``not isinstance(pid, int) or pid <= 0`` short-circuit (2, and the missing-pid half
+    of 1), the ``except (OSError, OverflowError)`` handler (the rest of 1, plus
+    PermissionError), and the fall-through after ``os.kill`` succeeds (3) — and returns
+    False from one, ``ProcessLookupError``. So the list is CHECKABLE AGAINST CONTROL
+    FLOW instead of being another guess at what a bad pid looks like. The four previous
+    versions were guesses, and each missed a case.
+    Measured on this machine 2026-08-16: zero false-presents in practice. That is the
+    current state, not a guarantee.
+
+    NOT HARDENED WITH ``_same_process_pids`` ON PURPOSE, and this is a cost call, not
+    an oversight: it shells out to ``ps``, and this function runs on every coord MCP
+    invocation that resolves identity. Tracked in techne#587 with the measurements.
+
+    The weaker claim is still the RIGHT DIRECTION for a guard that REFUSES on absence:
+    a false present costs only the old silent behaviour, while a false absent would
+    refuse a session that is genuinely working. A caller needing the stronger claim
+    wants ``live_sessions`` (TTL) or ``_same_process_pids`` (identity).
+    """
+    return {
+        sid
+        for rec in (_session_records() if records is None else records)
+        if (sid := rec.get("sessionId")) and _pid_alive(rec.get("pid"))
+    }
 
 
 def _git_worktree(cwd: str | None) -> dict | None:
