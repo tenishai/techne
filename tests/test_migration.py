@@ -2540,3 +2540,590 @@ class TestV21CoordReceiptNamespacing:
         _migrate(v20_coord_conn, 20, 21)
         v = v20_coord_conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         assert v == 21
+
+
+class TestBackupGrowthBounds:
+    """#574: a backup that fills the disk stops being a safety net.
+
+    Measured before this landed: one v18->v19 transition produced TWELVE
+    full-size copies (11 failed attempts, each backing up first), and nothing
+    ever pruned any of them — 1.4 GB accumulated, oldest six weeks.
+    """
+
+    def _db(self, tmp_path):
+        """A small real SQLite file, since backup_db refuses absent/empty ones."""
+        p = tmp_path / "techne.db"
+        c = sqlite3.connect(str(p))
+        c.execute("CREATE TABLE t (x INTEGER)")
+        c.execute("INSERT INTO t VALUES (1)")
+        c.commit()
+        return p, c
+
+    def test_retry_of_the_same_transition_reuses_the_existing_backup(self, tmp_path):
+        """The 12x case. Retries must not each copy the whole database.
+
+        Asserting on the PATH is not enough and this test used to do exactly
+        that: the backup name is second-resolution, so a re-copy inside the same
+        second lands on the same path and looks identical to a reuse. Mutation
+        proved it — deleting the reuse branch left this green. The observable
+        difference is whether bytes were written, so pin the MTIME.
+        """
+        from techne.core.migrator import backup_db
+
+        p, c = self._db(tmp_path)
+        first = backup_db(c, p, 18, 19)
+        assert first is not None
+        # Age it slightly — still well inside the reuse window — so that a
+        # re-copy would visibly advance the mtime.
+        aged = first.stat().st_mtime - 30
+        os.utime(first, (aged, aged))
+
+        again = backup_db(c, p, 18, 19)
+        assert again == first
+        assert again.stat().st_mtime == aged, "reuse must not rewrite the file"
+        assert len(list((tmp_path / "backups").glob("*.db.bak"))) == 1
+
+    def test_a_failed_copy_leaves_nothing_that_can_be_reused(self, tmp_path):
+        """sqlite3.connect() creates the destination BEFORE conn.backup() writes a
+        page, so a failure between them left a 0-BYTE file bearing the real name,
+        with an mtime of now — which the reuse branch then PREFERRED and announced
+        to the operator as their rollback point. Restoring from it raises "no such
+        table", discovered after the schema has already moved forward, and
+        migrations are forward-only. (Prudence, PR #578 r2.)"""
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+
+        # sqlite3.Connection is a C type and cannot be monkeypatched, so the
+        # failure is produced the way it actually happens: the destination file
+        # IS created — which is the whole point — and the copy into it then
+        # fails. A closed dest reproduces that exactly.
+        real_connect = m.sqlite3.connect
+
+        def connect_then_die(path, *a, **kw):
+            dest = real_connect(path, *a, **kw)  # creates the 0-byte file
+            dest.close()
+            return dest
+
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(m.sqlite3, "connect", connect_then_die)
+        with pytest.raises(sqlite3.Error):
+            m.backup_db(c, p, 18, 19)
+        monkey.undo()
+
+        # Precondition: the copy really did leave a file behind. If this ever
+        # stops being true the test is passing for the wrong reason.
+        partials = list((tmp_path / "backups").glob("*.partial"))
+        assert partials, "the probe did not reproduce a leftover destination file"
+
+        leftovers = sorted(q.name for q in (tmp_path / "backups").glob("*.db.bak"))
+        assert leftovers == [], f"a failed copy left a reusable name: {leftovers}"
+
+        # ...and the next attempt takes a real copy rather than handing back the
+        # wreckage. This is the half that matters: the operator is told a file is
+        # their backup.
+        good = m.backup_db(c, p, 18, 19)
+        assert good is not None and good.stat().st_size > 0
+        # NOT asserting the .partial is gone here. It held only because the failed
+        # and successful calls landed in the same wall-clock second, so the retry
+        # reopened the SAME partial name and renamed it away — the assertion read
+        # as "the mechanism cleans up" and pinned "the clock did not tick"
+        # (agents#578 r3). Cleanup is `_sweep_partials`, and its own test owns it.
+
+    def test_the_reused_backup_is_protected_from_its_own_prune(self, tmp_path, monkeypatch):
+        """`protect=existing` on the reuse path was unpinned: every other test has the
+        reused file also sorting newest, so protect never bore weight there. It bears
+        it the moment a future-dated file holds a keep slot — the residual
+        `_prune_backups` already documents. At keep=1 the skewed file is found[0], so
+        the file being RETURNED lands in the delete slice: announced as the rollback
+        point and deleted in the same breath, with backup_db returning a path that no
+        longer exists. Two documented residuals composing into a live one.
+        (Prudence, PR #578 r3, the seventh mutant.)"""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 1)
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+
+        existing = d / "techne-v18-to-v19-20260101-000000.db.bak"
+        existing.write_text("x")  # mtime now — in window, so reuse fires
+
+        skewed = d / "techne-v18-to-v19-20260102-000000.db.bak"
+        skewed.write_text("x")
+        ahead = time.time() + 86_400
+        os.utime(skewed, (ahead, ahead))  # sorts newest, holds the keep slot
+
+        got = m.backup_db(c, p, 18, 19)
+
+        assert got == existing, "precondition: this test must exercise the reuse path"
+        assert got.exists(), (
+            "the reused backup was pruned by its own call — announced as the "
+            "rollback point and deleted in the same breath"
+        )
+
+    def test_a_dead_partial_is_swept_and_a_live_one_is_not(self, tmp_path, monkeypatch):
+        """The atomic rename keeps a failed copy out of the reuse glob and out of the
+        keep slots — but nothing matches `*.db.bak.partial`, so it was immortal. In a
+        change whose subject is bounding growth that swaps one unbounded class for
+        another, and the failure mode is a copy dying REPEATEDLY, which is the retry
+        loop this PR exists for. Found by probing the fix rather than by review."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_PARTIAL_TTL_S", 300)
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+
+        # A DIFFERENT transition from the one being run, because the first sweep
+        # was scoped to the current prefix and left every other one immortal.
+        dead = d / "techne-v3-to-v4-20260101-000000.db.bak.partial"
+        dead.write_bytes(b"")
+        os.utime(dead, (1_700_000_000, 1_700_000_000))  # far older than the window
+
+        live = d / "techne-v18-to-v19-20260102-000000.db.bak.partial"
+        live.write_bytes(b"")  # mtime now — could be a copy still in flight
+
+        got = m.backup_db(c, p, 18, 19)
+
+        assert got is not None and got.suffix == ".bak"
+        assert not dead.exists(), "a dead partial was not swept"
+        assert live.exists(), "a partial inside the window may be an in-flight copy"
+
+    def test_the_reuse_path_also_prunes(self, tmp_path, monkeypatch):
+        """`return existing` short-circuited the function and the prune call sits
+        after the copy — so in the exact incident this PR was written for (twelve
+        copies on disk, the transition failing on every hook invocation) twelve
+        went in and twelve came out. And if the migration then SUCCEEDS, prune
+        does not run again for this database until the next schema bump.
+        (Prudence, PR #578 r2.)"""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 2)
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+        for i in range(5):
+            f = d / f"techne-v18-to-v19-2026010{i + 1}-000000.db.bak"
+            f.write_text("x")
+            os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
+        newest = d / "techne-v18-to-v19-20260105-000000.db.bak"
+        os.utime(newest, None)  # in-window, so this run takes the reuse path
+
+        got = m.backup_db(c, p, 18, 19)
+
+        assert got == newest, "precondition: this test must exercise the reuse path"
+        remaining = sorted(q.name for q in d.glob("*.db.bak"))
+        assert len(remaining) == 2, f"reuse path did not prune: {remaining}"
+        assert newest.name in remaining, "the reused backup must survive its own prune"
+
+    def test_a_bracket_in_the_stem_is_not_a_character_class(self, tmp_path):
+        """config stores the domain as str() with no charset validation, so the
+        stem reaches Path.glob raw. A store named `data[ab]` pruned `dataa`'s
+        backups — the same destructive cross-store deletion as the techne-vault
+        case, by a different mechanism. (Prudence, PR #578 r2.)"""
+        from techne.core.migrator import _prune_backups
+
+        d = tmp_path / "backups"
+        d.mkdir()
+        # TWO victims, so the keep limit actually bites. With one, an unescaped
+        # glob matches a single file, keep=1 deletes nothing, and the test passes
+        # for the wrong reason — which is what the first version of it did.
+        victims = []
+        for i, (frm, to) in enumerate(((1, 2), (2, 3))):
+            f = d / f"dataa-v{frm}-to-v{to}-2026010{i + 1}-000000.db.bak"
+            f.write_text("x")
+            os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
+            victims.append(f)
+
+        _prune_backups(d, "data[ab]", keep=1, protect=None)
+
+        assert all(v.exists() for v in victims), (
+            "a bracket in the stem became a character class and deleted another "
+            f"store's backups: {[v.name for v in victims if not v.exists()]}"
+        )
+
+    def test_a_bracket_stem_is_written_literally_and_still_reuses(self, tmp_path):
+        """The bracket test above drives `_prune_backups` directly, and that function
+        escapes its own argument, so it cannot see this: `backup_db` used ONE string
+        as both a glob pattern and the literal name on disk. With `glob.escape`
+        applied, stem `data[ab]` wrote `data[[]ab]-…` and the next call's pattern
+        matched `data[ab]-…`, a name nothing produces — so neither reuse nor prune
+        fired, silently, for exactly the stems the escape protects. The defect lived
+        in the gap between that unit test and this one. (Prudence, PR #578 r3.)"""
+        import techne.core.migrator as m
+
+        p = tmp_path / "data[ab].db"
+        c = sqlite3.connect(p)
+        c.execute("CREATE TABLE t (x)")
+        c.commit()
+
+        first = m.backup_db(c, p, 1, 2)
+        assert first is not None
+        assert first.name.startswith("data[ab]-v1-to-v2-"), (
+            f"the escape leaked into the written name: {first.name}"
+        )
+
+        aged = first.stat().st_mtime - 5
+        os.utime(first, (aged, aged))
+        again = m.backup_db(c, p, 1, 2)
+        assert again is not None
+        assert again.stat().st_mtime == aged, "reuse did not fire for a bracketed stem"
+
+    def test_the_break_is_sound_only_while_the_sort_key_is_the_age_key(self, tmp_path):
+        """The `break` is a pure optimisation ONLY because the sort key and the age
+        predicate are the same quantity. Sort by NAME — a realistic edit, since the
+        names are timestamps and it saves a stat() — and a file whose name is newest
+        but whose mtime is stale (restored from an archive, rsync -t, cp -p) sits at
+        the front, fails the window check, and breaks: hiding a valid in-window
+        backup behind it. That is the hiding bug 17ebc60 exists to prevent, reached
+        from a different direction. (Prudence, PR #578 r2, the fifth mutant.)"""
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+        # Newest NAME, stale MTIME — the shape a restore-from-archive produces.
+        stale_name_newest = d / "techne-v18-to-v19-20991231-000000.db.bak"
+        stale_name_newest.write_text("x")
+        os.utime(stale_name_newest, (1_700_000_000, 1_700_000_000))
+        # Older name, fresh mtime — the one that must be found.
+        valid = d / "techne-v18-to-v19-20260101-000000.db.bak"
+        valid.write_text("x")
+
+        got = m.backup_db(c, p, 18, 19)
+
+        assert got == valid, (
+            "an out-of-window candidate hid a valid one — the break is only sound "
+            f"while the sort key IS the age key; got {got.name if got else None}"
+        )
+
+    def test_the_env_overrides_are_actually_read(self, tmp_path, monkeypatch):
+        """Every other test monkeypatches the module attribute, so nothing read the
+        environment at all: a typo in either NAME shipped an operator knob that
+        silently did nothing, and ruff cannot see it because `os` stays used.
+        (Prudence, PR #578 r2.)"""
+        import importlib
+
+        import techne.core.migrator as m
+
+        monkeypatch.setenv("TECHNE_BACKUP_KEEP", "9")
+        monkeypatch.setenv("TECHNE_BACKUP_REUSE_WINDOW_S", "17")
+        importlib.reload(m)
+        try:
+            assert m.BACKUP_KEEP == 9, "TECHNE_BACKUP_KEEP is not read"
+            assert m.BACKUP_REUSE_WINDOW_S == 17, "TECHNE_BACKUP_REUSE_WINDOW_S is not read"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(m)
+
+    def test_a_non_numeric_env_value_does_not_break_the_import(self, tmp_path, monkeypatch):
+        """migrator.py is the seam every store imports, so `int(os.environ[...])` at
+        module scope made a typo in a VALUE fatal to the whole package — techne
+        became wholly unimportable. (Prudence, PR #578 r2.)"""
+        import importlib
+
+        import techne.core.migrator as m
+
+        monkeypatch.setenv("TECHNE_BACKUP_KEEP", "three")
+        try:
+            importlib.reload(m)  # must not raise
+            assert m.BACKUP_KEEP == 3, "a bad value must fall back to the default"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(m)
+
+    def test_reuse_is_scoped_to_the_same_transition(self, tmp_path):
+        """A DIFFERENT transition is a different rollback point and needs its own."""
+        from techne.core.migrator import backup_db
+
+        p, c = self._db(tmp_path)
+        a = backup_db(c, p, 18, 19)
+        b = backup_db(c, p, 19, 20)
+
+        assert a != b
+        assert len(list((tmp_path / "backups").glob("*.db.bak"))) == 2
+
+    def test_reuse_is_scoped_to_the_TARGET_version_too(self, tmp_path):
+        """Vary ONE axis. The test above moves from_v and to_v together, so it
+        pins only the from_v half of the key — dropping to_v from the prefix
+        entirely leaves it green.
+
+        The shape is reachable: to_v is SCHEMA_VERSION, so a v18->v19 that is
+        still failing after the operator upgrades techne becomes v18->v24. Same
+        from_v, different target, and a different rollback point."""
+        from techne.core.migrator import backup_db
+
+        p, c = self._db(tmp_path)
+        near = backup_db(c, p, 18, 19)
+        far = backup_db(c, p, 18, 24)
+
+        assert near is not None and far is not None
+        assert near != far, "a different TARGET must not reuse the v18 backup"
+        assert len(list((tmp_path / "backups").glob("*.db.bak"))) == 2
+
+    def test_pruning_announces_itself_on_stderr(self, tmp_path, monkeypatch, capsys):
+        """The stated requirement is that a deletion the operator cannot see is
+        worse than one they can. Without this the whole print can be deleted
+        with the suite green."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 1)
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 0)
+        p, c = self._db(tmp_path)
+
+        m.backup_db(c, p, 1, 2)
+        capsys.readouterr()
+        m.backup_db(c, p, 2, 3)
+
+        err = capsys.readouterr().err
+        assert "techne-v1-to-v2" in err, f"the pruned file must be named: {err!r}"
+
+    def test_a_negative_keep_still_protects_the_new_backup(self, tmp_path, monkeypatch):
+        """max(keep, 0) — TECHNE_BACKUP_KEEP is read from the environment, so a
+        negative value is reachable, and found[-1:] would keep the WRONG end of
+        the list: everything except the single oldest file.
+
+        TWO unprotected files must be present at a SINGLE prune, which is why
+        they are seeded rather than made by repeated backup_db calls: backup_db
+        prunes on every invocation, so only one unprotected file ever
+        accumulates, and found[-1:] and found[0:] delete the same thing at every
+        step. The mutant is equivalent until something can be stranded in the
+        middle of the list."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", -1)
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 0)
+        p, c = self._db(tmp_path)
+
+        d = tmp_path / "backups"
+        d.mkdir()
+        for i, (frm, to) in enumerate(((1, 2), (2, 3))):
+            f = d / f"techne-v{frm}-to-v{to}-2026010{i + 1}-000000.db.bak"
+            f.write_text("x")
+            os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
+
+        b = m.backup_db(c, p, 3, 4)
+
+        assert b is not None and b.exists(), "protect= must survive a negative keep"
+        remaining = sorted(q.name for q in d.glob("*.db.bak"))
+        assert remaining == [b.name], f"keep=-1 must behave as keep=0, got {remaining}"
+
+    def test_a_stale_backup_is_not_reused(self, tmp_path, monkeypatch):
+        """Beyond the window the live DB has moved on — restoring the old snapshot
+        would discard real work, so take a fresh copy."""
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        first = m.backup_db(c, p, 18, 19)
+        assert first is not None
+        # Age it past the window rather than sleeping.
+        old = first.stat().st_mtime - (m.BACKUP_REUSE_WINDOW_S + 60)
+        os.utime(first, (old, old))
+
+        again = m.backup_db(c, p, 18, 19)
+        assert again is not None
+        # NOT `again != first`: the filename is second-resolution, so a re-copy
+        # inside the same second reuses the same PATH. What must be true is that
+        # a fresh snapshot was actually written — i.e. the aged mtime is gone.
+        assert again.stat().st_mtime > old, "a stale backup must be re-copied, not reused"
+
+    def test_old_backups_are_pruned_to_the_keep_limit(self, tmp_path):
+        """Nothing pruned these before; 1.4 GB had accumulated, oldest six weeks.
+
+        Exercises _prune_backups directly with explicit mtimes: driving it through
+        backup_db makes the assertion depend on same-second filename resolution
+        and on when utime lands relative to the in-call prune.
+        """
+        from techne.core.migrator import _prune_backups
+
+        d = tmp_path / "backups"
+        d.mkdir()
+        made = []
+        for i, (frm, to) in enumerate(((1, 2), (2, 3), (3, 4), (4, 5))):
+            f = d / f"techne-v{frm}-to-v{to}-2026010{i + 1}-000000.db.bak"
+            f.write_text("x")
+            os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))  # strictly ascending
+            made.append(f)
+
+        newest = made[-1]
+        deleted = _prune_backups(d, "techne", keep=2, protect=newest)
+
+        remaining = sorted(q.name for q in d.glob("*.db.bak"))
+        assert len(remaining) == 2, remaining
+        assert newest.name in remaining, "the newest must survive"
+        assert made[0].name not in remaining, "the oldest must be pruned"
+        assert {q.name for q in deleted} == {made[0].name, made[1].name}
+
+    def test_backup_db_actually_invokes_pruning(self, tmp_path, monkeypatch):
+        """Integration cover for the call site.
+
+        The keep-limit test exercises _prune_backups directly, so it stays green
+        even if backup_db stops calling it — mutation proved that too. This pins
+        the wiring.
+        """
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 1)
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 0)  # force a fresh copy each time
+        p, c = self._db(tmp_path)
+
+        for i, (frm, to) in enumerate(((1, 2), (2, 3), (3, 4))):
+            b = m.backup_db(c, p, frm, to)
+            assert b is not None
+            # Push each finished backup deterministically into the past so the
+            # next call's prune sees an unambiguous ordering rather than a tie
+            # between files written in the same second.
+            past = 1_700_000_000 + i
+            os.utime(b, (past, past))
+
+        remaining = list((tmp_path / "backups").glob("*.db.bak"))
+        assert len(remaining) == 1, [q.name for q in remaining]
+
+    def test_the_backup_just_taken_is_never_pruned(self, tmp_path, monkeypatch):
+        """Deleting the file the caller is about to rely on would be the failure
+        this whole mechanism exists to prevent."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 0)
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 0)
+        p, c = self._db(tmp_path)
+
+        b = m.backup_db(c, p, 1, 2)
+        assert b is not None and b.exists(), "protect= must survive keep=0"
+
+    def test_pruning_only_touches_this_database(self, tmp_path, monkeypatch):
+        """backups/ is shared across stores (techne, archivist, codex, ...)."""
+        import techne.core.migrator as m
+
+        monkeypatch.setattr(m, "BACKUP_KEEP", 1)
+        monkeypatch.setattr(m, "BACKUP_REUSE_WINDOW_S", 0)
+        p, c = self._db(tmp_path)
+        (tmp_path / "backups").mkdir(exist_ok=True)
+        other = tmp_path / "backups" / "archivist-v1-to-v2-20260101-000000.db.bak"
+        other.write_text("not mine")
+
+        m.backup_db(c, p, 1, 2)
+        m.backup_db(c, p, 2, 3)
+
+        assert other.exists(), "a sibling store's backups must not be pruned"
+
+    def test_a_dangling_symlink_in_backups_does_not_break_the_store(self, tmp_path):
+        """#574 review: this was worse than the bug being fixed.
+
+        The reuse glob stat()ed every match with no is_file() guard, while
+        _prune_backups ten lines up had one. .stat() RAISES on a dangling
+        symlink where is_file() returns False, and nothing between backup_db and
+        connect() catches it — so one dangling symlink meant the store would not
+        open at all.
+        """
+        from techne.core.migrator import backup_db
+
+        p, c = self._db(tmp_path)
+        d = tmp_path / "backups"
+        d.mkdir()
+        (d / "techne-v18-to-v19-20260101-000000.db.bak").symlink_to(tmp_path / "gone.db")
+
+        assert backup_db(c, p, 18, 19) is not None, "a dangling symlink must not raise"
+
+    def test_a_future_dated_backup_is_not_reused_forever(self, tmp_path):
+        """#574 review: `now - mtime <= WINDOW` is satisfied at ANY magnitude when
+        mtime is in the future, because the difference goes negative — silently
+        disabling the staleness guard the window exists to provide."""
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        first = m.backup_db(c, p, 18, 19)
+        assert first is not None
+        ahead = first.stat().st_mtime + 365 * 24 * 3600  # a year in the future
+        os.utime(first, (ahead, ahead))
+
+        again = m.backup_db(c, p, 18, 19)
+        assert again is not None
+        assert again.stat().st_mtime != ahead, "a future-dated backup must not be reused"
+
+    def test_prune_does_not_reach_a_sibling_store_with_a_similar_name(self, tmp_path):
+        """#574 review: `{stem}-v*` is a PREFIX match, so `techne`'s prune deleted
+        `techne-vault`'s backups. Domains are user-configurable strings."""
+        from techne.core.migrator import _prune_backups
+
+        d = tmp_path / "backups"
+        d.mkdir()
+        mine, sibling = [], d / "techne-vault-v1-to-v2-20260101-000000.db.bak"
+        sibling.write_text("not mine")
+        # MUST be the OLDEST, or this test is hollow: left at "now" the sibling
+        # sorts newest, occupies the keep slot, and survives even under the
+        # prefix glob — which is exactly how it passed against the bug. Mutation
+        # caught it.
+        os.utime(sibling, (1_699_000_000, 1_699_000_000))
+        for i, (frm, to) in enumerate(((1, 2), (2, 3), (3, 4))):
+            f = d / f"techne-v{frm}-to-v{to}-2026010{i + 1}-000000.db.bak"
+            f.write_text("x")
+            os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
+            mine.append(f)
+
+        # keep=0, not 1: at keep=1 `protect` IS found[0], so it never enters the
+        # delete slice and `mine[-1].exists()` cannot fail — it reads as coverage
+        # of the protect branch while never reaching it. At keep=0 the branch is
+        # the only thing keeping it alive.
+        _prune_backups(d, "techne", keep=0, protect=mine[-1])
+
+        assert sibling.exists(), "a sibling store's backups must not be pruned"
+        assert mine[-1].exists(), "protect= must survive keep=0"
+        assert not mine[0].exists()
+
+    def test_a_skewed_backup_does_not_hide_a_valid_one_behind_it(self, tmp_path):
+        """#574 review round 2 — the regression the CLAMP introduced.
+
+        Every other reuse test has exactly ONE candidate in the directory, so
+        neither the sort order nor the `break` is observable. With two
+        candidates: a future-dated file sorts NEWEST, and if the scan `break`s
+        on it instead of `continue`-ing, the perfectly good in-window backup
+        behind it is never seen — one clock-skewed file permanently restores the
+        12-copy behaviour this PR exists to prevent.
+
+        This single test pins three things nothing else did: `reverse=True` on
+        the sort, the skew skip, and the `break`.
+        """
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        good = m.backup_db(c, p, 18, 19)
+        assert good is not None
+        # valid: inside the window, but not the newest
+        recent = good.stat().st_mtime - 60
+        os.utime(good, (recent, recent))
+        # and a skewed file that sorts ahead of it
+        skewed = good.parent / "techne-v18-to-v19-20991231-235959.db.bak"
+        skewed.write_text("clock skew")
+        ahead = good.stat().st_mtime + 365 * 24 * 3600
+        os.utime(skewed, (ahead, ahead))
+
+        again = m.backup_db(c, p, 18, 19)
+        assert again == good, f"the in-window backup must still be reused, got {again.name}"
+        assert again.stat().st_mtime == recent, "reuse must not rewrite the file"
+
+    def test_the_newest_in_window_backup_is_the_one_reused(self, tmp_path):
+        """Pins `reverse=True`, which nothing else observed.
+
+        Every other reuse test has a single valid candidate, so sort order is
+        invisible — removing `reverse=True` survived the whole suite. With TWO
+        in-window backups the choice becomes observable, and it matters: the
+        newest is the closest snapshot to the DB's current state, so restoring it
+        discards the least work.
+        """
+        import techne.core.migrator as m
+
+        p, c = self._db(tmp_path)
+        first = m.backup_db(c, p, 18, 19)
+        assert first is not None
+
+        older = first.parent / "techne-v18-to-v19-20260101-000000.db.bak"
+        older.write_text("older but still in window")
+        newer_t = first.stat().st_mtime - 60
+        older_t = first.stat().st_mtime - 600
+        os.utime(first, (newer_t, newer_t))
+        os.utime(older, (older_t, older_t))
+
+        again = m.backup_db(c, p, 18, 19)
+        assert again == first, f"the NEWEST in-window backup must win, got {again.name}"
