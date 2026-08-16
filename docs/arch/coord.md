@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-coord
 updated: 2026-08-07
-anchor: techne/core/coord.py sha=4c98d0e927106d7dd41cf25c31ae3eeed7183b96
+anchor: techne/core/coord.py sha=4c1a9577dcec10ec7a8a216e31766bf69939e6b8
 ---
 # coord — inter-session mailbox (techne#376)
 
@@ -9,6 +9,7 @@ WHAT: concurrent Claude Code sessions talk without a human router.
 IDENTITY: self-asserted session_id (CLAUDE_CODE_SESSION_ID); NO token — trust boundary = local machine (anything that writes techne.db can already do anything). ONE NARROW EXCEPTION since techne#393: the keys that select where memory EGRESSES to can be moved out of the agent's reach into an operator-owned layer → docs/arch/config-trust.md. That does not soften the statement above — it carves out the config surface only, and only when the deployment actually gives the agent a different uid.
 ADDRESSING: channel (default 'coord', broadcast) | session_id (direct, delivers even if offline).
 PRESENCE: live_sessions() reads ~/.claude/sessions/<pid>.json; keeps a row only if fresh within a 90-min window (_PRESENCE_FRESH_SECONDS) AND its pid is a live process — reap-on-read via os.kill(pid,0) (techne#380; heartbeat freshness alone advertised dead PIDs as routable, missing/foreign pid fails open). Read-only: never writes/deregisters the roster, so a hard SIGKILL still relies on TTL+reap.
+PRESENCE HAS TWO PREDICATES, AND USING THE WRONG ONE MAKES A GUARD INERT (techne#581). `live_sessions()` answers "who can I ROUTE to?" and therefore requires a fresh `updatedAt`. `present_session_ids()` answers "does this id name a session that EXISTS right now?" and requires only a sidecar plus a live pid. The distinction is forced by Claude Code, not invented here: it writes the `updatedAt` heartbeat ONLY for `entrypoint: "cli"` sessions, while every headless `claude -p` run (`entrypoint: "sdk-cli"` — every agent persona) writes a live pid and `updatedAt: null`. Measured 2026-08-16 in an agent's own config dir: `_session_records()` returned 3 while `live_sessions()` returned [] — permanently, not transiently. So an EXISTENCE test built on `live_sessions` is blind to every agent on the box, which is exactly how #573's first cut shipped a guard that could never fire there. `present_session_ids` inherits `_pid_alive`'s fail-open on a missing/non-int pid and has no TTL to bound it, so it is the WEAKER claim of the two by design — right for a guard that REFUSES on absence (a false present costs the old silent behaviour; a false absent would refuse a session that is genuinely working), wrong for routing.
 DELIVERY: push — post_tool_use hook injects unread into next tool call; session-start banner shows unread + who's live.
 
 INVARIANTS:

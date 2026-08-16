@@ -228,11 +228,24 @@ def _resolve_session_id(args: dict) -> str | None:
     attribution is durable, invisible, and poisons `coord_messages` and anything that
     reads it.
 
-    "COULD NOT CHECK" IS NOT "CHECKED AND FALSE". If `live_sessions()` yields nothing
-    at all — unreadable registry, no live sessions recorded — we cannot distinguish a
-    stale id from a working one, so we do NOT block. Absence of evidence is not
-    evidence of absence, and failing closed on an unreadable registry would take the
-    whole coord bus down on a machine where presence simply is not visible.
+    THE CHECK IS `present_session_ids()`, NOT `live_sessions()`, AND THAT CHOICE IS
+    THE WHOLE GUARD (techne#581 review). `live_sessions` requires a fresh `updatedAt`
+    heartbeat, which Claude Code writes only for `entrypoint: "cli"` sessions. Every
+    headless `claude -p` run — i.e. every agent persona — writes `updatedAt: null`,
+    so `live_sessions` returns [] in an agent's config dir and the `if live and ...`
+    precondition below is never satisfied. The guard would be INERT for exactly the
+    population most likely to be talking to a long-lived server: measured, a
+    fabricated id and a genuinely dead 5-day-old session both sailed through. A
+    guard's precondition is a way to switch the guard off; this one was switched off
+    by default for headless callers.
+
+    "COULD NOT CHECK" IS NOT "CHECKED AND FALSE". If the registry yields nothing at
+    all — unreadable, or no sidecars on the box — we cannot distinguish a stale id
+    from a working one, so we do NOT block. Absence of evidence is not evidence of
+    absence, and failing closed on an unreadable registry would take the whole coord
+    bus down on a machine where presence simply is not visible. Note this fail-open
+    is now much NARROWER than it was: it means "no session sidecars exist at all",
+    not "no session posted a heartbeat recently".
 
     A caller-supplied `session_id` is NOT checked: that is a self-assertion, it
     already took precedence, and a session too new to appear in the registry must
@@ -248,18 +261,18 @@ def _resolve_session_id(args: dict) -> str | None:
     if not env_sid:
         return None
 
-    from techne.core.coord import live_sessions
+    from techne.core.coord import present_session_ids
 
     try:
-        live = {s["session_id"] for s in live_sessions()}
+        live = present_session_ids()
     except Exception:  # noqa: BLE001 — presence is best-effort; see "could not check"
         return env_sid
 
     if live and env_sid not in live:
         raise ValueError(
             "techne#573: this MCP server's CLAUDE_CODE_SESSION_ID is "
-            f"{env_sid!r}, which is not a live session — the server outlived the "
-            "session that launched it and its env is frozen at process start. "
+            f"{env_sid!r}, which names no session present on this host — the server "
+            "outlived the session that launched it and its env is frozen at process start. "
             "Pass an explicit 'session_id' (your own), or restart the server so it "
             "re-captures the environment. Refusing rather than attributing this "
             "call to a session that has ended."
@@ -1275,7 +1288,8 @@ TOOLS = [
             "Send a message to another Claude Code session on this machine — coordinate "
             "without a human router (techne#376). Post to the broadcast channel 'coord' "
             "(default; every live session sees it) or address a specific session_id. Your "
-            "identity is taken from the server env — you don't pass it. REFLEX: announce "
+            "identity defaults to the server's env, which can be STALE (techne#573) — if "
+            "the call refuses, pass your own 'session_id'. REFLEX: announce "
             "here when you claim a git branch/worktree or are about to commit, and reply "
             "when you have unread from a peer."
         ),
@@ -1297,7 +1311,12 @@ TOOLS = [
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID). Pass only from a client without that env.",
+                    "description": (
+                        "Usually omitted — defaults to the server's env session id, "
+                        "which can be STALE if the server outlived the session that "
+                        "launched it (techne#573). Pass your own explicitly when the "
+                        "call refuses, or from a client without that env."
+                    ),
                 },
             },
             "required": ["body"],
@@ -1316,7 +1335,12 @@ TOOLS = [
                 "limit": {"type": "integer", "description": "Max threads to return (default 20)."},
                 "session_id": {
                     "type": "string",
-                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID).",
+                    "description": (
+                        "Usually omitted — defaults to the server's env session id, "
+                        "which can be STALE if the server outlived the session that "
+                        "launched it (techne#573). Pass your own explicitly when the "
+                        "call refuses, or from a client without that env."
+                    ),
                 },
             },
         },
@@ -1337,7 +1361,12 @@ TOOLS = [
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID).",
+                    "description": (
+                        "Usually omitted — defaults to the server's env session id, "
+                        "which can be STALE if the server outlived the session that "
+                        "launched it (techne#573). Pass your own explicitly when the "
+                        "call refuses, or from a client without that env."
+                    ),
                 },
             },
         },
@@ -1358,7 +1387,12 @@ TOOLS = [
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Usually omitted — defaults to this session (CLAUDE_CODE_SESSION_ID).",
+                    "description": (
+                        "Usually omitted — defaults to the server's env session id, "
+                        "which can be STALE if the server outlived the session that "
+                        "launched it (techne#573). Pass your own explicitly when the "
+                        "call refuses, or from a client without that env."
+                    ),
                 },
             },
         },

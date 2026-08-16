@@ -592,6 +592,46 @@ def live_sessions(
     return live
 
 
+def present_session_ids(records: list[dict] | None = None) -> set[str]:
+    """Session ids observably present on this host — WITH OR WITHOUT a heartbeat.
+
+    DELIBERATELY NOT :func:`live_sessions`, and the difference is not cosmetic.
+    ``live_sessions`` requires a FRESH ``updatedAt``, which Claude Code writes only
+    for ``entrypoint: "cli"`` (interactive) sessions. A headless ``claude -p`` run
+    (``entrypoint: "sdk-cli"`` — every agent persona on this box) writes a sidecar
+    with a valid pid and ``updatedAt: null``, so ``live_sessions`` scores it 0 and
+    drops it. Measured 2026-08-16 in an agent's own config dir: ``_session_records``
+    returned 3 while ``live_sessions`` returned ``[]``, permanently. Any caller using
+    ``live_sessions`` as an EXISTENCE test is therefore blind to every agent on the
+    machine (found in techne#581's review).
+
+    THE TWO ANSWER DIFFERENT QUESTIONS, so both are kept:
+      ``live_sessions``      — "who can I route to?" Freshness matters, because
+                               delivering to a session that stopped reading is a
+                               silent drop.
+      ``present_session_ids`` — "does this id name a session that exists right now?"
+                               A pid is observable when a heartbeat is absent.
+
+    Presence = the sidecar exists AND its pid is alive. Both predicates come from
+    the same primitives ``live_sessions`` uses (:func:`_session_records`,
+    :func:`_pid_alive`) rather than a second copy of the pid logic — a
+    reimplementation is a second definition and it will differ.
+
+    INHERITS ``_pid_alive``'s FAIL-OPEN: a missing or non-integer pid cannot be
+    disproven, so such a record counts as present. Without the TTL that bounds it in
+    ``live_sessions``, that is the one way a wound-down session can still be reported
+    here — a caller that needs the stronger claim wants ``live_sessions``. It is the
+    right direction for a guard that REFUSES on absence: a false present costs the
+    old silent behaviour, a false absent would refuse a session that is genuinely
+    working.
+    """
+    return {
+        sid
+        for rec in (_session_records() if records is None else records)
+        if (sid := rec.get("sessionId")) and _pid_alive(rec.get("pid"))
+    }
+
+
 def _git_worktree(cwd: str | None) -> dict | None:
     """Resolve a cwd to its git working tree: ``{toplevel, branch, is_primary}``.
 
