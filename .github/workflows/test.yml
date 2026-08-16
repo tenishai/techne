@@ -460,3 +460,30 @@ jobs:
       # less completely than an in-repo one, which is the trade the trust boundary
       # buys. Widening it means re-platforming those two gates: worth its own issue,
       # not worth blocking a security fix behind.
+
+  # TEMPORARY PROBE — deleted in the next commit. Captures GitHub's OWN evaluation
+  # of the guard expressions so the truth table is measured rather than derived.
+  expr-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate the guard expressions under a real pull_request event
+        run: |
+          cat <<'JSON'
+          PROBE_START
+          {
+            "event_name": "${{ github.event_name }}",
+            "repository": "${{ github.repository }}",
+            "real_fork_prop":        ${{ toJSON(github.event.pull_request.head.repo.fork) }},
+            "absent_prop":           ${{ toJSON(github.event.pull_request.head.repo.nonexistent_xyz) }},
+            "absent_eq_repository":  ${{ toJSON(github.event.pull_request.head.repo.nonexistent_xyz == github.repository) }},
+            "absent_eq_false":       ${{ toJSON(github.event.pull_request.head.repo.nonexistent_xyz == false) }},
+            "fork_eq_false":         ${{ toJSON(github.event.pull_request.head.repo.fork == false) }},
+            "OLD_guard_absent":      ${{ toJSON(!(github.event_name == 'pull_request' && github.event.pull_request.head.repo.nonexistent_xyz)) }},
+            "NEW_guard_absent":      ${{ toJSON(github.event_name != 'pull_request' || github.event.pull_request.head.repo.nonexistent_xyz == github.repository) }},
+            "NEW_guard_real":        ${{ toJSON(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }},
+            "FORK_ONLY_absent":      ${{ toJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.nonexistent_xyz != github.repository) }},
+            "full_name":             ${{ toJSON(github.event.pull_request.head.repo.full_name) }}
+          }
+          PROBE_END
+          JSON

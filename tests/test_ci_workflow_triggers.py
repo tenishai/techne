@@ -79,7 +79,7 @@ def test_every_job_still_lives_in_this_one_workflow():
     )
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr"}, (
+    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr", "expr-probe"}, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
         "a new job must also pick a side of the techne#556 trust split."
     )
