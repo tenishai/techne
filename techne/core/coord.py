@@ -541,10 +541,13 @@ def _pid_alive(pid: object) -> bool:
     except (OSError, OverflowError):
         # PermissionError (alive, not ours) or anything odd → fail open.
         # OverflowError is NOT an OSError: a pid >= 2**31 does not fit a C int and
-        # os.kill raises before probing anything. Pre-existing, but newly REACHABLE
-        # since present_session_ids dropped the TTL that used to discard such records
-        # before they got here (techne#581 round 2). Fail open, per "never reap on
-        # ambiguity" above — an unrepresentable pid is unverifiable, not dead.
+        # os.kill raises before probing anything. This was ALWAYS reachable, not newly
+        # so — live_sessions checks the TTL BEFORE calling here (see the ordering the
+        # _durable_name comment above already relies on), so a FRESH sidecar with such
+        # a pid always raised; only STALE ones were discarded first. present_session_ids
+        # widened the door rather than opening it (techne#581 round 3 corrected the
+        # opposite claim). Fail open, per "never reap on ambiguity" above — an
+        # unprobeable pid is unverifiable, not dead.
         return True
     return True
 
@@ -629,18 +632,24 @@ def present_session_ids(records: list[dict] | None = None) -> set[str]:
     pid on a lingering sidecar would otherwise read as alive. That warning applies
     here too, and this function accepts the weaker claim rather than escaping it.
 
-    SO A WOUND-DOWN SESSION CAN STILL BE REPORTED PRESENT, FOUR WAYS — enumerated
-    because an earlier revision of this docstring said "that is the one way" and was
-    wrong three times over (techne#581 round 2):
-      1. a MISSING or non-integer pid — ``_pid_alive`` cannot disprove it, fails open;
-      2. ``pid: 0`` or a NEGATIVE pid — these ARE integers, and ``pid <= 0`` takes the
-         same fail-open branch, so category 1's "non-integer" framing missed them;
-      3. a RECYCLED pid — a live integer pid owned by an unrelated process. Outside
-         the fail-open categories entirely: the probe succeeds and is simply wrong.
-         ``_same_process_pids`` is the existing remedy; see below for why it is not
-         called here;
-      4. any of the above outliving its session, because there is NO TTL here to bound
-         them the way ``live_sessions`` does.
+    SO A WOUND-DOWN SESSION CAN STILL BE REPORTED PRESENT. The enumeration below is
+    phrased by WHAT THE PROBE DOES rather than by what the pid looks like, because
+    every shape-based version of it has been wrong: three revisions of this docstring
+    claimed "the one way", then four ways, and each time a case fell outside the
+    categories — the last one introduced by the very commit that fixed the previous
+    miss (techne#581 rounds 2 and 3).
+      1. THE PROBE CANNOT RUN — ``_pid_alive`` returns True because it has nothing to
+         go on. Covers a MISSING pid, a NON-INTEGER pid, and a pid too large for a C
+         int (>= 2**31, where ``os.kill`` raises OverflowError before probing
+         anything). Unverifiable is not dead, so all of these fail open;
+      2. THE PROBE IS SKIPPED — ``pid: 0`` or a negative pid take the ``pid <= 0``
+         short-circuit. These ARE integers, which is what a "non-integer" framing kept
+         missing;
+      3. THE PROBE RUNS AND IS WRONG — a RECYCLED pid, live and owned by an unrelated
+         process. Nothing about the value gives it away. ``_same_process_pids`` is the
+         existing remedy; see below for why it is not called here;
+      4. NOTHING BOUNDS ANY OF THE ABOVE, because there is no TTL here the way
+         ``live_sessions`` has one.
     Measured on this machine 2026-08-16: zero false-presents in practice. That is the
     current state, not a guarantee.
 

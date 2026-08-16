@@ -395,12 +395,15 @@ def _fake_live(monkeypatch, *session_ids, raises=False, heartbeat=True):
 def test_mcp_identity_from_env(db_path, monkeypatch):
     """The happy path: env id IS present, so the fallback is used unchanged.
 
-    THIS TEST CANNOT DISCRIMINATE, AND THAT IS INHERENT — say so rather than let it
-    read as coverage. It survived all six mutants in #581's round-2 review because the
-    guard's fail-open produces the same answer as the guard passing: with no guard at
-    all, the env id is returned too. A happy-path assertion over a fail-open guard has
-    nothing to see. It is kept as a CONTRACT pin — the fallback must keep working —
-    and the refusal tests below are where the teeth are.
+    IT CANNOT DETECT A MISSING GUARD — with no guard at all the env id comes back too,
+    which is why it survived six of #581 round 2's mutants. But it is NOT untestable,
+    and an earlier docstring here said "nothing to see", which invites deletion of the
+    one test that pins the other direction: INVERTING the guard condition kills it.
+
+    That direction is the more costly one by this module's own argument — a guard that
+    over-fires refuses a session that is genuinely working, while the fail-open it
+    cannot see costs only the pre-#573 silent behaviour. So this is the over-firing
+    pin; the refusal tests below are the under-firing ones. (techne#581 round 3.)
     """
     from techne.mcp_server import _techne_send
 
@@ -455,6 +458,36 @@ def test_presence_survives_a_pid_too_large_for_a_c_int(monkeypatch):
         lambda: [{"sessionId": A, "pid": 2**31, "updatedAt": None}],
     )
     assert coord.present_session_ids() == {A}  # must not raise
+
+
+def test_one_poisoned_sidecar_does_not_disable_the_whole_guard(db_path, monkeypatch):
+    """WHAT THE OverflowError FIX ACTUALLY BUYS — bigger than "one record misreads".
+
+    `_resolve_session_id` wraps the presence lookup in `except Exception: return
+    env_sid`. So before the fix, a SINGLE unprobeable pid anywhere in the sessions
+    directory made `present_session_ids()` raise, the handler swallowed it, and the
+    #573 guard was silently disabled for EVERY caller — not just for the poisoned
+    record. One junk sidecar, whole guard off, no signal.
+
+    Here B is live and A (the env id) is not, so the guard must refuse. The poisoned
+    record is a bystander. Reverting the handler to `except OSError` gives DID NOT
+    RAISE ValueError.
+    """
+    import os
+
+    from techne.mcp_server import _techne_send
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [
+            {"sessionId": "poisoned", "pid": 2**31, "updatedAt": None},
+            {"sessionId": B, "pid": os.getpid(), "updatedAt": None},
+        ],
+    )
+    with pytest.raises(ValueError, match="573"):
+        _techne_send({"body": "should not send"}, _config(db_path))
 
 
 def test_presence_refuses_a_session_whose_pid_is_dead(monkeypatch):
