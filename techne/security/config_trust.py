@@ -100,6 +100,66 @@ EGRESS_KEYS: tuple[str, ...] = (
     "stores",
 )
 
+# The other half of the partition (techne#509). EGRESS_KEYS cannot be DERIVED —
+# "selects a destination for memory" is a judgment about meaning, not a property
+# of a type, and the field surface proves it: `archivist_db_path` is a
+# destination and `db_path` is not; `standalone: bool` is and `staleness_hours:
+# int` is not; `sync` is and `search` is not; `stores: dict` is and
+# `preserved_egress: dict` is not. Every type class straddles the line, so no
+# structural signal exists to infer from.
+#
+# What CAN be enforced is that the judgment was MADE. Every top-level `Config`
+# field must appear in exactly one of these two tuples, and
+# tests/test_config_trust.py fails if one appears in neither. A new
+# destination-selecting field can then no longer be added in silence — the
+# failure mode this list exists to close, and the one that left `stores`
+# ungoverned until round 2 of #508's review noticed it.
+#
+# THIS TUPLE CARRIES NO ENFORCEMENT. It is a record of review, not a mechanism;
+# only EGRESS_KEYS is consulted at runtime. Moving a name from here to there is
+# the change that has teeth.
+_NOT_A_DESTINATION: tuple[str, ...] = (
+    # Local volume, not a destination: where THIS install keeps its own state.
+    # The line #508 drew is "an arbitrary path memory is written to" — these are
+    # the install's own root, not a chosen target.
+    "db_path",
+    "data_dir",
+    "identity_dir",
+    # Behaviour tuning. These change what memory is kept, ranked or surfaced;
+    # none of them names a place it goes.
+    "threads",
+    "hooks",
+    "heuristic",
+    "search",
+    "injection",
+    "posture",
+    "archive",
+    "staleness_hours",
+    "tag_threshold",
+    "knowledge_confidence_half_life_days",
+    # Which client's transcripts are read. Not a network target.
+    "platform",
+    # OUTPUTS of the trust gate, not inputs to it — set by config loading itself
+    # (the verdict, the preserved agent values, the file it came from). Governing
+    # them would be circular.
+    "egress_trust",
+    "preserved_egress",
+    "loaded_from",
+    # `sources` — CLASSIFIED HERE, BUT THE ARGUMENT IS NOT SETTLED (techne#509
+    # follow-up). `sources.claude_code_transcripts.paths` is a list of arbitrary
+    # filesystem paths whose CONTENTS are ingested into the observation ledger.
+    # The rationale that puts `connections` in EGRESS_KEYS — "opened read-only,
+    # so this is ingestion rather than exfiltration — included anyway because a
+    # chosen input is a chosen trust source" — applies to it word for word.
+    #
+    # It is left OUT of EGRESS_KEYS deliberately and only because widening a
+    # security gate changes enforcement (a locked operator layer would start
+    # dropping agent-supplied source paths), and that blast radius deserves its
+    # own review rather than arriving as a side effect of adding a test. Filed as
+    # techne#585. If that review says "destination", this line moves up.
+    "sources",
+)
+
 #: THE ONLY TIER THAT IS A REAL LOCK. Not env-relocatable, so it is the one
 #: resolution step an agent cannot step around by editing its own environment.
 #: An agent that can write here already has root, at which point this module is
