@@ -393,7 +393,15 @@ def _fake_live(monkeypatch, *session_ids, raises=False, heartbeat=True):
 
 
 def test_mcp_identity_from_env(db_path, monkeypatch):
-    """The happy path: env id IS live, so the fallback is used unchanged."""
+    """The happy path: env id IS present, so the fallback is used unchanged.
+
+    THIS TEST CANNOT DISCRIMINATE, AND THAT IS INHERENT — say so rather than let it
+    read as coverage. It survived all six mutants in #581's round-2 review because the
+    guard's fail-open produces the same answer as the guard passing: with no guard at
+    all, the env id is returned too. A happy-path assertion over a fail-open guard has
+    nothing to see. It is kept as a CONTRACT pin — the fallback must keep working —
+    and the refusal tests below are where the teeth are.
+    """
     from techne.mcp_server import _techne_send
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", A)
@@ -430,6 +438,23 @@ def test_presence_sees_a_headless_session_that_live_sessions_cannot(monkeypatch)
 
     assert coord.present_session_ids() == {A}
     assert coord.live_sessions() == []
+
+
+def test_presence_survives_a_pid_too_large_for_a_c_int(monkeypatch):
+    """`OverflowError` is NOT an `OSError`, so `os.kill(2**31, 0)` escaped
+    `_pid_alive`'s handler and propagated out of the presence check.
+
+    Pre-existing in the primitive, but NEWLY REACHABLE: `live_sessions`'s TTL used to
+    discard a sidecar like this before the pid was ever probed, and presence dropped
+    that TTL. Fails open — an unrepresentable pid is unverifiable, not dead — which is
+    the rule `_pid_alive` already states for ambiguity.
+    """
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": A, "pid": 2**31, "updatedAt": None}],
+    )
+    assert coord.present_session_ids() == {A}  # must not raise
 
 
 def test_presence_refuses_a_session_whose_pid_is_dead(monkeypatch):

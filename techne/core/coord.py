@@ -538,8 +538,14 @@ def _pid_alive(pid: object) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except OSError:
-        return True  # PermissionError (alive, not ours) or anything odd → fail open
+    except (OSError, OverflowError):
+        # PermissionError (alive, not ours) or anything odd → fail open.
+        # OverflowError is NOT an OSError: a pid >= 2**31 does not fit a C int and
+        # os.kill raises before probing anything. Pre-existing, but newly REACHABLE
+        # since present_session_ids dropped the TTL that used to discard such records
+        # before they got here (techne#581 round 2). Fail open, per "never reap on
+        # ambiguity" above — an unrepresentable pid is unverifiable, not dead.
+        return True
     return True
 
 
@@ -617,13 +623,35 @@ def present_session_ids(records: list[dict] | None = None) -> set[str]:
     :func:`_pid_alive`) rather than a second copy of the pid logic — a
     reimplementation is a second definition and it will differ.
 
-    INHERITS ``_pid_alive``'s FAIL-OPEN: a missing or non-integer pid cannot be
-    disproven, so such a record counts as present. Without the TTL that bounds it in
-    ``live_sessions``, that is the one way a wound-down session can still be reported
-    here — a caller that needs the stronger claim wants ``live_sessions``. It is the
-    right direction for a guard that REFUSES on absence: a false present costs the
-    old silent behaviour, a false absent would refuse a session that is genuinely
-    working.
+    THIS IS TTL-FREE **AND** PID-ONLY, which is the combination :func:`_durable_name`
+    explicitly warns against above ("do NOT simplify to a pid-only check") — it pays
+    for ``_same_process_pids`` (a ``procStart`` match) precisely because a recycled
+    pid on a lingering sidecar would otherwise read as alive. That warning applies
+    here too, and this function accepts the weaker claim rather than escaping it.
+
+    SO A WOUND-DOWN SESSION CAN STILL BE REPORTED PRESENT, FOUR WAYS — enumerated
+    because an earlier revision of this docstring said "that is the one way" and was
+    wrong three times over (techne#581 round 2):
+      1. a MISSING or non-integer pid — ``_pid_alive`` cannot disprove it, fails open;
+      2. ``pid: 0`` or a NEGATIVE pid — these ARE integers, and ``pid <= 0`` takes the
+         same fail-open branch, so category 1's "non-integer" framing missed them;
+      3. a RECYCLED pid — a live integer pid owned by an unrelated process. Outside
+         the fail-open categories entirely: the probe succeeds and is simply wrong.
+         ``_same_process_pids`` is the existing remedy; see below for why it is not
+         called here;
+      4. any of the above outliving its session, because there is NO TTL here to bound
+         them the way ``live_sessions`` does.
+    Measured on this machine 2026-08-16: zero false-presents in practice. That is the
+    current state, not a guarantee.
+
+    NOT HARDENED WITH ``_same_process_pids`` ON PURPOSE, and this is a cost call, not
+    an oversight: it shells out to ``ps``, and this function runs on every coord MCP
+    invocation that resolves identity. Tracked in techne#587 with the measurements.
+
+    The weaker claim is still the RIGHT DIRECTION for a guard that REFUSES on absence:
+    a false present costs only the old silent behaviour, while a false absent would
+    refuse a session that is genuinely working. A caller needing the stronger claim
+    wants ``live_sessions`` (TTL) or ``_same_process_pids`` (identity).
     """
     return {
         sid
