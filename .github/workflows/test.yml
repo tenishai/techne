@@ -86,10 +86,40 @@ env:
 # documents runner paths (/var/servers/gha-runner, /var/servers/docker-compose/ci),
 # so the blast radius is not hypothetical.
 #
+# SCOPE — THIS IS DEFENCE IN DEPTH, NOT THE WHOLE CONTROL, and the distinction is
+# not modesty. The complementary control is GitHub's fork-PR contributor approval
+# policy, and it CANNOT BE PRE-STAGED: on a private repo the API refuses it.
+# Verified 2026-08-16 with an admin token:
+#     gh api repos/tenishai/techne/actions/permissions/fork-pr-contributor-approval
+#     -> 422 "Fork PR approval is not allowed for private repositories."
+# It only becomes settable AFTER the public flip — i.e. inside the very window it
+# is meant to protect. So it is a FIRST-ACTION-POST-FLIP runbook item on #556, not
+# a pre-flip checkbox, and until it is set this workflow guard is the only thing
+# standing between a fork PR and dev02. Read that as a reason to treat the guard as
+# load-bearing, not as a claim that the guard alone makes a public flip safe.
+#
 # So: every self-hosted job carries the SAME fork guard, and fork PRs are served by
 # `fork-pr` on a GitHub-hosted runner instead. Non-fork PRs and `push` on main are
 # unchanged — which keeps the measured cost decision behind the self-hosted pool
 # (#461) intact rather than undoing it.
+#
+# THE GUARD FAILS CLOSED, AND THE SPELLING IS THE MECHANISM (#570 step 3). It is a
+# POSITIVE IDENTITY CHECK — `head.repo.full_name == github.repository` — not a negated
+# truthiness test on `head.repo.fork`. Per GitHub's contexts reference a nonexistent
+# property "will evaluate to an empty string", and per the expressions reference loose
+# equality coerces mismatched types to a number (empty string -> 0, non-numeric string
+# -> NaN, false -> 0). So:
+#   OLD  !(event_name == 'pull_request' && head.repo.fork)
+#        a typo'd property makes the inner term falsy -> the negation is TRUE always
+#        -> fork code runs on dev02, silently. FAIL OPEN.
+#   ALSO head.repo.fork == false  ->  0 == 0  ->  TRUE. The obvious fix fails open too.
+#   NOW  event_name != 'pull_request' || head.repo.full_name == github.repository
+#        a typo'd property gives '' == 'owner/repo' -> 0 == NaN -> FALSE
+#        -> the self-hosted job is SKIPPED. FAIL CLOSED.
+# A mistake now costs a visibly missing job instead of arbitrary code execution on a
+# persistent host. The `event_name` clause is load-bearing: without it `push` reaches
+# the comparison, where the property is empty, and pushes would be sent to the wrong
+# runner. Keep both halves.
 #
 # THE GUARD IS REPEATED THREE TIMES AND THAT IS A HAZARD, not a style choice: this
 # finding was first raised against TWO jobs on 2026-07-30 and had grown to THREE by
@@ -107,7 +137,7 @@ jobs:
     # replicas x workers, so 2 replicas x -n 4 = 8 workers on 2 cores, which the
     # pin does not prevent — lower -n in step if you do that.
     runs-on: [self-hosted, linux, x64, dev02]
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
     strategy:
@@ -262,7 +292,7 @@ jobs:
   eval-vec:
     runs-on: [self-hosted, linux, x64, dev02]
     # Fork guard (#556) — see the block above `jobs:`.
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     # Observed at ~30s on the runner; 20 bounds a hang without being tight.
     timeout-minutes: 20
     steps:
@@ -342,7 +372,7 @@ jobs:
     # every push and every in-repo PR, still runs here. Only fork PRs are routed
     # away, and for those the scheduling risk #461 describes is the lesser of two
     # evils against arbitrary code execution on dev02.
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     timeout-minutes: 5
     steps:
       - name: Checkout techne
@@ -367,7 +397,7 @@ jobs:
   #
   # Runs on GitHub-hosted, so fork code never touches dev02.
   fork-pr:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

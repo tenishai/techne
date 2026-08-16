@@ -552,17 +552,38 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
 
 # The one guard expression, spelled once. Self-hosted jobs are compared against it
 # EXACTLY rather than fuzzily ("does the `if` mention fork?"), because the realistic
-# regression here is not a missing guard — it is a SUBTLY DIFFERENT one. Dropping
-# the `github.event_name` clause, or writing `head.repo.full_name != github.repository`
-# (null on `push`, so it sends pushes to the wrong runner), both read correct and
-# both fail open. An exact match makes a reviewer justify any change to it.
+# regression here is not a missing guard — it is a SUBTLY DIFFERENT one. Dropping the
+# `github.event_name` clause reads correct and fails open, which is why the clause is
+# load-bearing and why an exact match makes a reviewer justify any change.
+#
+# THE GUARD IS A POSITIVE IDENTITY CHECK, NOT A NEGATED TRUTHINESS TEST, AND THAT IS
+# THE POLARITY FIX (techne#570 step 3). Verified against GitHub's own references:
+#   - contexts: "If you attempt to dereference a nonexistent property, it will
+#     evaluate to an empty string."
+#   - expressions: loose equality coerces mismatched types to a number — empty string
+#     and null both -> 0, a non-numeric string -> NaN, false -> 0.
+# The OLD form `!(event_name == 'pull_request' && head.repo.fork)` therefore FAILED
+# OPEN: any unresolvable property made the inner term falsy, so the negation was TRUE
+# unconditionally and fork code ran on dev02. `head.repo.fork == false` is no better —
+# 0 == 0 is TRUE, so it fails open too, which is why the obvious fix is wrong.
+#
+# Comparing full_name to github.repository fails CLOSED instead. Types MATCH on the
+# real path (string vs string, no coercion), so a same-repo PR is a plain string
+# equality; but an unresolvable property gives '' == 'owner/repo' -> 0 == NaN -> FALSE
+# -> the self-hosted job is SKIPPED. A typo now costs a visibly missing job rather
+# than silent arbitrary code execution on a persistent host.
+#
+# The earlier revision of this comment warned against `full_name != github.repository`
+# because it is empty on `push`. That warning was about the expression WITHOUT the
+# `github.event_name` clause; with the clause, `push` is decided by the first disjunct
+# and never reaches the comparison. The hazard was real, the remedy is the clause.
 FORK_GUARD = (
-    "${{ !(github.event_name == 'pull_request' "
-    "&& github.event.pull_request.head.repo.fork) }}"
+    "${{ github.event_name != 'pull_request' "
+    "|| github.event.pull_request.head.repo.full_name == github.repository }}"
 )
 FORK_ONLY = (
     "${{ github.event_name == 'pull_request' "
-    "&& github.event.pull_request.head.repo.fork }}"
+    "&& github.event.pull_request.head.repo.full_name != github.repository }}"
 )
 
 
@@ -692,10 +713,14 @@ def _referenced_payload_paths() -> set[str]:
 def test_the_fork_guard_reads_properties_github_actually_sends():
     """THE TEETH THE EXACT-MATCH TESTS CANNOT HAVE (techne#570 review).
 
-    A missing property in a GitHub Actions expression yields **null**, not an error.
-    So `!(github.event_name == 'pull_request' && <missing>)` is `!(null)` — TRUE
+    A missing property in a GitHub Actions expression yields **an empty string**, not
+    an error — verified against the contexts reference: "If you attempt to dereference
+    a nonexistent property, it will evaluate to an empty string." An empty string
+    coerces to 0 and is falsy (expressions reference, coercion table).
+
+    So `!(github.event_name == 'pull_request' && <missing>)` is `!(falsy)` — TRUE
     unconditionally — and every self-hosted job runs for fork PRs, while the
-    fork-only job's condition is null and it NEVER fires. techne#556 and techne#530
+    fork-only job's condition is falsy and it NEVER fires. techne#556 and techne#530
     defeated at once, silently.
 
     MEASURED, and this is why this test exists: renaming `head.repo.fork` to
@@ -703,7 +728,7 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
     identical to baseline. The exact-match assertions could not tell a working guard
     from a typo'd one, because both sides of their comparison came from this file.
     Verified against the live API the same day: `head.repo` HAS `fork` and has no
-    `is_fork` — it resolves to null.
+    `is_fork` — so it dereferences to the empty string.
 
     So this anchors the property names to something the test does not author: the
     key structure of a real payload, captured from the API (see the fixture's
@@ -730,9 +755,10 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
     assert not unknown, (
         f"the workflow's fork guard reads properties GitHub does not send "
         f"(path -> first missing segment): {unknown}\n"
-        "A missing property yields NULL, not an error, so the guard silently "
-        "evaluates to a constant: self-hosted jobs run for fork PRs (techne#556) AND "
-        "the fork-only job never fires (techne#530).\n"
+        "A missing property dereferences to an EMPTY STRING, not an error, and an "
+        "empty string coerces to 0 — so the guard silently evaluates to a constant: "
+        "self-hosted jobs run for fork PRs (techne#556) AND the fork-only job never "
+        "fires (techne#530).\n"
         f"Known properties come from {PAYLOAD_SHAPE.name}, captured from a real "
         "payload. If GitHub genuinely added or renamed a field, refresh the fixture "
         "with the command in its `_provenance` — do NOT edit it by hand to make this "
