@@ -79,7 +79,7 @@ def test_every_job_still_lives_in_this_one_workflow():
     )
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr", "expr-probe"}, (
+    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr"}, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
         "a new job must also pick a side of the techne#556 trust split."
     )
@@ -557,26 +557,37 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
 # load-bearing and why an exact match makes a reviewer justify any change.
 #
 # THE GUARD IS A POSITIVE IDENTITY CHECK, NOT A NEGATED TRUTHINESS TEST, AND THAT IS
-# THE POLARITY FIX (techne#570 step 3). Verified against GitHub's own references:
-#   - contexts: "If you attempt to dereference a nonexistent property, it will
-#     evaluate to an empty string."
-#   - expressions: loose equality coerces mismatched types to a number — empty string
-#     and null both -> 0, a non-numeric string -> NaN, false -> 0.
-# The OLD form `!(event_name == 'pull_request' && head.repo.fork)` therefore FAILED
-# OPEN: any unresolvable property made the inner term falsy, so the negation was TRUE
-# unconditionally and fork code ran on dev02. `head.repo.fork == false` is no better —
-# 0 == 0 is TRUE, so it fails open too, which is why the obvious fix is wrong.
+# THE POLARITY FIX (techne#570 step 3).
 #
-# Comparing full_name to github.repository fails CLOSED instead. Types MATCH on the
-# real path (string vs string, no coercion), so a same-repo PR is a plain string
-# equality; but an unresolvable property gives '' == 'owner/repo' -> 0 == NaN -> FALSE
-# -> the self-hosted job is SKIPPED. A typo now costs a visibly missing job rather
-# than silent arbitrary code execution on a persistent host.
+# THE VALUES BELOW WERE MEASURED, NOT DERIVED — see
+# tests/fixtures/github/expression_truth_table.json, captured from GitHub's own
+# evaluator under a real `pull_request` event. TWO SUCCESSIVE ATTEMPTS TO DERIVE THEM
+# FROM THE REFERENCE PAGES PRODUCED TWO DIFFERENT WRONG ANSWERS, which is the whole
+# argument for measuring:
+#   - I first wrote "a missing property yields null".
+#   - The contexts page says it "will evaluate to an empty string", so I corrected to
+#     empty string — and the review then reasoned from THAT, concluding the comparison
+#     is string-vs-string with no coercion at all.
+#   - GitHub actually returns `null` (toJSON of the absent property). My original
+#     wording was right and my correction made it worse.
+# The CONCLUSION survived every version because it is over-determined: null and empty
+# string both make the comparison false. Only the mechanism was wrong — which is
+# exactly the kind of error that reads as rigorous and teaches the next reader wrongly.
+#
+# Measured:  <absent> == github.repository        -> false
+#            <absent> == false                    -> true
+#            OLD  !(ev=='pull_request' && <absent>)                    -> true   OPEN
+#            NEW  ev!='pull_request' || <absent>==github.repository    -> false  CLOSED
+# So the OLD form ran fork code on dev02 for any unresolvable property, silently;
+# `head.repo.fork == false` is no better (an absent property equals false); and the
+# identity check is the one that fails closed.
 #
 # The earlier revision of this comment warned against `full_name != github.repository`
 # because it is empty on `push`. That warning was about the expression WITHOUT the
 # `github.event_name` clause; with the clause, `push` is decided by the first disjunct
-# and never reaches the comparison. The hazard was real, the remedy is the clause.
+# and never reaches the comparison. The hazard was real, the remedy is the clause —
+# but note that clause is a DENYLIST OF ONE EVENT NAME, which is its own hole and is
+# why `test_no_trigger_is_added_without_deciding_the_fork_question` exists.
 FORK_GUARD = (
     "${{ github.event_name != 'pull_request' "
     "|| github.event.pull_request.head.repo.full_name == github.repository }}"
@@ -713,10 +724,8 @@ def _referenced_payload_paths() -> set[str]:
 def test_the_fork_guard_reads_properties_github_actually_sends():
     """THE TEETH THE EXACT-MATCH TESTS CANNOT HAVE (techne#570 review).
 
-    A missing property in a GitHub Actions expression yields **an empty string**, not
-    an error — verified against the contexts reference: "If you attempt to dereference
-    a nonexistent property, it will evaluate to an empty string." An empty string
-    coerces to 0 and is falsy (expressions reference, coercion table).
+    A missing property in a GitHub Actions expression is **null**, not an error —
+    MEASURED, see tests/fixtures/github/expression_truth_table.json. It is falsy.
 
     So `!(github.event_name == 'pull_request' && <missing>)` is `!(falsy)` — TRUE
     unconditionally — and every self-hosted job runs for fork PRs, while the
@@ -728,7 +737,7 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
     identical to baseline. The exact-match assertions could not tell a working guard
     from a typo'd one, because both sides of their comparison came from this file.
     Verified against the live API the same day: `head.repo` HAS `fork` and has no
-    `is_fork` — so it dereferences to the empty string.
+    `is_fork` — so it dereferences to null, and null is falsy.
 
     So this anchors the property names to something the test does not author: the
     key structure of a real payload, captured from the API (see the fixture's
@@ -755,12 +764,82 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
     assert not unknown, (
         f"the workflow's fork guard reads properties GitHub does not send "
         f"(path -> first missing segment): {unknown}\n"
-        "A missing property dereferences to an EMPTY STRING, not an error, and an "
-        "empty string coerces to 0 — so the guard silently evaluates to a constant: "
+        "A missing property is NULL, not an error (measured — see the truth-table "
+        "fixture), and null is falsy — so the guard silently evaluates to a constant: "
         "self-hosted jobs run for fork PRs (techne#556) AND the fork-only job never "
         "fires (techne#530).\n"
         f"Known properties come from {PAYLOAD_SHAPE.name}, captured from a real "
         "payload. If GitHub genuinely added or renamed a field, refresh the fixture "
         "with the command in its `_provenance` — do NOT edit it by hand to make this "
         "pass, which would restore exactly the blindness this test removes."
+    )
+
+
+def test_no_trigger_is_added_without_deciding_the_fork_question():
+    """THE GUARD'S FIRST DISJUNCT IS A DENYLIST OF ONE EVENT NAME (#570 review).
+
+    `FORK_GUARD` reads `github.event_name != 'pull_request' || ...`. Any OTHER trigger
+    that carries a `pull_request` payload satisfies that first disjunct and
+    short-circuits the whole guard TRUE — so all three self-hosted jobs run and
+    `fork-pr` does not fire, for a fork's code.
+
+    `pull_request_target` is the dangerous one and it is not hypothetical: it is the
+    documented way to give fork PRs access to secrets, it runs in the BASE repo's
+    context with full secrets available, and adding it here was measured to leave the
+    suite at 16 passed. Today's checkout has no `ref:`, so it would take the base
+    commit rather than the fork's — one line away from being immediate RCE rather than
+    merely fork-triggered runs on dev02.
+
+    This does not ban new triggers. It makes adding one a DECISION: extend the guard
+    (and this set) deliberately, rather than inheriting a hole from a disjunct that
+    was written when `pull_request` was the only PR-shaped event in the file.
+    """
+    declared = set(_triggers())
+    assert declared == {"push", "pull_request", "workflow_dispatch"}, (
+        f"the workflow's trigger set changed: {sorted(declared)}.\n"
+        "FORK_GUARD's first disjunct is `github.event_name != 'pull_request'`, so ANY "
+        "other trigger carrying a pull_request payload short-circuits the techne#556 "
+        "fork guard to TRUE and puts fork code back on the self-hosted pool.\n"
+        "If the new trigger cannot carry fork code, add it here with that reasoning. "
+        "If it can — `pull_request_target` above all — widen FORK_GUARD FIRST, then "
+        "add it here."
+    )
+
+
+def test_any_job_installing_vectors_must_warm_the_model_cache():
+    """ENUMERATED BY EFFECT, NOT BY NAME (#570 review, and the reason it was needed).
+
+    The two tests guarding the #535 invariant iterate `("test", "eval-vec")` — a
+    literal pair — so `fork-pr` escaped both BY CONSTRUCTION when it was added. It
+    installed the `vectors` extra and ran the suite with no cache step and no
+    pre-fetch, which is precisely the configuration this file records as the #535 red
+    build: an un-cached model re-downloaded by every job on every matrix entry.
+
+    A name list cannot see a job that does not exist yet. This asks the question of
+    every job in the file: if you pull in the vector backend and then run pytest, you
+    must also warm the cache. Adding a fifth job cannot dodge it.
+
+    `fork-pr` satisfies this by NOT installing `vectors` — cache writes are isolated
+    from fork PRs, so a cache step there would miss forever. Either answer passes;
+    having neither does not.
+    """
+    offenders = {}
+    for name, job in _jobs().items():
+        steps = job.get("steps") or []
+        runs = "\n".join(str(s.get("run", "")) for s in steps)
+        installs_vectors = "vectors]" in runs or "vectors," in runs
+        runs_pytest = "pytest" in runs
+        has_cache = any(
+            isinstance(s.get("uses"), str) and s["uses"].startswith("actions/cache")
+            for s in steps
+        )
+        if installs_vectors and runs_pytest and not has_cache:
+            offenders[name] = "installs [vectors] and runs pytest with no actions/cache step"
+
+    assert not offenders, (
+        f"jobs that would re-download the vector model on every run: {offenders}.\n"
+        "This is the #535 red build. Either add an actions/cache step plus the "
+        "backend-matched pre-fetch (see the `test` and `eval-vec` legs — note they "
+        "cache DIFFERENT backends and must not share a key), or do not install the "
+        "`vectors` extra in that job so the vector tests skip visibly under `-rs`."
     )

@@ -105,21 +105,34 @@ env:
 #
 # THE GUARD FAILS CLOSED, AND THE SPELLING IS THE MECHANISM (#570 step 3). It is a
 # POSITIVE IDENTITY CHECK — `head.repo.full_name == github.repository` — not a negated
-# truthiness test on `head.repo.fork`. Per GitHub's contexts reference a nonexistent
-# property "will evaluate to an empty string", and per the expressions reference loose
-# equality coerces mismatched types to a number (empty string -> 0, non-numeric string
-# -> NaN, false -> 0). So:
-#   OLD  !(event_name == 'pull_request' && head.repo.fork)
-#        a typo'd property makes the inner term falsy -> the negation is TRUE always
-#        -> fork code runs on dev02, silently. FAIL OPEN.
-#   ALSO head.repo.fork == false  ->  0 == 0  ->  TRUE. The obvious fix fails open too.
-#   NOW  event_name != 'pull_request' || head.repo.full_name == github.repository
-#        a typo'd property gives '' == 'owner/repo' -> 0 == NaN -> FALSE
-#        -> the self-hosted job is SKIPPED. FAIL CLOSED.
-# A mistake now costs a visibly missing job instead of arbitrary code execution on a
-# persistent host. The `event_name` clause is load-bearing: without it `push` reaches
-# the comparison, where the property is empty, and pushes would be sent to the wrong
-# runner. Keep both halves.
+# truthiness test on `head.repo.fork`.
+#
+# THESE VALUES ARE MEASURED, NOT DERIVED, and that matters because two rounds of
+# deriving them from the reference pages produced two different wrong answers. A
+# temporary job ran these expressions under a real `pull_request` event and emitted
+# toJSON of each; the output is checked in at
+# tests/fixtures/github/expression_truth_table.json with its provenance:
+#
+#   an absent property is            null      (NOT the empty string)
+#   <absent> == github.repository    false     <- the NEW guard's comparison
+#   <absent> == false                true      <- why `fork == false` is NOT a fix
+#   OLD  !(event_name=='pull_request' && <absent>)                       true   FAIL OPEN
+#   NEW  event_name!='pull_request' || <absent>==github.repository       false  FAIL CLOSED
+#   NEW  event_name!='pull_request' || full_name==github.repository      true   (real path)
+#   FORK_ONLY event_name=='pull_request' && <absent>!=github.repository  true
+#
+# So a typo'd property under the OLD guard ran fork code on dev02, silently; under the
+# NEW guard the self-hosted job is SKIPPED. A mistake now costs a visibly missing job
+# instead of arbitrary code execution on a persistent host. `fork == false` looks like
+# the obvious fix and is not one: an absent property equals false, so it fails open too.
+#
+# The `event_name` clause is load-bearing: without it `push` reaches the comparison,
+# where the property is absent, and pushes would be sent to the wrong runner.
+# BUT IT IS A DENYLIST OF ONE EVENT NAME, which is its own hazard — see the trigger
+# assertion in tests/test_ci_workflow_triggers.py. Any NEW trigger that carries a
+# `pull_request` payload (notably `pull_request_target`, which runs with full secrets)
+# satisfies `event_name != 'pull_request'` and short-circuits this guard TRUE. The
+# suite now fails if a trigger is added without deciding that question.
 #
 # THE GUARD IS REPEATED THREE TIMES AND THAT IS A HAZARD, not a style choice: this
 # finding was first raised against TWO jobs on 2026-07-30 and had grown to THREE by
@@ -434,7 +447,20 @@ jobs:
 
       - name: Install
         working-directory: techne
-        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex,vectors]"
+        # NO `vectors` EXTRA, DELIBERATELY (#570 review). Installing it makes the
+        # vector-backed tests RUN in the suite below, and this job has no cache step
+        # and no pre-fetch — the exact configuration recorded near the top of this
+        # file as the #535 red build: an un-cached model re-downloaded by every job on
+        # every matrix entry. A cache step is not the fix either, because GitHub
+        # isolates cache WRITES from fork PRs, so the first fork PR would miss and
+        # could never populate anything for the next one.
+        #
+        # This also makes the install match what this job's own footer already
+        # claims: fork PRs get the suite and the deterministic gates, NOT the vector
+        # gate. Before this the footer said one thing and the extra did another —
+        # the vector tests ran here, cold. With `-rs` below they report as SKIPPED,
+        # which is visible rather than silent.
+        run: uv pip install --python .venv-ci/bin/python -e ".[dev,codex]"
 
       # Same flags as the self-hosted leg, and for the same reasons: `-rs` so a
       # skip is reported rather than counted, `-n 4` to match what was measured.
@@ -460,30 +486,3 @@ jobs:
       # less completely than an in-repo one, which is the trade the trust boundary
       # buys. Widening it means re-platforming those two gates: worth its own issue,
       # not worth blocking a security fix behind.
-
-  # TEMPORARY PROBE — deleted in the next commit. Captures GitHub's OWN evaluation
-  # of the guard expressions so the truth table is measured rather than derived.
-  expr-probe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Evaluate the guard expressions under a real pull_request event
-        run: |
-          cat <<'JSON'
-          PROBE_START
-          {
-            "event_name": "${{ github.event_name }}",
-            "repository": "${{ github.repository }}",
-            "real_fork_prop":        ${{ toJSON(github.event.pull_request.head.repo.fork) }},
-            "absent_prop":           ${{ toJSON(github.event.pull_request.head.repo.nonexistent_xyz) }},
-            "absent_eq_repository":  ${{ toJSON(github.event.pull_request.head.repo.nonexistent_xyz == github.repository) }},
-            "absent_eq_false":       ${{ toJSON(github.event.pull_request.head.repo.nonexistent_xyz == false) }},
-            "fork_eq_false":         ${{ toJSON(github.event.pull_request.head.repo.fork == false) }},
-            "OLD_guard_absent":      ${{ toJSON(!(github.event_name == 'pull_request' && github.event.pull_request.head.repo.nonexistent_xyz)) }},
-            "NEW_guard_absent":      ${{ toJSON(github.event_name != 'pull_request' || github.event.pull_request.head.repo.nonexistent_xyz == github.repository) }},
-            "NEW_guard_real":        ${{ toJSON(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }},
-            "FORK_ONLY_absent":      ${{ toJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.nonexistent_xyz != github.repository) }},
-            "full_name":             ${{ toJSON(github.event.pull_request.head.repo.full_name) }}
-          }
-          PROBE_END
-          JSON
