@@ -650,6 +650,14 @@ def present_session_ids(records: list[dict] | None = None) -> set[str]:
          existing remedy; see below for why it is not called here;
       4. NOTHING BOUNDS ANY OF THE ABOVE, because there is no TTL here the way
          ``live_sessions`` has one.
+    1-3 ARE EXHAUSTIVE BY CONSTRUCTION, which is the whole reason for phrasing them by
+    outcome: ``_pid_alive`` returns True from exactly three places — the
+    ``not isinstance(pid, int) or pid <= 0`` short-circuit (2, and the missing-pid half
+    of 1), the ``except (OSError, OverflowError)`` handler (the rest of 1, plus
+    PermissionError), and the fall-through after ``os.kill`` succeeds (3) — and returns
+    False from one, ``ProcessLookupError``. So the list is CHECKABLE AGAINST CONTROL
+    FLOW instead of being another guess at what a bad pid looks like. The four previous
+    versions were guesses, and each missed a case.
     Measured on this machine 2026-08-16: zero false-presents in practice. That is the
     current state, not a guarantee.
 

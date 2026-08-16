@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-coord
 updated: 2026-08-07
-anchor: techne/core/coord.py sha=6722b35803fb417c0ade7eba8971f65bc8476492
+anchor: techne/core/coord.py sha=6ddef55013f143f0249497c18c69f652c9b8da91
 ---
 # coord — inter-session mailbox (techne#376)
 
