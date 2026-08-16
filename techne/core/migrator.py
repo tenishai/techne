@@ -24,6 +24,7 @@ Design contract (load-bearing — see techne#136):
 
 from __future__ import annotations
 
+import glob as _glob
 import os
 import re
 import sqlite3
@@ -76,12 +77,34 @@ user_version_io = VersionIO(
 #: point: it predates every failed attempt, so it cannot contain partially
 #: migrated state. Beyond the window a fresh copy is taken, because the live DB
 #: has moved on and restoring a stale snapshot would discard real work.
-BACKUP_REUSE_WINDOW_S = int(os.environ.get("TECHNE_BACKUP_REUSE_WINDOW_S", "3600"))
+def _env_int(name: str, default: int) -> int:
+    """Read an int from the environment, falling back loudly rather than dying.
+
+    `int(os.environ.get(...))` at module scope makes a TYPO IN A VALUE FATAL TO
+    THE WHOLE PACKAGE: this module is the low-level seam every store imports, so
+    `TECHNE_BACKUP_KEEP=three` raised ValueError at import and techne became
+    wholly unimportable. An operator knob must not be able to do that
+    (agents#578 r2).
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"[techne] ignoring {name}={raw!r} — not an integer; using {default}",
+            file=sys.stderr,
+        )
+        return default
+
+
+BACKUP_REUSE_WINDOW_S = _env_int("TECHNE_BACKUP_REUSE_WINDOW_S", 3600)
 
 #: How many backups to keep per database. One is written per migration RUN (not
 #: per step), so this is "the last N upgrade events". Nothing pruned these
 #: before: 1.4 GB had accumulated here, oldest 6 weeks (#574).
-BACKUP_KEEP = int(os.environ.get("TECHNE_BACKUP_KEEP", "3"))
+BACKUP_KEEP = _env_int("TECHNE_BACKUP_KEEP", 3)
 
 
 def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> list[Path]:
@@ -115,7 +138,11 @@ def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> lis
         # matches `techne`'s glob. Filename-shape scoping cannot fully separate
         # stores whose names collide by construction; doing that properly means
         # a per-store subdirectory, which is a bigger change than this fix.
-        (p for p in backup_dir.glob(f"{stem}-v[0-9]*-to-v[0-9]*-*.db.bak") if p.is_file()),
+        (
+            p
+            for p in backup_dir.glob(f"{_glob.escape(stem)}-v[0-9]*-to-v[0-9]*-*.db.bak")
+            if p.is_file()
+        ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -160,7 +187,7 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     # Reuse before copying. Same transition, still fresh → the existing file is
     # both cheaper and a strictly better rollback point (it predates any failed
     # attempt, so it holds no partially-migrated state).
-    prefix = f"{db_path.stem}-v{from_v}-to-v{to_v}-"
+    prefix = f"{_glob.escape(db_path.stem)}-v{from_v}-to-v{to_v}-"
     now = datetime.now().timestamp()
     # is_file() BEFORE stat(), matching _prune_backups ten lines up. That
     # asymmetry was a real defect: is_file() returns False for a dangling
@@ -195,6 +222,24 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
                 f"[techne] reusing backup for v{from_v}→v{to_v}: {existing.name}",
                 file=sys.stderr,
             )
+            # PRUNE ON THIS PATH TOO. `return existing` short-circuited the
+            # function and the prune call sits after the copy, so in the exact
+            # incident this PR was written for — v18→v19 failing on every hook
+            # invocation, twelve copies already on disk — twelve went in and
+            # twelve came out. And if that migration then SUCCEEDS, which is the
+            # hoped-for outcome, prune does not run again for this database
+            # until the next schema bump, which could be months. The 1.4 GB
+            # stays (agents#578 r2).
+            reused_pruned = _prune_backups(
+                backup_dir, db_path.stem, BACKUP_KEEP, protect=existing
+            )
+            if reused_pruned:
+                print(
+                    f"[techne] pruned {len(reused_pruned)} old backup(s), "
+                    f"keeping {BACKUP_KEEP}: "
+                    + ", ".join(q.name for q in reused_pruned),
+                    file=sys.stderr,
+                )
             return existing
         # Pure optimisation, and deliberately NOT pinned by a test: with valid
         # mtimes, if the newest candidate is out of window every older one is
@@ -204,11 +249,33 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = backup_dir / f"{prefix}{ts}.db.bak"
-    dest = sqlite3.connect(str(backup))
+
+    # WRITTEN UNDER A .partial NAME AND RENAMED, so a file only ever bears the
+    # real name once the copy has RETURNED. `sqlite3.connect(dest)` creates the
+    # destination BEFORE `conn.backup()` writes a page — measured, connect-only
+    # leaves it at 0 bytes — so any failure between the two (full disk, SIGTERM,
+    # hook timeout, source locked) used to leave a 0-byte file whose name matched
+    # the reuse glob, with an mtime of now.
+    #
+    # THE REUSE BRANCH IS WHAT MADE THAT DANGEROUS. Before it, every invocation
+    # took a fresh copy and a leftover partial was inert litter. With reuse, that
+    # empty file sorts newest, sits inside the window, and is PREFERRED — then
+    # announced to the operator as their rollback point. Restoring from it raises
+    # "no such table", discovered only after run_steps has already moved the
+    # schema forward, and migrations are forward-only (#78), so there is no
+    # second rollback path. The precondition is the one in this docstring: the
+    # disk fills BECAUSE backups accumulated (agents#578 r2).
+    #
+    # The rename is stronger than a size check because it also keeps a partial
+    # out of the pruner: it can neither be reused nor consume a keep slot, and
+    # no new predicate has to stay correct.
+    partial = backup_dir / f"{prefix}{ts}.db.bak.partial"
+    dest = sqlite3.connect(str(partial))
     try:
         conn.backup(dest)
     finally:
         dest.close()
+    os.replace(partial, backup)
 
     pruned = _prune_backups(backup_dir, db_path.stem, BACKUP_KEEP, protect=backup)
     if pruned:
