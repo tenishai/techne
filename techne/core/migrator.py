@@ -24,6 +24,8 @@ Design contract (load-bearing — see techne#136):
 
 from __future__ import annotations
 
+import glob as _glob
+import os
 import re
 import sqlite3
 import sys
@@ -62,6 +64,137 @@ user_version_io = VersionIO(
 
 # --- backup -----------------------------------------------------------------
 
+# Both knobs are module constants with env overrides rather than config.yaml
+# entries: migrator.py deliberately imports nothing from techne (see the module
+# docstring — it is the low-level seam other stores reuse), so reaching for
+# Config here would introduce the cycle that separation exists to avoid.
+
+#: Reuse an existing backup for the same (from_v, to_v) if it is younger than
+#: this. A FAILING migration retries on every hook invocation, and each retry
+#: used to copy the whole database first — measured at 12 full copies of one
+#: v18→v19 transition (#574), 11 of them from attempts that never wrote a
+#: version row. Within the window the earlier backup is also the BETTER rollback
+#: point: it predates every failed attempt, so it cannot contain partially
+#: migrated state. Beyond the window a fresh copy is taken, because the live DB
+#: has moved on and restoring a stale snapshot would discard real work.
+def _env_int(name: str, default: int) -> int:
+    """Read an int from the environment, falling back loudly rather than dying.
+
+    `int(os.environ.get(...))` at module scope makes a TYPO IN A VALUE FATAL TO
+    THE WHOLE PACKAGE: this module is the low-level seam every store imports, so
+    `TECHNE_BACKUP_KEEP=three` raised ValueError at import and techne became
+    wholly unimportable. An operator knob must not be able to do that
+    (agents#578 r2).
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"[techne] ignoring {name}={raw!r} — not an integer; using {default}",
+            file=sys.stderr,
+        )
+        return default
+
+
+BACKUP_REUSE_WINDOW_S = _env_int("TECHNE_BACKUP_REUSE_WINDOW_S", 3600)
+
+#: How many backups to keep per database. One is written per migration RUN (not
+#: per step), so this is "the last N upgrade events". Nothing pruned these
+#: before: 1.4 GB had accumulated here, oldest 6 weeks (#574).
+BACKUP_KEEP = _env_int("TECHNE_BACKUP_KEEP", 3)
+
+#: How long a `.db.bak.partial` may live before it is treated as an orphan
+#: rather than a copy in flight. Deliberately much shorter than the reuse window:
+#: a copy either completes or dies quickly, and an hour of accumulation during a
+#: retry loop is the growth this module exists to bound.
+BACKUP_PARTIAL_TTL_S = _env_int("TECHNE_BACKUP_PARTIAL_TTL_S", 300)
+
+
+def _prune_backups(backup_dir: Path, stem: str, keep: int, protect: Path) -> list[Path]:
+    """Delete all but the newest ``keep`` backups for ``stem``. Returns the deleted.
+
+    KNOWN RESIDUAL (#574 review): a future-dated file sorts newest here and so
+    occupies a keep slot, evicting a genuine recent backup. It costs a SLOT only
+    — backup_db skips skewed candidates rather than stopping at them, so reuse
+    still works. Left deliberately: treating future mtimes as junk risks deleting
+    a real backup written under clock skew, which is the worse error.
+
+    ``protect`` is never removed even if ``keep`` is 0 — deleting the backup the
+    caller is about to rely on would be the failure this whole mechanism exists
+    to prevent. Failures to unlink are swallowed deliberately: a migration must
+    not die because housekeeping could not remove a file.
+
+    A file that does NOT match the shape below is never pruned, and that is
+    deliberate rather than an oversight to fix later: it was not produced by
+    this naming scheme, so the pruner cannot know what it is or whether anything
+    depends on it, and refusing to delete it is the right default for
+    destructive code. The cost is that such a file is immortal, which is
+    acceptable while nothing is still *producing* unmatched names.
+    """
+    found = sorted(
+        # SHAPE match, not prefix match. `{stem}-v*` also matches a sibling store
+        # whose own name starts with "<stem>-v" — a domain called `techne-vault`
+        # had its backups deleted by `techne`'s prune. Domains are
+        # user-configurable strings (config.stores), so requiring digits either
+        # side of "-to-v" narrows it sharply. NOT airtight: a store literally
+        # named `techne-v2` produces `techne-v2-v1-to-v2-*.db.bak`, which still
+        # matches `techne`'s glob. Filename-shape scoping cannot fully separate
+        # stores whose names collide by construction; doing that properly means
+        # a per-store subdirectory, which is a bigger change than this fix.
+        (
+            p
+            for p in backup_dir.glob(f"{_glob.escape(stem)}-v[0-9]*-to-v[0-9]*-*.db.bak")
+            if p.is_file()
+        ),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    deleted: list[Path] = []
+    for stale in found[max(keep, 0) :]:
+        if stale == protect:
+            continue
+        try:
+            stale.unlink()
+            deleted.append(stale)
+        except OSError:
+            continue
+    return deleted
+
+
+def _sweep_partials(backup_dir: Path, stem: str, ttl_s: int) -> list[Path]:
+    """Reclaim `.db.bak.partial` orphans for one database, across ALL transitions.
+
+    Lives here rather than in `backup_db` because this is where the naming scheme
+    already lives, and because it must be scoped by STEM rather than by
+    transition: an orphan from a v18->v19 attempt is invisible to a later
+    v19->v20 run, so a per-transition sweep leaves it immortal (agents#578 r3).
+
+    The rename in `backup_db` keeps a failed copy out of the reuse glob and out
+    of the keep slots — both verified — at the cost of making it invisible to the
+    pruner too. In a change whose subject is bounding growth that converts
+    dangerous-but-bounded litter into safe-but-unbounded litter, on the exact
+    precondition the docstring below names: the disk fills BECAUSE backups
+    accumulated.
+
+    TTL rather than unconditional, because a young partial may belong to a copy
+    still in flight. The migration lock serialises hooks, but nothing stops an
+    operator running a second process by hand. Failures are swallowed:
+    housekeeping must not kill a migration.
+    """
+    swept: list[Path] = []
+    now = datetime.now().timestamp()
+    for dead in backup_dir.glob(f"{_glob.escape(stem)}-v[0-9]*-to-v[0-9]*-*.db.bak.partial"):
+        try:
+            if dead.is_file() and (now - dead.stat().st_mtime) > ttl_s:
+                dead.unlink()
+                swept.append(dead)
+        except OSError:
+            continue
+    return swept
+
 
 def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -> Path | None:
     """Snapshot the DB to ``<dir>/backups/`` before a migration rewrites it.
@@ -70,18 +203,145 @@ def backup_db(conn: sqlite3.Connection, db_path: Path, from_v: int, to_v: int) -
     (a plain file copy can miss un-checkpointed WAL frames). Returns the backup
     path, or ``None`` when there's nothing worth saving (absent/empty DB).
     Migrations are forward-only, so this backup is the rollback path (#78).
+
+    Two bounds on growth (#574), because a backup that fills the disk stops being
+    a safety net: a recent backup for the SAME transition is reused rather than
+    re-copied, and older backups beyond :data:`BACKUP_KEEP` are pruned. Both
+    announce on stderr — this module already narrates the migration there, and a
+    deletion the operator cannot see is worse than one they can.
+
+    Reuse cannot mask partial progress, and the reason is subtle enough to state
+    here rather than leave in a commit message: the caller reads ``from_v``
+    under the migration lock, so if any step succeeded, ``from_v`` has advanced
+    and the ``(from_v, to_v)`` key changes — which forces a fresh copy. Reuse
+    therefore happens only when *no* version row was written, which is exactly
+    the case where the earlier file is the better rollback point.
     """
     if not db_path.exists() or db_path.stat().st_size == 0:
         return None
     backup_dir = db_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # BEFORE the copy, and unconditionally. `_prune_backups` is called only after
+    # a successful reuse match or a successful replace — so if `conn.backup()`
+    # raises, neither runs, and on a full disk each attempt adds another orphan
+    # while the reclamation that would free space never executes (agents#578 r3).
+    _sweep_partials(backup_dir, db_path.stem, BACKUP_PARTIAL_TTL_S)
+
+    # Reuse before copying. Same transition, still fresh → the existing file is
+    # both cheaper and a strictly better rollback point (it predates any failed
+    # attempt, so it holds no partially-migrated state).
+    # TWO STRINGS, BECAUSE THERE ARE TWO JOBS. `glob.escape` is an identity on
+    # ordinary stems only by luck: for a stem containing `*`, `?` or `[` it
+    # REWRITES THE BYTES, and one string was being used both as a glob PATTERN
+    # and as the literal NAME written to disk. Measured: stem `data[ab]` wrote
+    # `data[[]ab]-v1-to-v2-….db.bak`, and the next call's pattern then matched the
+    # literal `data[ab]-…` — a name nothing produces. Neither reuse nor prune
+    # fired, silently, for exactly the stems the escape was added to protect
+    # (agents#578 r3). My r3 nit fix introduced this.
+    prefix = f"{db_path.stem}-v{from_v}-to-v{to_v}-"                      # names
+    pattern = f"{_glob.escape(db_path.stem)}-v{from_v}-to-v{to_v}-"       # globs
+    now = datetime.now().timestamp()
+    # is_file() BEFORE stat(), matching _prune_backups ten lines up. That
+    # asymmetry was a real defect: is_file() returns False for a dangling
+    # symlink where .stat() RAISES, and nothing between here and connect()
+    # catches it — so one dangling symlink in backups/ meant the store would not
+    # open at all. A generator also re-stats lazily, so a file removed between
+    # the glob and the sort cannot abort the migration either.
+    for existing in sorted(
+        (q for q in backup_dir.glob(f"{pattern}*.db.bak") if q.is_file()),
+        key=lambda q: q.stat().st_mtime,
+        reverse=True,
+    ):
+        # Three-way, and the ordering of the branches is the whole point.
+        #
+        # A future mtime makes `now - mtime` NEGATIVE, which satisfies an upper
+        # bound at any magnitude — so `age <= WINDOW` alone reuses a skewed file
+        # FOREVER. But clamping to `0 <= age <= WINDOW` and falling through to
+        # the break is the opposite failure: a future-dated file sorts NEWEST,
+        # fails the lower bound, and the break then hides every valid in-window
+        # backup behind it — so one skewed file permanently disables reuse and
+        # restores the 12-copy behaviour this exists to prevent.
+        #
+        # `continue` on skew keeps the early-exit for the genuinely-stale case
+        # while letting the scan step past it. Note the two residuals compound if
+        # you get this wrong: prune keeps the skewed file (it sorts newest and
+        # holds a keep slot), and a retained skewed file would keep reuse off.
+        age = now - existing.stat().st_mtime
+        if age < 0:
+            continue  # clock skew — older candidates may still be valid
+        if age <= BACKUP_REUSE_WINDOW_S:
+            print(
+                f"[techne] reusing backup for v{from_v}→v{to_v}: {existing.name}",
+                file=sys.stderr,
+            )
+            # PRUNE ON THIS PATH TOO. `return existing` short-circuited the
+            # function and the prune call sits after the copy, so in the exact
+            # incident this PR was written for — v18→v19 failing on every hook
+            # invocation, twelve copies already on disk — twelve went in and
+            # twelve came out. And if that migration then SUCCEEDS, which is the
+            # hoped-for outcome, prune does not run again for this database
+            # until the next schema bump, which could be months. The 1.4 GB
+            # stays (agents#578 r2).
+            reused_pruned = _prune_backups(
+                backup_dir, db_path.stem, BACKUP_KEEP, protect=existing
+            )
+            if reused_pruned:
+                print(
+                    f"[techne] pruned {len(reused_pruned)} old backup(s), "
+                    f"keeping {BACKUP_KEEP}: "
+                    + ", ".join(q.name for q in reused_pruned),
+                    file=sys.stderr,
+                )
+            return existing
+        # Pure optimisation, and deliberately NOT pinned by a test: with valid
+        # mtimes, if the newest candidate is out of window every older one is
+        # too, so removing this changes cost and not outcome. Mutation confirms
+        # it survives the suite — that is correct here rather than a gap.
+        break
+
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = backup_dir / f"{db_path.stem}-v{from_v}-to-v{to_v}-{ts}.db.bak"
-    dest = sqlite3.connect(str(backup))
+    backup = backup_dir / f"{prefix}{ts}.db.bak"
+
+    # WRITTEN UNDER A .partial NAME AND RENAMED, so a file only ever bears the
+    # real name once the copy has RETURNED. `sqlite3.connect(dest)` creates the
+    # destination BEFORE `conn.backup()` writes a page — measured, connect-only
+    # leaves it at 0 bytes — so any failure between the two (full disk, SIGTERM,
+    # hook timeout, source locked) used to leave a 0-byte file whose name matched
+    # the reuse glob, with an mtime of now.
+    #
+    # THE REUSE BRANCH IS WHAT MADE THAT DANGEROUS. Before it, every invocation
+    # took a fresh copy and a leftover partial was inert litter. With reuse, that
+    # empty file sorts newest, sits inside the window, and is PREFERRED — then
+    # announced to the operator as their rollback point. Restoring from it raises
+    # "no such table", discovered only after run_steps has already moved the
+    # schema forward, and migrations are forward-only (#78), so there is no
+    # second rollback path. The precondition is the one in this docstring: the
+    # disk fills BECAUSE backups accumulated (agents#578 r2).
+    #
+    # The rename is stronger than a size check because it also keeps a partial
+    # out of the pruner: it can neither be reused nor consume a keep slot, and
+    # no new predicate has to stay correct.
+    partial = backup_dir / f"{prefix}{ts}.db.bak.partial"
+    dest = sqlite3.connect(str(partial))
     try:
         conn.backup(dest)
     finally:
         dest.close()
+    os.replace(partial, backup)
+
+    pruned = _prune_backups(backup_dir, db_path.stem, BACKUP_KEEP, protect=backup)
+    if pruned:
+        # NAME them. A bare count is visible but not useful: an operator reading
+        # "pruned 1 old backup(s)" cannot tell whether it took the one they were
+        # about to restore from. This is the rollback path, so the line is worth
+        # its length — and a long one only happens on the first prune of a
+        # directory that was never pruned before.
+        print(
+            f"[techne] pruned {len(pruned)} old backup(s), keeping {BACKUP_KEEP}: "
+            + ", ".join(q.name for q in pruned),
+            file=sys.stderr,
+        )
     return backup
 
 
