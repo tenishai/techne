@@ -483,3 +483,322 @@ def test_two_real_repos_end_to_end_cli(tmp_path, monkeypatch):
     # 8. The group overview lists both indexed repos.
     r = runner.invoke(main, ["codex"])
     assert str(repo_a.resolve()) in r.output and str(repo_b.resolve()) in r.output
+
+
+# ---- techne#595: a zero result must describe its own reliability -------------
+
+
+def _repo(cfg, tmp_path):
+    repo = tmp_path / "svc"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    return repo, codex_db_for_repo(cfg, repo)
+
+
+def _add(db, repo, rel, *, body="def existing(): ...\n", indexed_hash=None, on_disk=True):
+    """Index one symbol from `rel`. `indexed_hash` mismatching the bytes = stale."""
+    import hashlib
+
+    if on_disk:
+        (repo / rel).write_text(body)
+    add_symbol(
+        db,
+        id=f"{rel}::sym_{rel.replace('.', '_')}::function::1",
+        file=rel,
+        name=f"sym_{rel.replace('.', '_')}",
+        kind="function",
+        file_hash=indexed_hash or hashlib.sha256(body.encode()).hexdigest(),
+    )
+
+
+def test_a_brand_new_module_is_not_reported_as_genuine_absence(tmp_path):
+    """THE ROUND-1 FINDING, and it is the whole reason this fix was rewritten.
+
+    `index_freshness` compares INDEXED files against disk. That structurally
+    cannot see a file the index never saw — and a symbol added since the last
+    index arrives in a NEW module at least as often as in an edited one.
+
+    The first cut certified "genuine absence" whenever the indexed files happened
+    to be fresh. Prudence's repro: one untouched indexed file, the sought symbol
+    sitting in `brand_new.py` beside it, and the tool answered "the index is
+    current (1 files all fresh) — so this is genuine absence". That is WORSE than
+    the silence it replaced: it turns no-information into a confident wrong answer.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "indexed.py")                       # fresh, indexed
+    (repo / "brand_new.py").write_text("def recall_attribution(): ...\n")  # never indexed
+
+    out = _codex_search({"query": "recall_attribution", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 0
+    assert out["index"]["unindexed"] == 1
+    assert out["index"]["coverage"] == "complete"
+    assert "never been indexed" in out["notice"]
+    assert "genuine absence" not in out["notice"]
+
+
+def test_an_empty_index_never_claims_to_be_current(tmp_path):
+    """`codex_db_for_repo` creates the db BEFORE `initial_walk`, so a docs-only
+    repo, a Go/Rust repo, or an install without the `codex` extra all leave a db
+    with zero symbols. An EMPTY index issuing a clean bill of health is the
+    strongest statement of trust from the weakest evidence."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, _ = _repo(cfg, tmp_path)
+
+    out = _codex_search({"query": "anything", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 0
+    assert out["index"]["files"] == 0
+    assert "THE INDEX IS EMPTY" in out["notice"]
+    assert "genuine absence" not in out["notice"]
+
+
+def test_the_notice_reports_counts_that_can_discriminate(tmp_path):
+    """Round 1 killed the first tests with THREE surviving mutants — deleting the
+    unknown branch, dropping `missing` from the total, and swapping the notice's
+    numbers — because the fixture made every count equal 1, so no arithmetic in
+    the message could be wrong.
+
+    This fixture makes them DISTINCT: 3 indexed files (1 fresh, 2 stale) plus 2
+    never indexed, so a swapped or miscounted figure shows up as a different
+    string.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "a.py")
+    _add(db, repo, "b.py", indexed_hash="0" * 64)
+    _add(db, repo, "c.py", indexed_hash="1" * 64)
+    (repo / "d.py").write_text("x = 1\n")
+    (repo / "e.py").write_text("y = 2\n")
+
+    out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
+    idx = out["index"]
+
+    assert (idx["files"], idx["fresh"], idx["stale"], idx["unindexed"]) == (3, 1, 2, 2)
+    # Unindexed outranks stale: a never-seen file is the stronger doubt.
+    assert "2 source file(s) on disk have never been indexed" in out["notice"]
+    assert "3 file(s) — 1 fresh, 2 stale, 0 missing, 0 unclassifiable" in out["notice"]
+    assert "2 on disk never indexed" in out["notice"]
+
+
+def test_genuine_absence_requires_a_complete_and_current_index(tmp_path):
+    """The claim survives, but only on evidence that supports it: disk enumerated,
+    nothing unindexed, everything fresh. A notice that ALWAYS hedges gets ignored,
+    so this branch has to stay reachable — it just may not be reached cheaply."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "only.py")
+
+    out = _codex_search({"query": "genuinely_absent", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 0
+    assert (out["index"]["stale"], out["index"]["unindexed"]) == (0, 0)
+    assert "genuine absence" in out["notice"]
+
+
+def test_a_hit_does_not_pay_for_the_index_scan(tmp_path):
+    """The scan walks the repo AND hashes every indexed file — affordable to
+    qualify a nothing, not to decorate a hit. A non-empty result must not carry
+    the index summary."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "only.py")
+
+    out = _codex_search({"query": "sym_only_py", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 1
+    assert "index" not in out
+
+
+def test_an_unreadable_hit_is_qualified_too(tmp_path):
+    """Round 1, aim point 1: the row-derived notice counted only stale/missing, so
+    a hit whose file could not be resolved came back with NO qualification. An
+    unverifiable hit is not a trustworthy hit."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    # Indexed, but the file is not on disk -> "missing"; and one with no hash at
+    # all -> "unknown", which previously escaped the notice entirely.
+    add_symbol(db, id="ghost.py::ghost::function::1", file="ghost.py", name="ghost",
+               kind="function", file_hash=None)
+    (repo / "ghost.py").write_text("def ghost(): ...\n")
+
+    out = _codex_search({"query": "ghost", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 1
+    assert out["results"][0]["freshness"] == "unknown"
+    assert "unverifiable" in out["notice"]
+
+
+def test_the_stale_branch_counts_missing_files_too(tmp_path):
+    """`stale + missing` must be discriminable from `stale` alone.
+
+    The first discriminating fixture had `missing == 0`, so dropping `missing`
+    from that sum survived as a mutant — the round-1 trap one variable over. Here
+    one indexed file is stale and another was DELETED from disk, with nothing
+    unindexed, so the stale branch is reached and the total can only be right by
+    counting both.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "stale.py", indexed_hash="0" * 64)   # on disk, bytes differ
+    _add(db, repo, "gone.py", on_disk=False)            # indexed, deleted from disk
+
+    out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
+    idx = out["index"]
+
+    assert (idx["stale"], idx["missing"], idx["unindexed"]) == (1, 1, 0)
+    assert "2 indexed file(s) are stale or missing" in out["notice"]
+
+
+def test_unindexed_ignores_directories_the_index_never_covered(tmp_path):
+    """The unindexed count is SCOPED to directories that already hold indexed
+    files, and this pins why.
+
+    `_walk_repo`'s skip list does not exclude virtualenvs: on the real techne
+    repo it yields 10,282 files, 10,042 of them inside `.venv-ci-3.12` and
+    `.venv-ci-3.13`. An unscoped count reported "10,055 never indexed" — which
+    would fire on every repo with a venv, and a warning that always fires is one
+    the reader learns to skip. That is the silence this fix exists to remove,
+    wearing a louder coat.
+
+    So: a new file BESIDE indexed ones counts; a file in a directory the index
+    never touched does not.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "pkg.py")                                   # indexed, at repo root
+    (repo / "sibling.py").write_text("def added_later(): ...\n")  # NEW, beside it
+
+    noise = repo / ".venv-ci-3.13" / "lib"
+    noise.mkdir(parents=True)
+    for i in range(5):
+        (noise / f"vendored_{i}.py").write_text("x = 1\n")      # never-indexed dir
+
+    out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
+
+    assert out["index"]["unindexed"] == 1, "the 5 vendored files must not count"
+    assert "1 source file(s) on disk have never been indexed" in out["notice"]
+
+
+def test_a_new_subpackage_is_not_reported_as_genuine_absence(tmp_path):
+    """THE ROUND-2 CRITICAL. Scoping by the file's OWN DIRECTORY was blind to any
+    NEW DIRECTORY, not merely a new top-level package.
+
+    A new sub-package under an already-indexed tree scored 0 unindexed and earned
+    "genuine absence" with the symbol sitting on disk. Worse in a
+    per-module-directory layout (`Foo/index.ts`, and this indexer handles `.ts`):
+    every new module lands in a new directory, so the count is pinned at 0
+    forever while the notice asserts certainty — the fix doing nothing, loudly.
+
+    Top-level component fixes it: `pkg/newsub/` still belongs to `pkg/`.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    (repo / "pkg").mkdir()
+    _add(db, repo, "pkg/known.py")
+    (repo / "pkg" / "newsub").mkdir()
+    (repo / "pkg" / "newsub" / "mod.py").write_text("def sought(): ...\n")
+
+    out = _codex_search({"query": "sought", "repo": str(repo)}, cfg)
+
+    assert out["index"]["unindexed"] == 1, "a new DIRECTORY under an indexed tree must count"
+    assert "genuine absence" not in out["notice"]
+
+
+def test_per_module_directory_layout_is_not_pinned_at_zero(tmp_path):
+    """The same Critical in the layout where it is total rather than occasional.
+
+    With `src/Foo/index.ts` per module, EVERY new module is a new directory, so
+    the per-directory rule could never report anything — a fix that runs, reports
+    zero, and certifies absence forever.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    (repo / "src" / "Bar").mkdir(parents=True)
+    _add(db, repo, "src/Bar/index.ts", body="export function bar() {}\n")
+    for name in ("Foo", "Baz"):
+        (repo / "src" / name).mkdir()
+        (repo / "src" / name / "index.ts").write_text("export function x() {}\n")
+
+    out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
+
+    assert out["index"]["unindexed"] == 2
+    assert "genuine absence" not in out["notice"]
+
+
+def test_unenumerable_disk_is_reported_as_unknown_not_absence(tmp_path, monkeypatch):
+    """PINS THE `coverage != complete` BRANCH — a surviving mutant in round 2.
+
+    Deleting that guard reproduces the ROUND-1 DEFECT VERBATIM with a green
+    suite: coverage falls through to the genuine-absence branch, and the tool
+    certifies absence on a disk it never read. Both surviving mutants were
+    doubt-expressing branches failing open to certainty, which is the shape of
+    every defect on this PR.
+
+    Driven through the real path: the walker raises, so `_unindexed_count`'s own
+    OSError handler produces the unknown coverage.
+    """
+    import techne.codex.source as src
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "only.py")
+
+    def boom(*a, **k):
+        raise OSError("cannot enumerate")
+        yield  # pragma: no cover — keeps this a generator
+
+    monkeypatch.setattr(src, "_walk_repo", boom)
+
+    out = _codex_search({"query": "anything", "repo": str(repo)}, cfg)
+
+    assert out["index"]["coverage"] == "unknown"
+    assert out["index"]["unindexed"] is None
+    assert "UNKNOWN, not absent" in out["notice"]
+    assert "genuine absence" not in out["notice"]
+
+
+def test_unclassifiable_files_block_the_absence_claim(tmp_path):
+    """PINS THE `unknown` BRANCH of the notice — the other round-2 survivor.
+
+    A symbol stored with no file_hash cannot be compared against disk, so the
+    index's freshness is not established. Deleting this branch let such a repo
+    fall through to "genuine absence" — certainty from evidence that was never
+    checked. Note the same-named kill in my round-1 write-up was the HIT-ROW
+    `stale_count` branch, which is separately pinned; this is the notice's.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    (repo / "opaque.py").write_text("def opaque(): ...\n")
+    add_symbol(db, id="opaque.py::opaque::function::1", file="opaque.py",
+               name="opaque", kind="function", file_hash=None)
+
+    out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
+
+    assert (out["index"]["unknown"], out["index"]["stale"]) == (1, 0)
+    assert "could not be classified" in out["notice"]
+    assert "genuine absence" not in out["notice"]
