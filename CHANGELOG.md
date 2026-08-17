@@ -11,8 +11,8 @@ The release where the instruments stopped lying. Nearly every fix below is the s
 a rail that was enabled, registered, and reporting healthy while doing nothing — a
 grep-assist that never once fired, a code index that certified its own pollution, a
 zero-result search that couldn't describe its own reliability, a CI guard that failed open
-on a typo, a completeness check satisfied by a prefix. None of them looked broken. That is
-what made them worth a release. 23 changes.
+on a typo, a completeness check satisfied by a prefix, a glob that skipped files without
+saying so. None of them looked broken. That is what made them worth a release. 24 changes.
 
 **Upgrading:** `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.14.0"`
 — the `--force` is required; a plain `pipx install` over an existing techne refuses. What
@@ -67,6 +67,15 @@ accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not
 
 - **Executable predicate for the evidence length test** (#541, #567) — the gate asserted a
   property it described in prose. It now runs the probe it claims to run.
+
+- **Archived `.jsonl.gz` transcripts are readable** (#621) — gzipping old transcripts is a
+  4.5x saving (14.0 MB → 3.1 MB measured on a real one, byte-identical round trip) against
+  366 MB of transcripts older than a fortnight. But a `.gz` was **invisible** to both
+  transcript globs — no error, just skipped — and the reader died on one with a
+  `UnicodeDecodeError`. So the corpus could shrink silently: archive to save space, and the
+  archived sessions quietly stop existing as far as import and search are concerned. The
+  reader now opens `.gz` transparently and both globs match it, so archiving is no longer a
+  form of deletion.
 
 - **Crash-recovery fault-injection gate** (#388) — techne is a stateful daemon over SQLite,
   and the interesting bugs live in *interrupted transitions*, which unit tests never reach
