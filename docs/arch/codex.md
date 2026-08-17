@@ -1,13 +1,15 @@
 ---
 card: arch-card:techne-codex
 updated: 2026-07-20
-anchor: techne/core/codex.py sha=4f27c264078f870d3748d8a85c7f98c74f10e3a8
+anchor: techne/core/codex.py sha=b02095cdabaea0354ddfbec2d01815bf20ba36c3
 ---
 # codex — code-graph store (EXPERIMENTAL)
 
 STATUS: experimental, P1 only; tree-sitter+graphqlite deferred until the Codex persona is scoped (docs/roadmap.md).
-SEAM: persona-agnostic code-graph substrate, db-per-repo (codex/<slug>-<hash>.db, PRAGMA user_version, CODEX_VERSION=2). files→symbols→call/import/def-use edges stored RELATIONALLY on SQLite — NOT a graph DB (keeps the single-file/portable substrate). Reachability/blast-radius = hand-rolled recursive CTEs, not a graph engine. graphqlite (Cypher + PageRank/Louvain UDF) = possible future techne[codex] upgrade, NOT built.
+SEAM: persona-agnostic code-graph substrate, db-per-repo (codex/<slug>-<hash>.db, PRAGMA user_version, CODEX_VERSION=3). files→symbols→call/import/def-use edges stored RELATIONALLY on SQLite — NOT a graph DB (keeps the single-file/portable substrate). Reachability/blast-radius = hand-rolled recursive CTEs, not a graph engine. graphqlite (Cypher + PageRank/Louvain UDF) = possible future techne[codex] upgrade, NOT built.
 PARSING: tree-sitter SourceAdapter (Python+TypeScript) lives SEPARATELY in techne/codex/source.py, behind the `techne[codex]` extra (tree-sitter, -python, -typescript, watchdog). LSP-assist: techne/codex/lsp_resolve.py + core/lsp_client.py.
+WHAT GETS WALKED — `_SKIP_DIRS` MATCHES PATH SEGMENTS, AND IT SKIPS VENV *CONTENTS*, NOT JUST DIRECTORIES CALLED `venv` (techne#604). Exact names only, no patterns, so a virtualenv named anything else (`.venv-ci-3.12`) walks straight in unless its `site-packages` / `dist-packages` segment is caught. Measured before that entry existed: 114,412 vendored symbols against 5,137 real ones — 96% of this repo's graph — and `codex_blast_radius` returning `aiohttp/web.py` as a dependent of a techne hook. The failure is SILENT: a plausible symbol from site-packages reads exactly like one of ours. Residual, accepted: each venv's `bin/activate_this.py` (2 symbols) still indexes.
+MIGRATION v2→v3 PURGES, IT DOES NOT MERELY GATE. Indexing is INCREMENTAL and the only DELETE is scoped to the file being re-indexed, so rows for files the walker no longer visits are never revisited — a polluted index survives a fix to the skip list forever. Worse, `index_freshness` (techne#595) then reports `stale: 0, coverage: complete` over them, because every one of those files IS present and unchanged on disk: they are not stale, they should not be there. `_codex_v2_to_v3` deletes exactly the excluded rows and their edges. Its patterns are held in codex.py as SQL rather than imported from `source._SKIP_DIRS` — the migration must run without the optional extra, and must encode what the skip list meant AT v3.
 OPS: schema symbols(id,file,name,kind,…)+edges; codex_meta KV (v2) persists repo_root; migrations via _apply_codex_migration() before store.migrate().
 API: `techne codex index <repo>`; MCP codex_search, codex_blast_radius.
 CONSUMERS: none cross-repo yet (experimental). CI installs the `codex` extra so extraction tests run, not skip.
