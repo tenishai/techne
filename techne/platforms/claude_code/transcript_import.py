@@ -58,14 +58,18 @@ def session_id_for(path: Path) -> str:
     """Session id from a transcript filename, for either spelling.
 
     ``Path("abc.jsonl.gz").stem`` is ``"abc.jsonl"``, so plain ``.stem`` silently
-    yields a WRONG id for an archived transcript — and that id becomes the Librarian's
-    ``source_url``, so the same session would index twice under two identities.
+    yields a WRONG id for an archived transcript — and that id reaches ``sessions.id``,
+    every ``observations.session_id``, and the Librarian's ``source_url``, so the same
+    session lands twice under two identities.
+
+    Raises ValueError on a name that is not a transcript. Falling back to ``.stem``
+    would reintroduce exactly the bug above, quietly, on the one input that reaches it.
     """
     name = path.name
     for suffix in TRANSCRIPT_SUFFIXES:
         if name.endswith(suffix):
             return name[: -len(suffix)]
-    return path.stem
+    raise ValueError(f"not a transcript filename: {path.name!r}")
 
 
 def iter_transcript_files(directory: Path) -> list[Path]:
@@ -130,7 +134,10 @@ def import_transcript(
                 ai_title = title  # last one wins (titles within a session are identical anyway)
 
     if not session_id:
-        session_id = jsonl_path.stem
+        # NOT .stem — this function's input domain now includes ".jsonl.gz", where
+        # .stem leaves the ".jsonl" on and the same session lands twice in
+        # `sessions.id` and every `observations.session_id`.
+        session_id = session_id_for(jsonl_path)
 
     conn = connect(db_path)
     try:

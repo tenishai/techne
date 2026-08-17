@@ -27,8 +27,9 @@ def _open_text(path: Path):
     """Open a transcript as UTF-8 text, transparently decompressing ``.gz``.
 
     Archived transcripts (``<session>.jsonl.gz``) must read exactly like live ones:
-    aged transcripts compress ~4.5x, and without this the reader raised
-    ``UnicodeDecodeError`` on the gzip magic bytes rather than reading the file (#621).
+    aged transcripts compress ~3.6x (measured over 3 real transcripts, 67.9 MB → 18.9
+    MB), and without this the reader raised ``UnicodeDecodeError`` on the gzip magic
+    bytes rather than reading the file (#621).
     """
     if path.suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8")
@@ -40,9 +41,12 @@ def iter_jsonl_records(jsonl_path: Path):
     blank/invalid lines.
 
     Whole-file iteration from the start. Offset-based tailing (see
-    ``jsonl_transcript``) does its own seeking and does not use this — byte offsets
-    into a compressed file are not seekable the same way, so tailing stays
-    uncompressed-only by design (a live session's transcript is never archived).
+    ``jsonl_transcript``) does its own seeking and does not use this — it opens the
+    file ``"rb"`` and seeks a raw byte offset, which is meaningless against a
+    compressed file, and its ``include_globs`` default of ``["*.jsonl"]`` cannot see
+    one anyway. So tailing stays uncompressed-only. That is safe only while a
+    transcript still being appended to is never archived, which is an ASSUMPTION about
+    how the archiver is operated — nothing here enforces it.
     """
     with _open_text(jsonl_path) as f:
         for line in f:

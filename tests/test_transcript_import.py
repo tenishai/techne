@@ -962,6 +962,66 @@ class TestArchivedTranscripts:
         assert results[0]["session_id"] == "sess-fixture"
         assert not results[0].get("skipped")
 
+    def test_session_id_falls_back_to_the_filename_for_either_spelling(self, db_path, tmp_path):
+        """The fallback at import_transcript fires only when NO record carries a
+        sessionId — every other fixture in this file sets one, which switches the
+        guard off. For a .gz, `.stem` would leave the ".jsonl" on and land the same
+        session twice in sessions.id and every observations.session_id."""
+        d = tmp_path / "proj"
+        d.mkdir()
+        recs = [  # deliberately no sessionId on any record
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-01T10:00:01.000Z",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu_1",
+                            "name": "Bash",
+                            "input": {"command": "pytest tests/"},
+                        }
+                    ]
+                },
+            },
+        ]
+        _write_jsonl(d / "plain-sess.jsonl", recs)
+        with gzip.open(d / "gz-sess.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write("\n".join(json.dumps(r) for r in recs) + "\n")
+
+        import_directory(db_path, d)
+
+        conn = connect(db_path)
+        try:
+            ids = sorted(r[0] for r in conn.execute("SELECT id FROM sessions").fetchall())
+        finally:
+            conn.close()
+        assert ids == ["gz-sess", "plain-sess"]
+
+    def test_session_jsonl_resolves_an_archived_transcript(self, tmp_path, monkeypatch):
+        """Session recovery is one of the three glob sites #621 named — without this
+        it is the third of the fix that could be deleted without a sound."""
+        from techne.platforms.claude_code import transcript_import as ti
+
+        projects = tmp_path / "projects"
+        (projects / "slug").mkdir(parents=True)
+        monkeypatch.setattr(ti, "PROJECTS_DIR", projects)
+
+        (projects / "slug" / "archived-only.jsonl.gz").write_bytes(gzip.compress(b"{}"))
+        assert ti._session_jsonl("archived-only").name == "archived-only.jsonl.gz"
+        assert ti._session_jsonl("nope") is None
+
+        # both spellings present: the uncompressed file wins
+        (projects / "slug" / "both.jsonl").write_text("{}")
+        (projects / "slug" / "both.jsonl.gz").write_bytes(gzip.compress(b"{}"))
+        assert ti._session_jsonl("both").name == "both.jsonl"
+
+    def test_session_id_for_rejects_a_non_transcript(self):
+        from techne.platforms.claude_code.transcript_import import session_id_for
+
+        with pytest.raises(ValueError):
+            session_id_for(Path("/x/notes.md"))
+
     def test_a_corrupt_archive_is_reported_not_fatal(self, db_path, tmp_path):
         """A truncated .gz must not take the whole directory import down with it —
         import_directory records it as a skip with a reason, and the good file lands."""

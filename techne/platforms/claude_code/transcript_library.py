@@ -35,23 +35,28 @@ class ClaudeCodeTranscriptSource:
         self.transcripts_dir = (
             Path(transcripts_dir) if transcripts_dir else default_transcripts_dir()
         )
-        # Files iter_transcripts could not read, as (path, error). A caller measuring
-        # index coverage can ask what was passed over instead of inferring it from a
-        # count that silently came up short.
+        # Files the LAST full consumption of iter_transcripts could not read, as
+        # (path, error). Valid only after the generator is exhausted, and it describes
+        # the files ITERATED — a caller that stops early (``index_transcripts(limit=N)``
+        # wraps this in islice) has not looked at the rest, so this is not a coverage
+        # figure for the directory. Reset at the top of each iteration.
         self.unreadable: list[tuple[Path, str]] = []
 
     def iter_transcripts(self) -> Iterator[Transcript]:
+        self.unreadable = []
         for jsonl in iter_transcript_files(self.transcripts_dir):
             turns: list[TranscriptTurn] = []
             try:
                 records = list(iter_jsonl_records(jsonl))
-            except (OSError, EOFError) as e:
-                # gzip.BadGzipFile subclasses OSError, but a TRUNCATED archive raises
-                # EOFError ("Compressed file ended before the end-of-stream marker"),
-                # which does not — both spellings have to be caught.
-                # An unreadable file (a truncated .gz, a permission error) must not take
-                # the whole indexing run down — but it must not pass QUIETLY either, or
-                # the next coverage measurement is a confident wrong answer. Count it.
+            except Exception as e:
+                # Deliberately broad, matching ``import_directory``. Enumerating the
+                # gzip failure classes was tried and was WRONG: BadGzipFile subclasses
+                # OSError and a truncated archive raises EOFError, but a valid header
+                # over a corrupt payload raises ``zlib.error``, which is neither — so
+                # an ``(OSError, EOFError)`` handler let the most likely corruption
+                # through and took the whole run down. One unreadable file must not do
+                # that; nor may it pass QUIETLY, or the next coverage measurement is a
+                # confident wrong answer. Count it.
                 self.unreadable.append((jsonl, str(e)))
                 log.warning("transcript_unreadable path=%s error=%s", jsonl, e)
                 continue

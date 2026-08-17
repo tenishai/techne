@@ -6,6 +6,8 @@ import gzip
 import json
 from pathlib import Path
 
+import pytest
+
 from techne.core.transcripts import Transcript
 from techne.platforms.claude_code.transcript_library import ClaudeCodeTranscriptSource
 
@@ -131,3 +133,74 @@ def test_an_unreadable_archive_is_recorded_not_fatal(tmp_path):
 
     assert [t.id for t in transcripts] == ["good"]
     assert [p.name for p, _ in source.unreadable] == ["truncated.jsonl.gz"]
+
+
+def test_a_corrupt_payload_is_recorded_not_fatal(tmp_path):
+    """A valid gzip header over a corrupt payload raises zlib.error, which is NEITHER
+    OSError NOR EOFError — the taxonomy an enumerated handler got wrong, and the most
+    likely real corruption."""
+    import zlib
+
+    d = tmp_path / "transcripts"
+    d.mkdir()
+    (d / "corrupt.jsonl.gz").write_bytes(b"\x1f\x8b\x08 not actually gzip")
+    _write_jsonl(d / "good.jsonl", _TURNS)
+
+    # pin the premise: this fixture really does raise the class neither name covers
+    with pytest.raises(zlib.error):
+        with gzip.open(d / "corrupt.jsonl.gz", "rt", encoding="utf-8") as f:
+            f.read()
+
+    source = ClaudeCodeTranscriptSource(d)
+    transcripts = list(source.iter_transcripts())
+
+    assert [t.id for t in transcripts] == ["good"]
+    assert [p.name for p, _ in source.unreadable] == ["corrupt.jsonl.gz"]
+
+
+def test_unreadable_resets_between_iterations(tmp_path):
+    """It describes the LAST consumption, not a running total."""
+    d = tmp_path / "transcripts"
+    d.mkdir()
+    (d / "corrupt.jsonl.gz").write_bytes(b"\x1f\x8b\x08 not actually gzip")
+
+    source = ClaudeCodeTranscriptSource(d)
+    for _ in range(3):
+        list(source.iter_transcripts())
+
+    assert len(source.unreadable) == 1
+
+
+@pytest.mark.skipif(
+    not (Path.home() / ".claude" / "projects").exists(),
+    reason="needs real Claude Code transcripts; hermetic in CI",
+)
+def test_real_transcripts_survive_the_round_trip(tmp_path):
+    """The only check exercising the adapter against records nobody constructed —
+    the property the constructed fixtures above cannot have."""
+    src = sorted(
+        (Path.home() / ".claude" / "projects").glob("*/*.jsonl"),
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )[:2]
+    if not src:
+        pytest.skip("no transcripts on disk")
+
+    plain_d, gz_d = tmp_path / "plain", tmp_path / "gz"
+    plain_d.mkdir()
+    gz_d.mkdir()
+    for f in src:
+        raw = f.read_bytes()
+        (plain_d / f.name).write_bytes(raw)
+        (gz_d / (f.name + ".gz")).write_bytes(gzip.compress(raw))
+
+    plain = {t.id: t for t in ClaudeCodeTranscriptSource(plain_d).iter_transcripts()}
+    source = ClaudeCodeTranscriptSource(gz_d)
+    archived = {t.id: t for t in source.iter_transcripts()}
+
+    assert source.unreadable == []
+    assert set(archived) == set(plain)
+    for sid in plain:
+        assert [(t.role, t.text) for t in archived[sid].turns] == [
+            (t.role, t.text) for t in plain[sid].turns
+        ]
