@@ -1,5 +1,6 @@
 """Tests for techne.core.transcript_import — JSONL backfill."""
 
+import gzip
 import json
 from pathlib import Path
 
@@ -914,3 +915,127 @@ def test_backfill_missing_transcript(db_path, tmp_path):
     )
     assert result["backfilled"] == 0
     assert "transcript not found" in result["reason"]
+
+
+# --- archived (.gz) transcripts (#621) -------------------------------------
+
+
+class TestArchivedTranscripts:
+    def test_session_id_for_both_spellings(self):
+        from techne.platforms.claude_code.transcript_import import session_id_for
+
+        assert session_id_for(Path("/x/sess-abc.jsonl")) == "sess-abc"
+        assert session_id_for(Path("/x/sess-abc.jsonl.gz")) == "sess-abc"
+        # a uuid session id has dots in nothing, but the guard must not eat one
+        assert session_id_for(Path("/x/a.b.jsonl.gz")) == "a.b"
+
+    def test_iter_transcript_files_prefers_plain_and_sorts(self, tmp_path):
+        from techne.platforms.claude_code.transcript_import import iter_transcript_files
+
+        (tmp_path / "b.jsonl").write_text("{}")
+        with gzip.open(tmp_path / "a.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write("{}")
+        # 'c' is mid-archive: both spellings on disk
+        (tmp_path / "c.jsonl").write_text("{}")
+        with gzip.open(tmp_path / "c.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write("{}")
+        (tmp_path / "notes.md").write_text("ignore me")
+
+        files = iter_transcript_files(tmp_path)
+
+        assert [f.name for f in files] == ["a.jsonl.gz", "b.jsonl", "c.jsonl"]
+
+    def test_import_directory_imports_an_archived_transcript(self, db_path, tmp_path):
+        d = tmp_path / "proj"
+        d.mkdir()
+        recs = [
+            _user_text("Hello, please run the tests", "2026-06-01T10:00:00.000Z"),
+            _bash_use("tu_1", "pytest tests/", "2026-06-01T10:00:01.000Z"),
+            _tool_result("tu_1", "2 passed", "2026-06-01T10:00:02.000Z"),
+        ]
+        with gzip.open(d / "sess-fixture.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write("\n".join(json.dumps(r) for r in recs) + "\n")
+
+        results = import_directory(db_path, d)
+
+        assert len(results) == 1
+        assert results[0]["session_id"] == "sess-fixture"
+        assert not results[0].get("skipped")
+
+    def test_session_id_falls_back_to_the_filename_for_either_spelling(self, db_path, tmp_path):
+        """The fallback at import_transcript fires only when NO record carries a
+        sessionId — every other fixture in this file sets one, which switches the
+        guard off. For a .gz, `.stem` would leave the ".jsonl" on and land the same
+        session twice in sessions.id and every observations.session_id."""
+        d = tmp_path / "proj"
+        d.mkdir()
+        recs = [  # deliberately no sessionId on any record
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-01T10:00:01.000Z",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu_1",
+                            "name": "Bash",
+                            "input": {"command": "pytest tests/"},
+                        }
+                    ]
+                },
+            },
+        ]
+        _write_jsonl(d / "plain-sess.jsonl", recs)
+        with gzip.open(d / "gz-sess.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write("\n".join(json.dumps(r) for r in recs) + "\n")
+
+        import_directory(db_path, d)
+
+        conn = connect(db_path)
+        try:
+            ids = sorted(r[0] for r in conn.execute("SELECT id FROM sessions").fetchall())
+        finally:
+            conn.close()
+        assert ids == ["gz-sess", "plain-sess"]
+
+    def test_session_jsonl_resolves_an_archived_transcript(self, tmp_path, monkeypatch):
+        """Session recovery is one of the three glob sites #621 named — without this
+        it is the third of the fix that could be deleted without a sound."""
+        from techne.platforms.claude_code import transcript_import as ti
+
+        projects = tmp_path / "projects"
+        (projects / "slug").mkdir(parents=True)
+        monkeypatch.setattr(ti, "PROJECTS_DIR", projects)
+
+        (projects / "slug" / "archived-only.jsonl.gz").write_bytes(gzip.compress(b"{}"))
+        assert ti._session_jsonl("archived-only").name == "archived-only.jsonl.gz"
+        assert ti._session_jsonl("nope") is None
+
+        # both spellings present: the uncompressed file wins
+        (projects / "slug" / "both.jsonl").write_text("{}")
+        (projects / "slug" / "both.jsonl.gz").write_bytes(gzip.compress(b"{}"))
+        assert ti._session_jsonl("both").name == "both.jsonl"
+
+    def test_session_id_for_rejects_a_non_transcript(self):
+        from techne.platforms.claude_code.transcript_import import session_id_for
+
+        with pytest.raises(ValueError):
+            session_id_for(Path("/x/notes.md"))
+
+    def test_a_corrupt_archive_is_reported_not_fatal(self, db_path, tmp_path):
+        """A truncated .gz must not take the whole directory import down with it —
+        import_directory records it as a skip with a reason, and the good file lands."""
+        d = tmp_path / "proj"
+        d.mkdir()
+        (d / "bad.jsonl.gz").write_bytes(b"\x1f\x8b\x08 not actually gzip")
+        _write_jsonl(
+            d / "sess-fixture.jsonl",
+            [_user_text("hi", "2026-06-01T10:00:00.000Z")],
+        )
+
+        results = import_directory(db_path, d)
+
+        by_skip = {r.get("session_id"): r for r in results}
+        assert by_skip["bad"]["skipped"] is True
+        assert "error" in by_skip["bad"]["reason"]
+        assert not by_skip["sess-fixture"].get("skipped")

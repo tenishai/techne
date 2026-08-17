@@ -5,6 +5,7 @@ platforms/claude_code/transcript_import.py (the #21 leak, #57). They parse the
 Anthropic-messages content-block shape, which any compliant client emits.
 """
 
+import gzip
 import json
 
 from techne.sync.jsonl_records import (
@@ -33,6 +34,28 @@ class TestIterJsonlRecords:
         p = tmp_path / "empty.jsonl"
         p.write_text("")
         assert list(iter_jsonl_records(p)) == []
+
+    def test_reads_gzipped_transcript_identically(self, tmp_path):
+        """An archived .jsonl.gz must read exactly like the .jsonl it came from (#621).
+
+        Before this, the reader handed the gzip magic bytes to a UTF-8 decode and
+        raised UnicodeDecodeError.
+        """
+        body = '{"a": 1}\n\nnot json\n{"b": 2}\n'
+        plain = tmp_path / "t.jsonl"
+        plain.write_text(body)
+        gz = tmp_path / "t.jsonl.gz"
+        with gzip.open(gz, "wt", encoding="utf-8") as f:
+            f.write(body)
+
+        assert list(iter_jsonl_records(gz)) == list(iter_jsonl_records(plain))
+        assert list(iter_jsonl_records(gz)) == [{"a": 1}, {"b": 2}]
+
+    def test_empty_gzipped_file(self, tmp_path):
+        gz = tmp_path / "empty.jsonl.gz"
+        with gzip.open(gz, "wt", encoding="utf-8") as f:
+            f.write("")
+        assert list(iter_jsonl_records(gz)) == []
 
 
 class TestContentBlocks:
