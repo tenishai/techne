@@ -79,6 +79,12 @@ env:
   UV_PYTHON_PREFERENCE: only-system
   UV_PYTHON_DOWNLOADS: never
 
+# >>> THE FLIP SEQUENCE LIVES IN docs/go-public-runbook.md. READ IT BEFORE MAKING
+# >>> THIS REPO PUBLIC. The single most important step happens BEFORE the flip and
+# >>> is not in this file: STOP THE RUNNER CONTAINER. A job whose labels match no
+# >>> ONLINE runner queues rather than executing, which is what actually closes the
+# >>> window between "public" and "approval policy applied" — being quick does not.
+#
 # TRUST SPLIT (#556). `pull_request:` above is deliberately unfiltered, so it fires
 # for FORK PRs too. Combined with `runs-on: [self-hosted, ...]` that is arbitrary
 # attacker code on dev02 the moment this repo goes public — GitHub's own guidance
