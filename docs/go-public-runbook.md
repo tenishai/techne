@@ -65,6 +65,35 @@ grep -rn "^permissions:" .github/workflows/test.yml   # expect: no output
 theoretical today and why `fork-pr` has never executed (#592). Do not read
 "0 forks" as "the guard works" — nothing has ever tested it.
 
+### THERE IS A THIRD LAYER, and it is the one that disappears at the flip
+
+Measured 2026-08-17 by opening a real fork PR (#628, since closed):
+
+```bash
+gh api repos/tenishai/techne/actions/permissions/fork-pr-workflows-private-repos
+# run_workflows_from_fork_pull_requests:  false   <- fork PRs run NOTHING
+# send_secrets_and_variables:             false   <- good
+# require_approval_for_fork_pr_workflows: false   <- HAZARD, see below
+```
+
+On a **private** repo, fork PRs execute **no workflows at all**. With forking
+temporarily enabled at both levels, a real fork PR produced `total=0` check runs —
+an entirely empty Checks tab. Nothing ran. Attempting to enable it returns
+`422 "Policy is forbidden by entity owner"`: an **org-level** policy forbids it,
+readable only with `admin:org` scope and applying to all 20 org repos.
+
+Two consequences, and the second is the one to carry into the flip:
+
+1. **Today's safety does not come from the workflow guard.** It comes from this
+   policy, which is private-repos-only. The guard has never been exercised.
+2. **This layer vanishes the instant the repo is public.** Everything that has
+   been protecting the runner so far stops applying at exactly the moment step 2
+   completes — which is why step 1 (no online runner) is not optional.
+
+And note `require_approval_for_fork_pr_workflows: false`. If anyone ever relaxes
+the org policy to test the fork path while still private, **fork PR workflows
+would run unapproved**. Enable approval in the same sitting or do not do it.
+
 ### Blockers outside this repo
 
 - **#207 contains a collaborator's personal email in an edit revision.** The body
@@ -155,6 +184,24 @@ ssh mash1 'systemctl is-active ci-firewall'   # expect: active
 - [ ] **A fork PR is actually exercised** — see #592. Until that has happened
       once, the fork path is a hand trace. This is the step most likely to be
       skipped, and it is the only one that tests the thing being defended.
+
+      **This is the FIRST OPPORTUNITY to do it.** It was attempted 2026-08-17 and
+      is not possible while private: an org policy forbids fork-PR workflows on
+      private repos, so a real fork PR produced zero check runs. Post-flip that
+      policy no longer applies, so this becomes both possible and urgent — the
+      window between "the guard is now the only control" and "the guard has been
+      tested" should be minutes, not weeks.
+
+      Concretely, once step 3 is verified: fork to a personal account, push a
+      one-file branch, open a PR, and confirm the split:
+
+      | job | expected |
+      |---|---|
+      | `test (3.12)`, `test (3.13)`, `eval-vec`, `arch-cards`, `crash-recovery` | **skipped** |
+      | `fork-pr` | **runs** on ubuntu-latest |
+
+      An empty Checks tab is a FINDING, not a pass — that is #530's shape, and it
+      is exactly what was observed while private.
 
 ---
 
