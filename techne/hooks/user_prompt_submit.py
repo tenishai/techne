@@ -142,13 +142,24 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     that fixed it 66 lines below — stale prose outliving its subject, which is the
     defect class this rail keeps producing.
 
-    THE LOOKUP STAYS ANYWAY, and the reason is a real difference rather than
-    inertia: filtering on ``knowledge_type`` is behaviourally equivalent here
-    (measured — 27 pass, and a control with the filter disabled fails 3, so the
-    equivalence is not vacuous) but it fails OPEN on a row that arrives without the
-    key, where the id lookup fails CLOSED. A push-excluded row leaking into context
-    because a field was missing is techne#561 verbatim. A filter whose job is to
-    keep rows out must not be the thing that lets one through.
+    THE LOOKUP STAYS ANYWAY — but NOT for the reason an earlier revision of this
+    paragraph gave, which was false and is corrected here rather than quietly
+    deleted. It claimed the id lookup "fails CLOSED" where a ``knowledge_type``
+    filter fails open. It does not: ``if not ids: return rows`` hands the batch
+    back UNFILTERED, and a row carrying no ``id`` is kept. Both fail open. I wrote
+    that sentence at a reviewer's prompting and neither of us checked it against
+    the code four lines below.
+
+    The real difference is AUTHORITY. This re-reads ``knowledge.type`` from the
+    table, so its answer does not depend on ``search()``'s row shape — the very
+    thing techne#566 just showed can carry a field that means something other than
+    what a caller assumes. Filtering on a value the search layer supplies makes
+    this guard only as correct as that layer's contract; reading the table makes it
+    independent of it.
+
+    Behaviourally the two are equivalent today (measured: the suite passes either
+    way, and a control with the filter disabled fails 3, so the equivalence is not
+    vacuous). Equivalence today is not the argument for keeping it.
 
     One primary-key lookup over the ids just returned. Raising here degrades the
     whole recall to nothing via the caller's handler — failing CLOSED, which is the

@@ -415,7 +415,10 @@ class TestInjectedTypeLabel:
     def test_distinct_kinds_stay_distinguishable(self):
         """The point of the label. A `decision` and an `evaluation` warrant
         different weight; collapsing them removes the distinction exactly where
-        the agent decides how much to trust the line."""
+        the agent decides how much to trust the line.
+
+        `document_card` and `pattern` are included as RENDERER inputs, not as a
+        claim they reach this rail — `_drop_pull_only` filters both upstream."""
         kinds = ["fact", "decision", "evaluation", "procedure", "document_card", "pattern"]
         # Content deliberately NOT equal to the kind: with `content=k` the assertion
         # could not tell a correct render from one that swapped label and content,
@@ -430,8 +433,14 @@ class TestInjectedTypeLabel:
 
     def test_a_pattern_row_is_visibly_a_pattern(self):
         """techne#561's month-long miss: a legacy `pattern` row rode the push rail
-        and was visually indistinguishable from a fact. The label that would have
-        exposed it was present on every line and said the wrong thing."""
+        and was visually indistinguishable from a fact.
+
+        PRECISION THIS TEST OWES (#566 r2): `pattern` and `document_card` are in
+        `PULL_ONLY_TYPES`, and `_drop_pull_only` runs BEFORE the renderer — so
+        today they cannot reach this rail at all. #561 predates that filter. This
+        pins `_build_context` as a pure function of the row it is handed, which is
+        what makes it correct for whatever the filter's contents become; it is not
+        evidence about what this rail currently emits."""
         out = self._ctx(
             [{"id": 9, "type": "knowledge", "knowledge_type": "pattern", "content": "x"}]
         )
@@ -451,6 +460,17 @@ class TestInjectedTypeLabel:
 
     def test_a_row_with_neither_is_labelled_note(self):
         assert "[note]" in self._ctx([{"id": 5, "content": "c"}])
+
+    def test_the_content_truncation_is_pinned(self):
+        """200 chars, and it was pinned by nothing — removing the slice entirely
+        left the suite green (#566 r2) while a recorded `document_card` decision
+        rests on it. An unbounded line here is a per-turn injection whose size is
+        set by whatever the longest matching row happens to be."""
+        out = self._ctx(
+            [{"id": 1, "type": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
+        )
+        assert "x" * 200 in out
+        assert "x" * 201 not in out
 
     def test_the_line_shape_is_pinned_including_the_id_prefix(self):
         """The `⟦techne#id⟧` prefix was pinned by nothing — deleting it left the
