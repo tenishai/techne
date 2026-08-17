@@ -386,6 +386,98 @@ class TestOutbox:
         assert stats(db_path)["synced"] == 2
 
 
+class TestUnlistedAdapterIsRefusedByDefault:
+    """techne#389 — default-deny on adapters techne does not ship.
+
+    THE ISSUE ASKED FOR SOMETHING THAT HAS NO TARGET, and the audit is why this
+    looks different from its sketch. #389 wanted a flag refusing to POST to
+    non-local destinations; measured 2026-08-17, techne contains ZERO
+    network-capable imports (no requests/httpx/aiohttp/urllib/http/socket), both
+    built-in adapters are local, and the one outbound path (litellm) is already
+    governed by EGRESS_KEYS. There is no POST to gate.
+
+    The real hole is `load_adapter` itself: it will import ANY class registered
+    under the `techne.sync_adapters` entry-point group and hand it every outbox
+    entry — full session and memory content.
+    """
+
+    def _fake_ep(self, monkeypatch, loaded):
+        """Register one unlisted entry point named 'remote'."""
+        from techne.sync import adapter as adapter_mod
+
+        class _EP:
+            name = "remote"
+
+            def load(self):
+                loaded.append(True)
+                return lambda **kw: object()
+
+        monkeypatch.setattr(adapter_mod, "entry_points", lambda group: [_EP()])
+
+    def test_unlisted_adapter_is_refused_and_never_imported(self, monkeypatch):
+        """THE REFUSAL MUST PRECEDE `ep.load()`. `load()` imports the module, and
+        import-time side effects are code execution — a gate that fires after the
+        class is in hand is cosmetic."""
+        from techne.sync.adapter import load_adapter
+
+        loaded: list = []
+        self._fake_ep(monkeypatch, loaded)
+
+        with pytest.raises(ValueError, match="not one of techne's built-ins"):
+            load_adapter("remote")
+
+        assert loaded == [], "the module must NOT be imported before the refusal"
+
+    def test_the_opt_in_actually_opens_it(self, monkeypatch):
+        """Otherwise the assertion above would also pass with the loader broken."""
+        from techne.sync.adapter import load_adapter
+
+        loaded: list = []
+        self._fake_ep(monkeypatch, loaded)
+
+        load_adapter("remote", allow_unlisted=True)
+
+        assert loaded == [True]
+
+    def test_builtins_are_unaffected(self, monkeypatch):
+        """Default-deny must not cost the shipped adapters — noop is the default
+        for every install, so breaking it would break everyone."""
+        from techne.sync.adapter import load_adapter
+
+        loaded: list = []
+        self._fake_ep(monkeypatch, loaded)
+
+        assert load_adapter("noop") is not None
+        assert load_adapter("filesystem", path="/tmp/x") is not None
+
+    def test_every_call_site_passes_the_flag(self):
+        """A GUARD WHOSE CALLERS DO NOT WIRE IT IS INERT, which is techne#596's
+        defect exactly — the rail was enabled, registered, and never fired because
+        its precondition was never met. `load_adapter` defaults `allow_unlisted`
+        to False, so a caller that forgets it fails CLOSED rather than open; this
+        pins the opposite risk, that someone "fixes" a refusal by hardcoding True
+        at a call site instead of setting the config key.
+        """
+        import pathlib
+        import re
+
+        offenders = []
+        for rel in (
+            "techne/cli.py",
+            "techne/hooks/session_start.py",
+            "techne/hooks/session_end.py",
+        ):
+            src = pathlib.Path(rel).read_text()
+            for call in re.findall(r"load_adapter\((?:[^()]|\([^()]*\))*\)", src):
+                if "allow_unlisted=config.sync.allow_unlisted_adapter" not in call:
+                    offenders.append(f"{rel}: {' '.join(call.split())}")
+
+        assert not offenders, (
+            "load_adapter call sites must pass the CONFIG value, so the operator "
+            f"layer governs it: {offenders}"
+        )
+
+
 class TestAdapterLoader:
     def test_load_noop(self):
         adapter = load_adapter("noop")

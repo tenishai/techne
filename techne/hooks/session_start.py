@@ -307,7 +307,12 @@ def _run_phases_2_to_9(
         from techne.sync.adapter import load_adapter
         from techne.sync.outbox import flush
 
-        adapter = load_adapter(config.sync.adapter, url=config.sync.url, path=config.sync.path)
+        adapter = load_adapter(
+            config.sync.adapter,
+            url=config.sync.url,
+            path=config.sync.path,
+            allow_unlisted=config.sync.allow_unlisted_adapter,
+        )
         synced, _failed = flush(config.db_path, adapter)
         if synced:
             print(f"techne: flushed {synced} outbox entries", file=sys.stderr)

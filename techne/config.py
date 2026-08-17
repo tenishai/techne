@@ -49,6 +49,12 @@ class SyncConfig:
     auth: str = ""
     audience: str = ""
     path: str = ""
+    #: Permit a sync adapter that is NOT one of techne's built-ins (techne#389).
+    #: Defaults False, i.e. DEFAULT-DENY. See `sync.adapter.load_adapter` for why
+    #: this is the boundary that exists rather than the ALLOW_REMOTE flag #389
+    #: originally sketched. Governed by the operator layer: `sync` is a whole-block
+    #: entry in EGRESS_KEYS, so this sub-key is covered with it.
+    allow_unlisted_adapter: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -611,10 +617,19 @@ class Config:
                 auth=s.get("auth", ""),
                 audience=s.get("audience", ""),
                 path=s.get("path", ""),
+                allow_unlisted_adapter=bool(s.get("allow_unlisted_adapter", False)),
                 extra={
                     k: v
                     for k, v in s.items()
-                    if k not in ("adapter", "url", "auth", "audience", "path")
+                    if k
+                    not in (
+                        "adapter",
+                        "url",
+                        "auth",
+                        "audience",
+                        "path",
+                        "allow_unlisted_adapter",
+                    )
                 },
             )
 
@@ -933,6 +948,11 @@ class Config:
             data["sync"]["audience"] = self.sync.audience
         if self.sync.path:
             data["sync"]["path"] = self.sync.path
+        # Emitted only when True: the default is deny, and writing `false` into
+        # every config.yaml would read as a knob someone chose rather than the
+        # built-in posture (techne#389).
+        if self.sync.allow_unlisted_adapter:
+            data["sync"]["allow_unlisted_adapter"] = True
         # Preserve adapter-specific extras that came in via _from_dict's
         # "kwargs" sweep, so load/save is a real round-trip.
         if self.sync.extra:
