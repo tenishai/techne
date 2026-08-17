@@ -94,9 +94,25 @@ env:
 #     -> 422 "Fork PR approval is not allowed for private repositories."
 # It only becomes settable AFTER the public flip — i.e. inside the very window it
 # is meant to protect. So it is a FIRST-ACTION-POST-FLIP runbook item on #556, not
-# a pre-flip checkbox, and until it is set this workflow guard is the only thing
-# standing between a fork PR and dev02. Read that as a reason to treat the guard as
-# load-bearing, not as a claim that the guard alone makes a public flip safe.
+# a pre-flip checkbox.
+#
+# *** THIS GUARD IS ATTACKER-EDITABLE, AND THAT IS NOT A CAVEAT — IT IS THE SCOPE. ***
+# For `pull_request`, GitHub evaluates the workflow FROM THE PR'S REF, not from the
+# base. MEASURED on this branch: run 31971484190 (event `pull_request`, head_sha
+# 124040e) executed an `expr-probe` job that existed ONLY on the PR's branch. So a
+# fork PR runs the fork's copy of THIS FILE — an attacker deletes the three `if:`
+# guards, or simply adds their own `pwn.yml` targeting dev02, and none of the
+# machinery below applies to them.
+#
+# AGAINST A DELIBERATE ATTACKER THIS GUARD CONTRIBUTES NOTHING. What it does buy is
+# NON-ADVERSARIAL exposure: an honest fork PR that would otherwise run on dev02 by
+# default, and CI coverage for fork contributors via `fork-pr`. That is worth having
+# and it is all this is.
+#
+# SO THE PRE-FLIP RUNBOOK ACTION IS NOT "RELY ON THIS GUARD" — that is the one thing
+# that does not work. It is: DE-REGISTER THE SELF-HOSTED RUNNERS FROM THIS REPO until
+# the fork-PR approval policy is settable (i.e. until after the flip), then re-register.
+# Unlike the approval policy, de-registering IS available pre-flip.
 #
 # So: every self-hosted job carries the SAME fork guard, and fork PRs are served by
 # `fork-pr` on a GitHub-hosted runner instead. Non-fork PRs and `push` on main are
@@ -113,13 +129,26 @@ env:
 # toJSON of each; the output is checked in at
 # tests/fixtures/github/expression_truth_table.json with its provenance:
 #
+# EVERY ROW BELOW WAS MEASURED IN ONE CONTEXT: a NON-FORK `pull_request` on this repo.
+# Four of them are context-DEPENDENT and are marked [ctx]; reading a [ctx] row as a law
+# is how this comment would mislead the next editor.
+#
 #   an absent property is            null      (NOT the empty string)
 #   <absent> == github.repository    false     <- the NEW guard's comparison
 #   <absent> == false                true      <- why `fork == false` is NOT a fix
 #   OLD  !(event_name=='pull_request' && <absent>)                       true   FAIL OPEN
 #   NEW  event_name!='pull_request' || <absent>==github.repository       false  FAIL CLOSED
-#   NEW  event_name!='pull_request' || full_name==github.repository      true   (real path)
-#   FORK_ONLY event_name=='pull_request' && <absent>!=github.repository  true
+#   NEW  event_name!='pull_request' || full_name==github.repository      true   [ctx]
+#   FORK_ONLY event_name=='pull_request' && <absent>!=github.repository  true   [ctx]
+#
+# THE [ctx] ROWS INVERT ON A FORK PR, and that inversion IS the feature: the NEW guard
+# reads `true` above only because this was a same-repo PR — on a fork it is FALSE, which
+# is what keeps fork code off dev02. Do not "fix" it to true.
+#
+# AND THE ROW THE SECURITY CLAIM RESTS ON HAS NEVER BEEN MEASURED IN ANY CONTEXT:
+# nobody has yet observed `fork-pr` actually fire, because no fork of this repo exists.
+# The fork-side behaviour is a HAND TRACE. One fork PR from a personal account would
+# convert it to measured; until then, say "expected" rather than "verified" about it.
 #
 # So a typo'd property under the OLD guard ran fork code on dev02, silently; under the
 # NEW guard the self-hosted job is SKIPPED. A mistake now costs a visibly missing job
@@ -451,9 +480,18 @@ jobs:
         # vector-backed tests RUN in the suite below, and this job has no cache step
         # and no pre-fetch — the exact configuration recorded near the top of this
         # file as the #535 red build: an un-cached model re-downloaded by every job on
-        # every matrix entry. A cache step is not the fix either, because GitHub
-        # isolates cache WRITES from fork PRs, so the first fork PR would miss and
-        # could never populate anything for the next one.
+        # every matrix entry.
+        #
+        # AND ADDING A CACHE IS THE WRONG FIX HERE ANYWAY, for a reason that does not
+        # depend on how GitHub scopes fork caches: this job runs ATTACKER-CONTROLLED
+        # CODE on GitHub's hosted account. Pulling a model down on both matrix legs to
+        # serve that is spending bandwidth and cache space on an untrusted contributor
+        # — the wrong place to add a resource, whatever the cache semantics turn out
+        # to be. (An earlier revision justified this by asserting GitHub isolates cache
+        # WRITES from fork PRs so a cache could never populate. That may well be true,
+        # but it was a HAND TRACE I did not verify, and the review flagged that reads
+        # are likely NOT isolated — a restore-only step would probably hit main's key.
+        # The argument above does not rest on either reading.)
         #
         # This also makes the install match what this job's own footer already
         # claims: fork PRs get the suite and the deterministic gates, NOT the vector

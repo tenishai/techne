@@ -775,71 +775,166 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
     )
 
 
-def test_no_trigger_is_added_without_deciding_the_fork_question():
-    """THE GUARD'S FIRST DISJUNCT IS A DENYLIST OF ONE EVENT NAME (#570 review).
+#: Events that carry a `pull_request` payload, i.e. that can be triggered BY A FORK.
+#: `github.event_name` differs per event, so FORK_GUARD's first disjunct — a comparison
+#: against the single literal 'pull_request' — is blind to every other member here.
+_FORK_CARRYING_EVENTS = {
+    "pull_request",
+    "pull_request_target",
+    "pull_request_review",
+    "pull_request_review_comment",
+}
 
-    `FORK_GUARD` reads `github.event_name != 'pull_request' || ...`. Any OTHER trigger
-    that carries a `pull_request` payload satisfies that first disjunct and
-    short-circuits the whole guard TRUE — so all three self-hosted jobs run and
-    `fork-pr` does not fire, for a fork's code.
 
-    `pull_request_target` is the dangerous one and it is not hypothetical: it is the
-    documented way to give fork PRs access to secrets, it runs in the BASE repo's
-    context with full secrets available, and adding it here was measured to leave the
-    suite at 16 passed. Today's checkout has no `ref:`, so it would take the base
-    commit rather than the fork's — one line away from being immediate RCE rather than
-    merely fork-triggered runs on dev02.
+def test_every_fork_carrying_trigger_is_named_in_the_guard():
+    """THE GUARD'S FIRST DISJUNCT IS A DENYLIST OF ONE EVENT NAME (#570 r1).
 
-    This does not ban new triggers. It makes adding one a DECISION: extend the guard
-    (and this set) deliberately, rather than inheriting a hole from a disjunct that
-    was written when `pull_request` was the only PR-shaped event in the file.
+    `FORK_GUARD` reads `github.event_name != 'pull_request' || ...`. Any OTHER event
+    carrying a fork's payload satisfies that disjunct, short-circuits the guard TRUE,
+    and puts fork code back on the self-hosted pool. `pull_request_target` is the
+    dangerous one: it is the documented way to give fork PRs secrets, it runs in the
+    BASE repo's context, and adding it left the suite green.
+
+    THIS ASSERTS THE GUARD, NOT A LIST OF BLESSED NAMES, and that is the #570 r2 fix.
+    The first version pinned the trigger SET and told the reader to "widen FORK_GUARD
+    first, then add it here" — so following the message's own remedy (add the trigger,
+    add it to the set, leave the guard alone) PASSED. A guard whose failure message
+    prescribes the hole is the #582 shape, and it is the second time I have shipped it.
+
+    Now the obligation is mechanical: declare a fork-carrying trigger and the guard
+    must name it. There is no list to add yourself to.
     """
-    declared = set(_triggers())
-    assert declared == {"push", "pull_request", "workflow_dispatch"}, (
-        f"the workflow's trigger set changed: {sorted(declared)}.\n"
-        "FORK_GUARD's first disjunct is `github.event_name != 'pull_request'`, so ANY "
-        "other trigger carrying a pull_request payload short-circuits the techne#556 "
-        "fork guard to TRUE and puts fork code back on the self-hosted pool.\n"
-        "If the new trigger cannot carry fork code, add it here with that reasoning. "
-        "If it can — `pull_request_target` above all — widen FORK_GUARD FIRST, then "
-        "add it here."
+    declared_fork_carrying = _FORK_CARRYING_EVENTS & set(_triggers())
+    assert declared_fork_carrying, (
+        "no fork-carrying trigger is declared at all — either the workflow stopped "
+        "running on pull_request (see techne#530) or _FORK_CARRYING_EVENTS is stale"
+    )
+
+    unguarded = sorted(e for e in declared_fork_carrying if f"'{e}'" not in FORK_GUARD)
+    assert not unguarded, (
+        f"these triggers can carry a FORK's code but FORK_GUARD never names them: "
+        f"{unguarded}\n"
+        f"FORK_GUARD is: {FORK_GUARD}\n"
+        "Its first disjunct compares `github.event_name` against ONE literal, so any "
+        "event it does not name short-circuits the techne#556 guard to TRUE and puts "
+        "fork code on the self-hosted pool.\n"
+        "Widening the guard is the ONLY fix — there is deliberately no allow-list here "
+        "to add the trigger to instead."
+    )
+
+    # ...and the fork-only side must stay the exact complement, or a trigger can be
+    # guarded off self-hosted while no hosted job picks it up: techne#530's empty
+    # Checks tab, reintroduced through the trust split.
+    unserved = sorted(e for e in declared_fork_carrying if f"'{e}'" not in FORK_ONLY)
+    assert not unserved, (
+        f"these triggers are guarded off the self-hosted pool but no hosted job "
+        f"serves them: {unserved}. FORK_ONLY is: {FORK_ONLY}"
     )
 
 
-def test_any_job_installing_vectors_must_warm_the_model_cache():
-    """ENUMERATED BY EFFECT, NOT BY NAME (#570 review, and the reason it was needed).
+#: Package names that PULL IN A VECTOR BACKEND. `backend_available()` tests
+#: IMPORTABILITY only, so installing any of these directly un-skips the vector tests
+#: just as surely as the `vectors` extra does — which is bypass (a) from #570 r2.
+_VECTOR_BACKEND_PACKAGES = ("fastembed", "model2vec", "sqlite-vec", "sqlite_vec")
 
-    The two tests guarding the #535 invariant iterate `("test", "eval-vec")` — a
-    literal pair — so `fork-pr` escaped both BY CONSTRUCTION when it was added. It
-    installed the `vectors` extra and ran the suite with no cache step and no
-    pre-fetch, which is precisely the configuration this file records as the #535 red
-    build: an un-cached model re-downloaded by every job on every matrix entry.
 
-    A name list cannot see a job that does not exist yet. This asks the question of
-    every job in the file: if you pull in the vector backend and then run pytest, you
-    must also warm the cache. Adding a fifth job cannot dodge it.
+def _pulls_in_a_vector_backend(steps: list[dict]) -> bool:
+    """True if these steps install a vector backend, by EXTRA or by PACKAGE NAME.
 
-    `fork-pr` satisfies this by NOT installing `vectors` — cache writes are isolated
-    from fork PRs, so a cache step there would miss forever. Either answer passes;
-    having neither does not.
+    Parsed out of install specs rather than substring-matched on the whole step: a
+    bare `"vectors" in runs` passes on `echo vectors` and cannot tell an installed
+    extra from a mentioned one (the #523 lesson, and the reason the by-name tests
+    above parse).
+    """
+    import re
+
+    runs = "\n".join(str(s.get("run", "")) for s in steps)
+    for spec in re.findall(r"-e\s+\"?\.\[([a-z0-9,._-]+)\]\"?", runs):
+        if "vectors" in {e.strip() for e in spec.split(",")}:
+            return True
+    # A direct install of the backend itself, on any pip/uv line.
+    for line in runs.splitlines():
+        if ("pip install" in line or "uv add" in line) and any(
+            pkg in line for pkg in _VECTOR_BACKEND_PACKAGES
+        ):
+            return True
+    return False
+
+
+def test_any_job_pulling_a_vector_backend_must_warm_the_model_cache():
+    """ENUMERATED BY EFFECT, NOT BY NAME — and with the SAME contract the by-name
+    tests impose, which the first version of this did not (#570 r2).
+
+    The two #535 guards iterate the literal pair ("test", "eval-vec"), so `fork-pr`
+    escaped both BY CONSTRUCTION when it was added: it installed the backend and ran
+    the suite with no cache and no pre-fetch, which is the #535 red build.
+
+    THE FIRST GENERALISATION WAS WEAKER THAN WHAT IT GENERALISED, and the review found
+    three ways through it, each leaving the suite green:
+      (a) install `fastembed` DIRECTLY — `backend_available()` is importability-only,
+          so the tests un-skip and cold-download without the `vectors` extra ever
+          appearing. Now caught by parsing package names too.
+      (b) an UNRELATED cache step (e.g. `~/.cache/uv`) satisfied a bare "has a step
+          whose `uses` starts with actions/cache". Now the cache must name a model
+          cache path.
+      (c) `actions/cache/restore@v4` with no save and no pre-fetch — a restore that
+          can never be populated. Now restore-only is rejected explicitly.
+
+    A guard that is easier to satisfy than the thing it replaces is not a
+    generalisation, it is a downgrade.
     """
     offenders = {}
     for name, job in _jobs().items():
         steps = job.get("steps") or []
         runs = "\n".join(str(s.get("run", "")) for s in steps)
-        installs_vectors = "vectors]" in runs or "vectors," in runs
-        runs_pytest = "pytest" in runs
-        has_cache = any(
-            isinstance(s.get("uses"), str) and s["uses"].startswith("actions/cache")
+        if not (_pulls_in_a_vector_backend(steps) and "pytest" in runs):
+            continue
+
+        uses = [str(s.get("uses", "")) for s in steps]
+        # A save-capable cache. `actions/cache/restore` alone can never populate the
+        # key it reads, so it is a permanent miss wearing a cache's name.
+        saves = [u for u in uses if u.startswith("actions/cache") and "/restore" not in u]
+        # ...and it must cache a MODEL path, not merely be some cache step.
+        cache_paths = " ".join(
+            str(s.get("with", {}).get("path", "")) for s in steps if isinstance(s.get("with"), dict)
+        )
+        caches_a_model = any(
+            k in cache_paths
+            for k in ("huggingface", "fastembed", "model2vec", "hf_home", "HF_HOME")
+        )
+        # A step that ACTUALLY DOWNLOADS THE MODEL, in either of the two legitimate
+        # forms this repo uses. Writing this as "must use the production entry point"
+        # — the `test` leg's contract — was too strict and flagged `eval-vec`, which
+        # is correct code: that leg is pinned to 3.14/model2vec and can name the model
+        # directly, whereas the `test` leg's backend VARIES BY PYTHON VERSION
+        # (>=3.14 model2vec, else fastembed) so it must ask the resolver. Both warm
+        # the cache; only a step that mentions a backend without loading anything does
+        # not. A mention is still not enough — the call has to be there.
+        prefetches = any(
+            (
+                "techne.core.embeddings" in str(s.get("run", ""))
+                and "_get_embedding_model" in str(s.get("run", ""))
+            )
+            or "from_pretrained" in str(s.get("run", ""))
             for s in steps
         )
-        if installs_vectors and runs_pytest and not has_cache:
-            offenders[name] = "installs [vectors] and runs pytest with no actions/cache step"
+
+        missing = []
+        if not saves:
+            missing.append("no save-capable actions/cache step (restore-only cannot populate)")
+        if not caches_a_model:
+            missing.append("no cache step naming a model path")
+        if not prefetches:
+            missing.append("no pre-fetch via techne.core.embeddings._get_embedding_model")
+        if missing:
+            offenders[name] = missing
 
     assert not offenders, (
-        f"jobs that would re-download the vector model on every run: {offenders}.\n"
-        "This is the #535 red build. Either add an actions/cache step plus the "
-        "backend-matched pre-fetch (see the `test` and `eval-vec` legs — note they "
-        "cache DIFFERENT backends and must not share a key), or do not install the "
-        "`vectors` extra in that job so the vector tests skip visibly under `-rs`."
+        f"jobs that pull in a vector backend and would re-download the model on every "
+        f"run: {offenders}.\n"
+        "This is the #535 red build. Either give the job a save-capable cache on a "
+        "model path PLUS the production-entry-point pre-fetch (see the `test` and "
+        "`eval-vec` legs — they cache DIFFERENT backends and must not share a key), or "
+        "do not pull in a vector backend at all, so the vector tests skip visibly "
+        "under `-rs`."
     )
