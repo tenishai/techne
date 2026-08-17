@@ -31,7 +31,10 @@ def main():
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
-        print(f"techne: session_end received invalid JSON on stdin — teardown skipped: {exc}", file=sys.stderr)
+        print(
+            f"techne: session_end received invalid JSON on stdin — teardown skipped: {exc}",
+            file=sys.stderr,
+        )
         data = {}
 
     from techne.hooks._liveness import record_hook_run, resolve_db_path
@@ -121,7 +124,10 @@ def main():
 
             try:
                 adapter = load_adapter(
-                    config.sync.adapter, url=config.sync.url, path=config.sync.path
+                    config.sync.adapter,
+                    url=config.sync.url,
+                    path=config.sync.path,
+                    allow_unlisted=config.sync.allow_unlisted_adapter,
                 )
                 flush(config.db_path, adapter)
             except Exception as e:
