@@ -693,9 +693,18 @@ def test_v3_purge_matches_the_walkers_semantics_not_sqls(tmp_path):
     assert not _v3_should_purge("/somewhere/site-packages/x.py", None)
 
 
-def test_v3_purge_unresolves_inbound_edges_rather_than_leaving_them_armed(tmp_path):
-    """An inbound edge is NOT deleted — a repo symbol really does call into that
-    vendored code, and dropping it erases a true fact.
+def test_v3_purge_converges_inbound_edges_on_fresh_index_state(tmp_path):
+    """An inbound edge is NOT deleted: the migration converges on the state a FRESH
+    v3 walk produces, which stores exactly `to_symbol=NULL, status='unresolved'`.
+    A migrated v2 db is byte-identical to a re-indexed one in `symbols` and
+    `edges`; deleting these edges would make the two disagree.
+
+    THIS TEST DOES NOT ASSERT THE RESULTING GRAPH IS SOUND. It is not — a NULL
+    `to_symbol` arms codegraph's name fallback, so `callers()` will claim a
+    repo-local call that never happened when a local symbol shares the bare name.
+    That is #606, it reproduces on a fresh index with no migration involved, and
+    it is out of scope here. The earlier name for this test
+    ("..._rather_than_leaving_them_armed") asserted the opposite and was wrong.
 
     The two asserts below are load-bearing for DIFFERENT reasons, and an earlier
     version of this docstring gave the same (wrong) reason for both:
@@ -748,8 +757,8 @@ def test_v3_purge_unresolves_inbound_edges_rather_than_leaving_them_armed(tmp_pa
         assert row is not None, "the inbound edge was deleted; it records a real call"
         assert row[0] is None
         assert row[1] == "unresolved", (
-            "a NULL to_symbol left at 'lsp' re-arms the name fallback and invents "
-            "a repo-local call that never happened"
+            "'lsp' with a NULL to_symbol is a state the v1 contract says cannot "
+            "exist; the reset restores the invariant and changes no query result"
         )
     finally:
         conn.close()
@@ -820,3 +829,90 @@ def test_v3_purge_binds_are_bounded_through_the_real_migration(tmp_path, monkeyp
         assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="needs tree-sitter grammars to walk a real repo")
+def test_v3_migrated_db_is_identical_to_a_fresh_index(tmp_path):
+    """THE OUTCOME, not the mechanism (#604 r4).
+
+    Twice on this change the recorded *reason* for unresolving inbound edges was
+    wrong while the code was right, and both times the reason was argued rather
+    than measured. This pins what the migration is actually FOR: a v2 db that
+    indexed vendored code must end up byte-identical to a repo indexed fresh with
+    the v3 skip list — same symbols, same edges, and the same answer through the
+    real accessor.
+
+    It is also the test that would fail if someone "fixed" #606 by deleting
+    inbound edges here: migration and re-index would then disagree.
+    """
+    from techne.codex.source import RepoSource
+    from techne.core.codegraph import add_symbol, callers
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration
+    from techne.core.migrator import user_version_io
+    from techne.core.stores import plain_connect
+
+    root = tmp_path / "repo"
+    (root / "app").mkdir(parents=True)
+    vend_dir = root / "vendor" / "site-packages" / "aiohttp"
+    vend_dir.mkdir(parents=True)
+    (root / "app" / "util.py").write_text("def get():\n    return 1\n")
+    (vend_dir / "web.py").write_text("def get():\n    return 2\n")
+    (root / "app" / "main.py").write_text(
+        "from aiohttp.web import get\n\ndef handler():\n    return get()\n"
+    )
+
+    def _new_db(name):
+        db = tmp_path / name
+        _apply_codex_migration(db)
+        c = plain_connect(db)
+        c.executescript(CODEX_SCHEMA)
+        c.commit()
+        c.close()
+        return db
+
+    def _dump(db):
+        c = plain_connect(db)
+        try:
+            syms = [r[0] for r in c.execute("SELECT id FROM symbols ORDER BY id")]
+            edges = [
+                tuple(r)
+                for r in c.execute(
+                    "SELECT from_symbol, to_name, to_symbol, resolution_status FROM edges "
+                    "ORDER BY from_symbol, to_name"
+                )
+            ]
+        finally:
+            c.close()
+        return syms, edges
+
+    fresh = _new_db("fresh.db")
+    RepoSource(db_path=fresh, repo_root=root, languages=["python"]).initial_walk()
+
+    # A v2-era db: the walker indexed site-packages AND resolved the call into it.
+    polluted = _new_db("polluted.db")
+    RepoSource(db_path=polluted, repo_root=root, languages=["python"]).initial_walk()
+    vend = "vendor/site-packages/aiohttp/web.py"
+    add_symbol(polluted, id=f"{vend}::get::function::1", file=vend, name="get", kind="function")
+    add_symbol(
+        polluted, id=f"{vend}::<module>::module::0", file=vend, name="<module>", kind="module"
+    )
+    c = plain_connect(polluted)
+    c.execute(
+        "UPDATE edges SET to_symbol = ?, resolution_status = 'lsp' "
+        "WHERE to_name = 'get' AND from_symbol LIKE 'app/main.py::handler%'",
+        (f"{vend}::get::function::1",),
+    )
+    user_version_io.write(c, 2)
+    c.commit()
+    c.close()
+
+    _apply_codex_migration(polluted)
+
+    assert _dump(polluted) == _dump(fresh), (
+        "a migrated v2 db must converge exactly on fresh-index state; if it does "
+        "not, `techne codex index` and the migration disagree about the same repo"
+    )
+    target = "app/util.py::get::function::1"
+    assert [x["id"] for x in callers(polluted, target)] == [
+        x["id"] for x in callers(fresh, target)
+    ], "the real accessor must agree too, not merely the stored rows"

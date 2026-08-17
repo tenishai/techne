@@ -267,20 +267,30 @@ def _v3_purge_batch(conn, doomed: list[str]) -> None:
     marks = ",".join("?" * len(doomed))
     # Outbound edges go with their symbol.
     conn.execute(f"DELETE FROM edges WHERE from_symbol IN ({marks})", doomed)
-    # INBOUND edges are unresolved, not deleted — a repo symbol really does call
-    # into that vendored code, and dropping the edge would erase a true fact.
+    # INBOUND edges are unresolved, not deleted. THE TARGET STATE IS WHAT A FRESH
+    # v3 WALK PRODUCES, and that is measured, not assumed: build a repo with a
+    # vendored `get` and a local `get`, index it fresh with site-packages skipped,
+    # and the edge is stored exactly as below — `to_symbol` NULL, status
+    # 'unresolved'. A migrated v2 db is then byte-identical to that fresh index in
+    # both `symbols` and `edges`. Deleting these edges instead would make a
+    # migrated db DIVERGE from a re-indexed one, which is the opposite of what a
+    # convergence migration is for.
     #
-    # RESETTING `resolution_status` RESTORES AN INVARIANT; IT CHANGES NO QUERY.
-    # An earlier version of this comment claimed the reset prevents codegraph's
-    # name fallback from re-arming. THAT WAS FALSE (#604 r3) and is recorded here
-    # because the wrong reason was mirrored into the arch card and a test message.
-    # codegraph reads `resolution_status` ONLY in `add_edge`'s INSERT; all four
-    # fallback sites (codegraph.py:261, 290, 341, 353) gate on `to_symbol IS NULL`
-    # alone, so 'lsp' and 'unresolved' return byte-identical results.
+    # READ THIS BEFORE CONCLUDING THE RESULTING STATE IS SAFE — IT IS NOT, AND
+    # THAT IS #606, NOT A BUG IN THIS MIGRATION. A NULL `to_symbol` arms
+    # codegraph's name fallback, so `callers()`/`callees()`/`reachable()` will
+    # match `to_name` against ANY repo symbol sharing the bare name and assert a
+    # repo-local call that never happened. A fresh index has the identical flaw;
+    # this migration neither causes nor cures it. Fixing it means qualifying the
+    # fallback or representing "external" explicitly — see #606.
     #
-    # Keep it anyway: 'lsp' with a NULL `to_symbol` is a state the v1 contract
-    # says cannot exist, and leaving rows in an impossible state means the next
-    # reader of this table has to distrust the column instead of the data.
+    # RESETTING `resolution_status` CHANGES NO QUERY, and two earlier versions of
+    # this comment got its rationale wrong in opposite directions. codegraph reads
+    # the column ONLY in `add_edge`'s INSERT; all four fallback sites
+    # (codegraph.py:261, 290, 341, 353) gate on `to_symbol IS NULL` alone, so
+    # 'lsp' and 'unresolved' return byte-identical results. It is reset purely to
+    # restore the v1 invariant that a NULL `to_symbol` is never 'lsp' — an
+    # impossible state forces the next reader to distrust the column.
     conn.execute(
         f"UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
         f"WHERE to_symbol IN ({marks})",
