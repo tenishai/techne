@@ -55,8 +55,9 @@ class ClaudeCodeTranscriptSource:
                 # over a corrupt payload raises ``zlib.error``, which is neither — so
                 # an ``(OSError, EOFError)`` handler let the most likely corruption
                 # through and took the whole run down. One unreadable file must not do
-                # that; nor may it pass QUIETLY, or the next coverage measurement is a
-                # confident wrong answer. Count it.
+                # that; nor may it pass QUIETLY. Recorded here and surfaced by
+                # ``index_transcripts`` as ``counts["unreadable"]`` — a swallowed error
+                # nothing reports would make a short count read as a smaller corpus.
                 self.unreadable.append((jsonl, str(e)))
                 log.warning("transcript_unreadable path=%s error=%s", jsonl, e)
                 continue

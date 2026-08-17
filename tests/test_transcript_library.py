@@ -204,3 +204,25 @@ def test_real_transcripts_survive_the_round_trip(tmp_path):
         assert [(t.role, t.text) for t in archived[sid].turns] == [
             (t.role, t.text) for t in plain[sid].turns
         ]
+
+
+def test_index_transcripts_surfaces_an_unreadable_archive_end_to_end(tmp_path):
+    """The real adapter through the real indexer: two files on disk, one indexed, and
+    the count says so rather than leaving the caller to infer it."""
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.core.transcripts import index_transcripts
+
+    d = tmp_path / "transcripts"
+    d.mkdir()
+    (d / "corrupt.jsonl.gz").write_bytes(b"\x1f\x8b\x08 not actually gzip")
+    _write_jsonl(d / "good.jsonl", _TURNS)
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
+
+    counts = index_transcripts(config, ClaudeCodeTranscriptSource(d), make_cards=False)
+
+    assert counts["total"] == 1
+    assert counts["unreadable"] == 1
