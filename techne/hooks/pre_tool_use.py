@@ -22,12 +22,77 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import sys
 
 # Tools whose pattern is a symbol-ish search worth augmenting with the code graph.
-# Grep only: Glob's "pattern" is a file glob (e.g. **/*.py), not a symbol name, so
-# feeding it to the symbol FTS yields noise/nothing — excluded (techne#206 dogfood).
-ASSIST_TOOLS = {"Grep"}
+# Glob is excluded: its "pattern" is a file glob (e.g. **/*.py), not a symbol name,
+# so feeding it to the symbol FTS yields noise/nothing (techne#206 dogfood).
+#
+# BASH IS HERE BECAUSE MATCHING ONLY `Grep` MADE THIS RAIL UNREACHABLE IN PRACTICE
+# (techne#596). The rail was enabled, registered, and never fired once across a
+# full session of searching this codebase — because every search was `grep` inside
+# a `Bash` call, which is the natural reach when you are already running shell
+# commands. That is not evasion: the guard's precondition was "the agent chose the
+# Grep tool", and falsifying it was free, accidental and invisible. The same shape
+# as the defects in #570/#581/#582, sitting in our own enforcement layer.
+ASSIST_TOOLS = {"Grep", "Bash"}
+
+#: Shell commands whose first non-flag argument is a search PATTERN. Deliberately
+#: not the whole read-only set from post_tool_use — `find`/`ls`/`cat` take paths,
+#: and feeding a path to the symbol FTS is the Glob mistake in a new costume.
+_SEARCH_HEADS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
+
+#: A pattern worth sending to the symbol index: a bare identifier, 3+ chars.
+#: CONSERVATIVE ON PURPOSE — this rail's failure mode is noise, and noise is what
+#: got the #206 original scoped down. Anything with a metacharacter, slash or dot
+#: is a regex/path/glob, not a symbol name, so it is left alone. A missed
+#: augmentation costs nothing; a wrong one trains the reader to ignore the block.
+_SYMBOLISH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
+
+
+def _bash_search_pattern(command: str) -> str | None:
+    """The symbol-shaped search pattern in a shell command, or None.
+
+    Reuses the hardened shell handling rather than re-deriving it:
+    ``_strip_heredoc_bodies`` (so a `grep` inside a heredoc BODY is not read as a
+    command — techne#544's finding) and ``_split_bash_segments`` (quote-aware, so
+    a `grep "a|b"` alternation is not split mid-pattern). Both are already shared
+    cross-module by ``core/evidence.py``; a second copy of either would drift from
+    the one the evidence gate depends on.
+    """
+    try:
+        from techne.core.evidence import _strip_heredoc_bodies
+        from techne.hooks.post_tool_use import _split_bash_segments
+
+        segments = _split_bash_segments(_strip_heredoc_bodies(command))
+    except Exception:  # noqa: BLE001 — augmentation is best-effort, never fatal
+        return None
+
+    for seg in segments:
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:  # unbalanced quotes — not parseable, skip
+            continue
+        if not tokens or os.path.basename(tokens[0]) not in _SEARCH_HEADS:
+            continue
+        rest = tokens[1:]
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            # `-e PATTERN` names the pattern explicitly and wins outright.
+            if tok in ("-e", "--regexp") and i + 1 < len(rest):
+                cand = rest[i + 1]
+                return cand if _SYMBOLISH.match(cand) else None
+            if tok.startswith("-"):
+                i += 1
+                continue
+            # First bare token is the pattern (grep PATTERN [paths...]).
+            return tok if _SYMBOLISH.match(tok) else None
+        # A search command with no positional pattern (all flags) — nothing to do.
+    return None
+
 
 # Liveness key namespace: `hook:codex_grep_assist:last_run` (techne#468). Named
 # for the RAIL rather than the hook file, because that is the thing an operator
@@ -118,16 +183,31 @@ def main() -> None:
     techne_db = config.db_path
 
     tool_input = data.get("tool_input", {})
-    pattern = tool_input.get("pattern", "")
-    if not pattern:
-        record_hook_run(techne_db, HOOK_NAME, outcome="noop:no-pattern")
-        sys.exit(0)
+    if tool_name == "Bash":
+        # A Bash call carries a whole command line, not a pattern field, and most
+        # of them are not searches at all. Extract conservatively or decline —
+        # declining is the common case and must stay cheap and silent.
+        pattern = _bash_search_pattern(tool_input.get("command", "")) or ""
+        if not pattern:
+            record_hook_run(techne_db, HOOK_NAME, outcome="noop:not-a-symbol-search")
+            sys.exit(0)
+    else:
+        pattern = tool_input.get("pattern", "")
+        if not pattern:
+            record_hook_run(techne_db, HOOK_NAME, outcome="noop:no-pattern")
+            sys.exit(0)
 
     # Resolve which repo the agent is actually working in: the Grep's target
     # `path` when given, else the session cwd. This scopes the injected symbols
     # to the repo being searched (techne#209 db-per-repo) — the fix for the
     # #206 signal/noise problem, where a single global graph injected an
     # unrelated repo's symbols.
+    #
+    # Bash has no `path` field, so it falls through to the session cwd. That is
+    # correct for the common `cd <repo> && grep …` shape and for a bare `grep` in
+    # the session's own directory; a search explicitly pointed at another repo's
+    # path is scoped to the session's repo instead, which is the pre-existing
+    # behaviour for a Grep with no `path` and is left alone rather than guessed at.
     start_path = tool_input.get("path") or data.get("cwd") or os.getcwd()
 
     from techne.hooks._timeout import bounded_hook

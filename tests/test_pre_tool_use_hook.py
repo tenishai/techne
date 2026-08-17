@@ -222,3 +222,106 @@ def test_malformed_stdin_exits_zero(home, monkeypatch, capsys):
         pre_tool_use.main()
     assert exc.value.code == 0
     assert capsys.readouterr().out == ""
+
+
+# ---- techne#596: the rail must reach the searches agents actually run --------
+
+
+class TestBashSearchPattern:
+    """`_bash_search_pattern` — the parse that decides whether a Bash call is a
+    symbol search worth augmenting.
+
+    WHY BASH AT ALL: matching only `Grep` made this rail unreachable in practice.
+    It was enabled, registered, and never fired once across a full session of
+    searching this codebase, because every search was `grep` inside a Bash call.
+    The guard's precondition was "the agent chose the Grep tool", and falsifying
+    it was free, accidental and invisible.
+
+    WHY IT IS FUSSY: the cost of a false fire is noise in every future Bash call,
+    which is how the #206 original got scoped down in the first place. A missed
+    augmentation costs nothing.
+    """
+
+    def _p(self, cmd):
+        from techne.hooks.pre_tool_use import _bash_search_pattern
+
+        return _bash_search_pattern(cmd)
+
+    def test_plain_grep_yields_the_symbol(self):
+        assert self._p("grep -rn recall_attribution techne/") == "recall_attribution"
+
+    def test_quoted_pattern_is_unquoted(self):
+        assert self._p('grep -rn "index_freshness" .') == "index_freshness"
+
+    def test_ripgrep_and_friends_count(self):
+        assert self._p("rg annotate_freshness") == "annotate_freshness"
+        assert self._p("ag _walk_repo src/") == "_walk_repo"
+
+    def test_explicit_dash_e_wins(self):
+        assert self._p("grep -rn -e resolve_repo_db_for_query .") == "resolve_repo_db_for_query"
+
+    def test_absolute_path_to_grep_still_counts(self):
+        assert self._p("/usr/bin/grep -rn search_symbols .") == "search_symbols"
+
+    def test_a_regex_is_not_a_symbol(self):
+        """The whole point of the identifier shape: a regex fed to the symbol FTS
+        is noise, and noise trains the reader to skip the injected block."""
+        assert self._p("grep -rn 'def .*attribution' .") is None
+        assert self._p("grep -rn 'foo|bar' .") is None
+
+    def test_a_path_or_glob_is_not_a_symbol(self):
+        assert self._p("grep -rn techne/core/codegraph.py .") is None
+        assert self._p("grep -rn '*.py' .") is None
+
+    def test_too_short_is_not_a_symbol(self):
+        assert self._p("grep -rn ab .") is None
+
+    def test_a_non_search_command_declines(self):
+        """The overwhelmingly common Bash call. Declining must be silent."""
+        assert self._p("git status --short") is None
+        assert self._p("python -m pytest -q") is None
+        assert self._p("ls -la") is None
+
+    def test_a_search_later_in_a_pipeline_is_found(self):
+        assert self._p("cat foo.py | grep -n index_freshness") == "index_freshness"
+
+    def test_a_search_after_cd_is_found(self):
+        """The shape that actually appears in this repo's sessions."""
+        assert self._p("cd /tmp/repo && grep -rn recall_attribution .") == "recall_attribution"
+
+    def test_a_grep_inside_a_heredoc_body_does_not_fire(self):
+        """REUSES `_strip_heredoc_bodies` rather than re-deriving it (techne#544).
+        A heredoc body is not quoted, so every line of it becomes a segment and a
+        body line starting with `grep` would otherwise read as a command."""
+        script = "cat > probe.sh <<'SH'\ngrep -rn totally_not_a_real_symbol .\nSH\n"
+        assert self._p(script) is None
+
+    def test_unbalanced_quotes_decline_rather_than_raise(self):
+        assert self._p("grep -rn 'unterminated .") is None
+
+    def test_empty_and_junk_decline(self):
+        assert self._p("") is None
+        assert self._p("   ") is None
+
+
+def test_bash_is_registered_in_the_matcher():
+    """The parse is worthless if Claude Code never invokes the hook for Bash.
+
+    Both halves are required and they lived as two separate literals — the
+    registration and the #287 drift check — so a matcher change made the drift
+    check report a phantom drift against our own registration. One constant now.
+    """
+    from techne.platforms.claude_code.hooks import GREP_ASSIST_MATCHER
+
+    assert "Bash" in GREP_ASSIST_MATCHER
+    assert "Grep" in GREP_ASSIST_MATCHER
+
+
+def test_assist_tools_and_matcher_agree():
+    """A third place the same fact could drift: the hook's own ASSIST_TOOLS gate.
+    If the matcher invites a tool the hook then refuses, the rail is registered
+    and inert — which is techne#596 exactly, one layer over."""
+    from techne.hooks.pre_tool_use import ASSIST_TOOLS
+    from techne.platforms.claude_code.hooks import GREP_ASSIST_MATCHER
+
+    assert set(GREP_ASSIST_MATCHER.split("|")) == ASSIST_TOOLS
