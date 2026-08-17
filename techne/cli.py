@@ -1137,9 +1137,7 @@ def outbox_sweep(ctx, retain_days, apply_):
     # `retain_days`, and it read the 7 default under `--retain-days 30` — the one
     # place an operator looks to confirm what they asked for.
     preview = sweep_preview(config.db_path, retain_days=retain_days)
-    result = sweep_delivered(
-        config.db_path, retain_days=retain_days, cutoff=preview["boundary"]
-    )
+    result = sweep_delivered(config.db_path, retain_days=retain_days, cutoff=preview["boundary"])
     click.echo(
         f"Swept {result['collapsed'] + result['aged_out']} row(s) "
         f"(collapsed {result['collapsed']}, aged out {result['aged_out']})."
@@ -3460,6 +3458,11 @@ def codex_index(ctx, repo, languages, lsp):
 
     s = stats(db_path)
     click.echo(f"Indexed: {count} symbols from {repo}")
+    if src.last_swept:
+        click.echo(
+            f"Swept:   {src.last_swept} symbols for paths the skip list excludes "
+            f"(#613 — stored before the current skip list)"
+        )
     click.echo(f"Totals:  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
 
     if lsp:
@@ -3502,8 +3505,10 @@ def codex_index_all(ctx, languages):
             click.echo(f"skip (missing): {root}")
             continue
         db_path = codex_db_for_repo(config, root)
-        count = RepoSource(db_path, root, languages=lang_list).initial_walk()
-        click.echo(f"reindexed {root}: {count} symbols")
+        src = RepoSource(db_path, root, languages=lang_list)
+        count = src.initial_walk()
+        swept = f", swept {src.last_swept} excluded" if src.last_swept else ""
+        click.echo(f"reindexed {root}: {count} symbols{swept}")
 
 
 @codex.command("stats")
