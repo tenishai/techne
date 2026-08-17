@@ -220,3 +220,45 @@ def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
     # Fused output carries the fusion tag on every row, never rrf_score.
     assert all(r["fusion"] == "vec_first" for r in results)
     assert all("rrf_score" not in r for r in results)
+
+
+def test_vec_channel_preserves_knowledge_type_through_fusion(db_path, monkeypatch):
+    """THE VEC HALF OF techne#566's REGRESSION PROTECTION.
+
+    `_build_context` renders a row's kind from `knowledge_type`. The tests for
+    that fix all fed FTS-shaped rows — while production is VEC-FIRST, so the
+    channel that actually leads was unpinned (#566 r1). If fusion ever dropped
+    the key on the vec path, every injected line would silently revert to
+    `[knowledge]` and the FTS tests would stay green.
+
+    This repo's canned vec rows omit `knowledge_type` entirely, which is a fixture
+    lying about the shape `search_vec` really returns (`search.py:682` sets it).
+    So this one models the real row and asserts the key survives fusion AND the
+    rendering that consumes it.
+    """
+    from techne.hooks.user_prompt_submit import _build_context
+
+    fake_fts = [
+        {"type": "knowledge", "id": 1, "knowledge_type": "fact", "content": "a", "rank": -1.0}
+    ]
+    fake_vec = [
+        {
+            "type": "knowledge",
+            "id": 2,
+            "knowledge_type": "decision",
+            "content": "b",
+            "distance": 0.1,
+        }
+    ]
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", use_vectors=True)
+
+    vec_row = next(r for r in results if r["id"] == 2)
+    assert vec_row.get("knowledge_type") == "decision", "fusion dropped the vec row's kind"
+
+    rendered = _build_context(results)
+    assert "[decision]" in rendered, "the vec-first row rendered as something other than its kind"
+    assert "[fact]" in rendered
+    assert "[knowledge]" not in rendered

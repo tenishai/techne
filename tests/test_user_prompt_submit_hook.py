@@ -376,3 +376,106 @@ def test_push_filter_is_pull_only_types_itself(home, monkeypatch, capsys):
         _seed_raw(f"Postgres join semantics note {i}.", ktype)
     out = _run(monkeypatch, capsys, {"prompt": "postgres join semantics"})
     assert out.strip() == "", f"no PULL_ONLY_TYPES row may be pushed: {out!r}"
+
+
+# ---- techne#566: the injected label must be the row's kind, not its table ----
+
+
+class TestInjectedTypeLabel:
+    """`_build_context` labels each recalled row. That label must be the row's
+    KIND (fact / decision / procedure / …), not the table it came out of.
+
+    THE BUG: `search()` sets `type` to the SOURCE TABLE and returns the row's own
+    kind separately as `knowledge_type`. Reading `type` labelled every injected
+    row `[knowledge]`.
+
+    WHY IT SURVIVED A MONTH: this rendering mirrors `egress._render_line`, which
+    reads `row["type"]` — correctly, because egress reads knowledge rows straight
+    from the table, where `type` IS the kind. Same field name, two shapes. The
+    SessionStart block showed `[fact]`/`[procedure]` while the per-turn block
+    showed `[knowledge]` for the same rows, in plain sight, every turn.
+    """
+
+    def _ctx(self, rows):
+        from techne.hooks.user_prompt_submit import _build_context
+
+        return _build_context(rows)
+
+    def test_the_row_kind_is_shown_not_the_table(self):
+        out = self._ctx(
+            [
+                {"id": 1, "type": "knowledge", "knowledge_type": "decision", "content": "d"},
+                {"id": 2, "type": "knowledge", "knowledge_type": "procedure", "content": "p"},
+            ]
+        )
+        assert "[decision]" in out
+        assert "[procedure]" in out
+        assert "[knowledge]" not in out
+
+    def test_distinct_kinds_stay_distinguishable(self):
+        """The point of the label. A `decision` and an `evaluation` warrant
+        different weight; collapsing them removes the distinction exactly where
+        the agent decides how much to trust the line.
+
+        `document_card` and `pattern` are included as RENDERER inputs, not as a
+        claim they reach this rail — `_drop_pull_only` filters both upstream."""
+        kinds = ["fact", "decision", "evaluation", "procedure", "document_card", "pattern"]
+        # Content deliberately NOT equal to the kind: with `content=k` the assertion
+        # could not tell a correct render from one that swapped label and content,
+        # because both strings were the same (#566 r1 Nit).
+        rows = [
+            {"id": i, "type": "knowledge", "knowledge_type": k, "content": f"body-{i}"}
+            for i, k in enumerate(kinds)
+        ]
+        out = self._ctx(rows)
+        for i, k in enumerate(kinds):
+            assert f"[{k}] body-{i}" in out, f"{k} was collapsed or rendered out of position"
+
+    def test_a_pattern_row_is_visibly_a_pattern(self):
+        """techne#561's month-long miss: a legacy `pattern` row rode the push rail
+        and was visually indistinguishable from a fact.
+
+        PRECISION THIS TEST OWES (#566 r2): `pattern` and `document_card` are in
+        `PULL_ONLY_TYPES`, and `_drop_pull_only` runs BEFORE the renderer — so
+        today they cannot reach this rail at all. #561 predates that filter. This
+        pins `_build_context` as a pure function of the row it is handed, which is
+        what makes it correct for whatever the filter's contents become; it is not
+        evidence about what this rail currently emits."""
+        out = self._ctx(
+            [{"id": 9, "type": "knowledge", "knowledge_type": "pattern", "content": "x"}]
+        )
+        assert "[pattern]" in out
+
+    def test_non_knowledge_rows_fall_back_to_the_table(self):
+        """Threads and observations carry no `knowledge_type`; for those the table
+        IS the most honest label available, so the fallback must survive."""
+        out = self._ctx(
+            [
+                {"id": 3, "type": "observation", "content": "o"},
+                {"id": 4, "type": "thread", "content": "t"},
+            ]
+        )
+        assert "[observation]" in out
+        assert "[thread]" in out
+
+    def test_a_row_with_neither_is_labelled_note(self):
+        assert "[note]" in self._ctx([{"id": 5, "content": "c"}])
+
+    def test_the_content_truncation_is_pinned(self):
+        """200 chars, and it was pinned by nothing — removing the slice entirely
+        left the suite green (#566 r2) while a recorded `document_card` decision
+        rests on it. An unbounded line here is a per-turn injection whose size is
+        set by whatever the longest matching row happens to be."""
+        out = self._ctx(
+            [{"id": 1, "type": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
+        )
+        assert "x" * 200 in out
+        assert "x" * 201 not in out
+
+    def test_the_line_shape_is_pinned_including_the_id_prefix(self):
+        """The `⟦techne#id⟧` prefix was pinned by nothing — deleting it left the
+        suite green (#566 r1 Nit). It is what makes an injected line citable, and
+        citation is what `recall_attribution` measures, so losing it silently
+        would take the attribution rail's only signal with it."""
+        out = self._ctx([{"id": 42, "type": "knowledge", "knowledge_type": "fact", "content": "z"}])
+        assert "- ⟦techne#42⟧ [fact] z" in out

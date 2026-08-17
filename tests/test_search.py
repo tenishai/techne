@@ -1120,3 +1120,50 @@ class TestSearchNoMutation:
             assert orig.get("type") == after.get("type")
             # The 'source' column (provenance) must not have been overwritten
             assert orig.get("source") == after.get("source")
+
+
+class TestVecChannelCarriesKnowledgeType:
+    """techne#566's PRODUCER, pinned on the real vector path.
+
+    The fusion side was pinned by test_search_rrf.py, but deleting
+    `"knowledge_type": k[1]` from `search.py:682` still left the suite
+    bit-identical at 2810/19 — the producer was unpinned, so the label fix could
+    silently revert to `[knowledge]` on the channel that actually leads.
+
+    A stubbed test cannot reach it: the fixture supplies the key it then asserts.
+    This runs the REAL vec query. Since techne#535 the main test matrix installs
+    `[vectors]` with a warm model cache, so this executes on every PR rather than
+    only in `eval-vec` — it is not eval-gated coverage.
+
+    Guarded on `backend_available()` rather than `importorskip("fastembed")`, for
+    the reason recorded four classes above: fastembed is absent-by-design on
+    py3.14 while model2vec provides working vector search there, so importorskip
+    on fastembed specifically would wrongly skip real coverage on 3.14.
+    """
+
+    def test_a_vec_hit_carries_the_rows_own_kind(self, db_path):
+        from techne.core import embeddings as embeddings_mod
+
+        pytest.importorskip("sqlite_vec")
+        if not embeddings_mod.backend_available():
+            pytest.skip("no embedding backend (model2vec or fastembed) available")
+
+        from techne.core.knowledge import store
+        from techne.core.search import backfill_vectors
+
+        store(
+            db_path,
+            "Vector retrieval must preserve the row's own kind, not the table name.",
+            type="decision",
+        )
+        backfill_vectors(db_path)
+
+        results = search(db_path, "vector retrieval preserve kind", use_vectors=True)
+
+        knowledge_rows = [r for r in results if r.get("type") == "knowledge"]
+        assert knowledge_rows, "no knowledge row came back; the query matched nothing"
+        assert all(r.get("knowledge_type") for r in knowledge_rows), (
+            "a knowledge row reached a consumer without its own kind — "
+            "every line it renders would read [knowledge]"
+        )
+        assert any(r.get("knowledge_type") == "decision" for r in knowledge_rows)
