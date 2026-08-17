@@ -5,6 +5,117 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-17
+
+The release where the instruments stopped lying. Nearly every fix below is the same shape:
+a rail that was enabled, registered, and reporting healthy while doing nothing — a
+grep-assist that never once fired, a code index that certified its own pollution, a
+zero-result search that couldn't describe its own reliability, a CI guard that failed open
+on a typo. None of them looked broken. That is what made them worth a release. 20 changes.
+
+**Upgrading:** `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.14.0"`
+— the `--force` is required; a plain `pipx install` over an existing techne refuses. What
+you cross depends on where you start:
+
+| from | schema | what runs |
+|---|---|---|
+| 0.13.0 | 24 → 24 | **Nothing.** Pure code upgrade, no migration. |
+| 0.11.0 / 0.12.0 | 18 → 24 | Six steps, including one history rewrite — see below. |
+| 0.9.0 / 0.10.0 | 17 → 24 | The above, plus step 18. |
+
+From **0.11/0.12** the six steps are: **19** adds `knowledge.vec_stale` (additive, defaults
+0); **20** builds a covering index on `outbox` — no data change, but its cost scales with
+accumulated synced rows, so the oldest store pays the most and this is the step that takes
+the time; **21** re-keys coord read receipts from the session UUID to `name:<display-name>`,
+which is why a relaunched session stops re-reading the whole backlog; **22** bumps the
+version so the additive `reflection_queue` table actually reaches existing databases;
+**23 rewrites `observations.timestamp` and `.event_at` in place across your entire history**,
+normalising three concurrently-written formats to one — the only step that touches existing
+data at scale; **24** backfills historical `sessions.ended_at` NULLs from last known activity.
+
+The migrator takes an automatic backup before migrating (`guarded_migrate(backup=True)`),
+and since #574 that backup is reused within a transition and pruned afterward rather than
+accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not required.
+
+### Added
+
+- **Citation-attribution for the knowledge rails** (#329, #560) — closes the last open
+  finding of the utilization work: whether an injected memory was actually *used*, not merely
+  retrieved. Without it, every change to what gets retrieved is unfalsifiable — there is no
+  way to tell an improvement from a regression. Behavioral proxy first, deliberately: free,
+  deterministic, no model key, CI-runnable.
+
+- **Executable predicate for the evidence length test** (#541, #567) — the gate asserted a
+  property it described in prose. It now runs the probe it claims to run.
+
+### Fixed
+
+- **grep-assist was unreachable in practice, and granted permission when it did fire**
+  (#596, #601) — the rail was enabled, registered, and fired *zero times* across a full
+  session of searching this codebase, because its matcher was `Grep` while every real search
+  was `grep` inside a `Bash` call. The guard's precondition was "the agent chose the Grep
+  tool", and falsifying it was free, accidental and invisible. Widening the matcher to
+  `Grep|Bash` is one line; the rest is parsing a shell command safely enough to deserve it —
+  per-head option tables measured against the actual binaries, unlisted options declining
+  rather than guessing. **Also removed an unconditional `permissionDecision: "allow"`**: dormant
+  and near-harmless while the matcher was `Grep` alone, a live hole the moment it matched
+  Bash, where a grant covers the entire command line while the parser only has to like one
+  segment. A test had pinned that grant as *intended*.
+
+- **The code index certified its own pollution** (#604, #605, #613, #615) — virtualenv
+  contents were indexed, so 96% of this repo's graph was vendored code: 114,412 foreign
+  symbols against 5,137 real ones, with `codex_blast_radius` returning `aiohttp/web.py` as a
+  dependent of a techne hook. Indexing is incremental and its only DELETE is scoped to the
+  file being re-indexed, so the polluted rows were never revisited — and `index_freshness`
+  reported `coverage: complete` over them, because those files really were present and
+  unchanged on disk. They were not stale; they should not have been there. Skip-list
+  enforcement now runs **on every index** rather than once in a migration, so a skip-list
+  change heals itself instead of needing a new migration each time.
+
+- **A zero-result code search described itself as authoritative** (#595, #598) — a found
+  result carried a staleness flag and a refresh notice; a zero result carried nothing. "I
+  cannot see it" rendered as "it is not there".
+
+- **grep-assist option tables** (#611, #616) — `--group-separator` now declines rather than
+  asserting an arity that differs between ugrep and GNU grep, where it would consume the
+  pattern. Provenance recorded for the table whose missing provenance caused the defect.
+
+- **Per-turn recall showed the source table as the row's kind** (#603), and the per-turn PUSH
+  rail injected pull-only rows (#561, #565).
+
+- **Health reported a guess about the install kind** instead of the revision (#568, #569).
+
+- **Migration backups grew without bound** (#574, #578) — now reused within a transition and
+  pruned after.
+
+- **MCP accepted a stale env-derived session identity** (#573, #581), and the reflect-ingest
+  surface pre-judged an empty response (#485, #563).
+
+- **Architect pattern search never got the OR fallback** (#70, #557, #558).
+
+- **A capture-rail test was measuring the CI runner** rather than the rail (#543, #564).
+
+### Security
+
+- **Fork PRs could reach the self-hosted runner** (#556, #570) — `pull_request` plus a
+  self-hosted pool is remote code execution on the runner host. The guard now fails *closed*;
+  the previous one failed open on a typo'd property, and for `pull_request` GitHub evaluates
+  the workflow from the PR's own ref, so an in-workflow guard is attacker-editable. Forking
+  is disabled at both repo and org level as the load-bearing control.
+
+- **Every Config field now forces a destination judgment** (#509, #582) — egress keys were
+  opt-out by omission, so a new field defaulted to leaving the machine.
+
+### Docs
+
+- Architecture cards for the **utilization seam** (#597) and the **codex** store, the latter
+  now anchored to both files it makes claims about (#617). The card gate catches drift only
+  where an anchor exists, so an unanchored claim is an unguarded one.
+
+- The PreToolUse protocol shape is **observed rather than inferred** (#612, #614) — settled by
+  dogfood, because telemetry structurally cannot see it: `record_hook_run` fires on printing,
+  not delivery, so a rail emitting into the void still reads healthy.
+
 ## [0.13.0] — 2026-08-11
 
 The milestone where the memory rails got their integrity checked, the evidence gate learned

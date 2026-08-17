@@ -1,12 +1,12 @@
 ---
 card: repo-card:techne
-updated: 2026-08-03
-anchor: pyproject.toml sha=4686c9b910ea440a92adab24c5435ae621d5a9a1
+updated: 2026-08-17
+anchor: pyproject.toml sha=126f46928dfddd242425e5f21b4a5360cfa3737d
 ---
 # techne — repo card
 
 WHAT: local-first, single-SQLite-file persistent memory for AI coding agents (mainly Claude Code). Captures sessions/threads/observations, curates durable knowledge, self-maintains (reflect/consolidate/dream) on the agent's OWN model — no API key.
-STATE: main, v0.13.0, Alpha, active (memory-rail integrity pass landed — durable reflection debt, one on-disk timestamp shape, derived session end times, outbox retention that keeps the dedup ledger; subsystem liveness in `techne doctor`; CI now arms every PR and actually runs the vector tests).
+STATE: main, v0.14.0, Alpha, active (instrumentation-honesty pass landed — grep-assist was unreachable via Bash AND granted permission when it fired, the code index certified its own vendored pollution, a zero-result search reported absence as fact, health guessed the install kind; skip-list enforcement moved from a one-shot migration into the indexer; fork PRs fail closed off the self-hosted pool, and every Config field now forces an egress judgment).
 STACK: Python 3.11+ (CI 3.12/3.13 matrix + a separate 3.14 `eval-vec` arm), Click CLI, stdlib sqlite3 (WAL) = sole store. Optional extras: sqlite-vec+fastembed/model2vec (vec search), tree-sitter (codegraph), litellm (headless). pip/pipx pkg `techne` + stdio MCP server. Dockerfile present.
 ENTRY:
 - CLI techne → techne/cli.py:main (init/status/threads/search/reflect/consolidate/dream/architect/codex/library/coord…)
