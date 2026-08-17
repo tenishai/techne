@@ -430,6 +430,45 @@ jobs:
         working-directory: techne
         run: python3.13 scripts/check_arch_cards.py
 
+  # CRASH-RECOVERY GATE (#388). The `crash` suite SIGKILLs a child mid-write and
+  # then proves the store: uncommitted work leaves no trace, committed work
+  # survives, a hot WAL replays, an interrupted migration does not stamp its
+  # version, and an interrupted flush never marks a row delivered.
+  #
+  # IT IS EXCLUDED FROM THE DEFAULT RUN, SO THIS JOB IS WHAT MAKES IT REAL.
+  # ARCHITECTURE.md draws exactly this line: exclusion alone does not tell you
+  # whether a suite is covered by a dedicated job or covered by nothing, and the
+  # second decays silently. `-p no:randomly` because these spawn subprocesses and
+  # assert on a shared on-disk store; order independence is not a property worth
+  # buying here, and a random order that flakes would teach people to re-run CI.
+  crash-recovery:
+    runs-on: [self-hosted, linux, x64, dev02]
+    # Fork guard (#556) — same rationale as every self-hosted job above.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout techne
+        uses: actions/checkout@v4
+        with:
+          path: techne
+
+      - name: Create venv on Python 3.13
+        working-directory: techne
+        run: python3.13 -m venv .venv-ci
+
+      - name: Install
+        working-directory: techne
+        run: |
+          .venv-ci/bin/python -m pip install -q --upgrade pip
+          .venv-ci/bin/python -m pip install -q -e ".[codex]" pytest
+
+      # -m crash OVERRIDES the addopts exclusion; without this flag the job would
+      # report green having selected zero tests, which is the failure mode the
+      # comment above exists to prevent.
+      - name: Crash-recovery fault injection (#388)
+        working-directory: techne
+        run: .venv-ci/bin/python -m pytest -m crash -q -rs -p no:randomly
+
   # THE OTHER HALF OF THE TRUST SPLIT (#556). Fork PRs are skipped by every
   # self-hosted job above, so without this they would get an EMPTY Checks tab —
   # which is the exact failure #530 fought: nothing in CI can report a run that

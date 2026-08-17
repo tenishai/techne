@@ -79,7 +79,11 @@ def test_every_job_still_lives_in_this_one_workflow():
     )
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr"}, (
+    # `crash-recovery` added 2026-08-17 (techne#388). It picked the SELF-HOSTED
+    # side of the #556 split and carries the same fork guard as its neighbours:
+    # the suite SIGKILLs child processes, which is not something to hand a fork
+    # PR on a shared runner.
+    assert set(jobs) == {"test", "eval-vec", "arch-cards", "crash-recovery", "fork-pr"}, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
         "a new job must also pick a side of the techne#556 trust split."
     )
