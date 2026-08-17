@@ -538,6 +538,71 @@ def _walk_repo(root: Path, languages: set[str]) -> Iterator[Path]:
             yield path
 
 
+def _is_excluded_stored_path(file_str: str, repo_root: Path) -> bool:
+    """True if a STORED ``symbols.file`` names a path `_walk_repo` would now skip.
+
+    Mirrors the walk's rule rather than restating it: relativise first, then match
+    exact case-sensitive segments. `_index_file` stores repo-relative paths and
+    falls back to absolute when `relative_to` fails, so both shapes turn up here.
+    An absolute path outside the repo is declined rather than guessed at — it is
+    not this walker's to judge.
+    """
+    path = Path(file_str)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(repo_root)
+        except ValueError:
+            return False
+    return any(part in _SKIP_DIRS for part in path.parts)
+
+
+def sweep_excluded_rows(db_path: Path, repo_root: Path) -> int:
+    """Delete stored rows the CURRENT skip list excludes. Returns the count (#613).
+
+    THIS IS WHERE SKIP-LIST ENFORCEMENT BELONGS, and putting it in a migration was
+    the mistake. Indexing is incremental and its only DELETE is scoped to the file
+    being re-indexed, so rows for files the walker no longer visits are never
+    revisited: nothing walks them, so nothing removes them. `_codex_v2_to_v3` fixed
+    that ONCE, for the entries `_SKIP_DIRS` held at v3 — but a migration step runs
+    exactly once, when `user_version` moves 2→3.
+
+    MEASURED, NOT CONSTRUCTED (#613): a db stamped v3 by a review worktree running
+    the PR code, then re-indexed from a tree that predated the skip-list change,
+    came back holding 114,410 vendored symbols with `user_version = 3`. The purge
+    can never fire again, and `index_freshness` reports `stale: 0, coverage:
+    "complete"` over those rows because the files genuinely are present and
+    unchanged on disk. They are not stale. They should not be there. That is the
+    self-certifying state of #604 reached by a second route.
+
+    Running the check on every full index makes a skip-list change self-healing:
+    `_SKIP_DIRS` has already changed twice, and under the old design each change
+    needed its own migration.
+
+    DELIBERATELY NOT FAIL-SAFE. Every other optional step in `initial_walk` (the
+    `repo_root` persist) degrades to a warning, and this one does not, because a
+    sweep that fails quietly returns the caller to precisely the silent pollution
+    it exists to end — a db that looks healed and is not. Loud beats tidy here.
+    """
+    from techne.core.codex import purge_symbol_ids
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db_path)
+    try:
+        doomed = [
+            row[0]
+            for row in conn.execute("SELECT id, file FROM symbols")
+            if _is_excluded_stored_path(row[1], repo_root)
+        ]
+        if not doomed:
+            return 0
+        purge_symbol_ids(conn, doomed)
+        conn.commit()
+        log.info("codex_swept_excluded root=%s symbols=%d", repo_root, len(doomed))
+        return len(doomed)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Public single-file surface — for external callers (e.g. the reindex-on-edit
 # freshness path, techne#301) that need one file indexed without a RepoSource.
@@ -590,6 +655,10 @@ class RepoSource:
         self._observer = None
         self._debouncer = None
         self._lock = threading.Lock()
+        #: Rows removed by the last `initial_walk`'s skip-list sweep (#613). Read
+        #: by the CLI so a heal is REPORTED rather than inferred from a shrinking
+        #: total — a purge nobody is told about is how #604 stayed invisible.
+        self.last_swept = 0
 
     # ------------------------------------------------------------------
     # SourceAdapter Protocol
@@ -606,7 +675,20 @@ class RepoSource:
         for path in _walk_repo(self._root, self._languages):
             files += 1
             total += _index_file(self._db_path, path, self._root)
-        log.info("codex_initial_walk root=%s files=%d symbols=%d", self._root, files, total)
+
+        # Enforce the CURRENT skip list against what is already stored (#613).
+        # The walk above cannot do this on its own: it only visits files it is
+        # willing to index, so rows written when the skip list was shorter are
+        # never revisited. Runs on every full index, which is what makes a
+        # skip-list change self-healing rather than needing a migration each time.
+        self.last_swept = sweep_excluded_rows(self._db_path, self._root)
+        log.info(
+            "codex_initial_walk root=%s files=%d symbols=%d swept=%d",
+            self._root,
+            files,
+            total,
+            self.last_swept,
+        )
 
         # Persist repo_root so annotate_freshness can resolve relative paths.
         try:

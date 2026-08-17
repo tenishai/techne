@@ -245,20 +245,37 @@ def _codex_v2_to_v3(conn) -> None:
     ]
     if not doomed:
         return
+    purge_symbol_ids(conn, doomed)
 
-    # CHUNKED, AND THE CHUNK IS THE FIX (#604 r3 Critical). Binding one parameter
-    # per doomed symbol is unbounded: this repo alone produced 114,410 of them,
-    # and a 265,000-row v2 index raises `OperationalError: too many SQL variables`
-    # against SQLite's native 250,000 limit. That raise lands BEFORE the version
-    # write and before `_migration_done.add`, so `user_version` stays at 2 and
-    # EVERY later `codex_store()` re-raises — taking down codex_search,
-    # codex_blast_radius and `techne codex index` permanently, and stranding the
-    # user in the self-certifying state this whole step exists to end.
-    #
-    # 500 is well under every SQLite build's floor (the compile-time default is
-    # 999 on old builds, 32,766 on modern ones, and the native limit here is
-    # 250,000) — chosen to be safe on the smallest, not fast on the largest.
-    for batch in (doomed[i : i + 500] for i in range(0, len(doomed), 500)):
+
+#: Symbols deleted per statement. See `purge_symbol_ids` for why this is bounded.
+_PURGE_CHUNK = 500
+
+
+def purge_symbol_ids(conn, doomed: list[str]) -> None:
+    """Delete symbols by id, with their edges, in bounded batches.
+
+    PUBLIC BECAUSE TWO CALLERS MUST NOT DRIFT (#613). The v2→v3 migration and the
+    indexer's skip-list sweep (`codex.source.sweep_excluded_rows`) remove the same
+    KIND of row, and if their edge handling ever disagreed, whether a db had been
+    healed by one or the other would become observable. The MECHANICS are shared
+    here on purpose; the PREDICATES are deliberately not — see `_V3_PURGE_SEGMENTS`
+    below for why the migration's must stay frozen while the sweep's must not.
+
+    CHUNKED, AND THE CHUNK IS THE FIX (#604 r3 Critical). Binding one parameter
+    per doomed symbol is unbounded: this repo alone produced 114,410 of them,
+    and a 265,000-row v2 index raises `OperationalError: too many SQL variables`
+    against SQLite's native 250,000 limit. In the migration that raise lands
+    BEFORE the version write and before `_migration_done.add`, so `user_version`
+    stays at 2 and EVERY later `codex_store()` re-raises — taking down
+    codex_search, codex_blast_radius and `techne codex index` permanently, and
+    stranding the user in the self-certifying state that step exists to end.
+
+    500 is well under every SQLite build's floor (the compile-time default is
+    999 on old builds, 32,766 on modern ones, and the native limit here is
+    250,000) — chosen to be safe on the smallest, not fast on the largest.
+    """
+    for batch in (doomed[i : i + _PURGE_CHUNK] for i in range(0, len(doomed), _PURGE_CHUNK)):
         _v3_purge_batch(conn, batch)
 
 
