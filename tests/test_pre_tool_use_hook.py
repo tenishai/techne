@@ -762,3 +762,86 @@ def test_the_prefilter_is_strictly_weaker_than_the_parse(home, monkeypatch, caps
         assert any(h in cmd for h in _SEARCH_HEADS), (
             f"the prefilter would drop a command the parse accepts: {cmd}"
         )
+
+
+class TestRoundFiveFindings:
+    """#596 round 5 — two Importants that survived four rounds of option work."""
+
+    def _p(self, cmd):
+        from techne.hooks.pre_tool_use import _bash_search_pattern
+
+        return _bash_search_pattern(cmd)
+
+    def test_options_that_leave_no_inline_pattern_decline(self):
+        """CORRECT ARITY IS NOT ENOUGH — an option can consume its value properly
+        and still leave no pattern behind (#596 r5).
+
+        `-e`/`--regexp` were special-cased because their value IS the pattern. Their
+        siblings fail the opposite way: with `-f` the patterns come from a FILE, so
+        every remaining operand is a path, and `rg --files` does not search at all.
+        The rail promoted the first operand, so `rg --files src` injected `src`.
+
+        BEING LISTED IS WHAT MADE THESE FIRE: `-f` sat in the value-taking table, so
+        it was skipped cleanly and the path after it looked exactly like a pattern.
+        An option in NO table would have declined.
+        """
+        assert self._p("rg --files src") is None
+        assert self._p("rg --files techne") is None
+        assert self._p("rg --files") is None
+        assert self._p("grep -f pats.txt src") is None
+        assert self._p("rg -f pats.txt src") is None
+        assert self._p("grep --file=pats.txt src") is None
+        assert self._p("grep -rn -f pats.txt techne") is None
+        assert self._p("rg --type-list") is None
+        # An `f` that is part of another option's VALUE is data, not a flag.
+        assert self._p("grep -A2 my_symbol src") == "my_symbol"
+
+    def test_grep_letters_whose_arity_differs_between_shim_and_bsd_decline(self):
+        """`grep` in a Bash tool call is NOT the grep on $PATH (#596 r5).
+
+        Claude Code installs a shell FUNCTION shimming grep to a ugrep bundled in
+        the `claude` binary; `shutil.which("grep")` reports /usr/bin/grep (BSD) and
+        never sees it. The r4 claim that "BSD grep and ugrep agree exactly" came
+        from a discriminator that false-negatives: ugrep given a value-taking option
+        with nothing after it says "no PATTERN specified", not "requires an
+        argument".
+
+        Re-derived via `grep --help -X` (which prints `-M MAGIC` vs `-y`): J, M and
+        O all take values and were all in the no-value set, so
+        `grep -M ELF <sym> src` injected `ELF`.
+
+        They now decline rather than moving to the value table, because the shim
+        falls back to real BSD grep on `-[Zz]*`, `--null`, `-*-filter*` and friends
+        — so a letter whose arity differs between the two binaries cannot be
+        resolved statically, and declining is the only answer right for the union.
+        """
+        assert self._p("grep -M ELF my_symbol src") is None
+        assert self._p("grep -J 5 my_symbol src") is None
+        assert self._p("grep -O py my_symbol src") is None
+        # Letters that DO agree still work.
+        assert self._p("grep -rn my_symbol .") == "my_symbol"
+        assert self._p("grep -i my_symbol src") == "my_symbol"
+
+    def test_multiple_pattern_naming_options_decline(self):
+        """The tool searches for ALL of them; this rail can inject one. Silently
+        keeping the last is an arbitrary choice dressed as an answer (#596 r5 Nit).
+        """
+        assert self._p("grep -e alpha_one -e beta_two .") is None
+        assert self._p("grep -e alpha_one --regexp=beta_two .") is None
+        assert self._p("grep -ealpha_one -ebeta_two .") is None
+        # One is still fine.
+        assert self._p("grep -e alpha_one .") == "alpha_one"
+
+    def test_a_head_without_a_table_declines_instead_of_raising(self):
+        """`_TABLES[head]` was a bare subscript, so re-adding a head to
+        `_SEARCH_HEADS` without a table would KeyError inside a hook (#596 r5 Nit).
+        Closed today, but this is exactly what re-adding `ag` would trip.
+        """
+        import techne.hooks.pre_tool_use as M
+
+        original = M._SEARCH_HEADS
+        try:
+            M._SEARCH_HEADS = frozenset(original | {"ag"})
+            assert self._p("ag my_symbol src") is None
+        finally:
+            M._SEARCH_HEADS = original

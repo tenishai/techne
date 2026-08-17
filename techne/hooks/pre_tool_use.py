@@ -77,9 +77,28 @@ _HEAD_ALIASES = {"grep": "grep", "egrep": "grep", "fgrep": "grep", "rg": "rg"}
 #: PATTERN, so `_named_pattern` intercepts it before arity is ever consulted.
 _TABLES = {
     "grep": (
-        # BSD grep 2.6.0 and ugrep 7.5.0 agree exactly on these; P and G are added
-        # for GNU grep (--perl-regexp / --basic-regexp), which takes no value either.
-        frozenset("abchilnopqrsuvwxyzEFGHIJLMORSUVXZPG"),
+        # `grep` IN A BASH TOOL CALL IS NOT THE grep ON $PATH (#596 r5). Claude Code
+        # installs a shell FUNCTION that shims grep to a ugrep bundled in the
+        # `claude` binary — `shutil.which("grep")` reports /usr/bin/grep (BSD 2.6.0)
+        # and never sees it. My r4 note claimed "BSD grep and ugrep agree exactly";
+        # that was measured with a discriminator that false-negatives, because ugrep
+        # given a value-taking option with nothing after it reports "no PATTERN
+        # specified" rather than "requires an argument".
+        #
+        # Re-derived from the binary that actually runs, via `grep --help -X`, which
+        # prints `-M MAGIC` for value-taking and `-y` for not: J, M and O ALL TAKE
+        # VALUES and were all in this set, so `grep -M ELF <sym> src` injected `ELF`.
+        # They are now in NEITHER table, which declines — deliberately, not by
+        # omission: the shim falls back to real BSD grep whenever an argument matches
+        # `-[Zz]*`, `--null`, `-*-filter*` and friends, so a letter whose arity
+        # differs between ugrep and BSD cannot be resolved statically. Declining is
+        # the only answer that is right for the union.
+        #
+        # ugrep also takes values for g, t, K and N; those are absent from both
+        # tables and therefore already decline. P and G are hand-traced from GNU
+        # grep (--perl-regexp / --basic-regexp, no value) — GNU is not installed
+        # here, so they are the weakest entries in this table.
+        frozenset("abchilnopqrsuvwxyzEFGHILRSUVXZPG"),
         frozenset("defmABCD"),
         # OPTIONAL-ARGUMENT LONGS, AND THEY MATTER: GNU/BSD spell these
         # `--color[=WHEN]` and `--context[=NUM]`, so they consume NOTHING when
@@ -235,6 +254,54 @@ _REDIRECT = re.compile(r"^[0-9]*>>?|^<")
 _SYMBOLISH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
 
 
+#: OPTIONS THAT MEAN "THERE IS NO INLINE PATTERN OPERAND" (#596 r5).
+#:
+#: `-e`/`--regexp` got special handling because their value IS the pattern. Their
+#: siblings were missed, and they fail in the opposite direction: with `-f` the
+#: patterns come from a FILE, so every remaining operand is a path, and `rg --files`
+#: does not search at all — it lists files. The rail happily promoted the first
+#: operand, so `rg --files src` injected `src` and `rg --files techne` injected
+#: `techne`.
+#:
+#: BEING LISTED IS WHAT MADE THESE FIRE. An option absent from every table declines;
+#: `-f` was in the value-taking table, so it was skipped cleanly and the path after
+#: it looked exactly like a pattern. Correct arity is not enough — an option can
+#: consume its value properly and still leave no pattern behind.
+_NO_PATTERN_SHORT = frozenset("f")
+_NO_PATTERN_LONG = frozenset(
+    {
+        "--file",
+        "--files",
+        "--type-list",
+        "--pcre2-version",
+        "--generate",
+        "--version",
+        "--help",
+    }
+)
+
+
+def _declares_no_pattern(tok: str, head: str) -> bool:
+    """True when *tok* means the command has no inline pattern operand."""
+    if tok.startswith("--"):
+        return tok.split("=", 1)[0] in _NO_PATTERN_LONG
+    body = tok[1:]
+    if not body:
+        return False
+    table = _TABLES.get(head)
+    if table is None:
+        return False
+    short_novalue, short_value, _, _ = table
+    for ch in body:
+        if ch in _NO_PATTERN_SHORT:
+            return True
+        # Stop at the first value-taking letter: the remainder is ITS value, not
+        # more flags, so an `f` inside it is data (`-A2f`, `-mf`).
+        if ch in short_value or ch not in short_novalue:
+            return False
+    return False
+
+
 def _named_pattern(tok: str, head: str) -> tuple[str, str | None] | None:
     """Does `tok` NAME the pattern via -e/--regexp? -> ("attached", v) | ("separate", None).
 
@@ -261,7 +328,10 @@ def _named_pattern(tok: str, head: str) -> tuple[str, str | None] | None:
     body = tok[1:]
     if not body:
         return None
-    short_novalue, short_value, _, _ = _TABLES[head]
+    table = _TABLES.get(head)
+    if table is None:
+        return None  # head with no table — decline (a hook must never raise)
+    short_novalue, short_value, _, _ = table
     for pos, ch in enumerate(body):
         if ch == "e":
             rest = body[pos + 1 :]
@@ -283,7 +353,10 @@ def _consumes_next(tok: str, head: str) -> bool | None:
     `head` is the CANONICAL search head (`grep`/`rg`), because arity is a property
     of the tool and not of the letter: `-r` takes a value in rg and none in grep.
     """
-    short_novalue, short_value, long_novalue, long_value = _TABLES[head]
+    table = _TABLES.get(head)
+    if table is None:
+        return None  # head with no table — decline (a hook must never raise)
+    short_novalue, short_value, long_novalue, long_value = table
     if tok.startswith("--"):
         if "=" in tok:
             return False  # value is attached
@@ -342,7 +415,15 @@ def _bash_search_pattern(command: str) -> str | None:
         head = os.path.basename(tokens[0])
         if head not in _SEARCH_HEADS:
             continue
-        head = _HEAD_ALIASES[head]
+        # THREE COLLECTIONS HAVE TO AGREE — `_SEARCH_HEADS`, `_HEAD_ALIASES` and
+        # `_TABLES` — and nothing enforces it (#596 r5 Nit). A head added to the
+        # first without the other two would KeyError INSIDE A HOOK. Decline instead:
+        # this rail's contract is that it never breaks the tool call. Re-adding `ag`
+        # is exactly the change that would trip this.
+        canonical = _HEAD_ALIASES.get(head)
+        if canonical is None:
+            continue
+        head = canonical
 
         pattern: str | None = None
         operands = 0
@@ -351,9 +432,17 @@ def _bash_search_pattern(command: str) -> str | None:
         while i < len(rest):
             tok = rest[i]
             if tok.startswith("-"):
+                if _declares_no_pattern(tok, head):
+                    return None  # patterns come from a file, or nothing is searched
                 named = _named_pattern(tok, head)
                 if named is not None:
                     kind, value = named
+                    # MULTIPLE PATTERN-NAMING OPTIONS DECLINE (#596 r5 Nit). The
+                    # tool searches for ALL of them; this rail can inject only one,
+                    # and silently keeping the last is an arbitrary choice dressed
+                    # as an answer.
+                    if pattern is not None:
+                        return None
                     if kind == "attached":
                         pattern = value  # `-e<sym>` / `--regexp=<sym>`
                         i += 1
