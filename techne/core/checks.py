@@ -379,7 +379,10 @@ def init_remedy(config) -> str | None:
 _HOOK_EXPECTATIONS = {
     "session_start": (timedelta(days=3), "fires once per session"),
     "session_end": (timedelta(days=3), "fires at session teardown"),
-    "codex_grep_assist": (timedelta(days=7), "fires on Grep, when enabled"),
+    "codex_grep_assist": (
+        timedelta(days=7),
+        "fires on a symbol-shaped Grep or Bash search, when enabled",
+    ),
     "post_compact": (timedelta(days=7), "fires after a compaction"),
     # INSTRUMENTED as of techne#479. These were listed here while carrying no
     # record_hook_run call at all, deliberately — so they read UNOBSERVABLE
