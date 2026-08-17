@@ -12,13 +12,28 @@ Discipline (same fail-safe posture as post_tool_use / session_start):
     add, nothing is printed. ALL logging/errors go to stderr.
   - Any error (config load, missing codex.db, empty search) degrades to a no-op.
 
-Protocol shape (confirmed: PreToolUse honors additionalContext without blocking):
+Protocol shape — NOT YET CONFIRMED FOR THIS EXACT SHAPE (#596 r8):
   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                           "additionalContext": "..."}}
 
 NOTE the absence of `permissionDecision`. This rail matches Bash, so a grant would
 cover the entire command line rather than the segment it recognised — see the
 comment at the emit site (#596 r7).
+
+The word "confirmed" used to sit on this line and it was borrowed: it traces to
+#208, whose payload INCLUDED the grant, so it never evidenced the bare shape.
+`post_tool_use.py` ships the bare shape on PostToolUse, where `permissionDecision`
+has no meaning — that evidences the field-set, not PreToolUse's handling of its
+absence. So whether PreToolUse still delivers `additionalContext` with no
+permission field is INFERRED FROM THE DOCS, not observed.
+
+This matters more than it looks, because it cannot be caught by telemetry:
+`record_hook_run(outcome="ok")` fires on successful PRINTING, not delivery, so a
+rail that emits into the void still reads healthy — which is techne#596's own
+invisibility defect wearing a new hat. Settle it by DOGFOOD: after
+`techne init` + a restart, run one search and look for a
+"## Codex — symbols matching" block. One minute, and then this note can say
+"observed" instead of "inferred".
 """
 
 from __future__ import annotations
