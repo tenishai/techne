@@ -463,3 +463,52 @@ def test_codex_migration_idempotent(tmp_path):
         assert version == CODEX_VERSION
     finally:
         conn2.close()
+
+
+def test_walk_repo_skips_virtualenv_contents_whatever_the_venv_is_called(tmp_path):
+    """A venv is excluded by its CONTENTS, not by its directory name (techne#604).
+
+    The exact-name list holds `venv`/`.venv`/`env`/`.env`, so a venv called
+    anything else was indexed in full. This repo's CI environments are named
+    `.venv-ci-3.12` / `.venv-ci-3.13`, and after a re-index the graph held
+    114,412 venv symbols against 5,137 real ones — 96% vendored code. Blast
+    radius then reported `aiohttp/web.py` as a dependent of a techne hook.
+
+    `site-packages` catches every virtualenv regardless of its directory name,
+    which is exactly the case that broke. Of those 114,412 symbols, 114,410 were
+    under `site-packages`.
+    """
+    from techne.codex.source import _EXT_LANGUAGE, _walk_repo
+
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "real.py").write_text("def mine(): ...\n")
+
+    # A venv whose directory name is NOT in the exact-name list.
+    vendored = repo / ".venv-ci-3.13" / "lib" / "python3.13" / "site-packages" / "aiohttp"
+    vendored.mkdir(parents=True)
+    (vendored / "web.py").write_text("def application(): ...\n")
+
+    # ...and one under a completely differently-named venv, to show the rule is
+    # about the contents rather than any venv-name convention.
+    other = repo / "toolchain" / "lib" / "site-packages" / "requests"
+    other.mkdir(parents=True)
+    (other / "api.py").write_text("def get(): ...\n")
+
+    found = {str(p.relative_to(repo)) for p in _walk_repo(repo, set(_EXT_LANGUAGE.values()))}
+
+    assert found == {"pkg/real.py"}, f"vendored code leaked into the walk: {sorted(found)}"
+
+
+def test_walk_repo_still_indexes_a_repo_dir_merely_named_like_a_package(tmp_path):
+    """The skip must not overreach: `site-packages` is skipped as a DIRECTORY
+    name, so a source file whose own name resembles it must survive."""
+    from techne.codex.source import _EXT_LANGUAGE, _walk_repo
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "site_packages_helper.py").write_text("def helper(): ...\n")
+
+    found = {str(p.relative_to(repo)) for p in _walk_repo(repo, set(_EXT_LANGUAGE.values()))}
+
+    assert found == {"site_packages_helper.py"}
