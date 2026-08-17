@@ -1,7 +1,15 @@
 # Going public — ordered runbook (techne#556)
 
-**Status: NOT YET EXECUTED.** This document is the plan, not a record. techne is
-private as of 2026-08-17.
+**Status: PAUSED, DELIBERATELY — not stalled.** Richard's call, 2026-08-17: the
+flip waits until more milestones are complete. This document is the plan, not a
+record. techne is private as of 2026-08-17.
+
+Nothing here is blocked on effort or on an unanswered question — the sequence is
+written, its preconditions are measured, and the two open issues (#556, #592) are
+gated on the flip rather than on work. **Do not start any of it opportunistically.**
+Step 2 is the point of no return for forks, and the value of this document is
+that the whole sequence happens in one sitting, in order, when someone has
+decided to.
 
 This exists because #556's most important step — the only one an operator can
 take *before* the flip — was written down nowhere anyone would look. A control
