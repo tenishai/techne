@@ -255,7 +255,15 @@ class TestBashSearchPattern:
 
     def test_ripgrep_and_friends_count(self):
         assert self._p("rg annotate_freshness") == "annotate_freshness"
-        assert self._p("ag _walk_repo src/") == "_walk_repo"
+        # `ag` DECLINES BY DESIGN (#596 r4). Its table entries were wrong — `-f`
+        # (--follow) and `-D` (--debug) take no value but were filed as taking one,
+        # so `ag -f <sym> src` injected `src`. ag is not installed here, so any
+        # table for it would be asserted from memory rather than measured against
+        # the binary, which is how the wrong entries arrived. A missed augmentation
+        # costs nothing; re-add ag only WITH A MEASURED TABLE.
+        assert self._p("ag _walk_repo src/") is None
+        assert self._p("ag -f _walk_repo src") is None
+        assert self._p("ag -D _walk_repo src") is None
 
     def test_explicit_dash_e_wins(self):
         assert self._p("grep -rn -e resolve_repo_db_for_query .") == "resolve_repo_db_for_query"
@@ -487,20 +495,32 @@ class TestRoundTwoFindings:
         assert self._p("cat x.py | rg foo_symbol") is None
 
     def test_an_ambiguous_flag_declines_rather_than_guessing(self):
-        """`-t` takes a value in rg and none in grep. Per-tool tables tried to
-        resolve that and could never be complete — measured in #596 r3: 13 of 13
-        UNLISTED value-taking options injected a WRONG pattern and 0 declined,
-        because an incomplete allow-list that fails OPEN promotes an operand to
-        the pattern (`rg --type json` searched for `json`).
+        """An option we cannot read declines the whole command — measured in #596
+        r3: 13 of 13 UNLISTED value-taking options injected a WRONG pattern and 0
+        declined, because an allow-list that fails OPEN promotes an operand to the
+        pattern (`rg --type json` searched for `json`).
 
-        Inverted: an option we cannot read declines the whole command. The cost is
-        a missed augmentation, which is nothing; the alternative was injecting a
-        wrong symbol, which is the noise that gets a rail switched off."""
+        `-t` IS NOT AN EXAMPLE OF THAT ANY MORE, and the r3 commit message claiming
+        it was is false (#596 r4). `t` sat in the shared value-taking table, so
+        `_consumes_next("-t")` returned True: it GUESSED. The assertion below passed
+        only because `-t` ate `search_symbols` and the leftover `.` failed
+        `_SYMBOLISH` — the RESULT, not the RULE. Change the operand and the guess
+        became visible: `grep -t search_symbols src` injected `src`.
+
+        Arity is now per-head, so `-t` is answered rather than guessed: rg has
+        `--type` (takes a value), grep has no `-t` at all (declines)."""
         assert self._p("rg -t json search_symbols") == "search_symbols"
         assert self._p("rg --type json search_symbols") == "search_symbols"
-        # Ambiguous across tools, and unknown long options, both decline.
-        assert self._p("grep -t search_symbols .") is None
+        # Unknown long options decline.
         assert self._p("grep --unknown-opt x search_symbols .") is None
+
+        # `-t` ON GREP, WITH OPERANDS THAT MAKE A GUESS VISIBLE. Each of these
+        # returned a WRONG PATH as the pattern before per-head tables; the leading
+        # case is the one the old assertion used, kept so the pair is legible.
+        assert self._p("grep -t search_symbols .") is None
+        assert self._p("grep -t search_symbols src") is None
+        assert self._p("grep -t search_symbols techne") is None
+        assert self._p("grep -rn -t sym_name src") is None
 
         # THE CASES THAT DISCRIMINATE. The two above also return None under a
         # mutant that guesses, because the guessed token happens to be
@@ -510,6 +530,80 @@ class TestRoundTwoFindings:
         # failure measured in #596 r3.
         assert self._p("rg --somefuture-opt jsonlike sym_name") is None
         assert self._p("rg -Y jsonlike sym_name") is None
+
+    def test_the_attached_spellings_of_e_and_regexp_name_the_pattern(self):
+        """`-e<sym>` and `--regexp=<sym>` are the two options whose value IS the
+        pattern, and the arity walk had both exactly backwards (#596 r4).
+
+        `--opt=value` returned False on "the value is attached", and a cluster
+        containing `e` returned False on "the caller handles it". Both are right
+        for `--type=json` and `-ie <sym>`; both were wrong here, because the
+        caller's special case only matched the SEPARATE spellings `-e` and
+        `--regexp`. So the pattern was skipped as if it were a flag and the NEXT
+        OPERAND was promoted — measured against /usr/bin/grep, not a man page:
+
+            grep --regexp=my_symbol src  ->  injected `src`
+            grep -emy_symbol mydir       ->  injected `mydir`
+        """
+        assert self._p("grep --regexp=my_symbol src") == "my_symbol"
+        assert self._p("grep -emy_symbol mydir") == "my_symbol"
+        assert self._p("grep -rn -emy_symbol src") == "my_symbol"
+        # The separate spellings, including inside a cluster, still work.
+        assert self._p("grep -e my_symbol src") == "my_symbol"
+        assert self._p("grep -ie my_symbol src") == "my_symbol"
+        assert self._p("grep --regexp my_symbol src") == "my_symbol"
+        # An ordinary attached long value is still a value, not a pattern.
+        assert self._p("rg --type=py my_symbol src") == "my_symbol"
+
+    def test_option_arity_is_per_head_because_the_same_letter_differs(self):
+        """A letter in a SHARED table asserts it means the same thing in every
+        tool. Three of those assertions were false, and the class was not
+        exhausted by the review that found them (#596 r4).
+
+        Measured with `<tool> -X </dev/null`, where "requires an argument" is the
+        discriminator:
+
+            -r   grep: recursive, NO value  |  rg: --replace, TAKES a value
+            -E   grep: --extended-regexp    |  rg: --encoding, TAKES a value
+            -t   grep: not an option        |  rg: --type, TAKES a value
+            -D   grep: --devices, TAKES one |  rg: not an option
+
+        `-E` was NOT in the review's list — it was found by auditing every listed
+        letter against the binaries instead of patching the three reported. No
+        single shared table can be right, because the same letter genuinely has
+        different arity per tool. Per-head tables need not be COMPLETE (unlisted
+        still declines); they need only be CORRECT for what they list.
+        """
+        # rg: -r/-E take values, so the pattern is the token AFTER the value.
+        # Verified against the binary: `rg -r new_name old_name t.txt` prints
+        # "new_name here", i.e. it matched the line containing `old_name`.
+        assert self._p("rg -r new_name old_name .") == "old_name"
+        assert self._p("rg --replace new_name old_name .") == "old_name"
+        assert self._p("rg -E utf8 my_symbol .") == "my_symbol"
+        # grep: the same letters take no value, so the pattern comes first.
+        assert self._p("grep -r my_symbol .") == "my_symbol"
+        assert self._p("grep -E my_symbol .") == "my_symbol"
+        # grep has no -t; rg has no -D. Both decline rather than guess.
+        assert self._p("grep -t my_symbol src") is None
+        assert self._p("rg -D my_symbol src") is None
+        # grep DOES have -D, and it takes a value.
+        assert self._p("grep -D skip my_symbol src") == "my_symbol"
+
+    def test_optional_argument_long_options_do_not_eat_the_pattern(self):
+        """GNU/BSD spell these `--color[=WHEN]` and `--context[=NUM]`, so written
+        bare they consume NOTHING. They were filed as value-taking, which ate the
+        pattern: `grep --context my_symbol src` injected `src` (#596 r4).
+
+        Found by probing the binaries, not by reading the review — and the same
+        options take a REAL value on rg, which is the divergence per-head tables
+        exist for.
+        """
+        assert self._p("grep --context my_symbol src") == "my_symbol"
+        assert self._p("grep --color my_symbol src") == "my_symbol"
+        assert self._p("grep --colour my_symbol src") == "my_symbol"
+        # rg's --context genuinely takes a value.
+        assert self._p("rg --context 3 my_symbol src") == "my_symbol"
+        assert self._p("rg --color always my_symbol src") == "my_symbol"
 
     def test_a_cluster_ending_in_e_does_not_eat_the_pattern(self):
         """`-e` is handled before the option loop, so a cluster ENDING in `e`
@@ -639,19 +733,27 @@ class TestRoundThreeFindings:
 
 def test_the_prefilter_is_strictly_weaker_than_the_parse(home, monkeypatch, capsys):
     """The prefilter exists for cost (#596 r3: ~113ms added to every Bash call,
-    79% of it on the decline path). It must never reject something the real parse
+    79% of it on the decline path). It should not reject something the real parse
     would have accepted — it is an optimisation, and an optimisation that changes
     behaviour is a bug.
 
-    So: every command the parse accepts must contain a search head, which is the
-    only thing the prefilter tests.
+    THIS IS A CORPUS, NOT A PROOF, and the r3 phrase "strictly weaker BY
+    CONSTRUCTION" overclaimed (#596 r4 Nit). The prefilter is a SUBSTRING test on
+    the raw command; the parse needs the BASENAME OF TOKEN 0 after shlex
+    unquoting. Those differ, and there are real counterexamples:
+
+        g''rep -rn my_symbol .      parses to my_symbol; prefilter rejects
+        gr\\ep -rn my_symbol .       parses to my_symbol; prefilter rejects
+
+    Both are missed augmentations, which cost nothing, and no agent writes them —
+    so the gap is accepted deliberately rather than closed. What the loop below
+    establishes is that the corpus is clean, not that the property holds.
     """
     from techne.hooks.pre_tool_use import _SEARCH_HEADS, _bash_search_pattern
 
     accepted = [
         "grep -rn sym_name .",
         "cd /repo && rg sym_name",
-        "ag sym_name src/",
         "/usr/bin/grep -rn sym_name .",
         "make build; grep -rn sym_name techne/",
     ]

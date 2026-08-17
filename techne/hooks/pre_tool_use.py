@@ -42,51 +42,185 @@ ASSIST_TOOLS = {"Grep", "Bash"}
 #: Shell commands whose first non-flag argument is a search PATTERN. Deliberately
 #: not the whole read-only set from post_tool_use — `find`/`ls`/`cat` take paths,
 #: and feeding a path to the symbol FTS is the Glob mistake in a new costume.
-_SEARCH_HEADS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
+#: `ag` IS DELIBERATELY ABSENT (#596 r4). It was listed, and its table entries were
+#: wrong — `-f` (ag: --follow, no value) and `-D` (ag: --debug, no value) were both
+#: filed as value-TAKING, so `ag -f <sym> src` injected `src`. The deeper problem is
+#: that ag is not installed on this machine, so every claim about its flags would be
+#: asserted from memory rather than measured against the binary — which is precisely
+#: how the wrong entries got there. Declining `ag` outright costs a missed
+#: augmentation and nothing else. Re-add it WITH A MEASURED TABLE, not from a man page.
+_SEARCH_HEADS = frozenset({"grep", "egrep", "fgrep", "rg"})
 
-#: Options KNOWN to take no value, for the three search heads. Everything else
-#: DECLINES (#596 r3) — the previous design listed value-TAKING options per tool
-#: and assumed anything unlisted was safe to skip past. That was measured false:
-#: 13 of 13 unlisted value-taking options injected a WRONG pattern and 0 declined
-#: (`rg --type json` searched the graph for `json`). Three hand-kept tables of
-#: someone else's flags could never be complete, and an incomplete allow-list that
-#: FAILS OPEN is the defect this rail keeps producing.
+#: PER-HEAD OPTION TABLES, MEASURED FROM THE BINARIES (#596 r4).
 #:
-#: Inverted, the failure mode is a missed augmentation, which costs nothing.
-_NO_VALUE_OPTS = frozenset("rRnHhiIlLwxvcazZoqsFEGPUV")
+#: Round 3 made unlisted options decline, which closed the unbounded failure class.
+#: What it left was the *bounded* one: a letter in a shared table is an assertion
+#: that it means the same thing in every tool, and those assertions were false.
+#: Measured against the actual binaries here — `<tool> -X </dev/null`, where
+#: "requires an argument" is the discriminator:
+#:
+#:   -r   grep: recursive, NO value   |  rg: --replace, TAKES a value
+#:   -E   grep: --extended-regexp     |  rg: --encoding, TAKES a value
+#:   -t   grep: not an option at all  |  rg: --type, TAKES a value
+#:   -D   grep: --devices, TAKES one  |  rg: not an option at all
+#:
+#: So `rg -r new_name old_name .` injected `new_name`, and `grep -t <sym> src`
+#: injected `src`. NO SINGLE SHARED TABLE CAN BE RIGHT — the same letter genuinely
+#: has different arity per tool. The head is known at parse time, so scope by it.
+#: Per-head tables need not be COMPLETE, because unlisted still declines; they only
+#: need to be CORRECT for what they list. That is what makes this tractable where
+#: round 3's "three hand-kept tables could never be complete" reasoning stalled.
+_HEAD_ALIASES = {"grep": "grep", "egrep": "grep", "fgrep": "grep", "rg": "rg"}
 
-#: Short options KNOWN to take a separate value, across grep/rg/ag. Kept so a
-#: perfectly ordinary `grep -A 5 <sym> .` is not lost to the decline rule — that
-#: would trade one failure mode for another.
-_VALUE_OPTS_SHORT = frozenset("ABCDdfmet")
-
-#: Long options KNOWN to take a separate value. Anything else long DECLINES.
-_VALUE_OPTS_LONG = frozenset(
-    {
-        "--after-context",
-        "--before-context",
-        "--context",
-        "--devices",
-        "--directories",
-        "--exclude",
-        "--exclude-dir",
-        "--exclude-from",
-        "--file",
-        "--include",
-        "--label",
-        "--max-count",
-        "--binary-files",
-        "--color",
-        "--colour",
-        "--group-separator",
-        "--regexp",
-        "--type",
-        "--type-not",
-        "--glob",
-        "--iglob",
-        "--ignore-file",
-    }
-)
+#: (short_novalue, short_value, long_novalue, long_value) per canonical head.
+#: `e` sits in short_value because -e DOES take a value — but that value is the
+#: PATTERN, so `_named_pattern` intercepts it before arity is ever consulted.
+_TABLES = {
+    "grep": (
+        # BSD grep 2.6.0 and ugrep 7.5.0 agree exactly on these; P and G are added
+        # for GNU grep (--perl-regexp / --basic-regexp), which takes no value either.
+        frozenset("abchilnopqrsuvwxyzEFGHIJLMORSUVXZPG"),
+        frozenset("defmABCD"),
+        # OPTIONAL-ARGUMENT LONGS, AND THEY MATTER: GNU/BSD spell these
+        # `--color[=WHEN]` and `--context[=NUM]`, so they consume NOTHING when
+        # written bare. Listing them as value-taking ate the pattern —
+        # `grep --context <sym> src` injected `src`.
+        frozenset({"--color", "--colour", "--context"}),
+        frozenset(
+            {
+                "--after-context",
+                "--before-context",
+                "--devices",
+                "--directories",
+                "--exclude",
+                "--exclude-dir",
+                "--exclude-from",
+                "--file",
+                "--include",
+                "--label",
+                "--max-count",
+                "--binary-files",
+                "--group-separator",
+            }
+        ),
+    ),
+    "rg": (
+        frozenset("abchilnopqsuvwxzFHILNPSUV"),
+        frozenset("defgjmrtABCEMT"),
+        # Full measured lists from `rg --help` (ripgrep 15.2.0). Note --context and
+        # --color DO take values here, the opposite of grep — the divergence the
+        # per-head split exists for.
+        frozenset(
+            {
+                "--auto-hybrid-regex",
+                "--binary",
+                "--block-buffered",
+                "--byte-offset",
+                "--case-sensitive",
+                "--column",
+                "--count",
+                "--count-matches",
+                "--crlf",
+                "--debug",
+                "--files",
+                "--files-with-matches",
+                "--files-without-match",
+                "--fixed-strings",
+                "--follow",
+                "--glob-case-insensitive",
+                "--heading",
+                "--help",
+                "--ignore-case",
+                "--ignore-file-case-insensitive",
+                "--include-zero",
+                "--invert-match",
+                "--json",
+                "--line-buffered",
+                "--line-number",
+                "--line-regexp",
+                "--max-columns-preview",
+                "--mmap",
+                "--multiline",
+                "--multiline-dotall",
+                "--no-config",
+                "--no-filename",
+                "--no-ignore",
+                "--no-ignore-dot",
+                "--no-ignore-exclude",
+                "--no-ignore-files",
+                "--no-ignore-global",
+                "--no-ignore-messages",
+                "--no-ignore-parent",
+                "--no-ignore-vcs",
+                "--no-line-number",
+                "--no-messages",
+                "--no-pcre2-unicode",
+                "--no-require-git",
+                "--no-unicode",
+                "--null-data",
+                "--one-file-system",
+                "--only-matching",
+                "--passthru",
+                "--pcre2",
+                "--pcre2-version",
+                "--pretty",
+                "--quiet",
+                "--search-zip",
+                "--smart-case",
+                "--sort-files",
+                "--stats",
+                "--stop-on-nonmatch",
+                "--text",
+                "--trace",
+                "--trim",
+                "--type-list",
+                "--unrestricted",
+                "--version",
+                "--vimgrep",
+                "--with-filename",
+                "--word-regexp",
+            }
+        ),
+        frozenset(
+            {
+                "--after-context",
+                "--before-context",
+                "--color",
+                "--colors",
+                "--context",
+                "--context-separator",
+                "--dfa-size-limit",
+                "--encoding",
+                "--engine",
+                "--field-context-separator",
+                "--field-match-separator",
+                "--file",
+                "--generate",
+                "--glob",
+                "--hostname-bin",
+                "--hyperlink-format",
+                "--iglob",
+                "--ignore-file",
+                "--max-columns",
+                "--max-count",
+                "--max-depth",
+                "--max-filesize",
+                "--path-separator",
+                "--pre",
+                "--pre-glob",
+                "--regex-size-limit",
+                "--replace",
+                "--sort",
+                "--sortr",
+                "--threads",
+                "--type",
+                "--type-add",
+                "--type-clear",
+                "--type-not",
+            }
+        ),
+    ),
+}
 
 #: A redirect target is NOT a path operand (#596 r3). `cat x | grep sym > out.txt`
 #: fired, because `out.txt` counted as "this searches a tree" — it is where the
@@ -101,18 +235,62 @@ _REDIRECT = re.compile(r"^[0-9]*>>?|^<")
 _SYMBOLISH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
 
 
-def _consumes_next(tok: str) -> bool | None:
+def _named_pattern(tok: str, head: str) -> tuple[str, str | None] | None:
+    """Does `tok` NAME the pattern via -e/--regexp? -> ("attached", v) | ("separate", None).
+
+    THE ATTACHED SPELLINGS ARE THE POINT (#596 r4). `-e` and `--regexp` are the two
+    options whose value IS the pattern, and both have attached forms that the
+    arity walk got exactly backwards:
+
+        grep --regexp=my_symbol src   ->  was injecting `src`
+        grep -emy_symbol mydir        ->  was injecting `mydir`
+
+    `--opt=value` returned False on the reasoning "the value is attached", and a
+    cluster containing `e` returned False on "the caller handles it". Both are
+    right for `--type=json` and `-ie <sym>`; both are wrong here, because the
+    attached remainder is not a flag's value to skip — it is the thing we are
+    looking for. The caller's special case only ever matched the SEPARATE
+    spellings, so the pattern was skipped and the next operand promoted.
+    """
+    if tok.startswith("--"):
+        if tok == "--regexp":
+            return ("separate", None)
+        if tok.startswith("--regexp="):
+            return ("attached", tok.split("=", 1)[1])
+        return None
+    body = tok[1:]
+    if not body:
+        return None
+    short_novalue, short_value, _, _ = _TABLES[head]
+    for pos, ch in enumerate(body):
+        if ch == "e":
+            rest = body[pos + 1 :]
+            return ("attached", rest) if rest else ("separate", None)
+        # A value-taking letter BEFORE `e` swallows the remainder as ITS value, so
+        # there is no `e` option here at all — let the arity walk handle the token.
+        if ch in short_value or ch not in short_novalue:
+            return None
+    return None
+
+
+def _consumes_next(tok: str, head: str) -> bool | None:
     """True/False if we KNOW whether `tok` consumes the next token; None if not.
 
     None means DECLINE THE WHOLE COMMAND. An option we do not recognise may or may
     not take a value, and guessing wrong promotes an operand to the pattern —
     which is how `rg --type json` came to search for `json`.
+
+    `head` is the CANONICAL search head (`grep`/`rg`), because arity is a property
+    of the tool and not of the letter: `-r` takes a value in rg and none in grep.
     """
+    short_novalue, short_value, long_novalue, long_value = _TABLES[head]
     if tok.startswith("--"):
         if "=" in tok:
             return False  # value is attached
-        if tok in _VALUE_OPTS_LONG:
+        if tok in long_value:
             return True
+        if tok in long_novalue:
+            return False
         return None  # unrecognised long option — too tool-specific to guess
     body = tok[1:]
     if not body:
@@ -120,11 +298,9 @@ def _consumes_next(tok: str) -> bool | None:
     # Walk the cluster. A value-taking letter that is NOT last carries its value
     # ATTACHED (`-A5`, `-m2`), so the cluster consumes nothing further.
     for pos, ch in enumerate(body):
-        if ch == "e":
-            return False  # `-e` names the pattern; the caller handles it
-        if ch in _VALUE_OPTS_SHORT:
+        if ch in short_value:
             return pos == len(body) - 1  # last -> separate value; else attached
-        if ch not in _NO_VALUE_OPTS:
+        if ch not in short_novalue:
             return None  # unrecognised short flag — decline rather than guess
     return False
 
@@ -166,6 +342,7 @@ def _bash_search_pattern(command: str) -> str | None:
         head = os.path.basename(tokens[0])
         if head not in _SEARCH_HEADS:
             continue
+        head = _HEAD_ALIASES[head]
 
         pattern: str | None = None
         operands = 0
@@ -173,12 +350,20 @@ def _bash_search_pattern(command: str) -> str | None:
         i = 0
         while i < len(rest):
             tok = rest[i]
-            if tok in ("-e", "--regexp") and i + 1 < len(rest):
-                pattern = rest[i + 1]  # named explicitly; everything else is a path
-                i += 2
-                continue
             if tok.startswith("-"):
-                consumes = _consumes_next(tok)
+                named = _named_pattern(tok, head)
+                if named is not None:
+                    kind, value = named
+                    if kind == "attached":
+                        pattern = value  # `-e<sym>` / `--regexp=<sym>`
+                        i += 1
+                        continue
+                    if i + 1 >= len(rest):
+                        return None  # `-e` with nothing after it — malformed
+                    pattern = rest[i + 1]  # named explicitly; the rest are paths
+                    i += 2
+                    continue
+                consumes = _consumes_next(tok, head)
                 if consumes is None:
                     return None  # unrecognised option — decline rather than guess
                 i += 2 if (consumes and i + 1 < len(rest)) else 1
@@ -232,6 +417,10 @@ def _is_piped_into(command: str, segments: list[str], index: int) -> bool:
         pos = found + len(seg)
     between = command[pos : command.find(segments[index], pos)]
     # `||` is a control operator, not a pipe; check it first or the `|` test eats it.
+    # NO BACKSLASH-ESCAPE HANDLING, DELIBERATELY (#596 r4 Nit). `echo a \| grep
+    # <sym>` reads as piped and therefore declines, though the pipe is escaped.
+    # That errs toward silence, which is the direction this rail is tuned for —
+    # noted so the comment does not read stronger than the code.
     return "|" in between.replace("||", "")
 
 
@@ -313,9 +502,13 @@ def main() -> None:
     # now runs on nearly every tool call, and it measured ~113 ms added to each
     # one — of which the DECLINE path was 79%, i.e. almost all of it paid by calls
     # that were never searches. A pure-string test costs nothing and takes that to
-    # ~49 ms. It must stay strictly weaker than `_bash_search_pattern`: a command
-    # with no search head cannot possibly yield a pattern, so this can only skip
-    # work the real parse would also have declined.
+    # ~49 ms. It is ALMOST, BUT NOT STRICTLY, weaker than `_bash_search_pattern`
+    # (#596 r4 Nit — the r3 wording claimed "by construction" and that is not
+    # proven): this is a SUBSTRING test on the raw command, while the parse takes
+    # the BASENAME OF TOKEN 0 after shlex unquoting. So `g''rep -rn <sym> .` and
+    # `gr\ep -rn <sym> .` would parse but are skipped here. Both are missed
+    # augmentations, which cost nothing, and neither is a form an agent writes —
+    # the gap is accepted knowingly rather than papered over.
     if tool_name == "Bash":
         _cmd = (data.get("tool_input") or {}).get("command") or ""
         if not any(h in _cmd for h in _SEARCH_HEADS):
