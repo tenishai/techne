@@ -116,12 +116,15 @@ _TABLES = {
         # prints `-M MAGIC` for value-taking and `-y` for not: J, M and O ALL TAKE
         # VALUES and were all in this set, so `grep -M ELF <sym> src` injected `ELF`.
         # They are now in NEITHER table, which declines — deliberately, not by
-        # omission: the shim falls back to real BSD grep whenever an argument matches
-        # `-[Zz]*`, `--null`, `-*-filter*` and friends, so which binary runs depends
-        # on the REST of the command line. Strictly the ambiguity is only reachable
-        # when a fallback trigger co-occurs (#596 r6 — "cannot be resolved
-        # statically" overstated it); declining is still the right call, because the
-        # rule stays true of the union and the cost is one niche form
+        # omission: the shim falls back to THE REAL SYSTEM grep whenever an argument
+        # matches `-[Zz]*`, `--null`, `-*-filter*` and friends, so which binary runs
+        # depends on the REST of the command line. That fallback is BSD grep on THIS
+        # machine and GNU grep on Linux (#611) — naming BSD alone read as a fact
+        # about the shim when it is a fact about macOS, and GNU is the fallback that
+        # matters wherever techne runs in CI or on a server. Strictly the ambiguity
+        # is only reachable when a fallback trigger co-occurs (#596 r6 — "cannot be
+        # resolved statically" overstated it); declining is still the right call,
+        # because the rule stays true of the union and the cost is one niche form
         # (`grep -O py <sym> .`).
         #
         # ugrep also takes values for g, t, K and N; those are absent from both
@@ -142,10 +145,28 @@ _TABLES = {
         #
         #   --color / --colour     `--color[=WHEN]`  optional in BOTH -> consumes
         #                          nothing bare. Straightforwardly no-value.
-        #   --group-separator      `--group-separator[=SEP]` in ugrep, ATTACHED-ONLY,
-        #                          and absent from BSD grep entirely. Bare it consumes
-        #                          nothing; listed as value-taking it ate the pattern
-        #                          (`grep --group-separator <sym> mydir` -> `mydir`).
+        #   --group-separator      DECLINES — in NEITHER table (#611). It was here,
+        #                          and "safe in both" is the test it fails. ugrep
+        #                          spells it `--group-separator[=SEP]`, ATTACHED-ONLY,
+        #                          so bare it consumes nothing (measured). GNU
+        #                          documents `--group-separator=SEP` as REQUIRED, and
+        #                          getopt_long accepts `--arg param` for a required
+        #                          argument, so on GNU it EATS THE NEXT TOKEN. Listed
+        #                          no-value, `grep --group-separator SEP <sym> src`
+        #                          therefore injects `SEP` on Linux whenever the
+        #                          separator is symbolish. BSD lacks the option
+        #                          entirely. Contrast `--context` directly below,
+        #                          which is ALSO tool-dependent and is KEPT: there,
+        #                          no-value never injects a WRONG pattern in either
+        #                          binary, only a missed one. That is the line —
+        #                          not consistency for its own sake. Cost of
+        #                          declining: the ugrep-correct BARE form is now a
+        #                          missed augmentation. Only that form — an attached
+        #                          `--group-separator=X` is self-contained in every
+        #                          binary and `_consumes_next` returns False on the
+        #                          `=` before any table is consulted, so it still
+        #                          resolves. GNU grep is not installed here, so its
+        #                          half is documented, not measured.
         #   --context              NOT optional in ugrep — it REQUIRES its argument
         #                          (`ugrep: invalid argument --context=my_symbol`),
         #                          the opposite of what r4 asserted. It stays here
@@ -160,7 +181,24 @@ _TABLES = {
         #                          unaffected. (Measured. An earlier draft of this very
         #                          comment claimed the pattern "still resolves" — it
         #                          does not, and scoring the case is what caught it.)
-        frozenset({"--color", "--colour", "--context", "--group-separator"}),
+        frozenset({"--color", "--colour", "--context"}),
+        # HOW THIS BLOCK WAS DERIVED, recorded because its absence is what produced
+        # the `--group-separator` defect (#611). Every OTHER table here carries its
+        # provenance; this one carried none, and the r4 entries were generalised
+        # from GNU/BSD rather than measured against the shim — reasoning that
+        # structurally cannot find an option which is optional only in ugrep.
+        #
+        # These are options whose argument is REQUIRED IN EVERY CANDIDATE BINARY
+        # (ugrep 7.5.0 here, GNU and BSD grep as the fallbacks), so skipping the
+        # next token is right regardless of which one runs. That is the same
+        # "safe in both" test `long_novalue` is held to, pointed the other way.
+        #
+        # `--max-count` carries one wrinkle worth recording so nobody rediscovers
+        # it: UGREP REJECTS THE SEPARATE FORM outright — `grep --max-count 1 <sym>
+        # src` exits 2 with "missing argument for --max-count", accepting only
+        # `--max-count=1`. Harmless in effect (the command fails before we could
+        # mislead anyone), and it stays listed because GNU accepts both spellings
+        # and the entry has to be right for the binary that accepts the form.
         frozenset(
             {
                 "--after-context",
@@ -776,9 +814,7 @@ def main() -> None:
         if db_path is None:
             # The single most likely reason this rail looks "on but does
             # nothing": the repo being searched was never indexed.
-            record_hook_run(
-                techne_db, HOOK_NAME, outcome="noop:no-repo-db", detail=str(start_path)
-            )
+            record_hook_run(techne_db, HOOK_NAME, outcome="noop:no-repo-db", detail=str(start_path))
             sys.exit(0)
         with bounded_hook(config.hooks.timeout_s, label="pre_tool_use"):
             results = annotate_freshness(

@@ -70,7 +70,11 @@ def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
     """Flag OFF (default) → no stdout, even with a populated per-repo db."""
     repo, db = _make_repo(home, indexed=True)
     add_symbol(
-        db, id="s1", file="auth.py", name="authenticate", kind="function",
+        db,
+        id="s1",
+        file="auth.py",
+        name="authenticate",
+        kind="function",
         signature="def authenticate(user): ...",
     )
     # No config.yaml at all → codex_grep_assist defaults to False.
@@ -84,7 +88,8 @@ def test_non_grep_glob_tool_emits_nothing(home, monkeypatch, capsys):
     repo, db = _make_repo(home, indexed=True)
     add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
     out = _run(
-        monkeypatch, capsys,
+        monkeypatch,
+        capsys,
         {"tool_name": "Read", "tool_input": {"pattern": "authenticate"}, "cwd": str(repo)},
     )
     assert out == ""
@@ -129,7 +134,11 @@ def test_matching_symbol_injects_context(home, monkeypatch, capsys):
     _write_config(home, codex_grep_assist=True)
     repo, db = _make_repo(home, indexed=True)
     add_symbol(
-        db, id="s1", file="auth.py", name="authenticate", kind="function",
+        db,
+        id="s1",
+        file="auth.py",
+        name="authenticate",
+        kind="function",
         signature="def authenticate(user, token): ...",
     )
     out = _run(monkeypatch, capsys, _grep("authenticate", repo))
@@ -199,7 +208,8 @@ def test_glob_tool_not_augmented(home, monkeypatch, capsys):
     repo, db = _make_repo(home, indexed=True)
     add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
     out = _run(
-        monkeypatch, capsys,
+        monkeypatch,
+        capsys,
         {"tool_name": "Glob", "tool_input": {"pattern": "authenticate"}, "cwd": str(repo)},
     )
     assert out == ""
@@ -215,8 +225,13 @@ def test_stale_symbol_shows_freshness_marker(home, monkeypatch, capsys):
     repo, db = _make_repo(home, indexed=True)
     ghost = home / "gone" / "auth.py"  # absolute path that does not exist
     add_symbol(
-        db, id="s1", file=str(ghost), name="authenticate", kind="function",
-        signature="def authenticate(user): ...", file_hash="deadbeef",
+        db,
+        id="s1",
+        file=str(ghost),
+        name="authenticate",
+        kind="function",
+        signature="def authenticate(user): ...",
+        file_hash="deadbeef",
     )
     out = _run(monkeypatch, capsys, _grep("authenticate", repo))
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -863,25 +878,56 @@ class TestRoundSixFindings:
 
         return _bash_search_pattern(cmd)
 
-    def test_group_separator_is_optional_and_must_not_skip_the_pattern(self):
-        """ugrep spells it `--group-separator[=SEP]` — OPTIONAL and attached-only —
-        so bare it consumes nothing. It sat in the value-taking table, so the rail
-        skipped the next token and injected the path (#596 r6):
+    def test_group_separator_declines_because_no_value_is_unsafe_on_gnu(self):
+        """`--group-separator` is in NEITHER table, so it DECLINES (#611).
 
-            grep --group-separator my_symbol mydir  ->  injected `mydir`
+        It went value-taking -> no-value (#596 r6) -> declining, and the last move
+        is the one with a rule behind it rather than a measurement. "No value" has
+        to be SAFE IN BOTH binaries, and here it is not:
 
-        Same class as the `--color`/`--context` fix documented directly above it in
-        the table. The r4 reasoning could not find this one: it was traced from
-        GNU/BSD, where `--group-separator` is not optional (and BSD grep does not
-        have the option at all), so it found exactly the GNU-optional set.
+            ugrep 7.5.0   `--group-separator[=SEP]`, ATTACHED-ONLY -> bare consumes
+                          nothing (measured on this machine)
+            GNU grep      `--group-separator=SEP`, argument REQUIRED — and
+                          getopt_long accepts `--arg param` for a required argument,
+                          so it EATS THE NEXT TOKEN
+            BSD grep      no such option
 
-        The fix is TWO-PART — `_consumes_next` tests `long_value` first, so the
-        entry has to be removed there, not merely added to `long_novalue`.
+        Classified no-value, `grep --group-separator SEP <sym> src` on Linux takes
+        `SEP` as the pattern and injects symbols for it whenever a separator happens
+        to be symbolish. That is a WRONG pattern, not a missing one.
+
+        CONTRAST `--context`, which is equally tool-dependent and is deliberately
+        KEPT in `long_novalue` (see the test below): there, no-value costs only a
+        MISSED augmentation in either binary, never a wrong one. That asymmetry is
+        the rule — not consistency for its own sake.
+
+        The cost is real, accepted, and SMALLER THAN IT LOOKS: only the BARE form
+        is lost. `_consumes_next` returns False for any `--opt=value` BEFORE it
+        consults a table, because an attached value is self-contained in every
+        binary — so the attached spelling still resolves its pattern even though
+        the option is now unlisted. Declining costs the one spelling whose meaning
+        actually differs between binaries, and nothing else.
         """
-        assert self._p("grep --group-separator my_symbol mydir") == "my_symbol"
-        assert self._p("grep --group-separator my_symbol src") == "my_symbol"
-        # The attached spelling is a genuine value and must stay skipped.
+        assert self._p("grep --group-separator my_symbol mydir") is None
+        assert self._p("grep --group-separator my_symbol src") is None
+        # Attached: unambiguous everywhere, handled by the `=` branch, still works.
         assert self._p("grep --group-separator=X my_symbol mydir") == "my_symbol"
+
+    def test_max_count_separate_form_is_rejected_by_ugrep_but_stays_listed(self):
+        """`--max-count` stays in `long_value` even though the binary that actually
+        runs here refuses the spelling that classification is about (#611).
+
+        Measured: `grep --max-count 1 <sym> src` exits 2 with
+        "missing argument for --max-count" — ugrep accepts only `--max-count=1`.
+        So on this machine the separate form never reaches a real search, which
+        makes our arity call unobservable rather than wrong.
+
+        It stays listed because GNU accepts BOTH spellings, and the table has to be
+        right for the binary that accepts the form. Skipping the token is correct
+        there; declining would inject the count as a pattern.
+        """
+        assert self._p("grep --max-count 1 my_symbol src") == "my_symbol"
+        assert self._p("grep --max-count=1 my_symbol src") == "my_symbol"
 
     def test_long_context_declines_on_grep_and_that_is_the_safe_direction(self):
         """`--context` is NOT optional in ugrep — it REQUIRES its argument, the
