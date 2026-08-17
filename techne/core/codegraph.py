@@ -495,3 +495,130 @@ def annotate_freshness(
         result.append(annotated)
 
     return result
+
+
+def index_freshness(db_path: Path, *, repo_root: Path | str | None = None) -> dict:
+    """Freshness of the INDEX ITSELF, independent of any query's results.
+
+    ``annotate_freshness`` can only flag files a query actually returned rows
+    from. That leaves the one case that most needs a warning with none: a symbol
+    ADDED since the last index has no row, so there is nothing to hang a flag on,
+    and the query returns an empty list that reads as authoritative absence
+    (techne#595). Measured instance — ``recall_attribution`` shipped 2026-08-13,
+    was absent from the index three days later, and ``codex_search`` for it
+    returned ``{"results": [], "count": 0}`` with no notice, while a SIBLING
+    symbol from the same stale file was correctly flagged ``stale`` in the same
+    session. The index knew; the query surface did not say.
+
+    So this asks the question absence cannot: how much of the index is behind
+    the working tree? Returns ``{files, fresh, stale, missing, unknown}``.
+
+    Implemented by handing every DISTINCT (file, file_hash) pair to
+    ``annotate_freshness`` rather than re-deriving the states here — a second
+    classifier would be a second definition of "stale" and would drift from the
+    one callers already see on their rows.
+
+    COST, measured on techne (228 indexed files): ~21 ms for the full scan, one
+    stat + one SHA-256 per distinct file. Cheap enough for the zero-result path,
+    where the alternative is the caller doing a cold source read of the whole
+    subsystem — but it is not free, so callers should reach for it when a result
+    needs qualifying, not on every call.
+    """
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute("SELECT DISTINCT file, file_hash FROM symbols").fetchall()
+    finally:
+        conn.close()
+
+    pseudo = [{"file": r["file"], "file_hash": r["file_hash"]} for r in rows]
+    annotated = annotate_freshness(db_path, pseudo, repo_root=repo_root)
+
+    counts = {"fresh": 0, "stale": 0, "missing": 0, "unknown": 0}
+    for row in annotated:
+        state = row.get("freshness", "unknown")
+        counts[state] = counts.get(state, 0) + 1
+
+    unindexed, coverage = _unindexed_count(rows, repo_root)
+    return {"files": len(annotated), **counts, "unindexed": unindexed, "coverage": coverage}
+
+
+def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
+    """Source files ON DISK that the index has never seen. ``(count, coverage)``.
+
+    THE HALF THE FRESHNESS CHECK STRUCTURALLY CANNOT SEE, and the reason it must
+    exist: comparing indexed files against disk answers "did what I indexed
+    change?" It cannot answer "is there something I never indexed?" — and a
+    symbol added since the last index arrives in a NEW module at least as often
+    as in an edited one. Without this, an index holding one untouched file
+    reports itself perfectly fresh while a brand-new module sits beside it
+    unseen, and any claim of "genuine absence" built on that is a confident lie
+    (techne#595 round 1).
+
+    Uses the INDEXER'S OWN discovery (`techne.codex.source._walk_repo`) rather
+    than a local notion of "source file". A second definition of which files
+    belong in the graph would drift from the one that populates it, and this
+    function exists precisely to catch drift. That module's grammar imports are
+    lazy, so this works without the optional `techne[codex]` extra — verified by
+    importing it with `tree_sitter` blocked.
+
+    ``coverage`` is the honest part:
+      complete — the disk was enumerated; the counts below are a real answer.
+      unknown  — no repo_root, or the walker is unavailable. WE CANNOT SEE THE
+                 DISK, so callers must not certify absence on this result.
+    """
+    if repo_root is None:
+        return None, "unknown"
+    try:
+        from techne.codex.source import _EXT_LANGUAGE, _walk_repo
+    except Exception:  # noqa: BLE001 — optional extra absent / import error
+        return None, "unknown"
+
+    root = Path(repo_root)
+    if not root.is_dir():
+        return None, "unknown"
+
+    indexed = {str(r["file"]) for r in indexed_rows}
+    # SCOPED BY TOP-LEVEL COMPONENT, and the scoping is not timidity — an
+    # unscoped count is worse than none. `_walk_repo`'s _SKIP_DIRS does not
+    # exclude virtualenvs, so on this repo it yields 10,282 files of which 10,042
+    # live in `.venv-ci-3.12` / `.venv-ci-3.13`. Reporting "10,055 files never
+    # indexed" would fire on every repo with a venv, and a warning that always
+    # fires is one the reader learns to skip — back to the silence this fix
+    # exists to remove, wearing a louder coat.
+    #
+    # PER-DIRECTORY WAS THE WRONG SCOPE AND SHIPPED A CRITICAL (#595 r2). Asking
+    # "does this file's own directory already hold indexed files?" is blind to
+    # any NEW DIRECTORY, not merely a new top-level package — a new sub-package
+    # under an already-indexed tree scored 0 unindexed and earned "genuine
+    # absence" with the symbol sitting on disk. Worse in a per-module-directory
+    # layout (`Foo/index.ts`, and this indexer handles `.ts`): EVERY new module
+    # lands in a new directory, so the count is pinned at 0 forever while the
+    # notice asserts certainty. The fix would have done nothing, loudly.
+    #
+    # Top-level component fixes both: a new directory anywhere under `techne/`
+    # still belongs to `techne/`, which the index covers. Measured identical to
+    # the per-directory rule on nine real indexes (techne 13, cabal 4, gojira 2)
+    # with venv noise still excluded, so the correction costs no precision.
+    #
+    # "ANY ANCESTOR" WAS CHECKED AND REJECTED: the repo root is an ancestor of
+    # everything, which re-admits all 10,055 venv files.
+    #
+    # THE REMAINING COST, stated because it is real: a genuinely NEW top-level
+    # component is still invisible — no indexed sibling at that level, so no
+    # signal. Narrower than what it replaces, not nothing.
+    def _component(rel: Path) -> str:
+        """Top-level component of a repo-relative path; "." for a root file."""
+        return rel.parts[0] if len(rel.parts) > 1 else "."
+
+    indexed_components = {_component(Path(f)) for f in indexed}
+    unseen = 0
+    try:
+        for path in _walk_repo(root, set(_EXT_LANGUAGE.values())):
+            rel = path.relative_to(root)
+            if str(rel) in indexed or str(path) in indexed:
+                continue
+            if _component(rel) in indexed_components:
+                unseen += 1
+    except OSError:
+        return None, "unknown"
+    return unseen, "complete"
