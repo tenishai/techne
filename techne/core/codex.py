@@ -38,7 +38,7 @@ from techne.core.stores import (
 
 log = logging.getLogger(__name__)
 
-CODEX_VERSION = 2
+CODEX_VERSION = 3
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -175,6 +175,51 @@ def _codex_v1_to_v2(conn) -> None:
     conn.executescript("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT);")
 
 
+#: Path segments whose contents `_walk_repo` refuses to index. Kept HERE as SQL
+#: patterns rather than imported from `techne.codex.source._SKIP_DIRS` on purpose:
+#: this migration must run without the optional `techne[codex]` extra installed,
+#: and it encodes what the skip list meant AT v3 — a migration that silently
+#: changes meaning when a constant is edited later is not a migration.
+_V3_PURGE_PATTERNS = (
+    "site-packages/%",
+    "%/site-packages/%",
+    "dist-packages/%",
+    "%/dist-packages/%",
+)
+
+
+def _codex_v2_to_v3(conn) -> None:
+    """codex.db v2 → v3: purge rows for files the walker no longer indexes (#604).
+
+    WITHOUT THIS, A POLLUTED INDEX SURVIVES THE FIX AND THEN CERTIFIES ITSELF.
+    Indexing is incremental and the only DELETE is scoped to the file being
+    re-indexed, so vendored rows written before `site-packages` was skipped are
+    never revisited — nothing walks them, so nothing removes them. Measured in
+    #605's review: pollute → fix → re-index leaves the vendored rows in place, and
+    `index_freshness` then reports `stale: 0, missing: 0, coverage: "complete"`.
+    The surface built to stop the index lying (techne#595) vouches for the
+    pollution, because every one of those files really is present and unchanged on
+    disk. It is not stale. It should not be there at all.
+
+    Deleting exactly the excluded rows rather than truncating the whole graph is
+    deliberate: a full rebuild costs a re-index of every repo and discards correct
+    data to remove incorrect data. `guarded_migrate` takes a backup first.
+    """
+    for pattern in _V3_PURGE_PATTERNS:
+        # Edges first — they reference symbols(id), and an orphaned edge is a
+        # dangling FK that outlives the symbol it described.
+        conn.execute(
+            "DELETE FROM edges WHERE from_symbol IN (SELECT id FROM symbols WHERE file LIKE ?)",
+            (pattern,),
+        )
+        conn.execute(
+            "UPDATE edges SET to_symbol = NULL "
+            "WHERE to_symbol IN (SELECT id FROM symbols WHERE file LIKE ?)",
+            (pattern,),
+        )
+        conn.execute("DELETE FROM symbols WHERE file LIKE ?", (pattern,))
+
+
 def _run_codex_steps(conn, current: int, target: int) -> None:
     """Chain all codex migration steps from *current* to *target*.
 
@@ -186,6 +231,8 @@ def _run_codex_steps(conn, current: int, target: int) -> None:
         _codex_v0_to_v1(conn)
     if current < 2:
         _codex_v1_to_v2(conn)
+    if current < 3:
+        _codex_v2_to_v3(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 

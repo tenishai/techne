@@ -501,8 +501,22 @@ def test_walk_repo_skips_virtualenv_contents_whatever_the_venv_is_called(tmp_pat
 
 
 def test_walk_repo_still_indexes_a_repo_dir_merely_named_like_a_package(tmp_path):
-    """The skip must not overreach: `site-packages` is skipped as a DIRECTORY
-    name, so a source file whose own name resembles it must survive."""
+    """The skip must not overreach onto a similarly-named FILE.
+
+    HONEST ABOUT ITS OWN STRENGTH (#605 r1): this passes with both new strings
+    deleted, because `site_packages_helper.py` was never at risk under ANY
+    matching scheme `_walk_repo` could plausibly use — it tests path PARTS, and a
+    file name is only ever the last part. So this is a guard against a future
+    change to substring matching, not evidence about the change being made here.
+    Its earlier docstring implied otherwise, which is a test claiming credit for a
+    property it does not establish.
+
+    The real overreach risk is a DIRECTORY genuinely named `site-packages` inside
+    a repo — `tests/fixtures/site-packages/` IS silently dropped now. Rated a Nit
+    in review because `build`, `dist`, `env` and `target` all carry identical
+    overreach and have for as long as the skip list has existed; fixing it would
+    mean changing that whole design, not this entry.
+    """
     from techne.codex.source import _EXT_LANGUAGE, _walk_repo
 
     repo = tmp_path / "repo"
@@ -512,3 +526,22 @@ def test_walk_repo_still_indexes_a_repo_dir_merely_named_like_a_package(tmp_path
     found = {str(p.relative_to(repo)) for p in _walk_repo(repo, set(_EXT_LANGUAGE.values()))}
 
     assert found == {"site_packages_helper.py"}
+
+
+def test_dist_packages_is_skipped_too(tmp_path):
+    """`dist-packages` had NO test — deleting it from the skip set left the whole
+    suite green (#605 r1), so half the fix's payload was unpinned. Debian and its
+    derivatives put system-installed packages there rather than in site-packages,
+    so a container-built repo hits this spelling and not the other."""
+    from techne.codex.source import _EXT_LANGUAGE, _walk_repo
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mine.py").write_text("def mine(): ...\n")
+    vendored = repo / "usr" / "lib" / "python3" / "dist-packages" / "yaml"
+    vendored.mkdir(parents=True)
+    (vendored / "loader.py").write_text("def load(): ...\n")
+
+    found = {str(p.relative_to(repo)) for p in _walk_repo(repo, set(_EXT_LANGUAGE.values()))}
+
+    assert found == {"mine.py"}

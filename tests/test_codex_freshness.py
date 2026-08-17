@@ -531,3 +531,126 @@ def test_codex_watch_requires_watchdog(tmp_path, monkeypatch):
         or "error" in output_lower
         or "watchdog" in output_lower
     ), f"Expected a clean error about watchdog:\n{result.output}"
+
+
+# ---- techne#604 v3: a polluted index must not survive the fix ----------------
+
+
+def test_v3_migration_purges_vendored_rows_and_their_edges(tmp_path):
+    """A POLLUTED INDEX SURVIVED THE FIX AND THEN CERTIFIED ITSELF (#605 r1).
+
+    Indexing is incremental and the only DELETE is scoped to the file being
+    re-indexed, so vendored rows written before `site-packages` was skipped are
+    never revisited — nothing walks them, so nothing removes them. Worse,
+    `index_freshness` then reports `stale: 0, missing: 0, coverage: "complete"`:
+    every one of those files really is present and unchanged on disk, so the
+    surface built to stop the index lying (techne#595) vouches for the pollution.
+
+    The v2→v3 step deletes exactly the excluded rows, and their edges with them —
+    an orphaned edge is a dangling FK that outlives the symbol it described.
+    """
+    from techne.core.codegraph import add_edge, add_symbol
+    from techne.core.codex import _apply_codex_migration, _codex_v2_to_v3
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    from techne.core.codex import CODEX_SCHEMA
+
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    add_symbol(
+        db, id="pkg/real.py::mine::function::1", file="pkg/real.py", name="mine", kind="function"
+    )
+    vend = ".venv-ci-3.13/lib/python3.13/site-packages/aiohttp/web.py"
+    add_symbol(
+        db, id=f"{vend}::application::function::1", file=vend, name="application", kind="function"
+    )
+    add_edge(db, from_symbol="pkg/real.py::mine::function::1", to_name="application", kind="call")
+    add_edge(db, from_symbol=f"{vend}::application::function::1", to_name="mine", kind="call")
+
+    conn = plain_connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 2
+
+        _codex_v2_to_v3(conn)
+        conn.commit()
+
+        files = [r[0] for r in conn.execute("SELECT file FROM symbols")]
+        assert files == ["pkg/real.py"], f"vendored rows survived: {files}"
+        # The vendored symbol's OUTGOING edge goes with it; the repo symbol's own
+        # edge survives rather than being collateral.
+        froms = [r[0] for r in conn.execute("SELECT from_symbol FROM edges")]
+        assert froms == ["pkg/real.py::mine::function::1"]
+    finally:
+        conn.close()
+
+
+def test_v3_purge_spares_a_repo_path_merely_containing_the_words(tmp_path):
+    """The purge is by PATH SEGMENT. A source file named `site_packages_util.py`,
+    or a directory `my-site-packages-tool/`, must survive — deleting real rows to
+    clean up junk ones is a worse failure than the junk."""
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration, _codex_v2_to_v3
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    for f in ("pkg/site_packages_util.py", "my-site-packages-tool/main.py"):
+        add_symbol(db, id=f"{f}::fn::function::1", file=f, name="fn", kind="function")
+
+    conn = plain_connect(db)
+    try:
+        _codex_v2_to_v3(conn)
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_a_v2_index_is_purged_by_the_migration_chain_not_just_the_step(tmp_path):
+    """PINS THE WIRING, NOT THE STEP.
+
+    The test above calls `_codex_v2_to_v3` directly, so removing it from
+    `_run_codex_steps` left the whole suite green — an identity check on an import
+    proving the import and not the use, in a test written to pin a fix. This one
+    stamps a db at v2, puts vendored rows in it, and runs the real
+    `_apply_codex_migration`: the purge must happen because the CHAIN runs it.
+    """
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA, CODEX_VERSION, _apply_codex_migration
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.execute("PRAGMA user_version = 2")  # a store written before #604
+    conn.commit()
+    conn.close()
+
+    vend = ".venv-ci-3.13/lib/python3.13/site-packages/aiohttp/web.py"
+    add_symbol(
+        db, id=f"{vend}::application::function::1", file=vend, name="application", kind="function"
+    )
+    add_symbol(
+        db, id="pkg/real.py::mine::function::1", file="pkg/real.py", name="mine", kind="function"
+    )
+
+    _apply_codex_migration(db)
+
+    conn = plain_connect(db)
+    try:
+        files = [r[0] for r in conn.execute("SELECT file FROM symbols")]
+        assert files == ["pkg/real.py"], f"the migration chain did not purge: {files}"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CODEX_VERSION
+    finally:
+        conn.close()

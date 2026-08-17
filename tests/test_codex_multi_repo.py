@@ -669,10 +669,12 @@ def test_unindexed_ignores_directories_the_index_never_covered(tmp_path):
     """The unindexed count is SCOPED to directories that already hold indexed
     files, and this pins why.
 
-    `_walk_repo`'s skip list does not exclude virtualenvs: on the real techne
-    repo it yields 10,282 files, 10,042 of them inside `.venv-ci-3.12` and
-    `.venv-ci-3.13`. An unscoped count reported "10,055 never indexed" — which
-    would fire on every repo with a venv, and a warning that always fires is one
+    HISTORICALLY — before techne#604 taught `_walk_repo` to skip `site-packages`
+    — the walk on the real techne repo yielded 10,282 files, 10,042 of them inside
+    `.venv-ci-3.12` and `.venv-ci-3.13`, and an unscoped count reported "10,055
+    never indexed". Those figures are now 242 and 2. The venv case is fixed at its
+    source; this test keeps pinning the GENERAL case, since `_SKIP_DIRS` cannot
+    enumerate every uncovered tree. A warning that always fires is one
     the reader learns to skip. That is the silence this fix exists to remove,
     wearing a louder coat.
 
