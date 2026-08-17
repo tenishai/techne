@@ -44,12 +44,49 @@ ASSIST_TOOLS = {"Grep", "Bash"}
 #: and feeding a path to the symbol FTS is the Glob mistake in a new costume.
 _SEARCH_HEADS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
 
+#: Options that consume the NEXT token as their value, so that token is NOT the
+#: pattern. Measured omission (#596 r1): `grep -D skip search_symbols .` injected
+#: symbols for `skip`, and `--exclude-dir node_modules search_symbols` lost the
+#: real pattern entirely. Attached forms (`-A5`, `--include=*.py`) consume nothing
+#: extra and are handled by the plain `-` prefix test.
+_VALUE_OPTS_SHORT = frozenset("ABCDdfme")
+_VALUE_OPTS_LONG = frozenset(
+    {
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--devices",
+        "--directories",
+        "--exclude",
+        "--exclude-dir",
+        "--exclude-from",
+        "--file",
+        "--include",
+        "--label",
+        "--max-count",
+        "--binary-files",
+        "--color",
+        "--colour",
+        "--group-separator",
+        "--regexp",
+    }
+)
+
 #: A pattern worth sending to the symbol index: a bare identifier, 3+ chars.
 #: CONSERVATIVE ON PURPOSE — this rail's failure mode is noise, and noise is what
 #: got the #206 original scoped down. Anything with a metacharacter, slash or dot
 #: is a regex/path/glob, not a symbol name, so it is left alone. A missed
 #: augmentation costs nothing; a wrong one trains the reader to ignore the block.
 _SYMBOLISH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
+
+
+def _takes_a_value(tok: str) -> bool:
+    """True if `tok` is an option whose value is the NEXT token."""
+    if tok.startswith("--"):
+        return tok in _VALUE_OPTS_LONG  # `--opt=value` never reaches here
+    # A short cluster consumes a value only if its LAST letter takes one:
+    # `-rn` does not, `-rm` does (the `m` of --max-count).
+    return len(tok) > 1 and tok[-1] in _VALUE_OPTS_SHORT
 
 
 def _bash_search_pattern(command: str) -> str | None:
@@ -61,6 +98,15 @@ def _bash_search_pattern(command: str) -> str | None:
     a `grep "a|b"` alternation is not split mid-pattern). Both are already shared
     cross-module by ``core/evidence.py``; a second copy of either would drift from
     the one the evidence gate depends on.
+
+    A LATER PIPELINE SEGMENT WITH NO PATH OPERAND IS FILTERING OUTPUT, NOT
+    SEARCHING A TREE, and declining those is what makes this rail usable at all.
+    Measured in #596's round-1 review against a real 1237-symbol graph: 11 of 11
+    everyday `<cmd> | grep <word>` calls injected context — `git branch -a | grep
+    main` put 8 symbols and 1039 characters into the model's context, `env | grep
+    PATH` another 8 — while the two genuine symbol searches injected 1 and 2. THE
+    NOISE FIRED HARDER THAN THE SIGNAL. The discriminator below was scored, not
+    guessed: 0 of 11 noise cases fire, 0 of 8 real searches are lost.
     """
     try:
         from techne.core.evidence import _strip_heredoc_bodies
@@ -70,28 +116,74 @@ def _bash_search_pattern(command: str) -> str | None:
     except Exception:  # noqa: BLE001 — augmentation is best-effort, never fatal
         return None
 
-    for seg in segments:
+    for index, seg in enumerate(segments):
         try:
             tokens = shlex.split(seg)
         except ValueError:  # unbalanced quotes — not parseable, skip
             continue
         if not tokens or os.path.basename(tokens[0]) not in _SEARCH_HEADS:
             continue
+
+        pattern: str | None = None
+        operands = 0
         rest = tokens[1:]
         i = 0
         while i < len(rest):
             tok = rest[i]
-            # `-e PATTERN` names the pattern explicitly and wins outright.
             if tok in ("-e", "--regexp") and i + 1 < len(rest):
-                cand = rest[i + 1]
-                return cand if _SYMBOLISH.match(cand) else None
-            if tok.startswith("-"):
-                i += 1
+                pattern = rest[i + 1]  # named explicitly; everything else is a path
+                i += 2
                 continue
-            # First bare token is the pattern (grep PATTERN [paths...]).
-            return tok if _SYMBOLISH.match(tok) else None
-        # A search command with no positional pattern (all flags) — nothing to do.
+            if tok.startswith("-"):
+                i += 2 if (_takes_a_value(tok) and i + 1 < len(rest)) else 1
+                continue
+            if pattern is None:
+                pattern = tok
+            else:
+                operands += 1  # a file/dir argument — this searches a TREE
+            i += 1
+
+        if pattern is None or not _SYMBOLISH.match(pattern):
+            return None
+        if index > 0 and operands == 0:
+            return None  # piped filter, not a search — see the docstring
+        return pattern
     return None
+
+
+def _bash_cd_target(command: str) -> str | None:
+    """The directory a leading literal ``cd`` moves to, or None.
+
+    WITHOUT THIS THE HOOK INJECTS THE WRONG REPO'S SYMBOLS (#596 r1, measured):
+    with the session cwd in repo alpha, `cd <beta> && grep -rn <alpha symbol> .`
+    emitted ALPHA's symbols for a search run in BETA — the techne#206 signal/noise
+    defect that techne#209's db-per-repo split exists to prevent, reintroduced
+    because Bash carries no `path` field and `cd` was never parsed.
+
+    LITERAL TARGETS ONLY. A path containing `$VAR`, a substitution, or `~` is left
+    alone rather than expanded here: guessing a directory wrong scopes the graph to
+    an unrelated repo, which is the failure being fixed, and the caller falls back
+    to the session cwd — the pre-existing behaviour — when this returns None.
+    """
+    try:
+        from techne.core.evidence import _strip_heredoc_bodies
+        from techne.hooks.post_tool_use import _split_bash_segments
+
+        segments = _split_bash_segments(_strip_heredoc_bodies(command))
+    except Exception:  # noqa: BLE001
+        return None
+    if not segments:
+        return None
+    try:
+        tokens = shlex.split(segments[0])
+    except ValueError:
+        return None
+    if len(tokens) != 2 or tokens[0] != "cd":
+        return None
+    target = tokens[1]
+    if any(ch in target for ch in ("$", "`", "~", "*")):
+        return None
+    return target
 
 
 # Liveness key namespace: `hook:codex_grep_assist:last_run` (techne#468). Named
@@ -203,12 +295,19 @@ def main() -> None:
     # #206 signal/noise problem, where a single global graph injected an
     # unrelated repo's symbols.
     #
-    # Bash has no `path` field, so it falls through to the session cwd. That is
-    # correct for the common `cd <repo> && grep …` shape and for a bare `grep` in
-    # the session's own directory; a search explicitly pointed at another repo's
-    # path is scoped to the session's repo instead, which is the pre-existing
-    # behaviour for a Grep with no `path` and is left alone rather than guessed at.
-    start_path = tool_input.get("path") or data.get("cwd") or os.getcwd()
+    # Bash has no `path` field. A leading literal `cd` is parsed because without
+    # it the hook emitted the WRONG REPO'S symbols: with the session cwd in repo
+    # alpha, `cd <beta> && grep -rn <alpha symbol> .` injected alpha's graph for a
+    # search run in beta — techne#206's defect, reintroduced through the door
+    # techne#209 was built to close (#596 r1, measured).
+    #
+    # Everything else still falls through to the session cwd, which is the
+    # pre-existing behaviour for a Grep with no `path`. A search pointed at another
+    # repo by a bare path operand is NOT followed: resolving that would mean
+    # picking one of several operands and guessing, and guessing wrong is the very
+    # failure above.
+    cd_target = _bash_cd_target(tool_input.get("command", "")) if tool_name == "Bash" else None
+    start_path = tool_input.get("path") or cd_target or data.get("cwd") or os.getcwd()
 
     from techne.hooks._timeout import bounded_hook
 

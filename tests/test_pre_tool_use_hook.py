@@ -282,8 +282,50 @@ class TestBashSearchPattern:
         assert self._p("python -m pytest -q") is None
         assert self._p("ls -la") is None
 
-    def test_a_search_later_in_a_pipeline_is_found(self):
-        assert self._p("cat foo.py | grep -n index_freshness") == "index_freshness"
+    def test_a_piped_filter_declines_even_when_the_word_is_symbol_shaped(self):
+        """THE NOISE FINDING (#596 r1), and it inverts what this test used to pin.
+
+        Measured against a real 1237-symbol graph: 11 of 11 everyday
+        `<cmd> | grep <word>` calls injected context — `git branch -a | grep main`
+        put 8 symbols and 1039 characters into the model's context — while the two
+        genuine symbol searches injected 1 and 2. The noise fired harder than the
+        signal, which is how a rail earns its way back out of the config.
+
+        A later pipeline segment with NO path operand is filtering the previous
+        command's output, not searching a tree. Declining those scored 0/11 noise
+        with 0/8 real searches lost.
+        """
+        assert self._p("cat foo.py | grep -n index_freshness") is None
+        assert self._p("git branch -a | grep main") is None
+        assert self._p("env | grep PATH") is None
+        assert self._p("ps aux | grep python") is None
+
+    def test_a_later_segment_WITH_a_path_operand_still_counts(self):
+        """The discriminator is the path operand, not the pipe. `… && grep -rn X .`
+        searches a tree and must survive."""
+        assert self._p("cd /tmp/repo && grep -rn index_freshness .") == "index_freshness"
+        assert self._p("make build; grep -rn search_symbols techne/") == "search_symbols"
+
+    def test_an_option_value_is_not_mistaken_for_the_pattern(self):
+        """Measured omission (#596 r1): `grep -D skip search_symbols .` injected
+        symbols for `skip`, and `--exclude-dir node_modules search_symbols` lost
+        the real pattern entirely. Context flags silently dropped the search."""
+        assert self._p("grep -D skip search_symbols .") == "search_symbols"
+        assert self._p("grep --exclude-dir node_modules search_symbols .") == "search_symbols"
+        assert self._p("grep -A 5 index_freshness .") == "index_freshness"
+        assert self._p("grep -B 3 index_freshness .") == "index_freshness"
+        assert self._p("grep -m 2 annotate_freshness .") == "annotate_freshness"
+
+    def test_attached_option_values_consume_nothing_extra(self):
+        """`-A5` and `--include=*.py` carry their value inline, so the next token
+        IS the pattern. A blanket 'skip the token after any flag' would eat it."""
+        assert self._p("grep -A5 index_freshness .") == "index_freshness"
+        assert self._p("grep --include=*.py search_symbols .") == "search_symbols"
+
+    def test_a_short_cluster_only_consumes_when_its_last_letter_does(self):
+        """`-rn` takes no value; `-rm` ends in `m` (--max-count) and does."""
+        assert self._p("grep -rn search_symbols .") == "search_symbols"
+        assert self._p("grep -rm 2 search_symbols .") == "search_symbols"
 
     def test_a_search_after_cd_is_found(self):
         """The shape that actually appears in this repo's sessions."""
@@ -325,3 +367,98 @@ def test_assist_tools_and_matcher_agree():
     from techne.platforms.claude_code.hooks import GREP_ASSIST_MATCHER
 
     assert set(GREP_ASSIST_MATCHER.split("|")) == ASSIST_TOOLS
+
+
+class TestBashCdTarget:
+    """`cd <repo> && grep …` must scope the graph to <repo>, not the session cwd.
+
+    Measured in #596 r1: with the session cwd in repo alpha, `cd <beta> && grep
+    -rn <alpha symbol> .` injected ALPHA's symbols for a search run in BETA — the
+    techne#206 signal/noise defect, coming back through the door techne#209 was
+    built to close, because Bash carries no `path` field.
+    """
+
+    def _t(self, cmd):
+        from techne.hooks.pre_tool_use import _bash_cd_target
+
+        return _bash_cd_target(cmd)
+
+    def test_a_leading_literal_cd_is_followed(self):
+        assert self._t("cd /tmp/beta && grep -rn foo .") == "/tmp/beta"
+
+    def test_a_quoted_path_with_spaces_survives(self):
+        assert self._t("cd '/tmp/my repo' && grep -rn foo .") == "/tmp/my repo"
+
+    def test_no_cd_yields_none(self):
+        assert self._t("grep -rn foo .") is None
+
+    def test_a_cd_that_is_not_first_is_not_followed(self):
+        """Only a LEADING cd is unambiguous; mid-chain the directory depends on
+        what ran before it."""
+        assert self._t("make build && cd /tmp/beta && grep -rn foo .") is None
+
+    def test_unexpandable_targets_decline_rather_than_guess(self):
+        """Guessing a directory wrong scopes the graph to an unrelated repo —
+        which IS the failure being fixed. Declining falls back to session cwd."""
+        assert self._t("cd $REPO && grep -rn foo .") is None
+        assert self._t("cd ~/work && grep -rn foo .") is None
+        assert self._t("cd `pwd` && grep -rn foo .") is None
+
+    def test_cd_with_extra_args_declines(self):
+        assert self._t("cd -P /tmp/beta && grep -rn foo .") is None
+
+
+def test_cd_target_selects_the_repo_the_search_actually_runs_in(home, monkeypatch, capsys):
+    """END-TO-END, because the helper tests could not see this.
+
+    `_bash_cd_target` had five passing unit tests while `main()` ignored its
+    result entirely — mutating the call site to `cd_target = None` left the whole
+    file green. That is "an identity check on an import proves the import, not
+    the use", in the tests written to pin a fix.
+
+    So this asserts the OBSERVABLE consequence: with the session cwd in repo
+    ALPHA and the command `cd <beta> && grep …`, the injected symbols must come
+    from BETA's graph. Getting this wrong is techne#206's signal/noise defect
+    arriving through the door techne#209 was built to close.
+    """
+    from techne.config import Config
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import codex_db_for_repo
+
+    _write_config(home, codex_grep_assist=True)
+    cfg = Config.load()
+
+    alpha = home / "alpha"
+    (alpha / ".git").mkdir(parents=True)
+    beta = home / "beta"
+    (beta / ".git").mkdir(parents=True)
+
+    add_symbol(
+        codex_db_for_repo(cfg, alpha),
+        id="a.py::shared_name::function::1",
+        file="a.py",
+        name="shared_name",
+        kind="function",
+        signature="def shared_name(): ...  # ALPHA",
+    )
+    add_symbol(
+        codex_db_for_repo(cfg, beta),
+        id="b.py::shared_name::function::1",
+        file="b.py",
+        name="shared_name",
+        kind="function",
+        signature="def shared_name(): ...  # BETA",
+    )
+
+    out = _run(
+        monkeypatch,
+        capsys,
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"cd {beta} && grep -rn shared_name ."},
+            "cwd": str(alpha),
+        },
+    )
+
+    assert "BETA" in out, "the search ran in beta; beta's graph must be the one injected"
+    assert "ALPHA" not in out, "injected the session cwd's graph for a search in another repo"
