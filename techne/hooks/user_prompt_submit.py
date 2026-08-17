@@ -133,9 +133,33 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
 
     THE ROW'S OWN ``type`` FIELD CANNOT BE USED. ``search()`` sets ``type`` to the
     SOURCE TABLE ("knowledge"), not to the knowledge row's ``type`` column — which
-    is also why every line this rail renders reads ``[knowledge]`` regardless of
-    what it actually is, and therefore why a `pattern` row riding this rail was
-    indistinguishable from a fact at a glance (techne#561, follow-up #566).
+    is why a `pattern` row riding this rail was indistinguishable from a fact at a
+    glance (techne#561).
+
+    THAT RENDERING BUG IS FIXED (techne#566): ``_build_context`` now reads
+    ``knowledge_type``, so lines render ``[fact]`` / ``[decision]`` / ``[pattern]``.
+    This paragraph asserted the opposite in the present tense until the same diff
+    that fixed it 66 lines below — stale prose outliving its subject, which is the
+    defect class this rail keeps producing.
+
+    THE LOOKUP STAYS ANYWAY — but NOT for the reason an earlier revision of this
+    paragraph gave, which was false and is corrected here rather than quietly
+    deleted. It claimed the id lookup "fails CLOSED" where a ``knowledge_type``
+    filter fails open. It does not: ``if not ids: return rows`` hands the batch
+    back UNFILTERED, and a row carrying no ``id`` is kept. Both fail open. I wrote
+    that sentence at a reviewer's prompting and neither of us checked it against
+    the code four lines below.
+
+    The real difference is AUTHORITY. This re-reads ``knowledge.type`` from the
+    table, so its answer does not depend on ``search()``'s row shape — the very
+    thing techne#566 just showed can carry a field that means something other than
+    what a caller assumes. Filtering on a value the search layer supplies makes
+    this guard only as correct as that layer's contract; reading the table makes it
+    independent of it.
+
+    Behaviourally the two are equivalent today (measured: the suite passes either
+    way, and a control with the filter disabled fails 3, so the equivalence is not
+    vacuous). Equivalence today is not the argument for keeping it.
 
     One primary-key lookup over the ids just returned. Raising here degrades the
     whole recall to nothing via the caller's handler — failing CLOSED, which is the
@@ -176,7 +200,32 @@ def _build_context(rows: list[dict]) -> str:
     ]
     for r in rows:
         rid = r.get("id")
-        rtype = r.get("type") or "note"
+        # `knowledge_type` FIRST, and the ordering is the whole fix (techne#566).
+        # `search()` sets `type` to the SOURCE TABLE — "knowledge" / "observation"
+        # / "thread" — and returns the row's own kind separately as
+        # `knowledge_type`. Reading `type` here labelled EVERY injected row
+        # `[knowledge]`, regardless of whether it was a fact, decision, procedure,
+        # evaluation, document_card or pattern.
+        #
+        # WHY THAT LOOKED RIGHT: this rendering mirrors `egress._render_line`,
+        # which does read `row["type"]` — correctly, because egress reads knowledge
+        # rows STRAIGHT FROM THE TABLE, where `type` IS the kind. Same field name,
+        # two different shapes, one of them arriving through `search()`. The
+        # SessionStart block has always shown `[fact]` / `[procedure]` / `[decision]`
+        # while the per-turn block showed `[knowledge]` for the same rows — the two
+        # rails disagreeing in plain sight for a month.
+        #
+        # It is not cosmetic. The docstring above promises this block frames memory
+        # as "recalled memory (verify-before-relying), not asserted ground truth",
+        # and a `decision` warrants different weight than an `evaluation`. Collapsing
+        # every kind to one label removes the distinction at exactly the point the
+        # agent is deciding how much to trust the line — and it is what let a legacy
+        # `pattern` row ride the push rail unnoticed for a month (techne#561).
+        #
+        # `type` remains the fallback because non-knowledge rows (thread,
+        # observation) carry no `knowledge_type`, and for those the table IS the
+        # most honest label available.
+        rtype = r.get("knowledge_type") or r.get("type") or "note"
         content = (r.get("content") or "")[:200]
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
     return "\n".join(lines)
