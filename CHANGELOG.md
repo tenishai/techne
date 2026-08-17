@@ -11,7 +11,8 @@ The release where the instruments stopped lying. Nearly every fix below is the s
 a rail that was enabled, registered, and reporting healthy while doing nothing — a
 grep-assist that never once fired, a code index that certified its own pollution, a
 zero-result search that couldn't describe its own reliability, a CI guard that failed open
-on a typo. None of them looked broken. That is what made them worth a release. 20 changes.
+on a typo, a completeness check satisfied by a prefix. None of them looked broken. That is
+what made them worth a release. 23 changes.
 
 **Upgrading:** `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.14.0"`
 — the `--force` is required; a plain `pipx install` over an existing techne refuses. What
@@ -47,6 +48,33 @@ accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not
 
 - **Executable predicate for the evidence length test** (#541, #567) — the gate asserted a
   property it described in prose. It now runs the probe it claims to run.
+
+- **Crash-recovery fault-injection gate** (#388) — techne is a stateful daemon over SQLite,
+  and the interesting bugs live in *interrupted transitions*, which unit tests never reach
+  because a unit test always gets to finish. A new `crash` suite SIGKILLs a child mid-write
+  and then proves the store: an uncommitted batch leaves no trace, a committed one survives,
+  a hot WAL replays, an interrupted migration does not stamp its version *and converges on
+  re-run*, and an interrupted flush never marks an undelivered row synced. **The child kills
+  itself at a chosen line** rather than racing a timer from the parent — a crash test that
+  fails randomly teaches people to re-run CI until it is green, which is how a real
+  regression gets waved through. What is tested is *our* usage, not SQLite's atomicity. Run
+  by a dedicated `crash-recovery` job, because a suite excluded from the default run and
+  executed by nothing decays quietly.
+
+- **Default-deny on unlisted sync adapters** (#389) — the issue asked for a flag refusing to
+  POST to non-local destinations; the audit it asked for found **no such POST**. techne has
+  zero network-capable imports, both built-in adapters are local, and the one outbound path
+  (litellm) is already governed. The real hole was `load_adapter`, which would import any
+  class registered under the `techne.sync_adapters` entry-point group and hand it every
+  outbox entry — full session and memory content. Unlisted adapters now require
+  `sync.allow_unlisted_adapter`, and the refusal precedes the import, because import-time
+  side effects are code execution. Within one OS user this is not a wall; it makes an
+  unlisted adapter impossible to load *silently*.
+
+- **A go-public runbook** (#556) — `docs/go-public-runbook.md`. Not yet executed; the flip is
+  deliberately paused. Its load-bearing finding: **stopping the runner does not shorten the
+  dangerous window between "public" and "approval policy applied", it closes it** — a job
+  whose labels match no *online* runner queues rather than executes.
 
 ### Fixed
 
@@ -106,11 +134,37 @@ accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not
 - **Every Config field now forces a destination judgment** (#509, #582) — egress keys were
   opt-out by omission, so a new field defaulted to leaving the machine.
 
+- **A dotted-key prefix was accepted as that judgment** (#588) — `reflect.model` in
+  `EGRESS_KEYS` marked the *entire* `reflect` block classified, so every other field inside
+  it forced no judgment at all. Measured: adding a nested LLM endpoint override left the
+  suite byte-identical. Classification is now exact and recursive.
+
+- **The completeness guard checked a surface the gate does not use** (#586) — it resolved
+  entries against the *dataclass* surface while the gate acts on the mapping the loader
+  walks; the two agree only by convention. It is now behavioural: load a config with each
+  key and without it, and require the result to differ. Found on the way and filed
+  separately (#620): `Config.load` reads a `conflict` block that `save` never writes, so a
+  hand-written one is dropped by any load→save cycle.
+
+- **`sources` is now a governed destination** (#585) — arbitrary filesystem paths whose
+  *contents* are ingested. **This changes enforcement:** a locked operator layer now
+  discards agent-supplied source paths.
+
+- **A recycled pid read as a present session** (#587) — presence was TTL-free and pid-only,
+  the exact combination the neighbouring code warns against. Demotion now requires *positive*
+  evidence of a mismatch, because the obvious implementation would manufacture false absents,
+  and a false absent refuses a session that is genuinely working. The `ps` snapshot is cached
+  (measured: 31.9 ms → 0.041 ms warm), since cost was why this was deferred rather than an
+  oversight.
+
 ### Docs
 
 - Architecture cards for the **utilization seam** (#597) and the **codex** store, the latter
   now anchored to both files it makes claims about (#617). The card gate catches drift only
-  where an anchor exists, so an unanchored claim is an unguarded one.
+  where an anchor exists, so an unanchored claim is an unguarded one. The cost is stated at
+  the anchor site: `source.py` churns for reasons unrelated to the card, so the gate will
+  fire on edits that do not concern it — **bump the sha, do not delete the anchor to make it
+  quiet.**
 
 - The PreToolUse protocol shape is **observed rather than inferred** (#612, #614) — settled by
   dogfood, because telemetry structurally cannot see it: `record_hook_run` fires on printing,

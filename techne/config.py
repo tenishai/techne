@@ -49,6 +49,12 @@ class SyncConfig:
     auth: str = ""
     audience: str = ""
     path: str = ""
+    #: Permit a sync adapter that is NOT one of techne's built-ins (techne#389).
+    #: Defaults False, i.e. DEFAULT-DENY. See `sync.adapter.load_adapter` for why
+    #: this is the boundary that exists rather than the ALLOW_REMOTE flag #389
+    #: originally sketched. Governed by the operator layer: `sync` is a whole-block
+    #: entry in EGRESS_KEYS, so this sub-key is covered with it.
+    allow_unlisted_adapter: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -611,10 +617,19 @@ class Config:
                 auth=s.get("auth", ""),
                 audience=s.get("audience", ""),
                 path=s.get("path", ""),
+                allow_unlisted_adapter=bool(s.get("allow_unlisted_adapter", False)),
                 extra={
                     k: v
                     for k, v in s.items()
-                    if k not in ("adapter", "url", "auth", "audience", "path")
+                    if k
+                    not in (
+                        "adapter",
+                        "url",
+                        "auth",
+                        "audience",
+                        "path",
+                        "allow_unlisted_adapter",
+                    )
                 },
             )
 
@@ -780,9 +795,24 @@ class Config:
 
         return cfg
 
-    def save(self, path: Path | None = None):
-        path = path or (techne_home() / "config.yaml")
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def to_yaml_dict(self) -> dict[str, Any]:
+        """The YAML surface — what `save` writes, before the egress gate touches it.
+
+        EXTRACTED SO THE TRUST GATE'S GUARD CAN CHECK THE RIGHT SURFACE (techne#586).
+        `EGRESS_KEYS` entries address THIS mapping: `config_trust._pop`/`_get`/`_set`
+        walk the raw dict loaded from config.yaml. The orphan guard used to resolve
+        them against the DATACLASS surface instead, and the two coincide only by
+        convention, because `load` bridges them with hardcoded string literals
+        (`c.get("model", ...)`). A rename could therefore leave the guard green
+        while the gate pinned nothing — measured in #582's review. Returning the
+        dict makes the real surface testable without writing a file.
+
+        MANY KEYS ARE CONDITIONAL — `llm_api_base`, `llm_api_key`, `identity_dir`,
+        `stores`, `connections`, `sources` and the `sync.*` extras are emitted only
+        when set — so a DEFAULT Config does not contain every governed key. A caller
+        checking coverage has to populate them first, or it will read "absent
+        because unset" as "absent because renamed".
+        """
         data: dict[str, Any] = {
             "db_path": str(self.db_path),
             "data_dir": str(self.data_dir),
@@ -918,12 +948,23 @@ class Config:
             data["sync"]["audience"] = self.sync.audience
         if self.sync.path:
             data["sync"]["path"] = self.sync.path
+        # Emitted only when True: the default is deny, and writing `false` into
+        # every config.yaml would read as a knob someone chose rather than the
+        # built-in posture (techne#389).
+        if self.sync.allow_unlisted_adapter:
+            data["sync"]["allow_unlisted_adapter"] = True
         # Preserve adapter-specific extras that came in via _from_dict's
         # "kwargs" sweep, so load/save is a real round-trip.
         if self.sync.extra:
             for k, v in self.sync.extra.items():
                 if k not in data["sync"]:
                     data["sync"][k] = v
+        return data
+
+    def save(self, path: Path | None = None):
+        path = path or (techne_home() / "config.yaml")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = self.to_yaml_dict()
         # Never write the egress set back down into the agent-writable file while
         # an operator layer is in force (techne#393). `techne init` is a
         # load→save round-trip, so without this the operator's pinned values

@@ -167,7 +167,11 @@ def test_the_card_still_carries_the_policy():
 #: A FOURTH expression is not necessarily wrong — it is a deliberate edit that
 #: should make someone check whether it widens selection, which is the whole
 #: point of tripping here rather than silently allowing it.
-BLESSED_MARKER_EXPRESSIONS = {"eval or eval_gate", "eval_vec"}
+#: `crash` blessed 2026-08-17 (techne#388): the fault-injection gate is excluded
+#: from the default run because it spawns subprocesses, and the `crash-recovery`
+#: job's whole purpose is to run it — which is the case this allowlist exists to
+#: distinguish from a suite nothing executes.
+BLESSED_MARKER_EXPRESSIONS = {"eval or eval_gate", "eval_vec", "crash"}
 
 
 def _pytest_marker_expressions(workflow: Path) -> list[str]:

@@ -61,6 +61,38 @@ def test_pull_request_has_no_base_branch_filter():
     )
 
 
+def test_the_go_public_runbook_exists_and_the_workflow_points_at_it():
+    """techne#556's actual complaint was that the one pre-flip action an operator
+    can take was written down NOWHERE THEY WOULD LOOK — it lived in an issue
+    comment. A control that exists only in a comment is not a control.
+
+    So the runbook is a file in the repo AND the workflow points at it, and both
+    halves are pinned here: a runbook nobody is directed to is the same failure
+    one step removed, and a pointer to a file that has been renamed or deleted is
+    worse than none because it reads as coverage.
+    """
+    runbook = WORKFLOW.parent.parent.parent / "docs" / "go-public-runbook.md"
+    assert runbook.exists(), (
+        "docs/go-public-runbook.md is missing — techne#556's flip sequence has no "
+        "home again, which is the exact failure that issue was filed about"
+    )
+
+    text = runbook.read_text()
+    # The load-bearing step. If someone trims the runbook down, this is the line
+    # that must survive: stopping the runner is what makes the post-flip window
+    # safe, rather than merely short.
+    assert "STOP THE CONTAINER" in text, (
+        "the runbook no longer states the stop-the-container step in its own "
+        "words — API de-registration alone does NOT stick (measured: prinkle "
+        "re-registered itself twice via its stored PAT)"
+    )
+
+    assert "docs/go-public-runbook.md" in WORKFLOW.read_text(), (
+        "the workflow no longer points at the runbook, so someone editing CI has "
+        "no path to the flip sequence"
+    )
+
+
 def test_every_job_still_lives_in_this_one_workflow():
     """The blast radius of the trigger, pinned.
 
@@ -79,7 +111,11 @@ def test_every_job_still_lives_in_this_one_workflow():
     )
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr"}, (
+    # `crash-recovery` added 2026-08-17 (techne#388). It picked the SELF-HOSTED
+    # side of the #556 split and carries the same fork guard as its neighbours:
+    # the suite SIGKILLs child processes, which is not something to hand a fork
+    # PR on a shared runner.
+    assert set(jobs) == {"test", "eval-vec", "arch-cards", "crash-recovery", "fork-pr"}, (
         f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
         "a new job must also pick a side of the techne#556 trust split."
     )

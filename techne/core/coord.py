@@ -79,39 +79,111 @@ def _same_process_pids(recs: list[dict]) -> set[int]:
     for r in recs:
         if isinstance(r.get("pid"), int) and r["pid"] > 0 and r.get("procStart"):
             wanted.setdefault(r["pid"], set()).add(r["procStart"])
-    if not wanted:
-        return set()
+    return {pid for pid, verdict in _classify_pids(wanted).items() if verdict is True}
+
+
+def _recycled_pids(recs: list[dict]) -> set[int]:
+    """Pids we have POSITIVE evidence are no longer the process the sidecar names.
+
+    THE COMPLEMENT OF `_same_process_pids` IS NOT THIS SET, and the difference is
+    the whole reason this exists (techne#587). "Not verified same" lumps together
+    a genuine mismatch with every unknown — no `procStart` recorded, `ps` silent
+    about the pid, an unparseable `lstart`, DST ambiguity. Demoting on that union
+    would turn each unknown into a FALSE ABSENT, and a false absent is the worse
+    error here: it refuses a session that is genuinely working, where a false
+    present merely restores the older, weaker behaviour.
+
+    So this returns only pids where `ps` gave us a start time, the sidecar claimed
+    one, and they DISAGREE. Everything else is absent from the result and stays
+    trusted.
+    """
+    wanted: dict[int, set[str]] = {}
+    for r in recs:
+        if isinstance(r.get("pid"), int) and r["pid"] > 0 and r.get("procStart"):
+            wanted.setdefault(r["pid"], set()).add(r["procStart"])
+    return {pid for pid, verdict in _classify_pids(wanted).items() if verdict is False}
+
+
+#: How long one `ps` snapshot may be reused. See `_classify_pids`.
+_PS_CACHE_TTL_S = 2.0
+_ps_cache: dict[tuple[int, ...], tuple[float, dict[int, int]]] = {}
+
+
+def _ps_starts(pids: tuple[int, ...]) -> dict[int, int]:
+    """pid -> process start time as an epoch, for the pids `ps` actually reports.
+
+    ONE ps FOR ALL CANDIDATES, AND CACHED, because cost is why hardening
+    `present_session_ids` was declined once already rather than an oversight
+    (techne#587). Measured on this host: `present_session_ids()` 0.005 ms against
+    one `_same_process_pids()` at 31.9 ms — a ~6,400x step, on a path that runs
+    for every coord MCP invocation resolving identity. A 2s window collapses a
+    burst to a single `ps` while staying far shorter than any interval over which
+    a pid could plausibly be recycled, so it buys the cost back without weakening
+    the claim in any way that matters.
+
+    A pid ABSENT from the result is UNKNOWN, NOT DEAD — `ps` may not list it, or
+    its `lstart` may not parse. Callers must never read absence as evidence; that
+    is the false-absent trap `_recycled_pids` exists to avoid.
+    """
+    if not pids:
+        return {}
+    now = time.monotonic()
+    hit = _ps_cache.get(pids)
+    if hit and now - hit[0] < _PS_CACHE_TTL_S:
+        return hit[1]
+    starts: dict[int, int] = {}
     try:
         out = subprocess.run(
-            ["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in wanted)],
+            ["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in pids)],
             capture_output=True,
             text=True,
             timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
-        return set()
+        return {}  # NOT cached: a failed probe must not pin an empty answer.
     if out.returncode != 0:
-        return set()
-
-    same: set[int] = set()
+        return {}
     for line in out.stdout.splitlines():
         parts = line.split()
         if len(parts) < 6:
             continue
         try:
-            pid = int(parts[0])
-            actual = int(time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y")))
-            claims = wanted[pid]
-        except (ValueError, OverflowError, KeyError):
+            starts[int(parts[0])] = int(
+                time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+            )
+        except (ValueError, OverflowError):
             continue
+    _ps_cache[pids] = (now, starts)
+    return starts
+
+
+def _classify_pids(wanted: dict[int, set[str]]) -> dict[int, bool]:
+    """pid -> True (same process), False (recycled), or ABSENT (unknown).
+
+    Three-valued on purpose. Collapsing unknown into either answer is how this
+    check goes wrong in one direction or the other — see `_recycled_pids`.
+    """
+    if not wanted:
+        return {}
+    starts = _ps_starts(tuple(sorted(wanted)))
+    verdicts: dict[int, bool] = {}
+    for pid, claims in wanted.items():
+        actual = starts.get(pid)
+        if actual is None:
+            continue  # ps said nothing — unknown, not an answer
+        # Parse first, judge second. An UNPARSEABLE claim proves nothing, so it
+        # must not count as a disagreement — that would manufacture a recycled
+        # verdict out of a formatting problem.
+        parsed: list[int] = []
         for claimed in claims:
             try:
-                if actual == int(calendar.timegm(time.strptime(claimed, "%a %b %d %H:%M:%S %Y"))):
-                    same.add(pid)
-                    break
+                parsed.append(int(calendar.timegm(time.strptime(claimed, "%a %b %d %H:%M:%S %Y"))))
             except (ValueError, OverflowError):
                 continue
-    return same
+        if not parsed:
+            continue  # nothing comparable — unknown
+        verdicts[pid] = actual in parsed
+    return verdicts
 
 
 def _durable_name(session_id: str, records: list[dict] | None = None) -> str | None:
@@ -661,19 +733,34 @@ def present_session_ids(records: list[dict] | None = None) -> set[str]:
     Measured on this machine 2026-08-16: zero false-presents in practice. That is the
     current state, not a guarantee.
 
-    NOT HARDENED WITH ``_same_process_pids`` ON PURPOSE, and this is a cost call, not
-    an oversight: it shells out to ``ps``, and this function runs on every coord MCP
-    invocation that resolves identity. Tracked in techne#587 with the measurements.
+    CASE 3 IS NOW CLOSED (techne#587). A recycled pid is demoted via
+    :func:`_recycled_pids`, so the docstring above describes what ``_pid_alive``
+    alone can tell you, not what this function returns. Cases 1, 2 and 4 stand.
 
-    The weaker claim is still the RIGHT DIRECTION for a guard that REFUSES on absence:
-    a false present costs only the old silent behaviour, while a false absent would
-    refuse a session that is genuinely working. A caller needing the stronger claim
-    wants ``live_sessions`` (TTL) or ``_same_process_pids`` (identity).
+    IT IS DEMOTED ONLY ON POSITIVE EVIDENCE — ``ps`` reported a start time, the
+    sidecar claimed one, and they DISAGREE. The complement of
+    ``_same_process_pids`` is deliberately NOT used, because that set lumps a real
+    mismatch together with every unknown (no ``procStart``, ``ps`` silent, an
+    unparseable ``lstart``), and demoting on the union manufactures FALSE ABSENTS.
+    The direction still matters exactly as before: a false present costs only the
+    older, weaker behaviour, while a false absent refuses a session that is
+    genuinely working.
+
+    THE COST OBJECTION WAS REAL AND IS NOW PAID FOR. This previously declined to
+    harden because ``ps`` is expensive on a path that runs for every coord MCP
+    invocation resolving identity — measured on this host at 0.005 ms here against
+    31.9 ms for one ``_same_process_pids``, a ~6,400x step. ``_ps_starts`` caches
+    the snapshot for :data:`_PS_CACHE_TTL_S`, which collapses a burst to a single
+    ``ps`` while staying far shorter than any plausible pid-recycling interval.
     """
+    recs = _session_records() if records is None else records
+    recycled = _recycled_pids(recs)
     return {
         sid
-        for rec in (_session_records() if records is None else records)
-        if (sid := rec.get("sessionId")) and _pid_alive(rec.get("pid"))
+        for rec in recs
+        if (sid := rec.get("sessionId"))
+        and _pid_alive(rec.get("pid"))
+        and rec.get("pid") not in recycled
     }
 
 
