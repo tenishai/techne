@@ -12,6 +12,13 @@ from pathlib import Path
 from techne.config import CLAUDE_CODE, Config
 from techne.platforms.claude_code.paths import claude_config_dir, claude_json_path
 
+#: The PreToolUse matcher for the codex grep-assist rail, DEFINED ONCE because it
+#: is asserted in two places — the registration below and `expected_registrations`
+#: for the #287 drift check. Two literals meant a matcher change made the drift
+#: check report a phantom drift against our own registration, which is a second
+#: definition of the same fact drifting from the first (techne#596).
+GREP_ASSIST_MATCHER = "Grep|Bash"
+
 # Import-time snapshots, honoring CLAUDE_CONFIG_DIR set before launch. The hook
 # installer runs as a fresh `techne` process per invocation, so the env is fixed
 # by then; tests monkeypatch these module attributes directly.
@@ -713,16 +720,26 @@ def register_hooks(config: Config):
         )
 
     # PreToolUse grep-assist (techne#206) — OPT-IN, experimental. Only registered
-    # when hooks.codex_grep_assist is ON. Unlike the always-on hooks above it uses
-    # a "Grep" matcher so it fires only on the agent's own content searches, and
-    # it's the sole techne PreToolUse entry — so a flipped-off flag on re-init
-    # cleanly removes it (the strip below drops any prior techne PreToolUse group).
+    # when hooks.codex_grep_assist is ON. It's the sole techne PreToolUse entry —
+    # so a flipped-off flag on re-init cleanly removes it (the strip below drops
+    # any prior techne PreToolUse group).
+    #
+    # MATCHER IS "Grep|Bash", NOT "Grep" (techne#596). With Grep alone the rail was
+    # enabled, registered, and NEVER FIRED ONCE across a full session of searching
+    # this codebase — because every search was `grep` inside a Bash call, which is
+    # the natural reach when already running shell commands. The matcher was the
+    # guard's precondition and falsifying it was free and accidental.
+    #
+    # Bash is the noisy half of that pair: most Bash calls are not searches at all,
+    # so `_bash_search_pattern` declines unless the command is a real search tool
+    # with a bare identifier pattern. The cost of a decline is one extra hook
+    # invocation that exits early; the cost of NOT matching Bash was the whole rail.
     pre_groups = hooks.setdefault("PreToolUse", [])
     pre_groups[:] = [g for g in pre_groups if not _group_contains_techne(g)]
     if config.hooks.codex_grep_assist:
         pre_groups.append(
             {
-                "matcher": "Grep",
+                "matcher": GREP_ASSIST_MATCHER,
                 "hooks": [
                     {"type": "command", "command": _hook_command("techne.hooks.pre_tool_use")}
                 ],
@@ -771,7 +788,7 @@ def _expected_registrations(config: Config) -> list[tuple[str, str]]:
     if config.hooks.post_tool_use:
         expected.append(("PostToolUse", ""))
     if config.hooks.codex_grep_assist:
-        expected.append(("PreToolUse", "Grep"))
+        expected.append(("PreToolUse", GREP_ASSIST_MATCHER))
     if config.hooks.per_turn_recall:
         expected.append(("UserPromptSubmit", ""))
     return expected
