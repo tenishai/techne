@@ -98,6 +98,23 @@ EGRESS_KEYS: tuple[str, ...] = (
     # SQLite-only, but a world-readable DSN is already a cross-agent leak in the
     # one-install-per-agent deployment where this gate is meant to be a wall.
     "stores",
+    # `sources.claude_code_transcripts.paths` is a list of arbitrary filesystem
+    # paths whose CONTENTS are ingested into the observation ledger. ADMITTED
+    # 2026-08-17 (techne#585, Richard's call) on the consistency argument: the
+    # rationale that admits `connections` above — "opened read-only, so this is
+    # ingestion rather than exfiltration — included anyway because a chosen input
+    # is a chosen trust source" — applies to it word for word, and keeping the
+    # two apart made the gate's own reasoning contradict itself.
+    #
+    # THIS CHANGED ENFORCEMENT, which is why it needed a decision rather than a
+    # test: under a LOCKED operator layer, EGRESS_KEYS entries in config.yaml are
+    # DROPPED, so a locked deployment now discards agent-supplied source paths
+    # instead of honouring them. That is the intended behaviour of locking — an
+    # agent choosing what gets read into its own memory is the thing being
+    # prevented — but it is a live behaviour change for any locked install that
+    # set `sources` in config.yaml, not a no-op. Pinned by
+    # TestKeySurgery::test_strip_removes_sources_now_that_it_is_governed.
+    "sources",
 )
 
 # The other half of the partition (techne#509). EGRESS_KEYS cannot be DERIVED —
@@ -145,19 +162,48 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     "egress_trust",
     "preserved_egress",
     "loaded_from",
-    # `sources` — CLASSIFIED HERE, BUT THE ARGUMENT IS NOT SETTLED (techne#509
-    # follow-up). `sources.claude_code_transcripts.paths` is a list of arbitrary
-    # filesystem paths whose CONTENTS are ingested into the observation ledger.
-    # The rationale that puts `connections` in EGRESS_KEYS — "opened read-only,
-    # so this is ingestion rather than exfiltration — included anyway because a
-    # chosen input is a chosen trust source" — applies to it word for word.
+    # DOTTED ENTRIES BELOW EXIST BECAUSE A PARTIALLY-GOVERNED BLOCK MUST BE
+    # JUDGED FIELD BY FIELD (techne#588). `reflect.model` and `conflict.model`
+    # are in EGRESS_KEYS, and the completeness check used to treat that as
+    # classifying the WHOLE `reflect` / `conflict` block by dotted-key prefix —
+    # so neither block appeared here, and every OTHER field inside them forced no
+    # judgment at all. Measured: adding `ReflectConfig.api_base`, an LLM endpoint
+    # override, left the suite byte-identical at 51 passed. That is #509's own
+    # failure mode one level down.
     #
-    # It is left OUT of EGRESS_KEYS deliberately and only because widening a
-    # security gate changes enforcement (a locked operator layer would start
-    # dropping agent-supplied source paths), and that blast radius deserves its
-    # own review rather than arriving as a side effect of adding a test. Filed as
-    # techne#585. If that review says "destination", this line moves up.
-    "sources",
+    # A block named WHOLE in either tuple still covers everything under it; only
+    # a block governed by dotted keys alone has to enumerate. So this list grows
+    # only when someone adds a field to `reflect` or `conflict` — which is
+    # exactly when a judgment is wanted.
+    #
+    # All of these change WHAT is kept, ranked, logged or reviewed. None names a
+    # place anything goes.
+    "conflict.log_raw_response",
+    "conflict.max_comparison_candidates",
+    "conflict.max_items_per_emit",
+    "reflect.enabled",
+    "reflect.emit_max_chars",
+    "reflect.emit_max_threads",
+    "reflect.existing_knowledge_k",
+    "reflect.include_existing_knowledge",
+    "reflect.log_raw_response",
+    "reflect.max_candidates_per_thread",
+    "reflect.min_confidence",
+    "reflect.min_observations_per_thread",
+    # `reflect.write_to` IS THE ONE WORTH ARGUING ABOUT, and it is the field
+    # #588's fix was most likely to catch, so the reasoning is recorded rather
+    # than assumed. It selects 'candidates' (human review) or 'live' (auto-
+    # promote straight into knowledge/identity) — a SINK TOGGLE by the wording of
+    # the completeness test's own error message, and `standalone` is in
+    # EGRESS_KEYS on exactly that basis.
+    #
+    # It stays here because BOTH of its destinations are tables in the SAME LOCAL
+    # DATABASE. `standalone=false` routes team memory to the archivist sink at
+    # another path — bytes land somewhere else. `write_to` never changes where
+    # bytes land; it changes whether a human sees them first. That is a review
+    # gate, not a destination, and it already has its own control: posture forces
+    # 'candidates' under spool_primary (`core/reflect.py:effective_write_to`).
+    "reflect.write_to",
 )
 
 #: THE ONLY TIER THAT IS A REAL LOCK. Not env-relocatable, so it is the one
