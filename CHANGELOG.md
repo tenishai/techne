@@ -5,6 +5,205 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-17
+
+The release where the instruments stopped lying. Nearly every fix below is the same shape:
+a rail that was enabled, registered, and reporting healthy while doing nothing — a
+grep-assist that never once fired, a code index that certified its own pollution, a
+zero-result search that couldn't describe its own reliability, a CI guard that failed open
+on a typo, a completeness check satisfied by a prefix, a glob that skipped files without
+saying so. None of them looked broken. That is what made them worth a release. 24 changes.
+
+**Upgrading:** `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.14.0"`
+— the `--force` is required; a plain `pipx install` over an existing techne refuses. What
+you cross depends on where you start:
+
+| from | schema | what runs |
+|---|---|---|
+| 0.13.0 | 24 → 24 | **Nothing.** Pure code upgrade, no migration. |
+| 0.11.0 / 0.12.0 | 18 → 24 | Six steps, including one history rewrite — see below. |
+| 0.9.0 / 0.10.0 | 17 → 24 | The above, plus step 18. |
+
+From **0.11/0.12** the six steps are: **19** adds `knowledge.vec_stale` (additive, defaults
+0); **20** builds a covering index on `outbox` — no data change, but its cost scales with
+accumulated synced rows, so the oldest store pays the most; **21** namespaces existing coord
+read receipts under `uuid:` and switches new ones to `name:<display-name>`, so a relaunched
+**named** session stops re-reading the backlog — *after draining it one final time*, because
+old UUID-keyed receipts deliberately do not transfer (the UUID→name map lived in per-session
+sidecars that are gone, and inventing one would fabricate the very "who read what" claim a
+receipt exists to record); **22** bumps the version so the additive `reflection_queue` table
+actually reaches existing databases — the bump *is* the load-bearing part, since an additive
+schema change at an unchanged version reaches new databases only; **23 rewrites
+`observations.timestamp` and `.event_at` in place across your entire history**, normalising
+three concurrently-written formats to one — the only step that touches existing data at
+scale; **24** backfills historical `sessions.ended_at` NULLs from last known activity.
+
+Coming from **0.9/0.10** you also cross **18**, which redeploys the `observations_*` FTS
+triggers in their content+tags+kind form and **rebuilds `observations_fts`** over your whole
+history — on those databases `tags`/`kind` were silently never indexed.
+
+**That one-time backlog drain in step 21 is expected and is indistinguishable from a fault
+unless you know.** If a named session re-reads the coord backlog once after upgrading, that
+is the migration working as designed, not a failure.
+
+**IF YOU RUN A LOCKED OPERATOR LAYER AND SET `sources` IN `config.yaml`, MOVE IT INTO THE
+OPERATOR LAYER BEFORE UPGRADING.** As of #585 `sources` is a governed destination, so a
+locked layer now *discards* agent-supplied source paths instead of honouring them. **The
+drop is silent** — nothing logs it — so the symptom is "techne stopped ingesting my
+transcripts" with nothing pointing back at the upgrade. Installs with no operator layer
+(the default) are unaffected.
+
+The migrator takes an automatic backup before migrating (`guarded_migrate(backup=True)`),
+and since #574 that backup is reused within a transition and pruned afterward rather than
+accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not required.
+
+### Added
+
+- **Citation-attribution for the knowledge rails** (#329, #560) — closes the last open
+  finding of the utilization work: whether an injected memory was actually *used*, not merely
+  retrieved. Without it, every change to what gets retrieved is unfalsifiable — there is no
+  way to tell an improvement from a regression. Behavioral proxy first, deliberately: free,
+  deterministic, no model key, CI-runnable.
+
+- **Executable predicate for the evidence length test** (#541, #567) — the gate asserted a
+  property it described in prose. It now runs the probe it claims to run.
+
+- **Archived `.jsonl.gz` transcripts are readable** (#621) — gzipping old transcripts is a
+  4.5x saving (14.0 MB → 3.1 MB measured on a real one, byte-identical round trip) against
+  366 MB of transcripts older than a fortnight. But a `.gz` was **invisible** to both
+  transcript globs — no error, just skipped — and the reader died on one with a
+  `UnicodeDecodeError`. So the corpus could shrink silently: archive to save space, and the
+  archived sessions quietly stop existing as far as import and search are concerned. The
+  reader now opens `.gz` transparently and both globs match it, so archiving is no longer a
+  form of deletion.
+
+- **Crash-recovery fault-injection gate** (#388) — techne is a stateful daemon over SQLite,
+  and the interesting bugs live in *interrupted transitions*, which unit tests never reach
+  because a unit test always gets to finish. A new `crash` suite SIGKILLs a child mid-write
+  and then proves the store: an uncommitted batch leaves no trace, a committed one survives,
+  a hot WAL replays, an interrupted migration does not stamp its version *and converges on
+  re-run*, and an interrupted flush never marks an undelivered row synced. **The child kills
+  itself at a chosen line** rather than racing a timer from the parent — a crash test that
+  fails randomly teaches people to re-run CI until it is green, which is how a real
+  regression gets waved through. What is tested is *our* usage, not SQLite's atomicity. Run
+  by a dedicated `crash-recovery` job, because a suite excluded from the default run and
+  executed by nothing decays quietly.
+
+- **A go-public runbook** (#556) — `docs/go-public-runbook.md`. Not yet executed; the flip is
+  deliberately paused. Its load-bearing finding: **stopping the runner does not shorten the
+  dangerous window between "public" and "approval policy applied", it closes it** — a job
+  whose labels match no *online* runner queues rather than executes.
+
+### Fixed
+
+- **grep-assist was unreachable in practice, and granted permission when it did fire**
+  (#596, #601) — the rail was enabled, registered, and fired *zero times* across a full
+  session of searching this codebase, because its matcher was `Grep` while every real search
+  was `grep` inside a `Bash` call. The guard's precondition was "the agent chose the Grep
+  tool", and falsifying it was free, accidental and invisible. Widening the matcher to
+  `Grep|Bash` is one line; the rest is parsing a shell command safely enough to deserve it —
+  per-head option tables measured against the actual binaries, unlisted options declining
+  rather than guessing. **Also removed an unconditional `permissionDecision: "allow"`**: dormant
+  and near-harmless while the matcher was `Grep` alone, a live hole the moment it matched
+  Bash, where a grant covers the entire command line while the parser only has to like one
+  segment. A test had pinned that grant as *intended*.
+
+- **The code index certified its own pollution** (#604, #605, #613, #615) — virtualenv
+  contents were indexed, so 96% of this repo's graph was vendored code: 114,412 foreign
+  symbols against 5,137 real ones, with `codex_blast_radius` returning `aiohttp/web.py` as a
+  dependent of a techne hook. Indexing is incremental and its only DELETE is scoped to the
+  file being re-indexed, so the polluted rows were never revisited — and `index_freshness`
+  reported `coverage: complete` over them, because those files really were present and
+  unchanged on disk. They were not stale; they should not have been there. Skip-list
+  enforcement now runs **on every index** rather than once in a migration, so a skip-list
+  change heals itself instead of needing a new migration each time.
+
+- **A zero-result code search described itself as authoritative** (#595, #598) — a found
+  result carried a staleness flag and a refresh notice; a zero result carried nothing. "I
+  cannot see it" rendered as "it is not there".
+
+- **grep-assist option tables** (#611, #616) — `--group-separator` now declines rather than
+  asserting an arity that differs between ugrep and GNU grep, where it would consume the
+  pattern. Provenance recorded for the table whose missing provenance caused the defect.
+
+- **Per-turn recall showed the source table as the row's kind** (#603), and the per-turn PUSH
+  rail injected pull-only rows (#561, #565).
+
+- **Health reported a guess about the install kind** instead of the revision (#568, #569).
+
+- **Migration backups grew without bound** (#574, #578) — now reused within a transition and
+  pruned after.
+
+- **MCP accepted a stale env-derived session identity** (#573, #581), and the reflect-ingest
+  surface pre-judged an empty response (#485, #563).
+
+- **Architect pattern search never got the OR fallback** (#70, #557, #558).
+
+- **A capture-rail test was measuring the CI runner** rather than the rail (#543, #564).
+
+### Security
+
+- **`sources` is now a governed destination — THE ONE ENTRY HERE THAT ASKS SOMETHING OF YOU**
+  (#585). `sources.claude_code_transcripts.paths` names arbitrary filesystem paths whose
+  *contents* are ingested into the observation ledger, and the rationale that already
+  governed `connections` applies to it word for word. **This changes enforcement, silently:**
+  under a locked operator layer, governed keys in `config.yaml` are *dropped*, so a locked
+  install now discards agent-supplied source paths where it previously honoured them.
+  Nothing logs the drop. **Action: if you run a locked operator layer with `sources` in
+  `config.yaml`, move it into the operator layer before upgrading** — see "Upgrading" above.
+  Default installs (no operator layer) are unaffected.
+
+- **Unlisted sync adapters are refused by default** (#389) — `load_adapter` would import any
+  class registered under the `techne.sync_adapters` entry-point group and hand it every
+  outbox entry, i.e. full session and memory content. Loading arbitrary registered code that
+  receives memory is an egress decision, not a plugin lookup. Now gated behind
+  `sync.allow_unlisted_adapter`, and the refusal *precedes* the import, because import-time
+  side effects are code execution. Within one OS user this is not a wall — it makes an
+  unlisted adapter impossible to load *silently*. Filed here rather than under Added: the
+  audit it came from found techne has **zero network-capable imports**, so there was no POST
+  to gate and this is hardening, not a feature.
+
+- **Fork PRs could reach the self-hosted runner** (#556, #570) — `pull_request` plus a
+  self-hosted pool is remote code execution on the runner host. The guard now fails *closed*;
+  the previous one failed open on a typo'd property, and for `pull_request` GitHub evaluates
+  the workflow from the PR's own ref, so an in-workflow guard is attacker-editable. Forking
+  is disabled at both repo and org level as the load-bearing control.
+
+- **Every Config field now forces a destination judgment** (#509, #582) — egress keys were
+  opt-out by omission, so a new field defaulted to leaving the machine.
+
+- **A dotted-key prefix was accepted as that judgment** (#588) — `reflect.model` in
+  `EGRESS_KEYS` marked the *entire* `reflect` block classified, so every other field inside
+  it forced no judgment at all. Measured: adding a nested LLM endpoint override left the
+  suite byte-identical. Classification is now exact and recursive.
+
+- **The completeness guard checked a surface the gate does not use** (#586) — it resolved
+  entries against the *dataclass* surface while the gate acts on the mapping the loader
+  walks; the two agree only by convention. It is now behavioural: load a config with each
+  key and without it, and require the result to differ. Found on the way and filed
+  separately (#620): `Config.load` reads a `conflict` block that `save` never writes, so a
+  hand-written one is dropped by any load→save cycle.
+
+- **A recycled pid read as a present session** (#587) — presence was TTL-free and pid-only,
+  the exact combination the neighbouring code warns against. Demotion now requires *positive*
+  evidence of a mismatch, because the obvious implementation would manufacture false absents,
+  and a false absent refuses a session that is genuinely working. The `ps` snapshot is cached
+  (measured: 31.9 ms → 0.041 ms warm), since cost was why this was deferred rather than an
+  oversight.
+
+### Docs
+
+- Architecture cards for the **utilization seam** (#597) and the **codex** store, the latter
+  now anchored to both files it makes claims about (#617). The card gate catches drift only
+  where an anchor exists, so an unanchored claim is an unguarded one. The cost is stated at
+  the anchor site: `source.py` churns for reasons unrelated to the card, so the gate will
+  fire on edits that do not concern it — **bump the sha, do not delete the anchor to make it
+  quiet.**
+
+- The PreToolUse protocol shape is **observed rather than inferred** (#612, #614) — settled by
+  dogfood, because telemetry structurally cannot see it: `record_hook_run` fires on printing,
+  not delivery, so a rail emitting into the void still reads healthy.
+
 ## [0.13.0] — 2026-08-11
 
 The milestone where the memory rails got their integrity checked, the evidence gate learned
