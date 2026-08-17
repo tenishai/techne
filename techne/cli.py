@@ -1283,15 +1283,40 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
             return
 
     include_prompts = not no_prompts
-    results = (
-        [
-            import_transcript(
+
+    def _import_one(p):
+        """Single-file import with the SAME net as import_directory's per-file handler.
+
+        Without it the two entry points disagree on the same file: a corrupt archive
+        passed as a directory reports `skip … reason: error: …` and exits 0, while the
+        identical file passed directly raised a raw traceback — or, for a TRUNCATED
+        archive, whose EOFError Click reads as an abort, printed a bare `Aborted!` with
+        no filename and no reason.
+
+        The filename goes in the REASON, not in ``session_id``: that field renders
+        truncated to 8 chars (it holds uuids), which would clip a name to "sess-bro".
+        And it is ``p.name`` rather than ``session_id_for(p)`` because here the path is
+        whatever the caller typed rather than a glob hit — ``session_id_for`` is itself
+        one of the raisers, so calling it in the handler would fault a second time
+        mid-exception. ``session_id`` stays None, matching ``import_transcript``'s own
+        no-records case.
+        """
+        try:
+            return import_transcript(
                 config.db_path,
-                path,
+                p,
                 include_user_prompts=include_prompts,
                 force=force,
             )
-        ]
+        except Exception as e:
+            return {
+                "session_id": None,
+                "skipped": True,
+                "reason": f"error reading {p.name}: {e}",
+            }
+
+    results = (
+        [_import_one(path)]
         if path.is_file()
         else import_directory(
             config.db_path,
