@@ -44,19 +44,23 @@ ASSIST_TOOLS = {"Grep", "Bash"}
 #: and feeding a path to the symbol FTS is the Glob mistake in a new costume.
 _SEARCH_HEADS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
 
-#: Options that consume the NEXT token as their value, so that token is NOT the
-#: pattern. Measured omission (#596 r1): `grep -D skip search_symbols .` injected
-#: symbols for `skip`, and `--exclude-dir node_modules search_symbols` lost the
-#: real pattern entirely. Attached forms (`-A5`, `--include=*.py`) consume nothing
-#: extra and are handled by the plain `-` prefix test.
-#: GREP'S table. `rg` and `ag` have DIFFERENT flags, and applying grep's to them
-#: is a second definition of someone else's CLI (#596 r2): `rg -t json foo`
-#: injected `json` because grep's `-t` takes no value while rg's does, and `ag -f`
-#: takes none while grep's does. So the tables are per-tool and anything not
-#: listed declines rather than guessing.
-_VALUE_OPTS_SHORT = frozenset("ABCDdfme")
-_RG_VALUE_OPTS_SHORT = frozenset("ABCdgmtE")
-_AG_VALUE_OPTS_SHORT = frozenset("ABCm")
+#: Options KNOWN to take no value, for the three search heads. Everything else
+#: DECLINES (#596 r3) — the previous design listed value-TAKING options per tool
+#: and assumed anything unlisted was safe to skip past. That was measured false:
+#: 13 of 13 unlisted value-taking options injected a WRONG pattern and 0 declined
+#: (`rg --type json` searched the graph for `json`). Three hand-kept tables of
+#: someone else's flags could never be complete, and an incomplete allow-list that
+#: FAILS OPEN is the defect this rail keeps producing.
+#:
+#: Inverted, the failure mode is a missed augmentation, which costs nothing.
+_NO_VALUE_OPTS = frozenset("rRnHhiIlLwxvcazZoqsFEGPUV")
+
+#: Short options KNOWN to take a separate value, across grep/rg/ag. Kept so a
+#: perfectly ordinary `grep -A 5 <sym> .` is not lost to the decline rule — that
+#: would trade one failure mode for another.
+_VALUE_OPTS_SHORT = frozenset("ABCDdfmet")
+
+#: Long options KNOWN to take a separate value. Anything else long DECLINES.
 _VALUE_OPTS_LONG = frozenset(
     {
         "--after-context",
@@ -76,8 +80,18 @@ _VALUE_OPTS_LONG = frozenset(
         "--colour",
         "--group-separator",
         "--regexp",
+        "--type",
+        "--type-not",
+        "--glob",
+        "--iglob",
+        "--ignore-file",
     }
 )
+
+#: A redirect target is NOT a path operand (#596 r3). `cat x | grep sym > out.txt`
+#: fired, because `out.txt` counted as "this searches a tree" — it is where the
+#: output GOES, and the command is still filtering stdin.
+_REDIRECT = re.compile(r"^[0-9]*>>?|^<")
 
 #: A pattern worth sending to the symbol index: a bare identifier, 3+ chars.
 #: CONSERVATIVE ON PURPOSE — this rail's failure mode is noise, and noise is what
@@ -87,26 +101,32 @@ _VALUE_OPTS_LONG = frozenset(
 _SYMBOLISH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
 
 
-def _takes_a_value(tok: str, head: str) -> bool:
-    """True if `tok` is an option of `head` whose value is the NEXT token.
+def _consumes_next(tok: str) -> bool | None:
+    """True/False if we KNOW whether `tok` consumes the next token; None if not.
 
-    PER-TOOL, because these are three different CLIs (#596 r2). `-e` is handled by
-    the caller before this is reached, so a cluster ENDING in `e` (`-ie`) must not
-    also be treated as value-taking here — it would consume the pattern itself and
-    promote the following operand.
+    None means DECLINE THE WHOLE COMMAND. An option we do not recognise may or may
+    not take a value, and guessing wrong promotes an operand to the pattern —
+    which is how `rg --type json` came to search for `json`.
     """
     if tok.startswith("--"):
-        return tok in _VALUE_OPTS_LONG  # `--opt=value` never reaches here
-    if len(tok) <= 1:
-        return False
-    table = {
-        "rg": _RG_VALUE_OPTS_SHORT,
-        "ag": _AG_VALUE_OPTS_SHORT,
-    }.get(head, _VALUE_OPTS_SHORT)
-    last = tok[-1]
-    if last == "e":
-        return False  # `-e` is the caller's business; see the docstring
-    return last in table
+        if "=" in tok:
+            return False  # value is attached
+        if tok in _VALUE_OPTS_LONG:
+            return True
+        return None  # unrecognised long option — too tool-specific to guess
+    body = tok[1:]
+    if not body:
+        return None
+    # Walk the cluster. A value-taking letter that is NOT last carries its value
+    # ATTACHED (`-A5`, `-m2`), so the cluster consumes nothing further.
+    for pos, ch in enumerate(body):
+        if ch == "e":
+            return False  # `-e` names the pattern; the caller handles it
+        if ch in _VALUE_OPTS_SHORT:
+            return pos == len(body) - 1  # last -> separate value; else attached
+        if ch not in _NO_VALUE_OPTS:
+            return None  # unrecognised short flag — decline rather than guess
+    return False
 
 
 def _bash_search_pattern(command: str) -> str | None:
@@ -158,7 +178,18 @@ def _bash_search_pattern(command: str) -> str | None:
                 i += 2
                 continue
             if tok.startswith("-"):
-                i += 2 if (_takes_a_value(tok, head) and i + 1 < len(rest)) else 1
+                consumes = _consumes_next(tok)
+                if consumes is None:
+                    return None  # unrecognised option — decline rather than guess
+                i += 2 if (consumes and i + 1 < len(rest)) else 1
+                continue
+            redirect = _REDIRECT.match(tok)
+            if redirect:
+                # A redirect and ITS TARGET are both skipped. Attachment is decided
+                # by whether anything FOLLOWS the operator (`>out.txt` attached,
+                # `2>` not) — keying on token length gets `2>` wrong, since it is
+                # two characters with a separate target.
+                i += 1 if tok[redirect.end() :] else 2
                 continue
             if pattern is None:
                 pattern = tok
@@ -277,6 +308,18 @@ def main() -> None:
     tool_name = data.get("tool_name", "")
     if tool_name not in ASSIST_TOOLS:
         sys.exit(0)
+
+    # PREFILTER BEFORE ANY techne IMPORT (#596 r3). Matching Bash means this hook
+    # now runs on nearly every tool call, and it measured ~113 ms added to each
+    # one — of which the DECLINE path was 79%, i.e. almost all of it paid by calls
+    # that were never searches. A pure-string test costs nothing and takes that to
+    # ~49 ms. It must stay strictly weaker than `_bash_search_pattern`: a command
+    # with no search head cannot possibly yield a pattern, so this can only skip
+    # work the real parse would also have declined.
+    if tool_name == "Bash":
+        _cmd = (data.get("tool_input") or {}).get("command") or ""
+        if not any(h in _cmd for h in _SEARCH_HEADS):
+            sys.exit(0)
 
     # ------------------------------------------------------------------
     # FAST PATH (techne#470). This rail is DEFAULT-OFF, so the overwhelmingly

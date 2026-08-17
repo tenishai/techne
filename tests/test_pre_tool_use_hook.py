@@ -318,8 +318,10 @@ class TestBashSearchPattern:
 
     def test_attached_option_values_consume_nothing_extra(self):
         """`-A5` and `--include=*.py` carry their value inline, so the next token
-        IS the pattern. A blanket 'skip the token after any flag' would eat it."""
+        IS the pattern. A blanket 'skip the token after any flag' would eat it,
+        and so would treating a value-taking letter as always separate."""
         assert self._p("grep -A5 index_freshness .") == "index_freshness"
+        assert self._p("grep -A 5 index_freshness .") == "index_freshness"
         assert self._p("grep --include=*.py search_symbols .") == "search_symbols"
 
     def test_a_short_cluster_only_consumes_when_its_last_letter_does(self):
@@ -484,12 +486,30 @@ class TestRoundTwoFindings:
         # ...while a genuine pipe still declines.
         assert self._p("cat x.py | rg foo_symbol") is None
 
-    def test_rg_and_ag_use_their_own_option_tables(self):
-        """grep's table applied to three CLIs is a second definition of someone
-        else's flags: `rg -t json foo` injected `json`, because grep's `-t` takes
-        no value while rg's does."""
+    def test_an_ambiguous_flag_declines_rather_than_guessing(self):
+        """`-t` takes a value in rg and none in grep. Per-tool tables tried to
+        resolve that and could never be complete — measured in #596 r3: 13 of 13
+        UNLISTED value-taking options injected a WRONG pattern and 0 declined,
+        because an incomplete allow-list that fails OPEN promotes an operand to
+        the pattern (`rg --type json` searched for `json`).
+
+        Inverted: an option we cannot read declines the whole command. The cost is
+        a missed augmentation, which is nothing; the alternative was injecting a
+        wrong symbol, which is the noise that gets a rail switched off."""
         assert self._p("rg -t json search_symbols") == "search_symbols"
-        assert self._p("grep -t search_symbols .") == "search_symbols"
+        assert self._p("rg --type json search_symbols") == "search_symbols"
+        # Ambiguous across tools, and unknown long options, both decline.
+        assert self._p("grep -t search_symbols .") is None
+        assert self._p("grep --unknown-opt x search_symbols .") is None
+
+        # THE CASES THAT DISCRIMINATE. The two above also return None under a
+        # mutant that guesses, because the guessed token happens to be
+        # non-symbol-shaped — so they pin the RESULT and not the RULE. These use
+        # an unknown option whose separate value IS symbol-shaped, so guessing
+        # produces a WRONG PATTERN rather than nothing: exactly the 13-of-13
+        # failure measured in #596 r3.
+        assert self._p("rg --somefuture-opt jsonlike sym_name") is None
+        assert self._p("rg -Y jsonlike sym_name") is None
 
     def test_a_cluster_ending_in_e_does_not_eat_the_pattern(self):
         """`-e` is handled before the option loop, so a cluster ENDING in `e`
@@ -583,3 +603,60 @@ def test_a_non_search_bash_call_does_not_clobber_liveness(home, monkeypatch, cap
     after_noise = _last_run()
 
     assert after_noise == after_success, "a non-search Bash call overwrote the rail's liveness"
+
+
+class TestRoundThreeFindings:
+    """The #596 r3 findings."""
+
+    def _p(self, cmd):
+        from techne.hooks.pre_tool_use import _bash_search_pattern
+
+        return _bash_search_pattern(cmd)
+
+    def test_a_redirect_target_is_not_a_path_operand(self):
+        """`cat x | grep sym > out.txt` fired, because `out.txt` counted as "this
+        searches a tree". It is where the output GOES; the command is still
+        filtering stdin. Attachment is decided by what FOLLOWS the operator —
+        keying on token length gets `2>` wrong, since it is two characters with a
+        separate target."""
+        assert self._p("cat x.py | grep sym_name > out.txt") is None
+        assert self._p("cat x.py | grep sym_name >out.txt") is None
+        assert self._p("cat x.py | grep sym_name 2> err.txt") is None
+        assert self._p("cat x.py | grep sym_name 2>&1") is None
+        # A real tree search keeps firing even when its output is redirected.
+        assert self._p("grep -rn sym_name . > out.txt") == "sym_name"
+
+    def test_the_operand_half_of_the_guard_is_pinned(self):
+        """Deleting `operands == 0` from the piped-filter guard survived the FULL
+        2836-test suite (#596 r3) — the branch was unpinned, so the discriminator
+        could silently become "decline every piped grep", losing real searches.
+
+        `cat x | grep sym .` is piped AND has an operand: it searches a tree whose
+        stdin happens to be attached, so it must fire."""
+        assert self._p("cat list.txt | grep -rn sym_name techne/") == "sym_name"
+        assert self._p("cat list.txt | grep sym_name") is None
+
+
+def test_the_prefilter_is_strictly_weaker_than_the_parse(home, monkeypatch, capsys):
+    """The prefilter exists for cost (#596 r3: ~113ms added to every Bash call,
+    79% of it on the decline path). It must never reject something the real parse
+    would have accepted — it is an optimisation, and an optimisation that changes
+    behaviour is a bug.
+
+    So: every command the parse accepts must contain a search head, which is the
+    only thing the prefilter tests.
+    """
+    from techne.hooks.pre_tool_use import _SEARCH_HEADS, _bash_search_pattern
+
+    accepted = [
+        "grep -rn sym_name .",
+        "cd /repo && rg sym_name",
+        "ag sym_name src/",
+        "/usr/bin/grep -rn sym_name .",
+        "make build; grep -rn sym_name techne/",
+    ]
+    for cmd in accepted:
+        assert _bash_search_pattern(cmd) is not None, cmd
+        assert any(h in cmd for h in _SEARCH_HEADS), (
+            f"the prefilter would drop a command the parse accepts: {cmd}"
+        )
