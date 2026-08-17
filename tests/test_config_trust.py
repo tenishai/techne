@@ -428,6 +428,32 @@ class TestKeySurgery:
         assert applied == []
         assert raw == {}
 
+    def test_strip_removes_sources_now_that_it_is_governed(self):
+        """techne#585 CHANGED ENFORCEMENT, so it gets a test rather than only a
+        comment. `sources.claude_code_transcripts.paths` names arbitrary
+        filesystem paths whose CONTENTS are ingested into the ledger; admitting
+        it to EGRESS_KEYS means a LOCKED operator layer now DROPS agent-supplied
+        source paths instead of honouring them.
+
+        That is the intended effect of locking — an agent choosing what gets read
+        into its own memory is the thing being prevented — but it is a live
+        behaviour change for any locked install that set `sources` in
+        config.yaml, not a no-op. Pinned here so nobody can quietly revert the
+        decision by moving one line back to `_NOT_A_DESTINATION`.
+        """
+        raw = {
+            "sources": {"claude_code_transcripts": {"paths": ["/tmp/somebody-elses-transcripts"]}},
+            "threads": {"min_observations": 3},
+        }
+
+        removed = strip_egress(raw)
+
+        assert "sources" in removed
+        assert "sources" not in raw
+        # A neighbouring non-destination block is untouched — the gate is
+        # targeted, not a blanket wipe.
+        assert raw["threads"] == {"min_observations": 3}
+
     def test_strip_tolerates_a_wrong_shaped_block(self):
         """A scalar where a mapping belongs must not raise — this runs inside
         Config.load, and a crash here takes down every hook on the host."""
@@ -892,32 +918,106 @@ def test_every_config_field_is_classified_as_destination_or_not():
     `_NOT_A_DESTINATION`), so this does not try to. It enforces the weaker,
     achievable property: that SOMEBODY MADE THE CALL. Adding a field now costs one
     line in one of two tuples instead of being allowed to pass in silence.
+
+    A PREFIX IS NOT A JUDGMENT (techne#588). This check used to compute the
+    governed set as `{k.split(".", 1)[0] for k in EGRESS_KEYS}`, so the single
+    entry `reflect.model` marked the ENTIRE `reflect` block classified — and
+    neither `reflect` nor `conflict` appeared in `_NOT_A_DESTINATION`, because
+    the prefix had already satisfied the check. Measured: adding
+    `ReflectConfig.api_base`, an LLM endpoint override, left the suite at 51
+    passed, byte-identical to baseline. A destination-selecting field nested one
+    level inside a partially-governed block was silently ungoverned, which is
+    precisely what this test exists to prevent.
+
+    So classification is now EXACT and RECURSIVE: a block named WHOLE (no dot) in
+    either tuple covers everything under it; a block governed only by DOTTED keys
+    is partially governed, and every field inside it must be judged in its own
+    right. The recursion is general rather than one-deep on purpose — the same
+    hole at depth 2 would otherwise be a new bug with the same shape.
     """
     from techne.security import config_trust
 
-    # A dotted key like "reflect.model" governs part of the `reflect` field, so the
-    # top-level name counts as classified by its prefix.
-    governed = {k.split(".", 1)[0] for k in config_trust.EGRESS_KEYS}
-    declined = set(config_trust._NOT_A_DESTINATION)
+    whole = {k for k in config_trust.EGRESS_KEYS if "." not in k}
+    whole |= {k for k in config_trust._NOT_A_DESTINATION if "." not in k}
+    dotted = {k for k in config_trust.EGRESS_KEYS if "." in k}
+    dotted |= {k for k in config_trust._NOT_A_DESTINATION if "." in k}
 
-    unclassified = [f for f in _config_field_names() if f not in governed and f not in declined]
+    unclassified = _unclassified_fields(Config, whole, dotted, prefix="")
     assert not unclassified, (
         f"Config fields with no destination judgment: {unclassified}. "
         "Add each to techne/security/config_trust.py — EGRESS_KEYS if it selects "
         "a destination for memory (a path, DSN, endpoint, model route or sink "
         "toggle), otherwise _NOT_A_DESTINATION with the reason. Silence here means "
-        "the operator layer does not govern it."
+        "the operator layer does not govern it.\n"
+        "A DOTTED name here means the enclosing block is only PARTIALLY governed "
+        "(some sub-key is in EGRESS_KEYS), so every field inside it needs its own "
+        "line — a prefix is not a judgment (techne#588)."
     )
+
+
+def _unclassified_fields(cls, whole: set[str], dotted: set[str], prefix: str) -> list[str]:
+    """Names under `cls` that no entry in either tuple judges.
+
+    `whole` = undotted entries (cover a block entirely); `dotted` = entries that
+    govern one field, which makes their enclosing block partially governed and
+    forces a per-field judgment inside it.
+    """
+    import dataclasses
+    import typing
+
+    out: list[str] = []
+    try:
+        hints = typing.get_type_hints(cls)
+    except Exception:  # noqa: BLE001 — an unresolvable annotation must not hide fields
+        hints = {}
+    for f in dataclasses.fields(cls):
+        dotted_name = f"{prefix}{f.name}"
+        if dotted_name in whole:
+            continue  # judged wholesale — covers everything beneath it
+        partial = any(k.startswith(f"{dotted_name}.") for k in dotted)
+        if not partial:
+            out.append(dotted_name)
+            continue
+        # Partially governed: descend and demand a judgment on every field inside.
+        inner = hints.get(f.name, f.type)
+        if dataclasses.is_dataclass(inner):
+            out.extend(_unclassified_fields(inner, whole | dotted, dotted, f"{dotted_name}."))
+    return out
 
 
 def test_the_two_tuples_do_not_overlap():
     """A name in both would make the record self-contradicting, and the runtime
-    would quietly follow EGRESS_KEYS while the comment claimed otherwise."""
+    would quietly follow EGRESS_KEYS while the comment claimed otherwise.
+
+    Compared EXACTLY, not by prefix (techne#588). Both tuples now carry dotted
+    entries — `reflect.model` governs, `reflect.write_to` declines — and those
+    are not a contradiction, they are the per-field judgment a partially-governed
+    block requires. Collapsing to prefixes would report them as one.
+    """
     from techne.security import config_trust
 
-    governed = {k.split(".", 1)[0] for k in config_trust.EGRESS_KEYS}
-    both = governed & set(config_trust._NOT_A_DESTINATION)
+    both = set(config_trust.EGRESS_KEYS) & set(config_trust._NOT_A_DESTINATION)
     assert not both, f"classified as both destination and not: {sorted(both)}"
+
+    # A block named WHOLE in one tuple must not also have dotted entries in the
+    # other: "all of `reflect` is not a destination" and "`reflect.model` is"
+    # cannot both be true, and the exact comparison above would not catch it.
+    whole_governed = {k for k in config_trust.EGRESS_KEYS if "." not in k}
+    whole_declined = {k for k in config_trust._NOT_A_DESTINATION if "." not in k}
+    contradictions = sorted(
+        k
+        for k in config_trust.EGRESS_KEYS + config_trust._NOT_A_DESTINATION
+        if "." in k
+        and (
+            (k.split(".", 1)[0] in whole_governed and k in config_trust._NOT_A_DESTINATION)
+            or (k.split(".", 1)[0] in whole_declined and k in config_trust.EGRESS_KEYS)
+        )
+    )
+    assert not contradictions, (
+        f"sub-keys contradicting a whole-block judgment: {contradictions} — the "
+        "block is classified wholesale in one tuple while a field inside it is "
+        "classified the other way."
+    )
 
 
 def _resolve_egress_key(key: str, root: object = None) -> str | None:
