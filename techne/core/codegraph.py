@@ -578,30 +578,46 @@ def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
         return None, "unknown"
 
     indexed = {str(r["file"]) for r in indexed_rows}
-    # SCOPED TO DIRECTORIES THE INDEX ALREADY COVERS, and the scoping is not
-    # timidity — an unscoped count is worse than none. `_walk_repo`'s _SKIP_DIRS
-    # does not exclude virtualenvs, so on this repo it yields 10,282 files of
-    # which 10,042 live in `.venv-ci-3.12` / `.venv-ci-3.13`. Reporting "10,055
-    # files never indexed" would fire on every repo with a venv, and a warning
-    # that always fires is one the reader learns to skip — which lands us back at
-    # the silence this whole fix exists to remove.
+    # SCOPED BY TOP-LEVEL COMPONENT, and the scoping is not timidity — an
+    # unscoped count is worse than none. `_walk_repo`'s _SKIP_DIRS does not
+    # exclude virtualenvs, so on this repo it yields 10,282 files of which 10,042
+    # live in `.venv-ci-3.12` / `.venv-ci-3.13`. Reporting "10,055 files never
+    # indexed" would fire on every repo with a venv, and a warning that always
+    # fires is one the reader learns to skip — back to the silence this fix
+    # exists to remove, wearing a louder coat.
     #
-    # The failure mode being detected is "a NEW MODULE beside the ones we index",
-    # so the question asked is exactly that: does this file sit in a directory
-    # that already contains indexed files? A venv was never indexed, so its
-    # directories hold nothing and it contributes nothing.
+    # PER-DIRECTORY WAS THE WRONG SCOPE AND SHIPPED A CRITICAL (#595 r2). Asking
+    # "does this file's own directory already hold indexed files?" is blind to
+    # any NEW DIRECTORY, not merely a new top-level package — a new sub-package
+    # under an already-indexed tree scored 0 unindexed and earned "genuine
+    # absence" with the symbol sitting on disk. Worse in a per-module-directory
+    # layout (`Foo/index.ts`, and this indexer handles `.ts`): EVERY new module
+    # lands in a new directory, so the count is pinned at 0 forever while the
+    # notice asserts certainty. The fix would have done nothing, loudly.
     #
-    # THE COST OF THAT CHOICE, stated because it is real: an entirely new
-    # TOP-LEVEL package is invisible here — no indexed sibling, so no signal. That
-    # is a narrower blind spot than the one it replaces, not the absence of one.
-    indexed_dirs = {str(Path(f).parent) for f in indexed}
+    # Top-level component fixes both: a new directory anywhere under `techne/`
+    # still belongs to `techne/`, which the index covers. Measured identical to
+    # the per-directory rule on nine real indexes (techne 13, cabal 4, gojira 2)
+    # with venv noise still excluded, so the correction costs no precision.
+    #
+    # "ANY ANCESTOR" WAS CHECKED AND REJECTED: the repo root is an ancestor of
+    # everything, which re-admits all 10,055 venv files.
+    #
+    # THE REMAINING COST, stated because it is real: a genuinely NEW top-level
+    # component is still invisible — no indexed sibling at that level, so no
+    # signal. Narrower than what it replaces, not nothing.
+    def _component(rel: Path) -> str:
+        """Top-level component of a repo-relative path; "." for a root file."""
+        return rel.parts[0] if len(rel.parts) > 1 else "."
+
+    indexed_components = {_component(Path(f)) for f in indexed}
     unseen = 0
     try:
         for path in _walk_repo(root, set(_EXT_LANGUAGE.values())):
             rel = path.relative_to(root)
             if str(rel) in indexed or str(path) in indexed:
                 continue
-            if str(rel.parent) in indexed_dirs:
+            if _component(rel) in indexed_components:
                 unseen += 1
     except OSError:
         return None, "unknown"

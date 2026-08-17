@@ -695,3 +695,110 @@ def test_unindexed_ignores_directories_the_index_never_covered(tmp_path):
 
     assert out["index"]["unindexed"] == 1, "the 5 vendored files must not count"
     assert "1 source file(s) on disk have never been indexed" in out["notice"]
+
+
+def test_a_new_subpackage_is_not_reported_as_genuine_absence(tmp_path):
+    """THE ROUND-2 CRITICAL. Scoping by the file's OWN DIRECTORY was blind to any
+    NEW DIRECTORY, not merely a new top-level package.
+
+    A new sub-package under an already-indexed tree scored 0 unindexed and earned
+    "genuine absence" with the symbol sitting on disk. Worse in a
+    per-module-directory layout (`Foo/index.ts`, and this indexer handles `.ts`):
+    every new module lands in a new directory, so the count is pinned at 0
+    forever while the notice asserts certainty — the fix doing nothing, loudly.
+
+    Top-level component fixes it: `pkg/newsub/` still belongs to `pkg/`.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    (repo / "pkg").mkdir()
+    _add(db, repo, "pkg/known.py")
+    (repo / "pkg" / "newsub").mkdir()
+    (repo / "pkg" / "newsub" / "mod.py").write_text("def sought(): ...\n")
+
+    out = _codex_search({"query": "sought", "repo": str(repo)}, cfg)
+
+    assert out["index"]["unindexed"] == 1, "a new DIRECTORY under an indexed tree must count"
+    assert "genuine absence" not in out["notice"]
+
+
+def test_per_module_directory_layout_is_not_pinned_at_zero(tmp_path):
+    """The same Critical in the layout where it is total rather than occasional.
+
+    With `src/Foo/index.ts` per module, EVERY new module is a new directory, so
+    the per-directory rule could never report anything — a fix that runs, reports
+    zero, and certifies absence forever.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    (repo / "src" / "Bar").mkdir(parents=True)
+    _add(db, repo, "src/Bar/index.ts", body="export function bar() {}\n")
+    for name in ("Foo", "Baz"):
+        (repo / "src" / name).mkdir()
+        (repo / "src" / name / "index.ts").write_text("export function x() {}\n")
+
+    out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
+
+    assert out["index"]["unindexed"] == 2
+    assert "genuine absence" not in out["notice"]
+
+
+def test_unenumerable_disk_is_reported_as_unknown_not_absence(tmp_path, monkeypatch):
+    """PINS THE `coverage != complete` BRANCH — a surviving mutant in round 2.
+
+    Deleting that guard reproduces the ROUND-1 DEFECT VERBATIM with a green
+    suite: coverage falls through to the genuine-absence branch, and the tool
+    certifies absence on a disk it never read. Both surviving mutants were
+    doubt-expressing branches failing open to certainty, which is the shape of
+    every defect on this PR.
+
+    Driven through the real path: the walker raises, so `_unindexed_count`'s own
+    OSError handler produces the unknown coverage.
+    """
+    import techne.codex.source as src
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "only.py")
+
+    def boom(*a, **k):
+        raise OSError("cannot enumerate")
+        yield  # pragma: no cover — keeps this a generator
+
+    monkeypatch.setattr(src, "_walk_repo", boom)
+
+    out = _codex_search({"query": "anything", "repo": str(repo)}, cfg)
+
+    assert out["index"]["coverage"] == "unknown"
+    assert out["index"]["unindexed"] is None
+    assert "UNKNOWN, not absent" in out["notice"]
+    assert "genuine absence" not in out["notice"]
+
+
+def test_unclassifiable_files_block_the_absence_claim(tmp_path):
+    """PINS THE `unknown` BRANCH of the notice — the other round-2 survivor.
+
+    A symbol stored with no file_hash cannot be compared against disk, so the
+    index's freshness is not established. Deleting this branch let such a repo
+    fall through to "genuine absence" — certainty from evidence that was never
+    checked. Note the same-named kill in my round-1 write-up was the HIT-ROW
+    `stale_count` branch, which is separately pinned; this is the notice's.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    (repo / "opaque.py").write_text("def opaque(): ...\n")
+    add_symbol(db, id="opaque.py::opaque::function::1", file="opaque.py",
+               name="opaque", kind="function", file_hash=None)
+
+    out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
+
+    assert (out["index"]["unknown"], out["index"]["stale"]) == (1, 0)
+    assert "could not be classified" in out["notice"]
+    assert "genuine absence" not in out["notice"]
