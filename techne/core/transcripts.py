@@ -155,9 +155,14 @@ def index_transcripts(
     are deduped/superseded by source_url so re-running only rewrites changed
     sessions. When `make_cards`, each document also gets a pull-only Option D card
     (gist+pointer, pending) so it rides knowledge recall. Returns counts
-    {total, stored, unchanged, empty}.
+    {total, stored, unchanged, empty, unreadable}.
+
+    ``unreadable`` is how many transcripts the source could not read at all. It is
+    reported because ``total`` counts what was YIELDED — a source that skips a corrupt
+    file comes up short, and a short count with no other signal is indistinguishable
+    from a smaller corpus. Sources that do not track it report 0.
     """
-    counts = {"total": 0, "stored": 0, "unchanged": 0, "empty": 0}
+    counts = {"total": 0, "stored": 0, "unchanged": 0, "empty": 0, "unreadable": 0}
     transcripts = source.iter_transcripts()
     if limit:
         transcripts = itertools.islice(transcripts, limit)
@@ -189,4 +194,7 @@ def index_transcripts(
             summary=build_transcript_gist(config.db_path, t.id) if make_cards else None,
         )
         counts["stored" if stored else "unchanged"] += 1
+    # AFTER the loop — the source populates this as it iterates, so reading it earlier
+    # would report 0. Under `limit` this covers only the transcripts actually reached.
+    counts["unreadable"] = len(getattr(source, "unreadable", ()))
     return counts

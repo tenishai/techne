@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from techne.config import Config
 from techne.core.database import init_db
 from techne.core.documents import get_document, list_documents
@@ -70,7 +72,7 @@ def test_index_neutral_source_stores_and_dedups(tmp_path):
         ]
     )
     counts = index_transcripts(config, source)
-    assert counts == {"total": 3, "stored": 2, "unchanged": 0, "empty": 1}
+    assert counts == {"total": 3, "stored": 2, "unchanged": 0, "empty": 1, "unreadable": 0}
 
     docs = list_documents(librarian_db(config), source_type="fake-client-transcript")
     assert len(docs) == 2
@@ -149,3 +151,40 @@ def test_transcript_gist_none_without_threads(tmp_path):
     init_db(db).close()
     sid = start_session(db, project_path="/p", agent_identity="t")
     assert build_transcript_gist(db, sid) is None  # no threads → no index
+
+
+class _UnreadableSource(_FakeSource):
+    """A source that could not read some of what it was pointed at."""
+
+    def __init__(self, transcripts, unreadable):
+        super().__init__(transcripts)
+        self.unreadable = unreadable
+
+
+def test_index_reports_unreadable_from_the_source(tmp_path):
+    """`total` counts what was YIELDED, so a source that skips a corrupt file comes up
+    short — and a short count with no other signal reads as a smaller corpus."""
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
+    source = _UnreadableSource(
+        [_t("s1", [("user", "alpha")])],
+        unreadable=[(Path("/x/corrupt.jsonl.gz"), "zlib.error: invalid code lengths set")],
+    )
+
+    counts = index_transcripts(config, source, make_cards=False)
+
+    assert counts["total"] == 1
+    assert counts["unreadable"] == 1
+
+
+def test_index_reports_zero_unreadable_for_a_source_without_the_field(tmp_path):
+    """TranscriptSource is a protocol — another platform's adapter need not track it."""
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
+
+    counts = index_transcripts(config, _FakeSource([_t("s1", [("user", "alpha")])]))
+
+    assert not hasattr(_FakeSource, "unreadable")
+    assert counts["unreadable"] == 0

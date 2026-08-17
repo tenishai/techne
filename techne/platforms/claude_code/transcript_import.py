@@ -47,6 +47,45 @@ def default_transcripts_dir(cwd: Path | None = None) -> Path:
     return PROJECTS_DIR / project_slug_for_cwd(cwd)
 
 
+# Claude Code writes ``<session_id>.jsonl``; an archived one keeps that name and gains
+# ``.gz`` (#621). Both spellings live here rather than in ``sync.jsonl_records`` because
+# the ``<session_id>.<ext>`` naming is a Claude Code on-disk convention — that module
+# owns record parsing, not path layout.
+TRANSCRIPT_SUFFIXES = (".jsonl", ".jsonl.gz")
+
+
+def session_id_for(path: Path) -> str:
+    """Session id from a transcript filename, for either spelling.
+
+    ``Path("abc.jsonl.gz").stem`` is ``"abc.jsonl"``, so plain ``.stem`` silently
+    yields a WRONG id for an archived transcript — and that id reaches ``sessions.id``,
+    every ``observations.session_id``, and the Librarian's ``source_url``, so the same
+    session lands twice under two identities.
+
+    Raises ValueError on a name that is not a transcript. Falling back to ``.stem``
+    would reintroduce exactly the bug above, quietly, on the one input that reaches it.
+    """
+    name = path.name
+    for suffix in TRANSCRIPT_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    raise ValueError(f"not a transcript filename: {path.name!r}")
+
+
+def iter_transcript_files(directory: Path) -> list[Path]:
+    """Every transcript in `directory`, one per session, ordered by session id.
+
+    Prefers the uncompressed file when a session has both — an archive run that has
+    written ``x.jsonl.gz`` but not yet unlinked ``x.jsonl`` must not yield that session
+    twice (it would double-import observations, which are append-only).
+    """
+    by_session: dict[str, Path] = {}
+    for suffix in reversed(TRANSCRIPT_SUFFIXES):  # .gz first, so .jsonl overwrites it
+        for path in directory.glob(f"*{suffix}"):
+            by_session[session_id_for(path)] = path
+    return [by_session[sid] for sid in sorted(by_session)]
+
+
 def import_transcript(
     db_path: Path,
     jsonl_path: Path,
@@ -95,7 +134,10 @@ def import_transcript(
                 ai_title = title  # last one wins (titles within a session are identical anyway)
 
     if not session_id:
-        session_id = jsonl_path.stem
+        # NOT .stem — this function's input domain now includes ".jsonl.gz", where
+        # .stem leaves the ".jsonl" on and the same session lands twice in
+        # `sessions.id` and every `observations.session_id`.
+        session_id = session_id_for(jsonl_path)
 
     conn = connect(db_path)
     try:
@@ -286,9 +328,10 @@ def import_directory(
     include_user_prompts: bool = True,
     force: bool = False,
 ) -> list[dict]:
-    """Import every *.jsonl file in `directory`. Returns one result per file."""
+    """Import every transcript in `directory` (.jsonl or archived .jsonl.gz, one per
+    session). Returns one result per file."""
     results = []
-    for jsonl_path in sorted(directory.glob("*.jsonl")):
+    for jsonl_path in iter_transcript_files(directory):
         try:
             results.append(
                 import_transcript(
@@ -301,7 +344,7 @@ def import_directory(
         except Exception as e:
             results.append(
                 {
-                    "session_id": jsonl_path.stem,
+                    "session_id": session_id_for(jsonl_path),
                     "skipped": True,
                     "reason": f"error: {e}",
                 }
@@ -314,10 +357,14 @@ def _session_jsonl(session_id: str) -> Path | None:
 
     Claude Code names each transcript ``<session_id>.jsonl`` and files it under
     the slug for the session's cwd, so search every slug rather than assume the
-    current working directory.
+    current working directory. An archived ``.jsonl.gz`` resolves too, and the
+    uncompressed file wins when both exist (#621).
     """
-    hits = sorted(PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
-    return hits[0] if hits else None
+    for suffix in TRANSCRIPT_SUFFIXES:
+        hits = sorted(PROJECTS_DIR.glob(f"*/{session_id}{suffix}"))
+        if hits:
+            return hits[0]
+    return None
 
 
 def backfill_uncaptured(
