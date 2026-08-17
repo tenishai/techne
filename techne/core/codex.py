@@ -246,18 +246,41 @@ def _codex_v2_to_v3(conn) -> None:
     if not doomed:
         return
 
+    # CHUNKED, AND THE CHUNK IS THE FIX (#604 r3 Critical). Binding one parameter
+    # per doomed symbol is unbounded: this repo alone produced 114,410 of them,
+    # and a 265,000-row v2 index raises `OperationalError: too many SQL variables`
+    # against SQLite's native 250,000 limit. That raise lands BEFORE the version
+    # write and before `_migration_done.add`, so `user_version` stays at 2 and
+    # EVERY later `codex_store()` re-raises — taking down codex_search,
+    # codex_blast_radius and `techne codex index` permanently, and stranding the
+    # user in the self-certifying state this whole step exists to end.
+    #
+    # 500 is well under every SQLite build's floor (the compile-time default is
+    # 999 on old builds, 32,766 on modern ones, and the native limit here is
+    # 250,000) — chosen to be safe on the smallest, not fast on the largest.
+    for batch in (doomed[i : i + 500] for i in range(0, len(doomed), 500)):
+        _v3_purge_batch(conn, batch)
+
+
+def _v3_purge_batch(conn, doomed: list[str]) -> None:
+    """Delete one bounded batch of symbols, with their edges."""
     marks = ",".join("?" * len(doomed))
     # Outbound edges go with their symbol.
     conn.execute(f"DELETE FROM edges WHERE from_symbol IN ({marks})", doomed)
     # INBOUND edges are unresolved, not deleted — a repo symbol really does call
     # into that vendored code, and dropping the edge would erase a true fact.
     #
-    # RESETTING `resolution_status` IS NOT COSMETIC (#604 r2). Leaving it at
-    # 'lsp' with `to_symbol` NULL is a state the v1 contract says cannot exist,
-    # and it RE-ARMS codegraph's name fallback: `callees()`, `callers()` and
-    # `reachable()` then match `to_name` against a repo-local symbol and assert a
-    # call that never happened, replacing a true "this goes into vendored aiohttp"
-    # with a false "this calls our own function of the same name".
+    # RESETTING `resolution_status` RESTORES AN INVARIANT; IT CHANGES NO QUERY.
+    # An earlier version of this comment claimed the reset prevents codegraph's
+    # name fallback from re-arming. THAT WAS FALSE (#604 r3) and is recorded here
+    # because the wrong reason was mirrored into the arch card and a test message.
+    # codegraph reads `resolution_status` ONLY in `add_edge`'s INSERT; all four
+    # fallback sites (codegraph.py:261, 290, 341, 353) gate on `to_symbol IS NULL`
+    # alone, so 'lsp' and 'unresolved' return byte-identical results.
+    #
+    # Keep it anyway: 'lsp' with a NULL `to_symbol` is a state the v1 contract
+    # says cannot exist, and leaving rows in an impossible state means the next
+    # reader of this table has to distrust the column instead of the data.
     conn.execute(
         f"UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
         f"WHERE to_symbol IN ({marks})",

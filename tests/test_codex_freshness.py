@@ -697,13 +697,20 @@ def test_v3_purge_unresolves_inbound_edges_rather_than_leaving_them_armed(tmp_pa
     """An inbound edge is NOT deleted — a repo symbol really does call into that
     vendored code, and dropping it erases a true fact.
 
-    But leaving `resolution_status` at 'lsp' with `to_symbol` NULL is a state the
-    v1 contract says cannot exist, and it RE-ARMS codegraph's name fallback:
-    `callees()`, `callers()` and `reachable()` then match `to_name` against a
-    repo-local symbol and assert a call that never happened (#604 r2). Both the
-    NULL and the status reset are load-bearing — and the NULL itself had no test,
-    while removing it raises `IntegrityError: FOREIGN KEY constraint failed` on
-    real data.
+    The two asserts below are load-bearing for DIFFERENT reasons, and an earlier
+    version of this docstring gave the same (wrong) reason for both:
+
+      - `to_symbol IS NULL` is load-bearing BEHAVIOURALLY. It had no test, and
+        removing it raises `IntegrityError: FOREIGN KEY constraint failed` on
+        real data (#604 r2).
+      - `resolution_status = 'unresolved'` is load-bearing as an INVARIANT ONLY.
+        It changes no query result: codegraph reads that column only in
+        `add_edge`'s INSERT, and all four fallback sites gate on
+        `to_symbol IS NULL` alone, so 'lsp' and 'unresolved' are indistinguishable
+        to `callees`/`callers`/`reachable` (#604 r3 — the claim that the reset
+        prevents a fallback from re-arming was disproved by A/B through the real
+        accessors). It stays because 'lsp' with a NULL `to_symbol` is a state the
+        v1 contract says cannot exist.
     """
     from techne.core.codegraph import add_edge, add_symbol
     from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration, _codex_v2_to_v3
@@ -744,5 +751,72 @@ def test_v3_purge_unresolves_inbound_edges_rather_than_leaving_them_armed(tmp_pa
             "a NULL to_symbol left at 'lsp' re-arms the name fallback and invents "
             "a repo-local call that never happened"
         )
+    finally:
+        conn.close()
+
+
+def test_v3_purge_binds_are_bounded_through_the_real_migration(tmp_path, monkeypatch):
+    """The purge must not bind one SQL parameter per doomed symbol (#604 r3 Critical).
+
+    `doomed` is unbounded — indexing this repo's own venv produced 114,410 of them
+    — so a single `IN (?,?,…)` blows SQLite's SQLITE_LIMIT_VARIABLE_NUMBER and
+    raises `OperationalError: too many SQL variables`. That raise lands BEFORE the
+    version write, so `user_version` stays at 2 and EVERY later `codex_store()`
+    re-raises: codex_search, codex_blast_radius and `techne codex index` are down
+    permanently, stranding the user in the self-certifying state v3 exists to end.
+
+    Rather than materialise 250k rows, this lowers the limit on the connection the
+    migration actually uses. It drives `_apply_codex_migration` — NOT `_codex_v2_to_v3`
+    directly — because the bug is only reachable through the real chain, and a
+    helper-level test would pass against a migration that was never wired in.
+    """
+    import sqlite3
+
+    from techne.core import codex as codex_mod
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration
+    from techne.core.stores import plain_connect
+
+    limit, doomed_count = 600, 1500
+    assert doomed_count > limit, "fixture must exceed the limit or it proves nothing"
+
+    real_connect = codex_mod.plain_connect
+
+    def _capped_connect(*a, **kw):
+        conn = real_connect(*a, **kw)
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, limit)
+        return conn
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.executemany(
+        "INSERT INTO symbols (id, file, name, kind) VALUES (?, ?, ?, 'function')",
+        [
+            (
+                f"vendor/site-packages/pkg/m{i}.py::f{i}::function::1",
+                f"vendor/site-packages/pkg/m{i}.py",
+                f"f{i}",
+            )
+            for i in range(doomed_count)
+        ],
+    )
+    from techne.core.migrator import user_version_io
+
+    user_version_io.write(conn, 2)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(codex_mod, "plain_connect", _capped_connect)
+    # Unchunked, this raises OperationalError: too many SQL variables.
+    _apply_codex_migration(db)
+
+    conn = plain_connect(db)
+    try:
+        assert user_version_io.read(conn) == 3, (
+            "migration did not reach the version write — a mid-purge raise leaves "
+            "user_version at 2 and every later codex_store() re-raises"
+        )
+        assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 0
     finally:
         conn.close()
