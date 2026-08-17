@@ -90,21 +90,50 @@ _TABLES = {
         # VALUES and were all in this set, so `grep -M ELF <sym> src` injected `ELF`.
         # They are now in NEITHER table, which declines — deliberately, not by
         # omission: the shim falls back to real BSD grep whenever an argument matches
-        # `-[Zz]*`, `--null`, `-*-filter*` and friends, so a letter whose arity
-        # differs between ugrep and BSD cannot be resolved statically. Declining is
-        # the only answer that is right for the union.
+        # `-[Zz]*`, `--null`, `-*-filter*` and friends, so which binary runs depends
+        # on the REST of the command line. Strictly the ambiguity is only reachable
+        # when a fallback trigger co-occurs (#596 r6 — "cannot be resolved
+        # statically" overstated it); declining is still the right call, because the
+        # rule stays true of the union and the cost is one niche form
+        # (`grep -O py <sym> .`).
         #
         # ugrep also takes values for g, t, K and N; those are absent from both
-        # tables and therefore already decline. P and G are hand-traced from GNU
-        # grep (--perl-regexp / --basic-regexp, no value) — GNU is not installed
-        # here, so they are the weakest entries in this table.
+        # tables and therefore already decline.
+        #
+        # P and G ARE MEASURED, NOT TRACED (#596 r6 corrected an earlier note here
+        # that called them the weakest entries): ugrep documents `-G, --basic-regexp`
+        # and `-P, --perl-regexp`, both no-value, and BSD grep takes `-G` no-value
+        # too (`-P` is simply not a BSD option, so that path errors on its own).
+        # Do not "fix" two correct entries on the strength of the old comment.
         frozenset("abchilnopqrsuvwxyzEFGHILRSUVXZPG"),
         frozenset("defmABCD"),
-        # OPTIONAL-ARGUMENT LONGS, AND THEY MATTER: GNU/BSD spell these
-        # `--color[=WHEN]` and `--context[=NUM]`, so they consume NOTHING when
-        # written bare. Listing them as value-taking ate the pattern —
-        # `grep --context <sym> src` injected `src`.
-        frozenset({"--color", "--colour", "--context"}),
+        # LONGS THAT MUST NOT SKIP A TOKEN. The r4 comment here reasoned from
+        # GNU/BSD ("both are `--opt[=ARG]`, so bare they consume nothing"), and
+        # that reasoning could not see the shim — which is why it missed
+        # `--group-separator` for a whole round (#596 r6). Per-entry, measured
+        # against ugrep's own help and behaviour:
+        #
+        #   --color / --colour     `--color[=WHEN]`  optional in BOTH -> consumes
+        #                          nothing bare. Straightforwardly no-value.
+        #   --group-separator      `--group-separator[=SEP]` in ugrep, ATTACHED-ONLY,
+        #                          and absent from BSD grep entirely. Bare it consumes
+        #                          nothing; listed as value-taking it ate the pattern
+        #                          (`grep --group-separator <sym> mydir` -> `mydir`).
+        #   --context              NOT optional in ugrep — it REQUIRES its argument
+        #                          (`ugrep: invalid argument --context=my_symbol`),
+        #                          the opposite of what r4 asserted. It stays here
+        #                          because no-value is the only classification SAFE
+        #                          IN BOTH: GNU/BSD really do treat it as optional, so
+        #                          `long_value` would skip a real pattern there and
+        #                          inject the path. The cost is that the LONG spelling
+        #                          now DECLINES on grep — the numeric argument lands as
+        #                          the first operand and is never `_SYMBOLISH`, so
+        #                          `grep --context 3 <sym> src` yields None. A missed
+        #                          augmentation, and the short `-C 3 <sym> src` form is
+        #                          unaffected. (Measured. An earlier draft of this very
+        #                          comment claimed the pattern "still resolves" — it
+        #                          does not, and scoring the case is what caught it.)
+        frozenset({"--color", "--colour", "--context", "--group-separator"}),
         frozenset(
             {
                 "--after-context",
@@ -119,7 +148,6 @@ _TABLES = {
                 "--label",
                 "--max-count",
                 "--binary-files",
-                "--group-separator",
             }
         ),
     ),

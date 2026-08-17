@@ -845,3 +845,47 @@ class TestRoundFiveFindings:
             assert self._p("ag my_symbol src") is None
         finally:
             M._SEARCH_HEADS = original
+
+
+class TestRoundSixFindings:
+    """#596 round 6 — the long-option table, derived from the wrong binary."""
+
+    def _p(self, cmd):
+        from techne.hooks.pre_tool_use import _bash_search_pattern
+
+        return _bash_search_pattern(cmd)
+
+    def test_group_separator_is_optional_and_must_not_skip_the_pattern(self):
+        """ugrep spells it `--group-separator[=SEP]` — OPTIONAL and attached-only —
+        so bare it consumes nothing. It sat in the value-taking table, so the rail
+        skipped the next token and injected the path (#596 r6):
+
+            grep --group-separator my_symbol mydir  ->  injected `mydir`
+
+        Same class as the `--color`/`--context` fix documented directly above it in
+        the table. The r4 reasoning could not find this one: it was traced from
+        GNU/BSD, where `--group-separator` is not optional (and BSD grep does not
+        have the option at all), so it found exactly the GNU-optional set.
+
+        The fix is TWO-PART — `_consumes_next` tests `long_value` first, so the
+        entry has to be removed there, not merely added to `long_novalue`.
+        """
+        assert self._p("grep --group-separator my_symbol mydir") == "my_symbol"
+        assert self._p("grep --group-separator my_symbol src") == "my_symbol"
+        # The attached spelling is a genuine value and must stay skipped.
+        assert self._p("grep --group-separator=X my_symbol mydir") == "my_symbol"
+
+    def test_long_context_declines_on_grep_and_that_is_the_safe_direction(self):
+        """`--context` is NOT optional in ugrep — it REQUIRES its argument, the
+        opposite of what the r4 comment asserted. It stays classified no-value
+        because that is the only choice safe in BOTH binaries: GNU/BSD do treat it
+        as optional, so `long_value` would skip a real pattern there.
+
+        The cost is that the LONG spelling declines on grep — the numeric argument
+        lands as the first operand and is never `_SYMBOLISH`. A missed
+        augmentation, not a wrong injection, and the short form is unaffected.
+        """
+        assert self._p("grep --context 3 my_symbol src") is None
+        assert self._p("grep -C 3 my_symbol src") == "my_symbol"
+        # rg genuinely takes a value there, and resolves.
+        assert self._p("rg --context 3 my_symbol src") == "my_symbol"
