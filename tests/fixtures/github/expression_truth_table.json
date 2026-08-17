@@ -1,0 +1,21 @@
+{
+  "_provenance": "MEASURED, not derived. Captured from GitHub's own expression evaluator by a temporary `expr-probe` job on branch fix/556-runner-trust-split, run 31971484190 job 95224516259, under a real `pull_request` event on 2026-08-16. The job emitted toJSON of each expression and was deleted in the following commit. To refresh: re-add a ubuntu-latest job echoing toJSON of these expressions, push to an open PR, read the job log, delete the job. Do NOT hand-edit \u2014 the point of this file is that GitHub produced it.",
+  "_context": {
+    "event_name": "pull_request",
+    "repository": "tenishai/techne",
+    "head.repo.full_name": "tenishai/techne",
+    "head.repo.fork": false
+  },
+  "absent_property_value": null,
+  "expressions": {
+    "head.repo.<absent> == github.repository": false,
+    "head.repo.<absent> == false": true,
+    "head.repo.fork == false": true,
+    "OLD_GUARD  !(event_name == 'pull_request' && head.repo.<absent>)": true,
+    "NEW_GUARD  event_name != 'pull_request' || head.repo.<absent> == github.repository": false,
+    "NEW_GUARD  event_name != 'pull_request' || head.repo.full_name == github.repository": true,
+    "FORK_ONLY  event_name == 'pull_request' && head.repo.<absent> != github.repository": true
+  },
+  "_context_dependence_warning": "FOUR ROWS ARE CONTEXT-DEPENDENT, not laws. Everything here was measured in ONE context: a NON-FORK pull_request on tenishai/techne (see _context). The rows keyed NEW_GUARD-with-full_name and FORK_ONLY INVERT on a fork PR \u2014 and that inversion is the feature, not a discrepancy. The <absent> rows are expected to be context-independent, but 'expected' is doing real work in that sentence.",
+  "_never_measured": "NO ROW HERE COVERS A FORK PR ACTUALLY FIRING `fork-pr`. No fork of this repo exists, so the fork-side behaviour of the trust split is a HAND TRACE. One fork PR from a personal account would convert it to measured."
+}

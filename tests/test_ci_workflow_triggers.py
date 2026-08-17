@@ -79,8 +79,9 @@ def test_every_job_still_lives_in_this_one_workflow():
     )
 
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    assert set(jobs) == {"test", "eval-vec", "arch-cards"}, (
-        f"job set changed: {sorted(jobs)}. All three ride this one trigger."
+    assert set(jobs) == {"test", "eval-vec", "arch-cards", "fork-pr"}, (
+        f"job set changed: {sorted(jobs)}. All of them ride this one trigger — and "
+        "a new job must also pick a side of the techne#556 trust split."
     )
 
 
@@ -545,3 +546,395 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
                 "conservatively rather than because it is dangerous — `no:` and `load:` "
                 "are one flag and this predicate deliberately does not parse the value."
             )
+
+
+# ---- techne#556: fork PRs must never reach the self-hosted pool ---------------
+
+# The one guard expression, spelled once. Self-hosted jobs are compared against it
+# EXACTLY rather than fuzzily ("does the `if` mention fork?"), because the realistic
+# regression here is not a missing guard — it is a SUBTLY DIFFERENT one. Dropping the
+# `github.event_name` clause reads correct and fails open, which is why the clause is
+# load-bearing and why an exact match makes a reviewer justify any change.
+#
+# THE GUARD IS A POSITIVE IDENTITY CHECK, NOT A NEGATED TRUTHINESS TEST, AND THAT IS
+# THE POLARITY FIX (techne#570 step 3).
+#
+# THE VALUES BELOW WERE MEASURED, NOT DERIVED — see
+# tests/fixtures/github/expression_truth_table.json, captured from GitHub's own
+# evaluator under a real `pull_request` event. TWO SUCCESSIVE ATTEMPTS TO DERIVE THEM
+# FROM THE REFERENCE PAGES PRODUCED TWO DIFFERENT WRONG ANSWERS, which is the whole
+# argument for measuring:
+#   - I first wrote "a missing property yields null".
+#   - The contexts page says it "will evaluate to an empty string", so I corrected to
+#     empty string — and the review then reasoned from THAT, concluding the comparison
+#     is string-vs-string with no coercion at all.
+#   - GitHub actually returns `null` (toJSON of the absent property). My original
+#     wording was right and my correction made it worse.
+# The CONCLUSION survived every version because it is over-determined: null and empty
+# string both make the comparison false. Only the mechanism was wrong — which is
+# exactly the kind of error that reads as rigorous and teaches the next reader wrongly.
+#
+# Measured:  <absent> == github.repository        -> false
+#            <absent> == false                    -> true
+#            OLD  !(ev=='pull_request' && <absent>)                    -> true   OPEN
+#            NEW  ev!='pull_request' || <absent>==github.repository    -> false  CLOSED
+# So the OLD form ran fork code on dev02 for any unresolvable property, silently;
+# `head.repo.fork == false` is no better (an absent property equals false); and the
+# identity check is the one that fails closed.
+#
+# The earlier revision of this comment warned against `full_name != github.repository`
+# because it is empty on `push`. That warning was about the expression WITHOUT the
+# `github.event_name` clause; with the clause, `push` is decided by the first disjunct
+# and never reaches the comparison. The hazard was real, the remedy is the clause —
+# but note that clause is a DENYLIST OF ONE EVENT NAME, which is its own hole and is
+# why `test_no_trigger_is_added_without_deciding_the_fork_question` exists.
+FORK_GUARD = (
+    "${{ github.event_name != 'pull_request' "
+    "|| github.event.pull_request.head.repo.full_name == github.repository }}"
+)
+FORK_ONLY = (
+    "${{ github.event_name == 'pull_request' "
+    "&& github.event.pull_request.head.repo.full_name != github.repository }}"
+)
+
+
+def _jobs() -> dict:
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"]
+
+
+def _is_self_hosted(runs_on) -> bool:
+    """True when a `runs-on` targets the self-hosted pool, in either YAML spelling.
+
+    `runs-on` accepts a bare string, a list of labels, or a mapping with `labels:`
+    / `group:`. Checking only the list form would let the same exposure return
+    through a spelling this repo does not use today.
+    """
+    if isinstance(runs_on, str):
+        return "self-hosted" in runs_on
+    if isinstance(runs_on, list):
+        return "self-hosted" in runs_on
+    if isinstance(runs_on, dict):
+        labels = runs_on.get("labels") or []
+        if isinstance(labels, str):
+            labels = [labels]
+        return "self-hosted" in labels or bool(runs_on.get("group"))
+    return False
+
+
+def test_no_fork_reachable_job_runs_on_self_hosted():
+    """THE INVARIANT (techne#556). `pull_request:` is unfiltered, so it fires for
+    FORK PRs; a self-hosted job reachable from one is arbitrary attacker code on
+    dev02 the moment this repo goes public.
+
+    WHY THIS IS A TEST AND NOT A COMMENT — the same reason as the trigger above,
+    and here there is evidence: this finding was raised against TWO jobs in a
+    2026-07-30 audit, re-verified unfixed on 07-31, and had grown to THREE by
+    08-12. A new job inherits `runs-on` from its neighbour and does not inherit the
+    guard, and nothing failed when it didn't. Now something does.
+    """
+    offenders = {
+        name: job.get("if")
+        for name, job in _jobs().items()
+        if _is_self_hosted(job.get("runs-on")) and job.get("if") != FORK_GUARD
+    }
+    assert not offenders, (
+        "every self-hosted job must carry the exact techne#556 fork guard.\n"
+        f"expected: {FORK_GUARD}\n"
+        f"offending jobs (name -> its `if`): {offenders}\n"
+        "A fork PR reaching dev02 is RCE on a persistent host that also stores "
+        "runner paths in this file."
+    )
+
+
+def test_fork_prs_still_get_ci_on_a_hosted_runner():
+    """The other half. Guarding the self-hosted jobs without providing a hosted
+    path would leave a fork PR with an EMPTY Checks tab — techne#530's failure
+    exactly, where "no run" is indistinguishable from "nothing to report". A
+    security fix that silently stops testing outside contributions has traded one
+    invisible failure for another.
+    """
+    hosted_fork_jobs = {
+        name
+        for name, job in _jobs().items()
+        if not _is_self_hosted(job.get("runs-on")) and job.get("if") == FORK_ONLY
+    }
+    assert hosted_fork_jobs, (
+        "no job serves fork PRs on a hosted runner, so a fork PR would get zero "
+        f"checks. Expected some job with `if: {FORK_ONLY}` on a hosted `runs-on`."
+    )
+
+
+def test_the_two_guards_are_complements_not_overlaps():
+    """No job may match BOTH sides, and the fork-only job must not be self-hosted.
+
+    Belt-and-braces on the pair above: if the two expressions ever drift apart, a
+    job could satisfy both (running fork code on dev02) or neither (silently never
+    running at all).
+    """
+    for name, job in _jobs().items():
+        cond = job.get("if")
+        if cond == FORK_ONLY:
+            assert not _is_self_hosted(job.get("runs-on")), (
+                f"job {name!r} runs ONLY on fork PRs but targets the self-hosted "
+                "pool — that is precisely the exposure, inverted"
+            )
+    assert FORK_GUARD != FORK_ONLY
+    # Every job carries one of the two, so none is accidentally unguarded.
+    unclassified = {
+        name: job.get("if")
+        for name, job in _jobs().items()
+        if job.get("if") not in (FORK_GUARD, FORK_ONLY)
+    }
+    assert not unclassified, (
+        f"jobs with neither trust-split guard: {unclassified}. Pick a side — "
+        "self-hosted jobs take FORK_GUARD, hosted fork jobs take FORK_ONLY."
+    )
+
+
+# ---- techne#556: the guard must name properties GitHub actually sends ---------
+
+PAYLOAD_SHAPE = Path(__file__).parent / "fixtures" / "github" / "pull_request_payload_shape.json"
+
+
+def _payload_shape() -> dict:
+    import json
+
+    return json.loads(PAYLOAD_SHAPE.read_text())
+
+
+def _referenced_payload_paths() -> set[str]:
+    """Every `github.event.pull_request.<path>` the WORKFLOW's `if:` expressions read.
+
+    READ FROM THE WORKFLOW, NOT FROM `FORK_GUARD`/`FORK_ONLY`. That is the entire
+    point of this test: the constants above are strings the TEST supplies, so a
+    rename applied consistently to both the workflow and the constants leaves an
+    exact-match assertion comparing two mutated values and agreeing. This function
+    deliberately never touches them.
+    """
+    import re
+
+    paths: set[str] = set()
+    for job in _jobs().values():
+        cond = job.get("if")
+        if isinstance(cond, str):
+            paths.update(re.findall(r"github\.event\.pull_request\.([A-Za-z0-9_.]+)", cond))
+    return paths
+
+
+def test_the_fork_guard_reads_properties_github_actually_sends():
+    """THE TEETH THE EXACT-MATCH TESTS CANNOT HAVE (techne#570 review).
+
+    A missing property in a GitHub Actions expression is **null**, not an error —
+    MEASURED, see tests/fixtures/github/expression_truth_table.json. It is falsy.
+
+    So `!(github.event_name == 'pull_request' && <missing>)` is `!(falsy)` — TRUE
+    unconditionally — and every self-hosted job runs for fork PRs, while the
+    fork-only job's condition is falsy and it NEVER fires. techne#556 and techne#530
+    defeated at once, silently.
+
+    MEASURED, and this is why this test exists: renaming `head.repo.fork` to
+    `head.repo.is_fork` in the workflow AND in both constants above gave 15 PASSED,
+    identical to baseline. The exact-match assertions could not tell a working guard
+    from a typo'd one, because both sides of their comparison came from this file.
+    Verified against the live API the same day: `head.repo` HAS `fork` and has no
+    `is_fork` — so it dereferences to null, and null is falsy.
+
+    So this anchors the property names to something the test does not author: the
+    key structure of a real payload, captured from the API (see the fixture's
+    `_provenance`). A guard naming a property GitHub does not send now fails here
+    even if every string in this file was renamed to match it.
+    """
+    shape = _payload_shape()
+    referenced = _referenced_payload_paths()
+    assert referenced, (
+        "no github.event.pull_request.* property found in any job's `if:`. Either the "
+        "trust split was removed, or it is now expressed in a form this test cannot "
+        "see — which would make the guard unverified rather than verified."
+    )
+
+    unknown = {}
+    for path in sorted(referenced):
+        node = shape
+        for segment in path.split("."):
+            if not isinstance(node, dict) or segment not in node:
+                unknown[path] = segment
+                break
+            node = node[segment]
+
+    assert not unknown, (
+        f"the workflow's fork guard reads properties GitHub does not send "
+        f"(path -> first missing segment): {unknown}\n"
+        "A missing property is NULL, not an error (measured — see the truth-table "
+        "fixture), and null is falsy — so the guard silently evaluates to a constant: "
+        "self-hosted jobs run for fork PRs (techne#556) AND the fork-only job never "
+        "fires (techne#530).\n"
+        f"Known properties come from {PAYLOAD_SHAPE.name}, captured from a real "
+        "payload. If GitHub genuinely added or renamed a field, refresh the fixture "
+        "with the command in its `_provenance` — do NOT edit it by hand to make this "
+        "pass, which would restore exactly the blindness this test removes."
+    )
+
+
+#: Events that carry a `pull_request` payload, i.e. that can be triggered BY A FORK.
+#: `github.event_name` differs per event, so FORK_GUARD's first disjunct — a comparison
+#: against the single literal 'pull_request' — is blind to every other member here.
+_FORK_CARRYING_EVENTS = {
+    "pull_request",
+    "pull_request_target",
+    "pull_request_review",
+    "pull_request_review_comment",
+}
+
+
+def test_every_fork_carrying_trigger_is_named_in_the_guard():
+    """THE GUARD'S FIRST DISJUNCT IS A DENYLIST OF ONE EVENT NAME (#570 r1).
+
+    `FORK_GUARD` reads `github.event_name != 'pull_request' || ...`. Any OTHER event
+    carrying a fork's payload satisfies that disjunct, short-circuits the guard TRUE,
+    and puts fork code back on the self-hosted pool. `pull_request_target` is the
+    dangerous one: it is the documented way to give fork PRs secrets, it runs in the
+    BASE repo's context, and adding it left the suite green.
+
+    THIS ASSERTS THE GUARD, NOT A LIST OF BLESSED NAMES, and that is the #570 r2 fix.
+    The first version pinned the trigger SET and told the reader to "widen FORK_GUARD
+    first, then add it here" — so following the message's own remedy (add the trigger,
+    add it to the set, leave the guard alone) PASSED. A guard whose failure message
+    prescribes the hole is the #582 shape, and it is the second time I have shipped it.
+
+    Now the obligation is mechanical: declare a fork-carrying trigger and the guard
+    must name it. There is no list to add yourself to.
+    """
+    declared_fork_carrying = _FORK_CARRYING_EVENTS & set(_triggers())
+    assert declared_fork_carrying, (
+        "no fork-carrying trigger is declared at all — either the workflow stopped "
+        "running on pull_request (see techne#530) or _FORK_CARRYING_EVENTS is stale"
+    )
+
+    unguarded = sorted(e for e in declared_fork_carrying if f"'{e}'" not in FORK_GUARD)
+    assert not unguarded, (
+        f"these triggers can carry a FORK's code but FORK_GUARD never names them: "
+        f"{unguarded}\n"
+        f"FORK_GUARD is: {FORK_GUARD}\n"
+        "Its first disjunct compares `github.event_name` against ONE literal, so any "
+        "event it does not name short-circuits the techne#556 guard to TRUE and puts "
+        "fork code on the self-hosted pool.\n"
+        "Widening the guard is the ONLY fix — there is deliberately no allow-list here "
+        "to add the trigger to instead."
+    )
+
+    # ...and the fork-only side must stay the exact complement, or a trigger can be
+    # guarded off self-hosted while no hosted job picks it up: techne#530's empty
+    # Checks tab, reintroduced through the trust split.
+    unserved = sorted(e for e in declared_fork_carrying if f"'{e}'" not in FORK_ONLY)
+    assert not unserved, (
+        f"these triggers are guarded off the self-hosted pool but no hosted job "
+        f"serves them: {unserved}. FORK_ONLY is: {FORK_ONLY}"
+    )
+
+
+#: Package names that PULL IN A VECTOR BACKEND. `backend_available()` tests
+#: IMPORTABILITY only, so installing any of these directly un-skips the vector tests
+#: just as surely as the `vectors` extra does — which is bypass (a) from #570 r2.
+_VECTOR_BACKEND_PACKAGES = ("fastembed", "model2vec", "sqlite-vec", "sqlite_vec")
+
+
+def _pulls_in_a_vector_backend(steps: list[dict]) -> bool:
+    """True if these steps install a vector backend, by EXTRA or by PACKAGE NAME.
+
+    Parsed out of install specs rather than substring-matched on the whole step: a
+    bare `"vectors" in runs` passes on `echo vectors` and cannot tell an installed
+    extra from a mentioned one (the #523 lesson, and the reason the by-name tests
+    above parse).
+    """
+    import re
+
+    runs = "\n".join(str(s.get("run", "")) for s in steps)
+    for spec in re.findall(r"-e\s+\"?\.\[([a-z0-9,._-]+)\]\"?", runs):
+        if "vectors" in {e.strip() for e in spec.split(",")}:
+            return True
+    # A direct install of the backend itself, on any pip/uv line.
+    for line in runs.splitlines():
+        if ("pip install" in line or "uv add" in line) and any(
+            pkg in line for pkg in _VECTOR_BACKEND_PACKAGES
+        ):
+            return True
+    return False
+
+
+def test_any_job_pulling_a_vector_backend_must_warm_the_model_cache():
+    """ENUMERATED BY EFFECT, NOT BY NAME — and with the SAME contract the by-name
+    tests impose, which the first version of this did not (#570 r2).
+
+    The two #535 guards iterate the literal pair ("test", "eval-vec"), so `fork-pr`
+    escaped both BY CONSTRUCTION when it was added: it installed the backend and ran
+    the suite with no cache and no pre-fetch, which is the #535 red build.
+
+    THE FIRST GENERALISATION WAS WEAKER THAN WHAT IT GENERALISED, and the review found
+    three ways through it, each leaving the suite green:
+      (a) install `fastembed` DIRECTLY — `backend_available()` is importability-only,
+          so the tests un-skip and cold-download without the `vectors` extra ever
+          appearing. Now caught by parsing package names too.
+      (b) an UNRELATED cache step (e.g. `~/.cache/uv`) satisfied a bare "has a step
+          whose `uses` starts with actions/cache". Now the cache must name a model
+          cache path.
+      (c) `actions/cache/restore@v4` with no save and no pre-fetch — a restore that
+          can never be populated. Now restore-only is rejected explicitly.
+
+    A guard that is easier to satisfy than the thing it replaces is not a
+    generalisation, it is a downgrade.
+    """
+    offenders = {}
+    for name, job in _jobs().items():
+        steps = job.get("steps") or []
+        runs = "\n".join(str(s.get("run", "")) for s in steps)
+        if not (_pulls_in_a_vector_backend(steps) and "pytest" in runs):
+            continue
+
+        uses = [str(s.get("uses", "")) for s in steps]
+        # A save-capable cache. `actions/cache/restore` alone can never populate the
+        # key it reads, so it is a permanent miss wearing a cache's name.
+        saves = [u for u in uses if u.startswith("actions/cache") and "/restore" not in u]
+        # ...and it must cache a MODEL path, not merely be some cache step.
+        cache_paths = " ".join(
+            str(s.get("with", {}).get("path", "")) for s in steps if isinstance(s.get("with"), dict)
+        )
+        caches_a_model = any(
+            k in cache_paths
+            for k in ("huggingface", "fastembed", "model2vec", "hf_home", "HF_HOME")
+        )
+        # A step that ACTUALLY DOWNLOADS THE MODEL, in either of the two legitimate
+        # forms this repo uses. Writing this as "must use the production entry point"
+        # — the `test` leg's contract — was too strict and flagged `eval-vec`, which
+        # is correct code: that leg is pinned to 3.14/model2vec and can name the model
+        # directly, whereas the `test` leg's backend VARIES BY PYTHON VERSION
+        # (>=3.14 model2vec, else fastembed) so it must ask the resolver. Both warm
+        # the cache; only a step that mentions a backend without loading anything does
+        # not. A mention is still not enough — the call has to be there.
+        prefetches = any(
+            (
+                "techne.core.embeddings" in str(s.get("run", ""))
+                and "_get_embedding_model" in str(s.get("run", ""))
+            )
+            or "from_pretrained" in str(s.get("run", ""))
+            for s in steps
+        )
+
+        missing = []
+        if not saves:
+            missing.append("no save-capable actions/cache step (restore-only cannot populate)")
+        if not caches_a_model:
+            missing.append("no cache step naming a model path")
+        if not prefetches:
+            missing.append("no pre-fetch via techne.core.embeddings._get_embedding_model")
+        if missing:
+            offenders[name] = missing
+
+    assert not offenders, (
+        f"jobs that pull in a vector backend and would re-download the model on every "
+        f"run: {offenders}.\n"
+        "This is the #535 red build. Either give the job a save-capable cache on a "
+        "model path PLUS the production-entry-point pre-fetch (see the `test` and "
+        "`eval-vec` legs — they cache DIFFERENT backends and must not share a key), or "
+        "do not pull in a vector backend at all, so the vector tests skip visibly "
+        "under `-rs`."
+    )
