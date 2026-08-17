@@ -654,3 +654,95 @@ def test_a_v2_index_is_purged_by_the_migration_chain_not_just_the_step(tmp_path)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == CODEX_VERSION
     finally:
         conn.close()
+
+
+def test_v3_purge_matches_the_walkers_semantics_not_sqls(tmp_path):
+    """THE PURGE RULE MUST BE THE WALK RULE (#604 r2).
+
+    The first cut used SQL `LIKE`: case-INSENSITIVE, matching SUBSTRINGS of the
+    WHOLE stored path. Both halves were wrong. `vendor/SITE-PACKAGES/x.py` was
+    purged though `_walk_repo` — case-SENSITIVE, on path PARTS — would index it.
+    And an ABSOLUTE path under an ancestor named `site-packages` matched, so a
+    repo living under such an ancestor would lose EVERY row. `source.py:530-534`
+    guards against exactly that and explains why; the migration threw the guard
+    away and kept the hazard.
+    """
+    from techne.core.codex import _v3_should_purge
+
+    root = "/home/me/proj"
+    # Real vendored code — relative and absolute — is purged.
+    assert _v3_should_purge("vendor/site-packages/aiohttp/web.py", root)
+    assert _v3_should_purge(f"{root}/.venv/lib/python3.13/site-packages/x.py", root)
+    assert _v3_should_purge("usr/lib/python3/dist-packages/yaml.py", root)
+
+    # Case differences are NOT the walker's rule, so they must survive.
+    assert not _v3_should_purge("vendor/SITE-PACKAGES/x.py", root)
+    assert not _v3_should_purge("vendor/Site-Packages/x.py", root)
+
+    # A segment merely CONTAINING the word survives; parts, not substrings.
+    assert not _v3_should_purge("my-site-packages-tool/main.py", root)
+    assert not _v3_should_purge("pkg/site_packages_util.py", root)
+
+    # THE ANCESTOR HAZARD: the repo itself lives under a `site-packages` dir.
+    # Relative rows are judged on the repo-relative path, so nothing matches.
+    nested = "/opt/site-packages/proj"
+    assert not _v3_should_purge("pkg/real.py", nested)
+    assert not _v3_should_purge(f"{nested}/pkg/real.py", nested)
+
+    # An absolute path with no repo_root cannot be made relative — decline.
+    assert not _v3_should_purge("/somewhere/site-packages/x.py", None)
+
+
+def test_v3_purge_unresolves_inbound_edges_rather_than_leaving_them_armed(tmp_path):
+    """An inbound edge is NOT deleted — a repo symbol really does call into that
+    vendored code, and dropping it erases a true fact.
+
+    But leaving `resolution_status` at 'lsp' with `to_symbol` NULL is a state the
+    v1 contract says cannot exist, and it RE-ARMS codegraph's name fallback:
+    `callees()`, `callers()` and `reachable()` then match `to_name` against a
+    repo-local symbol and assert a call that never happened (#604 r2). Both the
+    NULL and the status reset are load-bearing — and the NULL itself had no test,
+    while removing it raises `IntegrityError: FOREIGN KEY constraint failed` on
+    real data.
+    """
+    from techne.core.codegraph import add_edge, add_symbol
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration, _codex_v2_to_v3
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    vend = "vendor/site-packages/aiohttp/web.py"
+    add_symbol(db, id="pkg/a.py::mine::function::1", file="pkg/a.py", name="mine", kind="function")
+    add_symbol(
+        db, id=f"{vend}::application::function::1", file=vend, name="application", kind="function"
+    )
+    add_edge(
+        db,
+        from_symbol="pkg/a.py::mine::function::1",
+        to_name="application",
+        kind="call",
+        to_symbol=f"{vend}::application::function::1",
+        resolution_status="lsp",
+    )
+
+    conn = plain_connect(db)
+    try:
+        _codex_v2_to_v3(conn)
+        conn.commit()
+        row = conn.execute(
+            "SELECT to_symbol, resolution_status FROM edges "
+            "WHERE from_symbol = 'pkg/a.py::mine::function::1'"
+        ).fetchone()
+        assert row is not None, "the inbound edge was deleted; it records a real call"
+        assert row[0] is None
+        assert row[1] == "unresolved", (
+            "a NULL to_symbol left at 'lsp' re-arms the name fallback and invents "
+            "a repo-local call that never happened"
+        )
+    finally:
+        conn.close()

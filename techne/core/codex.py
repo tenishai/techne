@@ -175,17 +175,47 @@ def _codex_v1_to_v2(conn) -> None:
     conn.executescript("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT);")
 
 
-#: Path segments whose contents `_walk_repo` refuses to index. Kept HERE as SQL
-#: patterns rather than imported from `techne.codex.source._SKIP_DIRS` on purpose:
-#: this migration must run without the optional `techne[codex]` extra installed,
-#: and it encodes what the skip list meant AT v3 — a migration that silently
-#: changes meaning when a constant is edited later is not a migration.
-_V3_PURGE_PATTERNS = (
-    "site-packages/%",
-    "%/site-packages/%",
-    "dist-packages/%",
-    "%/dist-packages/%",
-)
+#: Directory names whose CONTENTS `_walk_repo` refuses to index, frozen at v3.
+#: Held here rather than imported from `techne.codex.source._SKIP_DIRS` on purpose:
+#: this migration must run WITHOUT the optional `techne[codex]` extra, and it must
+#: encode what the skip list meant AT v3 — a migration whose meaning changes when
+#: someone edits a constant is not a migration.
+_V3_PURGE_SEGMENTS = ("site-packages", "dist-packages")
+
+
+def _v3_should_purge(file_str: str, repo_root: str | None) -> bool:
+    """True if `file_str` names a file the v3 walker would refuse to index.
+
+    MATCHES THE WALKER'S SEMANTICS, NOT SQL's (#604 r2). The first cut used SQL
+    `LIKE`, which is case-INSENSITIVE and matches SUBSTRINGS of the WHOLE stored
+    path. Both halves were wrong:
+
+      - `vendor/SITE-PACKAGES/x.py` was purged though `_walk_repo` — which does
+        case-SENSITIVE exact matching on path PARTS — would index it.
+      - a row stored as an ABSOLUTE path under an ancestor directory named
+        `site-packages` matched, and if the repo itself lives under such an
+        ancestor that is EVERY row. `source.py:530-534` guards against exactly
+        that by testing parts of the REPO-RELATIVE path, and explains why; the
+        migration threw the guard away and kept the hazard.
+
+    So the test is done here, in Python, over path parts of the repo-relative
+    path — one definition of "segment" rather than a SQL dialect's near-miss.
+    """
+    from pathlib import PurePosixPath
+
+    path = PurePosixPath(file_str)
+    if path.is_absolute():
+        if not repo_root:
+            # Cannot make it relative, so cannot apply the walker's rule. Decline
+            # rather than guess: over-purging deletes correct rows, and the whole
+            # point of this step is that wrong rows are worse than missing ones
+            # only when they MISLEAD.
+            return False
+        try:
+            path = path.relative_to(PurePosixPath(repo_root))
+        except ValueError:
+            return False  # outside the repo — not ours to judge
+    return any(part in _V3_PURGE_SEGMENTS for part in path.parts)
 
 
 def _codex_v2_to_v3(conn) -> None:
@@ -205,19 +235,35 @@ def _codex_v2_to_v3(conn) -> None:
     deliberate: a full rebuild costs a re-index of every repo and discards correct
     data to remove incorrect data. `guarded_migrate` takes a backup first.
     """
-    for pattern in _V3_PURGE_PATTERNS:
-        # Edges first — they reference symbols(id), and an orphaned edge is a
-        # dangling FK that outlives the symbol it described.
-        conn.execute(
-            "DELETE FROM edges WHERE from_symbol IN (SELECT id FROM symbols WHERE file LIKE ?)",
-            (pattern,),
-        )
-        conn.execute(
-            "UPDATE edges SET to_symbol = NULL "
-            "WHERE to_symbol IN (SELECT id FROM symbols WHERE file LIKE ?)",
-            (pattern,),
-        )
-        conn.execute("DELETE FROM symbols WHERE file LIKE ?", (pattern,))
+    row = conn.execute("SELECT value FROM codex_meta WHERE key = 'repo_root'").fetchone()
+    repo_root = row[0] if row else None
+
+    doomed = [
+        r[0]
+        for r in conn.execute("SELECT id, file FROM symbols")
+        if _v3_should_purge(r[1], repo_root)
+    ]
+    if not doomed:
+        return
+
+    marks = ",".join("?" * len(doomed))
+    # Outbound edges go with their symbol.
+    conn.execute(f"DELETE FROM edges WHERE from_symbol IN ({marks})", doomed)
+    # INBOUND edges are unresolved, not deleted — a repo symbol really does call
+    # into that vendored code, and dropping the edge would erase a true fact.
+    #
+    # RESETTING `resolution_status` IS NOT COSMETIC (#604 r2). Leaving it at
+    # 'lsp' with `to_symbol` NULL is a state the v1 contract says cannot exist,
+    # and it RE-ARMS codegraph's name fallback: `callees()`, `callers()` and
+    # `reachable()` then match `to_name` against a repo-local symbol and assert a
+    # call that never happened, replacing a true "this goes into vendored aiohttp"
+    # with a false "this calls our own function of the same name".
+    conn.execute(
+        f"UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
+        f"WHERE to_symbol IN ({marks})",
+        doomed,
+    )
+    conn.execute(f"DELETE FROM symbols WHERE id IN ({marks})", doomed)
 
 
 def _run_codex_steps(conn, current: int, target: int) -> None:
