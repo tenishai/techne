@@ -483,3 +483,89 @@ def test_two_real_repos_end_to_end_cli(tmp_path, monkeypatch):
     # 8. The group overview lists both indexed repos.
     r = runner.invoke(main, ["codex"])
     assert str(repo_a.resolve()) in r.output and str(repo_b.resolve()) in r.output
+
+
+# ---- techne#595: a zero result must describe its own reliability -------------
+
+
+def _repo_with_indexed_file(cfg, tmp_path, *, body: str, indexed_hash: str | None = None):
+    """A repo whose index holds one symbol from `mod.py`, with `body` on disk.
+
+    Pass `indexed_hash` to simulate an index built against DIFFERENT bytes than
+    the file now has — which is what "stale" means here.
+    """
+    import hashlib
+
+    repo = tmp_path / "svc"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (repo / "mod.py").write_text(body)
+    real = hashlib.sha256(body.encode()).hexdigest()
+    db = codex_db_for_repo(cfg, repo)
+    add_symbol(
+        db,
+        id="mod.py::existing::function::1",
+        file="mod.py",
+        name="existing",
+        kind="function",
+        file_hash=indexed_hash or real,
+    )
+    return repo, db
+
+
+def test_zero_result_on_a_stale_index_says_it_may_be_a_blind_spot(tmp_path):
+    """THE #595 DEFECT. The stale notice is derived from the ROWS returned, so an
+    empty result got none — and that is exactly when the caller needs it.
+
+    A symbol added since the last index has no row to hang a flag on, so "not
+    indexed" was served in the same shape as "does not exist". Measured in the
+    wild: `recall_attribution` shipped 2026-08-13 and codex_search reported it
+    absent three days later, while flagging a SIBLING symbol from the same stale
+    file as stale in the same session.
+    """
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, _ = _repo_with_indexed_file(
+        cfg, tmp_path, body="def existing(): ...\n", indexed_hash="0" * 64
+    )
+
+    out = _codex_search({"query": "added_after_indexing", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 0
+    assert out["index"]["stale"] == 1
+    assert "blind spot" in out["notice"]
+    assert "may be a blind spot rather than an absence" in out["notice"]
+
+
+def test_zero_result_on_a_fresh_index_says_it_is_genuine_absence(tmp_path):
+    """The other half, and it is why this is not just a blanket warning: when the
+    index IS current, a zero result is real information and should be reported as
+    such. A notice that always hedges teaches the reader to ignore it."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, _ = _repo_with_indexed_file(cfg, tmp_path, body="def existing(): ...\n")
+
+    out = _codex_search({"query": "genuinely_absent", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 0
+    assert out["index"]["stale"] == 0
+    assert out["index"]["fresh"] == 1
+    assert "genuine absence" in out["notice"]
+    assert "blind spot" not in out["notice"]
+
+
+def test_a_hit_does_not_pay_for_the_index_scan(tmp_path):
+    """The scan is ~21ms over 228 files — cheap enough to qualify a nothing, not
+    cheap enough to add to every hit. A non-empty result keeps the row-derived
+    notice and must not carry the index summary."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, _ = _repo_with_indexed_file(cfg, tmp_path, body="def existing(): ...\n")
+
+    out = _codex_search({"query": "existing", "repo": str(repo)}, cfg)
+
+    assert out["count"] == 1
+    assert "index" not in out

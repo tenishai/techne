@@ -1422,7 +1422,7 @@ _NO_REPO_HINT = (
 
 def _codex_search(args: dict, config: Config) -> dict:
     """FTS over Codex symbols, scoped to the active repo (db-per-repo, techne#209)."""
-    from techne.core.codegraph import annotate_freshness, search_symbols
+    from techne.core.codegraph import annotate_freshness, index_freshness, search_symbols
 
     query = args.get("query", "")
     limit = args.get("limit", 20)
@@ -1436,6 +1436,56 @@ def _codex_search(args: dict, config: Config) -> dict:
         result["notice"] = (
             f"{stale_count} result(s) may be outdated — re-run `techne codex index` to refresh."
         )
+    elif not hits:
+        # A ZERO RESULT MUST DESCRIBE ITS OWN RELIABILITY (techne#595). The notice
+        # above is derived from the ROWS returned, so an empty result silently
+        # gets none — and that is the one case where the caller most needs the
+        # warning. A symbol added since the last index has no row to flag, so
+        # "not indexed" is served in the same shape as "does not exist", and the
+        # caller reasonably concludes the latter. Measured: `recall_attribution`
+        # shipped 2026-08-13 and this tool reported it absent three days later,
+        # while flagging a sibling symbol from the SAME stale file as stale.
+        #
+        # Same principle _codex_blast_radius already applies below (techne#303 /
+        # #300): an empty result that reads as a finding must be qualified.
+        # Sibling cause, fixed separately: techne#392, multi-term AND to zero.
+        #
+        # Only on the empty path — the scan is ~21 ms over 228 files here, worth
+        # it to qualify a nothing, not worth it on every hit.
+        # repo_root passed explicitly rather than left to codex_meta: a db written
+        # before the meta key existed (or by a path that never set it) resolves
+        # every RELATIVE file path to "unknown", and an all-unknown scan reported
+        # as "current" would be this very bug wearing the fix's clothes.
+        import os as _os
+        from pathlib import Path as _Path
+
+        from techne.core.repo import find_repo_root
+
+        idx = index_freshness(
+            db_path, repo_root=find_repo_root(_Path(args.get("repo") or _os.getcwd()))
+        )
+        result["index"] = idx
+        behind = idx["stale"] + idx["missing"]
+        if behind:
+            result["notice"] = (
+                f"NO MATCH — but {behind} of {idx['files']} indexed files are "
+                "stale or missing, so this may be a blind spot rather than an absence. "
+                "A symbol added since the last index cannot appear here. "
+                "Re-run `techne codex index` before concluding it does not exist."
+            )
+        elif idx["unknown"]:
+            # Cannot classify — say so. Claiming "current" from an index we could
+            # not assess is the same defect one level up.
+            result["notice"] = (
+                f"NO MATCH, and the index's freshness could NOT be determined "
+                f"({idx['unknown']} of {idx['files']} files unresolvable). Treat this as "
+                "unknown rather than absent; re-run `techne codex index`."
+            )
+        else:
+            result["notice"] = (
+                f"NO MATCH, and the index is current ({idx['files']} files "
+                "all fresh) — so this is genuine absence rather than a stale index."
+            )
     return result
 
 
