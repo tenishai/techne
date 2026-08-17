@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""PreToolUse hook — graph-augment the agent's own Grep with Codex (techne#206).
+"""PreToolUse hook — graph-augment the agent's own searches with Codex (techne#206).
 
-When the agent issues a Grep tool call AND the opt-in flag
-``hooks.codex_grep_assist`` is ON, this hook runs a Codex symbol search for the
-search pattern and injects the matching symbols into the model's context via
+When the agent issues a Grep tool call — or a Bash call whose command line
+contains a symbol-shaped search, which is the common path (#596) — AND the opt-in
+flag ``hooks.codex_grep_assist`` is ON, this hook runs a Codex symbol search for
+the search pattern and injects the matching symbols into the model's context via
 ``hookSpecificOutput.additionalContext``.
 
 Discipline (same fail-safe posture as post_tool_use / session_start):
@@ -12,7 +13,7 @@ Discipline (same fail-safe posture as post_tool_use / session_start):
     add, nothing is printed. ALL logging/errors go to stderr.
   - Any error (config load, missing codex.db, empty search) degrades to a no-op.
 
-Protocol shape — NOT YET CONFIRMED FOR THIS EXACT SHAPE (#596 r8):
+Protocol shape — OBSERVED, not inferred (#612, 2026-08-17):
   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                           "additionalContext": "..."}}
 
@@ -20,20 +21,28 @@ NOTE the absence of `permissionDecision`. This rail matches Bash, so a grant wou
 cover the entire command line rather than the segment it recognised — see the
 comment at the emit site (#596 r7).
 
-The word "confirmed" used to sit on this line and it was borrowed: it traces to
-#208, whose payload INCLUDED the grant, so it never evidenced the bare shape.
-`post_tool_use.py` ships the bare shape on PostToolUse, where `permissionDecision`
-has no meaning — that evidences the field-set, not PreToolUse's handling of its
-absence. So whether PreToolUse still delivers `additionalContext` with no
-permission field is INFERRED FROM THE DOCS, not observed.
+The word "confirmed" used to sit on this line while the shape was UNTESTED, and it
+was borrowed: it traces to #208, whose payload INCLUDED the grant, so it never
+evidenced the bare shape. `post_tool_use.py` ships the bare shape on PostToolUse,
+where `permissionDecision` has no meaning — that evidences the field-set, not
+PreToolUse's handling of its absence. So until #612 the claim rested on the docs.
 
-This matters more than it looks, because it cannot be caught by telemetry:
+It had to be settled by DOGFOOD, because telemetry structurally cannot see it:
 `record_hook_run(outcome="ok")` fires on successful PRINTING, not delivery, so a
 rail that emits into the void still reads healthy — which is techne#596's own
-invisibility defect wearing a new hat. Settle it by DOGFOOD: after
-`techne init` + a restart, run one search and look for a
-"## Codex — symbols matching" block. One minute, and then this note can say
-"observed" instead of "inferred".
+invisibility defect wearing a new hat.
+
+THE OBSERVATION that closed #612: from a fresh session on runtime b377d75, a plain
+`cd <repo> && grep -rn register_hooks <path>` — an ordinary Bash call, no Grep tool
+— returned a "## Codex — symbols matching" block carrying four symbols. Delivery
+confirmed. Two notes for whoever repeats this:
+  - A silent run is not a dead rail. A multi-word pattern (`"def register_hooks"`)
+    is rejected by `_SYMBOLISH` and records `noop:no-pattern`, printing nothing.
+    `techne doctor` shows the last outcome; read it before concluding absence.
+  - The repo resolved via `_bash_cd_target`, not the session cwd — which had no
+    codex db and would have yielded `noop:no-repo-db`.
+If the payload shape ever changes again, this note goes back to "inferred" until
+someone re-runs that search.
 """
 
 from __future__ import annotations
