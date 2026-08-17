@@ -16,19 +16,35 @@ across the platform boundary, which a second SourceAdapter would have forced to
 be promoted or duplicated. See #57 (memory portability across clients).
 """
 
+import gzip
 import json
 from pathlib import Path
 
 from techne.hooks.post_tool_use import SKIP_TOOLS, _bash_is_readonly_noise
 
 
+def _open_text(path: Path):
+    """Open a transcript as UTF-8 text, transparently decompressing ``.gz``.
+
+    Archived transcripts (``<session>.jsonl.gz``) must read exactly like live ones:
+    aged transcripts compress ~4.5x, and without this the reader raised
+    ``UnicodeDecodeError`` on the gzip magic bytes rather than reading the file (#621).
+    """
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8")
+    return path.open(encoding="utf-8")
+
+
 def iter_jsonl_records(jsonl_path: Path):
-    """Yield parsed JSON objects from a .jsonl file, skipping blank/invalid lines.
+    """Yield parsed JSON objects from a .jsonl (or .jsonl.gz) file, skipping
+    blank/invalid lines.
 
     Whole-file iteration from the start. Offset-based tailing (see
-    ``jsonl_transcript``) does its own seeking and does not use this.
+    ``jsonl_transcript``) does its own seeking and does not use this — byte offsets
+    into a compressed file are not seekable the same way, so tailing stays
+    uncompressed-only by design (a live session's transcript is never archived).
     """
-    with jsonl_path.open(encoding="utf-8") as f:
+    with _open_text(jsonl_path) as f:
         for line in f:
             line = line.strip()
             if not line:
