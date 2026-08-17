@@ -579,12 +579,18 @@ def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
 
     indexed = {str(r["file"]) for r in indexed_rows}
     # SCOPED BY TOP-LEVEL COMPONENT, and the scoping is not timidity — an
-    # unscoped count is worse than none. `_walk_repo`'s _SKIP_DIRS does not
-    # exclude virtualenvs, so on this repo it yields 10,282 files of which 10,042
-    # live in `.venv-ci-3.12` / `.venv-ci-3.13`. Reporting "10,055 files never
-    # indexed" would fire on every repo with a venv, and a warning that always
-    # fires is one the reader learns to skip — back to the silence this fix
-    # exists to remove, wearing a louder coat.
+    # unscoped count is worse than none. HISTORICALLY (before techne#604 taught
+    # `_walk_repo` to skip `site-packages`) the walk on this repo yielded 10,282
+    # files, 10,042 of them inside `.venv-ci-3.12` / `.venv-ci-3.13`, and an
+    # unscoped count reported "10,055 files never indexed" — a warning that fires
+    # on every repo with a venv is one the reader learns to skip, i.e. back to the
+    # silence this fix exists to remove, wearing a louder coat.
+    #
+    # THOSE NUMBERS ARE NOW 242 AND 2: #604 removed the noise at its source, so
+    # the scoping is no longer load-bearing against VENVS specifically. It is kept
+    # because it is load-bearing against the general case — any directory tree the
+    # index does not cover, of which a venv was merely the loudest example, and
+    # `_SKIP_DIRS` cannot enumerate every one of those.
     #
     # PER-DIRECTORY WAS THE WRONG SCOPE AND SHIPPED A CRITICAL (#595 r2). Asking
     # "does this file's own directory already hold indexed files?" is blind to

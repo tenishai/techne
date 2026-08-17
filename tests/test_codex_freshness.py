@@ -531,3 +531,388 @@ def test_codex_watch_requires_watchdog(tmp_path, monkeypatch):
         or "error" in output_lower
         or "watchdog" in output_lower
     ), f"Expected a clean error about watchdog:\n{result.output}"
+
+
+# ---- techne#604 v3: a polluted index must not survive the fix ----------------
+
+
+def test_v3_migration_purges_vendored_rows_and_their_edges(tmp_path):
+    """A POLLUTED INDEX SURVIVED THE FIX AND THEN CERTIFIED ITSELF (#605 r1).
+
+    Indexing is incremental and the only DELETE is scoped to the file being
+    re-indexed, so vendored rows written before `site-packages` was skipped are
+    never revisited — nothing walks them, so nothing removes them. Worse,
+    `index_freshness` then reports `stale: 0, missing: 0, coverage: "complete"`:
+    every one of those files really is present and unchanged on disk, so the
+    surface built to stop the index lying (techne#595) vouches for the pollution.
+
+    The v2→v3 step deletes exactly the excluded rows, and their edges with them —
+    an orphaned edge is a dangling FK that outlives the symbol it described.
+    """
+    from techne.core.codegraph import add_edge, add_symbol
+    from techne.core.codex import _apply_codex_migration, _codex_v2_to_v3
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    from techne.core.codex import CODEX_SCHEMA
+
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    add_symbol(
+        db, id="pkg/real.py::mine::function::1", file="pkg/real.py", name="mine", kind="function"
+    )
+    vend = ".venv-ci-3.13/lib/python3.13/site-packages/aiohttp/web.py"
+    add_symbol(
+        db, id=f"{vend}::application::function::1", file=vend, name="application", kind="function"
+    )
+    add_edge(db, from_symbol="pkg/real.py::mine::function::1", to_name="application", kind="call")
+    add_edge(db, from_symbol=f"{vend}::application::function::1", to_name="mine", kind="call")
+
+    conn = plain_connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 2
+
+        _codex_v2_to_v3(conn)
+        conn.commit()
+
+        files = [r[0] for r in conn.execute("SELECT file FROM symbols")]
+        assert files == ["pkg/real.py"], f"vendored rows survived: {files}"
+        # The vendored symbol's OUTGOING edge goes with it; the repo symbol's own
+        # edge survives rather than being collateral.
+        froms = [r[0] for r in conn.execute("SELECT from_symbol FROM edges")]
+        assert froms == ["pkg/real.py::mine::function::1"]
+    finally:
+        conn.close()
+
+
+def test_v3_purge_spares_a_repo_path_merely_containing_the_words(tmp_path):
+    """The purge is by PATH SEGMENT. A source file named `site_packages_util.py`,
+    or a directory `my-site-packages-tool/`, must survive — deleting real rows to
+    clean up junk ones is a worse failure than the junk."""
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration, _codex_v2_to_v3
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    for f in ("pkg/site_packages_util.py", "my-site-packages-tool/main.py"):
+        add_symbol(db, id=f"{f}::fn::function::1", file=f, name="fn", kind="function")
+
+    conn = plain_connect(db)
+    try:
+        _codex_v2_to_v3(conn)
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_a_v2_index_is_purged_by_the_migration_chain_not_just_the_step(tmp_path):
+    """PINS THE WIRING, NOT THE STEP.
+
+    The test above calls `_codex_v2_to_v3` directly, so removing it from
+    `_run_codex_steps` left the whole suite green — an identity check on an import
+    proving the import and not the use, in a test written to pin a fix. This one
+    stamps a db at v2, puts vendored rows in it, and runs the real
+    `_apply_codex_migration`: the purge must happen because the CHAIN runs it.
+    """
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA, CODEX_VERSION, _apply_codex_migration
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.execute("PRAGMA user_version = 2")  # a store written before #604
+    conn.commit()
+    conn.close()
+
+    vend = ".venv-ci-3.13/lib/python3.13/site-packages/aiohttp/web.py"
+    add_symbol(
+        db, id=f"{vend}::application::function::1", file=vend, name="application", kind="function"
+    )
+    add_symbol(
+        db, id="pkg/real.py::mine::function::1", file="pkg/real.py", name="mine", kind="function"
+    )
+
+    _apply_codex_migration(db)
+
+    conn = plain_connect(db)
+    try:
+        files = [r[0] for r in conn.execute("SELECT file FROM symbols")]
+        assert files == ["pkg/real.py"], f"the migration chain did not purge: {files}"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CODEX_VERSION
+    finally:
+        conn.close()
+
+
+def test_v3_purge_matches_the_walkers_semantics_not_sqls(tmp_path):
+    """THE PURGE RULE MUST BE THE WALK RULE (#604 r2).
+
+    The first cut used SQL `LIKE`: case-INSENSITIVE, matching SUBSTRINGS of the
+    WHOLE stored path. Both halves were wrong. `vendor/SITE-PACKAGES/x.py` was
+    purged though `_walk_repo` — case-SENSITIVE, on path PARTS — would index it.
+    And an ABSOLUTE path under an ancestor named `site-packages` matched, so a
+    repo living under such an ancestor would lose EVERY row. `source.py:530-534`
+    guards against exactly that and explains why; the migration threw the guard
+    away and kept the hazard.
+    """
+    from techne.core.codex import _v3_should_purge
+
+    root = "/home/me/proj"
+    # Real vendored code — relative and absolute — is purged.
+    assert _v3_should_purge("vendor/site-packages/aiohttp/web.py", root)
+    assert _v3_should_purge(f"{root}/.venv/lib/python3.13/site-packages/x.py", root)
+    assert _v3_should_purge("usr/lib/python3/dist-packages/yaml.py", root)
+
+    # Case differences are NOT the walker's rule, so they must survive.
+    assert not _v3_should_purge("vendor/SITE-PACKAGES/x.py", root)
+    assert not _v3_should_purge("vendor/Site-Packages/x.py", root)
+
+    # A segment merely CONTAINING the word survives; parts, not substrings.
+    assert not _v3_should_purge("my-site-packages-tool/main.py", root)
+    assert not _v3_should_purge("pkg/site_packages_util.py", root)
+
+    # THE ANCESTOR HAZARD: the repo itself lives under a `site-packages` dir.
+    # Relative rows are judged on the repo-relative path, so nothing matches.
+    nested = "/opt/site-packages/proj"
+    assert not _v3_should_purge("pkg/real.py", nested)
+    assert not _v3_should_purge(f"{nested}/pkg/real.py", nested)
+
+    # An absolute path with no repo_root cannot be made relative — decline.
+    assert not _v3_should_purge("/somewhere/site-packages/x.py", None)
+
+
+def test_v3_purge_converges_inbound_edges_on_fresh_index_state(tmp_path):
+    """An inbound edge is NOT deleted: the migration converges on the state a FRESH
+    v3 walk produces, which stores exactly `to_symbol=NULL, status='unresolved'`.
+    A migrated v2 db is byte-identical to a re-indexed one in `symbols` and
+    `edges`; deleting these edges would make the two disagree.
+
+    THIS TEST DOES NOT ASSERT THE RESULTING GRAPH IS SOUND. It is not — a NULL
+    `to_symbol` arms codegraph's name fallback, so `callers()` will claim a
+    repo-local call that never happened when a local symbol shares the bare name.
+    That is #606, it reproduces on a fresh index with no migration involved, and
+    it is out of scope here. The earlier name for this test
+    ("..._rather_than_leaving_them_armed") asserted the opposite and was wrong.
+
+    The two asserts below are load-bearing for DIFFERENT reasons, and an earlier
+    version of this docstring gave the same (wrong) reason for both:
+
+      - `to_symbol IS NULL` is load-bearing BEHAVIOURALLY. It had no test, and
+        removing it raises `IntegrityError: FOREIGN KEY constraint failed` on
+        real data (#604 r2).
+      - `resolution_status = 'unresolved'` is load-bearing as an INVARIANT ONLY.
+        It changes no query result: codegraph reads that column only in
+        `add_edge`'s INSERT, and all four fallback sites gate on
+        `to_symbol IS NULL` alone, so 'lsp' and 'unresolved' are indistinguishable
+        to `callees`/`callers`/`reachable` (#604 r3 — the claim that the reset
+        prevents a fallback from re-arming was disproved by A/B through the real
+        accessors). It stays because 'lsp' with a NULL `to_symbol` is a state the
+        v1 contract says cannot exist.
+    """
+    from techne.core.codegraph import add_edge, add_symbol
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration, _codex_v2_to_v3
+    from techne.core.stores import plain_connect
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    vend = "vendor/site-packages/aiohttp/web.py"
+    add_symbol(db, id="pkg/a.py::mine::function::1", file="pkg/a.py", name="mine", kind="function")
+    add_symbol(
+        db, id=f"{vend}::application::function::1", file=vend, name="application", kind="function"
+    )
+    add_edge(
+        db,
+        from_symbol="pkg/a.py::mine::function::1",
+        to_name="application",
+        kind="call",
+        to_symbol=f"{vend}::application::function::1",
+        resolution_status="lsp",
+    )
+
+    conn = plain_connect(db)
+    try:
+        _codex_v2_to_v3(conn)
+        conn.commit()
+        row = conn.execute(
+            "SELECT to_symbol, resolution_status FROM edges "
+            "WHERE from_symbol = 'pkg/a.py::mine::function::1'"
+        ).fetchone()
+        assert row is not None, "the inbound edge was deleted; it records a real call"
+        assert row[0] is None
+        assert row[1] == "unresolved", (
+            "'lsp' with a NULL to_symbol is a state the v1 contract says cannot "
+            "exist; the reset restores the invariant and changes no query result"
+        )
+    finally:
+        conn.close()
+
+
+def test_v3_purge_binds_are_bounded_through_the_real_migration(tmp_path, monkeypatch):
+    """The purge must not bind one SQL parameter per doomed symbol (#604 r3 Critical).
+
+    `doomed` is unbounded — indexing this repo's own venv produced 114,410 of them
+    — so a single `IN (?,?,…)` blows SQLite's SQLITE_LIMIT_VARIABLE_NUMBER and
+    raises `OperationalError: too many SQL variables`. That raise lands BEFORE the
+    version write, so `user_version` stays at 2 and EVERY later `codex_store()`
+    re-raises: codex_search, codex_blast_radius and `techne codex index` are down
+    permanently, stranding the user in the self-certifying state v3 exists to end.
+
+    Rather than materialise 250k rows, this lowers the limit on the connection the
+    migration actually uses. It drives `_apply_codex_migration` — NOT `_codex_v2_to_v3`
+    directly — because the bug is only reachable through the real chain, and a
+    helper-level test would pass against a migration that was never wired in.
+    """
+    import sqlite3
+
+    from techne.core import codex as codex_mod
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration
+    from techne.core.stores import plain_connect
+
+    limit, doomed_count = 600, 1500
+    assert doomed_count > limit, "fixture must exceed the limit or it proves nothing"
+
+    real_connect = codex_mod.plain_connect
+
+    def _capped_connect(*a, **kw):
+        conn = real_connect(*a, **kw)
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, limit)
+        return conn
+
+    db = tmp_path / "codex.db"
+    _apply_codex_migration(db)
+    conn = plain_connect(db)
+    conn.executescript(CODEX_SCHEMA)
+    conn.executemany(
+        "INSERT INTO symbols (id, file, name, kind) VALUES (?, ?, ?, 'function')",
+        [
+            (
+                f"vendor/site-packages/pkg/m{i}.py::f{i}::function::1",
+                f"vendor/site-packages/pkg/m{i}.py",
+                f"f{i}",
+            )
+            for i in range(doomed_count)
+        ],
+    )
+    from techne.core.migrator import user_version_io
+
+    user_version_io.write(conn, 2)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(codex_mod, "plain_connect", _capped_connect)
+    # Unchunked, this raises OperationalError: too many SQL variables.
+    _apply_codex_migration(db)
+
+    conn = plain_connect(db)
+    try:
+        assert user_version_io.read(conn) == 3, (
+            "migration did not reach the version write — a mid-purge raise leaves "
+            "user_version at 2 and every later codex_store() re-raises"
+        )
+        assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="needs tree-sitter grammars to walk a real repo")
+def test_v3_migrated_db_is_identical_to_a_fresh_index(tmp_path):
+    """THE OUTCOME, not the mechanism (#604 r4).
+
+    Twice on this change the recorded *reason* for unresolving inbound edges was
+    wrong while the code was right, and both times the reason was argued rather
+    than measured. This pins what the migration is actually FOR: a v2 db that
+    indexed vendored code must end up byte-identical to a repo indexed fresh with
+    the v3 skip list — same symbols, same edges, and the same answer through the
+    real accessor.
+
+    It is also the test that would fail if someone "fixed" #606 by deleting
+    inbound edges here: migration and re-index would then disagree.
+    """
+    from techne.codex.source import RepoSource
+    from techne.core.codegraph import add_symbol, callers
+    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration
+    from techne.core.migrator import user_version_io
+    from techne.core.stores import plain_connect
+
+    root = tmp_path / "repo"
+    (root / "app").mkdir(parents=True)
+    vend_dir = root / "vendor" / "site-packages" / "aiohttp"
+    vend_dir.mkdir(parents=True)
+    (root / "app" / "util.py").write_text("def get():\n    return 1\n")
+    (vend_dir / "web.py").write_text("def get():\n    return 2\n")
+    (root / "app" / "main.py").write_text(
+        "from aiohttp.web import get\n\ndef handler():\n    return get()\n"
+    )
+
+    def _new_db(name):
+        db = tmp_path / name
+        _apply_codex_migration(db)
+        c = plain_connect(db)
+        c.executescript(CODEX_SCHEMA)
+        c.commit()
+        c.close()
+        return db
+
+    def _dump(db):
+        c = plain_connect(db)
+        try:
+            syms = [tuple(r) for r in c.execute("SELECT * FROM symbols ORDER BY id")]
+            edges = [
+                tuple(r)
+                for r in c.execute(
+                    "SELECT from_symbol, to_name, to_symbol, resolution_status FROM edges "
+                    "ORDER BY from_symbol, to_name"
+                )
+            ]
+        finally:
+            c.close()
+        return syms, edges
+
+    fresh = _new_db("fresh.db")
+    RepoSource(db_path=fresh, repo_root=root, languages=["python"]).initial_walk()
+
+    # A v2-era db: the walker indexed site-packages AND resolved the call into it.
+    polluted = _new_db("polluted.db")
+    RepoSource(db_path=polluted, repo_root=root, languages=["python"]).initial_walk()
+    vend = "vendor/site-packages/aiohttp/web.py"
+    add_symbol(polluted, id=f"{vend}::get::function::1", file=vend, name="get", kind="function")
+    add_symbol(
+        polluted, id=f"{vend}::<module>::module::0", file=vend, name="<module>", kind="module"
+    )
+    c = plain_connect(polluted)
+    c.execute(
+        "UPDATE edges SET to_symbol = ?, resolution_status = 'lsp' "
+        "WHERE to_name = 'get' AND from_symbol LIKE 'app/main.py::handler%'",
+        (f"{vend}::get::function::1",),
+    )
+    user_version_io.write(c, 2)
+    c.commit()
+    c.close()
+
+    _apply_codex_migration(polluted)
+
+    assert _dump(polluted) == _dump(fresh), (
+        "a migrated v2 db must converge exactly on fresh-index state; if it does "
+        "not, `techne codex index` and the migration disagree about the same repo"
+    )
+    target = "app/util.py::get::function::1"
+    assert [x["id"] for x in callers(polluted, target)] == [
+        x["id"] for x in callers(fresh, target)
+    ], "the real accessor must agree too, not merely the stored rows"
