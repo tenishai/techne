@@ -49,7 +49,14 @@ _SEARCH_HEADS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
 #: symbols for `skip`, and `--exclude-dir node_modules search_symbols` lost the
 #: real pattern entirely. Attached forms (`-A5`, `--include=*.py`) consume nothing
 #: extra and are handled by the plain `-` prefix test.
+#: GREP'S table. `rg` and `ag` have DIFFERENT flags, and applying grep's to them
+#: is a second definition of someone else's CLI (#596 r2): `rg -t json foo`
+#: injected `json` because grep's `-t` takes no value while rg's does, and `ag -f`
+#: takes none while grep's does. So the tables are per-tool and anything not
+#: listed declines rather than guessing.
 _VALUE_OPTS_SHORT = frozenset("ABCDdfme")
+_RG_VALUE_OPTS_SHORT = frozenset("ABCdgmtE")
+_AG_VALUE_OPTS_SHORT = frozenset("ABCm")
 _VALUE_OPTS_LONG = frozenset(
     {
         "--after-context",
@@ -80,13 +87,26 @@ _VALUE_OPTS_LONG = frozenset(
 _SYMBOLISH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
 
 
-def _takes_a_value(tok: str) -> bool:
-    """True if `tok` is an option whose value is the NEXT token."""
+def _takes_a_value(tok: str, head: str) -> bool:
+    """True if `tok` is an option of `head` whose value is the NEXT token.
+
+    PER-TOOL, because these are three different CLIs (#596 r2). `-e` is handled by
+    the caller before this is reached, so a cluster ENDING in `e` (`-ie`) must not
+    also be treated as value-taking here — it would consume the pattern itself and
+    promote the following operand.
+    """
     if tok.startswith("--"):
         return tok in _VALUE_OPTS_LONG  # `--opt=value` never reaches here
-    # A short cluster consumes a value only if its LAST letter takes one:
-    # `-rn` does not, `-rm` does (the `m` of --max-count).
-    return len(tok) > 1 and tok[-1] in _VALUE_OPTS_SHORT
+    if len(tok) <= 1:
+        return False
+    table = {
+        "rg": _RG_VALUE_OPTS_SHORT,
+        "ag": _AG_VALUE_OPTS_SHORT,
+    }.get(head, _VALUE_OPTS_SHORT)
+    last = tok[-1]
+    if last == "e":
+        return False  # `-e` is the caller's business; see the docstring
+    return last in table
 
 
 def _bash_search_pattern(command: str) -> str | None:
@@ -112,16 +132,19 @@ def _bash_search_pattern(command: str) -> str | None:
         from techne.core.evidence import _strip_heredoc_bodies
         from techne.hooks.post_tool_use import _split_bash_segments
 
-        segments = _split_bash_segments(_strip_heredoc_bodies(command))
+        stripped = _strip_heredoc_bodies(command)
+        segments = _split_bash_segments(stripped)
     except Exception:  # noqa: BLE001 — augmentation is best-effort, never fatal
         return None
 
     for index, seg in enumerate(segments):
+        piped_into = _is_piped_into(stripped, segments, index)
         try:
             tokens = shlex.split(seg)
         except ValueError:  # unbalanced quotes — not parseable, skip
             continue
-        if not tokens or os.path.basename(tokens[0]) not in _SEARCH_HEADS:
+        head = os.path.basename(tokens[0])
+        if head not in _SEARCH_HEADS:
             continue
 
         pattern: str | None = None
@@ -135,7 +158,7 @@ def _bash_search_pattern(command: str) -> str | None:
                 i += 2
                 continue
             if tok.startswith("-"):
-                i += 2 if (_takes_a_value(tok) and i + 1 < len(rest)) else 1
+                i += 2 if (_takes_a_value(tok, head) and i + 1 < len(rest)) else 1
                 continue
             if pattern is None:
                 pattern = tok
@@ -145,10 +168,40 @@ def _bash_search_pattern(command: str) -> str | None:
 
         if pattern is None or not _SYMBOLISH.match(pattern):
             return None
-        if index > 0 and operands == 0:
-            return None  # piped filter, not a search — see the docstring
+        if piped_into and operands == 0:
+            return None  # filtering stdin, not searching a tree — see the docstring
         return pattern
     return None
+
+
+def _is_piped_into(command: str, segments: list[str], index: int) -> bool:
+    """True if `segments[index]` receives the previous command's stdout.
+
+    THE DISCRIMINATOR IS THE PIPE, NOT THE POSITION (#596 r2).
+    `_split_bash_segments` splits on `&&`, `||`, `;`, newline and `|` IDENTICALLY,
+    so "not the first segment" is not "later in a pipeline". Testing position
+    declined `cd /repo && rg foo` — and `rg foo` with NO operand is rg's normal
+    form, so that is a real search lost. Worse, `_bash_cd_target` exists for
+    exactly the `cd X && <search>` shape, so the two halves of the same fix
+    collided. Measured on the reviewer's corpus: pipe-precedence still declines
+    11/11 noise cases AND recovers every lost search.
+
+    Derived by locating the segment in the original string rather than by
+    re-scanning it: a second quote-aware scanner would be a second definition of
+    "segment", and this function exists because the first one already conflates
+    operators.
+    """
+    if index == 0:
+        return False
+    pos = 0
+    for seg in segments[:index]:
+        found = command.find(seg, pos)
+        if found < 0:
+            return False  # cannot locate — decline to guess, i.e. treat as unpiped
+        pos = found + len(seg)
+    between = command[pos : command.find(segments[index], pos)]
+    # `||` is a control operator, not a pipe; check it first or the `|` test eats it.
+    return "|" in between.replace("||", "")
 
 
 def _bash_cd_target(command: str) -> str | None:
@@ -281,7 +334,17 @@ def main() -> None:
         # declining is the common case and must stay cheap and silent.
         pattern = _bash_search_pattern(tool_input.get("command", "")) or ""
         if not pattern:
-            record_hook_run(techne_db, HOOK_NAME, outcome="noop:not-a-symbol-search")
+            # DELIBERATELY NOT RECORDED (#596 r2). Matching Bash means this hook
+            # now fires on nearly every tool call, and recording each one
+            # overwrote `hook:codex_grep_assist:last_run` — a single `git status`
+            # clobbered a successful injection, so techne#468's detector read
+            # identically whether the rail worked perfectly or never fired. That
+            # is #596's own invisibility, relocated into the observability layer
+            # by the fix for it.
+            #
+            # Same reasoning as the disabled-flag exit above: a rail that was not
+            # APPLICABLE did not run and do nothing. Only outcomes of an actual
+            # attempted search are liveness events.
             sys.exit(0)
     else:
         pattern = tool_input.get("pattern", "")
@@ -306,8 +369,16 @@ def main() -> None:
     # repo by a bare path operand is NOT followed: resolving that would mean
     # picking one of several operands and guessing, and guessing wrong is the very
     # failure above.
+    session_cwd = data.get("cwd") or os.getcwd()
     cd_target = _bash_cd_target(tool_input.get("command", "")) if tool_name == "Bash" else None
-    start_path = tool_input.get("path") or cd_target or data.get("cwd") or os.getcwd()
+    if cd_target and not os.path.isabs(cd_target):
+        # RESOLVED AGAINST THE SESSION cwd, NOT THE HOOK PROCESS'S (#596 r2).
+        # `find_repo_root` resolves a relative path against os.getcwd(), which is
+        # wherever the hook happens to run — so `cd ../beta && grep …` injected a
+        # THIRD repo's graph. This line deliberately mirrors the `data["cwd"]`
+        # preference below rather than inheriting the process's.
+        cd_target = os.path.normpath(os.path.join(session_cwd, cd_target))
+    start_path = tool_input.get("path") or cd_target or session_cwd
 
     from techne.hooks._timeout import bounded_hook
 

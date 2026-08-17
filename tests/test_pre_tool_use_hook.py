@@ -462,3 +462,124 @@ def test_cd_target_selects_the_repo_the_search_actually_runs_in(home, monkeypatc
 
     assert "BETA" in out, "the search ran in beta; beta's graph must be the one injected"
     assert "ALPHA" not in out, "injected the session cwd's graph for a search in another repo"
+
+
+class TestRoundTwoFindings:
+    """The four #596 r2 findings, each pinned by the case that exposed it."""
+
+    def _p(self, cmd):
+        from techne.hooks.pre_tool_use import _bash_search_pattern
+
+        return _bash_search_pattern(cmd)
+
+    def test_a_control_operator_is_not_a_pipe(self):
+        """`_split_bash_segments` splits on `&&`, `||`, `;`, newline and `|`
+        IDENTICALLY, so "not the first segment" is not "later in a pipeline".
+        Testing position declined `cd /repo && rg foo` — and `rg foo` with no
+        operand is rg's NORMAL form, so that was a real search lost, by the same
+        commit that added `_bash_cd_target` for exactly that shape."""
+        assert self._p("cd /repo && rg foo_symbol") == "foo_symbol"
+        assert self._p("make build; rg foo_symbol") == "foo_symbol"
+        assert self._p("test -d x || rg foo_symbol") == "foo_symbol"
+        # ...while a genuine pipe still declines.
+        assert self._p("cat x.py | rg foo_symbol") is None
+
+    def test_rg_and_ag_use_their_own_option_tables(self):
+        """grep's table applied to three CLIs is a second definition of someone
+        else's flags: `rg -t json foo` injected `json`, because grep's `-t` takes
+        no value while rg's does."""
+        assert self._p("rg -t json search_symbols") == "search_symbols"
+        assert self._p("grep -t search_symbols .") == "search_symbols"
+
+    def test_a_cluster_ending_in_e_does_not_eat_the_pattern(self):
+        """`-e` is handled before the option loop, so a cluster ENDING in `e`
+        must not ALSO be treated as value-taking — it would consume the pattern
+        and promote the next operand."""
+        assert self._p("grep -ie search_symbols .") == "search_symbols"
+
+    def test_a_relative_cd_is_not_resolved_against_the_hook_process(self):
+        """`find_repo_root` resolves a relative path against os.getcwd() — wherever
+        the hook happens to run — so `cd ../beta && grep …` injected a THIRD
+        repo's graph. The helper still returns the literal; `main()` anchors it to
+        the SESSION cwd."""
+        assert self._t("cd ../beta && grep -rn foo .") == "../beta"
+
+    def _t(self, cmd):
+        from techne.hooks.pre_tool_use import _bash_cd_target
+
+        return _bash_cd_target(cmd)
+
+
+def test_a_relative_cd_resolves_against_the_session_cwd(home, monkeypatch, capsys):
+    """END-TO-END for finding 2. Session cwd in alpha, `cd ../beta` — beta's graph
+    must be injected, not the hook process's notion of `../beta`."""
+    from techne.config import Config
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import codex_db_for_repo
+
+    _write_config(home, codex_grep_assist=True)
+    cfg = Config.load()
+    nest = home / "nest"
+    for name in ("alpha", "beta"):
+        (nest / name / ".git").mkdir(parents=True)
+    add_symbol(
+        codex_db_for_repo(cfg, nest / "beta"),
+        id="b.py::shared::function::1",
+        file="b.py",
+        name="shared",
+        kind="function",
+        signature="def shared(): ...  # BETA",
+    )
+
+    out = _run(
+        monkeypatch,
+        capsys,
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd ../beta && grep -rn shared ."},
+            "cwd": str(nest / "alpha"),
+        },
+    )
+    assert "BETA" in out
+
+
+def test_a_non_search_bash_call_does_not_clobber_liveness(home, monkeypatch, capsys):
+    """Matching Bash makes this hook fire on nearly every tool call. Recording
+    each one overwrote `last_run`, so a single `git status` clobbered a successful
+    injection and techne#468's detector read identically whether the rail worked
+    perfectly or never fired — #596's own invisibility, relocated into the
+    observability layer by the fix for it."""
+    from techne.config import Config
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    def _last_run():
+        conn = connect(Config.load().db_path)
+        try:
+            return get_state(conn, "hook:codex_grep_assist:last_run")
+        finally:
+            conn.close()
+
+    _write_config(home, codex_grep_assist=True)
+    repo, db = _make_repo(home, indexed=True)
+    from techne.core.codegraph import add_symbol
+
+    add_symbol(
+        db, id="s.py::authenticate::function::1", file="s.py", name="authenticate", kind="function"
+    )
+
+    _run(monkeypatch, capsys, _grep("authenticate", repo))
+    after_success = _last_run()
+
+    _run(
+        monkeypatch,
+        capsys,
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status --short"},
+            "cwd": str(repo),
+        },
+    )
+    after_noise = _last_run()
+
+    assert after_noise == after_success, "a non-search Bash call overwrote the rail's liveness"
