@@ -416,15 +416,17 @@ class TestInjectedTypeLabel:
         """The point of the label. A `decision` and an `evaluation` warrant
         different weight; collapsing them removes the distinction exactly where
         the agent decides how much to trust the line."""
+        kinds = ["fact", "decision", "evaluation", "procedure", "document_card", "pattern"]
+        # Content deliberately NOT equal to the kind: with `content=k` the assertion
+        # could not tell a correct render from one that swapped label and content,
+        # because both strings were the same (#566 r1 Nit).
         rows = [
-            {"id": i, "type": "knowledge", "knowledge_type": k, "content": k}
-            for i, k in enumerate(
-                ["fact", "decision", "evaluation", "procedure", "document_card", "pattern"]
-            )
+            {"id": i, "type": "knowledge", "knowledge_type": k, "content": f"body-{i}"}
+            for i, k in enumerate(kinds)
         ]
         out = self._ctx(rows)
-        for k in ("fact", "decision", "evaluation", "procedure", "document_card", "pattern"):
-            assert f"[{k}]" in out, f"{k} was collapsed away"
+        for i, k in enumerate(kinds):
+            assert f"[{k}] body-{i}" in out, f"{k} was collapsed or rendered out of position"
 
     def test_a_pattern_row_is_visibly_a_pattern(self):
         """techne#561's month-long miss: a legacy `pattern` row rode the push rail
@@ -449,3 +451,11 @@ class TestInjectedTypeLabel:
 
     def test_a_row_with_neither_is_labelled_note(self):
         assert "[note]" in self._ctx([{"id": 5, "content": "c"}])
+
+    def test_the_line_shape_is_pinned_including_the_id_prefix(self):
+        """The `⟦techne#id⟧` prefix was pinned by nothing — deleting it left the
+        suite green (#566 r1 Nit). It is what makes an injected line citable, and
+        citation is what `recall_attribution` measures, so losing it silently
+        would take the attribution rail's only signal with it."""
+        out = self._ctx([{"id": 42, "type": "knowledge", "knowledge_type": "fact", "content": "z"}])
+        assert "- ⟦techne#42⟧ [fact] z" in out

@@ -133,9 +133,22 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
 
     THE ROW'S OWN ``type`` FIELD CANNOT BE USED. ``search()`` sets ``type`` to the
     SOURCE TABLE ("knowledge"), not to the knowledge row's ``type`` column — which
-    is also why every line this rail renders reads ``[knowledge]`` regardless of
-    what it actually is, and therefore why a `pattern` row riding this rail was
-    indistinguishable from a fact at a glance (techne#561, follow-up #566).
+    is why a `pattern` row riding this rail was indistinguishable from a fact at a
+    glance (techne#561).
+
+    THAT RENDERING BUG IS FIXED (techne#566): ``_build_context`` now reads
+    ``knowledge_type``, so lines render ``[fact]`` / ``[decision]`` / ``[pattern]``.
+    This paragraph asserted the opposite in the present tense until the same diff
+    that fixed it 66 lines below — stale prose outliving its subject, which is the
+    defect class this rail keeps producing.
+
+    THE LOOKUP STAYS ANYWAY, and the reason is a real difference rather than
+    inertia: filtering on ``knowledge_type`` is behaviourally equivalent here
+    (measured — 27 pass, and a control with the filter disabled fails 3, so the
+    equivalence is not vacuous) but it fails OPEN on a row that arrives without the
+    key, where the id lookup fails CLOSED. A push-excluded row leaking into context
+    because a field was missing is techne#561 verbatim. A filter whose job is to
+    keep rows out must not be the thing that lets one through.
 
     One primary-key lookup over the ids just returned. Raising here degrades the
     whole recall to nothing via the caller's handler — failing CLOSED, which is the
