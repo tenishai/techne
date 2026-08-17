@@ -176,7 +176,32 @@ def _build_context(rows: list[dict]) -> str:
     ]
     for r in rows:
         rid = r.get("id")
-        rtype = r.get("type") or "note"
+        # `knowledge_type` FIRST, and the ordering is the whole fix (techne#566).
+        # `search()` sets `type` to the SOURCE TABLE — "knowledge" / "observation"
+        # / "thread" — and returns the row's own kind separately as
+        # `knowledge_type`. Reading `type` here labelled EVERY injected row
+        # `[knowledge]`, regardless of whether it was a fact, decision, procedure,
+        # evaluation, document_card or pattern.
+        #
+        # WHY THAT LOOKED RIGHT: this rendering mirrors `egress._render_line`,
+        # which does read `row["type"]` — correctly, because egress reads knowledge
+        # rows STRAIGHT FROM THE TABLE, where `type` IS the kind. Same field name,
+        # two different shapes, one of them arriving through `search()`. The
+        # SessionStart block has always shown `[fact]` / `[procedure]` / `[decision]`
+        # while the per-turn block showed `[knowledge]` for the same rows — the two
+        # rails disagreeing in plain sight for a month.
+        #
+        # It is not cosmetic. The docstring above promises this block frames memory
+        # as "recalled memory (verify-before-relying), not asserted ground truth",
+        # and a `decision` warrants different weight than an `evaluation`. Collapsing
+        # every kind to one label removes the distinction at exactly the point the
+        # agent is deciding how much to trust the line — and it is what let a legacy
+        # `pattern` row ride the push rail unnoticed for a month (techne#561).
+        #
+        # `type` remains the fallback because non-knowledge rows (thread,
+        # observation) carry no `knowledge_type`, and for those the table IS the
+        # most honest label available.
+        rtype = r.get("knowledge_type") or r.get("type") or "note"
         content = (r.get("content") or "")[:200]
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
     return "\n".join(lines)

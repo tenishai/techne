@@ -376,3 +376,76 @@ def test_push_filter_is_pull_only_types_itself(home, monkeypatch, capsys):
         _seed_raw(f"Postgres join semantics note {i}.", ktype)
     out = _run(monkeypatch, capsys, {"prompt": "postgres join semantics"})
     assert out.strip() == "", f"no PULL_ONLY_TYPES row may be pushed: {out!r}"
+
+
+# ---- techne#566: the injected label must be the row's kind, not its table ----
+
+
+class TestInjectedTypeLabel:
+    """`_build_context` labels each recalled row. That label must be the row's
+    KIND (fact / decision / procedure / …), not the table it came out of.
+
+    THE BUG: `search()` sets `type` to the SOURCE TABLE and returns the row's own
+    kind separately as `knowledge_type`. Reading `type` labelled every injected
+    row `[knowledge]`.
+
+    WHY IT SURVIVED A MONTH: this rendering mirrors `egress._render_line`, which
+    reads `row["type"]` — correctly, because egress reads knowledge rows straight
+    from the table, where `type` IS the kind. Same field name, two shapes. The
+    SessionStart block showed `[fact]`/`[procedure]` while the per-turn block
+    showed `[knowledge]` for the same rows, in plain sight, every turn.
+    """
+
+    def _ctx(self, rows):
+        from techne.hooks.user_prompt_submit import _build_context
+
+        return _build_context(rows)
+
+    def test_the_row_kind_is_shown_not_the_table(self):
+        out = self._ctx(
+            [
+                {"id": 1, "type": "knowledge", "knowledge_type": "decision", "content": "d"},
+                {"id": 2, "type": "knowledge", "knowledge_type": "procedure", "content": "p"},
+            ]
+        )
+        assert "[decision]" in out
+        assert "[procedure]" in out
+        assert "[knowledge]" not in out
+
+    def test_distinct_kinds_stay_distinguishable(self):
+        """The point of the label. A `decision` and an `evaluation` warrant
+        different weight; collapsing them removes the distinction exactly where
+        the agent decides how much to trust the line."""
+        rows = [
+            {"id": i, "type": "knowledge", "knowledge_type": k, "content": k}
+            for i, k in enumerate(
+                ["fact", "decision", "evaluation", "procedure", "document_card", "pattern"]
+            )
+        ]
+        out = self._ctx(rows)
+        for k in ("fact", "decision", "evaluation", "procedure", "document_card", "pattern"):
+            assert f"[{k}]" in out, f"{k} was collapsed away"
+
+    def test_a_pattern_row_is_visibly_a_pattern(self):
+        """techne#561's month-long miss: a legacy `pattern` row rode the push rail
+        and was visually indistinguishable from a fact. The label that would have
+        exposed it was present on every line and said the wrong thing."""
+        out = self._ctx(
+            [{"id": 9, "type": "knowledge", "knowledge_type": "pattern", "content": "x"}]
+        )
+        assert "[pattern]" in out
+
+    def test_non_knowledge_rows_fall_back_to_the_table(self):
+        """Threads and observations carry no `knowledge_type`; for those the table
+        IS the most honest label available, so the fallback must survive."""
+        out = self._ctx(
+            [
+                {"id": 3, "type": "observation", "content": "o"},
+                {"id": 4, "type": "thread", "content": "t"},
+            ]
+        )
+        assert "[observation]" in out
+        assert "[thread]" in out
+
+    def test_a_row_with_neither_is_labelled_note(self):
+        assert "[note]" in self._ctx([{"id": 5, "content": "c"}])
