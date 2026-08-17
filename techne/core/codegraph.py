@@ -537,4 +537,72 @@ def index_freshness(db_path: Path, *, repo_root: Path | str | None = None) -> di
     for row in annotated:
         state = row.get("freshness", "unknown")
         counts[state] = counts.get(state, 0) + 1
-    return {"files": len(annotated), **counts}
+
+    unindexed, coverage = _unindexed_count(rows, repo_root)
+    return {"files": len(annotated), **counts, "unindexed": unindexed, "coverage": coverage}
+
+
+def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
+    """Source files ON DISK that the index has never seen. ``(count, coverage)``.
+
+    THE HALF THE FRESHNESS CHECK STRUCTURALLY CANNOT SEE, and the reason it must
+    exist: comparing indexed files against disk answers "did what I indexed
+    change?" It cannot answer "is there something I never indexed?" — and a
+    symbol added since the last index arrives in a NEW module at least as often
+    as in an edited one. Without this, an index holding one untouched file
+    reports itself perfectly fresh while a brand-new module sits beside it
+    unseen, and any claim of "genuine absence" built on that is a confident lie
+    (techne#595 round 1).
+
+    Uses the INDEXER'S OWN discovery (`techne.codex.source._walk_repo`) rather
+    than a local notion of "source file". A second definition of which files
+    belong in the graph would drift from the one that populates it, and this
+    function exists precisely to catch drift. That module's grammar imports are
+    lazy, so this works without the optional `techne[codex]` extra — verified by
+    importing it with `tree_sitter` blocked.
+
+    ``coverage`` is the honest part:
+      complete — the disk was enumerated; the counts below are a real answer.
+      unknown  — no repo_root, or the walker is unavailable. WE CANNOT SEE THE
+                 DISK, so callers must not certify absence on this result.
+    """
+    if repo_root is None:
+        return None, "unknown"
+    try:
+        from techne.codex.source import _EXT_LANGUAGE, _walk_repo
+    except Exception:  # noqa: BLE001 — optional extra absent / import error
+        return None, "unknown"
+
+    root = Path(repo_root)
+    if not root.is_dir():
+        return None, "unknown"
+
+    indexed = {str(r["file"]) for r in indexed_rows}
+    # SCOPED TO DIRECTORIES THE INDEX ALREADY COVERS, and the scoping is not
+    # timidity — an unscoped count is worse than none. `_walk_repo`'s _SKIP_DIRS
+    # does not exclude virtualenvs, so on this repo it yields 10,282 files of
+    # which 10,042 live in `.venv-ci-3.12` / `.venv-ci-3.13`. Reporting "10,055
+    # files never indexed" would fire on every repo with a venv, and a warning
+    # that always fires is one the reader learns to skip — which lands us back at
+    # the silence this whole fix exists to remove.
+    #
+    # The failure mode being detected is "a NEW MODULE beside the ones we index",
+    # so the question asked is exactly that: does this file sit in a directory
+    # that already contains indexed files? A venv was never indexed, so its
+    # directories hold nothing and it contributes nothing.
+    #
+    # THE COST OF THAT CHOICE, stated because it is real: an entirely new
+    # TOP-LEVEL package is invisible here — no indexed sibling, so no signal. That
+    # is a narrower blind spot than the one it replaces, not the absence of one.
+    indexed_dirs = {str(Path(f).parent) for f in indexed}
+    unseen = 0
+    try:
+        for path in _walk_repo(root, set(_EXT_LANGUAGE.values())):
+            rel = path.relative_to(root)
+            if str(rel) in indexed or str(path) in indexed:
+                continue
+            if str(rel.parent) in indexed_dirs:
+                unseen += 1
+    except OSError:
+        return None, "unknown"
+    return unseen, "complete"

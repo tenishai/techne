@@ -1430,11 +1430,15 @@ def _codex_search(args: dict, config: Config) -> dict:
     if db_path is None:
         return {"results": [], "count": 0, "notice": _NO_REPO_HINT}
     hits = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
-    stale_count = sum(1 for h in hits if h.get("freshness") in ("stale", "missing"))
+    # "unknown" included (techne#595 r1): a hit whose file could not be read or
+    # resolved is not a trustworthy hit, and counting only stale/missing meant an
+    # unreadable file returned a result with NO qualification at all.
+    stale_count = sum(1 for h in hits if h.get("freshness") in ("stale", "missing", "unknown"))
     result: dict = {"results": hits, "count": len(hits)}
     if stale_count:
         result["notice"] = (
-            f"{stale_count} result(s) may be outdated — re-run `techne codex index` to refresh."
+            f"{stale_count} result(s) may be outdated or unverifiable — "
+            "re-run `techne codex index` to refresh."
         )
     elif not hits:
         # A ZERO RESULT MUST DESCRIBE ITS OWN RELIABILITY (techne#595). The notice
@@ -1465,28 +1469,70 @@ def _codex_search(args: dict, config: Config) -> dict:
             db_path, repo_root=find_repo_root(_Path(args.get("repo") or _os.getcwd()))
         )
         result["index"] = idx
-        behind = idx["stale"] + idx["missing"]
-        if behind:
-            result["notice"] = (
-                f"NO MATCH — but {behind} of {idx['files']} indexed files are "
-                "stale or missing, so this may be a blind spot rather than an absence. "
-                "A symbol added since the last index cannot appear here. "
-                "Re-run `techne codex index` before concluding it does not exist."
-            )
-        elif idx["unknown"]:
-            # Cannot classify — say so. Claiming "current" from an index we could
-            # not assess is the same defect one level up.
-            result["notice"] = (
-                f"NO MATCH, and the index's freshness could NOT be determined "
-                f"({idx['unknown']} of {idx['files']} files unresolvable). Treat this as "
-                "unknown rather than absent; re-run `techne codex index`."
-            )
-        else:
-            result["notice"] = (
-                f"NO MATCH, and the index is current ({idx['files']} files "
-                "all fresh) — so this is genuine absence rather than a stale index."
-            )
+        result["notice"] = _zero_result_notice(idx)
     return result
+
+
+def _zero_result_notice(idx: dict) -> str:
+    """Describe how much a zero result can be trusted (techne#595).
+
+    ORDERED SO THE STRONGEST DOUBT WINS, and every branch reports the FULL
+    breakdown rather than one ratio — "1 of 6 stale" implies the other five were
+    assessed and were fine, which is false when they were never assessed at all.
+
+    "Genuine absence" is asserted ONLY when the disk was enumerated, nothing is
+    unindexed, and every indexed file is fresh. The first cut of this fix said it
+    whenever the indexed files happened to be fresh — which certified absence
+    using evidence that could not see a brand-new module, and an index of ONE
+    untouched file declared itself current while the symbol sat beside it unseen.
+    That is worse than the silence it replaced: it converts "no information" into
+    a confident wrong answer.
+    """
+    files, stale, missing = idx["files"], idx["stale"], idx["missing"]
+    unknown, unindexed, coverage = idx["unknown"], idx["unindexed"], idx["coverage"]
+    tally = (
+        f"index: {files} file(s) — {idx['fresh']} fresh, {stale} stale, "
+        f"{missing} missing, {unknown} unclassifiable"
+    )
+    if coverage == "complete":
+        tally += f", {unindexed} on disk never indexed"
+
+    if files == 0:
+        # An EMPTY index issuing a clean bill of health is the strongest possible
+        # statement of trust from the weakest possible evidence. Reachable through
+        # the shipping CLI: codex_db_for_repo creates the db before initial_walk,
+        # so a docs-only repo, a Go/Rust repo, or an install without the `codex`
+        # extra all leave a db with zero symbols.
+        return (
+            "NO MATCH, and THE INDEX IS EMPTY (0 files) — this says nothing about "
+            "whether the symbol exists. Run `techne codex index <repo>`."
+        )
+    if coverage != "complete":
+        return (
+            f"NO MATCH, but the disk could not be enumerated, so files may exist that "
+            f"were never indexed. Treat this as UNKNOWN, not absent. {tally}."
+        )
+    if unindexed:
+        return (
+            f"NO MATCH — but {unindexed} source file(s) on disk have never been indexed, "
+            "so a symbol in a NEW module cannot appear here. This is likely a blind spot "
+            f"rather than an absence. Re-run `techne codex index`. {tally}."
+        )
+    if stale or missing:
+        return (
+            f"NO MATCH — but {stale + missing} indexed file(s) are stale or missing, so a "
+            "symbol added or moved since the last index cannot appear here. Likely a blind "
+            f"spot rather than an absence. Re-run `techne codex index`. {tally}."
+        )
+    if unknown:
+        return (
+            f"NO MATCH, and {unknown} file(s) could not be classified, so the index's "
+            f"freshness is not established. Treat this as unknown rather than absent. {tally}."
+        )
+    return (
+        f"NO MATCH, and the index is complete and current — every file on disk is indexed "
+        f"and unchanged. This is genuine absence. {tally}."
+    )
 
 
 def _codex_blast_radius(args: dict, config: Config) -> dict:
