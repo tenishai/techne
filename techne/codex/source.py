@@ -67,6 +67,31 @@ _SKIP_DIRS: frozenset[str] = frozenset(
         ".venv",
         "env",
         ".env",
+        # THE NAMES ABOVE ARE THE VENV DIRECTORY; THESE TWO ARE ITS CONTENTS, and
+        # that difference is the whole fix (techne#604). A venv called anything
+        # else — this repo's CI environments are `.venv-ci-3.12` / `.venv-ci-3.13`
+        # — sails past the exact-name list and gets indexed in full.
+        #
+        # MEASURED on tenishai/techne after a re-index: 114,412 venv symbols
+        # against 5,137 repo symbols, i.e. 96% of the graph was vendored code.
+        # `codex_blast_radius` on a hook function returned 500 dependents whose
+        # nearest were `_pytest/pytester.py`, `aiohttp/web.py` and
+        # `huggingface_hub/cli/hf.py`; `codex_search` ranked a standard library
+        # against ours. The failure is silent — a plausible symbol from
+        # site-packages reads exactly like one of ours.
+        #
+        # Skipping the CONTENTS rather than the container catches every
+        # virtualenv regardless of what its directory is called, which is
+        # precisely the case that broke. Of those 114,412 symbols, 114,410 were
+        # under `site-packages`.
+        #
+        # THE RESIDUAL IS TWO SYMBOLS and is left alone deliberately: each venv's
+        # `bin/activate_this.py`. Adding prefix matching for `venv*`/`.venv*`
+        # would be new machinery serving 0.002% of the measured problem, and
+        # naming `.venv-ci-3.12` explicitly would be the hand-kept list this repo
+        # has rejected repeatedly (techne#1022).
+        "site-packages",
+        "dist-packages",
         "build",
         "dist",
         "target",

@@ -38,7 +38,7 @@ from techne.core.stores import (
 
 log = logging.getLogger(__name__)
 
-CODEX_VERSION = 2
+CODEX_VERSION = 3
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -175,6 +175,144 @@ def _codex_v1_to_v2(conn) -> None:
     conn.executescript("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT);")
 
 
+#: Directory names whose CONTENTS `_walk_repo` refuses to index, frozen at v3.
+#: Held here rather than imported from `techne.codex.source._SKIP_DIRS` on purpose:
+#: this migration must run WITHOUT the optional `techne[codex]` extra, and it must
+#: encode what the skip list meant AT v3 — a migration whose meaning changes when
+#: someone edits a constant is not a migration.
+_V3_PURGE_SEGMENTS = ("site-packages", "dist-packages")
+
+
+def _v3_should_purge(file_str: str, repo_root: str | None) -> bool:
+    """True if `file_str` names a file the v3 walker would refuse to index.
+
+    MATCHES THE WALKER'S SEMANTICS, NOT SQL's (#604 r2). The first cut used SQL
+    `LIKE`, which is case-INSENSITIVE and matches SUBSTRINGS of the WHOLE stored
+    path. Both halves were wrong:
+
+      - `vendor/SITE-PACKAGES/x.py` was purged though `_walk_repo` — which does
+        case-SENSITIVE exact matching on path PARTS — would index it.
+      - a row stored as an ABSOLUTE path under an ancestor directory named
+        `site-packages` matched, and if the repo itself lives under such an
+        ancestor that is EVERY row. `source.py:530-534` guards against exactly
+        that by testing parts of the REPO-RELATIVE path, and explains why; the
+        migration threw the guard away and kept the hazard.
+
+    So the test is done here, in Python, over path parts of the repo-relative
+    path — one definition of "segment" rather than a SQL dialect's near-miss.
+    """
+    from pathlib import PurePosixPath
+
+    path = PurePosixPath(file_str)
+    if path.is_absolute():
+        if not repo_root:
+            # Cannot make it relative, so cannot apply the walker's rule. Decline
+            # rather than guess: over-purging deletes correct rows, and the whole
+            # point of this step is that wrong rows are worse than missing ones
+            # only when they MISLEAD.
+            return False
+        try:
+            path = path.relative_to(PurePosixPath(repo_root))
+        except ValueError:
+            return False  # outside the repo — not ours to judge
+    return any(part in _V3_PURGE_SEGMENTS for part in path.parts)
+
+
+def _codex_v2_to_v3(conn) -> None:
+    """codex.db v2 → v3: purge rows for files the walker no longer indexes (#604).
+
+    WITHOUT THIS, A POLLUTED INDEX SURVIVES THE FIX AND THEN CERTIFIES ITSELF.
+    Indexing is incremental and the only DELETE is scoped to the file being
+    re-indexed, so vendored rows written before `site-packages` was skipped are
+    never revisited — nothing walks them, so nothing removes them. Measured in
+    #605's review: pollute → fix → re-index leaves the vendored rows in place, and
+    `index_freshness` then reports `stale: 0, missing: 0, coverage: "complete"`.
+    The surface built to stop the index lying (techne#595) vouches for the
+    pollution, because every one of those files really is present and unchanged on
+    disk. It is not stale. It should not be there at all.
+
+    Deleting exactly the excluded rows rather than truncating the whole graph is
+    deliberate: a full rebuild costs a re-index of every repo and discards correct
+    data to remove incorrect data. `guarded_migrate` takes a backup first.
+    """
+    row = conn.execute("SELECT value FROM codex_meta WHERE key = 'repo_root'").fetchone()
+    repo_root = row[0] if row else None
+
+    doomed = [
+        r[0]
+        for r in conn.execute("SELECT id, file FROM symbols")
+        if _v3_should_purge(r[1], repo_root)
+    ]
+    if not doomed:
+        return
+
+    # CHUNKED, AND THE CHUNK IS THE FIX (#604 r3 Critical). Binding one parameter
+    # per doomed symbol is unbounded: this repo alone produced 114,410 of them,
+    # and a 265,000-row v2 index raises `OperationalError: too many SQL variables`
+    # against SQLite's native 250,000 limit. That raise lands BEFORE the version
+    # write and before `_migration_done.add`, so `user_version` stays at 2 and
+    # EVERY later `codex_store()` re-raises — taking down codex_search,
+    # codex_blast_radius and `techne codex index` permanently, and stranding the
+    # user in the self-certifying state this whole step exists to end.
+    #
+    # 500 is well under every SQLite build's floor (the compile-time default is
+    # 999 on old builds, 32,766 on modern ones, and the native limit here is
+    # 250,000) — chosen to be safe on the smallest, not fast on the largest.
+    for batch in (doomed[i : i + 500] for i in range(0, len(doomed), 500)):
+        _v3_purge_batch(conn, batch)
+
+
+def _v3_purge_batch(conn, doomed: list[str]) -> None:
+    """Delete one bounded batch of symbols, with their edges."""
+    marks = ",".join("?" * len(doomed))
+    # Outbound edges go with their symbol.
+    conn.execute(f"DELETE FROM edges WHERE from_symbol IN ({marks})", doomed)
+    # INBOUND edges are unresolved, not deleted.
+    #
+    # THE ARGUMENT THAT SETTLES IT IS DURABILITY, NOT SYMMETRY (#604 r5). Three
+    # earlier passes at this comment reached for "migration and re-index would
+    # disagree", which is true but weak — it invites the reply "so accept the
+    # divergence". The decisive fact is that DELETING BUYS NOTHING THAT SURVIVES.
+    # Measured on the delete variant: right after migrating, `callers()` on the
+    # local `get` returns []; then touch the file that references it, let the
+    # ordinary incremental index run ONCE, and the edge and its false caller are
+    # both back:
+    #
+    #     after DELETE migration:  callers(app/util.py::get) -> []
+    #     after ONE re-index:      callers(app/util.py::get) -> ['app/main.py::handler']
+    #
+    # So deleting is a cosmetic removal that self-reverses the first time anyone
+    # edits the referencing file, and it pays PERMANENT divergence from
+    # `techne codex index` for it.
+    #
+    # The target state is therefore what a fresh v3 walk produces, measured rather
+    # than assumed: index a repo with a vendored `get` and a local `get`, with
+    # site-packages skipped, and the edge is stored exactly as below — `to_symbol`
+    # NULL, status 'unresolved'.
+    #
+    # READ THIS BEFORE CONCLUDING THE RESULTING STATE IS SAFE — IT IS NOT, AND
+    # THAT IS #606, NOT A BUG IN THIS MIGRATION. A NULL `to_symbol` arms
+    # codegraph's name fallback, so `callers()`/`callees()`/`reachable()` will
+    # match `to_name` against ANY repo symbol sharing the bare name and assert a
+    # repo-local call that never happened. A fresh index has the identical flaw;
+    # this migration neither causes nor cures it. Fixing it means qualifying the
+    # fallback or representing "external" explicitly — see #606.
+    #
+    # RESETTING `resolution_status` CHANGES NO QUERY, and two earlier versions of
+    # this comment got its rationale wrong in opposite directions. codegraph reads
+    # the column ONLY in `add_edge`'s INSERT; all four fallback sites
+    # (codegraph.py:261, 290, 341, 353) gate on `to_symbol IS NULL` alone, so
+    # 'lsp' and 'unresolved' return byte-identical results. It is reset purely to
+    # restore the v1 invariant that a NULL `to_symbol` is never 'lsp' — an
+    # impossible state forces the next reader to distrust the column.
+    conn.execute(
+        f"UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
+        f"WHERE to_symbol IN ({marks})",
+        doomed,
+    )
+    conn.execute(f"DELETE FROM symbols WHERE id IN ({marks})", doomed)
+
+
 def _run_codex_steps(conn, current: int, target: int) -> None:
     """Chain all codex migration steps from *current* to *target*.
 
@@ -186,6 +324,8 @@ def _run_codex_steps(conn, current: int, target: int) -> None:
         _codex_v0_to_v1(conn)
     if current < 2:
         _codex_v1_to_v2(conn)
+    if current < 3:
+        _codex_v2_to_v3(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
