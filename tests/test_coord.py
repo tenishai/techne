@@ -490,6 +490,111 @@ def test_one_poisoned_sidecar_does_not_disable_the_whole_guard(db_path, monkeypa
         _techne_send({"body": "should not send"}, _config(db_path))
 
 
+def test_presence_refuses_a_recycled_pid(monkeypatch):
+    """CASE 3 OF THE DOCSTRING, closed by techne#587.
+
+    A wound-down session leaves a sidecar behind; its pid gets recycled onto an
+    unrelated live process. `_pid_alive` succeeds and is simply WRONG — nothing
+    about the pid value gives it away, which is why this needed the `procStart`
+    comparison rather than a better look at the number.
+    """
+    import os
+
+    live_pid = os.getpid()
+    # A REAL, PARSEABLE claim — only `_ps_starts` is stubbed, so the actual
+    # comparison in `_classify_pids` runs. Patching the classifier would report
+    # the patch (this module's own docstring, techne#981).
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [
+            {
+                "sessionId": A,
+                "pid": live_pid,
+                "updatedAt": None,
+                "procStart": "Mon Aug 17 10:00:00 2026",
+            }
+        ],
+    )
+    # ps reports a start time for that pid, and it disagrees with the claim.
+    monkeypatch.setattr(coord, "_ps_starts", lambda pids: {live_pid: 111})
+
+    assert coord.present_session_ids() == set(), "a recycled pid must not read as present"
+
+    # And the SAME roster whose claim matches is present — otherwise the
+    # assertion above would also pass with presence hardcoded to empty.
+    import calendar
+    import time as _t
+
+    agreed = int(calendar.timegm(_t.strptime("Mon Aug 17 10:00:00 2026", "%a %b %d %H:%M:%S %Y")))
+    monkeypatch.setattr(coord, "_ps_starts", lambda pids: {live_pid: agreed})
+    assert coord.present_session_ids() == {A}
+
+
+def test_presence_keeps_a_session_ps_cannot_speak_to(monkeypatch):
+    """THE FALSE-ABSENT TRAP, and the reason the complement of
+    `_same_process_pids` is not used (techne#587).
+
+    "Not verified same" covers a real mismatch AND every unknown — no procStart,
+    ps silent, an unparseable lstart. Demoting on that union would refuse sessions
+    that are genuinely working, which is the worse error: a false present costs
+    only the older weaker behaviour, a false absent refuses a live peer.
+    """
+    import os
+
+    live_pid = os.getpid()
+    monkeypatch.setattr(
+        coord,
+        "_session_records",
+        lambda: [{"sessionId": A, "pid": live_pid, "updatedAt": None}],  # no procStart
+    )
+    monkeypatch.setattr(coord, "_ps_starts", lambda pids: {})  # ps says nothing
+
+    assert coord.present_session_ids() == {A}, (
+        "an unverifiable pid must stay PRESENT — unknown is not evidence of death"
+    )
+
+
+def test_recycled_pids_needs_positive_disagreement_not_mere_absence(monkeypatch):
+    """`_recycled_pids` is the complement of nothing — it reports only pids where
+    ps gave a start, the sidecar claimed one, and they disagree."""
+    recs = [
+        {"sessionId": A, "pid": 4242, "procStart": "Mon Aug 17 10:00:00 2026"},
+        {"sessionId": B, "pid": 4343},  # no claim -> unknown, never recycled
+    ]
+    # ps knows neither -> nothing is provably recycled.
+    monkeypatch.setattr(coord, "_ps_starts", lambda pids: {})
+    assert coord._recycled_pids(recs) == set()
+
+    # ps knows 4242 and disagrees -> exactly that one is recycled.
+    monkeypatch.setattr(coord, "_ps_starts", lambda pids: {4242: 999, 4343: 999})
+    assert coord._recycled_pids(recs) == {4242}
+
+
+def test_ps_snapshot_is_cached_so_presence_stays_cheap(monkeypatch):
+    """The cost objection techne#587 recorded was real — one ps measured 31.9 ms
+    against 0.005 ms for the unhardened check, on a path that runs per coord MCP
+    invocation. The snapshot is cached, so a burst pays for one ps, not N."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stdout = ""
+
+        return R()
+
+    coord._ps_cache.clear()
+    monkeypatch.setattr(coord.subprocess, "run", fake_run)
+
+    for _ in range(5):
+        coord._ps_starts((4242,))
+
+    assert len(calls) == 1, f"expected one ps for five calls, got {len(calls)}"
+
+
 def test_presence_refuses_a_session_whose_pid_is_dead(monkeypatch):
     """Presence drops the heartbeat requirement, NOT the liveness one. A sidecar left
     behind by a session that ended must not count — that corpse is exactly what the

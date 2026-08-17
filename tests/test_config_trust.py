@@ -428,6 +428,32 @@ class TestKeySurgery:
         assert applied == []
         assert raw == {}
 
+    def test_strip_removes_sources_now_that_it_is_governed(self):
+        """techne#585 CHANGED ENFORCEMENT, so it gets a test rather than only a
+        comment. `sources.claude_code_transcripts.paths` names arbitrary
+        filesystem paths whose CONTENTS are ingested into the ledger; admitting
+        it to EGRESS_KEYS means a LOCKED operator layer now DROPS agent-supplied
+        source paths instead of honouring them.
+
+        That is the intended effect of locking — an agent choosing what gets read
+        into its own memory is the thing being prevented — but it is a live
+        behaviour change for any locked install that set `sources` in
+        config.yaml, not a no-op. Pinned here so nobody can quietly revert the
+        decision by moving one line back to `_NOT_A_DESTINATION`.
+        """
+        raw = {
+            "sources": {"claude_code_transcripts": {"paths": ["/tmp/somebody-elses-transcripts"]}},
+            "threads": {"min_observations": 3},
+        }
+
+        removed = strip_egress(raw)
+
+        assert "sources" in removed
+        assert "sources" not in raw
+        # A neighbouring non-destination block is untouched — the gate is
+        # targeted, not a blanket wipe.
+        assert raw["threads"] == {"min_observations": 3}
+
     def test_strip_tolerates_a_wrong_shaped_block(self):
         """A scalar where a mapping belongs must not raise — this runs inside
         Config.load, and a crash here takes down every hook on the host."""
@@ -875,7 +901,6 @@ def _config_field_names() -> list[str]:
     of names in the test would be a second copy of the surface, drifting exactly
     when the guard needs to be right.
     """
-    import dataclasses
 
     from techne.config import Config
 
@@ -892,195 +917,237 @@ def test_every_config_field_is_classified_as_destination_or_not():
     `_NOT_A_DESTINATION`), so this does not try to. It enforces the weaker,
     achievable property: that SOMEBODY MADE THE CALL. Adding a field now costs one
     line in one of two tuples instead of being allowed to pass in silence.
+
+    A PREFIX IS NOT A JUDGMENT (techne#588). This check used to compute the
+    governed set as `{k.split(".", 1)[0] for k in EGRESS_KEYS}`, so the single
+    entry `reflect.model` marked the ENTIRE `reflect` block classified — and
+    neither `reflect` nor `conflict` appeared in `_NOT_A_DESTINATION`, because
+    the prefix had already satisfied the check. Measured: adding
+    `ReflectConfig.api_base`, an LLM endpoint override, left the suite at 51
+    passed, byte-identical to baseline. A destination-selecting field nested one
+    level inside a partially-governed block was silently ungoverned, which is
+    precisely what this test exists to prevent.
+
+    So classification is now EXACT and RECURSIVE: a block named WHOLE (no dot) in
+    either tuple covers everything under it; a block governed only by DOTTED keys
+    is partially governed, and every field inside it must be judged in its own
+    right. The recursion is general rather than one-deep on purpose — the same
+    hole at depth 2 would otherwise be a new bug with the same shape.
     """
     from techne.security import config_trust
 
-    # A dotted key like "reflect.model" governs part of the `reflect` field, so the
-    # top-level name counts as classified by its prefix.
-    governed = {k.split(".", 1)[0] for k in config_trust.EGRESS_KEYS}
-    declined = set(config_trust._NOT_A_DESTINATION)
+    whole = {k for k in config_trust.EGRESS_KEYS if "." not in k}
+    whole |= {k for k in config_trust._NOT_A_DESTINATION if "." not in k}
+    dotted = {k for k in config_trust.EGRESS_KEYS if "." in k}
+    dotted |= {k for k in config_trust._NOT_A_DESTINATION if "." in k}
 
-    unclassified = [f for f in _config_field_names() if f not in governed and f not in declined]
+    unclassified = _unclassified_fields(Config, whole, dotted, prefix="")
     assert not unclassified, (
         f"Config fields with no destination judgment: {unclassified}. "
         "Add each to techne/security/config_trust.py — EGRESS_KEYS if it selects "
         "a destination for memory (a path, DSN, endpoint, model route or sink "
         "toggle), otherwise _NOT_A_DESTINATION with the reason. Silence here means "
-        "the operator layer does not govern it."
+        "the operator layer does not govern it.\n"
+        "A DOTTED name here means the enclosing block is only PARTIALLY governed "
+        "(some sub-key is in EGRESS_KEYS), so every field inside it needs its own "
+        "line — a prefix is not a judgment (techne#588)."
     )
+
+
+def _unclassified_fields(cls, whole: set[str], dotted: set[str], prefix: str) -> list[str]:
+    """Names under `cls` that no entry in either tuple judges.
+
+    `whole` = undotted entries (cover a block entirely); `dotted` = entries that
+    govern one field, which makes their enclosing block partially governed and
+    forces a per-field judgment inside it.
+    """
+    import typing
+
+    out: list[str] = []
+    try:
+        hints = typing.get_type_hints(cls)
+    except Exception:  # noqa: BLE001 — an unresolvable annotation must not hide fields
+        hints = {}
+    for f in dataclasses.fields(cls):
+        dotted_name = f"{prefix}{f.name}"
+        if dotted_name in whole:
+            continue  # judged wholesale — covers everything beneath it
+        partial = any(k.startswith(f"{dotted_name}.") for k in dotted)
+        if not partial:
+            out.append(dotted_name)
+            continue
+        # Partially governed: descend and demand a judgment on every field inside.
+        inner = hints.get(f.name, f.type)
+        if dataclasses.is_dataclass(inner):
+            out.extend(_unclassified_fields(inner, whole | dotted, dotted, f"{dotted_name}."))
+    return out
 
 
 def test_the_two_tuples_do_not_overlap():
     """A name in both would make the record self-contradicting, and the runtime
-    would quietly follow EGRESS_KEYS while the comment claimed otherwise."""
+    would quietly follow EGRESS_KEYS while the comment claimed otherwise.
+
+    Compared EXACTLY, not by prefix (techne#588). Both tuples now carry dotted
+    entries — `reflect.model` governs, `reflect.write_to` declines — and those
+    are not a contradiction, they are the per-field judgment a partially-governed
+    block requires. Collapsing to prefixes would report them as one.
+    """
     from techne.security import config_trust
 
-    governed = {k.split(".", 1)[0] for k in config_trust.EGRESS_KEYS}
-    both = governed & set(config_trust._NOT_A_DESTINATION)
+    both = set(config_trust.EGRESS_KEYS) & set(config_trust._NOT_A_DESTINATION)
     assert not both, f"classified as both destination and not: {sorted(both)}"
 
+    # A block named WHOLE in one tuple must not also have dotted entries in the
+    # other: "all of `reflect` is not a destination" and "`reflect.model` is"
+    # cannot both be true, and the exact comparison above would not catch it.
+    whole_governed = {k for k in config_trust.EGRESS_KEYS if "." not in k}
+    whole_declined = {k for k in config_trust._NOT_A_DESTINATION if "." not in k}
+    contradictions = sorted(
+        k
+        for k in config_trust.EGRESS_KEYS + config_trust._NOT_A_DESTINATION
+        if "." in k
+        and (
+            (k.split(".", 1)[0] in whole_governed and k in config_trust._NOT_A_DESTINATION)
+            or (k.split(".", 1)[0] in whole_declined and k in config_trust.EGRESS_KEYS)
+        )
+    )
+    assert not contradictions, (
+        f"sub-keys contradicting a whole-block judgment: {contradictions} — the "
+        "block is classified wholesale in one tuple while a field inside it is "
+        "classified the other way."
+    )
 
-def _resolve_egress_key(key: str, root: object = None) -> str | None:
-    """Walk a dotted EGRESS_KEYS entry through the real dataclass structure.
 
-    Returns None when the key resolves, else the segment that broke it. `root`
-    defaults to `Config` and exists so the tests below can exercise the walker's
-    own edge cases against synthetic dataclasses — the real `Config` has no field
-    in the shapes limits 2 and 3 describe, so without it those branches would be
-    unreachable from the suite and pin nothing (#582 round 2 measured exactly
-    that: mutating the UNVERIFIABLE branch away left the suite byte-identical).
+# THE DATACLASS WALKER WAS DELETED HERE (techne#586). `_resolve_egress_key`,
+# `_Unverifiable`, the synthetic `_WalkerRoot` fixtures and their unit tests all
+# existed to make an orphan guard that resolved EGRESS_KEYS against the DATACLASS
+# surface trustworthy — including two documented limits (a dict keyed by runtime
+# data, and a `list[...]` that must not be unwrapped as though it were a
+# dataclass) and a hard-won fix for a silent mis-unwrap.
+#
+# All of it is retired because the guard no longer walks that surface at all. The
+# gate acts on the surface `Config.load` READS, so the replacement below loads a
+# config with each key and without it and requires the result to differ. That has
+# no walker, therefore no limits 2 and 3, and no synthetic fixtures whose only
+# consumer was the walker. Keeping them would have been coverage of a helper
+# nothing depends on — which reads as safety and is not.
+#
+# The limits are gone from docs/arch/config-trust.md in the same change.
 
-    EVERY segment is resolved, not just the head. The runtime traverses the whole
-    path (`_pop`/`_get`/`_set` recurse), so a check that stops at the head accepts
-    `conflict.model` after `ConflictConfig.model` has been renamed — the key then
-    governs nothing while the tuple still looks complete, which is the #504 shape
-    this test exists to catch. Measured in #582's review: renaming
-    `ConflictConfig.model` -> `llm_model` left the suite byte-identically green.
+#: A distinctive YAML value per governed key, in the SHAPE `Config.load` expects.
+#: Hand-written on purpose: the point of the guard below is to prove the loader
+#: READS each key, and a probe derived from the loader would prove nothing. If a
+#: key's shape changes, the guard fails loudly rather than silently passing.
+_EGRESS_PROBES: dict[str, object] = {
+    "sync": {"adapter": "filesystem", "path": "/tmp/probe-sync"},
+    # `role` must be one of _FEDERATION_ROLES — the loader validates it, so a
+    # made-up role fails here rather than silently probing nothing.
+    "connections": {"probe": {"role": "team", "db_path": "/tmp/probe-peer.db"}},
+    "llm_api_base": "https://probe.example",
+    "llm_api_key": "probe-key",
+    "model": "openai/probe-model",
+    "reflect.model": "openai/probe-reflect",
+    "conflict.model": "openai/probe-conflict",
+    "archivist_db_path": "/tmp/probe-archivist.db",
+    "standalone": False,
+    "stores": {"librarian": {"adapter": "sqlite", "dsn": "/tmp/probe-lib.db"}},
+    "sources": {"claude_code_transcripts": {"paths": ["/tmp/probe-transcripts"]}},
+}
 
-    THIS CHECKS THE DATACLASS SURFACE, AND THE GATE ACTS ON THE YAML SURFACE.
-    They are INDEPENDENT and coincide only by convention: `Config.load` maps YAML
-    to fields through hardcoded string literals (`c.get("model", ...)` at
-    config.py:763), so renaming a field AND its loader kwarg while the YAML key
-    stays put leaves the gate working while this check reports an orphan. The
-    reverse is worse and is why the message below does not say "rename the entry
-    to match the field": doing that yields `conflict.llm_model`, which #582's
-    review MEASURED as test-green / gate-broken / agent's value surviving — this
-    guard's remedy manufacturing the very shape it exists to catch.
 
-    So this is a PROXY for the property that matters, not the property itself.
-    It is kept because the surfaces do coincide today and drift between them is
-    rarer than a plain rename, but a sound check would have to derive the keys
-    the loader actually reads. Tracked in techne#586; do not read a pass here as
-    "the gate governs this key".
-
-    Raises `_Unverifiable` when a segment remains but the owner is no longer a
-    dataclass (e.g. a `dict[str, ...]` whose keys are runtime data). Static
-    resolution genuinely cannot settle those, and the caller reports them as such
-    rather than counting them either way — a test that cannot see should say so.
-    """
-    import dataclasses
-    import typing
+def _load_raw(tmp_path, raw: dict, monkeypatch):
+    """Write `raw` as config.yaml and load it with no operator layer in play."""
+    import dataclasses as _dc
 
     from techne.config import Config
 
-    owner: object = Config if root is None else root
-    for segment in key.split("."):
-        if not dataclasses.is_dataclass(owner):
-            raise _Unverifiable(key, segment)
-        if segment not in {f.name for f in dataclasses.fields(owner)}:
-            return segment
-        hint = typing.get_type_hints(owner)[segment]
-        # Unwrap `X | None` ONLY — otherwise a nested optional config stops the walk
-        # one level short and reports a false orphan.
-        #
-        # THE UNWRAP IS CONDITIONED ON A None HAVING BEEN STRIPPED, not on arity.
-        # `len(args) == 1` alone unwraps ANY single-argument generic, so
-        # `list[StoreSpec]` resolved to `StoreSpec` and the walk continued as though
-        # a list were a dataclass — silently, unlike the _Unverifiable path. Found in
-        # #582's round-2 review; verified: list[StoreSpec] has 1 arg and no NoneType,
-        # so it now falls through to _Unverifiable, which is the honest answer since
-        # `_get`/`_pop` cannot traverse a list either.
-        args = typing.get_args(hint)
-        non_none = [a for a in args if a is not type(None)]
-        owner = non_none[0] if len(non_none) == 1 and len(non_none) < len(args) else hint
-    return None
+    monkeypatch.setattr(config_trust, "evaluate_lock", lambda _p: TrustVerdict(ABSENT, None, "t"))
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    cfg = Config.load(path)
+    state = _dc.asdict(cfg)
+    # Volatile: identify the file and the verdict, not the governed values.
+    for volatile in ("loaded_from", "egress_trust", "preserved_egress"):
+        state.pop(volatile, None)
+    return state
 
 
-class _Unverifiable(Exception):
-    def __init__(self, key: str, segment: str) -> None:
-        super().__init__(f"{key!r} (at {segment!r})")
+def _set_dotted(raw: dict, dotted: str, value) -> None:
+    node = raw
+    parts = dotted.split(".")
+    for seg in parts[:-1]:
+        node = node.setdefault(seg, {})
+    node[parts[-1]] = value
 
 
-@dataclasses.dataclass
-class _WalkerLeaf:
-    value: str = ""
+def test_every_egress_key_is_a_key_the_loader_actually_reads(tmp_path, monkeypatch):
+    """The other direction: a key the loader never reads governs nothing.
 
+    TESTED AGAINST THE READ SURFACE, WHICH IS THE ONE THE GATE ACTS ON
+    (techne#586). This guard used to walk the DATACLASS surface via
+    `dataclasses.fields` + `get_type_hints`. That surface is INDEPENDENT of the
+    one that matters: `EGRESS_KEYS` entries address the raw mapping
+    `_pop`/`_get`/`_set` walk, and `Config.load` bridges YAML to fields through
+    hardcoded string literals (`c.get("model", ...)`), so the two coincide by
+    convention only. #582's review measured both failure directions, and the
+    dangerous one is a rename of the ENTRY to match a renamed FIELD: old guard
+    green, gate broken, agent's destination surviving a locked layer.
 
-@dataclasses.dataclass
-class _WalkerRoot:
-    """Synthetic root for the walker's edge cases. MODULE SCOPE ON PURPOSE:
-    `get_type_hints` resolves annotations against the defining module's globals, so
-    a dataclass declared inside a test function raises NameError on its own field
-    types."""
+    A WRITE-SURFACE CHECK IS ALSO WRONG, and that was this fix's first attempt.
+    Resolving against `Config.to_yaml_dict()` looked right and reported
+    `conflict.model` as an orphan — because `save` emits no `conflict` block at
+    all, though `load` reads one (config.py:759). The read and write surfaces are
+    not the same set, so only the read side answers "can the gate deny anything
+    here?".
 
-    optional: _WalkerLeaf | None = None  # must STILL unwrap — not a limit
-    listed: list[_WalkerLeaf] = dataclasses.field(default_factory=list)  # limit 3
-    mapped: dict[str, _WalkerLeaf] = dataclasses.field(default_factory=dict)  # limit 2
-    plain: _WalkerLeaf = dataclasses.field(default_factory=_WalkerLeaf)
-
-
-def test_the_resolver_reports_its_own_blind_spots_instead_of_guessing():
-    """PINS LIMITS 2 AND 3 of the orphan walker (docs/arch/config-trust.md).
-
-    Both are unreachable through the real `Config`, which is why round 2 of #582's
-    review could mutate the UNVERIFIABLE branch away and see a byte-identical green
-    suite. A guard with no live case pins nothing — so these drive the walker
-    directly, through `root`.
-
-    LIMIT 3 IS THE ONE THAT USED TO FAIL SILENTLY. The unwrap was `args[0] if
-    len(args) == 1`, which unwraps ANY single-argument generic, so a `list[Leaf]`
-    resolved to `Leaf` and the walk continued as though a list were a dataclass.
-    `_get`/`_pop` cannot traverse a list either, so the honest answer is
-    UNVERIFIABLE, not a confident resolution.
+    So the property is tested BEHAVIOURALLY and with no key→field mapping to rot:
+    load a config WITH the key and one WITHOUT it, and require the resulting
+    Config to differ. If it does not, the loader ignores the key, and stripping it
+    denies nothing.
     """
-    Root = _WalkerRoot
+    baseline = _load_raw(tmp_path, {}, monkeypatch)
 
-    # The unwrap that must KEEP working — otherwise limit 3's fix would have been
-    # bought by breaking optional nested configs, and this pair is what tells the
-    # two apart.
-    assert _resolve_egress_key("optional.value", root=Root) is None
-    assert _resolve_egress_key("plain.value", root=Root) is None
-
-    # A real miss is still reported as a miss, not swallowed as unverifiable.
-    assert _resolve_egress_key("plain.gone", root=Root) == "gone"
-
-    # Limit 3: a list is NOT a dataclass, and saying so is the fix.
-    with pytest.raises(_Unverifiable):
-        _resolve_egress_key("listed.value", root=Root)
-
-    # Limit 2: a dict keyed by runtime data cannot be settled statically.
-    with pytest.raises(_Unverifiable):
-        _resolve_egress_key("mapped.value", root=Root)
-
-
-def test_every_egress_key_still_names_a_real_config_field():
-    """The other direction: a key that no longer matches a field governs nothing.
-
-    A rename of `archivist_db_path` would leave EGRESS_KEYS pointing at a field
-    that does not exist — the gate would still look complete and would pin
-    nothing, which is #504's shape (mechanism present, not load-bearing).
-    """
-    from techne.security import config_trust
-
-    orphans: dict[str, str] = {}
-    unverifiable: list[str] = []
+    inert = []
     for key in config_trust.EGRESS_KEYS:
-        try:
-            broken_at = _resolve_egress_key(key)
-        except _Unverifiable as exc:
-            unverifiable.append(str(exc))
-            continue
-        if broken_at is not None:
-            orphans[key] = broken_at
+        probe = _EGRESS_PROBES.get(key)
+        assert probe is not None, (
+            f"no probe for governed key {key!r} — add one to _EGRESS_PROBES in the "
+            "shape Config.load expects, so the key stays covered by this guard"
+        )
+        raw: dict = {}
+        _set_dotted(raw, key, probe)
+        if _load_raw(tmp_path, raw, monkeypatch) == baseline:
+            inert.append(key)
 
-    assert not orphans, (
-        f"EGRESS_KEYS entries naming no Config field (key -> missing segment): {orphans} "
-        "— a renamed or removed field leaves the gate pinning nothing while still "
-        "looking complete.\n"
-        "DO NOT simply rename the entry to match the new FIELD name. EGRESS_KEYS "
-        "addresses the YAML surface (`_pop`/`_get` walk the raw dict), and "
-        "`Config.load` maps YAML to fields through hardcoded literals, so the two "
-        "can differ. Renaming the entry to a field the YAML does not use was "
-        "MEASURED in #582's review as: this test green, the gate broken, the "
-        "agent's value surviving a locked operator layer.\n"
-        "Instead: find what `Config.load` reads for this value (grep the loader for "
-        "the enclosing block) and make the entry name THAT key. If the YAML key is "
-        "genuinely gone, drop the entry. See techne#586."
+    assert not inert, (
+        f"EGRESS_KEYS entries the loader does not read: {inert} — setting them in "
+        "config.yaml changes nothing, so stripping them denies nothing while the "
+        "gate still looks complete (#504's shape).\n"
+        "Find what `Config.load` READS for this value (grep the loader for the "
+        "enclosing block) and make the entry name THAT key — not the dataclass "
+        "field name, which can differ (techne#586)."
     )
-    assert not unverifiable, (
-        f"EGRESS_KEYS entries this test cannot statically resolve: {unverifiable}. "
-        "A segment under a non-dataclass container (a dict keyed by runtime data) "
-        "cannot be checked against the surface, so the orphan guard does not cover "
-        "it. Either pin the container itself instead of a path through it, or add a "
-        "test that exercises the traversal against a real loaded config."
+
+
+def test_the_read_surface_guard_catches_an_entry_the_loader_cannot_read(tmp_path, monkeypatch):
+    """The false negative from #582's review, pinned so it cannot come back.
+
+    Renaming an EGRESS_KEYS entry to match a renamed FIELD rather than the YAML
+    key left the old dataclass guard green while the gate silently stopped
+    governing that destination. Behaviourally the mistake is unmissable: the
+    invented key changes nothing about the loaded Config.
+    """
+    baseline = _load_raw(tmp_path, {}, monkeypatch)
+
+    real: dict = {}
+    _set_dotted(real, "conflict.model", "openai/probe-conflict")
+    assert _load_raw(tmp_path, real, monkeypatch) != baseline, (
+        "precondition: the real key is read by the loader"
+    )
+
+    invented: dict = {}
+    _set_dotted(invented, "conflict.llm_model", "openai/probe-conflict")
+    assert _load_raw(tmp_path, invented, monkeypatch) == baseline, (
+        "a field-name rename the YAML never adopted must change NOTHING — that is "
+        "exactly the green-test/broken-gate case techne#586 exists to close"
     )
