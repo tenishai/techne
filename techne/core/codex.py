@@ -267,14 +267,28 @@ def _v3_purge_batch(conn, doomed: list[str]) -> None:
     marks = ",".join("?" * len(doomed))
     # Outbound edges go with their symbol.
     conn.execute(f"DELETE FROM edges WHERE from_symbol IN ({marks})", doomed)
-    # INBOUND edges are unresolved, not deleted. THE TARGET STATE IS WHAT A FRESH
-    # v3 WALK PRODUCES, and that is measured, not assumed: build a repo with a
-    # vendored `get` and a local `get`, index it fresh with site-packages skipped,
-    # and the edge is stored exactly as below — `to_symbol` NULL, status
-    # 'unresolved'. A migrated v2 db is then byte-identical to that fresh index in
-    # both `symbols` and `edges`. Deleting these edges instead would make a
-    # migrated db DIVERGE from a re-indexed one, which is the opposite of what a
-    # convergence migration is for.
+    # INBOUND edges are unresolved, not deleted.
+    #
+    # THE ARGUMENT THAT SETTLES IT IS DURABILITY, NOT SYMMETRY (#604 r5). Three
+    # earlier passes at this comment reached for "migration and re-index would
+    # disagree", which is true but weak — it invites the reply "so accept the
+    # divergence". The decisive fact is that DELETING BUYS NOTHING THAT SURVIVES.
+    # Measured on the delete variant: right after migrating, `callers()` on the
+    # local `get` returns []; then touch the file that references it, let the
+    # ordinary incremental index run ONCE, and the edge and its false caller are
+    # both back:
+    #
+    #     after DELETE migration:  callers(app/util.py::get) -> []
+    #     after ONE re-index:      callers(app/util.py::get) -> ['app/main.py::handler']
+    #
+    # So deleting is a cosmetic removal that self-reverses the first time anyone
+    # edits the referencing file, and it pays PERMANENT divergence from
+    # `techne codex index` for it.
+    #
+    # The target state is therefore what a fresh v3 walk produces, measured rather
+    # than assumed: index a repo with a vendored `get` and a local `get`, with
+    # site-packages skipped, and the edge is stored exactly as below — `to_symbol`
+    # NULL, status 'unresolved'.
     #
     # READ THIS BEFORE CONCLUDING THE RESULTING STATE IS SAFE — IT IS NOT, AND
     # THAT IS #606, NOT A BUG IN THIS MIGRATION. A NULL `to_symbol` arms

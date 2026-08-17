@@ -873,7 +873,7 @@ def test_v3_migrated_db_is_identical_to_a_fresh_index(tmp_path):
     def _dump(db):
         c = plain_connect(db)
         try:
-            syms = [r[0] for r in c.execute("SELECT id FROM symbols ORDER BY id")]
+            syms = [tuple(r) for r in c.execute("SELECT * FROM symbols ORDER BY id")]
             edges = [
                 tuple(r)
                 for r in c.execute(
