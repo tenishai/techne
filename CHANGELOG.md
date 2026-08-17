@@ -26,13 +26,32 @@ you cross depends on where you start:
 
 From **0.11/0.12** the six steps are: **19** adds `knowledge.vec_stale` (additive, defaults
 0); **20** builds a covering index on `outbox` — no data change, but its cost scales with
-accumulated synced rows, so the oldest store pays the most and this is the step that takes
-the time; **21** re-keys coord read receipts from the session UUID to `name:<display-name>`,
-which is why a relaunched session stops re-reading the whole backlog; **22** bumps the
-version so the additive `reflection_queue` table actually reaches existing databases;
-**23 rewrites `observations.timestamp` and `.event_at` in place across your entire history**,
-normalising three concurrently-written formats to one — the only step that touches existing
-data at scale; **24** backfills historical `sessions.ended_at` NULLs from last known activity.
+accumulated synced rows, so the oldest store pays the most; **21** namespaces existing coord
+read receipts under `uuid:` and switches new ones to `name:<display-name>`, so a relaunched
+**named** session stops re-reading the backlog — *after draining it one final time*, because
+old UUID-keyed receipts deliberately do not transfer (the UUID→name map lived in per-session
+sidecars that are gone, and inventing one would fabricate the very "who read what" claim a
+receipt exists to record); **22** bumps the version so the additive `reflection_queue` table
+actually reaches existing databases — the bump *is* the load-bearing part, since an additive
+schema change at an unchanged version reaches new databases only; **23 rewrites
+`observations.timestamp` and `.event_at` in place across your entire history**, normalising
+three concurrently-written formats to one — the only step that touches existing data at
+scale; **24** backfills historical `sessions.ended_at` NULLs from last known activity.
+
+Coming from **0.9/0.10** you also cross **18**, which redeploys the `observations_*` FTS
+triggers in their content+tags+kind form and **rebuilds `observations_fts`** over your whole
+history — on those databases `tags`/`kind` were silently never indexed.
+
+**That one-time backlog drain in step 21 is expected and is indistinguishable from a fault
+unless you know.** If a named session re-reads the coord backlog once after upgrading, that
+is the migration working as designed, not a failure.
+
+**IF YOU RUN A LOCKED OPERATOR LAYER AND SET `sources` IN `config.yaml`, MOVE IT INTO THE
+OPERATOR LAYER BEFORE UPGRADING.** As of #585 `sources` is a governed destination, so a
+locked layer now *discards* agent-supplied source paths instead of honouring them. **The
+drop is silent** — nothing logs it — so the symptom is "techne stopped ingesting my
+transcripts" with nothing pointing back at the upgrade. Installs with no operator layer
+(the default) are unaffected.
 
 The migrator takes an automatic backup before migrating (`guarded_migrate(backup=True)`),
 and since #574 that backup is reused within a transition and pruned afterward rather than
@@ -60,16 +79,6 @@ accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not
   regression gets waved through. What is tested is *our* usage, not SQLite's atomicity. Run
   by a dedicated `crash-recovery` job, because a suite excluded from the default run and
   executed by nothing decays quietly.
-
-- **Default-deny on unlisted sync adapters** (#389) — the issue asked for a flag refusing to
-  POST to non-local destinations; the audit it asked for found **no such POST**. techne has
-  zero network-capable imports, both built-in adapters are local, and the one outbound path
-  (litellm) is already governed. The real hole was `load_adapter`, which would import any
-  class registered under the `techne.sync_adapters` entry-point group and hand it every
-  outbox entry — full session and memory content. Unlisted adapters now require
-  `sync.allow_unlisted_adapter`, and the refusal precedes the import, because import-time
-  side effects are code execution. Within one OS user this is not a wall; it makes an
-  unlisted adapter impossible to load *silently*.
 
 - **A go-public runbook** (#556) — `docs/go-public-runbook.md`. Not yet executed; the flip is
   deliberately paused. Its load-bearing finding: **stopping the runner does not shorten the
@@ -125,6 +134,26 @@ accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not
 
 ### Security
 
+- **`sources` is now a governed destination — THE ONE ENTRY HERE THAT ASKS SOMETHING OF YOU**
+  (#585). `sources.claude_code_transcripts.paths` names arbitrary filesystem paths whose
+  *contents* are ingested into the observation ledger, and the rationale that already
+  governed `connections` applies to it word for word. **This changes enforcement, silently:**
+  under a locked operator layer, governed keys in `config.yaml` are *dropped*, so a locked
+  install now discards agent-supplied source paths where it previously honoured them.
+  Nothing logs the drop. **Action: if you run a locked operator layer with `sources` in
+  `config.yaml`, move it into the operator layer before upgrading** — see "Upgrading" above.
+  Default installs (no operator layer) are unaffected.
+
+- **Unlisted sync adapters are refused by default** (#389) — `load_adapter` would import any
+  class registered under the `techne.sync_adapters` entry-point group and hand it every
+  outbox entry, i.e. full session and memory content. Loading arbitrary registered code that
+  receives memory is an egress decision, not a plugin lookup. Now gated behind
+  `sync.allow_unlisted_adapter`, and the refusal *precedes* the import, because import-time
+  side effects are code execution. Within one OS user this is not a wall — it makes an
+  unlisted adapter impossible to load *silently*. Filed here rather than under Added: the
+  audit it came from found techne has **zero network-capable imports**, so there was no POST
+  to gate and this is hardening, not a feature.
+
 - **Fork PRs could reach the self-hosted runner** (#556, #570) — `pull_request` plus a
   self-hosted pool is remote code execution on the runner host. The guard now fails *closed*;
   the previous one failed open on a typo'd property, and for `pull_request` GitHub evaluates
@@ -145,10 +174,6 @@ accumulating. Taking your own copy of `~/.techne/` first is belt-and-braces, not
   key and without it, and require the result to differ. Found on the way and filed
   separately (#620): `Config.load` reads a `conflict` block that `save` never writes, so a
   hand-written one is dropped by any load→save cycle.
-
-- **`sources` is now a governed destination** (#585) — arbitrary filesystem paths whose
-  *contents* are ingested. **This changes enforcement:** a locked operator layer now
-  discards agent-supplied source paths.
 
 - **A recycled pid read as a present session** (#587) — presence was TTL-free and pid-only,
   the exact combination the neighbouring code warns against. Demotion now requires *positive*
