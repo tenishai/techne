@@ -32,8 +32,19 @@ techne init
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
 > Upgrade later with `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
-> (a plain `pipx install` on an already-installed techne refuses without `--force`). The
-> `git clone` + `pip install -e .` flow above is for **developing** techne (live local edits).
+> (a plain `pipx install` on an already-installed techne refuses without `--force`). **After an
+> upgrade, run `techne skills install`** — an upgrade does not re-run `techne init`, so the
+> bundled procedures below are not refreshed on their own.
+> The `git clone` + `pip install -e .` flow above is for **developing** techne (live local edits).
+
+> **Bundled procedures.** `techne init` also installs two operator procedures as slash
+> commands: **`/self-care`** (hygiene pass — sweep the outbox, prune backups and snapshots,
+> drain the rails, reclaim disk) and **`/techne-promote`** (turn accumulated observations
+> into reviewed knowledge without an API key). They ship *with* techne rather than from a
+> skills marketplace because they drive its CLI and know the store layout of the version
+> they came with — a procedure written for 0.12 can be wrong for 0.15. `techne skills status`
+> shows what you have; a copy you have edited is reported, never silently overwritten.
+> Install without them via `techne init --no-skills`.
 
 ---
 
