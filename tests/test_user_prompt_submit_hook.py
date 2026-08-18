@@ -495,6 +495,110 @@ class TestInjectedTypeLabel:
         assert "- ⟦techne#42⟧ [fact] z" in out
 
 
+# ---------------------------------------------------------------------------
+# Startup directive (techne#643) — once per session, gated on pending work.
+#
+# The hook-level contract is what's covered here: WHEN the block fires, that it
+# fires at most once per session, and that it stays silent when there is nothing
+# to drain. `pending_reflection` is patched rather than fixtured because it has
+# its own tests — what would drift undetected is the gate around it, not it.
+# ---------------------------------------------------------------------------
+
+
+def _patch_pending(monkeypatch, result):
+    """Point the startup block's signal at `result` (a list of session dicts)."""
+    monkeypatch.setattr("techne.core.reflect.pending_reflection", lambda config, **kw: result)
+
+
+def _state(name: str):
+    """Read one extension_state payload from the TECHNE_HOME db."""
+    from techne.config import Config
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    conn = connect(Config.load().db_path)
+    try:
+        return get_state(conn, name)
+    finally:
+        conn.close()
+
+
+def test_startup_directive_off_by_default(home, monkeypatch, capsys):
+    """Default-OFF, like every other injecting block on this hook."""
+    _write_config(home, per_turn_recall=False, per_turn_seed=False)
+    _patch_pending(monkeypatch, [{"session_id": "s1", "observations": 40}])
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    assert out == ""
+
+
+def test_startup_directive_fires_on_first_prompt_when_work_pending(home, monkeypatch, capsys):
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "startup drain" in ctx
+    assert "~28 unreflected observation" in ctx
+    # The two constraints that make the drain correct rather than merely present.
+    assert "techne_reflect_emit" in ctx
+    assert "#646" in ctx
+
+
+def test_startup_directive_fires_at_most_once_per_session(home, monkeypatch, capsys):
+    """The whole point of the extension_state gate."""
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    first = _run(monkeypatch, capsys, {"prompt": "one", "session_id": "s1"})
+    assert "startup drain" in first
+    second = _run(monkeypatch, capsys, {"prompt": "two", "session_id": "s1"})
+    assert second == ""
+
+
+def test_a_new_session_re_arms_the_directive(home, monkeypatch, capsys):
+    """Session-scoped key, so a new session needs no cleanup pass to re-arm."""
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    _run(monkeypatch, capsys, {"prompt": "one", "session_id": "s1"})
+    out = _run(monkeypatch, capsys, {"prompt": "one", "session_id": "s2"})
+    assert "startup drain" in out
+
+
+def test_no_pending_work_emits_nothing_but_still_closes_the_gate(home, monkeypatch, capsys):
+    """Silence is the common case, and it must not cost a DB read every turn.
+
+    The marker is written even though nothing was injected — "once per session",
+    not "once per session that had work". Without it a quiet session re-runs the
+    pending query on every single prompt.
+    """
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [])
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    assert out == ""
+    assert _state("startup_directive:s1") == {"fired": False, "sessions": 0}
+
+
+def test_missing_session_id_stays_silent(home, monkeypatch, capsys):
+    """No session id means no gate is possible; an ungated directive would fire
+    on EVERY prompt, which is the failure mode this feature exists to avoid."""
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    out = _run(monkeypatch, capsys, {"prompt": "hello"})
+    assert out == ""
+
+
+def test_startup_failure_never_costs_the_turn(home, monkeypatch, capsys):
+    """A chore nudge is the least important thing this hook does."""
+    _write_config(home, startup_directive=True, per_turn_seed=True)
+
+    def _boom(config, **kw):
+        raise RuntimeError("signal unavailable")
+
+    monkeypatch.setattr("techne.core.reflect.pending_reflection", _boom)
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    # Exit 0 is asserted inside _run; the seed block must survive the failure.
+    assert "seed check" in out
+    assert "startup drain" not in out
+
+
 def test_drop_pull_only_ignores_rows_from_other_tables(tmp_path):
     """techne#608: the id lookup reads `knowledge`, and ids are PER-TABLE.
 
