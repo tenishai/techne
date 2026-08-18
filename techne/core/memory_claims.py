@@ -23,7 +23,6 @@ from techne.core._resident import extract_json_array
 from techne.core._resident import prompt_hash as _prompt_hash
 from techne.core.curated import live_curated_memory
 from techne.core.state import deed_log
-from techne.platforms.claude_code.paths import memory_project_slug
 
 log = get_logger(__name__)
 
@@ -137,6 +136,13 @@ def claims_emit(
       deed_log_capped — True when the pull cap was hit (older deeds omitted; narrow --since)
       memory_files    — list of source_path strings ([] when memory_present=False)
     """
+    # LAZY, NOT STRUCTURAL (techne#626, part of #57). This is core logic and must not
+    # bind a platform module at import time — the 17 other platform imports in this
+    # codebase are already inside function bodies for exactly that reason, and these
+    # two were the last top-level ones outside techne/platforms/. Lazy keeps the
+    # dependency soft: it fires only on the Claude Code path.
+    from techne.platforms.claude_code.paths import memory_project_slug
+
     cwd = Path(cwd) if cwd else Path.cwd()
     slug = memory_project_slug(cwd)
 
