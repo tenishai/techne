@@ -96,6 +96,31 @@ non-editable pinned install, use the direct-reference form:
 
 **Upgrading an existing `[vectors]` DB to Python 3.14:** switching interpreters swaps the active embedding backend (fastembed/MiniLM-384 → model2vec/potion-256) — the two are not comparable vector spaces, so existing embeddings are dropped on next backfill and semantic search silently degrades to FTS-only until you re-embed. Run `techne vectors status` to check, then `techne vectors backfill` to restore the vector channel.
 
+**The backend is your choice, not just the interpreter's.** Auto-selection is a default, not a constraint — set it explicitly and it wins on any Python:
+
+```yaml
+search:
+  embedding_backend: model2vec   # or: fastembed   ("" = auto-select, the default)
+  embedding_model: ""            # optional; defaults per backend
+```
+
+`model2vec` works on **every supported Python (3.11+)**, not only 3.14 — the `<3.14` fastembed default exists because `onnxruntime` had no 3.14 wheel, which is a fact about *onnxruntime*, not a judgment that fastembed is better below it. Verified 2026-08-17: `model2vec` 0.9.0 installs and runs on 3.13.
+
+**It costs disk, and the difference is large.** Measured on a clean venv installing `techne[recommended] @ v0.14.0`:
+
+| backend | install | why |
+|---|---|---|
+| `fastembed` (py<3.14 default) | **289 MB** | `onnxruntime` 74M + `sympy` 72M + `numpy` 37M + `PIL` 15M + `tokenizers` 8.8M |
+| `model2vec` (py3.14 default) | **85 MB** | numpy-only static embeddings; no onnxruntime, no sympy, no PIL |
+
+The techne wheel itself is **676 KB**; effectively all of the difference is the embedding backend's dependency tree.
+
+**Choosing `model2vec` on py<3.14 is a real decision with a real cost:** it is 256-d against fastembed's 384-d, so the same "not comparable vector spaces" warning above applies — an existing store must be re-embedded (`techne vectors backfill`) or semantic search silently degrades to FTS-only. Set it before you build up a vector channel, or budget for the re-embed. On a fresh install it is free.
+
+Note the smaller model was chosen on merit rather than only availability: `potion-base-8M` (256-d) measured *better* than `potion-retrieval-32M` (512-d) for natural-language paraphrase queries, which is how recall is actually used.
+
+`embedding_backend: ""` means **auto-select, not disabled** — so read the live backend from `techne vectors status` rather than inferring it from an empty config value.
+
 ---
 
 ## Quick start — Claude Code integration
