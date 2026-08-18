@@ -285,14 +285,20 @@ def _techne_send(args: dict, config: Config) -> dict:
 
     sid = _resolve_session_id(args)
     if not sid:
-        raise ValueError("techne_send: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+        raise ValueError(
+            "techne_send: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)"
+        )
     body = args.get("body")
     if not body:
         raise ValueError("techne_send requires 'body' (non-empty)")
     to = args.get("to") or coord.DEFAULT_CHANNEL
     mid = coord.send(
-        config.db_path, sid, body, to=to,
-        thread_id=args.get("thread_id"), reply_to=args.get("reply_to"),
+        config.db_path,
+        sid,
+        body,
+        to=to,
+        thread_id=args.get("thread_id"),
+        reply_to=args.get("reply_to"),
     )
     return {"id": mid, "from_session": sid, "to": to}
 
@@ -302,7 +308,9 @@ def _techne_coord_threads(args: dict, config: Config) -> dict:
 
     sid = _resolve_session_id(args)
     if not sid:
-        raise ValueError("techne_coord_threads: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+        raise ValueError(
+            "techne_coord_threads: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)"
+        )
     return {
         "session_id": sid,
         "threads": coord.threads(config.db_path, sid, limit=args.get("limit", 20)),
@@ -314,7 +322,9 @@ def _techne_inbox(args: dict, config: Config) -> dict:
 
     sid = _resolve_session_id(args)
     if not sid:
-        raise ValueError("techne_inbox: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+        raise ValueError(
+            "techne_inbox: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)"
+        )
     msgs = coord.inbox(config.db_path, sid, mark_read=bool(args.get("mark_read", False)))
     return {
         "session_id": sid,
@@ -329,7 +339,9 @@ def _techne_mark_read(args: dict, config: Config) -> dict:
 
     sid = _resolve_session_id(args)
     if not sid:
-        raise ValueError("techne_mark_read: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)")
+        raise ValueError(
+            "techne_mark_read: no session_id (pass 'session_id' or set CLAUDE_CODE_SESSION_ID)"
+        )
     n = coord.mark_read(config.db_path, sid, args.get("message_ids"))
     return {"marked_read": n}
 
@@ -736,7 +748,7 @@ TOOLS = [
         "description": (
             "Compute the transitive reachability (blast radius) of a Codex symbol. "
             "direction defaults to `in`=what reaches this symbol (dependents) — the "
-            "\"what breaks if I change this\" impact set; `out`=what this symbol reaches "
+            '"what breaks if I change this" impact set; `out`=what this symbol reaches '
             "(dependencies). Uses recursive CTE BFS over the call/import graph. "
             "tests/fixtures/** nodes are excluded by default (name-collision noise in the "
             "v1 name-based edge model; set include_fixtures=true to keep them). Scoped to "
@@ -1551,8 +1563,11 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     db_path = _codex_repo_db(args, config)
     if db_path is None:
         return {
-            "symbol_id": symbol_id, "direction": direction, "depth": depth,
-            "nodes": [], "notice": _NO_REPO_HINT,
+            "symbol_id": symbol_id,
+            "direction": direction,
+            "depth": depth,
+            "nodes": [],
+            "notice": _NO_REPO_HINT,
         }
     # Resolve a bare name / reject an unresolvable id, so a mistyped argument
     # returns an explicit error instead of an empty node list that reads as
@@ -1562,20 +1577,23 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     except SymbolResolutionError as exc:
         result = {
             "symbol_id": args.get("symbol_id", ""),
-            "direction": direction, "depth": depth,
-            "nodes": [], "error": str(exc),
+            "direction": direction,
+            "depth": depth,
+            "nodes": [],
+            "error": str(exc),
         }
         if exc.candidates:
-            result["candidates"] = [
-                {"id": c["id"], "file": c["file"]} for c in exc.candidates[:10]
-            ]
+            result["candidates"] = [{"id": c["id"], "file": c["file"]} for c in exc.candidates[:10]]
             # Signal the cap rather than silently truncating (parity with the
             # CLI's "... and N more"; the total is already in the error text).
             if len(exc.candidates) > 10:
                 result["candidates_truncated"] = True
         return result
     raw = reachable(
-        db_path, symbol_id, direction=direction, max_depth=depth,
+        db_path,
+        symbol_id,
+        direction=direction,
+        max_depth=depth,
         exclude_fixtures=not include_fixtures,
     )
     rows = annotate_freshness(db_path, raw)
@@ -1630,135 +1648,14 @@ def _techne_reflect_emit(args: dict, config: Config) -> dict:
     session does the work. Defaults to the most recent session with unreflected
     work (skipping empty/already-emitted sessions), and caps the batch so a large
     session can't exceed the transport's token cap (tenishai/techne#267).
+
+    Thin wrapper: the pass itself lives in core.reflect.emit_reflection_pass, shared
+    with `techne reflect emit`. It was inlined here, and the CLI's separate
+    implementation silently skipped the cursor advance (tenishai/techne#645).
     """
-    from techne.core.database import connect
-    from techne.core.extension_state import get_state, set_state
-    from techne.core.reflect import (
-        emit_reflection_batch,
-        load_session_for_reflection,
-        pending_reflection,
-    )
+    from techne.core.reflect import emit_reflection_pass
 
-    session_id = args.get("session_id")
-    if not session_id:
-        # Default to the most-recent session that actually has unreflected work,
-        # NOT simply the newest session by started_at: the canonical reflect-before-
-        # restart call fires while a fresh (empty) session is the newest, so the raw
-        # "ORDER BY started_at DESC" default landed on a count:0 session and forced a
-        # manual hunt for the real id (tenishai/techne#267).
-        pend = pending_reflection(config)
-        session_id = pend[0]["session_id"] if pend else None
-    if not session_id:
-        return {"batch": [], "count": 0, "note": "no session with unreflected work"}
-
-    threads, observations = load_session_for_reflection(config, session_id)
-    batch = emit_reflection_batch(config, session_id, threads, observations)
-    total = len(batch)
-
-    # Per-thread emit cursor (techne#269/#236): a session with more reflectable threads
-    # than the emit cap must drain losslessly across passes — the #268 marker collapsed
-    # the whole session to "emitted" on the first partial emit, so threads past the cap
-    # were never reflected. Load the prompt_hashes already delivered and exclude them, so
-    # each pass takes the NEXT slice of unemitted threads: no overlap, no loss. The cursor
-    # is keyed on prompt_hash — the stable, always-present per-thread id (thread_id can be
-    # NULL for unpersisted threads) and the same key #236 dedups candidates on.
-    conn = connect(config.db_path)
-    try:
-        marker = get_state(conn, f"reflect:emitted:{session_id}")
-    finally:
-        conn.close()
-    already = set(marker.get("emitted", [])) if marker else set()
-    # Stability invariant: prompt_hash is derived from the rendered prompt INCLUDING the
-    # per-thread existing-knowledge block (reflect._build_prompt), so it must not shift
-    # between cursor passes mid-drain — otherwise an already-emitted thread re-appears.
-    # This holds on the DEFAULT path (write_to='candidates'): that path never mutates live
-    # knowledge, and a completed session's observations are frozen, so the hash is stable.
-    # KNOWN LIVE-MODE LIMITATION (write_to='live'): promoting knowledge mid-drain can alter
-    # a drained thread's existing-knowledge block, changing its prompt_hash. The cursor
-    # would then re-emit it, and #236's (prompt_hash, content) dedup would be sidestepped
-    # (duplicate candidate / re-promotion). Re-engineering the cursor key is out of scope
-    # for this PR; document here as a known limitation of the live write path.
-    batch = [item for item in batch if item["prompt_hash"] not in already]
-
-    # Bound the payload so a large session can't produce a batch that exceeds the MCP
-    # transport's token cap — an oversized emit used to error out AND still mark the
-    # session reflected, silently dropping the whole session's memory (techne#267).
-    # `is not None` (not truthiness) so an explicit limit=0 is honored as "emit none"
-    # rather than silently reinterpreted as the default.
-    limit = args.get("limit")
-    if limit is None:
-        limit = config.reflect.emit_max_threads
-    batch = batch[:limit]
-    # Trim by serialized size to a char budget (proxy for the transport token cap),
-    # keeping >=1 prompt so a lone huge thread still makes progress. Single O(n) pass
-    # — accumulate a prefix that fits — rather than re-dumping the whole batch per pop.
-    max_chars = config.reflect.emit_max_chars
-    kept, running = [], 2  # 2 = the enclosing "[]"
-    for item in batch:
-        item_len = len(json.dumps(item)) + 1  # + separator headroom
-        if kept and running + item_len > max_chars:
-            break
-        kept.append(item)
-        running += item_len
-    batch = kept if kept else batch[:1]
-
-    # Cursor-relative truncation: `remaining` counts threads NOT YET emitted across all
-    # passes (total minus the cumulative emitted set), so a multi-pass drain reports its
-    # true shortfall and reaches 0 only when the whole session is done (techne#269).
-    newly = [item["prompt_hash"] for item in batch]
-    emitted_ids = sorted(already | set(newly))
-    truncated = len(emitted_ids) < total
-    remaining = total - len(emitted_ids)
-    # A lone thread that alone exceeds the budget can't be delivered whole. Marking
-    # the session emitted here would silently skip it — footgun 3, unchanged (Prudence,
-    # #268). Detect it, leave the cursor UNADVANCED so the auto-trigger keeps surfacing
-    # it, and flag the payload loudly. (True per-thread chunking of one oversized prompt
-    # is still out of scope; the cursor drains whole threads only.)
-    oversized = len(batch) == 1 and len(json.dumps(batch)) > max_chars
-    delivered = bool(batch) and not oversized
-
-    # Advance the cursor: record the cumulative set of emitted thread prompt_hashes plus
-    # the session's total, so pending_reflection re-surfaces the session until every
-    # thread is drained (techne#269) and re-emits skip already-delivered threads. This is
-    # ALSO the exactly-once reflected-marker (techne#236 Gap 2) — one unified marker, not
-    # two. `count`/`remaining` are kept for continuity with the #268 payload. We do NOT
-    # advance when nothing deliverable was produced (empty or oversized single thread).
-    if delivered:
-        conn = connect(config.db_path)
-        try:
-            set_state(
-                conn,
-                f"reflect:emitted:{session_id}",
-                {
-                    "emitted": emitted_ids,
-                    "total": total,
-                    "remaining": remaining,
-                    "count": len(emitted_ids),
-                },
-            )
-        finally:
-            conn.close()
-
-    result = {"session_id": session_id, "count": len(batch), "batch": batch}
-    if truncated:
-        result["truncated"] = True
-        result["remaining"] = remaining
-        result["note"] = (
-            f"Session has {total} threads; emitted {len(batch)} this pass (cap={limit}). "
-            f"{remaining} not yet emitted — re-emit with the same session_id (the "
-            "per-thread cursor auto-resumes from where this pass stopped) to drain the rest."
-        )
-    if oversized:
-        result["oversized"] = True
-        result["note"] = (
-            f"A single thread's serialized prompt exceeds emit_max_chars ({max_chars}) "
-            "and can't be delivered whole; the session cursor is left UNADVANCED so it "
-            "isn't silently skipped. Needs per-thread prompt chunking (#269 follow-up). "
-            "Because the cursor drains threads IN ORDER, an oversized lone thread also "
-            "blocks every thread after it in the session — the session remains pending "
-            "until per-thread chunking lands (#269 follow-up)."
-        )
-    return result
+    return emit_reflection_pass(config, args.get("session_id"), limit=args.get("limit"))
 
 
 def _techne_reflect_ingest(args: dict, config: Config) -> dict:
@@ -1770,13 +1667,10 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
     (`techne reflect review`); they only touch live knowledge/identity when
     config.reflect.write_to == 'live'. Call once per answered thread.
     """
-    from techne.core.reflect import ingest_reflection_response
+    from techne.core.reflect import ingest_one_and_drain
 
     response = args.get("response", "")
-    if not isinstance(response, str):
-        response = json.dumps(response) if response else ""
-
-    # NO PRE-JUDGING THE INPUT HERE (techne#485). This surface used to short-circuit
+    # Hand the raw response straight to the core. An earlier wrapper here special-cased
     # a whitespace/empty response with {"note": "nothing to ingest"} and no `errors`
     # key — while the core it wraps calls that identical input `parse_failures=1,
     # errors=1` ("empty response"). That erased the exact distinction #465 exists to
@@ -1784,25 +1678,17 @@ def _techne_reflect_ingest(args: dict, config: Config) -> dict:
     # actually talks through. Hand every response to the core and report what it
     # reports; the counts shape then comes from new_ingest_counts() upstream and
     # cannot drift from this call site again.
-    thread_id = args.get("thread_id", "")
-    result = ingest_reflection_response(
+    #
+    # The drain half now lives in ingest_one_and_drain, shared with `techne reflect
+    # ingest` — it was inlined here, so the CLI path never marked debt paid (#644).
+    return ingest_one_and_drain(
         config,
         args.get("session_id", ""),
-        thread_id,
+        args.get("thread_id", ""),
         args.get("prompt_hash", ""),
         response,
         model_used=args.get("model_used", "agent-assisted"),
     )
-    # Drain ONLY on a pass that actually happened. parse_failures marks the
-    # branch whose own comment reads "THE PASS DID NOT HAPPEN" (reflect.py:645) —
-    # draining there stamps a DISCARDED reflection as paid, permanently, since
-    # drain is guarded on drained_at IS NULL. errors covers the same ground for
-    # any other failure mode.
-    if thread_id and not result.get("parse_failures") and not result.get("errors"):
-        from techne.core.reflect import drain_reflection_queue
-
-        result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
-    return result
 
 
 def _techne_consolidate_emit(args: dict, config: Config) -> dict:

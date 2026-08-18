@@ -44,6 +44,7 @@ class FaithfulnessGateError(ValueError):
     ``faithfulness_warning`` so the operator knows exactly what the concern was.
     """
 
+
 PROMPT_TEMPLATE = """You are reviewing a thread of work an AI agent just finished.
 Decide what (if anything) should be saved for the agent's future sessions.
 
@@ -251,9 +252,7 @@ def parse_response(raw: str, max_items: int) -> ParsedResponse:
                 confidence=confidence,
             )
         )
-    return ParsedResponse(
-        out, failure=None, dropped=(len(considered) - len(out)) + truncated
-    )
+    return ParsedResponse(out, failure=None, dropped=(len(considered) - len(out)) + truncated)
 
 
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
@@ -657,6 +656,291 @@ def emit_reflection_batch(
     return batch
 
 
+def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
+    """Undrained queue rows for *session_id* that no emit can produce a prompt for.
+
+    THE #646 VISIBILITY SURFACE. `emittable_thread_ids` is the single source of
+    truth for "is this thread owed reflection", but it is evaluated TWICE against
+    separately-derived observation buckets — once at session_end (lifecycle) and
+    again here at emit time. When the two disagree the queue row is real and the
+    prompt is impossible, so the row can never be drained by doing the work.
+
+    Deliberately does NOT drain them. Draining an unemittable row restores a clean
+    banner and destroys the only evidence the class exists, which is exactly how
+    it survived #527 r4. Report, don't sweep.
+    """
+    threads, observations = load_session_for_reflection(config, session_id)
+    emittable = set(emittable_thread_ids(config, session_id, threads, observations))
+    conn = connect(config.db_path)
+    try:
+        queued = [
+            r["thread_id"]
+            for r in conn.execute(
+                "SELECT thread_id FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NULL",
+                (session_id,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    return [t for t in queued if t not in emittable]
+
+
+def reflection_debt_stats(config: Config) -> dict:
+    """Queue-level counts: what is owed, what has been paid, and how old the debt is.
+
+    Separate from candidate_stats (which counts PROPOSALS). This counts the LEDGER
+    — the record #514 was filed on. `pending` is what the SessionStart banner
+    reports; `unemittable` is the #646 subset of it that no amount of reflecting
+    can clear.
+    """
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute(
+            "SELECT count(*) AS total, "
+            "       sum(drained_at IS NULL) AS pending, "
+            "       min(CASE WHEN drained_at IS NULL THEN enqueued_at END) AS oldest "
+            "  FROM reflection_queue"
+        ).fetchone()
+        sessions = [
+            r["session_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT session_id FROM reflection_queue WHERE drained_at IS NULL"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    pending = row["pending"] or 0
+    stats = {
+        "total": row["total"] or 0,
+        "pending": pending,
+        "drained": (row["total"] or 0) - pending,
+        "sessions_pending": len(sessions),
+        "oldest_pending": row["oldest"],
+    }
+    return stats
+
+
+def emit_reflection_pass(
+    config: Config,
+    session_id: str | None = None,
+    *,
+    limit: int | None = None,
+) -> dict:
+    """Render one cursor-aware pass of a session's reflection prompts.
+
+    THE ONE EMIT IMPLEMENTATION. Both `techne_reflect_emit` (MCP) and
+    `techne reflect emit` (CLI) call this — #645 exists because they did not, and
+    the CLI path silently skipped the cursor advance every one of them assumed was
+    happening. A second implementation of a rail drifts on its BOOKKEEPING first,
+    because that half is invisible to whoever runs it.
+
+    Returns {session_id, count, batch} plus, when relevant, truncated/remaining/
+    oversized/note/unemittable_queued.
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id:
+        # Default to the most-recent session that actually has unreflected work,
+        # NOT simply the newest session by started_at: the canonical reflect-before-
+        # restart call fires while a fresh (empty) session is the newest, so the raw
+        # "ORDER BY started_at DESC" default landed on a count:0 session and forced a
+        # manual hunt for the real id (tenishai/techne#267).
+        pend = pending_reflection(config)
+        session_id = pend[0]["session_id"] if pend else None
+    if not session_id:
+        return {"batch": [], "count": 0, "note": "no session with unreflected work"}
+
+    threads, observations = load_session_for_reflection(config, session_id)
+    batch = emit_reflection_batch(config, session_id, threads, observations)
+    total = len(batch)
+
+    # Per-thread emit cursor (techne#269/#236): a session with more reflectable threads
+    # than the emit cap must drain losslessly across passes — the #268 marker collapsed
+    # the whole session to "emitted" on the first partial emit, so threads past the cap
+    # were never reflected. Load the prompt_hashes already delivered and exclude them, so
+    # each pass takes the NEXT slice of unemitted threads: no overlap, no loss. The cursor
+    # is keyed on prompt_hash — the stable, always-present per-thread id (thread_id can be
+    # NULL for unpersisted threads) and the same key #236 dedups candidates on.
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    already = set(marker.get("emitted", [])) if marker else set()
+    # Stability invariant: prompt_hash is derived from the rendered prompt INCLUDING the
+    # per-thread existing-knowledge block (reflect._build_prompt), so it must not shift
+    # between cursor passes mid-drain — otherwise an already-emitted thread re-appears.
+    # This holds on the DEFAULT path (write_to='candidates'): that path never mutates live
+    # knowledge, and a completed session's observations are frozen, so the hash is stable.
+    # KNOWN LIVE-MODE LIMITATION (write_to='live'): promoting knowledge mid-drain can alter
+    # a drained thread's existing-knowledge block, changing its prompt_hash. The cursor
+    # would then re-emit it, and #236's (prompt_hash, content) dedup would be sidestepped
+    # (duplicate candidate / re-promotion).
+    batch = [item for item in batch if item["prompt_hash"] not in already]
+
+    # Bound the payload so a large session can't produce a batch that exceeds the MCP
+    # transport's token cap — an oversized emit used to error out AND still mark the
+    # session reflected, silently dropping the whole session's memory (techne#267).
+    # `is not None` (not truthiness) so an explicit limit=0 is honored as "emit none"
+    # rather than silently reinterpreted as the default.
+    if limit is None:
+        limit = config.reflect.emit_max_threads
+    batch = batch[:limit]
+    # Trim by serialized size to a char budget (proxy for the transport token cap),
+    # keeping >=1 prompt so a lone huge thread still makes progress. Single O(n) pass
+    # — accumulate a prefix that fits — rather than re-dumping the whole batch per pop.
+    max_chars = config.reflect.emit_max_chars
+    kept, running = [], 2  # 2 = the enclosing "[]"
+    for item in batch:
+        item_len = len(json.dumps(item)) + 1  # + separator headroom
+        if kept and running + item_len > max_chars:
+            break
+        kept.append(item)
+        running += item_len
+    batch = kept if kept else batch[:1]
+
+    # Cursor-relative truncation: `remaining` counts threads NOT YET emitted across all
+    # passes (total minus the cumulative emitted set), so a multi-pass drain reports its
+    # true shortfall and reaches 0 only when the whole session is done (techne#269).
+    newly = [item["prompt_hash"] for item in batch]
+    emitted_ids = sorted(already | set(newly))
+    truncated = len(emitted_ids) < total
+    remaining = total - len(emitted_ids)
+    # A lone thread that alone exceeds the budget can't be delivered whole. Marking
+    # the session emitted here would silently skip it — footgun 3, unchanged (Prudence,
+    # #268). Detect it, leave the cursor UNADVANCED so the auto-trigger keeps surfacing
+    # it, and flag the payload loudly.
+    oversized = len(batch) == 1 and len(json.dumps(batch)) > max_chars
+    delivered = bool(batch) and not oversized
+
+    # Advance the cursor: record the cumulative set of emitted thread prompt_hashes plus
+    # the session's total, so pending_reflection re-surfaces the session until every
+    # thread is drained (techne#269) and re-emits skip already-delivered threads. This is
+    # ALSO the exactly-once reflected-marker (techne#236 Gap 2) — one unified marker, not
+    # two. We do NOT advance when nothing deliverable was produced.
+    if delivered:
+        conn = connect(config.db_path)
+        try:
+            set_state(
+                conn,
+                f"reflect:emitted:{session_id}",
+                {
+                    "emitted": emitted_ids,
+                    "total": total,
+                    "remaining": remaining,
+                    "count": len(emitted_ids),
+                },
+            )
+        finally:
+            conn.close()
+
+    result = {"session_id": session_id, "count": len(batch), "batch": batch}
+    if truncated:
+        result["truncated"] = True
+        result["remaining"] = remaining
+        result["note"] = (
+            f"Session has {total} threads; emitted {len(batch)} this pass (cap={limit}). "
+            f"{remaining} not yet emitted — re-emit with the same session_id (the "
+            "per-thread cursor auto-resumes from where this pass stopped) to drain the rest."
+        )
+    if oversized:
+        result["oversized"] = True
+        result["note"] = (
+            f"A single thread's serialized prompt exceeds emit_max_chars ({max_chars}) "
+            "and can't be delivered whole; the session cursor is left UNADVANCED so it "
+            "isn't silently skipped. Needs per-thread prompt chunking (#269 follow-up). "
+            "Because the cursor drains threads IN ORDER, an oversized lone thread also "
+            "blocks every thread after it in the session — the session remains pending "
+            "until per-thread chunking lands (#269 follow-up)."
+        )
+    # #646: surface queue rows this session owes that no emit can render. Reported,
+    # never drained — see unemittable_queue_rows.
+    stuck = unemittable_queue_rows(config, session_id)
+    if stuck:
+        result["unemittable_queued"] = len(stuck)
+        result["unemittable_note"] = (
+            f"{len(stuck)} queued thread(s) for this session are below "
+            f"reflect.min_observations_per_thread ({config.reflect.min_observations_per_thread}) "
+            "at emit time, so no prompt can be rendered for them and reflecting can never "
+            "drain them (tenishai/techne#646). They are left queued deliberately."
+        )
+    return result
+
+
+def ingest_one_and_drain(
+    config: Config,
+    session_id: str,
+    thread_id: str,
+    prompt_hash: str,
+    raw_response: str,
+    *,
+    model_used: str = "agent-assisted",
+) -> dict:
+    """Ingest one answered prompt AND mark its reflection debt paid.
+
+    THE ONE INGEST-PLUS-BOOKKEEPING PATH (#644). The drain half lived only in the
+    MCP tool, so `techne reflect ingest` — the path the documented /techne-promote
+    skill actually runs — wrote candidates and left every queue row undrained
+    forever. Both callers come here now.
+
+    Drains ONLY on a pass that actually happened. parse_failures marks the branch
+    whose own comment reads "THE PASS DID NOT HAPPEN" (see ingest_reflection_response)
+    — draining there stamps a DISCARDED reflection as paid, permanently, since drain
+    is guarded on drained_at IS NULL. errors covers the same ground for any other
+    failure mode.
+    """
+    # Tolerate an inlined array: an agent calling this through MCP can hand back a
+    # real JSON list rather than the string the parser expects. This normalization
+    # lived in the MCP wrapper, which is precisely why it was easy to drop when the
+    # two paths were unified — it belongs on the shared path, not on one caller.
+    if not isinstance(raw_response, str):
+        raw_response = json.dumps(raw_response) if raw_response else ""
+    result = ingest_reflection_response(
+        config,
+        session_id,
+        thread_id,
+        prompt_hash,
+        raw_response,
+        model_used=model_used,
+    )
+    if thread_id and not result.get("parse_failures") and not result.get("errors"):
+        result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
+    return result
+
+
+def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
+    """Ingest a whole emit batch the agent has filled in. Returns summed counts.
+
+    The file-round-trip half of the no-API-key path: `techne reflect emit -o f`,
+    the agent fills each item's `raw_response`, `techne reflect ingest f`. An item
+    whose raw_response is blank is a deliberately unanswered thread, not an error —
+    it is skipped WITHOUT draining, so the debt stays owed.
+    """
+    totals = new_ingest_counts()
+    totals["skipped"] = 0
+    totals["drained"] = 0
+    for it in items:
+        raw = it.get("raw_response")
+        if not isinstance(raw, str):
+            raw = json.dumps(raw) if raw else ""  # tolerate an inlined array
+        if not raw.strip():  # noqa: E501 - blank means the agent declined this thread
+            totals["skipped"] += 1
+            continue
+        counts = ingest_one_and_drain(
+            config,
+            it.get("session_id", ""),
+            it.get("thread_id", "") or "",
+            it.get("prompt_hash", ""),
+            raw,
+            model_used=it.get("model_used", "agent-assisted"),
+        )
+        totals["drained"] += counts.pop("reflection_debt_drained", 0)
+        for k, v in counts.items():
+            totals[k] += v
+    return totals
+
+
 def effective_write_to(config: Config) -> str:
     """Return the effective write_to mode honoring the coexistence posture.
 
@@ -909,6 +1193,31 @@ def list_candidates(
         conn.close()
 
 
+def _card_type_or_fact(ktype: str, tags: str) -> str:
+    """Refuse to mint a `document_card` that has no `doc:<id>` pointer (#633).
+
+    `document_card` is a MANAGED type: the card summary pass owns it and supplies
+    the librarian pointer. Neither reflect-promote nor consolidate-merge has a
+    document in hand, so both could mint a card with nothing behind it — four such
+    rows exist (knowledge 361, 366, 624, 625), and `fsck`'s dangling_cards check has
+    been red since 2026-06-21 because of them.
+
+    Demote rather than reject: the content is real prose about a document and worth
+    keeping, it just isn't a card. This mirrors the fallback already on the same line
+    at both call sites (an unrecognized type becomes `fact`).
+    """
+    from techne.core.cards import CARD_TYPE, card_doc_id
+
+    if ktype == CARD_TYPE and card_doc_id(tags or "") is None:
+        log.warning(
+            "refusing to mint an unbacked %s (no doc: pointer in tags); storing as fact "
+            "instead — tenishai/techne#633",
+            CARD_TYPE,
+        )
+        return "fact"
+    return ktype
+
+
 def _apply_add(conn, row, db_path: Path) -> int | None:
     """Apply an additive candidate — the original reflect promotion path, verbatim.
 
@@ -937,8 +1246,8 @@ def _apply_add(conn, row, db_path: Path) -> int | None:
         content = redact_credentials(row["content"])
         conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
         numeric = CONFIDENCE_NUMERIC[conf]
-        ktype = row["type"] if row["type"] in VALID_TYPES else "fact"
         tags = row["tags"] or ""
+        ktype = _card_type_or_fact(row["type"] if row["type"] in VALID_TYPES else "fact", tags)
         cur2 = conn.execute(
             """INSERT INTO knowledge
                  (type, content, source, tags, confidence, confidence_numeric)
@@ -1022,7 +1331,9 @@ def _apply_merge(conn, row, db_path: Path) -> int | None:
             f"merge candidate {row['id']} needs at least two target_ids, got {targets}"
         )
     conf = row["confidence"] if row["confidence"] in VALID_CONFIDENCE else "medium"
-    ktype = row["type"] if row["type"] in VALID_TYPES else "fact"
+    ktype = _card_type_or_fact(
+        row["type"] if row["type"] in VALID_TYPES else "fact", row["tags"] or ""
+    )
     return _merge_in_conn(
         conn,
         targets,
@@ -1096,11 +1407,7 @@ def promote_candidate(
         # merge/supersede candidates before touching status. The check fires only when
         # faithfulness_ok == 0 (checked and flagged); NULL (unchecked) and 1 (faithful)
         # pass through. force=True bypasses the gate after operator review.
-        if (
-            not force
-            and action in _FAITHFULNESS_GATED_ACTIONS
-            and row["faithfulness_ok"] == 0
-        ):
+        if not force and action in _FAITHFULNESS_GATED_ACTIONS and row["faithfulness_ok"] == 0:
             warning = row["faithfulness_warning"] or "candidate was flagged unfaithful"
             raise FaithfulnessGateError(
                 f"Candidate {candidate_id} ({action}) was flagged unfaithful: "
