@@ -120,13 +120,71 @@ def test_empty_pattern_emits_nothing(home, monkeypatch, capsys):
     assert out == ""
 
 
-def test_no_matching_symbol_emits_nothing(home, monkeypatch, capsys):
-    """Flag ON, db present, but pattern matches nothing → no stdout."""
+def _index_one_real_file(home, repo, db, *, name="authenticate"):
+    """Index a file that genuinely exists on disk with a matching hash, so the
+    index is COMPLETE AND CURRENT — the only state in which a zero result is
+    trustworthy silence (techne#602)."""
+    import hashlib
+
+    src = repo / "auth.py"
+    src.write_text("def authenticate(user):\n    return user\n")
+    add_symbol(
+        db,
+        id="s1",
+        file="auth.py",
+        name=name,
+        kind="function",
+        file_hash=hashlib.sha256(src.read_bytes()).hexdigest(),
+    )
+    return src
+
+
+def test_no_match_on_a_current_index_stays_silent(home, monkeypatch, capsys):
+    """techne#602's noise guard, and the reason this is not just "always warn".
+
+    This rail fires on EVERY miss. A notice that always hedges is the failure
+    #598 explicitly guarded against — it gets ignored and takes the real
+    warnings with it. When the index is complete and current the absence really
+    is an absence, so the rail says nothing.
+    """
     _write_config(home, codex_grep_assist=True)
     repo, db = _make_repo(home, indexed=True)
-    add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
+    _index_one_real_file(home, repo, db)
     out = _run(monkeypatch, capsys, _grep("nonexistentxyz", repo))
-    assert out == ""
+    assert out == "", "a complete, current index must not hedge about a genuine absence"
+
+
+def test_no_match_on_a_stale_index_says_so(home, monkeypatch, capsys):
+    """techne#602: a stale index and a genuinely absent symbol produced IDENTICAL
+    silence — #595 in a third location, after codex_search was fixed in #598.
+
+    It matters more here than there: an MCP codex_search is a deliberate query
+    whose answer the caller reads, while this rail fires on a search the agent
+    was doing anyway. Silence is indistinguishable from the rail being off, which
+    is how it spent months looking enabled and doing nothing (#596).
+    """
+    _write_config(home, codex_grep_assist=True)
+    repo, db = _make_repo(home, indexed=True)
+    add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")  # not on disk
+    out = _run(monkeypatch, capsys, _grep("nonexistentxyz", repo))
+    assert out, "a zero result over a stale index must not be silent"
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "NO MATCH" in ctx
+    assert "blind spot" in ctx
+    assert "hookSpecificOutput" in out and "permissionDecision" not in out, (
+        "this rail must never become a permission oracle (#596 r7)"
+    )
+
+
+def test_empty_index_is_never_reported_as_absence(home, monkeypatch, capsys):
+    """An empty index issuing a clean bill of health is the strongest possible
+    claim from the weakest possible evidence — and it is reachable through the
+    shipping CLI, because codex_db_for_repo creates the db before initial_walk."""
+    _write_config(home, codex_grep_assist=True)
+    repo, _db = _make_repo(home, indexed=True)
+    out = _run(monkeypatch, capsys, _grep("nonexistentxyz", repo))
+    assert out, "an empty index must not answer a query with confident silence"
+    assert "INDEX IS EMPTY" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
 def test_matching_symbol_injects_context(home, monkeypatch, capsys):
@@ -197,9 +255,15 @@ def test_cross_repo_symbol_not_injected(home, monkeypatch, capsys):
     db_b = codex_db_for_repo(Config.load(), repo_b)
     add_symbol(db_b, id="s1", file="b.py", name="beta_secret", kind="function")
 
-    # Grep for beta_secret while working in repo A → no injection (A has no such symbol).
+    # Grep for beta_secret while working in repo A → repo B's symbol must not leak.
     out = _run(monkeypatch, capsys, _grep("beta_secret", repo_a))
-    assert out == ""
+    assert "beta_secret" not in out, "repo B's symbol leaked into repo A's search"
+    assert "b.py" not in out
+    # Repo A's index is EMPTY, so since techne#602 the rail says so rather than
+    # answering with confident silence. That notice is about A's own index and
+    # carries nothing from B — which is what this test is actually guarding.
+    if out:
+        assert "INDEX IS EMPTY" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
 def test_glob_tool_not_augmented(home, monkeypatch, capsys):
