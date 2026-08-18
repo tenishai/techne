@@ -1284,6 +1284,16 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
 
     include_prompts = not no_prompts
 
+    def _import_skip_is_benign(result: dict) -> bool:
+        """True when a skip means "already done", not "went wrong" (techne#630).
+
+        `import_transcript` is idempotent by design: a session that already has
+        observations is skipped with reason "already has N observations". That is
+        the feature working, and it must not become a non-zero exit — otherwise
+        re-running an import, the safest possible habit, starts reporting failure.
+        """
+        return "already has" in (result.get("reason") or "")
+
     def _import_one(p):
         """Single-file import with the SAME net as import_directory's per-file handler.
 
@@ -1347,24 +1357,38 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
         f"{tool_total} tool obs + {prompt_total} prompts added, "
         f"{summaries_set} session summaries set"
     )
-    # EXIT 0 EVEN WHEN A SINGLE FILE IMPORTED NOTHING — DELIBERATE (techne#630).
+    # A SINGLE FILE THAT FAILED EXITS NON-ZERO (techne#630, Richard: "we should fix").
     #
-    # The tension is real and worth stating rather than leaving for the next
-    # reader to rediscover. The partial-success argument that justifies exit 0 for
-    # a DIRECTORY (some imported, some skipped — the run did useful work) does NOT
-    # apply to one file, where "0 imported, 1 skipped" is total failure. On that
-    # reading this should exit non-zero.
+    # The partial-success argument that justifies exit 0 for a DIRECTORY — some
+    # imported, some skipped, the run did useful work — does not apply to one file,
+    # where a failure is the whole outcome. Reporting that as success is the
+    # "no silent failures" rule broken at the exit code while the stdout is honest.
     #
-    # It does not, for two reasons that outweigh it:
-    #   1. #622 established, in a test named for it, that BOTH ENTRY POINTS AGREE
-    #      on the same broken file. A file behaving differently depending on
-    #      whether you named it or let a glob find it is its own surprise.
-    #   2. The failure is NOT silent, which is what the objection is really about:
-    #      the filename, the reason, and "0 imported, 1 skipped" all print. Only
-    #      the exit code is generous, and a grep found no automation consuming it.
+    # GATED ON FAILURE, NOT ON `imported == 0`, and the distinction is the reason
+    # this is not a one-line change. `skipped` covers three different outcomes:
     #
-    # If a caller ever needs to branch on this, the right fix is an explicit
-    # `--strict` rather than flipping a contract other callers may depend on.
+    #   "already has N observations"  -> IDEMPOTENT SUCCESS. Re-importing a file
+    #                                    techne already holds is the designed
+    #                                    behaviour; failing here would break every
+    #                                    re-run and punish the safe habit.
+    #   "empty"                       -> failure: nothing to import from a file the
+    #                                    caller explicitly named.
+    #   "error: ..." / "error reading" -> failure.
+    #
+    # A flat `not imported` test would have turned the first of those into an
+    # error. Measured before changing anything: `import_transcript`/
+    # `import_directory` are called from cli.py ONLY (the automatic capture path
+    # uses backfill_uncaptured from session_end), and nothing on this machine
+    # consumes the exit code — no scripts, no cron, no hooks, and zero invocations
+    # across 2,648 lines of shell history. So the blast radius is a human at a
+    # prompt, which is exactly who benefits from a non-zero exit.
+    #
+    # The DIRECTORY branch is untouched: #622's `test_both_entry_points_agree_on_
+    # the_same_broken_file` asserted equal exit codes, and that test is updated
+    # rather than deleted — the entry points still agree on OUTPUT, which is what
+    # made the original claim worth making.
+    if path.is_file() and skipped and not _import_skip_is_benign(results[0]):
+        raise click.ClickException(f"{path.name}: {results[0].get('reason', 'import failed')}")
 
 
 @main.command("migrate-summaries")
