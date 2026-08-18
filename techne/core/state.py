@@ -5,6 +5,7 @@ import re
 import uuid
 from pathlib import Path
 
+from techne.config import CLAUDE_CODE
 from techne.core.database import connect, normalize_timestamp
 from techne.core.redaction import redact_credentials
 
@@ -97,7 +98,7 @@ def start_session(
     db_path: Path,
     project_path: str = "",
     agent_identity: str = "",
-    platform: str = "claude-code",
+    platform: str = CLAUDE_CODE,
     *,
     session_id: str | None = None,
 ) -> str:
@@ -415,7 +416,7 @@ def ensure_session(
     *,
     project_path: str = "",
     agent_identity: str = "",
-    platform: str = "claude-code",
+    platform: str = CLAUDE_CODE,
 ) -> None:
     """Idempotently ensure a session row exists, stamped with its platform.
 

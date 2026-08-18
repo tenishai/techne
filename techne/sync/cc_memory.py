@@ -20,7 +20,6 @@ from techne._log import get_logger
 from techne.config import Config
 from techne.core.curated import ingest_memory_file
 from techne.core.memory_doctor import find_curated_memory_files
-from techne.platforms.claude_code.paths import memory_project_slug
 
 log = get_logger(__name__)
 
@@ -60,6 +59,12 @@ class CCMemorySource:
         STORED (new inserts + supersessions).  Re-running on unchanged
         files returns 0 (all content-hash no-ops).
         """
+        # Lazy rather than structural (techne#626). This module IS named for Claude
+        # Code, so the import is honest — but #57 asks that MOVING it under
+        # platforms/ be weighed against the #107 reconciler's adapter routing, and
+        # a lazy import buys the decoupling now without that risk.
+        from techne.platforms.claude_code.paths import memory_project_slug
+
         cwd = self._cwd or Path.cwd()
         slug = memory_project_slug(cwd)
         files = find_curated_memory_files(cwd)
