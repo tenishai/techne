@@ -277,8 +277,16 @@ def test_the_two_legs_do_not_share_a_cache_key():
 
 #: pytest args that NARROW what runs. Any of these means it is not the default suite.
 _SELECTORS = {
-    "-m", "-k", "--ignore", "--ignore-glob", "--deselect",
-    "--collect-only", "--co", "--lf", "--last-failed", "--ff",
+    "-m",
+    "-k",
+    "--ignore",
+    "--ignore-glob",
+    "--deselect",
+    "--collect-only",
+    "--co",
+    "--lf",
+    "--last-failed",
+    "--ff",
 }
 #: pytest args that consume the NEXT token, so its value is not a positional.
 #: The long spellings matter as much as the short ones: without `--config-file`
@@ -372,11 +380,7 @@ def test_eval_vec_runs_the_default_suite_not_only_the_gate():
     nowhere — and #536 is a bug in the other branch of that function.
     """
     # Line by line: a `run: |` block would otherwise merge tokens across commands.
-    lines = [
-        ln
-        for s in _job_steps("eval-vec")
-        for ln in str(s.get("run", "")).splitlines()
-    ]
+    lines = [ln for s in _job_steps("eval-vec") for ln in str(s.get("run", "")).splitlines()]
     argvs = [a for a in (_pytest_argv(ln) for ln in lines) if a is not None]
     # PARSED, not scanned. This assertion used to be `"-m eval_vec" in
     # _run_lines("eval-vec")` — a substring scan over the joined run: scalars, the
@@ -566,9 +570,7 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
     spot.
     """
     for job in ("test", "eval-vec"):
-        for line in (
-            ln for s in _job_steps(job) for ln in str(s.get("run", "")).splitlines()
-        ):
+        for line in (ln for s in _job_steps(job) for ln in str(s.get("run", "")).splitlines()):
             argv = _pytest_argv(line)
             if argv is None or not _is_default_suite(argv):
                 continue
@@ -764,9 +766,17 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
     MEASURED, see tests/fixtures/github/expression_truth_table.json. It is falsy.
 
     So `!(github.event_name == 'pull_request' && <missing>)` is `!(falsy)` — TRUE
-    unconditionally — and every self-hosted job runs for fork PRs, while the
-    fork-only job's condition is falsy and it NEVER fires. techne#556 and techne#530
-    defeated at once, silently.
+    unconditionally — and every self-hosted job runs for fork PRs. techne#556 and
+    techne#530 defeated at once, silently.
+
+    THE FORK-ONLY SIDE IS THE OPPOSITE OF WHAT THIS DOCSTRING USED TO SAY (techne#591).
+    It claimed the fork-only job's condition "is falsy and it NEVER fires" — true of an
+    EARLIER truthiness spelling, and stale since 45634e7. The SHIPPED spelling compares:
+    `event_name == 'pull_request' && <missing> != github.repository` measures TRUE
+    (see the fixture), because `null != "tenishai/techne"`. So a typo makes the
+    fork-only job fire on EVERY pull request, including same-repo ones — it
+    over-fires rather than never firing. Both jobs run, which is why the exact-match
+    tests could not see the difference.
 
     MEASURED, and this is why this test exists: renaming `head.repo.fork` to
     `head.repo.is_fork` in the workflow AND in both constants above gave 15 PASSED,
@@ -802,8 +812,9 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
         f"(path -> first missing segment): {unknown}\n"
         "A missing property is NULL, not an error (measured — see the truth-table "
         "fixture), and null is falsy — so the guard silently evaluates to a constant: "
-        "self-hosted jobs run for fork PRs (techne#556) AND the fork-only job never "
-        "fires (techne#530).\n"
+        "self-hosted jobs run for fork PRs (techne#556) AND the fork-only job fires on "
+        "EVERY pull request, same-repo included, since `null != <repo>` is true "
+        "(techne#530, corrected in techne#591 — it over-fires, it does not go silent).\n"
         f"Known properties come from {PAYLOAD_SHAPE.name}, captured from a real "
         "payload. If GitHub genuinely added or renamed a field, refresh the fixture "
         "with the command in its `_provenance` — do NOT edit it by hand to make this "
