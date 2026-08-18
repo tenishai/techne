@@ -169,6 +169,15 @@ class HookConfig:
     # the already-warm context; the session-end batch reconciles/dedups. The
     # model self-gates (stores only when something durable emerged). Default OFF.
     per_turn_seed: bool = False
+    # FIRST-PROMPT STARTUP DIRECTIVE (techne#643). Rides UserPromptSubmit rather
+    # than SessionStart for a platform reason, not a preference: `prompt` and
+    # `agent` hooks are barred from SessionStart ("subagents aren't available at
+    # session initialization" — code.claude.com/docs/en/hooks, verified
+    # 2026-08-18), and SessionStart also fires before MCP servers finish
+    # connecting. So the earliest point where a model AND techne's MCP tools
+    # both exist is the first prompt. Gated once per session via
+    # extension_state; see `_startup_block`. Default OFF.
+    startup_directive: bool = False
 
 
 ReflectWriteTo = Literal["candidates", "live"]
@@ -684,6 +693,7 @@ class Config:
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
                 per_turn_seed=h.get("per_turn_seed", False),
+                startup_directive=h.get("startup_directive", False),
             )
 
         if "heuristic" in raw and isinstance(raw["heuristic"], dict):
@@ -846,6 +856,7 @@ class Config:
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
                 "per_turn_recall_log": self.hooks.per_turn_recall_log,
                 "per_turn_seed": self.hooks.per_turn_seed,
+                "startup_directive": self.hooks.startup_directive,
             },
             "heuristic": {
                 "boundary_threshold": self.heuristic.boundary_threshold,

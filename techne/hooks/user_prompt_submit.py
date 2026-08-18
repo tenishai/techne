@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook — per-turn recall (read) + seed (write) (techne#109/#277).
+"""UserPromptSubmit hook — recall (read) + seed (write) + startup (techne#109/#277/#643).
 
-The DYNAMIC per-turn complement to the STABLE SessionStart injection. Two
+The DYNAMIC per-turn complement to the STABLE SessionStart injection. Three
 independent, opt-in (default-OFF) blocks land in ``additionalContext`` after the
 stable prefix:
 
@@ -14,8 +14,14 @@ stable prefix:
     Best-effort and model-self-gated; the session-end reflect batch
     reconciles/dedups the stream of seeds. This is the interactive complement to
     end-of-session reflect, NOT a replacement — the batch stays the safety net.
+  - STARTUP (``hooks.startup_directive``, techne#643): once per session, on the
+    FIRST prompt and only when reflection work is actually pending, ask the
+    in-session agent to spawn a subagent that drains it. Lives here rather than
+    on SessionStart because ``prompt`` and ``agent`` hooks are barred from that
+    event and MCP servers have not connected yet — the first prompt is the
+    earliest point where a model and techne's own tools both exist.
 
-Either block can fire alone; a recall failure never suppresses the seed nudge.
+Any block can fire alone; a recall failure never suppresses the seed nudge.
 
 Design note (techne#109): SessionStart content is injected once and stays stable
 for the session; per-turn recall belongs on UserPromptSubmit so it lands *after*
@@ -90,6 +96,93 @@ _SEED_NUDGE = (
     "transient chatter, restatements of existing memory, and this turn's "
     "mechanics."
 )
+
+
+#: State key prefix for the once-per-session startup gate. Session-scoped, so a
+#: new session re-arms without any cleanup pass; `once: true` on the hook entry
+#: could not do this job — the CC docs say it is "only honored for hooks declared
+#: in skill frontmatter; ignored in settings files" (verified 2026-08-18).
+STARTUP_STATE_PREFIX = "startup_directive"
+
+
+def _startup_block(config, session_id: str | None) -> str | None:
+    """First-prompt startup directive (techne#643), or None to stay silent.
+
+    WHY THIS IS NOT A SessionStart HOOK, which is where an operator looks for it
+    first: `prompt` and `agent` hooks are barred from SessionStart ("subagents
+    aren't available at session initialization"), and SessionStart fires before
+    MCP servers finish connecting, so techne's own tools are absent there too
+    (both verified against code.claude.com/docs/en/hooks, 2026-08-18). The first
+    prompt is the earliest point where a model and the MCP tools both exist.
+
+    THE NUDGE IS GATED ON WORK EXISTING, not merely on the session being new. A
+    directive that fires on every session regardless is the failure this whole
+    change is fixing — the banner has carried a reflection-debt line since
+    2026-08-14 and it stopped being read. Silence when there is nothing to do is
+    what keeps the noisy case meaningful.
+
+    SIGNAL IS `pending_reflection`, NOT `pending_reflection_queue`, and the
+    difference is load-bearing. The queue is the honest ledger of debt, but it
+    currently holds rows that can never produce a prompt (#646: the
+    min_observations gate is evaluated twice against separately-derived buckets),
+    so gating on it would nudge every session forever about work no drain can
+    clear. `pending_reflection` self-corrects instead: emit sets the
+    `reflect:emitted:<id>` marker even on an empty batch, so a non-reflectable
+    session is nudged at most once. That self-correction holds only on the MCP
+    path today — the CLI never sets the cursor (#645) — which is the second
+    reason the directive below names the MCP tools explicitly.
+
+    Any failure returns None. A startup nudge is the least important thing this
+    hook does; it must never cost a turn.
+    """
+    from techne.core.extension_state import get_state, set_state
+    from techne.core.reflect import pending_reflection
+
+    # No session id → no gate is possible, and an ungated directive would fire on
+    # EVERY prompt. Stay silent rather than nag.
+    if not session_id:
+        return None
+
+    from techne.core.database import connect
+
+    key = f"{STARTUP_STATE_PREFIX}:{session_id}"
+    conn = connect(config.db_path)
+    try:
+        if get_state(conn, key) is not None:
+            return None
+        pending = pending_reflection(config)
+        # MARK FIRED EVEN WHEN THERE IS NOTHING TO SAY. The gate's job is "once
+        # per session", not "once per session that had work" — without this the
+        # check re-runs on every prompt of a quiet session, which is a per-turn
+        # DB read for a nudge that is not coming.
+        set_state(conn, key, {"fired": bool(pending), "sessions": len(pending)})
+    finally:
+        conn.close()
+
+    if not pending:
+        return None
+
+    total = sum(p.get("observations", 0) for p in pending)
+    return (
+        "## techne — startup drain (techne#643)\n"
+        "> First prompt of this session. Fires once, only when work is pending.\n"
+        "\n"
+        f"{len(pending)} session(s) carrying ~{total} unreflected observation(s). "
+        "Spawn a subagent to drain them so the work stays out of this session's "
+        "context, and keep going with what the operator actually asked for — "
+        "report the result when it lands.\n"
+        "\n"
+        "The subagent MUST use the MCP tools `techne_reflect_emit` / "
+        "`techne_reflect_ingest`, NOT `techne reflect` on the CLI: the CLI path "
+        "never marks the queue drained (#644) and never sets the emitted cursor "
+        "(#645), so a CLI drain re-does the same threads every session. Pass an "
+        "explicit session_id — emit defaults to the most recent session, which is "
+        "this freshly-created empty one (techne#628).\n"
+        "\n"
+        "Threads that stay queued after a clean drain are #646, not a failure: "
+        "they are sub-threshold at emit time and cannot produce a prompt. Leave "
+        "them queued and say so — do not force them."
+    )
 
 
 # PULL-ONLY MEANS PULL-ONLY ON EVERY PUSH RAIL, NOT JUST SESSION_START (techne#561).
@@ -313,7 +406,9 @@ def main() -> None:
 
     # Both per-turn injections are opt-in (default OFF). Neither on → no-op.
     # No marker: see the note at the top of main().
-    if not (config.hooks.per_turn_recall or config.hooks.per_turn_seed):
+    if not (
+        config.hooks.per_turn_recall or config.hooks.per_turn_seed or config.hooks.startup_directive
+    ):
         sys.exit(0)
 
     blocks: list[str] = []
@@ -368,6 +463,20 @@ def main() -> None:
     # ------------------------------------------------------------------
     if config.hooks.per_turn_seed:
         blocks.append(_SEED_NUDGE)
+
+    # ------------------------------------------------------------------
+    # Startup block (techne#643) — once per session, only when reflection work
+    # is actually pending. LAST in the block order deliberately: recall answers
+    # the prompt the operator just typed, and a chore directive must not push it
+    # down. Failure degrades to no block, never to a lost turn.
+    # ------------------------------------------------------------------
+    if config.hooks.startup_directive:
+        try:
+            startup_block = _startup_block(config, data.get("session_id"))
+            if startup_block:
+                blocks.append(startup_block)
+        except Exception as e:  # noqa: BLE001
+            print(f"techne: startup directive skipped: {e}", file=sys.stderr)
 
     if not blocks:
         # "INJECTED NOTHING" IS A LEGAL OUTCOME, not a failure (#414) — a recall
