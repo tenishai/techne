@@ -77,9 +77,7 @@ def test_walk_repo_under_skip_named_parent(tmp_path):
     absolute parts (else the repo's own ancestor silently yields zero files)."""
     repo = tmp_path / "build" / "myrepo"  # 'build' is in _SKIP_DIRS
     repo.mkdir(parents=True)
-    (repo / "mod.py").write_text(
-        "def alpha():\n    return beta()\n\n\ndef beta():\n    return 1\n"
-    )
+    (repo / "mod.py").write_text("def alpha():\n    return beta()\n\n\ndef beta():\n    return 1\n")
     db = _make_db(tmp_path)
     assert _make_source(db, repo).initial_walk() > 0  # 0 before the relative-parts fix
 
@@ -247,9 +245,7 @@ def test_incrementality_on_file_change(tmp_path):
     # Fetch file_hash directly — search_symbols only returns id/file/name/kind/sig/rank.
     conn_tmp = plain_connect(db)
     try:
-        row = conn_tmp.execute(
-            "SELECT file_hash FROM symbols WHERE name='add' LIMIT 1"
-        ).fetchone()
+        row = conn_tmp.execute("SELECT file_hash FROM symbols WHERE name='add' LIMIT 1").fetchone()
         old_hash = row[0] if row else None
     finally:
         conn_tmp.close()
@@ -545,3 +541,112 @@ def test_dist_packages_is_skipped_too(tmp_path):
     found = {str(p.relative_to(repo)) for p in _walk_repo(repo, set(_EXT_LANGUAGE.values()))}
 
     assert found == {"mine.py"}
+
+
+# ---------------------------------------------------------------------------
+# techne#610 — a RESOLVED inbound edge made re-indexing its target file fail
+# with FOREIGN KEY, silently, leaving the file's previous rows behind.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
+def test_reindex_survives_a_resolved_inbound_edge(tmp_path):
+    """The reproduction from the issue, end to end.
+
+    A plain walk never hits this: fresh edges leave `to_symbol` NULL and NULL does
+    not constrain. It needs a resolver pass to have populated it — and then it
+    selects for exactly the symbols that matter, because a file fails to re-index
+    PRECISELY BECAUSE something calls into it.
+    """
+    from techne.codex.source import RepoSource
+    from techne.core.stores import plain_connect
+
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    util = repo / "app" / "util.py"
+    util.write_text("def helper():\n    return 1\n")
+    (repo / "app" / "main.py").write_text(
+        "from app.util import helper\n\n\ndef go():\n    return helper()\n"
+    )
+
+    db = _make_db(tmp_path)
+    src = RepoSource(db, repo, languages=["python"])
+    assert src.initial_walk() > 0
+    assert src.last_failed == 0
+
+    # Simulate the resolver pass (lsp_resolve or any other) that populates to_symbol.
+    conn = plain_connect(db)
+    try:
+        target = conn.execute(
+            "SELECT id FROM symbols WHERE file = ? AND name = ?", ("app/util.py", "helper")
+        ).fetchone()
+        assert target, "precondition: helper indexed"
+        conn.execute(
+            "UPDATE edges SET to_symbol = ?, resolution_status = 'lsp' WHERE to_name = ?",
+            (target[0], "helper"),
+        )
+        conn.commit()
+        assert (
+            conn.execute("SELECT count(*) FROM edges WHERE to_symbol IS NOT NULL").fetchone()[0]
+            >= 1
+        ), "precondition: an inbound edge is resolved"
+    finally:
+        conn.close()
+
+    # Edit the file everything points AT, and re-walk.
+    util.write_text("def helper():\n    return 2\n\n\ndef helper2():\n    return 3\n")
+    src2 = RepoSource(db, repo, languages=["python"])
+    src2.initial_walk()
+
+    assert src2.last_failed == 0, (
+        "re-indexing a file with a resolved inbound edge hit FOREIGN KEY and rolled "
+        "back — the edit never entered the graph (#610)"
+    )
+
+    conn = plain_connect(db)
+    try:
+        names = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM symbols WHERE file = ?", ("app/util.py",)
+            ).fetchall()
+        }
+        assert "helper2" in names, "the edit did not reach the graph — stale rows kept"
+        # The inbound call is still a TRUE FACT; only its resolved target was replaced.
+        surviving = conn.execute("SELECT count(*) FROM edges WHERE to_name = 'helper'").fetchone()[
+            0
+        ]
+        assert surviving >= 1, "unresolving must not DELETE the caller's edge"
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
+def test_a_failed_file_is_counted_not_swallowed(tmp_path, monkeypatch):
+    """#610's second half: 0 used to mean both 'unchanged' and 'blew up'.
+
+    A run that could not index 461 files exited 0 while those files silently kept
+    their previous rows — the graph was stale exactly where the run looked clean.
+    """
+    from techne.codex import source as source_mod
+    from techne.codex.source import RepoSource, _index_file_safe
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def a():\n    return 1\n")
+
+    real_parse = source_mod._parse_file
+
+    def _boom(*args, **kwargs):
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+    monkeypatch.setattr(source_mod, "_parse_file", _boom)
+    count, failed = _index_file_safe(_make_db(tmp_path), repo / "a.py", repo)
+    assert (count, failed) == (0, True), "a failure must be distinguishable from a no-op"
+
+    monkeypatch.setattr(source_mod, "_parse_file", real_parse)
+    db = _make_db(tmp_path / "second")
+    (tmp_path / "second").mkdir(exist_ok=True)
+    src = RepoSource(db, repo, languages=["python"])
+    src.initial_walk()
+    assert src.last_failed == 0, "a clean walk must not report phantom failures"

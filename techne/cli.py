@@ -3591,6 +3591,15 @@ def codex_index(ctx, repo, languages, lsp):
             f"(#613 — stored before the current skip list)"
         )
     click.echo(f"Totals:  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
+    if src.last_failed:
+        # Not a warning tucked into a log file: a run that could not index N files
+        # exits NON-ZERO. Those files kept their previous rows, so the graph is
+        # stale exactly where this output otherwise reads as success (#610).
+        raise click.ClickException(
+            f"{src.last_failed} file(s) failed to index and kept their PREVIOUS rows — "
+            "the graph is stale for those paths. See the codex_index_failed tracebacks "
+            "in the log (tenishai/techne#610)."
+        )
 
     if lsp:
         from techne.codex.lsp_resolve import resolve_edges_lsp
@@ -3626,6 +3635,7 @@ def codex_index_all(ctx, languages):
         click.echo("no repos indexed. Run: techne codex index <repo>")
         return
     lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
+    total_failed = 0
     for root_str, _db in repos:
         root = Path(root_str)
         if not root.exists():
@@ -3635,7 +3645,18 @@ def codex_index_all(ctx, languages):
         src = RepoSource(db_path, root, languages=lang_list)
         count = src.initial_walk()
         swept = f", swept {src.last_swept} excluded" if src.last_swept else ""
-        click.echo(f"reindexed {root}: {count} symbols{swept}")
+        # Reported per-repo rather than raised: this loop is a sweep over many repos
+        # and one bad repo must not hide the rest. The summary below is what makes
+        # the run non-zero.
+        failed = f", {src.last_failed} FAILED (stale, #610)" if src.last_failed else ""
+        total_failed += src.last_failed
+        click.echo(f"reindexed {root}: {count} symbols{swept}{failed}")
+
+    if total_failed:
+        raise click.ClickException(
+            f"{total_failed} file(s) across all repos failed to index and kept their "
+            "PREVIOUS rows — the graph is stale for those paths (tenishai/techne#610)."
+        )
 
 
 @codex.command("stats")
