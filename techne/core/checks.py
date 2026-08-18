@@ -1270,6 +1270,27 @@ def check_maintenance_rails(config) -> list[CheckResult]:
                 verdict = temporal_verdict(last, interval)
                 detail = f"{note}; {count} candidates all-time"
                 remedy = f"techne {rail} --help" if verdict is Verdict.STALE else None
+                # AND SAY WHAT HAPPENED TO THE OUTPUT (techne#636). This check reads
+                # MAX(created_at) — pure EMISSION — so it goes green the moment a rail
+                # produces a candidate and stays green no matter what becomes of it.
+                # Measured when #636 was filed: rail:reflect green with 206 candidates
+                # PENDING and the last review decision on 2026-07-27. A rail that emits
+                # into a queue nobody drains is not working; it is accumulating.
+                #
+                # VERDICT DELIBERATELY STILL KEYED ON EMISSION. This check is named for
+                # liveness and that is what it answers; making an unreviewed backlog
+                # turn doctor STALE is a policy change about the OPERATOR's review
+                # cadence, not about whether the rail ran, and it belongs in its own
+                # decision rather than smuggled into the fix that made it visible.
+                # Reported, not enforced — the same split #497 landed for dangling.
+                pending, last_decision = _rail_consumption(conn, rail)
+                if pending:
+                    detail += f"; {pending} pending review"
+                    detail += (
+                        f", last decision {last_decision}"
+                        if last_decision
+                        else ", NO decision ever recorded"
+                    )
 
             results.append(
                 CheckResult(
@@ -1290,6 +1311,29 @@ def check_maintenance_rails(config) -> list[CheckResult]:
     finally:
         conn.close()
     return results
+
+
+def _rail_consumption(conn, rail: str) -> tuple[int, str | None]:
+    """(candidates still pending, date of the last promote/discard) for one rail.
+
+    The half `MAX(created_at)` structurally cannot see (techne#636): emission is
+    the rail doing its job, consumption is anyone acting on it, and a check that
+    measures only the first reports a rail as healthy while its output piles up
+    unread. Best-effort — a missing column must never take the whole check down.
+    """
+    try:
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_candidates WHERE origin = ? AND status = 'pending'",
+            (rail,),
+        ).fetchone()[0]
+        last_decision = conn.execute(
+            "SELECT MAX(reviewed_at) FROM knowledge_candidates "
+            "WHERE origin = ? AND status IN ('promoted', 'discarded')",
+            (rail,),
+        ).fetchone()[0]
+    except Exception:  # noqa: BLE001 — schema drift must not break liveness reporting
+        return 0, None
+    return pending or 0, (last_decision or None)
 
 
 @register_check
@@ -1911,7 +1955,44 @@ def check_vector_coverage(config) -> CheckResult:
     # knowledge_vec ONLY. #408's headline mechanism — threads rotating rowid on
     # INSERT OR REPLACE, one stranded embedding per summary update, unbounded —
     # is counted by no check at all. The leak is fixed; its observability is not.
-    healthy = missing == 0 and stale == 0 and orphans == 0
+    # COUNT THE WHOLE POPULATION THE REMEDY ACTS ON (techne#635). This counted
+    # `knowledge` alone while `backfill_vectors` embeds knowledge, OBSERVATIONS and
+    # THREADS — so the card's own capitalised rule, "A CHECK MUST COUNT THE
+    # POPULATION ITS REMEDY ACTS ON" (docs/arch/liveness.md), was violated by the
+    # check that quotes it. Measured on the live store when filed: 450 observations
+    # and 14 threads unembedded, invisible to the check that exists to catch this.
+    #
+    # THE SILENT-GREEN PATH IS SPECIFIC, not theoretical: work heavily for weeks
+    # without promoting knowledge and knowledge coverage stays high, so doctor
+    # stays green while OBSERVATION coverage rots. Observations are the population
+    # `per_turn_recall` actually reads, so recall degrades to FTS-only for all
+    # recent work with no signal anywhere. That is the 2026-07-16 incident (0 of
+    # 11,000 observations embedded) waiting to recur.
+    #
+    # Simpler counts than knowledge deliberately: observations are append-only and
+    # threads rotate their rowid, so neither carries `vec_stale` or supersession —
+    # "present or not" IS the whole question for them, and inventing a richer
+    # predicate here would be a second definition of coverage.
+    sibling_gaps: dict[str, int] = {}
+    conn = connect(config.db_path)
+    try:
+        for tbl, id_col in (("observations", "id"), ("threads", "rowid")):
+            try:
+                tot = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                emb = conn.execute(
+                    f"SELECT COUNT(*) FROM {tbl} "
+                    f"WHERE {id_col} IN (SELECT rowid FROM {tbl}_vec_rowids)"
+                ).fetchone()[0]
+            except Exception:  # noqa: BLE001 — that table's vec channel is absent
+                continue
+            if tot - emb > 0:
+                sibling_gaps[tbl] = tot - emb
+    finally:
+        conn.close()
+    for tbl, gap in sibling_gaps.items():
+        detail += f", {gap} {tbl} unembedded"
+
+    healthy = missing == 0 and stale == 0 and orphans == 0 and not sibling_gaps
     return CheckResult(
         name="vectors:coverage",
         subsystem="search",

@@ -1049,3 +1049,64 @@ class TestTheRailNeverGrantsPermission:
         assert "permissionDecision" not in hso
         assert "permissionDecisionReason" not in hso
         assert "authenticate" in hso["additionalContext"]
+
+
+def test_a_delivery_is_logged_where_the_audit_can_see_it(home, monkeypatch, capsys):
+    """techne#637: every other injecting rail writes to `context_injections`; this
+    one wrote only to the liveness marker — a SINGLE row, no counter, no history.
+
+    `SELECT source FROM context_injections` had zero grep-assist rows, EVER, so
+    `techne audit` was structurally blind to the rail with the worst track record
+    (#596, #601, #611, #612). #612 closed by dogfood — one person, one search,
+    one block — and that was the only delivery it could ever demonstrate, because
+    nothing durable recorded the others.
+    """
+    from techne.config import Config
+    from techne.core.database import connect
+
+    _write_config(home, codex_grep_assist=True)
+    repo, db = _make_repo(home, indexed=True)
+    add_symbol(
+        db,
+        id="s1",
+        file="auth.py",
+        name="authenticate",
+        kind="function",
+        signature="def authenticate(user): ...",
+    )
+
+    payload = _grep("authenticate", repo)
+    payload["session_id"] = "sess-637"
+    out = _run(monkeypatch, capsys, payload)
+    assert out, "precondition: the rail injected"
+
+    conn = connect(Config.load().db_path)
+    try:
+        rows = conn.execute(
+            "SELECT source, session_id, trigger_snippet, hit_count FROM context_injections "
+            "WHERE source = 'codex_grep_assist'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows, "the delivery was not logged — techne audit still cannot see this rail"
+    assert rows[0]["session_id"] == "sess-637"
+    assert "authenticate" in rows[0]["trigger_snippet"]
+    assert rows[0]["hit_count"] == 1
+
+
+def test_a_logging_failure_never_costs_the_injection(home, monkeypatch, capsys):
+    """The augmentation is the job; the measurement must never break it."""
+    import techne.hooks._injection_log as inj
+
+    _write_config(home, codex_grep_assist=True)
+    repo, db = _make_repo(home, indexed=True)
+    add_symbol(db, id="s1", file="auth.py", name="authenticate", kind="function")
+
+    def _boom(*a, **k):
+        raise RuntimeError("logging is down")
+
+    monkeypatch.setattr(inj, "log_context_injection", _boom)
+
+    out = _run(monkeypatch, capsys, _grep("authenticate", repo))
+    assert "authenticate" in out, "a broken injection log must not suppress the injection"
