@@ -214,6 +214,7 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
         return []
     conn = plain_connect(db_path)
     try:
+
         def _match(match_str: str) -> list[dict]:
             rows = conn.execute(
                 """SELECT s.id, s.file, s.name, s.kind, s.signature, s.file_hash,
@@ -542,6 +543,68 @@ def index_freshness(db_path: Path, *, repo_root: Path | str | None = None) -> di
     return {"files": len(annotated), **counts, "unindexed": unindexed, "coverage": coverage}
 
 
+def zero_result_notice(idx: dict) -> str:
+    """Describe how much a zero result can be trusted (techne#595).
+
+    ORDERED SO THE STRONGEST DOUBT WINS, and every branch reports the FULL
+    breakdown rather than one ratio — "1 of 6 stale" implies the other five were
+    assessed and were fine, which is false when they were never assessed at all.
+
+    "Genuine absence" is asserted ONLY when the disk was enumerated, nothing is
+    unindexed, and every indexed file is fresh. The first cut of this fix said it
+    whenever the indexed files happened to be fresh — which certified absence
+    using evidence that could not see a brand-new module, and an index of ONE
+    untouched file declared itself current while the symbol sat beside it unseen.
+    That is worse than the silence it replaced: it converts "no information" into
+    a confident wrong answer.
+    """
+    files, stale, missing = idx["files"], idx["stale"], idx["missing"]
+    unknown, unindexed, coverage = idx["unknown"], idx["unindexed"], idx["coverage"]
+    tally = (
+        f"index: {files} file(s) — {idx['fresh']} fresh, {stale} stale, "
+        f"{missing} missing, {unknown} unclassifiable"
+    )
+    if coverage == "complete":
+        tally += f", {unindexed} on disk never indexed"
+
+    if files == 0:
+        # An EMPTY index issuing a clean bill of health is the strongest possible
+        # statement of trust from the weakest possible evidence. Reachable through
+        # the shipping CLI: codex_db_for_repo creates the db before initial_walk,
+        # so a docs-only repo, a Go/Rust repo, or an install without the `codex`
+        # extra all leave a db with zero symbols.
+        return (
+            "NO MATCH, and THE INDEX IS EMPTY (0 files) — this says nothing about "
+            "whether the symbol exists. Run `techne codex index <repo>`."
+        )
+    if coverage != "complete":
+        return (
+            f"NO MATCH, but the disk could not be enumerated, so files may exist that "
+            f"were never indexed. Treat this as UNKNOWN, not absent. {tally}."
+        )
+    if unindexed:
+        return (
+            f"NO MATCH — but {unindexed} source file(s) on disk have never been indexed, "
+            "so a symbol in a NEW module cannot appear here. This is likely a blind spot "
+            f"rather than an absence. Re-run `techne codex index`. {tally}."
+        )
+    if stale or missing:
+        return (
+            f"NO MATCH — but {stale + missing} indexed file(s) are stale or missing, so a "
+            "symbol added or moved since the last index cannot appear here. Likely a blind "
+            f"spot rather than an absence. Re-run `techne codex index`. {tally}."
+        )
+    if unknown:
+        return (
+            f"NO MATCH, and {unknown} file(s) could not be classified, so the index's "
+            f"freshness is not established. Treat this as unknown rather than absent. {tally}."
+        )
+    return (
+        f"NO MATCH, and the index is complete and current — every file on disk is indexed "
+        f"and unchanged. This is genuine absence. {tally}."
+    )
+
+
 def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
     """Source files ON DISK that the index has never seen. ``(count, coverage)``.
 
@@ -578,6 +641,7 @@ def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
         return None, "unknown"
 
     indexed = {str(r["file"]) for r in indexed_rows}
+
     # SCOPED BY TOP-LEVEL COMPONENT, and the scoping is not timidity — an
     # unscoped count is worse than none. HISTORICALLY (before techne#604 taught
     # `_walk_repo` to skip `site-packages`) the walk on this repo yielded 10,282
