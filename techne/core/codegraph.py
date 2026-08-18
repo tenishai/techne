@@ -626,8 +626,19 @@ def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
 
     ``coverage`` is the honest part:
       complete — the disk was enumerated; the counts below are a real answer.
-      unknown  — no repo_root, or the walker is unavailable. WE CANNOT SEE THE
-                 DISK, so callers must not certify absence on this result.
+      unknown  — no repo_root, the walker is unavailable, a directory could not
+                 be read, or a symlinked directory was not followed. WE CANNOT
+                 SEE THE DISK, so callers must not certify absence on this result.
+
+    FOUR ROUTES REACH "genuine absence" WRONGLY, and all four are named here
+    because two of them used to be undocumented (techne#599):
+      1. An unreadable directory — now downgrades to ``unknown``.
+      2. A symlinked directory, never descended into — now downgrades too.
+      3. A genuinely NEW TOP-LEVEL component: no indexed sibling at that level,
+         so the scoping rule below has no signal. STILL UNFIXED and accepted —
+         it is the stated cost of the scoping, narrower than what it replaced.
+      4. A root-only index plus any subdirectory: follows from the "." component
+         rule, same accepted cost as 3.
     """
     if repo_root is None:
         return None, "unknown"
@@ -647,8 +658,16 @@ def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
     # `_walk_repo` to skip `site-packages`) the walk on this repo yielded 10,282
     # files, 10,042 of them inside `.venv-ci-3.12` / `.venv-ci-3.13`, and an
     # unscoped count reported "10,055 files never indexed" — a warning that fires
-    # on every repo with a venv is one the reader learns to skip, i.e. back to the
-    # silence this fix exists to remove, wearing a louder coat.
+    # that often is one the reader learns to skip, i.e. back to the silence this
+    # fix exists to remove, wearing a louder coat.
+    #
+    # CORRECTED (techne#600): an earlier version of this comment said such a
+    # warning "fires on every repo with a venv", which is FALSE and worth
+    # correcting because the reason is what a future reader acts on. `_SKIP_DIRS`
+    # DOES exclude `venv`, `.venv`, `env`, `.env`. What it misses is the
+    # `.venv-ci-*` spelling this repo uses for its CI environments — i.e.
+    # SPELLINGS OUTSIDE the skip list, not venvs as a category. Someone trusting
+    # the old sentence would have concluded `_SKIP_DIRS` was useless.
     #
     # THOSE NUMBERS ARE NOW 242 AND 2: #604 removed the noise at its source, so
     # the scoping is no longer load-bearing against VENVS specifically. It is kept
@@ -682,13 +701,48 @@ def _unindexed_count(indexed_rows, repo_root) -> tuple[int | None, str]:
 
     indexed_components = {_component(Path(f)) for f in indexed}
     unseen = 0
+    # THE `except OSError` THAT USED TO WRAP THIS WAS DEAD CODE (techne#599).
+    # `_walk_repo` was built on `Path.rglob`, which swallows per-directory errors
+    # internally — an unreadable directory just DROPS OUT of the walk, no
+    # exception. So a `chmod 000` directory holding the sought symbol vanished
+    # from enumeration while this returned "complete" and the caller went on to
+    # say "This is genuine absence" with the symbol physically on disk. That is
+    # the exact sentence #595 exists to make trustworthy, and it was the FOURTH
+    # failure-open found on that PR: every doubt-expressing mechanism in it
+    # degraded into confidence.
+    blind = False
+
+    def _saw_error(_exc: OSError) -> None:
+        nonlocal blind
+        blind = True
+
+    def _saw_symlink_dir(_path: Path) -> None:
+        nonlocal blind
+        blind = True
+
     try:
-        for path in _walk_repo(root, set(_EXT_LANGUAGE.values())):
+        for path in _walk_repo(
+            root,
+            set(_EXT_LANGUAGE.values()),
+            onerror=_saw_error,
+            on_symlink_dir=_saw_symlink_dir,
+        ):
             rel = path.relative_to(root)
             if str(rel) in indexed or str(path) in indexed:
                 continue
             if _component(rel) in indexed_components:
                 unseen += 1
     except OSError:
+        # KEPT, and it is NOT the dead branch #599 named. This catches the walker
+        # ITSELF failing outright; the callbacks above catch the different case of
+        # a walk that succeeds while quietly dropping a directory. Two failure
+        # modes, two mechanisms — collapsing them is what left the second one
+        # unhandled for so long.
+        return None, "unknown"
+    if blind:
+        # A directory we could not read, or a symlinked one we did not follow,
+        # may hold the very file being asked about. `None` rather than a partial
+        # count, matching the raise path: a number here would read as an answer
+        # when the enumeration never completed.
         return None, "unknown"
     return unseen, "complete"
