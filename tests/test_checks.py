@@ -341,16 +341,12 @@ class TestConfigGateBeatsMarker:
         config.hooks.codex_grep_assist = True
         record_hook_run(config.db_path, "codex_grep_assist", outcome="ok")
 
-        enabled = next(
-            r for r in run_checks(config) if r.name == "hook:codex_grep_assist"
-        )
+        enabled = next(r for r in run_checks(config) if r.name == "hook:codex_grep_assist")
         assert enabled.verdict is Verdict.LIVE
 
         # Operator turns it off. The marker is untouched and still recent.
         config.hooks.codex_grep_assist = False
-        disabled = next(
-            r for r in run_checks(config) if r.name == "hook:codex_grep_assist"
-        )
+        disabled = next(r for r in run_checks(config) if r.name == "hook:codex_grep_assist")
         assert disabled.verdict is Verdict.DORMANT
         assert "hooks.codex_grep_assist" in disabled.detail
 
@@ -375,9 +371,7 @@ def _assert_no_hook_is_gated_off(hooks):
     from techne.core.checks import Verdict
 
     gated = [
-        r.name
-        for r in hooks
-        if r.verdict is Verdict.DORMANT and "disabled by config" in r.detail
+        r.name for r in hooks if r.verdict is Verdict.DORMANT and "disabled by config" in r.detail
     ]
     assert not gated, (
         f"these hooks are gated off, so the cohort assertion below does not cover them: {gated}. "
@@ -471,6 +465,84 @@ class TestNoFalseGreens:
         assert cov.verdict is Verdict.STALE
         assert "missing" in cov.detail
         assert cov.remedy
+
+    def test_vector_coverage_counts_observations_and_threads_too(self, config):
+        """techne#635 — the check violated the rule its own card states in capitals:
+        "A CHECK MUST COUNT THE POPULATION ITS REMEDY ACTS ON".
+
+        It counted `knowledge` alone while `backfill_vectors` embeds knowledge,
+        OBSERVATIONS and THREADS. Measured when filed: 450 observations and 14
+        threads unembedded, invisible to the check that exists to catch exactly
+        this — 464 rows the remedy would act on and the check could not see.
+
+        The silent-green path is specific: work heavily without promoting
+        knowledge, knowledge coverage stays high, doctor stays green, and
+        OBSERVATION coverage rots. Observations are what `per_turn_recall` reads,
+        so recall degrades to FTS-only for all recent work with no signal anywhere
+        — the 2026-07-16 incident (0 of 11,000 embedded) waiting to recur.
+        """
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+        from techne.core.state import add_observation, ensure_session
+
+        # Knowledge fully embedded, so the knowledge half alone would read GREEN.
+        kid = store(config.db_path, "an embedded fact", type="fact")
+        ensure_session(config.db_path, "s-635")
+        add_observation(config.db_path, "s-635", "Bash", "an UNembedded observation")
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS knowledge_vec_rowids (rowid INTEGER)")
+            conn.execute("INSERT INTO knowledge_vec_rowids (rowid) VALUES (?)", (kid,))
+            conn.execute("CREATE TABLE IF NOT EXISTS observations_vec_rowids (rowid INTEGER)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        cov = next(r for r in run_checks(config) if r.name == "vectors:coverage")
+        assert cov.verdict is Verdict.STALE, (
+            "an unembedded observation must fail the check that its remedy would fix"
+        )
+        assert "observations unembedded" in cov.detail
+        assert "missing" not in cov.detail, "the knowledge half is complete and must say so"
+
+    def test_rail_check_reports_what_became_of_the_candidates(self, config):
+        """techne#636 — the rail check reads MAX(created_at), pure EMISSION, so it
+        goes green the moment a rail produces a candidate and stays green no matter
+        what becomes of it. Measured when filed: rail:reflect green with 206
+        candidates pending and the last review decision on 2026-07-27.
+
+        A rail emitting into a queue nobody drains is not working, it is
+        accumulating. The VERDICT stays emission-keyed deliberately — an unreviewed
+        backlog is a fact about the operator's review cadence, not about whether
+        the rail ran — but the reader can now see it.
+        """
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+
+        config.reflect.enabled = True  # else the rail short-circuits to DORMANT
+        store(config.db_path, "material so the rails are not dormant", type="fact")
+        from techne.core.state import ensure_session
+
+        ensure_session(config.db_path, "s-636")
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO knowledge_candidates "
+                "(scope, type, content, confidence, status, origin, source_session_id, "
+                " model_used, prompt_hash, created_at) "
+                "VALUES ('knowledge','fact','a pending candidate','high','pending','reflect',"
+                "'s-636', 'test', 'h636', datetime('now'))"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        reflect = next(r for r in run_checks(config) if r.name == "rail:reflect")
+        assert "1 pending review" in reflect.detail
+        assert "NO decision ever recorded" in reflect.detail, (
+            "a rail whose output nobody has ever acted on must say so"
+        )
 
     def test_a_superseded_row_does_not_count_as_missing_forever(self, config):
         """techne#496 — THE CHECK COULD NEVER GO GREEN.
@@ -904,9 +976,7 @@ class TestSeverityInvariants:
         from techne.core.checks import CheckResult, Kind, Verdict
 
         def _ok(v):
-            return CheckResult(
-                name="x", subsystem="s", kind=Kind.TEMPORAL, verdict=v, detail=""
-            ).ok
+            return CheckResult(name="x", subsystem="s", kind=Kind.TEMPORAL, verdict=v, detail="").ok
 
         assert _ok(Verdict.LIVE) and _ok(Verdict.DORMANT)
         for bad in (Verdict.STALE, Verdict.UNOBSERVABLE, Verdict.BROKEN, Verdict.UNKNOWN):
@@ -1135,7 +1205,9 @@ class TestProducerSilenceIsNotWallClock:
         )
         if inflight:
             # The session the check is running INSIDE — started, not yet ended.
-            conn.execute("INSERT INTO sessions (id, started_at) VALUES ('inflight', datetime('now'))")
+            conn.execute(
+                "INSERT INTO sessions (id, started_at) VALUES ('inflight', datetime('now'))"
+            )
         conn.execute(
             "INSERT INTO outbox (target, data_json, status, synced_at, created_at) VALUES "
             f"('sink:archivist', '{{}}', 'synced', datetime('now','-{enq_days_ago} days'),"
@@ -1498,9 +1570,7 @@ class TestCoreRailsAreInstrumented:
         assert err.get("stage") == "capture", err
         assert "timed out" in err.get("msg", ""), err
 
-    def test_post_tool_use_records_a_filtered_call_as_a_noop_not_silence(
-        self, config, monkeypatch
-    ):
+    def test_post_tool_use_records_a_filtered_call_as_a_noop_not_silence(self, config, monkeypatch):
         """A tool the capture filter skips is still a RUN. Recording nothing here
         is what made a quiet rail indistinguishable from a dead one."""
         from techne.hooks import post_tool_use
@@ -1583,7 +1653,7 @@ class TestCoreRailsAreInstrumented:
         )
 
     def test_user_prompt_submit_records_an_empty_recall_as_a_noop(self, config, monkeypatch):
-        """"Injected nothing" is a legal outcome (#414), and it is the ONLY thing
+        """ "Injected nothing" is a legal outcome (#414), and it is the ONLY thing
         that distinguishes a working-but-quiet retrieval rail from a dead one."""
         from techne.hooks import user_prompt_submit
 
@@ -1593,9 +1663,7 @@ class TestCoreRailsAreInstrumented:
         )
         assert self._marker(config, "user_prompt_submit").get("outcome") == "noop:nothing-to-inject"
 
-    def test_user_prompt_submit_writes_nothing_when_the_rail_is_disabled(
-        self, config, monkeypatch
-    ):
+    def test_user_prompt_submit_writes_nothing_when_the_rail_is_disabled(self, config, monkeypatch):
         """Both flags default OFF and this fires on EVERY prompt — a marker write
         for a rail the operator has not enabled would be a per-turn write for no
         signal. The config gate answers that case without one."""
@@ -1633,9 +1701,7 @@ class TestCoreRailsAreInstrumented:
     def test_pre_compact_records_a_checkpoint(self, config, monkeypatch):
         from techne.hooks import pre_compact
 
-        self._run_hook(
-            pre_compact, {"session_id": "s1", "trigger": "auto"}, config, monkeypatch
-        )
+        self._run_hook(pre_compact, {"session_id": "s1", "trigger": "auto"}, config, monkeypatch)
         marker = self._marker(config, "pre_compact")
         assert marker.get("outcome") == "ok", marker
 
@@ -1672,8 +1738,7 @@ class TestCoreRailsAreInstrumented:
                 1
                 for node in ast.walk(tree)
                 if isinstance(node, ast.Call)
-                and getattr(node.func, "id", getattr(node.func, "attr", None))
-                == "record_hook_run"
+                and getattr(node.func, "id", getattr(node.func, "attr", None)) == "record_hook_run"
             )
 
         missing = []
@@ -1714,7 +1779,8 @@ class TestRuntimeRevision:
         g(origin, "add", "-A")
         subprocess.run(
             ["git", "-C", str(origin), "-c", "commit.gpgsign=false", "commit", "-qm", "base"],
-            capture_output=True, check=True,
+            capture_output=True,
+            check=True,
         )
 
         clone = tmp_path / "runtime"
@@ -1729,7 +1795,8 @@ class TestRuntimeRevision:
             g(origin, "add", "-A")
             subprocess.run(
                 ["git", "-C", str(origin), "-c", "commit.gpgsign=false", "commit", "-qm", f"c{i}"],
-                capture_output=True, check=True,
+                capture_output=True,
+                check=True,
             )
         if behind:
             subprocess.run(
@@ -1824,9 +1891,7 @@ class TestRuntimeRevision:
         assert "local ref" in r.detail, r.detail
         assert seen, "the guard never saw a git call — it would pass vacuously"
 
-    def test_the_live_branch_states_the_freshness_caveat_too(
-        self, config, tmp_path, monkeypatch
-    ):
+    def test_the_live_branch_states_the_freshness_caveat_too(self, config, tmp_path, monkeypatch):
         """THE FALSE-GREEN CASE IS THE ONE THAT NEEDED THE CAVEAT AND LACKED IT.
 
         "level with origin/main" against a ref last fetched three weeks ago reads
@@ -1840,7 +1905,8 @@ class TestRuntimeRevision:
         runtime = self._repo(tmp_path, behind=1)
         subprocess.run(
             ["git", "-C", str(runtime), "merge", "-q", "--ff-only", "origin/main"],
-            capture_output=True, check=True,
+            capture_output=True,
+            check=True,
         )
         r = self._check(config, runtime, monkeypatch)
         assert r.verdict is Verdict.LIVE, r.detail
@@ -1960,9 +2026,7 @@ class TestRuntimeRevision:
         assert "LOCAL EDITS UNKNOWN" in r.detail, r.detail
         assert "WORKING TREE DIRTY" not in r.detail, "claimed to know the tree state"
 
-    def test_ahead_of_main_is_named_not_called_level_with(
-        self, config, tmp_path, monkeypatch
-    ):
+    def test_ahead_of_main_is_named_not_called_level_with(self, config, tmp_path, monkeypatch):
         """On a deployment, a local commit nobody pushed is worth naming — and it
         is the state that let this PR pass locally while CI went red."""
         import subprocess
@@ -2078,7 +2142,8 @@ def test_a_feature_branch_is_not_reported_as_an_undeployed_runtime(config, tmp_p
     runtime = TestRuntimeRevision._repo(tmp_path, behind=2)
     subprocess.run(
         ["git", "-C", str(runtime), "checkout", "-q", "-b", "feat/something"],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
     r = TestRuntimeRevision._check(config, runtime, monkeypatch)
     assert r.verdict is Verdict.DORMANT, r.detail
@@ -2108,7 +2173,8 @@ def test_a_working_checkout_still_states_how_far_behind_it_is(config, tmp_path, 
     runtime = TestRuntimeRevision._repo(tmp_path, behind=3)
     subprocess.run(
         ["git", "-C", str(runtime), "checkout", "-q", "-b", "peer/session-work"],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
     r = TestRuntimeRevision._check(config, runtime, monkeypatch)
     assert r.verdict is Verdict.DORMANT and r.ok, r.detail

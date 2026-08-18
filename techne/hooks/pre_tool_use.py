@@ -963,6 +963,38 @@ def main() -> None:
     # The one path where the rail actually did its job. `detail` carries the
     # symbol count so `techne status` can show utilization, not just liveness.
     record_hook_run(techne_db, HOOK_NAME, outcome="ok", detail=f"{len(results)} symbols")
+
+    # AND LOG THE DELIVERY WHERE THE AUDIT CAN SEE IT (techne#637). Every other
+    # injecting rail writes to `context_injections`; this one wrote only to the
+    # liveness marker — a SINGLE row with no counter and no history — so
+    # `SELECT source FROM context_injections` had zero grep-assist rows, ever, and
+    # `techne audit` was structurally blind to this rail.
+    #
+    # THAT IS WORSE HERE THAN ANYWHERE ELSE, because this is the rail with the
+    # worst track record: it produced #596, #601, #611 and #612, and its whole
+    # history is of looking healthy while doing nothing. #612 closed by dogfood —
+    # one person, one search, one block — and that remains the ONLY delivery it
+    # has ever been able to demonstrate, precisely because nothing durable
+    # recorded the others. The utilization card's founding rule, "INSTRUMENT READS
+    # BEFORE ADDING RETRIEVAL", was unmet by the one rail that had already burned
+    # us twice.
+    #
+    # Best-effort by contract (log_context_injection never raises), and AFTER the
+    # emit: the augmentation is the job, the measurement must never cost it.
+    try:
+        from techne.hooks._injection_log import log_context_injection
+
+        log_context_injection(
+            config.db_path,
+            source=HOOK_NAME,
+            session_id=data.get("session_id"),
+            trigger=pattern,
+            rows=results,
+            injected_text=context,
+            k_requested=config.hooks.codex_grep_assist_limit,
+        )
+    except Exception as e:  # noqa: BLE001 — measurement must never break the rail
+        print(f"techne: grep-assist injection log skipped: {e}", file=sys.stderr)
     sys.exit(0)
 
 
