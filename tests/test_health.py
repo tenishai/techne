@@ -106,12 +106,45 @@ def test_banner_reports_an_unreadable_revision_as_unverified_not_healthy(config)
     assert "UNVERIFIED" in banner
 
 
-def test_banner_installed_build_warns(config):
+def test_banner_installed_build_states_rather_than_warns(config):
+    """#575: a pinned install used to render a PERMANENT ⚠️ nobody could clear.
+
+    Reverses #568/#569's healthy=False here, deliberately. That was the right
+    call inside a PR widening warning coverage, and it deferred the fix to a
+    latest-release comparison — which is not coming, because techne is
+    local-first and does not phone home (Richard, 2026-08-18).
+
+    The banner's mark is SHARED with subsystem liveness, so a permanent ⚠️ meant
+    every real fault below it arrived pre-ignored. Currency of an install is an
+    unknowable, not a fault; it belongs in the text, not in the severity.
+    """
     h = collect_health(config)
     h["build"] = "installed"
     banner = format_banner(h)
+    assert "⚠️" not in banner, "an unknowable must not render as a fault"
+    assert "currency not checked" in banner, "but the banner must still SAY it is unchecked"
+    assert "releases" in banner, "and name how to check it"
+
+
+def test_installed_build_never_claims_it_is_level(config):
+    """The demotion must not leak into the payload. `drifted` stays None — we did
+    not check, so no consumer may conclude the install is current."""
+    from techne.core.health import _revision_info
+
+    info = _revision_info(Path("/somewhere/site-packages/techne"))
+    assert info["build"] == "installed"
+    assert info["drifted"] is None, "None means unchecked; False would claim we checked"
+
+
+def test_installed_build_still_goes_amber_on_a_real_fault(config):
+    """The demotion must not mask anything. A failing subsystem still turns the
+    mark ⚠️ on a pinned install — that is the whole reason the ⚠️ was worth
+    reclaiming."""
+    h = collect_health(config)
+    h["build"] = "installed"
+    h["checks_worst"] = "stale"
+    banner = format_banner(h)
     assert "⚠️" in banner
-    assert "may lag repo HEAD" in banner
 
 
 def test_banner_db_unreachable(config):
@@ -332,9 +365,7 @@ def test_banner_memory_line_includes_identity(config):
 
     conn = connect(config.db_path)
     try:
-        conn.execute(
-            "INSERT INTO identity (key, value) VALUES ('user.name', 'Richard')"
-        )
+        conn.execute("INSERT INTO identity (key, value) VALUES ('user.name', 'Richard')")
         conn.commit()
     finally:
         conn.close()
@@ -355,9 +386,7 @@ def test_banner_memory_line_appends_non_canonical_types_after_canonical(config):
     # 'pattern' is not in VALID_TYPES, so store() would reject it — insert direct.
     conn = connect(config.db_path)
     try:
-        conn.execute(
-            "INSERT INTO knowledge (type, content) VALUES ('pattern', 'some pattern')"
-        )
+        conn.execute("INSERT INTO knowledge (type, content) VALUES ('pattern', 'some pattern')")
         conn.commit()
     finally:
         conn.close()
@@ -783,9 +812,7 @@ class TestRevisionInfo:
         (git / "refs" / "heads").mkdir(parents=True)
         (git / "HEAD").write_text("ref: refs/heads/main\n")
         (git / "refs" / "heads" / "main").write_text("abc1234" + "0" * 33 + "\n")
-        (git / "packed-refs").write_text(
-            f"{'bbbbbbb' + '0' * 33} refs/remotes/origin/main\n"
-        )
+        (git / "packed-refs").write_text(f"{'bbbbbbb' + '0' * 33} refs/remotes/origin/main\n")
         (git / "FETCH_HEAD").write_text("whatever\n")  # must NOT be used
 
         info = _revision_info(root / "techne")
@@ -815,12 +842,23 @@ class TestFreshnessCaveat:
 
     def _h(self, **over):
         base = {
-            "db_ok": True, "version": "0.13.0", "package_path": "/x/techne",
-            "observations": 0, "threads": 0, "active_threads": 0, "knowledge": 0,
-            "pending_outbox": 0, "sync_adapter": "noop", "last_session": "—",
-            "db_path": "/x", "build": "checkout", "revision": "abc1234",
-            "remote_revision": "abc1234", "drifted": False,
-            "branch": "refs/heads/main", "remote_ref_age_days": 0,
+            "db_ok": True,
+            "version": "0.13.0",
+            "package_path": "/x/techne",
+            "observations": 0,
+            "threads": 0,
+            "active_threads": 0,
+            "knowledge": 0,
+            "pending_outbox": 0,
+            "sync_adapter": "noop",
+            "last_session": "—",
+            "db_path": "/x",
+            "build": "checkout",
+            "revision": "abc1234",
+            "remote_revision": "abc1234",
+            "drifted": False,
+            "branch": "refs/heads/main",
+            "remote_ref_age_days": 0,
         }
         base.update(over)
         return base
@@ -900,8 +938,12 @@ class TestFreshnessCaveat:
         which is exactly when a SessionStart banner greets you. The earlier
         wording printed the same sha on both sides of the word "differs"."""
         b = format_banner(
-            self._h(branch="refs/heads/feat", drifted=None,
-                    revision="abc1234", remote_revision="abc1234")
+            self._h(
+                branch="refs/heads/feat",
+                drifted=None,
+                revision="abc1234",
+                remote_revision="abc1234",
+            )
         )
         assert "level with origin/main abc1234" in b
         assert "differs" not in b

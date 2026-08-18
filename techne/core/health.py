@@ -435,21 +435,45 @@ def format_banner(health: dict) -> str:
     # would be wrong for it — a fetch that moves nothing rewrites FETCH_HEAD but
     # not the ref (15:05:36 vs 14:37:01 here, 28 minutes apart).
     _age = health.get("remote_ref_age_days")
-    fetched = (
-        f", local ref last moved {_age}d ago" if _age is not None else ", ref age unknown"
-    )
+    fetched = f", local ref last moved {_age}d ago" if _age is not None else ", ref age unknown"
     _remote = health.get("remote_revision")
     branch = health.get("branch")
 
     if build == "installed":
-        # UNCHANGED from the pre-#568 contract, deliberately. An installed copy
-        # still cannot be checked for currency locally — there is no reference
-        # version to compare against without a network call — so it keeps its
-        # honest "I cannot verify this" warning. Downgrading it belongs with the
-        # latest-release comparison that would make the check real, not here:
-        # this PR must not shrink warning coverage while widening it elsewhere.
-        healthy = False
-        build_note = "installed — may lag repo HEAD"
+        # DEMOTED FROM A WARNING TO A STATEMENT (#575), reversing the #568/#569
+        # decision to keep healthy=False here. That call was right for its own
+        # scope — a PR widening warning coverage must not quietly narrow it — and
+        # it deferred this to "the latest-release comparison that would make the
+        # check real". Richard's call, 2026-08-18: techne is local-first and does
+        # not phone home, so that comparison is not coming, and the ⚠️ would have
+        # been permanent.
+        #
+        # A PERMANENT WARNING NOBODY CAN CLEAR IS NOT A WARNING, IT IS NOISE, and
+        # it is not free: this banner's mark is shared with subsystem liveness, so
+        # a pinned install rendered ⚠️ forever and every REAL fault below it
+        # arrived pre-ignored. Reporting an UNKNOWABLE as unhealthy is a category
+        # error — the install is not faulty, its currency is simply not a local
+        # fact. #575's own words: "honest and useless".
+        #
+        # AND THE TWO SURFACES DISAGREED, which this docstring already forbids
+        # ("keep the two in agreement — a user-visible surface that contradicts
+        # doctor is worse than one that stays quiet"). `check_runtime_revision`
+        # has always returned DORMANT for a packaged install, with the comment "a
+        # legitimate, healthy state — not something to report red" (checks.py).
+        # So `techne doctor` called this condition healthy while the banner
+        # called it a fault, for the same install. This aligns the banner TO
+        # doctor rather than inventing a third opinion.
+        #
+        # The honesty is kept where honesty belongs, in the TEXT: the line still
+        # says currency is unchecked and names how to check it, and `drifted`
+        # stays None in the payload (never False — we did not check, so no
+        # consumer may conclude "level"). What changes is only that we stop
+        # crying wolf about it.
+        healthy = True
+        build_note = (
+            "installed build — currency not checked (techne does not phone home); "
+            "compare against github.com/tenishai/techne/releases"
+        )
     elif branch and branch != "refs/heads/main":
         # Deliberately off main — a feature branch, worktree or CI checkout, which
         # is SUPPOSED to differ, so this stays healthy. But it STILL STATES the
