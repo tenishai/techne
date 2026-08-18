@@ -176,13 +176,31 @@ env:
 # instead of arbitrary code execution on a persistent host. `fork == false` looks like
 # the obvious fix and is not one: an absent property equals false, so it fails open too.
 #
-# The `event_name` clause is load-bearing: without it `push` reaches the comparison,
-# where the property is absent, and pushes would be sent to the wrong runner.
-# BUT IT IS A DENYLIST OF ONE EVENT NAME, which is its own hazard — see the trigger
-# assertion in tests/test_ci_workflow_triggers.py. Any NEW trigger that carries a
-# `pull_request` payload (notably `pull_request_target`, which runs with full secrets)
-# satisfies `event_name != 'pull_request'` and short-circuits this guard TRUE. The
-# suite now fails if a trigger is added without deciding that question.
+# THE GUARD IS AN ALLOW-LIST NOW, NOT A DENYLIST (techne#590, 2026-08-18). It reads
+# "push OR workflow_dispatch OR (pull_request AND head repo is us)". The old shape
+# opened with `event_name != 'pull_request'`, A DENYLIST OF ONE NAME: any other
+# event carrying a `pull_request` payload — notably `pull_request_target`, which
+# runs with full secrets — satisfied that disjunct and short-circuited the guard
+# TRUE, putting fork code on the self-hosted pool.
+#
+# #570 policed that with a hand-maintained list of fork-carrying event names in the
+# test file. That is the same hazard one level up, and it had already failed: the
+# list omitted `pull_request_review_thread`, whose payload carries `pull_request`
+# as a REQUIRED property (verified against GitHub's payload docs 2026-08-18). A
+# copy of a fact GitHub owns goes stale the first time GitHub adds an event — the
+# same reasoning this file already records for refusing a hand-maintained BRANCH
+# list (#530). The list is deleted; the allow-list makes it unnecessary.
+#
+# AN UNKNOWN EVENT NOW FAILS CLOSED — it satisfies no disjunct, so the self-hosted
+# job SKIPS and the hosted `fork-pr` job (the exact complement, `!(...)` of the same
+# string) picks it up. Proven by EVALUATION, not grep: tests/gha_expr.py implements
+# the expression semantics and is validated against this repo's measured truth
+# table, then tests/test_ci_workflow_triggers.py runs both guards over synthetic
+# contexts including events GitHub has not invented yet.
+#
+# The composite expression below has NOT itself been observed in a live run; its
+# primitives have. Treat it as hand-traced-from-measured-parts until a fork PR
+# exercises it.
 #
 # THE GUARD IS REPEATED THREE TIMES AND THAT IS A HAZARD, not a style choice: this
 # finding was first raised against TWO jobs on 2026-07-30 and had grown to THREE by
@@ -200,7 +218,7 @@ jobs:
     # replicas x workers, so 2 replicas x -n 4 = 8 workers on 2 cores, which the
     # pin does not prevent — lower -n in step if you do that.
     runs-on: [self-hosted, linux, x64, dev02]
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
     strategy:
@@ -355,7 +373,7 @@ jobs:
   eval-vec:
     runs-on: [self-hosted, linux, x64, dev02]
     # Fork guard (#556) — see the block above `jobs:`.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     # Observed at ~30s on the runner; 20 bounds a hang without being tight.
     timeout-minutes: 20
     steps:
@@ -435,7 +453,7 @@ jobs:
     # every push and every in-repo PR, still runs here. Only fork PRs are routed
     # away, and for those the scheduling risk #461 describes is the lesser of two
     # evils against arbitrary code execution on dev02.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     timeout-minutes: 5
     steps:
       - name: Checkout techne
@@ -465,7 +483,7 @@ jobs:
   crash-recovery:
     runs-on: [self-hosted, linux, x64, dev02]
     # Fork guard (#556) — same rationale as every self-hosted job above.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     timeout-minutes: 10
     steps:
       - name: Checkout techne
@@ -499,7 +517,7 @@ jobs:
   #
   # Runs on GitHub-hosted, so fork code never touches dev02.
   fork-pr:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+    if: ${{ !(github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

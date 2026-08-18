@@ -12,9 +12,14 @@ so it gets a guard that runs in the suite the trigger would have run.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
+
+# The expression evaluator is a sibling module, not a package import.
+sys.path.insert(0, str(Path(__file__).parent))
+from gha_expr import evaluate  # noqa: E402
 
 yaml = pytest.importorskip("yaml")
 
@@ -626,14 +631,39 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
 # and never reaches the comparison. The hazard was real, the remedy is the clause —
 # but note that clause is a DENYLIST OF ONE EVENT NAME, which is its own hole and is
 # why `test_no_trigger_is_added_without_deciding_the_fork_question` exists.
-FORK_GUARD = (
-    "${{ github.event_name != 'pull_request' "
-    "|| github.event.pull_request.head.repo.full_name == github.repository }}"
+# INVERTED TO AN ALLOW-LIST (techne#590, 2026-08-18, Richard: "we should invert").
+#
+# The old guard's first disjunct was `github.event_name != 'pull_request'` — A
+# DENYLIST OF ONE EVENT NAME. Any other event carrying a fork's payload satisfied
+# it, short-circuited the guard TRUE, and put fork code on the self-hosted pool.
+# #570 added a test that every DECLARED fork-carrying trigger must be named in the
+# guard, and that test works — but the list it checks, `_FORK_CARRYING_EVENTS`, is
+# hand-maintained here, which is the same hazard one level up. It was already
+# missing `pull_request_review_thread`, VERIFIED 2026-08-18 against GitHub's
+# payload docs: that event's payload carries `pull_request` as a REQUIRED
+# property. Not a hand trace any more.
+#
+# A hand-copied list of GitHub's event names fails silently the first time GitHub
+# adds an event — the same reasoning test.yml already records for refusing a
+# hand-maintained BRANCH list in #530.
+#
+# So: name what may reach the self-hosted pool, not what may not. An unknown event
+# now evaluates FALSE and the self-hosted job SKIPS — fail-closed by construction,
+# the same direction #570 established for property typos.
+TRUSTED_POOL = (
+    "github.event_name == 'push' "
+    "|| github.event_name == 'workflow_dispatch' "
+    "|| (github.event_name == 'pull_request' "
+    "&& github.event.pull_request.head.repo.full_name == github.repository)"
 )
-FORK_ONLY = (
-    "${{ github.event_name == 'pull_request' "
-    "&& github.event.pull_request.head.repo.full_name != github.repository }}"
-)
+FORK_GUARD = "${{ " + TRUSTED_POOL + " }}"
+#: THE EXACT COMPLEMENT BY CONSTRUCTION — literally `!(...)` of the same string,
+#: not a hand-written mirror. The two cannot drift, which is what the old pair's
+#: `unserved` assertion was manually policing. It also fixes the gap that made a
+#: pure allow-list unsafe: an unknown event skips self-hosted AND is picked up
+#: here, so it runs on a hosted runner instead of leaving an empty Checks tab
+#: (techne#530's failure, which the trust split could otherwise reintroduce).
+FORK_ONLY = "${{ !(" + TRUSTED_POOL + ") }}"
 
 
 def _jobs() -> dict:
@@ -822,61 +852,112 @@ def test_the_fork_guard_reads_properties_github_actually_sends():
     )
 
 
-#: Events that carry a `pull_request` payload, i.e. that can be triggered BY A FORK.
-#: `github.event_name` differs per event, so FORK_GUARD's first disjunct — a comparison
-#: against the single literal 'pull_request' — is blind to every other member here.
-_FORK_CARRYING_EVENTS = {
-    "pull_request",
-    "pull_request_target",
-    "pull_request_review",
-    "pull_request_review_comment",
-}
+# `_FORK_CARRYING_EVENTS` LIVED HERE AND IS DELETED (techne#590).
+#
+# It was a hand-maintained copy of a fact GitHub owns — the set of events whose
+# payload can carry a fork's head — and it existed only to police a guard whose
+# first disjunct was a denylist of one event name. Two failure modes, one of which
+# had already happened:
+#   1. It silently omitted `pull_request_review_thread`. VERIFIED 2026-08-18 against
+#      GitHub's payload docs: that event carries `pull_request` as a REQUIRED
+#      property, so the omission was real, not a hand trace.
+#   2. It could never be complete, because GitHub adds events on its own schedule
+#      and nothing here would notice. Exactly the reasoning test.yml already records
+#      for refusing a hand-maintained BRANCH list (#530).
+#
+# The allow-list makes the list unnecessary rather than more accurate: an event the
+# guard does not NAME as trusted fails closed, whether or not anyone wrote it down.
+# Keeping a list that nothing consults would be the worst of both — it reads as
+# coverage while enforcing nothing.
 
 
-def test_every_fork_carrying_trigger_is_named_in_the_guard():
-    """THE GUARD'S FIRST DISJUNCT IS A DENYLIST OF ONE EVENT NAME (#570 r1).
+def _ctx(event_name: str, *, head_repo: str | None = "tenishai/techne") -> dict:
+    """A run context. `head_repo=None` means the payload carries no pull_request at
+    all — which is what a non-PR event actually looks like, absent properties and all."""
+    gh: dict = {"event_name": event_name, "repository": "tenishai/techne", "event": {}}
+    if head_repo is not None:
+        gh["event"]["pull_request"] = {"head": {"repo": {"full_name": head_repo}}}
+    return {"github": gh}
 
-    `FORK_GUARD` reads `github.event_name != 'pull_request' || ...`. Any OTHER event
-    carrying a fork's payload satisfies that disjunct, short-circuits the guard TRUE,
-    and puts fork code back on the self-hosted pool. `pull_request_target` is the
-    dangerous one: it is the documented way to give fork PRs secrets, it runs in the
-    BASE repo's context, and adding it left the suite green.
 
-    THIS ASSERTS THE GUARD, NOT A LIST OF BLESSED NAMES, and that is the #570 r2 fix.
-    The first version pinned the trigger SET and told the reader to "widen FORK_GUARD
-    first, then add it here" — so following the message's own remedy (add the trigger,
-    add it to the set, leave the guard alone) PASSED. A guard whose failure message
-    prescribes the hole is the #582 shape, and it is the second time I have shipped it.
+def test_an_unknown_event_cannot_reach_the_self_hosted_pool():
+    """THE PROPERTY THE INVERSION BUYS (techne#590), EVALUATED rather than grepped.
 
-    Now the obligation is mechanical: declare a fork-carrying trigger and the guard
-    must name it. There is no list to add yourself to.
+    The old guard was a DENYLIST of one event name, so anything GitHub adds — or
+    anything we declare without thinking — short-circuited it TRUE and reached
+    dev02. `_FORK_CARRYING_EVENTS` tried to police that with a hand-maintained
+    list, which is the same hazard one level up, and it was already missing
+    `pull_request_review_thread` (verified against GitHub's payload docs: that
+    event carries `pull_request` as a REQUIRED property).
+
+    Driven through `gha_expr.evaluate`, which is validated against GitHub's own
+    measured truth table. String matching cannot make this claim; evaluation can.
     """
-    declared_fork_carrying = _FORK_CARRYING_EVENTS & set(_triggers())
-    assert declared_fork_carrying, (
-        "no fork-carrying trigger is declared at all — either the workflow stopped "
-        "running on pull_request (see techne#530) or _FORK_CARRYING_EVENTS is stale"
-    )
+    for event in (
+        "pull_request_target",  # the dangerous one: fork code WITH secrets
+        "pull_request_review",
+        "pull_request_review_comment",
+        "pull_request_review_thread",  # the member the hand-maintained list missed
+        "issue_comment",
+        "merge_group",
+        "an_event_github_has_not_invented_yet",
+    ):
+        assert evaluate(FORK_GUARD, _ctx(event)) is False, (
+            f"{event!r} reaches the SELF-HOSTED pool — the guard is not fail-closed"
+        )
+        assert evaluate(FORK_ONLY, _ctx(event)) is True, (
+            f"{event!r} is kept off self-hosted but NO hosted job serves it, which is "
+            "techne#530's empty Checks tab reintroduced through the trust split"
+        )
 
-    unguarded = sorted(e for e in declared_fork_carrying if f"'{e}'" not in FORK_GUARD)
-    assert not unguarded, (
-        f"these triggers can carry a FORK's code but FORK_GUARD never names them: "
-        f"{unguarded}\n"
-        f"FORK_GUARD is: {FORK_GUARD}\n"
-        "Its first disjunct compares `github.event_name` against ONE literal, so any "
-        "event it does not name short-circuits the techne#556 guard to TRUE and puts "
-        "fork code on the self-hosted pool.\n"
-        "Widening the guard is the ONLY fix — there is deliberately no allow-list here "
-        "to add the trigger to instead."
-    )
 
-    # ...and the fork-only side must stay the exact complement, or a trigger can be
-    # guarded off self-hosted while no hosted job picks it up: techne#530's empty
-    # Checks tab, reintroduced through the trust split.
-    unserved = sorted(e for e in declared_fork_carrying if f"'{e}'" not in FORK_ONLY)
-    assert not unserved, (
-        f"these triggers are guarded off the self-hosted pool but no hosted job "
-        f"serves them: {unserved}. FORK_ONLY is: {FORK_ONLY}"
+def test_the_trusted_events_still_reach_the_pool():
+    """Fail-closed is worthless if it closes on everything."""
+    for ctx in (
+        _ctx("push", head_repo=None),
+        _ctx("workflow_dispatch", head_repo=None),
+        _ctx("pull_request", head_repo="tenishai/techne"),  # same-repo PR
+    ):
+        assert evaluate(FORK_GUARD, ctx) is True
+        assert evaluate(FORK_ONLY, ctx) is False
+
+
+def test_a_fork_pr_goes_hosted_and_only_hosted():
+    """techne#556's whole point, unchanged by the inversion."""
+    fork = _ctx("pull_request", head_repo="someone/techne-fork")
+    assert evaluate(FORK_GUARD, fork) is False, "fork code reached the self-hosted pool"
+    assert evaluate(FORK_ONLY, fork) is True, "a fork PR would get no CI at all"
+
+
+def test_the_two_guards_are_exact_complements_under_every_shape():
+    """They are `X` and `!(X)` by construction; this proves the construction holds.
+    Exactly one side runs for every context — nothing double-runs, nothing is
+    unserved. That invariant used to be policed by a hand-written mirror string."""
+    for ctx in (
+        _ctx("push", head_repo=None),
+        _ctx("workflow_dispatch", head_repo=None),
+        _ctx("pull_request", head_repo="tenishai/techne"),
+        _ctx("pull_request", head_repo="someone/techne-fork"),
+        _ctx("pull_request_target", head_repo="someone/techne-fork"),
+        _ctx("schedule", head_repo=None),
+    ):
+        guard, fork_only = evaluate(FORK_GUARD, ctx), evaluate(FORK_ONLY, ctx)
+        assert guard != fork_only, (
+            f"both sides agree for {ctx['github']['event_name']!r} — that event would "
+            "either run twice or not at all"
+        )
+
+
+def test_the_guard_never_regrows_a_denylist():
+    """One-line explanation for whoever breaks the evaluator tests above: an
+    `!=` on event_name is the denylist shape #590 removed, and it is unsatisfiable
+    to police with a list."""
+    assert "!=" not in FORK_GUARD, (
+        "FORK_GUARD contains `!=` — that is the DENYLIST shape techne#590 removed; "
+        "any event it does not name satisfies it and reaches the self-hosted pool"
     )
+    for literal in ("'push'", "'workflow_dispatch'", "'pull_request'"):
+        assert literal in FORK_GUARD, f"the allow-list stopped naming {literal}"
 
 
 #: Package names that PULL IN A VECTOR BACKEND. `backend_available()` tests
