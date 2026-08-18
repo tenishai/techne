@@ -439,6 +439,17 @@ def _parse_file(
     return symbols, edges
 
 
+class IndexFailure(Exception):
+    """Raised by _index_file_checked when one file could not be indexed.
+
+    Exists because the old contract could not express failure: _index_file
+    returns a symbol count, and 0 means BOTH "unchanged, nothing to do" and
+    "blew up and rolled back". 461 files failed to index in a single run of this
+    repo while the run exited 0 (techne#610). A caller that wants to report
+    honestly needs the two apart.
+    """
+
+
 def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
     """Parse and index *file_path* into codex.db. Returns symbol count (0 = skipped).
 
@@ -484,6 +495,24 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
                 "DELETE FROM edges WHERE from_symbol IN (SELECT id FROM symbols WHERE file = ?)",
                 (file_str,),
             )
+            # INBOUND edges are the other half, and leaving them out is what made a
+            # re-index fail with FOREIGN KEY on any file something RESOLVED calls into
+            # (techne#610). `edges.to_symbol` is also REFERENCES symbols(id), and those
+            # rows belong to OTHER files, so they are not ours to delete — the call is
+            # still a true fact, only its resolved target is being replaced. Unresolve
+            # them and let the re-insert re-resolve, mirroring what the v3 migration
+            # does for the same asymmetry (#605).
+            #
+            # A plain walk never hits this: fresh edges leave to_symbol NULL and NULL
+            # does not constrain. It needs a resolver pass to have populated it — and
+            # then it selects for exactly the symbols that matter, because a file fails
+            # to re-index PRECISELY BECAUSE something calls into it. The better
+            # connected a module is, the more certainly it went stale.
+            conn.execute(
+                "UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
+                "WHERE to_symbol IN (SELECT id FROM symbols WHERE file = ?)",
+                (file_str,),
+            )
         conn.execute("DELETE FROM symbols WHERE file = ?", (file_str,))
         # NB: deliberately no commit here — delete + re-insert share one
         # transaction. A parse that yields nothing (or raises) rolls back the
@@ -514,13 +543,18 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
         log.debug("codex_indexed file=%s symbols=%d edges=%d", file_str, len(symbols), len(edges))
         return len(symbols)
 
-    except Exception:
+    except Exception as exc:
         log.exception("codex_index_failed file=%s", file_path)
         try:
             conn.rollback()
         except Exception:  # noqa: BLE001
             pass
-        return 0
+        # Best-effort per file is still the right posture — one unparseable file
+        # must not abort a whole-repo walk. What changes is that the failure is now
+        # RECOVERABLE INFORMATION rather than an indistinguishable 0: the rollback
+        # leaves the file's PREVIOUS rows in place, so a silent 0 here means the
+        # edit never entered the graph while the run reported success.
+        raise IndexFailure(str(file_path)) from exc
     finally:
         conn.close()
 
@@ -610,10 +644,25 @@ def sweep_excluded_rows(db_path: Path, repo_root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _index_file_safe(db_path: Path, file_path: Path, repo_root: Path) -> tuple[int, bool]:
+    """(symbol_count, failed). Best-effort per file — one bad file must never abort
+    a whole-repo walk — but the failure is COUNTABLE instead of an anonymous 0."""
+    try:
+        return _index_file(db_path, file_path, repo_root), False
+    except IndexFailure:
+        return 0, True
+
+
 def index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
     """Index a single file into a repo's codex db; returns the symbol count
-    (incremental — an unchanged file is a no-op via its stored hash)."""
-    return _index_file(db_path, file_path, repo_root)
+    (incremental — an unchanged file is a no-op via its stored hash).
+
+    Stays best-effort and int-returning for its existing callers (the
+    reindex-on-edit rail, techne#301); the traceback is already logged by
+    _index_file. Callers that must distinguish "unchanged" from "failed" should
+    use _index_file_safe or catch IndexFailure directly."""
+    count, _failed = _index_file_safe(db_path, file_path, repo_root)
+    return count
 
 
 def is_indexable_path(file_path: Path) -> bool:
@@ -659,6 +708,9 @@ class RepoSource:
         #: by the CLI so a heal is REPORTED rather than inferred from a shrinking
         #: total — a purge nobody is told about is how #604 stayed invisible.
         self.last_swept = 0
+        #: Files the last initial_walk could not index. Non-zero means the graph is
+        #: stale for those paths and the run must not be read as a success (#610).
+        self.last_failed = 0
 
     # ------------------------------------------------------------------
     # SourceAdapter Protocol
@@ -672,9 +724,16 @@ class RepoSource:
         """
         total = 0
         files = 0
+        failed = 0
         for path in _walk_repo(self._root, self._languages):
             files += 1
-            total += _index_file(self._db_path, path, self._root)
+            n, did_fail = _index_file_safe(self._db_path, path, self._root)
+            total += n
+            failed += did_fail
+        # A run that failed to index 461 files must SAY SO rather than exit 0
+        # (techne#610). Each failure rolls back, so the file silently keeps its
+        # previous rows: the graph is stale exactly where the run looked fine.
+        self.last_failed = failed
 
         # Enforce the CURRENT skip list against what is already stored (#613).
         # The walk above cannot do this on its own: it only visits files it is
@@ -683,12 +742,22 @@ class RepoSource:
         # skip-list change self-healing rather than needing a migration each time.
         self.last_swept = sweep_excluded_rows(self._db_path, self._root)
         log.info(
-            "codex_initial_walk root=%s files=%d symbols=%d swept=%d",
+            "codex_initial_walk root=%s files=%d symbols=%d swept=%d failed=%d",
             self._root,
             files,
             total,
             self.last_swept,
+            failed,
         )
+        if failed:
+            log.warning(
+                "codex_index_incomplete root=%s failed=%d of %d files — those files kept "
+                "their PREVIOUS rows, so the graph is stale where this run looked clean "
+                "(tenishai/techne#610)",
+                self._root,
+                failed,
+                files,
+            )
 
         # Persist repo_root so annotate_freshness can resolve relative paths.
         try:
@@ -739,8 +808,13 @@ class RepoSource:
             if path.suffix.lower() not in valid_exts:
                 return
             with self._lock:
-                n = _index_file(db_path, path, root)
-                if n:
+                n, did_fail = _index_file_safe(db_path, path, root)
+                if did_fail:
+                    log.warning(
+                        "codex_watch_reindex_failed file=%s — kept its previous rows (#610)",
+                        path,
+                    )
+                elif n:
                     log.info("codex_watch_reindex file=%s symbols=%d", path, n)
 
         self._debouncer = Debouncer(_on_change, self._debounce_ms)
