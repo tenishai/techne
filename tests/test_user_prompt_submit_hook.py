@@ -60,10 +60,7 @@ def _injection_log_rows(source: str | None = None) -> list[dict]:
 
     conn = sqlite3.connect(str(Config.load().db_path))
     try:
-        names = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "context_injections" not in names:
             return []
         cur = conn.execute(
@@ -79,8 +76,9 @@ def _injection_log_rows(source: str | None = None) -> list[dict]:
 
 def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
     """Flag OFF (no config.yaml → default False) → no stdout, even with a match."""
-    _seed("Postgres was chosen over MongoDB for join semantics.",
-          type="decision", confidence="high")
+    _seed(
+        "Postgres was chosen over MongoDB for join semantics.", type="decision", confidence="high"
+    )
     out = _run(monkeypatch, capsys, {"prompt": "why postgres"})
     assert out == ""
 
@@ -88,8 +86,12 @@ def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
 def test_flag_on_matching_injects_context(home, monkeypatch, capsys):
     """Flag ON + prompt matching a stored fact → protocol JSON injection."""
     _write_config(home, per_turn_recall=True)
-    _seed("Postgres was chosen over MongoDB for join semantics.",
-          type="decision", tags="storage", confidence="high")
+    _seed(
+        "Postgres was chosen over MongoDB for join semantics.",
+        type="decision",
+        tags="storage",
+        confidence="high",
+    )
     out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
     assert out.strip(), "expected protocol JSON on stdout"
     payload = json.loads(out)
@@ -110,10 +112,13 @@ def test_recall_injection_is_logged_with_hit_ids(home, monkeypatch, capsys):
     _write_config(home, per_turn_recall=True)
     _seed(
         "Postgres was chosen over MongoDB for join semantics.",
-        type="decision", tags="storage", confidence="high",
+        type="decision",
+        tags="storage",
+        confidence="high",
     )
     out = _run(
-        monkeypatch, capsys,
+        monkeypatch,
+        capsys,
         {"prompt": "postgres join decision", "session_id": "sess-1"},
     )
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -150,7 +155,8 @@ def test_recall_log_can_be_disabled(home, monkeypatch, capsys):
     _write_config(home, per_turn_recall=True, per_turn_recall_log=False)
     _seed(
         "Postgres was chosen over MongoDB for join semantics.",
-        type="decision", confidence="high",
+        type="decision",
+        confidence="high",
     )
     out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
     assert "Postgres" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -321,8 +327,12 @@ def test_pull_only_filter_does_not_starve_a_normal_recall(home, monkeypatch, cap
     """The filter drops ONLY pull-only rows — a matching fact still injects."""
     _write_config(home, per_turn_recall=True)
     _seed_raw("Postgres was chosen over MongoDB for join semantics.", "pattern")
-    _seed("Postgres connection pooling is handled by pgbouncer.",
-          type="fact", tags="storage", confidence="high")
+    _seed(
+        "Postgres connection pooling is handled by pgbouncer.",
+        type="fact",
+        tags="storage",
+        confidence="high",
+    )
     out = _run(monkeypatch, capsys, {"prompt": "postgres pooling"})
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "pgbouncer" in ctx
@@ -337,8 +347,12 @@ def test_filtered_row_is_not_logged_as_injected(home, monkeypatch, capsys):
     """
     _write_config(home, per_turn_recall=True)
     pid = _seed_raw("Postgres was chosen over MongoDB for join semantics.", "pattern")
-    _seed("Postgres connection pooling is handled by pgbouncer.",
-          type="fact", tags="storage", confidence="high")
+    _seed(
+        "Postgres connection pooling is handled by pgbouncer.",
+        type="fact",
+        tags="storage",
+        confidence="high",
+    )
     _run(monkeypatch, capsys, {"prompt": "postgres pooling", "session_id": "s-561"})
 
     rows = _injection_log_rows("per_turn_recall")
@@ -479,3 +493,107 @@ class TestInjectedTypeLabel:
         would take the attribution rail's only signal with it."""
         out = self._ctx([{"id": 42, "type": "knowledge", "knowledge_type": "fact", "content": "z"}])
         assert "- ⟦techne#42⟧ [fact] z" in out
+
+
+# ---------------------------------------------------------------------------
+# Startup directive (techne#643) — once per session, gated on pending work.
+#
+# The hook-level contract is what's covered here: WHEN the block fires, that it
+# fires at most once per session, and that it stays silent when there is nothing
+# to drain. `pending_reflection` is patched rather than fixtured because it has
+# its own tests — what would drift undetected is the gate around it, not it.
+# ---------------------------------------------------------------------------
+
+
+def _patch_pending(monkeypatch, result):
+    """Point the startup block's signal at `result` (a list of session dicts)."""
+    monkeypatch.setattr("techne.core.reflect.pending_reflection", lambda config, **kw: result)
+
+
+def _state(name: str):
+    """Read one extension_state payload from the TECHNE_HOME db."""
+    from techne.config import Config
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    conn = connect(Config.load().db_path)
+    try:
+        return get_state(conn, name)
+    finally:
+        conn.close()
+
+
+def test_startup_directive_off_by_default(home, monkeypatch, capsys):
+    """Default-OFF, like every other injecting block on this hook."""
+    _write_config(home, per_turn_recall=False, per_turn_seed=False)
+    _patch_pending(monkeypatch, [{"session_id": "s1", "observations": 40}])
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    assert out == ""
+
+
+def test_startup_directive_fires_on_first_prompt_when_work_pending(home, monkeypatch, capsys):
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "startup drain" in ctx
+    assert "~28 unreflected observation" in ctx
+    # The two constraints that make the drain correct rather than merely present.
+    assert "techne_reflect_emit" in ctx
+    assert "#646" in ctx
+
+
+def test_startup_directive_fires_at_most_once_per_session(home, monkeypatch, capsys):
+    """The whole point of the extension_state gate."""
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    first = _run(monkeypatch, capsys, {"prompt": "one", "session_id": "s1"})
+    assert "startup drain" in first
+    second = _run(monkeypatch, capsys, {"prompt": "two", "session_id": "s1"})
+    assert second == ""
+
+
+def test_a_new_session_re_arms_the_directive(home, monkeypatch, capsys):
+    """Session-scoped key, so a new session needs no cleanup pass to re-arm."""
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    _run(monkeypatch, capsys, {"prompt": "one", "session_id": "s1"})
+    out = _run(monkeypatch, capsys, {"prompt": "one", "session_id": "s2"})
+    assert "startup drain" in out
+
+
+def test_no_pending_work_emits_nothing_but_still_closes_the_gate(home, monkeypatch, capsys):
+    """Silence is the common case, and it must not cost a DB read every turn.
+
+    The marker is written even though nothing was injected — "once per session",
+    not "once per session that had work". Without it a quiet session re-runs the
+    pending query on every single prompt.
+    """
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [])
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    assert out == ""
+    assert _state("startup_directive:s1") == {"fired": False, "sessions": 0}
+
+
+def test_missing_session_id_stays_silent(home, monkeypatch, capsys):
+    """No session id means no gate is possible; an ungated directive would fire
+    on EVERY prompt, which is the failure mode this feature exists to avoid."""
+    _write_config(home, startup_directive=True)
+    _patch_pending(monkeypatch, [{"session_id": "old", "observations": 28}])
+    out = _run(monkeypatch, capsys, {"prompt": "hello"})
+    assert out == ""
+
+
+def test_startup_failure_never_costs_the_turn(home, monkeypatch, capsys):
+    """A chore nudge is the least important thing this hook does."""
+    _write_config(home, startup_directive=True, per_turn_seed=True)
+
+    def _boom(config, **kw):
+        raise RuntimeError("signal unavailable")
+
+    monkeypatch.setattr("techne.core.reflect.pending_reflection", _boom)
+    out = _run(monkeypatch, capsys, {"prompt": "hello", "session_id": "s1"})
+    # Exit 0 is asserted inside _run; the seed block must survive the failure.
+    assert "seed check" in out
+    assert "startup drain" not in out
