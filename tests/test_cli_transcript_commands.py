@@ -105,30 +105,50 @@ def test_index_transcripts_limit_zero_indexes_nothing(cli_db, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_single_file_import_that_imports_nothing_is_reported_not_silent(cli_db, tmp_path):
-    """techne#630, resolved as "document the current behaviour as intentional".
+def test_single_file_import_that_failed_exits_non_zero(cli_db, tmp_path):
+    """techne#630, decided 2026-08-18 (Richard: "we should fix").
 
-    The issue offered two resolutions: exit non-zero when a single-file import
-    imported nothing, or record the current contract deliberately. The second is
-    correct here, because #622 established in a test named for it that BOTH ENTRY
-    POINTS AGREE on the same broken file — and a file behaving differently
-    depending on whether you named it or a glob found it is its own surprise.
+    The partial-success argument that justifies exit 0 for a DIRECTORY does not
+    apply to one named file: a failure is the whole outcome, and reporting it as
+    success breaks "no silent failures" at the exit code while stdout is honest.
 
-    What the objection is really about is silence, and there is none: the
-    filename, the reason, and the tally all print. Only the exit code is
-    generous. This test pins that the REPORTING stays, so a future change cannot
-    quietly make it a silent success.
+    The reporting is unchanged and still asserted — this is about the return
+    value, not about going quiet.
     """
     bad = tmp_path / "sess-broken.jsonl.gz"
     bad.write_bytes(b"not gzip at all")
 
     result = CliRunner().invoke(main, ["import", str(bad), "--no-prompts"])
 
-    assert result.exit_code == 0, "deliberate — see techne#630 and the comment in cli.py"
-    assert "sess-broken" in result.output, "the failure must name the file"
-    assert "0 imported, 1 skipped" in result.output, "and report the tally honestly"
-    assert "error" in result.output.lower(), "and give a reason"
+    assert result.exit_code != 0
+    assert "sess-broken" in result.output, "the failure must still name the file"
+    assert "0 imported, 1 skipped" in result.output, "and still report the tally"
+    assert "error" in result.output.lower(), "and still give a reason"
     assert "Aborted!" not in result.output, "never a bare abort (#622)"
+
+
+def test_re_importing_an_already_imported_file_still_exits_zero(cli_db, tmp_path):
+    """THE CASE A FLAT `not imported` TEST WOULD HAVE BROKEN (techne#630).
+
+    `import_transcript` is idempotent by design — a session that already has
+    observations is skipped with reason "already has N observations". That skip is
+    the feature working. Gating the exit code on `imported == 0` would turn the
+    safest possible habit, re-running an import, into a reported failure.
+
+    So the guard is on FAILURE, not on zero, and this pins the difference.
+    """
+    good = _good_transcript(tmp_path / "aaaaaaaa-1111-2222-3333-444444444444.jsonl")
+
+    first = CliRunner().invoke(main, ["import", str(good), "--no-prompts"])
+    assert first.exit_code == 0 and "1 imported" in first.output
+
+    second = CliRunner().invoke(main, ["import", str(good), "--no-prompts"])
+
+    assert second.exit_code == 0, (
+        "re-importing an already-imported file is idempotent SUCCESS, not failure"
+    )
+    assert "0 imported, 1 skipped" in second.output
+    assert "already has" in second.output
 
 
 def test_single_file_import_that_works_still_exits_zero(cli_db, tmp_path):
