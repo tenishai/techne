@@ -1347,6 +1347,24 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
         f"{tool_total} tool obs + {prompt_total} prompts added, "
         f"{summaries_set} session summaries set"
     )
+    # EXIT 0 EVEN WHEN A SINGLE FILE IMPORTED NOTHING — DELIBERATE (techne#630).
+    #
+    # The tension is real and worth stating rather than leaving for the next
+    # reader to rediscover. The partial-success argument that justifies exit 0 for
+    # a DIRECTORY (some imported, some skipped — the run did useful work) does NOT
+    # apply to one file, where "0 imported, 1 skipped" is total failure. On that
+    # reading this should exit non-zero.
+    #
+    # It does not, for two reasons that outweigh it:
+    #   1. #622 established, in a test named for it, that BOTH ENTRY POINTS AGREE
+    #      on the same broken file. A file behaving differently depending on
+    #      whether you named it or let a glob find it is its own surprise.
+    #   2. The failure is NOT silent, which is what the objection is really about:
+    #      the filename, the reason, and "0 imported, 1 skipped" all print. Only
+    #      the exit code is generous, and a grep found no automation consuming it.
+    #
+    # If a caller ever needs to branch on this, the right fix is an explicit
+    # `--strict` rather than flipping a contract other callers may depend on.
 
 
 @main.command("migrate-summaries")
