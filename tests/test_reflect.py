@@ -141,8 +141,10 @@ def test_parse_response_counts_rejected_items_as_dropped():
     A prompt drifting out of contract shows up here first, and before this it was
     as silent as a parse failure.
     """
-    raw = '[{"scope": "nonsense", "type": "fact", "content": "x"},' \
-          ' {"scope": "knowledge", "type": "not-a-type", "content": "y"}]'
+    raw = (
+        '[{"scope": "nonsense", "type": "fact", "content": "x"},'
+        ' {"scope": "knowledge", "type": "not-a-type", "content": "y"}]'
+    )
     r = parse_response(raw, max_items=5)
     assert r.candidates == []
     assert r.failure is None, "the array DID parse — this is not a parse failure"
@@ -686,7 +688,9 @@ def test_ingest_is_idempotent_on_replay(tmp_path):
     )
     thread_id = f"{session_id}-1"
 
-    first = ingest_reflection_response(config, session_id, thread_id, "deadbeef", _candidate_array())
+    first = ingest_reflection_response(
+        config, session_id, thread_id, "deadbeef", _candidate_array()
+    )
     assert first["candidates_written"] == 1
     second = ingest_reflection_response(
         config, session_id, thread_id, "deadbeef", _candidate_array()
@@ -879,8 +883,15 @@ def test_spool_primary_blocks_live_write_via_ingest(tmp_path):
 
 def _candidate_json(content: str = "a durable fact") -> str:
     return json.dumps(
-        [{"scope": "knowledge", "type": "fact", "content": content,
-          "tags": "test", "confidence": "high"}]
+        [
+            {
+                "scope": "knowledge",
+                "type": "fact",
+                "content": content,
+                "tags": "test",
+                "confidence": "high",
+            }
+        ]
     )
 
 
@@ -897,9 +908,9 @@ def test_ingest_reflection_response_logs_on_insert_failure(tmp_path, caplog):
             )
 
     assert counts["errors"] == 1, "error counter must still increment (behavior preserved)"
-    assert any(
-        "ingest_reflection_response" in r.message for r in caplog.records
-    ), "log.exception must emit a record naming the function"
+    assert any("ingest_reflection_response" in r.message for r in caplog.records), (
+        "log.exception must emit a record naming the function"
+    )
 
 
 def test_reflect_on_session_logs_on_generate_fn_failure(tmp_path, caplog):
@@ -907,7 +918,9 @@ def test_reflect_on_session_logs_on_generate_fn_failure(tmp_path, caplog):
     counter increments.  Uses an injectable generate_fn that raises."""
     config = _mk_config(tmp_path, enabled=True)
     session_id, obs = _mk_session_with_obs(config, 5)
-    thread = Thread(thread_num=1, label="crash thread", summary="s", observation_indices=list(range(5)))
+    thread = Thread(
+        thread_num=1, label="crash thread", summary="s", observation_indices=list(range(5))
+    )
     _save_thread_row(config, session_id, thread)
 
     def exploding_generate_fn(_prompt):
@@ -919,9 +932,9 @@ def test_reflect_on_session_logs_on_generate_fn_failure(tmp_path, caplog):
         )
 
     assert result["errors"] == 1, "error counter must still increment (behavior preserved)"
-    assert any(
-        "reflect_on_session" in r.message for r in caplog.records
-    ), "log.exception must emit a record naming the function"
+    assert any("reflect_on_session" in r.message for r in caplog.records), (
+        "log.exception must emit a record naming the function"
+    )
 
 
 def test_reflect_on_session_logs_on_make_generate_fn_failure(tmp_path, caplog):
@@ -937,9 +950,9 @@ def test_reflect_on_session_logs_on_make_generate_fn_failure(tmp_path, caplog):
             result = reflect_on_session(config, session_id, [thread], obs)
 
     assert result["errors"] == 1, "error counter must still increment (behavior preserved)"
-    assert any(
-        "reflect_on_session" in r.message for r in caplog.records
-    ), "log.exception must emit a record naming the function"
+    assert any("reflect_on_session" in r.message for r in caplog.records), (
+        "log.exception must emit a record naming the function"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1579,4 +1592,247 @@ def test_sub_threshold_threads_are_not_queued(tmp_path):
     assert pending_reflection_queue(config.db_path) == [], (
         "a thread emit will never produce a prompt for must not be queued — it "
         "could never be drained (#527 r4)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The CLI promotion path — the one the documented /techne-promote skill runs.
+# tenishai/techne#642 umbrella: #644 (no drain), #645 (no cursor), #646 (stuck rows).
+# ---------------------------------------------------------------------------
+
+
+def _mk_db_backed_session(config, n_obs: int = 14) -> str:
+    """A session whose observations and threads actually exist in the DB.
+
+    emit_reflection_pass re-derives threads from the store (exactly as the MCP tool
+    does), so these tests cannot hand it in-memory Thread objects the way the
+    older emit_reflection_batch tests do. Going through add_observation +
+    redetect_threads means these tests exercise the route production takes,
+    including the enqueue.
+    """
+    from techne.core.state import add_observation
+    from techne.lifecycle import redetect_threads
+
+    session_id = start_session(config.db_path, project_path="/tmp/p", agent_identity="test-agent")
+    for i in range(n_obs):
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+    redetect_threads(config, session_id)
+    return session_id
+
+
+def _fill_raw_responses(batch, content="CLI round-trip fact"):
+    """Stand in for the agent: answer every emitted prompt."""
+    for item in batch:
+        item["raw_response"] = _candidate_array(content)
+    return batch
+
+
+def test_cli_round_trip_drains_the_queue_and_advances_the_cursor(tmp_path):
+    """#644 + #645, together, because they are one broken path.
+
+    `techne reflect emit` -> agent fills raw_response -> `techne reflect ingest`
+    is the documented no-API-key promotion path. Before this, ingest wrote
+    candidates and drained nothing (drain_reflection_queue had exactly one
+    production caller, in mcp_server), and emit never wrote the
+    `reflect:emitted:` cursor that pending_reflection's own docstring assumes.
+    So the debt banner and the pending-reflection nudge could BOTH be cleared
+    only by the MCP path, and the skill left no trace of having run.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    owed_before = len(pending_reflection_queue(config.db_path))
+    assert owed_before >= 1, "precondition: the session owes reflection"
+
+    result = emit_reflection_pass(config, session_id)
+    batch = result["batch"]
+    assert batch, "precondition: emit produced a prompt"
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    assert marker and marker.get("emitted"), (
+        "emit must advance the reflect:emitted: cursor — without it "
+        "pending_reflection re-nominates this session on every SessionStart (#645)"
+    )
+
+    totals = ingest_reflection_batch(config, _fill_raw_responses(batch))
+    assert totals["candidates_written"] >= 1
+    assert totals["drained"] == len(batch), "ingest must report the debt it paid (#644)"
+    assert pending_reflection_queue(config.db_path) == [], (
+        "the CLI ingest path must drain the queue, not just the MCP path (#644)"
+    )
+
+
+def test_cli_ingest_does_not_drain_an_unanswered_thread(tmp_path):
+    """A blank raw_response is a deliberate skip, not work done.
+
+    Draining it would stamp unpaid debt as paid — permanently, since drain is
+    guarded on `drained_at IS NULL`.
+    """
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    owed = len(pending_reflection_queue(config.db_path))
+
+    batch = emit_reflection_pass(config, session_id)["batch"]
+    assert batch
+    for item in batch:
+        item["raw_response"] = ""  # the agent declined this thread
+
+    totals = ingest_reflection_batch(config, batch)
+    assert totals["skipped"] == len(batch)
+    assert totals["drained"] == 0
+    assert len(pending_reflection_queue(config.db_path)) == owed, (
+        "an unanswered thread still owes reflection"
+    )
+
+
+def test_cli_ingest_does_not_drain_on_a_parse_failure(tmp_path):
+    """A DISCARDED reflection is not a completed one (techne#465, drain half).
+
+    Mirrors the MCP guard: drain only when parse_failures and errors are both 0.
+    """
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    owed = len(pending_reflection_queue(config.db_path))
+
+    batch = emit_reflection_pass(config, session_id)["batch"]
+    assert batch
+    for item in batch:
+        item["raw_response"] = "this is not JSON at all"
+
+    totals = ingest_reflection_batch(config, batch)
+    assert totals["parse_failures"] == len(batch)
+    assert totals["drained"] == 0
+    assert len(pending_reflection_queue(config.db_path)) == owed, (
+        "a parse failure means the pass did not happen; the debt is still owed"
+    )
+
+
+def test_unemittable_queue_rows_are_reported_and_never_drained(tmp_path):
+    """#646: the min_observations gate is evaluated twice, against different buckets.
+
+    Enqueue threads that ARE emittable at session_end, then make them
+    sub-threshold at emit time by raising the floor. Those rows are now real debt
+    no prompt can ever pay. They must be REPORTED, not swept — draining them
+    would restore a clean banner and destroy the only evidence the class exists,
+    which is exactly how it survived #527 r4.
+    """
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        pending_reflection_queue,
+        unemittable_queue_rows,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    owed = len(pending_reflection_queue(config.db_path))
+    assert owed >= 1
+
+    # The second evaluation disagrees with the first — the divergence #646 measures.
+    config.reflect.min_observations_per_thread = 9999
+
+    stuck = unemittable_queue_rows(config, session_id)
+    assert len(stuck) == owed, "every queued row is now unemittable and must be visible"
+
+    result = emit_reflection_pass(config, session_id)
+    assert result["count"] == 0
+    assert result["unemittable_queued"] == owed
+    assert "646" in result["unemittable_note"]
+    assert len(pending_reflection_queue(config.db_path)) == owed, (
+        "an unemittable row must stay queued — reporting it is the fix, draining it is the bug"
+    )
+
+
+def test_reflection_debt_stats_counts_the_ledger_not_the_candidates(tmp_path):
+    """The debt ledger and the candidate counts answer different questions."""
+    from techne.core.reflect import (
+        drain_reflection_queue,
+        pending_reflection_queue,
+        reflection_debt_stats,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    _mk_db_backed_session(config)
+    queued = pending_reflection_queue(config.db_path)
+    assert queued
+
+    d = reflection_debt_stats(config)
+    assert d["pending"] == len(queued)
+    assert d["drained"] == 0
+    assert d["sessions_pending"] == 1
+    assert d["oldest_pending"] is not None
+
+    drain_reflection_queue(config.db_path, [q["thread_id"] for q in queued])
+    d = reflection_debt_stats(config)
+    assert d["pending"] == 0
+    assert d["drained"] == len(queued)
+    assert d["oldest_pending"] is None
+
+
+def test_promote_refuses_to_mint_an_unbacked_document_card(tmp_path):
+    """#633: `fsck` dangling_cards has been red since 2026-06-21.
+
+    reflect-promote and consolidate-merge could both mint a `document_card` with
+    no `doc:<id>` pointer — four such rows exist (knowledge 361, 366, 624, 625).
+    The content is real, so demote it to `fact` rather than dropping it.
+    """
+    from techne.core.database import connect
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_response,
+        list_candidates,
+        promote_candidate,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    item = emit_reflection_pass(config, session_id)["batch"][0]
+
+    unbacked = json.dumps(
+        [
+            {
+                "scope": "knowledge",
+                "type": "document_card",
+                "content": "A card with nothing behind it.",
+                "tags": "document_card,backing:summary",  # no doc:<id>
+                "confidence": "high",
+            }
+        ]
+    )
+    ingest_reflection_response(
+        config, session_id, item["thread_id"], item["prompt_hash"], unbacked, model_used="test"
+    )
+    cand = [c for c in list_candidates(config.db_path, status="pending")][0]
+    new_id = promote_candidate(config.db_path, cand["id"])
+
+    conn = connect(config.db_path)
+    try:
+        row = conn.execute("SELECT type FROM knowledge WHERE id = ?", (new_id,)).fetchone()
+    finally:
+        conn.close()
+    assert row["type"] == "fact", (
+        "a document_card with no doc: pointer is not a card — it must not be minted "
+        "as one, or fsck goes red forever (#633)"
     )
