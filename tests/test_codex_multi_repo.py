@@ -92,9 +92,7 @@ def test_codex_db_for_repo_creates_and_migrates(tmp_path):
 
     conn = plain_connect(db)
     try:
-        tables = {
-            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
         conn.close()
     assert {"symbols", "edges", "codex_meta"} <= tables
@@ -118,12 +116,20 @@ def test_two_repos_no_bleed(tmp_path):
     assert db_a != db_b
 
     add_symbol(
-        db_a, id="alpha.py::alpha_only::function::1", file="alpha.py",
-        name="alpha_only", kind="function", signature="def alpha_only()",
+        db_a,
+        id="alpha.py::alpha_only::function::1",
+        file="alpha.py",
+        name="alpha_only",
+        kind="function",
+        signature="def alpha_only()",
     )
     add_symbol(
-        db_b, id="beta.py::beta_only::function::1", file="beta.py",
-        name="beta_only", kind="function", signature="def beta_only()",
+        db_b,
+        id="beta.py::beta_only::function::1",
+        file="beta.py",
+        name="beta_only",
+        kind="function",
+        signature="def beta_only()",
     )
 
     a_hits = {h["name"] for h in search_symbols(db_a, "alpha_only")}
@@ -209,7 +215,11 @@ def test_migrate_legacy_codex_db(tmp_path):
     legacy = codex_store(cfg).db_path
     assert legacy == tmp_path / "codex.db"
     add_symbol(
-        legacy, id="x.py::keep::function::1", file="x.py", name="keep", kind="function",
+        legacy,
+        id="x.py::keep::function::1",
+        file="x.py",
+        name="keep",
+        kind="function",
     )
     set_meta(legacy, "repo_root", str(repo.resolve()))
 
@@ -528,7 +538,7 @@ def test_a_brand_new_module_is_not_reported_as_genuine_absence(tmp_path):
 
     cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
     repo, db = _repo(cfg, tmp_path)
-    _add(db, repo, "indexed.py")                       # fresh, indexed
+    _add(db, repo, "indexed.py")  # fresh, indexed
     (repo / "brand_new.py").write_text("def recall_attribution(): ...\n")  # never indexed
 
     out = _codex_search({"query": "recall_attribution", "repo": str(repo)}, cfg)
@@ -631,8 +641,14 @@ def test_an_unreadable_hit_is_qualified_too(tmp_path):
     repo, db = _repo(cfg, tmp_path)
     # Indexed, but the file is not on disk -> "missing"; and one with no hash at
     # all -> "unknown", which previously escaped the notice entirely.
-    add_symbol(db, id="ghost.py::ghost::function::1", file="ghost.py", name="ghost",
-               kind="function", file_hash=None)
+    add_symbol(
+        db,
+        id="ghost.py::ghost::function::1",
+        file="ghost.py",
+        name="ghost",
+        kind="function",
+        file_hash=None,
+    )
     (repo / "ghost.py").write_text("def ghost(): ...\n")
 
     out = _codex_search({"query": "ghost", "repo": str(repo)}, cfg)
@@ -655,8 +671,8 @@ def test_the_stale_branch_counts_missing_files_too(tmp_path):
 
     cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
     repo, db = _repo(cfg, tmp_path)
-    _add(db, repo, "stale.py", indexed_hash="0" * 64)   # on disk, bytes differ
-    _add(db, repo, "gone.py", on_disk=False)            # indexed, deleted from disk
+    _add(db, repo, "stale.py", indexed_hash="0" * 64)  # on disk, bytes differ
+    _add(db, repo, "gone.py", on_disk=False)  # indexed, deleted from disk
 
     out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
     idx = out["index"]
@@ -680,18 +696,31 @@ def test_unindexed_ignores_directories_the_index_never_covered(tmp_path):
 
     So: a new file BESIDE indexed ones counts; a file in a directory the index
     never touched does not.
+
+    THE NOISE DIRECTORY'S NAME IS LOAD-BEARING (techne#600). It must be a name
+    `_SKIP_DIRS` does NOT filter, or `_walk_repo` removes the noise before the
+    scoping rule is ever consulted and this test passes with the scoping DELETED
+    — correct by accident of a directory name, and a well-meaning tidy-up to the
+    conventional `.venv` would silently disarm it. The assertion below fails
+    loudly if anyone renames it into the skip list.
     """
+    from techne.codex.source import _SKIP_DIRS
     from techne.mcp_server import _codex_search
 
     cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
     repo, db = _repo(cfg, tmp_path)
-    _add(db, repo, "pkg.py")                                   # indexed, at repo root
+    _add(db, repo, "pkg.py")  # indexed, at repo root
     (repo / "sibling.py").write_text("def added_later(): ...\n")  # NEW, beside it
 
-    noise = repo / ".venv-ci-3.13" / "lib"
+    noise_dir_name = ".venv-ci-3.13"
+    assert noise_dir_name not in _SKIP_DIRS, (
+        f"{noise_dir_name!r} is now in _SKIP_DIRS, so _walk_repo filters this noise "
+        "before the scoping rule runs and this test no longer pins anything (#600)"
+    )
+    noise = repo / noise_dir_name / "lib"
     noise.mkdir(parents=True)
     for i in range(5):
-        (noise / f"vendored_{i}.py").write_text("x = 1\n")      # never-indexed dir
+        (noise / f"vendored_{i}.py").write_text("x = 1\n")  # never-indexed dir
 
     out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
 
@@ -796,11 +825,77 @@ def test_unclassifiable_files_block_the_absence_claim(tmp_path):
     cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
     repo, db = _repo(cfg, tmp_path)
     (repo / "opaque.py").write_text("def opaque(): ...\n")
-    add_symbol(db, id="opaque.py::opaque::function::1", file="opaque.py",
-               name="opaque", kind="function", file_hash=None)
+    add_symbol(
+        db,
+        id="opaque.py::opaque::function::1",
+        file="opaque.py",
+        name="opaque",
+        kind="function",
+        file_hash=None,
+    )
 
     out = _codex_search({"query": "nothing_here", "repo": str(repo)}, cfg)
 
     assert (out["index"]["unknown"], out["index"]["stale"]) == (1, 0)
     assert "could not be classified" in out["notice"]
+    assert "genuine absence" not in out["notice"]
+
+
+def test_an_unreadable_directory_blocks_the_absence_claim(tmp_path):
+    """techne#599: `Path.rglob` swallows per-directory errors internally, so an
+    unreadable directory simply DROPPED OUT of the walk — no exception, no signal.
+
+    `_unindexed_count`'s `except OSError` documented a degraded result on failure
+    and never fired. A `chmod 000` directory holding the sought symbol vanished
+    from enumeration while coverage still said "complete" and the tool asserted
+    "This is genuine absence" — the exact sentence #595 exists to make
+    trustworthy. The fourth failure-open found on that PR.
+    """
+    import os
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform == "win32" or os.geteuid() == 0:
+        _pytest.skip("needs POSIX permissions and a non-root user")
+
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "pkg.py")
+
+    hidden = repo / "secret"
+    hidden.mkdir()
+    (hidden / "target.py").write_text("def the_symbol_we_want(): ...\n")
+    os.chmod(hidden, 0o000)
+    try:
+        out = _codex_search({"query": "the_symbol_we_want", "repo": str(repo)}, cfg)
+    finally:
+        os.chmod(hidden, 0o755)  # so tmp_path cleanup can remove it
+
+    assert out["index"]["coverage"] == "unknown", (
+        "a directory we could not read must not be reported as a complete enumeration"
+    )
+    assert "genuine absence" not in out["notice"]
+    assert "UNKNOWN, not absent" in out["notice"]
+
+
+def test_a_symlinked_directory_blocks_the_absence_claim(tmp_path):
+    """techne#599 route 2: symlinked directories are not descended into — the
+    same as before — but the hole is now observable instead of unrecorded."""
+    from techne.mcp_server import _codex_search
+
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    repo, db = _repo(cfg, tmp_path)
+    _add(db, repo, "pkg.py")
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "target.py").write_text("def the_symbol_we_want(): ...\n")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+
+    out = _codex_search({"query": "the_symbol_we_want", "repo": str(repo)}, cfg)
+
+    assert out["index"]["coverage"] == "unknown"
     assert "genuine absence" not in out["notice"]

@@ -597,3 +597,40 @@ def test_startup_failure_never_costs_the_turn(home, monkeypatch, capsys):
     # Exit 0 is asserted inside _run; the seed block must survive the failure.
     assert "seed check" in out
     assert "startup drain" not in out
+
+
+def test_drop_pull_only_ignores_rows_from_other_tables(tmp_path):
+    """techne#608: the id lookup reads `knowledge`, and ids are PER-TABLE.
+
+    Correct today only because the single caller hardcodes table="knowledge".
+    Widen that to "all" — plausible, since recall already spans tables — and an
+    OBSERVATION with id 42 gets dropped because KNOWLEDGE row 42 happens to be a
+    pull-only kind. Silent, wrong, and it would read as the guard working.
+
+    This drives the widened shape directly rather than waiting for the caller to
+    change, because "a guard whose correctness depends on a condition held
+    somewhere else and written down nowhere" is the exact class this milestone
+    keeps surfacing.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.hooks.user_prompt_submit import _drop_pull_only
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    # `document` is pull-only AND storable in personal memory; `pattern` is
+    # refused here by design (techne#137, it belongs in architect.db).
+    doc_id = store(db, "a pull-only document row", type="document")
+
+    rows = [
+        {"type": "knowledge", "id": doc_id, "content": "the document"},
+        # An observation that merely SHARES the id. Not this guard's business.
+        {"type": "observation", "id": doc_id, "content": "an unrelated observation"},
+    ]
+    kept = _drop_pull_only(db, rows)
+
+    kept_kinds = {(r["type"], r["id"]) for r in kept}
+    assert ("knowledge", doc_id) not in kept_kinds, "the pull-only knowledge row must go"
+    assert ("observation", doc_id) in kept_kinds, (
+        "an observation was dropped because a KNOWLEDGE row shares its id (#608)"
+    )

@@ -1347,6 +1347,24 @@ def import_cmd(ctx, path: "Path | None", no_prompts: bool, force: bool):
         f"{tool_total} tool obs + {prompt_total} prompts added, "
         f"{summaries_set} session summaries set"
     )
+    # EXIT 0 EVEN WHEN A SINGLE FILE IMPORTED NOTHING — DELIBERATE (techne#630).
+    #
+    # The tension is real and worth stating rather than leaving for the next
+    # reader to rediscover. The partial-success argument that justifies exit 0 for
+    # a DIRECTORY (some imported, some skipped — the run did useful work) does NOT
+    # apply to one file, where "0 imported, 1 skipped" is total failure. On that
+    # reading this should exit non-zero.
+    #
+    # It does not, for two reasons that outweigh it:
+    #   1. #622 established, in a test named for it, that BOTH ENTRY POINTS AGREE
+    #      on the same broken file. A file behaving differently depending on
+    #      whether you named it or let a glob find it is its own surprise.
+    #   2. The failure is NOT silent, which is what the objection is really about:
+    #      the filename, the reason, and "0 imported, 1 skipped" all print. Only
+    #      the exit code is generous, and a grep found no automation consuming it.
+    #
+    # If a caller ever needs to branch on this, the right fix is an explicit
+    # `--strict` rather than flipping a contract other callers may depend on.
 
 
 @main.command("migrate-summaries")
@@ -1633,7 +1651,25 @@ def prompts_path(ctx):
     ),
 )
 @click.pass_context
-def init(ctx, platform, identity_dir, posture):
+@click.option(
+    "--skills/--no-skills",
+    "install_skills",
+    default=True,
+    show_default=True,
+    help=(
+        "Install techne's operational procedures (self-care, techne-promote) into the "
+        "platform's command directory. They are version-coupled to this techne, which is "
+        "why they ship with it rather than from a marketplace (techne#641)."
+    ),
+)
+@click.option(
+    "--force-skills",
+    is_flag=True,
+    default=False,
+    help="Overwrite a procedure you have edited. Off by default: techne reports a "
+    "diverged copy rather than silently restoring its own.",
+)
+def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
     """Initialize techne — create database, register hooks, set up MCP."""
     from techne.core.database import init_db
     from techne.core.memory_doctor import find_curated_memory_files
@@ -1673,6 +1709,18 @@ def init(ctx, platform, identity_dir, posture):
             raise click.ClickException(str(exc)) from exc
         click.echo("Claude Code hooks registered")
         click.echo("MCP server registered")
+
+        # Operational procedures (techne#641). Deliberately AFTER the two guards
+        # above: if register_hooks refuses this install, we have not scattered
+        # markdown into ~/.claude for an install that is about to fail.
+        if install_skills:
+            from techne.platforms.claude_code.skills import register_skills
+
+            for r in register_skills(config, force=force_skills):
+                line = f"Skill {r.name}: {r.action}"
+                if r.detail:
+                    line += f" — {r.detail}"
+                click.echo(line)
 
     # Resolve coexistence posture (techne#107 PR4).
     cc = bool(find_curated_memory_files())
@@ -2224,6 +2272,77 @@ def memory_sync_cmd(ctx):
 
 @main.group(invoke_without_command=True)
 @click.pass_context
+def skills(ctx):
+    """Install and inspect techne's bundled operational procedures (techne#641).
+
+    `self-care` and `techne-promote` are version-coupled to techne — they drive its
+    CLI and know this version's store layout — so they ship WITH the package rather
+    than from a marketplace, where they would drift from the tool they operate.
+
+    This group exists because `techne init` is not enough: an existing user upgrades
+    with `pipx install --force`, never re-runs init, and would otherwise never
+    receive them. That is exactly the 0.11/0.12 partner who has never run a hygiene
+    pass and most needs one.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    ctx.invoke(skills_status_cmd)
+
+
+@skills.command("status")
+@click.pass_context
+def skills_status_cmd(ctx):
+    """Report each procedure as current / outdated / user-modified / absent."""
+    from techne.platforms.claude_code.skills import skills_dir, skills_status
+
+    config = ctx.obj["config"]
+    click.echo(f"Skills directory: {skills_dir()}")
+    for r in skills_status(config):
+        line = f"  {r.name}: {r.action}"
+        if r.detail:
+            line += f" — {r.detail}"
+        click.echo(line)
+
+
+@skills.command("install")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite a procedure you have edited (default: report it and leave it).",
+)
+@click.pass_context
+def skills_install(ctx, force):
+    """Write the bundled procedures into the platform's command directory."""
+    from techne.platforms.claude_code.skills import register_skills
+
+    config = ctx.obj["config"]
+    for r in register_skills(config, force=force):
+        line = f"{r.name}: {r.action} -> {r.path}"
+        if r.detail:
+            line += f"\n  {r.detail}"
+        click.echo(line)
+
+
+@skills.command("remove")
+@click.pass_context
+def skills_remove(ctx):
+    """Remove only the copies techne wrote and still owns."""
+    from techne.platforms.claude_code.skills import unregister_skills
+
+    config = ctx.obj["config"]
+    results = unregister_skills(config)
+    if not results:
+        click.echo("nothing installed by techne")
+    for r in results:
+        line = f"{r.name}: {r.action}"
+        if r.detail:
+            line += f" — {r.detail}"
+        click.echo(line)
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
 def reflect(ctx):
     """Inspect and manage end-of-session reflection candidates.
 
@@ -2251,6 +2370,19 @@ def reflect(ctx):
         click.echo("By scope:")
         for k, n in sorted(s["by_scope"].items()):
             click.echo(f"  {k}: {n}")
+    # The DEBT ledger, which is a different question from the CANDIDATE counts above:
+    # candidates measure what reflection proposed, the queue measures what reflection
+    # still OWES. They were never shown together, which is part of why an undrained
+    # queue went unnoticed for weeks (tenishai/techne#644).
+    from techne.core.reflect import reflection_debt_stats
+
+    d = reflection_debt_stats(config)
+    click.echo(
+        f"Reflection debt: {d['pending']} thread(s) owed across "
+        f"{d['sessions_pending']} session(s); {d['drained']} of {d['total']} paid"
+    )
+    if d["oldest_pending"]:
+        click.echo(f"  oldest owed: {d['oldest_pending']}")
 
 
 @reflect.command("review")
@@ -2335,26 +2467,19 @@ def reflect_emit(ctx, session_id, limit, output):
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.core.database import connect
-    from techne.core.reflect import emit_reflection_batch, load_session_for_reflection
+    from techne.core.reflect import emit_reflection_pass
 
-    if not session_id:
-        conn = connect(config.db_path)
-        try:
-            row = conn.execute(
-                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-        finally:
-            conn.close()
-        session_id = row["id"] if row else None
+    # ONE emit implementation, shared with the MCP tool. This command used to build
+    # its own batch and never advanced the `reflect:emitted:` cursor, so a session
+    # reflected through the CLI stayed "pending" forever and was re-nominated on
+    # every SessionStart (tenishai/techne#645).
+    result = emit_reflection_pass(config, session_id, limit=limit)
+    batch = result.get("batch", [])
+    session_id = result.get("session_id") or session_id
     if not session_id:
         click.echo("No session to reflect on.", err=True)
         ctx.exit(1)
 
-    threads, observations = load_session_for_reflection(config, session_id)
-    batch = emit_reflection_batch(config, session_id, threads, observations)
-    if limit:
-        batch = batch[:limit]
     # Placeholder the agent fills in-place with its JSON candidate array per thread,
     # then feeds the SAME file to `ingest` — no id reconstruction needed.
     for it in batch:
@@ -2368,6 +2493,9 @@ def reflect_emit(ctx, session_id, limit, output):
         )
     else:
         click.echo(payload)
+    for key in ("note", "unemittable_note"):
+        if result.get(key):
+            click.echo(result[key], err=True)
 
 
 @reflect.command("ingest")
@@ -2386,35 +2514,21 @@ def reflect_ingest(ctx, responses_file):
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.core.reflect import ingest_reflection_response, new_ingest_counts
+    from techne.core.reflect import ingest_reflection_batch
 
     items = json.loads(responses_file.read_text(encoding="utf-8"))
-    # From the ONE definition — this dict is summed with `totals[k] += v`, and a
-    # hand-maintained copy here is what crashed with KeyError on every non-empty
-    # response when a key was added upstream (techne#465).
-    totals = new_ingest_counts()
-    skipped = 0
-    for it in items:
-        raw = it.get("raw_response")
-        if not isinstance(raw, str):
-            raw = json.dumps(raw) if raw else ""  # tolerate an inlined array
-        if not raw.strip():
-            skipped += 1  # unanswered thread (placeholder left empty) — not an error
-            continue
-        counts = ingest_reflection_response(
-            config,
-            it["session_id"],
-            it["thread_id"],
-            it.get("prompt_hash", ""),
-            raw,
-            model_used=it.get("model_used", "agent-assisted"),
-        )
-        for k, v in counts.items():
-            totals[k] += v
+    # ONE ingest implementation, shared with the MCP tool. This command used to
+    # write candidates and stop — `drain_reflection_queue` had a single production
+    # caller in mcp_server, so the documented /techne-promote path paid reflection
+    # debt and never marked it paid (tenishai/techne#644).
+    totals = ingest_reflection_batch(config, items)
+    skipped = totals.pop("skipped", 0)
+    drained = totals.pop("drained", 0)
 
     click.echo(json.dumps(totals, indent=2))
     if skipped:
         click.echo(f"skipped {skipped} thread(s) with empty raw_response")
+    click.echo(f"reflection debt drained: {drained} thread(s)")
     if config.reflect.write_to == "live":
         click.echo("write_to=live — candidates promoted straight to knowledge/identity.")
     else:
@@ -2487,9 +2601,10 @@ def reflect_discard(ctx, candidate_id, decided_by, decision_reason):
 def reflect_stats(ctx):
     """Counts of pending / promoted / discarded candidates."""
     config = ctx.obj["config"]
-    from techne.core.reflect import candidate_stats
+    from techne.core.reflect import candidate_stats, reflection_debt_stats
 
     s = candidate_stats(config.db_path)
+    s["debt"] = reflection_debt_stats(config)
     click.echo(json.dumps(s, indent=2))
 
 
@@ -3494,6 +3609,15 @@ def codex_index(ctx, repo, languages, lsp):
             f"(#613 — stored before the current skip list)"
         )
     click.echo(f"Totals:  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
+    if src.last_failed:
+        # Not a warning tucked into a log file: a run that could not index N files
+        # exits NON-ZERO. Those files kept their previous rows, so the graph is
+        # stale exactly where this output otherwise reads as success (#610).
+        raise click.ClickException(
+            f"{src.last_failed} file(s) failed to index and kept their PREVIOUS rows — "
+            "the graph is stale for those paths. See the codex_index_failed tracebacks "
+            "in the log (tenishai/techne#610)."
+        )
 
     if lsp:
         from techne.codex.lsp_resolve import resolve_edges_lsp
@@ -3529,6 +3653,7 @@ def codex_index_all(ctx, languages):
         click.echo("no repos indexed. Run: techne codex index <repo>")
         return
     lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
+    total_failed = 0
     for root_str, _db in repos:
         root = Path(root_str)
         if not root.exists():
@@ -3538,7 +3663,18 @@ def codex_index_all(ctx, languages):
         src = RepoSource(db_path, root, languages=lang_list)
         count = src.initial_walk()
         swept = f", swept {src.last_swept} excluded" if src.last_swept else ""
-        click.echo(f"reindexed {root}: {count} symbols{swept}")
+        # Reported per-repo rather than raised: this loop is a sweep over many repos
+        # and one bad repo must not hide the rest. The summary below is what makes
+        # the run non-zero.
+        failed = f", {src.last_failed} FAILED (stale, #610)" if src.last_failed else ""
+        total_failed += src.last_failed
+        click.echo(f"reindexed {root}: {count} symbols{swept}{failed}")
+
+    if total_failed:
+        raise click.ClickException(
+            f"{total_failed} file(s) across all repos failed to index and kept their "
+            "PREVIOUS rows — the graph is stale for those paths (tenishai/techne#610)."
+        )
 
 
 @codex.command("stats")

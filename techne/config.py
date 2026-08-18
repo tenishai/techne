@@ -911,6 +911,20 @@ class Config:
                 "confidence_floor": self.archive.confidence_floor,
                 "reaffirmation_window_days": self.archive.reaffirmation_window_days,
             },
+            # `conflict` was READ by _from_dict and written by nothing (techne#620),
+            # so a hand-written block was silently dropped by any load->save cycle —
+            # and `techne init` IS such a cycle. No error, no diff to notice. Emitted
+            # unconditionally here, mirroring `reflect`, its same-shaped sibling.
+            #
+            # Not a gate defect and worth not conflating: `strip_egress` operates on
+            # the RAW dict from config.yaml, so `conflict.model` was governed and
+            # stripped correctly the whole time.
+            "conflict": {
+                "model": self.conflict.model,
+                "max_comparison_candidates": self.conflict.max_comparison_candidates,
+                "max_items_per_emit": self.conflict.max_items_per_emit,
+                "log_raw_response": self.conflict.log_raw_response,
+            },
         }
         # sources: only emit the sub-keys that are configured to avoid
         # polluting a minimal config with empty stubs.

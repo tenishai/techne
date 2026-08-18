@@ -647,6 +647,30 @@ def _bash_cd_target(command: str) -> str | None:
 HOOK_NAME = "codex_grep_assist"
 
 
+def _index_is_behind(idx: dict) -> bool:
+    """True when a zero result cannot be trusted as genuine absence (techne#602).
+
+    The silence-vs-noise dial for this rail. Anything that can HIDE a symbol
+    counts: stale or missing indexed files, files on disk never indexed, files
+    that could not be classified, a disk that could not be enumerated, and an
+    empty index — which is the strongest claim of trust from the weakest
+    evidence, and is reachable through the shipping CLI because codex_db_for_repo
+    creates the db before initial_walk ever runs.
+
+    Everything else stays silent. A complete, current index means the absence
+    really is an absence, and saying so on every miss is how a warning becomes
+    wallpaper.
+    """
+    return bool(
+        idx.get("files", 0) == 0
+        or idx.get("coverage") != "complete"
+        or idx.get("unindexed")
+        or idx.get("stale")
+        or idx.get("missing")
+        or idx.get("unknown")
+    )
+
+
 def _build_context(pattern: str, results: list[dict]) -> str:
     """Render matching symbols into a compact additionalContext block.
 
@@ -832,7 +856,68 @@ def main() -> None:
         sys.exit(0)
 
     if not results:
-        record_hook_run(techne_db, HOOK_NAME, outcome="noop:no-results")
+        # A STALE INDEX AND A GENUINELY ABSENT SYMBOL PRODUCED IDENTICAL SILENCE
+        # (techne#602) — #595 in a third location, after codex_search was fixed in
+        # #598. It matters MORE here than there: an MCP codex_search is a
+        # deliberate query whose answer the caller reads, while this rail fires on
+        # a search the agent was doing anyway, so its whole value is telling the
+        # agent something it did not know to ask. Silence is indistinguishable
+        # from the rail being off — which is how it spent months looking enabled
+        # and doing nothing (#596).
+        #
+        # ONLY SPEAK WHEN THE INDEX IS ACTUALLY BEHIND. This fires on every miss,
+        # and a notice that always hedges is the failure #598 explicitly guarded
+        # against: it gets ignored, and takes the real warnings with it. A
+        # complete, current index stays silent — the absence really is an absence.
+        #
+        # index_freshness is ~21ms over 228 files. Affordable HERE, on the path
+        # where the alternative is the agent cold-reading a subsystem, and
+        # deliberately not on the hit path, which already returned symbols.
+        notice = None
+        try:
+            with bounded_hook(config.hooks.timeout_s, label="pre_tool_use"):
+                from pathlib import Path
+
+                from techne.core.codegraph import index_freshness, zero_result_notice
+                from techne.core.repo import find_repo_root
+
+                # Path(), not start_path directly: it arrives as a str from the
+                # hook payload and find_repo_root does .is_dir() on it. Without
+                # this the whole check raised, was caught by the degrade branch
+                # below, and the rail stayed silent — passing every test that
+                # asserted silence while delivering nothing.
+                idx = index_freshness(db_path, repo_root=find_repo_root(Path(start_path)))
+                if _index_is_behind(idx):
+                    notice = zero_result_notice(idx)
+        except Exception as e:  # noqa: BLE001  — catches HookTimeout too
+            # Degrading to the old silence is correct: this path exists to ADD a
+            # caveat, and a hook that cannot compute one must not block the tool.
+            print(f"techne: grep-assist freshness check degraded: {e}", file=sys.stderr)
+
+        if notice is None:
+            record_hook_run(techne_db, HOOK_NAME, outcome="noop:no-results")
+            sys.exit(0)
+
+        try:
+            print(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "additionalContext": f"techne codex — {notice}",
+                        }
+                    }
+                )
+            )
+            record_hook_run(techne_db, HOOK_NAME, outcome="ok:no-results-qualified")
+        except Exception as e:  # noqa: BLE001
+            print(f"techne: grep-assist emit failed: {e}", file=sys.stderr)
+            record_hook_run(
+                techne_db,
+                HOOK_NAME,
+                outcome="noop:emit-failed",
+                error={"stage": "emit-notice", "msg": f"{type(e).__name__}: {e}"},
+            )
         sys.exit(0)
 
     # ------------------------------------------------------------------
