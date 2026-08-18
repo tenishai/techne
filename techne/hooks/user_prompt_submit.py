@@ -150,12 +150,14 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     that sentence at a reviewer's prompting and neither of us checked it against
     the code four lines below.
 
-    The real difference is AUTHORITY. This re-reads ``knowledge.type`` from the
-    table, so its answer does not depend on ``search()``'s row shape — the very
-    thing techne#566 just showed can carry a field that means something other than
-    what a caller assumes. Filtering on a value the search layer supplies makes
-    this guard only as correct as that layer's contract; reading the table makes it
-    independent of it.
+    The real difference is AUTHORITY, and its SCOPE is worth stating exactly
+    (techne#609): this re-reads ``knowledge.type`` from the table, so its answer
+    does not depend on ``search()``'s ``type`` FIELD — the very thing techne#566
+    showed can carry a value meaning something other than what a caller assumes.
+    It still depends on ``search()`` supplying a correct ``id``. Authority over
+    the kind, not over the whole row. Filtering on a value the search layer
+    supplies makes this guard only as correct as that layer's contract; reading
+    the table makes it independent of it for the field that decides the outcome.
 
     Behaviourally the two are equivalent today (measured: the suite passes either
     way, and a control with the filter disabled fails 3, so the equivalence is not
@@ -165,7 +167,19 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     whole recall to nothing via the caller's handler — failing CLOSED, which is the
     right direction for a filter whose job is to keep rows out.
     """
-    ids = [r.get("id") for r in rows if r.get("id") is not None]
+    # SCOPED BY SOURCE TABLE (techne#608). knowledge ids are per-table
+    # autoincrement, and this lookup reads the `knowledge` table — so collecting
+    # ids from rows of ANY table would resolve an observation's id 42 against
+    # KNOWLEDGE row 42. Correct today only because the single caller hardcodes
+    # table="knowledge"; widen that to "all" — plausible, since recall already
+    # spans tables — and an observation gets dropped because an unrelated
+    # knowledge row happens to be a `pattern`. Silent, wrong, and it would read
+    # as the guard working.
+    #
+    # Filtering here rather than asserting: the function already discriminates on
+    # `type` elsewhere, a non-knowledge row simply is not this guard's business,
+    # and passing it through is the correct answer rather than a crash.
+    ids = [r.get("id") for r in rows if r.get("id") is not None and r.get("type") == "knowledge"]
     if not ids:
         return rows
     from techne.core.knowledge import PULL_ONLY_TYPES
@@ -183,7 +197,10 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
         }
     finally:
         conn.close()
-    return [r for r in rows if r.get("id") not in excluded]
+    # The DROP is scoped too, not just the id collection (techne#608). Filtering
+    # on id alone re-introduces the collision one line later: a same-id row from
+    # another table would still be removed by a verdict computed from `knowledge`.
+    return [r for r in rows if not (r.get("type") == "knowledge" and r.get("id") in excluded)]
 
 
 def _build_context(rows: list[dict]) -> str:
@@ -192,6 +209,13 @@ def _build_context(rows: list[dict]) -> str:
     Mirrors egress `_render_line` formatting: each row carries its ⟦techne#id⟧
     provenance prefix so injected facts are attributable and honestly framed as
     recalled memory (verify-before-relying), not asserted ground truth.
+
+    THE ``r.get("type")`` AND ``"note"`` FALLBACKS BELOW ARE UNREACHABLE ON THIS
+    RAIL (techne#609). This recall hardcodes ``table="knowledge"``, which
+    guarantees ``knowledge_type`` on every row. They are kept for shared-shape
+    safety, not because the key is ever absent here — said out loud so a future
+    reader does not read the fallback as EVIDENCE that it sometimes is, and
+    weaken a guard on that basis. The tests already record this.
     """
     lines = [
         "## techne — durable facts relevant to this prompt",

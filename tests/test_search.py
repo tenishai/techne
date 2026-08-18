@@ -124,7 +124,18 @@ class TestSearchFtsKnowledge:
         assert any("quidditch" in c for c in contents)
 
     def test_search_fts_knowledge_result_shape(self, db_path):
-        """Knowledge results have the expected keys."""
+        """Knowledge results have the expected keys — and the right VALUE for the
+        one that a consumer renders (techne#607).
+
+        Key-presence alone left the FTS producer only INCIDENTALLY covered.
+        Mutating `search.py` to `"knowledge_type": "knowledge"` — key present,
+        value wrong, which is #566 returning on this channel — turned the suite
+        red only via two federation tests that exist for an unrelated reason. Not
+        one recall-rail test failed. The vec channel got a value-asserting
+        producer test in #603; this puts FTS on the same footing, so the tripwire
+        lives beside the thing it guards rather than in a subsystem that could be
+        refactored without anyone noticing the coverage left with it.
+        """
         store_knowledge(db_path, "albatross migration pattern spans hemispheres", type="fact")
 
         results = search_fts(db_path, "albatross", table="knowledge")
@@ -143,6 +154,11 @@ class TestSearchFtsKnowledge:
             "rank",
         ):
             assert key in r, f"Missing key: {key}"
+        assert r["knowledge_type"] == "fact", (
+            "knowledge_type must carry the ROW'S OWN kind, not the source table — "
+            "a row labelled 'knowledge' renders as [knowledge] for every kind, "
+            "which is exactly techne#566 (#607)"
+        )
 
     def test_search_fts_knowledge_superseded_excluded(self, db_path):
         """Superseded knowledge entries are not returned by FTS search."""
@@ -393,8 +409,8 @@ class TestPrepareFtsQuery:
     def test_none_for_all_punctuation_and_backslash(self):
         from techne.core.search import prepare_fts_query
 
-        assert prepare_fts_query("\\") is None        # lone backslash → sanitizes to ""
-        assert prepare_fts_query("\\\\  \\") is None   # only backslashes/space → no terms
+        assert prepare_fts_query("\\") is None  # lone backslash → sanitizes to ""
+        assert prepare_fts_query("\\\\  \\") is None  # only backslashes/space → no terms
 
     def test_real_query_sanitized(self):
         from techne.core.search import prepare_fts_query
@@ -432,7 +448,7 @@ class TestBuildOrFtsQuery:
         result = build_or_fts_query('say "hi"')
         # the bare token `"hi"` has its quotes doubled inside the phrase literal
         assert '"say"' in result
-        assert ' OR ' in result
+        assert " OR " in result
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +468,7 @@ class TestOrFallback:
         )
         # AND form requires every term incl. "for", "log" (doc has "logs") and
         # "ingestion" (doc has "ingesting") — none of which match → AND empty.
-        and_only = search_fts(
-            db_path, "mongoose pattern for structured log ingestion", table="all"
-        )
+        and_only = search_fts(db_path, "mongoose pattern for structured log ingestion", table="all")
         # With the OR fallback wired in, the entry is recovered.
         assert len(and_only) >= 1
         assert any("mongoose" in r.get("content", "") for r in and_only)
@@ -933,7 +947,9 @@ class TestEnsureVecBackendIdentity:
             conn.execute("INSERT INTO threads_vec(rowid, embedding) VALUES (1, ?)", (emb512,))
             conn.commit()
             rows = conn.execute("SELECT rowid FROM threads_vec").fetchall()
-            assert [r[0] for r in rows] == [1]  # old rowid 1 is gone-then-reinserted, table was empty
+            assert [r[0] for r in rows] == [
+                1
+            ]  # old rowid 1 is gone-then-reinserted, table was empty
 
         finally:
             conn.close()
@@ -953,7 +969,9 @@ class TestEnsureVecBackendIdentity:
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
 
-            backend = EmbeddingBackend("model2vec", "minishlab/potion-retrieval-32M", impl=None, dim=512)
+            backend = EmbeddingBackend(
+                "model2vec", "minishlab/potion-retrieval-32M", impl=None, dim=512
+            )
 
             # First call stamps identity (fresh DB, no existing tables).
             assert _ensure_vec_backend_identity(conn, backend) is False
@@ -987,7 +1005,9 @@ class TestEnsureVecBackendIdentity:
         if not backend_available():
             pytest.skip("no embedding backend (model2vec or fastembed) available")
 
-        store_knowledge(db_path, "a fact that will need embedding at the new dimension", type="fact")
+        store_knowledge(
+            db_path, "a fact that will need embedding at the new dimension", type="fact"
+        )
 
         conn = connect(db_path)
         try:
@@ -999,7 +1019,9 @@ class TestEnsureVecBackendIdentity:
 
             _ensure_vec_table(conn, "knowledge_vec", 384)
             emb384 = struct.pack("384f", *([0.1] * 384))
-            conn.execute("INSERT INTO knowledge_vec(rowid, embedding) VALUES (999999, ?)", (emb384,))
+            conn.execute(
+                "INSERT INTO knowledge_vec(rowid, embedding) VALUES (999999, ?)", (emb384,)
+            )
             # Stamp a DIFFERENT identity than whatever's actually active, so the
             # real backfill_vectors call is guaranteed to observe a mismatch.
             set_state(conn, "embedding_backend", {"name": "fastembed:bogus-old-model", "dim": 384})
@@ -1086,9 +1108,9 @@ class TestEnsureVecBackendIdentity:
         # Flag cleared → the row drops out of the re-embed set (loop termination).
         conn = connect(db_path)
         try:
-            stale = conn.execute(
-                "SELECT vec_stale FROM knowledge WHERE id = ?", (kid,)
-            ).fetchone()[0]
+            stale = conn.execute("SELECT vec_stale FROM knowledge WHERE id = ?", (kid,)).fetchone()[
+                0
+            ]
             assert stale == 0
         finally:
             conn.close()

@@ -60,10 +60,7 @@ def _injection_log_rows(source: str | None = None) -> list[dict]:
 
     conn = sqlite3.connect(str(Config.load().db_path))
     try:
-        names = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "context_injections" not in names:
             return []
         cur = conn.execute(
@@ -79,8 +76,9 @@ def _injection_log_rows(source: str | None = None) -> list[dict]:
 
 def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
     """Flag OFF (no config.yaml → default False) → no stdout, even with a match."""
-    _seed("Postgres was chosen over MongoDB for join semantics.",
-          type="decision", confidence="high")
+    _seed(
+        "Postgres was chosen over MongoDB for join semantics.", type="decision", confidence="high"
+    )
     out = _run(monkeypatch, capsys, {"prompt": "why postgres"})
     assert out == ""
 
@@ -88,8 +86,12 @@ def test_flag_off_default_emits_nothing(home, monkeypatch, capsys):
 def test_flag_on_matching_injects_context(home, monkeypatch, capsys):
     """Flag ON + prompt matching a stored fact → protocol JSON injection."""
     _write_config(home, per_turn_recall=True)
-    _seed("Postgres was chosen over MongoDB for join semantics.",
-          type="decision", tags="storage", confidence="high")
+    _seed(
+        "Postgres was chosen over MongoDB for join semantics.",
+        type="decision",
+        tags="storage",
+        confidence="high",
+    )
     out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
     assert out.strip(), "expected protocol JSON on stdout"
     payload = json.loads(out)
@@ -110,10 +112,13 @@ def test_recall_injection_is_logged_with_hit_ids(home, monkeypatch, capsys):
     _write_config(home, per_turn_recall=True)
     _seed(
         "Postgres was chosen over MongoDB for join semantics.",
-        type="decision", tags="storage", confidence="high",
+        type="decision",
+        tags="storage",
+        confidence="high",
     )
     out = _run(
-        monkeypatch, capsys,
+        monkeypatch,
+        capsys,
         {"prompt": "postgres join decision", "session_id": "sess-1"},
     )
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -150,7 +155,8 @@ def test_recall_log_can_be_disabled(home, monkeypatch, capsys):
     _write_config(home, per_turn_recall=True, per_turn_recall_log=False)
     _seed(
         "Postgres was chosen over MongoDB for join semantics.",
-        type="decision", confidence="high",
+        type="decision",
+        confidence="high",
     )
     out = _run(monkeypatch, capsys, {"prompt": "postgres join decision"})
     assert "Postgres" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -321,8 +327,12 @@ def test_pull_only_filter_does_not_starve_a_normal_recall(home, monkeypatch, cap
     """The filter drops ONLY pull-only rows — a matching fact still injects."""
     _write_config(home, per_turn_recall=True)
     _seed_raw("Postgres was chosen over MongoDB for join semantics.", "pattern")
-    _seed("Postgres connection pooling is handled by pgbouncer.",
-          type="fact", tags="storage", confidence="high")
+    _seed(
+        "Postgres connection pooling is handled by pgbouncer.",
+        type="fact",
+        tags="storage",
+        confidence="high",
+    )
     out = _run(monkeypatch, capsys, {"prompt": "postgres pooling"})
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "pgbouncer" in ctx
@@ -337,8 +347,12 @@ def test_filtered_row_is_not_logged_as_injected(home, monkeypatch, capsys):
     """
     _write_config(home, per_turn_recall=True)
     pid = _seed_raw("Postgres was chosen over MongoDB for join semantics.", "pattern")
-    _seed("Postgres connection pooling is handled by pgbouncer.",
-          type="fact", tags="storage", confidence="high")
+    _seed(
+        "Postgres connection pooling is handled by pgbouncer.",
+        type="fact",
+        tags="storage",
+        confidence="high",
+    )
     _run(monkeypatch, capsys, {"prompt": "postgres pooling", "session_id": "s-561"})
 
     rows = _injection_log_rows("per_turn_recall")
@@ -479,3 +493,40 @@ class TestInjectedTypeLabel:
         would take the attribution rail's only signal with it."""
         out = self._ctx([{"id": 42, "type": "knowledge", "knowledge_type": "fact", "content": "z"}])
         assert "- ⟦techne#42⟧ [fact] z" in out
+
+
+def test_drop_pull_only_ignores_rows_from_other_tables(tmp_path):
+    """techne#608: the id lookup reads `knowledge`, and ids are PER-TABLE.
+
+    Correct today only because the single caller hardcodes table="knowledge".
+    Widen that to "all" — plausible, since recall already spans tables — and an
+    OBSERVATION with id 42 gets dropped because KNOWLEDGE row 42 happens to be a
+    pull-only kind. Silent, wrong, and it would read as the guard working.
+
+    This drives the widened shape directly rather than waiting for the caller to
+    change, because "a guard whose correctness depends on a condition held
+    somewhere else and written down nowhere" is the exact class this milestone
+    keeps surfacing.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+    from techne.hooks.user_prompt_submit import _drop_pull_only
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    # `document` is pull-only AND storable in personal memory; `pattern` is
+    # refused here by design (techne#137, it belongs in architect.db).
+    doc_id = store(db, "a pull-only document row", type="document")
+
+    rows = [
+        {"type": "knowledge", "id": doc_id, "content": "the document"},
+        # An observation that merely SHARES the id. Not this guard's business.
+        {"type": "observation", "id": doc_id, "content": "an unrelated observation"},
+    ]
+    kept = _drop_pull_only(db, rows)
+
+    kept_kinds = {(r["type"], r["id"]) for r in kept}
+    assert ("knowledge", doc_id) not in kept_kinds, "the pull-only knowledge row must go"
+    assert ("observation", doc_id) in kept_kinds, (
+        "an observation was dropped because a KNOWLEDGE row shares its id (#608)"
+    )
