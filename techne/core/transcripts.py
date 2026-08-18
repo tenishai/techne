@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -63,6 +63,19 @@ class TranscriptSource(Protocol):
     canonical shape. The ONLY thing a new client must implement."""
 
     platform: str
+
+    #: OPTIONAL. Transcripts this source could not read at all, as ``(path, error)``
+    #: pairs, populated AS IT ITERATES. ``index_transcripts`` reads it via
+    #: ``getattr(source, "unreadable", ())`` and reports ``len()`` of it, so a source
+    #: that skips a corrupt file is not silently indistinguishable from a smaller
+    #: corpus. Declared here because it was previously readable from any source and
+    #: documented on none — a new adapter author had no way to learn the attribute
+    #: name or its shape (techne#629).
+    #:
+    #: It must be SIZED (``len()`` is called on it) and it must be a real attribute
+    #: on the source, not a generator: a lazy iterator would report 0 before the
+    #: walk and be consumed by the reporting. Omit it entirely and the count is 0.
+    unreadable: Sequence[tuple[Path, str]]
 
     def iter_transcripts(self) -> Iterator[Transcript]:
         """Yield each available transcript as a `Transcript`. Lazy (a generator)
@@ -164,8 +177,14 @@ def index_transcripts(
     """
     counts = {"total": 0, "stored": 0, "unchanged": 0, "empty": 0, "unreadable": 0}
     transcripts = source.iter_transcripts()
-    if limit:
+    # `is not None`, not truthiness: `--limit 0` used to mean NO LIMIT and iterate
+    # the whole directory — measured, and the opposite of what the flag says
+    # (noted alongside techne#631). An explicit 0 is a legitimate "index nothing",
+    # which is how every other bounded surface in this codebase reads it.
+    if limit is not None and limit > 0:
         transcripts = itertools.islice(transcripts, limit)
+    elif limit == 0:
+        transcripts = iter(())
 
     from techne.core.library import index_document
 

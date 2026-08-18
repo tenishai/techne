@@ -114,7 +114,7 @@ def test_idless_tool_use_skipped_no_clobber(db_path, tmp_path):
         [
             _bash_use_no_id("rm -rf /a", "2026-06-01T10:00:00.000Z"),
             _bash_use_no_id("rm -rf /b", "2026-06-01T10:00:01.000Z"),  # clobbered "" on old code
-            _tool_result_no_id("done", "2026-06-01T10:00:02.000Z"),    # popped "" on old code
+            _tool_result_no_id("done", "2026-06-01T10:00:02.000Z"),  # popped "" on old code
             _bash_use("tu_real", "pytest -q", "2026-06-01T10:00:03.000Z"),
             _tool_result("tu_real", "file1", "2026-06-01T10:00:04.000Z"),
         ],
@@ -124,14 +124,15 @@ def test_idless_tool_use_skipped_no_clobber(db_path, tmp_path):
     conn = connect(db_path)
     try:
         contents = "\n".join(
-            r[0] for r in conn.execute(
+            r[0]
+            for r in conn.execute(
                 "SELECT content FROM observations WHERE content LIKE '%Ran:%'"
             ).fetchall()
         )
     finally:
         conn.close()
-    assert "pytest -q" in contents            # the real, id-bearing tool call imported
-    assert "rm -rf" not in contents           # the id-less ones did NOT (no phantom)
+    assert "pytest -q" in contents  # the real, id-bearing tool call imported
+    assert "rm -rf" not in contents  # the id-less ones did NOT (no phantom)
 
 
 def test_imports_tool_calls_and_prompts(db_path, transcript):
@@ -910,9 +911,7 @@ def test_backfill_noop_when_captured_live(db_path, tmp_path):
 def test_backfill_missing_transcript(db_path, tmp_path):
     from techne.platforms.claude_code.transcript_import import backfill_uncaptured
 
-    result = backfill_uncaptured(
-        _cfg(db_path), "sess-fixture", jsonl_path=tmp_path / "nope.jsonl"
-    )
+    result = backfill_uncaptured(_cfg(db_path), "sess-fixture", jsonl_path=tmp_path / "nope.jsonl")
     assert result["backfilled"] == 0
     assert "transcript not found" in result["reason"]
 
@@ -1039,3 +1038,145 @@ class TestArchivedTranscripts:
         assert by_skip["bad"]["skipped"] is True
         assert "error" in by_skip["bad"]["reason"]
         assert not by_skip["sess-fixture"].get("skipped")
+
+
+# ---------------------------------------------------------------------------
+# techne#632 — `_session_jsonl` is exercised directly, but its use INSIDE
+# `backfill_uncaptured` (i.e. the no-jsonl_path branch) was never covered.
+# ---------------------------------------------------------------------------
+
+
+def _bash_transcript_rows(session_id: str, command: str = "pytest -q"):
+    """A minimal transcript containing one Bash tool_use — a gap tool when
+    capture_bash is off, which is what backfill exists to reclaim."""
+    return [
+        {
+            "type": "assistant",
+            "sessionId": session_id,
+            "cwd": "/tmp/proj",
+            "timestamp": "2026-08-18T00:00:01Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu1",
+                        "name": "Bash",
+                        "input": {"command": command},
+                    }
+                ],
+            },
+        },
+        # The PAIRED result. backfill writes on the tool_use/tool_result pair, not
+        # on the call alone — a tool_use with no result is an unfinished call.
+        {
+            "type": "user",
+            "sessionId": session_id,
+            "cwd": "/tmp/proj",
+            "timestamp": "2026-08-18T00:00:02Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu1",
+                        "content": "1 passed",
+                    }
+                ],
+            },
+        },
+    ]
+
+
+def test_backfill_finds_the_transcript_itself_when_no_path_is_given(tmp_path, monkeypatch):
+    """The end-to-end path #632 names: backfill resolving its OWN transcript.
+
+    Every existing test hands `jsonl_path=` in, so the `_session_jsonl(session_id)`
+    branch — the one production actually takes at session_end — had no coverage.
+    """
+    import json as _json
+
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.platforms.claude_code import transcript_import as ti
+
+    session_id = "cccccccc-1111-2222-3333-444444444444"
+    projects = tmp_path / "projects"
+    slug = projects / "-tmp-proj"
+    slug.mkdir(parents=True)
+    (slug / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in _bash_transcript_rows(session_id)) + "\n"
+    )
+    monkeypatch.setattr(ti, "PROJECTS_DIR", projects)
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "techne.db"
+    init_db(cfg.db_path).close()
+    cfg.hooks.capture_bash = False  # so Bash is a gap tool worth backfilling
+
+    out = ti.backfill_uncaptured(cfg, session_id)  # NO jsonl_path — the point
+
+    assert out.get("reason") != "transcript not found", (
+        "backfill could not locate its own transcript via _session_jsonl (#632)"
+    )
+    assert out["backfilled"] >= 1, "the Bash row was not reclaimed"
+
+
+def test_backfill_resolves_an_archived_transcript_end_to_end(tmp_path, monkeypatch):
+    """#621's `.jsonl.gz` resolution, driven through backfill rather than through
+    `_session_jsonl` alone — the combination is what production runs."""
+    import gzip as _gzip
+    import json as _json
+
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.platforms.claude_code import transcript_import as ti
+
+    session_id = "dddddddd-1111-2222-3333-444444444444"
+    projects = tmp_path / "projects"
+    slug = projects / "-tmp-proj"
+    slug.mkdir(parents=True)
+    raw = "\n".join(_json.dumps(r) for r in _bash_transcript_rows(session_id, "ruff check")) + "\n"
+    (slug / f"{session_id}.jsonl.gz").write_bytes(_gzip.compress(raw.encode()))
+    monkeypatch.setattr(ti, "PROJECTS_DIR", projects)
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "techne.db"
+    init_db(cfg.db_path).close()
+    cfg.hooks.capture_bash = False
+
+    out = ti.backfill_uncaptured(cfg, session_id)
+
+    assert out.get("reason") != "transcript not found"
+    assert out["backfilled"] >= 1, "an archived transcript was not reclaimed by backfill"
+
+
+def test_backfill_is_idempotent_across_reruns(tmp_path, monkeypatch):
+    """The docstring's central claim, driven on the self-resolving path: a second
+    session_end (e.g. after a compact) must never double-insert."""
+    import json as _json
+
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.platforms.claude_code import transcript_import as ti
+
+    session_id = "eeeeeeee-1111-2222-3333-444444444444"
+    projects = tmp_path / "projects"
+    slug = projects / "-tmp-proj"
+    slug.mkdir(parents=True)
+    (slug / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in _bash_transcript_rows(session_id)) + "\n"
+    )
+    monkeypatch.setattr(ti, "PROJECTS_DIR", projects)
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "techne.db"
+    init_db(cfg.db_path).close()
+    cfg.hooks.capture_bash = False
+
+    first = ti.backfill_uncaptured(cfg, session_id)
+    second = ti.backfill_uncaptured(cfg, session_id)
+
+    assert first["backfilled"] >= 1
+    assert second["backfilled"] == 0, "a re-run double-inserted"
+    assert second["skipped_existing"] >= 1
