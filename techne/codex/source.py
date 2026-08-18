@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Iterator
 
 log = logging.getLogger(__name__)
 
@@ -559,17 +560,63 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
         conn.close()
 
 
-def _walk_repo(root: Path, languages: set[str]) -> Iterator[Path]:
-    """Yield source files under *root*, skipping ignored directories."""
+def _walk_repo(
+    root: Path,
+    languages: set[str],
+    *,
+    onerror: Callable[[OSError], None] | None = None,
+    on_symlink_dir: Callable[[Path], None] | None = None,
+) -> Iterator[Path]:
+    """Yield source files under *root*, skipping ignored directories.
+
+    THE CALLBACKS EXIST BECAUSE THE OLD WALK COULD NOT FAIL OUT LOUD (techne#599).
+    This was `root.rglob("*")`, and `rglob` swallows per-directory errors
+    internally: an unreadable directory simply DROPS OUT of the walk — no
+    exception, no signal. `_unindexed_count` guarded it with `except OSError` and
+    documented a degraded result on failure; that handler was dead code, so a
+    `chmod 000` directory holding the sought symbol vanished from enumeration
+    while `coverage` still said "complete" and the caller asserted "This is
+    genuine absence" with the symbol physically on disk.
+
+    `onerror` receives per-directory OSErrors (unreadable/vanished directories);
+    `on_symlink_dir` receives symlinked directories, which are NOT descended into
+    — the same as before, but now observable rather than an unrecorded hole.
+    Indexing ignores both by default, which keeps its long-standing best-effort
+    behaviour; only callers that make a POSITIVE claim about completeness need to
+    care, and now they can.
+
+    os.walk rather than rglob also prunes `_SKIP_DIRS` before descending instead
+    of walking a venv and discarding it afterwards.
+    """
     exts = {ext for ext, lang in _EXT_LANGUAGE.items() if lang in languages}
-    for path in root.rglob("*"):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=onerror, followlinks=False):
+        here = Path(dirpath)
         # Skip ignored dirs by the path RELATIVE to the repo root. Testing
         # path.parts would also match the repo's own ancestors (a repo under
         # ~/build/ or a monorepo under target/), silently yielding zero files.
-        if any(part in _SKIP_DIRS for part in path.relative_to(root).parts):
+        try:
+            rel_parts = here.relative_to(root).parts
+        except ValueError:  # pragma: no cover — os.walk stays under root
             continue
-        if path.is_file() and path.suffix.lower() in exts:
-            yield path
+        if any(part in _SKIP_DIRS for part in rel_parts):
+            dirnames[:] = []
+            continue
+        # Prune in place so os.walk never descends into them at all.
+        kept = []
+        for d in dirnames:
+            if d in _SKIP_DIRS:
+                continue
+            if (here / d).is_symlink():
+                # Not followed — unchanged from rglob — but no longer silent.
+                if on_symlink_dir is not None:
+                    on_symlink_dir(here / d)
+                continue
+            kept.append(d)
+        dirnames[:] = kept
+        for name in filenames:
+            path = here / name
+            if path.suffix.lower() in exts and path.is_file():
+                yield path
 
 
 def _is_excluded_stored_path(file_str: str, repo_root: Path) -> bool:
