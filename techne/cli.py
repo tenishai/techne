@@ -1633,7 +1633,25 @@ def prompts_path(ctx):
     ),
 )
 @click.pass_context
-def init(ctx, platform, identity_dir, posture):
+@click.option(
+    "--skills/--no-skills",
+    "install_skills",
+    default=True,
+    show_default=True,
+    help=(
+        "Install techne's operational procedures (self-care, techne-promote) into the "
+        "platform's command directory. They are version-coupled to this techne, which is "
+        "why they ship with it rather than from a marketplace (techne#641)."
+    ),
+)
+@click.option(
+    "--force-skills",
+    is_flag=True,
+    default=False,
+    help="Overwrite a procedure you have edited. Off by default: techne reports a "
+    "diverged copy rather than silently restoring its own.",
+)
+def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
     """Initialize techne — create database, register hooks, set up MCP."""
     from techne.core.database import init_db
     from techne.core.memory_doctor import find_curated_memory_files
@@ -1673,6 +1691,18 @@ def init(ctx, platform, identity_dir, posture):
             raise click.ClickException(str(exc)) from exc
         click.echo("Claude Code hooks registered")
         click.echo("MCP server registered")
+
+        # Operational procedures (techne#641). Deliberately AFTER the two guards
+        # above: if register_hooks refuses this install, we have not scattered
+        # markdown into ~/.claude for an install that is about to fail.
+        if install_skills:
+            from techne.platforms.claude_code.skills import register_skills
+
+            for r in register_skills(config, force=force_skills):
+                line = f"Skill {r.name}: {r.action}"
+                if r.detail:
+                    line += f" — {r.detail}"
+                click.echo(line)
 
     # Resolve coexistence posture (techne#107 PR4).
     cc = bool(find_curated_memory_files())
@@ -2220,6 +2250,77 @@ def memory_sync_cmd(ctx):
 
     stored = CCMemorySource(config).initial_walk()
     click.echo(f"memory sync — {stored} file(s) drained (stored/updated) of {found} found")
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def skills(ctx):
+    """Install and inspect techne's bundled operational procedures (techne#641).
+
+    `self-care` and `techne-promote` are version-coupled to techne — they drive its
+    CLI and know this version's store layout — so they ship WITH the package rather
+    than from a marketplace, where they would drift from the tool they operate.
+
+    This group exists because `techne init` is not enough: an existing user upgrades
+    with `pipx install --force`, never re-runs init, and would otherwise never
+    receive them. That is exactly the 0.11/0.12 partner who has never run a hygiene
+    pass and most needs one.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    ctx.invoke(skills_status_cmd)
+
+
+@skills.command("status")
+@click.pass_context
+def skills_status_cmd(ctx):
+    """Report each procedure as current / outdated / user-modified / absent."""
+    from techne.platforms.claude_code.skills import skills_dir, skills_status
+
+    config = ctx.obj["config"]
+    click.echo(f"Skills directory: {skills_dir()}")
+    for r in skills_status(config):
+        line = f"  {r.name}: {r.action}"
+        if r.detail:
+            line += f" — {r.detail}"
+        click.echo(line)
+
+
+@skills.command("install")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite a procedure you have edited (default: report it and leave it).",
+)
+@click.pass_context
+def skills_install(ctx, force):
+    """Write the bundled procedures into the platform's command directory."""
+    from techne.platforms.claude_code.skills import register_skills
+
+    config = ctx.obj["config"]
+    for r in register_skills(config, force=force):
+        line = f"{r.name}: {r.action} -> {r.path}"
+        if r.detail:
+            line += f"\n  {r.detail}"
+        click.echo(line)
+
+
+@skills.command("remove")
+@click.pass_context
+def skills_remove(ctx):
+    """Remove only the copies techne wrote and still owns."""
+    from techne.platforms.claude_code.skills import unregister_skills
+
+    config = ctx.obj["config"]
+    results = unregister_skills(config)
+    if not results:
+        click.echo("nothing installed by techne")
+    for r in results:
+        line = f"{r.name}: {r.action}"
+        if r.detail:
+            line += f" — {r.detail}"
+        click.echo(line)
 
 
 @main.group(invoke_without_command=True)
