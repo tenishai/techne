@@ -2251,6 +2251,19 @@ def reflect(ctx):
         click.echo("By scope:")
         for k, n in sorted(s["by_scope"].items()):
             click.echo(f"  {k}: {n}")
+    # The DEBT ledger, which is a different question from the CANDIDATE counts above:
+    # candidates measure what reflection proposed, the queue measures what reflection
+    # still OWES. They were never shown together, which is part of why an undrained
+    # queue went unnoticed for weeks (tenishai/techne#644).
+    from techne.core.reflect import reflection_debt_stats
+
+    d = reflection_debt_stats(config)
+    click.echo(
+        f"Reflection debt: {d['pending']} thread(s) owed across "
+        f"{d['sessions_pending']} session(s); {d['drained']} of {d['total']} paid"
+    )
+    if d["oldest_pending"]:
+        click.echo(f"  oldest owed: {d['oldest_pending']}")
 
 
 @reflect.command("review")
@@ -2335,26 +2348,19 @@ def reflect_emit(ctx, session_id, limit, output):
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.core.database import connect
-    from techne.core.reflect import emit_reflection_batch, load_session_for_reflection
+    from techne.core.reflect import emit_reflection_pass
 
-    if not session_id:
-        conn = connect(config.db_path)
-        try:
-            row = conn.execute(
-                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-        finally:
-            conn.close()
-        session_id = row["id"] if row else None
+    # ONE emit implementation, shared with the MCP tool. This command used to build
+    # its own batch and never advanced the `reflect:emitted:` cursor, so a session
+    # reflected through the CLI stayed "pending" forever and was re-nominated on
+    # every SessionStart (tenishai/techne#645).
+    result = emit_reflection_pass(config, session_id, limit=limit)
+    batch = result.get("batch", [])
+    session_id = result.get("session_id") or session_id
     if not session_id:
         click.echo("No session to reflect on.", err=True)
         ctx.exit(1)
 
-    threads, observations = load_session_for_reflection(config, session_id)
-    batch = emit_reflection_batch(config, session_id, threads, observations)
-    if limit:
-        batch = batch[:limit]
     # Placeholder the agent fills in-place with its JSON candidate array per thread,
     # then feeds the SAME file to `ingest` — no id reconstruction needed.
     for it in batch:
@@ -2368,6 +2374,9 @@ def reflect_emit(ctx, session_id, limit, output):
         )
     else:
         click.echo(payload)
+    for key in ("note", "unemittable_note"):
+        if result.get(key):
+            click.echo(result[key], err=True)
 
 
 @reflect.command("ingest")
@@ -2386,35 +2395,21 @@ def reflect_ingest(ctx, responses_file):
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.core.reflect import ingest_reflection_response, new_ingest_counts
+    from techne.core.reflect import ingest_reflection_batch
 
     items = json.loads(responses_file.read_text(encoding="utf-8"))
-    # From the ONE definition — this dict is summed with `totals[k] += v`, and a
-    # hand-maintained copy here is what crashed with KeyError on every non-empty
-    # response when a key was added upstream (techne#465).
-    totals = new_ingest_counts()
-    skipped = 0
-    for it in items:
-        raw = it.get("raw_response")
-        if not isinstance(raw, str):
-            raw = json.dumps(raw) if raw else ""  # tolerate an inlined array
-        if not raw.strip():
-            skipped += 1  # unanswered thread (placeholder left empty) — not an error
-            continue
-        counts = ingest_reflection_response(
-            config,
-            it["session_id"],
-            it["thread_id"],
-            it.get("prompt_hash", ""),
-            raw,
-            model_used=it.get("model_used", "agent-assisted"),
-        )
-        for k, v in counts.items():
-            totals[k] += v
+    # ONE ingest implementation, shared with the MCP tool. This command used to
+    # write candidates and stop — `drain_reflection_queue` had a single production
+    # caller in mcp_server, so the documented /techne-promote path paid reflection
+    # debt and never marked it paid (tenishai/techne#644).
+    totals = ingest_reflection_batch(config, items)
+    skipped = totals.pop("skipped", 0)
+    drained = totals.pop("drained", 0)
 
     click.echo(json.dumps(totals, indent=2))
     if skipped:
         click.echo(f"skipped {skipped} thread(s) with empty raw_response")
+    click.echo(f"reflection debt drained: {drained} thread(s)")
     if config.reflect.write_to == "live":
         click.echo("write_to=live — candidates promoted straight to knowledge/identity.")
     else:
@@ -2487,9 +2482,10 @@ def reflect_discard(ctx, candidate_id, decided_by, decision_reason):
 def reflect_stats(ctx):
     """Counts of pending / promoted / discarded candidates."""
     config = ctx.obj["config"]
-    from techne.core.reflect import candidate_stats
+    from techne.core.reflect import candidate_stats, reflection_debt_stats
 
     s = candidate_stats(config.db_path)
+    s["debt"] = reflection_debt_stats(config)
     click.echo(json.dumps(s, indent=2))
 
 
