@@ -136,20 +136,35 @@ env:
 # tests/fixtures/github/expression_truth_table.json with its provenance:
 #
 # EVERY ROW BELOW WAS MEASURED IN ONE CONTEXT: a NON-FORK `pull_request` on this repo.
-# Four of them are context-DEPENDENT and are marked [ctx]; reading a [ctx] row as a law
-# is how this comment would mislead the next editor.
+# TWO KINDS OF CONTEXT-DEPENDENCE, and they are NOT the same axis (techne#591 —
+# an earlier version of this table marked one row that cannot vary and omitted one
+# that does). [fork] varies with WHO opened the PR; [push] varies with WHICH EVENT.
 #
 #   an absent property is            null      (NOT the empty string)
 #   <absent> == github.repository    false     <- the NEW guard's comparison
 #   <absent> == false                true      <- why `fork == false` is NOT a fix
+#   head.repo.fork == false                                              true   [fork]
 #   OLD  !(event_name=='pull_request' && <absent>)                       true   FAIL OPEN
-#   NEW  event_name!='pull_request' || <absent>==github.repository       false  FAIL CLOSED
-#   NEW  event_name!='pull_request' || full_name==github.repository      true   [ctx]
-#   FORK_ONLY event_name=='pull_request' && <absent>!=github.repository  true   [ctx]
+#   NEW  event_name!='pull_request' || <absent>==github.repository       false  [push] FAIL CLOSED
+#   NEW  event_name!='pull_request' || full_name==github.repository      true   [fork] [push]
+#   FORK_ONLY event_name=='pull_request' && <absent>!=github.repository  true   [push]
 #
-# THE [ctx] ROWS INVERT ON A FORK PR, and that inversion IS the feature: the NEW guard
+# THE [fork] ROWS INVERT ON A FORK PR, and that inversion IS the feature: the NEW guard
 # reads `true` above only because this was a same-repo PR — on a fork it is FALSE, which
 # is what keeps fork code off dev02. Do not "fix" it to true.
+#
+# FORK_ONLY IS *NOT* [fork], which is the correction #591 filed: both of its operands
+# are fork-invariant. `<absent> != github.repository` is `null != "tenishai/techne"` —
+# true in EVERY context, because the property is absent from the payload rather than
+# holding a fork's name. It varies only with the EVENT.
+#
+# THE THREE `<absent>` ROWS CARRYING `event_name` ARE NOT UNIFORM UNDER `push`, and the
+# old blanket "expected to be context-independent" hid the difference. Under `push`:
+#   NEW-with-<absent>  false -> TRUE   (the `event_name != 'pull_request'` disjunct wins)
+#   FORK_ONLY          true  -> FALSE  (the `event_name == 'pull_request'` conjunct fails)
+#   OLD                true  -> true   UNCHANGED — the negation absorbs it either way,
+#                                      which is exactly why the OLD guard failed open
+#                                      no matter what event arrived.
 #
 # AND THE ROW THE SECURITY CLAIM RESTS ON HAS NEVER BEEN MEASURED IN ANY CONTEXT:
 # nobody has yet observed `fork-pr` actually fire, because no fork of this repo exists.

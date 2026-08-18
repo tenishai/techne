@@ -36,6 +36,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from techne.core.state import add_observation
 from techne.exit_codes import StartupConfigError
@@ -100,13 +101,38 @@ class Debouncer:
 
     Thread-safe — backed by stdlib ``threading.Timer`` and an internal
     ``threading.Lock``.
+
+    ``timer_factory`` EXISTS FOR THE TESTS, and the reason is worth stating because
+    an injection seam that only tests use looks like over-design until you know it
+    (techne#593). The coalescing tests had no way to assert the behaviour without
+    asserting a WALL-CLOCK RACE: three `schedule()` calls separated by 10ms sleeps
+    coalesce only if every sleep returns within the 50ms window. That margin is 5x
+    and unguarded, so a loaded host falsifies the PRECONDITION and the failure is
+    indistinguishable from the Debouncer genuinely failing to coalesce. Observed,
+    not theorised — `tests/test_watch.py` failed on the dev02 runner during the
+    2026-08-16 fleet migration and passed on prinkle and mash1 at the same commit.
+    It is not fixed by the migration, only no longer triggered.
+
+    Widening the delay was rejected: it buys headroom, keeps the race, re-tunes a
+    number against one machine (which is what #543 was about), and slows the suite
+    on every run to serve the slowest host. A seam lets the test control time
+    instead of hoping for it, and production keeps `threading.Timer` untouched.
     """
 
-    def __init__(self, callback: Callable[[Path], None], delay_ms: int) -> None:
+    def __init__(
+        self,
+        callback: Callable[[Path], None],
+        delay_ms: int,
+        *,
+        timer_factory: Callable[..., Any] | None = None,
+    ) -> None:
         self._callback = callback
         self._delay = max(0.0, delay_ms / 1000.0)
-        self._timers: dict[str, threading.Timer] = {}
+        self._timers: dict[str, Any] = {}
         self._lock = threading.Lock()
+        #: Must return an object with `start()` and `cancel()`, called as
+        #: factory(interval, function, args=...) — i.e. threading.Timer's signature.
+        self._timer_factory = timer_factory or threading.Timer
 
     def schedule(self, path: Path) -> None:
         key = str(path)
@@ -114,8 +140,11 @@ class Debouncer:
             existing = self._timers.get(key)
             if existing is not None:
                 existing.cancel()
-            timer = threading.Timer(self._delay, self._fire, args=(path,))
-            timer.daemon = True
+            timer = self._timer_factory(self._delay, self._fire, args=(path,))
+            # A fake timer in a test has no daemon flag to set, and requiring one
+            # would leak threading into the seam for no benefit.
+            if hasattr(timer, "daemon"):
+                timer.daemon = True
             self._timers[key] = timer
             timer.start()
 

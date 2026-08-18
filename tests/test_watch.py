@@ -61,6 +61,36 @@ class TestMatches:
 # ---- Debouncer ------------------------------------------------------------
 
 
+class _FakeTimer:
+    """A threading.Timer stand-in that only moves when a test says so (techne#593).
+
+    Same call shape as threading.Timer so the seam cannot silently diverge:
+    constructed with (function, args), then `start()` / `cancel()` / `elapse()`.
+    """
+
+    def __init__(self, fn, args) -> None:
+        self.fn = fn
+        self.args = args
+        self.started = False
+        self.cancelled = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def elapse(self) -> None:
+        """Fire as a real timer would when its interval expires."""
+        if not self.cancelled:
+            self.fn(*self.args)
+
+
+def _record(bucket, timer):
+    bucket.append(timer)
+    return timer
+
+
 class TestDebouncer:
     def test_fires_after_delay(self) -> None:
         seen: list[Path] = []
@@ -73,15 +103,54 @@ class TestDebouncer:
         assert seen == [Path("/tmp/x")]
 
     def test_coalesces_rapid_schedules_on_same_key(self) -> None:
-        """Two schedule() calls within the window → callback fires ONCE."""
+        """Three schedule() calls in the window → callback fires ONCE.
+
+        DETERMINISTIC SINCE techne#593. This asserted a wall-clock race: three
+        calls separated by 10ms sleeps coalesce only if every sleep returns
+        inside the 50ms window — a 5x margin, unguarded, where falsifying the
+        PRECONDITION is indistinguishable from the Debouncer genuinely failing to
+        coalesce. That is the house rule "a guard's precondition is a way to
+        switch the guard off", in a test rather than in production code.
+
+        Observed, not theorised: this failed on the dev02 runner during the
+        2026-08-16 fleet migration — asserted one event, saw two — and passed on
+        prinkle and mash1 at the same commit. The fleet move did not fix it, it
+        only stopped triggering it.
+
+        Widening the delay was rejected: it buys headroom, keeps the race, and
+        re-tunes a number against one machine (#543). A fake timer removes time
+        from the assertion entirely.
+        """
+        seen: list[Path] = []
+        fired: list[_FakeTimer] = []
+        d = Debouncer(
+            lambda p: seen.append(p),
+            delay_ms=50,
+            timer_factory=lambda interval, fn, args: _record(fired, _FakeTimer(fn, args)),
+        )
+
+        d.schedule(Path("/tmp/x"))
+        d.schedule(Path("/tmp/x"))  # cancel + reschedule
+        d.schedule(Path("/tmp/x"))
+
+        assert [t.cancelled for t in fired] == [True, True, False], (
+            "each schedule() must cancel the pending timer for that key"
+        )
+        assert seen == [], "nothing fires until a timer elapses"
+
+        fired[-1].elapse()  # only the surviving timer runs
+        assert seen == [Path("/tmp/x")]
+
+    def test_coalescing_still_holds_against_the_real_clock(self) -> None:
+        """A smoke test over the REAL threading.Timer, so the fake cannot drift
+        from it (techne#593). Deliberately generous — it exists to catch a seam
+        that stopped matching production, not to pin the coalescing window."""
         seen: list[Path] = []
         d = Debouncer(lambda p: seen.append(p), delay_ms=50)
         d.schedule(Path("/tmp/x"))
-        time.sleep(0.01)
-        d.schedule(Path("/tmp/x"))  # cancel + reschedule
-        time.sleep(0.01)
         d.schedule(Path("/tmp/x"))
-        time.sleep(0.1)
+        d.schedule(Path("/tmp/x"))
+        time.sleep(0.4)
         assert seen == [Path("/tmp/x")]
 
     def test_different_keys_fire_independently(self) -> None:
@@ -102,8 +171,10 @@ class TestDebouncer:
 
     def test_callback_exception_does_not_break_debouncer(self) -> None:
         """A bad callback must not propagate or leave the debouncer broken."""
+
         def boom(_p):
             raise RuntimeError("kaboom")
+
         d = Debouncer(boom, delay_ms=10)
         d.schedule(Path("/tmp/x"))  # should not raise
         time.sleep(0.05)
