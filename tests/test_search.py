@@ -1139,7 +1139,7 @@ class TestSearchNoMutation:
 
         fts_after = search_fts(db_path, "mutation", table="threads", limit=5)
         for orig, after in zip(original_source_values, fts_after):
-            assert orig.get("type") == after.get("type")
+            assert orig.get("source_table") == after.get("source_table")
             # The 'source' column (provenance) must not have been overwritten
             assert orig.get("source") == after.get("source")
 

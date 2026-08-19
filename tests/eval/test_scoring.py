@@ -23,7 +23,9 @@ _RESOLVER = {"g": "knowledge:1"}
 
 
 def _row(type_: str, id_: int, content: str) -> dict:
-    return {"type": type_, "id": id_, "content": content}
+    # `source_table` since techne#579 — scoring keys gold ids on the TABLE
+    # ("knowledge:1"), never on the row's own kind.
+    return {"source_table": type_, "id": id_, "content": content}
 
 
 def test_score_formula_unchanged():

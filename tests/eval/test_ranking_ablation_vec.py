@@ -144,11 +144,11 @@ def test_ranking_ablation_vec(pinned_model2vec, tmp_path, capsys):
 
         # Arm A: full hybrid, RRF-fused (pre-#401 baseline, rebuilt via _rrf_fuse).
         rrf_retrieved = _rrf_hybrid(db_path, query, table, limit=_LIMIT)
-        rrf_ranked = [f"{r['type']}:{r['id']}" for r in rrf_retrieved]
+        rrf_ranked = [f"{r['source_table']}:{r['id']}" for r in rrf_retrieved]
 
         # Arm B: simple union, vec-first, no fusion.
         simple_retrieved = _simple_hybrid(db_path, query, table, limit=_LIMIT)
-        simple_ranked = [f"{r['type']}:{r['id']}" for r in simple_retrieved]
+        simple_ranked = [f"{r['source_table']}:{r['id']}" for r in simple_retrieved]
 
         # Soft invariant only — this test measures, it does not gate.
         assert len(rrf_retrieved) <= _LIMIT
@@ -162,18 +162,22 @@ def test_ranking_ablation_vec(pinned_model2vec, tmp_path, capsys):
             # aggregate_gold requires it.
             "fpr": 0.0,
         }
-        rrf_rows.append({
-            **common,
-            "recall_at_5": round(recall_at_k(expected, rrf_ranked, 5), 3),
-            "recall_at_10": round(recall_at_k(expected, rrf_ranked, 10), 3),
-            "mrr": round(mrr(expected, rrf_ranked), 3),
-        })
-        simple_rows.append({
-            **common,
-            "recall_at_5": round(recall_at_k(expected, simple_ranked, 5), 3),
-            "recall_at_10": round(recall_at_k(expected, simple_ranked, 10), 3),
-            "mrr": round(mrr(expected, simple_ranked), 3),
-        })
+        rrf_rows.append(
+            {
+                **common,
+                "recall_at_5": round(recall_at_k(expected, rrf_ranked, 5), 3),
+                "recall_at_10": round(recall_at_k(expected, rrf_ranked, 10), 3),
+                "mrr": round(mrr(expected, rrf_ranked), 3),
+            }
+        )
+        simple_rows.append(
+            {
+                **common,
+                "recall_at_5": round(recall_at_k(expected, simple_ranked, 5), 3),
+                "recall_at_10": round(recall_at_k(expected, simple_ranked, 10), 3),
+                "mrr": round(mrr(expected, simple_ranked), 3),
+            }
+        )
 
     rrf_by_class = aggregate_gold(rrf_rows)
     simple_by_class = aggregate_gold(simple_rows)

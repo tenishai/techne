@@ -66,7 +66,7 @@ def test_retrieval_gate(tmp_path, capsys):
             use_vectors=False,
             half_life_days=_HALF_LIFE_DAYS,
         )
-        ranked = [f"{r['type']}:{r['id']}" for r in retrieved]
+        ranked = [f"{r['source_table']}:{r['id']}" for r in retrieved]
 
         row = {
             "id": task["id"],
