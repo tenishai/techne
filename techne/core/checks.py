@@ -2006,3 +2006,172 @@ def check_vector_coverage(config) -> CheckResult:
         detail=detail,
         remedy=None if healthy else "techne vectors backfill",
     )
+
+
+#: HOW EACH STORE RECORDS ITS SCHEMA VERSION (techne#676).
+#:
+#: This registry exists because the check below is impossible without it, and
+#: writing it down uncovered that a naive version of this check would REPORT
+#: THREE FALSE PROBLEMS on a healthy machine. `PRAGMA user_version` reads 0 on
+#: techne.db, archivist.db and librarian.db — not because they are behind, but
+#: because they do not use that mechanism at all. Their real stamps read 24, 24
+#: and "none". A check comparing the pragma to a code constant across every db
+#: would have flagged all three and been ignored within a week.
+#:
+#: `migrator.VersionIO` made the mechanism pluggable (techne#136) so core could
+#: keep its audited `schema_version` table while domains use the zero-ceremony
+#: pragma. That was the right call, and the cost is that "what version is this
+#: store" has three different answers depending on the file. The knowledge was
+#: spread across database.py, architect.py, codex.py and stores.py, and nothing
+#: held it in one place — so nothing could ask the question uniformly.
+#:
+#: Entries are (label, filename-or-glob, mechanism, code-constant-getter).
+#: mechanism: "table" = MAX(version) FROM schema_version | "pragma" =
+#: PRAGMA user_version | "none" = purely additive, no ladder, nothing to compare.
+_VERSION_REGISTRY: tuple[tuple[str, str, str, str | None], ...] = (
+    ("core", "techne.db", "table", "techne.core.database:SCHEMA_VERSION"),
+    ("archivist", "archivist.db", "table", "techne.core.database:SCHEMA_VERSION"),
+    ("architect", "architect.db", "pragma", "techne.core.architect:ARCHITECT_VERSION"),
+    ("codex", "codex/*.db", "pragma", "techne.core.codex:CODEX_VERSION"),
+    # librarian.db is migrated by SqliteStore.migrate — executescript, additive
+    # only, no ladder and no stamp. Nothing to compare, and saying so beats
+    # reporting a 0 that means "unused field".
+    ("librarian", "librarian.db", "none", None),
+)
+
+
+def _code_version(ref: str) -> int | None:
+    """Resolve 'module:CONSTANT' at call time, so a renamed constant fails here
+    rather than silently reading as 0."""
+    import importlib
+
+    mod_name, _, attr = ref.partition(":")
+    try:
+        return int(getattr(importlib.import_module(mod_name), attr))
+    except Exception:  # noqa: BLE001 — a missing constant is a finding, not a crash
+        return None
+
+
+def _store_version(path: Path, mechanism: str) -> int | None:
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        if mechanism == "pragma":
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+@register_check
+def check_schema_versions(config) -> list[CheckResult]:
+    """Does each store's version stamp match the code that migrates it? (techne#676)
+
+    A STORE AHEAD OF ITS CODE IS SILENTLY UN-MIGRATABLE. `guarded_migrate` used to
+    fold `current > target` into `current >= target` and return without a word;
+    architect.db sat at user_version 4 against a code constant of 3 for at least
+    six days, skipping every migration, and nothing could see it. The guard is now
+    loud on stderr — this is the half a human reads on purpose.
+
+    A store BEHIND its code is normal and reports LIVE: that is the ladder waiting
+    to run, not a fault. Only AHEAD is a finding, because no step above the code's
+    version has ever existed, so the stamp cannot describe the store's real shape.
+    """
+    results: list[CheckResult] = []
+    root = Path(config.data_dir)
+    for label, pattern, mechanism, const_ref in _VERSION_REGISTRY:
+        paths = sorted(root.glob(pattern)) if "*" in pattern else [root / pattern]
+        paths = [p for p in paths if p.exists()]
+        if not paths:
+            continue
+        if mechanism == "none":
+            results.append(
+                CheckResult(
+                    name=f"schema:{label}",
+                    subsystem="migrator",
+                    kind=Kind.FRESHNESS,
+                    verdict=Verdict.DORMANT,
+                    evidence=f"{pattern}: additive-only store (SqliteStore.migrate)",
+                    detail="no version ladder — nothing to compare",
+                )
+            )
+            continue
+
+        expected = _code_version(const_ref) if const_ref else None
+        if expected is None:
+            results.append(
+                CheckResult(
+                    name=f"schema:{label}",
+                    subsystem="migrator",
+                    kind=Kind.FRESHNESS,
+                    verdict=Verdict.UNKNOWN,
+                    evidence=f"could not resolve {const_ref}",
+                    detail=f"{label}: the code constant is unreadable — check renamed?",
+                )
+            )
+            continue
+
+        ahead, behind, unreadable = [], [], []
+        for p in paths:
+            got = _store_version(p, mechanism)
+            if got is None:
+                unreadable.append(p.name)
+            elif got > expected:
+                ahead.append(f"{p.name}=v{got}")
+            elif got < expected:
+                behind.append(f"{p.name}=v{got}")
+
+        evidence = (
+            f"{mechanism}, code=v{expected}, {len(paths)} file(s); "
+            f"ahead={ahead or '-'} behind={behind or '-'}"
+        )
+        if ahead:
+            results.append(
+                CheckResult(
+                    name=f"schema:{label}",
+                    subsystem="migrator",
+                    kind=Kind.FRESHNESS,
+                    verdict=Verdict.BROKEN,
+                    evidence=evidence,
+                    detail=(
+                        f"{len(ahead)} {label} store(s) are AHEAD of code v{expected} "
+                        f"({', '.join(ahead)}) — migrations are being SKIPPED and the "
+                        "stamp does not describe the real shape"
+                    ),
+                    remedy="techne doctor --explain schema (decide the stamp; see techne#676)",
+                )
+            )
+        elif unreadable:
+            results.append(
+                CheckResult(
+                    name=f"schema:{label}",
+                    subsystem="migrator",
+                    kind=Kind.FRESHNESS,
+                    verdict=Verdict.UNKNOWN,
+                    evidence=evidence,
+                    detail=f"could not read the version of: {', '.join(unreadable)}",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    name=f"schema:{label}",
+                    subsystem="migrator",
+                    kind=Kind.FRESHNESS,
+                    verdict=Verdict.LIVE,
+                    evidence=evidence,
+                    detail=(
+                        f"{len(behind)} store(s) below code v{expected}, will migrate on open"
+                        if behind
+                        else f"all {len(paths)} store(s) at code v{expected}"
+                    ),
+                )
+            )
+    return results

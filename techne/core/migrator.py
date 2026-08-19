@@ -376,7 +376,41 @@ def guarded_migrate(
     def _do() -> None:
         # Double-checked: a process we raced may have migrated while we waited.
         current = read_version(conn)
-        if current >= target_version:
+        if current == target_version:
+            return
+        if current > target_version:
+            # THE STORE CLAIMS A SHAPE THE CODE HAS NEVER DEFINED (techne#676).
+            #
+            # This was folded into `current >= target_version` and returned in
+            # silence. For `==` that is the correct no-op; for `>` it is not a
+            # no-op at all, it is an INCONSISTENCY — and it was found the
+            # expensive way. architect.db has read `user_version = 4` since at
+            # least 2026-08-13 while every revision of the code declared
+            # ARCHITECT_VERSION = 3 and no v3→v4 step has ever existed. Six days
+            # of migrations were skipped with no error, no warning, no log line.
+            #
+            # WE WARN RATHER THAN RAISE, deliberately. This runs on the capture
+            # hot path via connect(); raising would take every session down over
+            # a condition that is inconsistent but not actively destructive. The
+            # observable half belongs in `techne doctor`, where a human reads it
+            # — see check_schema_versions.
+            #
+            # THE REAL DANGER IS NOT THIS SKIP, IT IS THE HOLE IT LEAVES. A store
+            # stamped ahead has rungs of the ladder that never ran. When the code
+            # later passes it, migration resumes from the STAMP rather than from
+            # the shape, so those rungs stay unrun forever. Structural
+            # idempotency guards (column-presence, never version-presence) are
+            # what actually protect against that — which is exactly why this
+            # module's own contract insists on them, and why a step gated only on
+            # `current < N` is not enough on a store whose N cannot be trusted.
+            print(
+                f"[techne] WARNING: {label} at v{current} is AHEAD of this code's "
+                f"v{target_version} ({db_path.name}). Migrations are being SKIPPED. "
+                "No step above the code's version has ever run, so the version "
+                "stamp does not describe this store's real shape. "
+                "Run `techne doctor` for the full picture.",
+                file=sys.stderr,
+            )
             return
         note = ""
         if backup:
