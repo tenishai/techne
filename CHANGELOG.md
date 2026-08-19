@@ -5,6 +5,107 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+The release about what the store is willing to claim. 0.14.0 stopped the instruments
+lying about whether rails *ran*; this one goes after what they assert when they do —
+a search result that reported its source table as its kind, a memory we were on record
+as not believing that got ranked rather than filtered, a call graph asserting 19,345
+edges it had resolved none of, a version stamp certifying migrations that never ran,
+and a health check that had been red since June with no way to clear it. Plus the half
+that makes any of it reach you: techne can now introduce itself. **29 changes.**
+
+### Added
+
+- **`techne capabilities` and the `techne_capabilities` MCP tool** (#638) — what is
+  switched on *on this install*, what each thing off would buy you, and the exact
+  config line, grounded in counts from your own store. Measured on a fresh install:
+  **8 of 8 capabilities report OFF**, because nearly everything is opt-in. It also
+  reports bundled workflows absent from disk, which no config flag can see. A
+  one-line invitation fires at session start **once per version change** and never
+  again — deliberately, since #562 measured how fast a recurring banner becomes noise.
+- **`self-care` and `techne-promote` ship with techne** (#641) — installed by
+  `techne init`, versioned *with* the release because they drive its CLI and know its
+  store layout. `techne skills install` / `status`; never overwrites a copy you edited.
+- **First-prompt startup directive** (#643), gated on pending work and once per session.
+- **Relevance floor for per-turn recall** (#414) — "inject nothing" is a legal outcome
+  now. Ships the mechanism with the **value deliberately unset**: the threshold should
+  come from the replay harness (#415), which is unbuilt, so behaviour is unchanged
+  until someone sets it from evidence. The config comment carries the measured anchor.
+- **`techne cards repair`** (#684) and a `remedy` field on fsck's results.
+- **Rescue@10 eval gate** (#583) — does a supersede actually reach the ranker? Includes
+  a test pinning the *known limit*: a rewrite that drops the original cue terms is not
+  rescued.
+- **`docs/mcp-tools.md`** — the complete agent-facing surface, pinned by a test so a
+  tool cannot ship undocumented.
+
+### Fixed
+
+- **`search()` reported the source TABLE as `row['type']`** (#579, #566) — every
+  consumer reading it was misled. The row now says which table *and* which kind.
+- **`status='uncertain'` ranked instead of filtering** (#501) — we were injecting what
+  we are on record as not believing. "Written down but not trusted" is now expressible.
+- **The per-turn rail re-sent what the session already had** (#576) — 45% of
+  deliveries, with compaction-aware suppression now in place.
+- **SessionStart spent 74.5% of its budget on sessions that produce nothing** (#562).
+  No classifier can spot them in advance — project path, identity and lifetime were all
+  measured and rejected — but 94% never submit a prompt, so the fix is **placement**:
+  the model's copy waits for a first prompt that may never come. The operator banner is
+  unaffected; it rides a separate carrier.
+- **The code graph asserted calls it could not resolve** (#606). All 19,345 call edges
+  have `to_symbol IS NULL`; 57% name-match some symbol and 99 ambiguous names cover
+  4,177 edges. Rows now carry `resolution: exact | name-inferred`, `only_proven` returns
+  what can be proved, and blast radius reports the split. The default stays permissive
+  because flipping it would empty the call graph on every store today — the fix is
+  honesty, not suppression. The indexer-side fix is #679.
+- **A store ahead of its code migrated silently** (#676) — `current >= target` folded
+  "already there" together with "ahead of the code". `architect.db` sat at v4 against a
+  code constant of 3 for six days, **skipping every migration with no error, no warning,
+  no log line**. Now loud on stderr, plus a `techne doctor` check per store.
+- **fsck was red since June with no way to clear it** (#684) — #633 fixed the producer
+  and left four rows behind. `maintenance.CheckResult` had no `remedy` field, so fsck
+  could name a fault and offer nothing. A check that can never go green trains you to
+  ignore it.
+- **The applies graph could not see new patterns** (#674) — 141 of 505 patterns linked,
+  a ceiling rather than a lag. Plus the `limenal`/`liminal` split, canonicalised at
+  extraction and migrated.
+- **461 silent codex index failures** (#610), a disk walk that swallowed errors (#599,
+  #600), grep-assist answering a stale index with silence (#602).
+- **The CLI reflect path left no record** (#642, #644, #645, #646) — ingest never
+  drained the queue, emit never set the cursor.
+- Also: #575, #590, #591, #593, #607, #608, #609, #620, #626, #629, #630, #631, #632,
+  #635, #637.
+
+### Docs
+
+- **`docs/welcome.md`** now opens by telling you not to read it — `techne capabilities`
+  answers for your machine. Adds the shipped workflows and this release's honesty
+  features.
+- **`docs/mcp-tools.md`** is new; the README's CLI reference gained `capabilities`,
+  `audit`, `profile`, `prompts`, `deposit` and `cards repair`.
+- **The counterfactual is #682** — four source sites claimed it was tracked, by two
+  different numbers, neither of which was it. One was in `techne audit`'s
+  operator-facing output.
+- **Corrected the import-model claim from #606** (#679): from-imported *names* are
+  recorded; what is missing is the source **module**, and therefore the binding.
+
+### Upgrading
+
+**Core schema is unchanged — `SCHEMA_VERSION` stays at 24, so from 0.14.0 there is no
+techne.db migration.** Coming from 0.11/0.12 you still cross the 0.14.0 ladder; see that
+release's notes, which remain accurate.
+
+**`architect.db` migrates 3 → 4** — one step, collapsing the misspelled `limenal` target
+into `liminal`. It is `INSERT OR IGNORE` + `DELETE`, not `UPDATE`, because the primary key
+is `(pattern_id, target)` and a straight update collides on every pattern carrying both
+spellings. `guarded_migrate` takes a backup first.
+
+**If `techne doctor` reports `schema:<store>` BROKEN after upgrading, read it.** That
+check is new in this release and it can only fire on a store *ahead* of its code —
+meaning migrations are being skipped. Behind is normal and reports healthy.
+
+**Run `techne skills install` after upgrading.** An upgrade does not re-run `techne init`,
+so the bundled workflows are not refreshed automatically.
+
+
 ## [0.14.0] — 2026-08-17
 
 The release where the instruments stopped lying. Nearly every fix below is the same shape:
