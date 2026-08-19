@@ -45,7 +45,8 @@ that makes any of it reach you: techne can now introduce itself. **29 changes.**
   we are on record as not believing. "Written down but not trusted" is now expressible.
 - **The per-turn rail re-sent what the session already had** (#576) — 45% of
   deliveries, with compaction-aware suppression now in place.
-- **SessionStart spent 74.5% of its budget on sessions that produce nothing** (#562).
+- **SessionStart spent 74.5% of its budget on sessions that produce nothing** (#562 —
+  re-measured 2026-08-18; the issue title's 76% is the original, smaller sample).
   No classifier can spot them in advance — project path, identity and lifetime were all
   measured and rejected — but 94% never submit a prompt, so the fix is **placement**:
   the model's copy waits for a first prompt that may never come. The operator banner is
@@ -76,9 +77,9 @@ that makes any of it reach you: techne can now introduce itself. **29 changes.**
 
 ### Docs
 
-- **`docs/welcome.md`** now opens by telling you not to read it — `techne capabilities`
-  answers for your machine. Adds the shipped workflows and this release's honesty
-  features.
+- **`docs/welcome.md`** gains an up-front "Don't read this — ask it" section pointing
+  at `techne capabilities`, because a guide is a snapshot and your install is the
+  truth. Adds the shipped workflows and this release's honesty features.
 - **`docs/mcp-tools.md`** is new; the README's CLI reference gained `capabilities`,
   `audit`, `profile`, `prompts`, `deposit` and `cards repair`.
 - **The counterfactual is #682** — four source sites claimed it was tracked, by two
