@@ -283,6 +283,47 @@ def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
 _RESEND_OVERFETCH = 3
 
 
+def _claim_deferred_session_context(db_path, session_id: str | None) -> str | None:
+    """Take this session's deferred SessionStart context, once (techne#562).
+
+    SessionStart stashes its model-facing block instead of injecting it, because
+    74.5% of that spend went to sessions that produce nothing and 94% of those
+    never reach a prompt. Arriving here means this session DID ask something, so
+    it earns the context now.
+
+    CLAIMED, NOT READ — the stash is deleted in the same call. A second prompt must
+    not re-inject it, which would trade the old waste for a worse one (#576 exists
+    because the per-turn rail re-sent 46% of its deliveries).
+
+    Best-effort: any failure returns None, and the session simply runs without the
+    session-start block rather than the hook failing. The operator still saw the
+    banner at startup — that half was never deferred.
+    """
+    if not session_id:
+        return None
+    try:
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state, set_state
+        from techne.hooks.session_start import DEFERRED_CONTEXT_KEY
+
+        key = f"{DEFERRED_CONTEXT_KEY}:{session_id}"
+        conn = connect(db_path)
+        try:
+            payload = get_state(conn, key)
+            if not payload:
+                return None
+            summary = payload.get("summary") or None
+            # Clear FIRST, so a failure after this point costs one block rather
+            # than re-injecting on every subsequent turn.
+            set_state(conn, key, {})
+            return summary
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — never fail the turn over a deferred block
+        print(f"techne: deferred session context unavailable: {e}", file=sys.stderr)
+        return None
+
+
 def _already_sent_this_session(db_path, session_id: str | None) -> set:
     """Knowledge ids this session has ALREADY been given, since its last compaction.
 
@@ -544,6 +585,32 @@ def main() -> None:
         sys.exit(0)
 
     blocks: list[str] = []
+
+    # techne#562 — claim this session's deferred SessionStart context, if any.
+    # FIRST in `blocks`, so the session-state block still precedes per-turn recall
+    # exactly as it did when SessionStart injected it inline. Ordering is the one
+    # thing deferral could quietly change, and it does not.
+    deferred_ctx = _claim_deferred_session_context(config.db_path, data.get("session_id"))
+    if deferred_ctx:
+        blocks.append(deferred_ctx)
+        # Logged as its OWN source, not folded into per_turn_recall: the audit must
+        # still be able to say what session_start cost and whether it was used.
+        # Without this the 74.5%-waste measurement that motivated #562 becomes
+        # unrepeatable the moment the fix lands.
+        if config.hooks.per_turn_recall_log:
+            try:
+                from techne.hooks._injection_log import log_context_injection
+
+                log_context_injection(
+                    config.db_path,
+                    source="session_start_deferred",
+                    session_id=data.get("session_id"),
+                    trigger=None,
+                    rows=[],
+                    injected_text=deferred_ctx,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"techne: deferred-context log skipped: {e}", file=sys.stderr)
     degraded: str | None = None
     rows: list = []
 
