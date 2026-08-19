@@ -5,6 +5,8 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-19
+
 The release about what the store is willing to claim. 0.14.0 stopped the instruments
 lying about whether rails *ran*; this one goes after what they assert when they do —
 a search result that reported its source table as its kind, a memory we were on record
@@ -89,6 +91,9 @@ that makes any of it reach you: techne can now introduce itself. **29 changes.**
   recorded; what is missing is the source **module**, and therefore the binding.
 
 ### Upgrading
+
+`pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.15.0"`
+— the `--force` is required; a plain `pipx install` over an existing techne refuses.
 
 **Core schema is unchanged — `SCHEMA_VERSION` stays at 24, so from 0.14.0 there is no
 techne.db migration.** Coming from 0.11/0.12 you still cross the 0.14.0 ladder; see that
