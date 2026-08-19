@@ -4111,11 +4111,65 @@ def fsck_cmd(ctx):
     click.echo(f"databases present: {present}")
     for c in report.checks:
         click.echo(f"  [{'OK  ' if c.ok else 'FAIL'}] {c.name}: {c.summary}")
+        # techne#684: a structural fault with no named path is how a check gets
+        # trained into background noise. Print the remedy; never run it.
+        if not c.ok and c.remedy:
+            click.echo(f"         fix: {c.remedy}")
     if report.ok:
         click.echo("fsck: all cross-DB checks passed.")
     else:
         click.echo("fsck: inconsistencies found.", err=True)
         raise SystemExit(1)
+
+
+@main.group()
+def cards():
+    """Document cards — the techne.db -> librarian.db pointer layer."""
+
+
+@cards.command("repair")
+@click.option(
+    "--apply",
+    "do_apply",
+    is_flag=True,
+    default=False,
+    help="Perform the retype. Without this, prints what would change and exits.",
+)
+@click.pass_context
+def cards_repair(ctx, do_apply):
+    """Retype document_cards that never had a doc pointer (techne#684).
+
+    A document_card IS a pointer at a librarian document. A row with no pointer
+    was never a card — #633's producer bug chose the type when it had nothing to
+    point at — so the content is real knowledge wearing the wrong type, and the
+    repair is to retype it to `fact`.
+
+    A card whose pointer EXISTS but does not resolve is a different fault
+    (librarian.db out of sync) and is REPORTED, never touched: restoring the
+    document and superseding the card are both valid and only a human knows which.
+    """
+    from techne.core.cards import repair_pointerless_cards
+
+    config = ctx.obj["config"]
+    result = repair_pointerless_cards(config, apply=do_apply)
+
+    if not result["retyped"] and not result["needs_human"]:
+        click.echo("No dangling cards. Nothing to repair.")
+        return
+
+    if result["retyped"]:
+        verb = "Retyped" if result["applied"] else "Would retype"
+        click.echo(f"{verb} {len(result['retyped'])} card(s) with no doc pointer -> fact:")
+        for cid in result["retyped"]:
+            click.echo(f"  knowledge#{cid}")
+        if not result["applied"]:
+            click.echo("\nDry run. Re-run with --apply to perform it.")
+
+    if result["needs_human"]:
+        click.echo(f"\n{len(result['needs_human'])} card(s) need a human — pointer set but unresolvable:")
+        for d in result["needs_human"]:
+            click.echo(f"  knowledge#{d['card_id']}  doc:{d.get('doc_id')}  ({d.get('reason')})")
+        click.echo("  Restore librarian.db, or supersede the card. This command will not guess.")
 
 
 @main.command("reconcile")

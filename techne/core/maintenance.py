@@ -83,6 +83,15 @@ class CheckResult:
     ok: bool
     summary: str
     details: dict = field(default_factory=dict)
+    #: The command that fixes it. Checks REPORT, they never self-heal — the same
+    #: rule core/checks.py states, and until techne#684 this dataclass could only
+    #: obey half of it: fsck could name a structural fault and offer the operator
+    #: nothing to do about it. Four dangling cards sat red from June to August
+    #: because of that, on a check documented as "usable in scripts/CI" and
+    #: exiting non-zero. A check that can never go green trains the operator to
+    #: ignore it — the invariant core/checks.py already carries, arrived at here
+    #: from the other direction.
+    remedy: str | None = None
 
 
 @dataclass
@@ -117,7 +126,15 @@ def _check_dangling_cards(config: Config, present: dict[str, bool]) -> CheckResu
     if n_stale:
         parts.append(f"{n_stale} stale (advisory)")
     summary = f"{rep['total']} cards: " + (", ".join(parts) if parts else "all resolve")
-    return CheckResult("dangling_cards", ok, summary, details=rep)
+    # Only the no-pointer case has a mechanical repair, so only name one when it is
+    # the case in hand — offering `cards repair` for a `missing` pointer would
+    # promise a fix that command deliberately refuses to perform.
+    remedy = None
+    if any(d.get("reason") == "no doc pointer" for d in rep["dangling"]):
+        remedy = "techne cards repair   (retypes cards that never had a pointer; techne#684)"
+    elif n_dangling:
+        remedy = "restore librarian.db or supersede the card — a missing pointer needs a human"
+    return CheckResult("dangling_cards", ok, summary, details=rep, remedy=remedy)
 
 
 # Registry of cross-DB checks. Each is (config, present) -> CheckResult. Add codex/pattern
