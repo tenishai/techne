@@ -418,8 +418,18 @@ class TestInjectedTypeLabel:
     def test_the_row_kind_is_shown_not_the_table(self):
         out = self._ctx(
             [
-                {"id": 1, "source_table": "knowledge", "knowledge_type": "decision", "content": "d"},
-                {"id": 2, "source_table": "knowledge", "knowledge_type": "procedure", "content": "p"},
+                {
+                    "id": 1,
+                    "source_table": "knowledge",
+                    "knowledge_type": "decision",
+                    "content": "d",
+                },
+                {
+                    "id": 2,
+                    "source_table": "knowledge",
+                    "knowledge_type": "procedure",
+                    "content": "p",
+                },
             ]
         )
         assert "[decision]" in out
@@ -491,7 +501,9 @@ class TestInjectedTypeLabel:
         suite green (#566 r1 Nit). It is what makes an injected line citable, and
         citation is what `recall_attribution` measures, so losing it silently
         would take the attribution rail's only signal with it."""
-        out = self._ctx([{"id": 42, "source_table": "knowledge", "knowledge_type": "fact", "content": "z"}])
+        out = self._ctx(
+            [{"id": 42, "source_table": "knowledge", "knowledge_type": "fact", "content": "z"}]
+        )
         assert "- ⟦techne#42⟧ [fact] z" in out
 
 
@@ -634,3 +646,103 @@ def test_drop_pull_only_ignores_rows_from_other_tables(tmp_path):
     assert ("observation", doc_id) in kept_kinds, (
         "an observation was dropped because a KNOWLEDGE row shares its id (#608)"
     )
+
+
+# ---------------------------------------------------------------------------
+# techne#576 — the per-turn rail had no memory of what it already said.
+# ---------------------------------------------------------------------------
+
+
+def _injection_row(db, session_id: str, hit_ids: list[int], *, when: str | None = None):
+    """Record a delivery the way log_context_injection does."""
+    import json as _json
+
+    from techne.core.database import connect
+    from techne.hooks._injection_log import _DDL
+
+    conn = connect(db)
+    try:
+        # The table is created lazily by log_context_injection, not by init_db —
+        # so build it the same way rather than hand-rolling a copy that could drift.
+        conn.executescript(_DDL)
+        if when:
+            conn.execute(
+                "INSERT INTO context_injections "
+                "(source, session_id, timestamp, hit_ids, hit_count, approx_tokens) "
+                "VALUES ('per_turn_recall', ?, ?, ?, ?, 0)",
+                (session_id, when, _json.dumps(hit_ids), len(hit_ids)),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO context_injections "
+                "(source, session_id, hit_ids, hit_count, approx_tokens) "
+                "VALUES ('per_turn_recall', ?, ?, ?, 0)",
+                (session_id, _json.dumps(hit_ids), len(hit_ids)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_rows_already_sent_this_session_are_reported(home):
+    """The measurement this fixes: 46.1% of 7,004 live deliveries went to a session
+    that had already received that exact row (re-measured 2026-08-18; #208 alone
+    accounts for 223 redundant re-sends of a note dated 2026-06-10)."""
+    from techne.core.database import init_db
+    from techne.core.state import ensure_session
+    from techne.hooks.user_prompt_submit import _already_sent_this_session
+
+    db = home / "t.db"
+    init_db(db).close()
+    ensure_session(db, "s-576")
+    _injection_row(db, "s-576", [208, 728])
+    _injection_row(db, "s-576", [198])
+
+    assert _already_sent_this_session(db, "s-576") == {208, 728, 198}
+    assert _already_sent_this_session(db, "other-session") == set()
+    assert _already_sent_this_session(db, None) == set(), "no session id → suppress nothing"
+
+
+def test_a_compaction_resets_the_suppression_window(home):
+    """THE BOUNDARY THAT MAKES SUPPRESSION SAFE.
+
+    After a compact, previously injected text may no longer be in the model's
+    context. Suppressing on the strength of a delivery that PREDATES the compact
+    would withhold something the agent no longer has — turning a waste fix into a
+    correctness bug. Only deliveries since the last checkpoint count.
+    """
+    from techne.core.database import connect, init_db
+    from techne.core.state import ensure_session
+    from techne.hooks.user_prompt_submit import _already_sent_this_session
+
+    db = home / "t.db"
+    init_db(db).close()
+    ensure_session(db, "s-576b")
+
+    _injection_row(db, "s-576b", [111], when="2026-08-18 10:00:00")
+    conn = connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO checkpoints (session_id, trigger, data_json, created_at) "
+            "VALUES (?, 'auto', '{}', '2026-08-18 11:00:00')",
+            ("s-576b",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _injection_row(db, "s-576b", [222], when="2026-08-18 12:00:00")
+
+    sent = _already_sent_this_session(db, "s-576b")
+    assert 222 in sent, "a delivery AFTER the compact is still in the window"
+    assert 111 not in sent, (
+        "a delivery from BEFORE the compact must not suppress — that content may "
+        "have left the context window, and withholding it would be a correctness bug"
+    )
+
+
+def test_suppression_failure_degrades_to_resending_not_to_silence(home):
+    """Suppression is an optimisation. If it breaks, the rail must fall back to the
+    old (wasteful) behaviour rather than to injecting nothing."""
+    from techne.hooks.user_prompt_submit import _already_sent_this_session
+
+    assert _already_sent_this_session(home / "does-not-exist.db", "s") == set()

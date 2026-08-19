@@ -221,6 +221,79 @@ def _startup_block(config, session_id: str | None) -> str | None:
 # re-ranking to backfill, which would change what the rail selects.
 
 
+#: How many candidates to fetch per requested slot before re-send suppression.
+#: 3x is a guess bounded by cost, not a tuned value: at the default k=5 it is 15
+#: rows from an already-indexed query, and it only has to survive the worst
+#: measured session. If suppression starts routinely emptying the block, raise it
+#: — the symptom would be per_turn_recall logging hit_count=0 while the store
+#: plainly holds relevant rows.
+_RESEND_OVERFETCH = 3
+
+
+def _already_sent_this_session(db_path, session_id: str | None) -> set:
+    """Knowledge ids this session has ALREADY been given, since its last compaction.
+
+    THE MEASURED WASTE (techne#576). Re-measured 2026-08-18 on the live store:
+    3,227 of 7,004 per_turn_recall deliveries — **46.1%** — went to a session that
+    had already received that exact row. The rail has no memory of what it said
+    this turn-loop, so it re-selects and re-delivers the same rows turn after turn.
+    Worst repeater is knowledge#208 at 223 redundant re-sends, and it is a
+    `project-current-state` note dated 2026-06-10.
+
+    At ~316 tokens per injection this is the largest identified waste in the read
+    path, and it needs no model, no ranking change and no new capture:
+    `context_injections.hit_ids` already records every delivery per session.
+
+    THE COMPACTION BOUNDARY IS LOAD-BEARING, and it is why this reads `checkpoints`
+    rather than the whole session. After a compact, previously injected text may no
+    longer be in the model's context — so suppressing on the strength of a delivery
+    that predates the compact would withhold something the agent no longer has.
+    Only deliveries SINCE the last checkpoint count. A session that has never
+    compacted has no boundary and the whole session counts.
+
+    Best-effort: any failure returns an empty set, which degrades to the old
+    re-sending behaviour rather than to no recall at all.
+    """
+    if not session_id:
+        return set()
+    try:
+        from techne.core.database import connect
+
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT MAX(created_at) FROM checkpoints WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            boundary = row[0] if row else None
+            if boundary:
+                cur = conn.execute(
+                    "SELECT hit_ids FROM context_injections "
+                    "WHERE session_id = ? AND timestamp > ? AND hit_ids IS NOT NULL",
+                    (session_id, boundary),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT hit_ids FROM context_injections "
+                    "WHERE session_id = ? AND hit_ids IS NOT NULL",
+                    (session_id,),
+                )
+            sent: set = set()
+            for (raw,) in cur:
+                if not raw:
+                    continue
+                try:
+                    sent.update(json.loads(raw))
+                except (ValueError, TypeError):
+                    continue
+            return sent
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — suppression is an optimisation, never a gate
+        print(f"techne: re-send suppression degraded: {e}", file=sys.stderr)
+        return set()
+
+
 def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     """Drop rows whose knowledge.type is push-excluded, by looking the type UP.
 
@@ -433,14 +506,31 @@ def main() -> None:
             from techne.hooks._timeout import bounded_hook
 
             with bounded_hook(config.hooks.timeout_s, label="user_prompt_submit"):
+                k = config.hooks.per_turn_recall_limit
+                # OVER-FETCH, THEN SUPPRESS, so the session gets k FRESH rows rather
+                # than k-minus-the-duplicates (techne#576). Dropping without
+                # over-fetching would trade duplicate delivery for thinner
+                # delivery, which is not the trade the issue asks for — the rows
+                # being re-sent are legitimately high-scoring, they have just
+                # already been said.
                 rows = search(
                     config.db_path,
                     prompt,
                     table="knowledge",
-                    limit=config.hooks.per_turn_recall_limit,
+                    limit=k * _RESEND_OVERFETCH,
                     include_archived=False,
                 )
                 rows = _drop_pull_only(config.db_path, rows)
+                already = _already_sent_this_session(config.db_path, data.get("session_id"))
+                if already:
+                    fresh = [r for r in rows if r.get("id") not in already]
+                    # An all-duplicate turn legitimately yields NOTHING. That is a
+                    # real outcome, not a failure — the log records an empty recall
+                    # as signal, and #414 is the issue arguing "inject nothing"
+                    # must be legal. Do NOT fall back to the duplicates here; that
+                    # would restore exactly the waste this suppresses.
+                    rows = fresh
+                rows = rows[:k]
             recall_block = _build_context(rows) if rows else ""
             if recall_block:
                 blocks.append(recall_block)
