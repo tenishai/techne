@@ -161,7 +161,9 @@ On failure, check the note on the reminder that triggered this pass:
 - **A new failure stops the pass.** Report it, don't paper over it, don't delete anything else until it's understood.
 - **A failure already recorded as a known, triaged bug** does not stop the pass — re-confirm it is the *same* failure (same ids, same reason), note that it is still open, and continue. Re-investigating a known bug every fortnight is its own kind of waste.
 
-Known-open as of the first run: 4 dangling `document_card` rows (knowledge ids 361, 366, 624, 625), all `reason='no doc pointer'`, minted by the `reflect-promote` and `consolidate-merge` rails. Producer bug, not corruption. If it is still unfiled when you read this, file it.
+RESOLVED 2026-08-19 — kept here because the SHAPE recurs. The first run found 4 dangling `document_card` rows minted by the `reflect-promote` and `consolidate-merge` rails: a producer bug, not corruption. techne#633 fixed the producer; the four rows survived it and `fsck` stayed red from June to August, because **fixing the cause does not clear the debris**. techne#684 added `techne cards repair` and they are gone.
+
+So if `fsck` reports dangling cards now: run `techne cards repair` (dry-run by default) and read what it says. It retypes rows that never had a doc pointer — those were never cards, only mistyped knowledge — and it deliberately REFUSES to touch a card whose pointer exists but does not resolve, because that is librarian.db out of sync and only a human can choose between restoring the document and superseding the card. Do not talk it into guessing.
 
 Then reschedule. There is no reminder CLI; reminders are MCP-only:
 

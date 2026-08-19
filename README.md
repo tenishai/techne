@@ -338,6 +338,10 @@ techne migrate-summaries [--dry-run]       # one-shot: reclassify pre-v4 session
 # Operations (cross-DB integrity)
 techne fsck                                # run every cross-DB consistency check in one pass;
                                            # exits non-zero on any inconsistency (CI-friendly)
+techne cards repair [--apply]              # retype document_cards that never had a doc pointer
+                                           # (they were mistyped knowledge, not cards). Dry-run by
+                                           # default. REFUSES to touch a card whose pointer exists
+                                           # but doesn't resolve — that needs a human
 techne reconcile                           # force the schema drift-reconcile passes on techne.db;
                                            # use when you suspect schema drift or after an
                                            # additive SCHEMA_SQL change at unchanged SCHEMA_VERSION
