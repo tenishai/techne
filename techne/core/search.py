@@ -298,6 +298,7 @@ def _fts_match_rows(
     table: SearchTable,
     candidate_limit: int,
     include_archived: bool = True,
+    include_uncertain: bool = False,
 ) -> list[dict]:
     """Run the per-table FTS5 MATCH queries for ``fts_query`` and return raw
     candidate rows (pre-rerank). Shared by the implicit-AND pass and the #70
@@ -371,6 +372,21 @@ def _fts_match_rows(
         # clause here — not a bound param — because it's a boolean-selected literal
         # SQL fragment, never user input.
         archived_clause = "" if include_archived else " AND k.status != 'archived'"
+        # techne#501: `uncertain` is a TRUST STATE and now FILTERS, where it used to
+        # only feed decay_score as "a tiebreak/penalty, not a primary signal"
+        # (weight 0.1). A state answers "may this be acted on"; a confidence answers
+        # "how sure" — and we already have `confidence` + `confidence_numeric` doing
+        # the second job. Wiring the state to rank instead of to a filter meant an
+        # entry we are on record as NOT BELIEVING still surfaced, still injected,
+        # and still read to the agent as true, just slightly lower down.
+        #
+        # DEFAULT IS FAIL-CLOSED, unlike include_archived's permissive default, and
+        # the asymmetry is deliberate: this one is free. Measured 2026-08-18 —
+        # 1091 knowledge rows, ALL `current`, and knowledge_deps is empty, so
+        # `_cascade_uncertain` has never fired in production. Filtering by default
+        # changes nothing today and protects the moment #443 populates the deps
+        # and the cascade starts flipping rows.
+        uncertain_clause = "" if include_uncertain else " AND k.status != 'uncertain'"
         rows = conn.execute(
             f"""SELECT k.id, k.type, k.content, k.tags, k.confidence,
                       k.confidence_numeric, k.last_confirmed_at, k.status,
@@ -379,7 +395,7 @@ def _fts_match_rows(
                FROM knowledge_fts f
                JOIN knowledge k ON k.id = f.rowid
                WHERE knowledge_fts MATCH ?
-                 AND k.superseded_by IS NULL{archived_clause}
+                 AND k.superseded_by IS NULL{archived_clause}{uncertain_clause}
                ORDER BY rank
                LIMIT ?""",
             (fts_query, candidate_limit),
@@ -422,6 +438,7 @@ def search_fts(
     confidence_decay_weight: float = 0.1,
     half_life_days: float = 30.0,
     include_archived: bool = True,
+    include_uncertain: bool = False,
 ) -> list[dict]:
     """Full-text search across techne tables.
 
@@ -460,7 +477,12 @@ def search_fts(
 
     try:
         results = _fts_match_rows(
-            conn, fts_query, table, candidate_limit, include_archived=include_archived
+            conn,
+            fts_query,
+            table,
+            candidate_limit,
+            include_archived=include_archived,
+            include_uncertain=include_uncertain,
         )
 
         # #70: bare space-separated terms are FTS5 implicit-AND, so a multi-word
@@ -472,7 +494,12 @@ def search_fts(
             or_query = build_or_fts_query(query)
             if or_query:
                 results = _fts_match_rows(
-                    conn, or_query, table, candidate_limit, include_archived=include_archived
+                    conn,
+                    or_query,
+                    table,
+                    candidate_limit,
+                    include_archived=include_archived,
+                    include_uncertain=include_uncertain,
                 )
 
         # For multi-table ("all"), pre-sort by raw rank for a deterministic input
@@ -579,6 +606,7 @@ def search_vec(
     table: SearchTable = "all",
     limit: int = 10,
     include_archived: bool = True,
+    include_uncertain: bool = False,
 ) -> list[dict]:
     """Semantic vector search. Requires sqlite-vec and an embedding backend
     (model2vec or fastembed — techne#601/#602; see core/embeddings.py).
@@ -691,11 +719,15 @@ def search_vec(
                 # techne#216: DEFAULT recall drops soft-archived rows on the vec
                 # channel too. Fixed literal clause (boolean-selected), never user input.
                 archived_clause = "" if include_archived else " AND status != 'archived'"
+                # techne#501 — same trust-state filter on the vector channel. A
+                # per-channel divergence here would mean an uncertain row is
+                # reachable by vector and not by FTS, which is worse than either.
+                uncertain_clause = "" if include_uncertain else " AND status != 'uncertain'"
                 live = 0
                 for row in rows:
                     k = conn.execute(
-                        f"""SELECT id, type, content, tags, confidence
-                           FROM knowledge WHERE id = ? AND superseded_by IS NULL{archived_clause}""",
+                        f"""SELECT id, type, content, tags, confidence, status
+                           FROM knowledge WHERE id = ? AND superseded_by IS NULL{archived_clause}{uncertain_clause}""",
                         (row[0],),
                     ).fetchone()
                     if k:
@@ -707,6 +739,12 @@ def search_vec(
                                 "content": k[2][:500],
                                 "tags": k[3],
                                 "confidence": k[4],
+                                # techne#501: the FTS row has always carried `status`;
+                                # this one did not. An explicit search that TAGS an
+                                # uncertain row could otherwise return a vec-only hit
+                                # with nothing to tag it by — the same per-channel
+                                # divergence the filter above exists to prevent.
+                                "status": k[5],
                                 "distance": row[1],
                             }
                         )
@@ -776,6 +814,7 @@ def search(
     use_vectors: bool = True,
     half_life_days: float = 30.0,
     include_archived: bool = True,
+    include_uncertain: bool = False,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
     union (techne#401).
@@ -811,13 +850,19 @@ def search(
         limit=limit,
         half_life_days=half_life_days,
         include_archived=include_archived,
+        include_uncertain=include_uncertain,
     )
 
     if not use_vectors:
         return fts_results
 
     vec_results = search_vec(
-        db_path, query, table=table, limit=limit, include_archived=include_archived
+        db_path,
+        query,
+        table=table,
+        limit=limit,
+        include_archived=include_archived,
+        include_uncertain=include_uncertain,
     )
     if not vec_results:
         return fts_results
