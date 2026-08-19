@@ -844,3 +844,88 @@ def test_a_hit_with_no_readable_signal_is_kept(home):
     rows = [{"source_table": "knowledge", "id": 9, "content": "x"}]
     kept = _apply_relevance_floor(rows, _cfg(per_turn_recall_floor_vec_distance=0.1))
     assert [r["id"] for r in kept] == [9]
+
+
+# ---------------------------------------------------------------------------
+# techne#562 — the session-start context waits for a prompt that may never come.
+# ---------------------------------------------------------------------------
+
+
+def _stash(db, session_id: str, summary: str):
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.hooks.session_start import DEFERRED_CONTEXT_KEY
+
+    conn = connect(db)
+    try:
+        set_state(conn, f"{DEFERRED_CONTEXT_KEY}:{session_id}", {"summary": summary})
+    finally:
+        conn.close()
+
+
+def test_the_first_prompt_claims_the_deferred_context(home):
+    """The saving comes from PLACEMENT, not detection. Measured: 132,177 of
+    177,302 session_start tokens (74.5%) went to sessions producing nothing, and
+    94% of those never submit a prompt. Arriving here means this session asked
+    something, so it earns the context."""
+    from techne.core.database import init_db
+    from techne.core.state import ensure_session
+    from techne.hooks.user_prompt_submit import _claim_deferred_session_context
+
+    db = home / "t.db"
+    init_db(db).close()
+    ensure_session(db, "s-562")
+    _stash(db, "s-562", "## techne\n> session state")
+
+    assert _claim_deferred_session_context(db, "s-562") == "## techne\n> session state"
+
+
+def test_it_is_claimed_once_not_read_repeatedly(home):
+    """CLAIMED, not read. A second prompt must not re-inject it — that would trade
+    the old waste for a worse one, which is the exact defect #576 fixed on the
+    per-turn rail (46% of deliveries were re-sends)."""
+    from techne.core.database import init_db
+    from techne.core.state import ensure_session
+    from techne.hooks.user_prompt_submit import _claim_deferred_session_context
+
+    db = home / "t.db"
+    init_db(db).close()
+    ensure_session(db, "s-562b")
+    _stash(db, "s-562b", "once only")
+
+    assert _claim_deferred_session_context(db, "s-562b") == "once only"
+    assert _claim_deferred_session_context(db, "s-562b") is None, "re-injected on turn 2"
+
+
+def test_a_session_that_never_prompts_costs_nothing(home):
+    """THE 94%. The stash is inert until claimed — no injection, no tokens. This
+    asserts the absence, because the whole saving IS the absence."""
+    from techne.core.database import connect, init_db
+    from techne.core.state import ensure_session
+    from techne.hooks._injection_log import _DDL
+
+    db = home / "t.db"
+    init_db(db).close()
+    ensure_session(db, "s-562c")
+    _stash(db, "s-562c", "never claimed")
+
+    conn = connect(db)
+    try:
+        conn.executescript(_DDL)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM context_injections WHERE session_id = ?", ("s-562c",)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0, "a session that never prompted was still charged for an injection"
+
+
+def test_no_stash_is_not_an_error(home):
+    """Deferral off, or a session that predates it: the claim is simply empty."""
+    from techne.core.database import init_db
+    from techne.hooks.user_prompt_submit import _claim_deferred_session_context
+
+    db = home / "t.db"
+    init_db(db).close()
+    assert _claim_deferred_session_context(db, "no-such-session") is None
+    assert _claim_deferred_session_context(db, None) is None

@@ -46,6 +46,7 @@ def fake_home(tmp_path, monkeypatch):
     (`claude_code`, which tests assert against).
     """
     from techne.platforms.claude_code import hooks as hooks_mod
+
     home = tmp_path / "home"
     home.mkdir()
     settings_path = home / ".claude" / "settings.json"
@@ -98,8 +99,7 @@ class TestRegisterHooks:
                     # invocation or the standalone preflight guard script. Both are
                     # now routed through the launcher (techne#276).
                     assert (
-                        " -m techne.hooks." in h["command"]
-                        or "preflight_guard.py" in h["command"]
+                        " -m techne.hooks." in h["command"] or "preflight_guard.py" in h["command"]
                     )
 
     def test_matcher_is_empty_string(self, fake_home, cfg):
@@ -115,6 +115,7 @@ class TestRegisterHooks:
         # they route through the generated POSIX launcher so a dead Homebrew
         # interpreter triggers auto-heal before any module is imported.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         launcher = str(hooks_mod._launcher_path())
@@ -122,15 +123,14 @@ class TestRegisterHooks:
             for group in groups:
                 for h in group["hooks"]:
                     cmd = h["command"]
-                    assert launcher in cmd, (
-                        f"{event} hook doesn't reference launcher: {cmd!r}"
-                    )
+                    assert launcher in cmd, f"{event} hook doesn't reference launcher: {cmd!r}"
 
     def test_hook_commands_pin_interpreter_via_launcher(self, fake_home, cfg, monkeypatch):
         # The launcher bakes in sys.executable so the right interpreter is used
         # even if `python` on PATH is something else or absent (replaces the
         # pre-#276 assertion that commands started with sys.executable directly).
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         launcher_content = hooks_mod._launcher_path().read_text()
         # Assert against the PY= LINE specifically: the heal message embeds the
@@ -142,12 +142,11 @@ class TestRegisterHooks:
         # file so exec "$PY" works correctly. The hook command itself references
         # the launcher path (which has no spaces), not the interpreter directly.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         # Pin the SEAM, not the global: _interpreter() validates that its candidate
         # can import techne (techne#458), which a synthetic path never will. The
         # seam exists for exactly this — see its docstring.
-        monkeypatch.setattr(
-            hooks_mod, "_interpreter", lambda: Path("/Users/some user/python")
-        )
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: Path("/Users/some user/python"))
         claude_code.register_hooks(cfg)
         launcher_content = hooks_mod._launcher_path().read_text()
         # shlex.quote wraps the spaced path in single quotes
@@ -196,10 +195,7 @@ class TestRegisterHooks:
         assert "matcher" in ss_groups[0]
         # Foreign hook in PostToolUse preserved
         ptu_groups = settings["hooks"]["PostToolUse"]
-        foreign = [
-            g for g in ptu_groups
-            if not claude_code._group_contains_techne(g)
-        ]
+        foreign = [g for g in ptu_groups if not claude_code._group_contains_techne(g)]
         assert len(foreign) == 1
         assert foreign[0].get("command") == "/usr/bin/true"
 
@@ -228,9 +224,9 @@ class TestPreflightGuard:
         assert "preflight_guard.py" in cmd
         assert "-m techne.hooks.session_start" in cmd
         assert " ; " in cmd, "commands must be sequenced, not two parallel hooks"
-        assert cmd.index("preflight_guard.py") < cmd.index(
-            "techne.hooks.session_start"
-        ), "guard must run before session_start"
+        assert cmd.index("preflight_guard.py") < cmd.index("techne.hooks.session_start"), (
+            "guard must run before session_start"
+        )
 
     def test_preflight_command_uses_launcher_and_abs_path(self, fake_home, cfg):
         # After techne#276, the preflight command routes through the launcher
@@ -262,10 +258,25 @@ class TestPreflightGuard:
         # replaced by the packaged one — not duplicated.
         path = claude_code.SETTINGS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"hooks": {"SessionStart": [
-            {"matcher": "", "hooks": [{"type": "command",
-             "command": "/old/py /home/x/.claude/techne_preflight.py"}]},
-        ]}}))
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "/old/py /home/x/.claude/techne_preflight.py",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                }
+            )
+        )
         claude_code.register_hooks(cfg)
         cmd = self._session_start_cmd()  # asserts exactly one group
         assert "/old/py" not in cmd  # old hand-wired one replaced, not kept
@@ -300,6 +311,7 @@ class TestLauncher:
     def test_launcher_generated_executable_on_register(self, fake_home, cfg):
         # register_hooks must create the launcher before writing settings.json.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         launcher = hooks_mod._launcher_path()
         assert launcher.exists(), "launcher file not created"
@@ -311,6 +323,7 @@ class TestLauncher:
         # sys.executable is baked into the PY= assignment so the launcher pins
         # to the exact interpreter techne was installed under.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         content = hooks_mod._launcher_path().read_text()
         # shlex.quote may or may not add quotes depending on the path; the resolved
@@ -321,6 +334,7 @@ class TestLauncher:
     def test_launcher_heal_command_present(self, fake_home, cfg):
         # A heal block is present (the [ -x ] || { ... } guard).
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         content = hooks_mod._launcher_path().read_text()
         assert '[ -x "$PY" ] || {' in content
@@ -329,6 +343,7 @@ class TestLauncher:
     def test_launcher_path_in_hook_commands(self, fake_home, cfg):
         # Every registered hook command references the launcher, not sys.executable.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         launcher = str(hooks_mod._launcher_path())
@@ -343,6 +358,7 @@ class TestLauncher:
         # Both the preflight guard and session_start sides of the `;`-chain
         # must route through the launcher — heal fires before either side runs.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -358,6 +374,7 @@ class TestLauncher:
         # re-running register_hooks must regenerate the launcher (keeps in sync
         # if sys.executable changes between installs).
         from techne.platforms.claude_code import hooks as hooks_mod
+
         claude_code.register_hooks(cfg)
         launcher = hooks_mod._launcher_path()
         assert launcher.exists()
@@ -372,10 +389,25 @@ class TestLauncher:
         # recognized by _group_contains_techne and replaced with the launcher form.
         path = claude_code.SETTINGS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"hooks": {"SessionStart": [
-            {"matcher": "", "hooks": [{"type": "command",
-             "command": f"{sys.executable} -m techne.hooks.session_start"}]},
-        ]}}))
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"{sys.executable} -m techne.hooks.session_start",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                }
+            )
+        )
         claude_code.register_hooks(cfg)
         settings = json.loads(path.read_text())
         ss_groups = settings["hooks"]["SessionStart"]
@@ -389,10 +421,25 @@ class TestLauncher:
         # must replace it with the officially managed launcher, not duplicate it).
         path = claude_code.SETTINGS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"hooks": {"SessionStart": [
-            {"matcher": "", "hooks": [{"type": "command",
-             "command": "/bin/sh /some/.claude/techne-hook.sh -m techne.hooks.session_start"}]},
-        ]}}))
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "/bin/sh /some/.claude/techne-hook.sh -m techne.hooks.session_start",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                }
+            )
+        )
         claude_code.register_hooks(cfg)
         settings = json.loads(path.read_text())
         ss_groups = settings["hooks"]["SessionStart"]
@@ -402,6 +449,7 @@ class TestLauncher:
         # After unregister, no techne groups must remain in settings.json, and the
         # launcher file must be deleted so it doesn't orphan after uninstall.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         # Provide a minimal MCP config so unregister's MCP cleanup path runs cleanly.
         mcp = hooks_mod.MCP_CONFIG_PATH
         mcp.parent.mkdir(parents=True, exist_ok=True)
@@ -426,6 +474,7 @@ class TestLauncher:
         # names python3 so a minor-version removal is survived as long as python3
         # and pipx are on PATH at heal time.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         monkeypatch.setattr(
             hooks_mod,
             "_interpreter",
@@ -444,6 +493,7 @@ class TestHealCommand:
         # removal is survived (pipx's DEFAULT_PYTHON = its own sys.executable; by
         # naming python3 we decouple from whatever Python pipx itself runs under).
         from techne.platforms.claude_code import hooks as hooks_mod
+
         monkeypatch.setattr(
             hooks_mod,
             "_interpreter",
@@ -461,6 +511,7 @@ class TestHealCommand:
         # running init. Without pinning, probing a synthetic path fails and
         # defaults to (False, ""), so this would pass for the wrong reason.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         monkeypatch.setattr(hooks_mod, "_interpreter", lambda: Path("/usr/bin/python3.12"))
         monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (False, "/usr"))
         cmd = hooks_mod._heal_command()
@@ -475,6 +526,7 @@ class TestHealCommand:
         # impossible once the base interpreter is gone — emit remediation and
         # exit 1 instead of attempting a fragile auto-rebuild.
         from techne.platforms.claude_code import hooks as hooks_mod
+
         venv = tmp_path / "venv"
         monkeypatch.setattr(hooks_mod, "_interpreter", lambda: venv / "bin" / "python")
         monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (True, str(venv)))
@@ -494,9 +546,8 @@ class TestHealCommand:
         # Only the `pipx/venvs/` PATH SEGMENT triggers pipx mode. A random
         # path that contains 'pipx' elsewhere must not false-positive.
         from techne.platforms.claude_code import hooks as hooks_mod
-        monkeypatch.setattr(
-            hooks_mod, "_interpreter", lambda: Path("/opt/pipx-tools/bin/python")
-        )
+
+        monkeypatch.setattr(hooks_mod, "_interpreter", lambda: Path("/opt/pipx-tools/bin/python"))
         monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (False, "/opt/pipx-tools"))
         cmd = hooks_mod._heal_command()
         # system path without pipx/venvs/ → pip path, not pipx reinstall
@@ -570,14 +621,21 @@ class TestConfigSafety:
 
         path = hooks_mod.SETTINGS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
-            "permissions": {"allow": ["Bash(ls:*)"]},
-            "hooks": {
-                "PreToolUse": [
-                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]}
-                ]
-            },
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "permissions": {"allow": ["Bash(ls:*)"]},
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": "/usr/bin/true"}],
+                            }
+                        ]
+                    },
+                }
+            )
+        )
 
         claude_code.register_hooks(cfg)
         settings = json.loads(path.read_text())
@@ -645,9 +703,7 @@ class TestLauncherExecution:
         """Write an executable shim that appends 'CALLED: <name> <args>' to *log*."""
         s = bin_dir / name
         s.write_text(
-            "#!/bin/sh\n"
-            f'echo "CALLED: {name} $@" >> {shlex.quote(str(log))}\n'
-            + body + "\n"
+            f'#!/bin/sh\necho "CALLED: {name} $@" >> {shlex.quote(str(log))}\n' + body + "\n"
         )
         s.chmod(0o755)
 
@@ -670,7 +726,9 @@ class TestLauncherExecution:
         env = {"PATH": "/bin:/usr/bin", "HOME": str(tmp_path)}
         result = subprocess.run(
             ["/bin/sh", str(launcher), "dummy_arg"],
-            capture_output=True, text=True, env=env,
+            capture_output=True,
+            text=True,
+            env=env,
         )
 
         assert result.returncode == 1, (
@@ -711,24 +769,22 @@ class TestLauncherExecution:
         # exec should forward it to our python3 shim.
         result = subprocess.run(
             ["/bin/sh", str(launcher), "sentinel_arg"],
-            capture_output=True, text=True, env=env,
+            capture_output=True,
+            text=True,
+            env=env,
         )
 
         assert log.exists(), "python3 shim was never called — heal did not fire"
         calls = log.read_text()
 
         # First call: the install step (-m pip install ...)
-        assert "-m pip install" in calls, (
-            f"expected install call in log; got:\n{calls}"
-        )
+        assert "-m pip install" in calls, f"expected install call in log; got:\n{calls}"
         # Second call: exec re-points to python3 and forwards the sentinel arg.
         assert "sentinel_arg" in calls, (
             f"expected exec to re-point to python3 and forward args; got:\n{calls}"
         )
 
-    def test_pipx_heal_invokes_pipx_with_python_flag(
-        self, fake_home, cfg, monkeypatch, tmp_path
-    ):
+    def test_pipx_heal_invokes_pipx_with_python_flag(self, fake_home, cfg, monkeypatch, tmp_path):
         """pipx-install launcher with a dead interpreter: heal calls `pipx reinstall
         --python <python3-path> techne` (shim logs the call for assertion)."""
         from techne.platforms.claude_code import hooks as hooks_mod
@@ -761,15 +817,15 @@ class TestLauncherExecution:
         # the pipx shim was called with the right arguments.
         subprocess.run(
             ["/bin/sh", str(launcher), "dummy_arg"],
-            capture_output=True, text=True, env=env,
+            capture_output=True,
+            text=True,
+            env=env,
         )
 
         assert log.exists(), "pipx shim was never called — heal did not fire"
         calls = log.read_text()
 
-        assert "CALLED: pipx" in calls, (
-            f"expected pipx to be invoked; got:\n{calls}"
-        )
+        assert "CALLED: pipx" in calls, f"expected pipx to be invoked; got:\n{calls}"
         assert "reinstall" in calls, f"expected 'reinstall' in pipx call; got:\n{calls}"
         assert "techne" in calls, f"expected 'techne' in pipx call; got:\n{calls}"
         # --python flag must be present (verified against pipx CLI reference: reinstall
@@ -841,13 +897,20 @@ class TestHookDrift:
 
         path = hooks_mod.SETTINGS_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
-            "hooks": {
-                "PreToolUse": [
-                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]}
-                ]
-            }
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": "/usr/bin/true"}],
+                            }
+                        ]
+                    }
+                }
+            )
+        )
         cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=False)
         claude_code.register_hooks(cfg)  # preserves the foreign hook
         assert claude_code.check_hook_drift(cfg) == []
@@ -862,11 +925,11 @@ class TestHookDrift:
     @pytest.mark.parametrize(
         "body",
         [
-            "{corrupt not json",   # unparseable
-            "[]",                  # valid JSON, wrong shape
-            '"hello"',             # valid JSON, wrong shape
-            "123",                 # valid JSON, wrong shape
-            '{"hooks": []}',       # object, but `hooks` is not one — the plausible one
+            "{corrupt not json",  # unparseable
+            "[]",  # valid JSON, wrong shape
+            '"hello"',  # valid JSON, wrong shape
+            "123",  # valid JSON, wrong shape
+            '{"hooks": []}',  # object, but `hooks` is not one — the plausible one
             '{"hooks": "nope"}',
             '{"hooks": null}',
             # The traversal walks FIVE levels; the first cut of this guard validated
@@ -874,8 +937,8 @@ class TestHookDrift:
             # from further down — swallowed by session_start's `except Exception`
             # into a green tick with every hook dead. Everything below is one of
             # those levels. (PR #457.)
-            '{"hooks": {"SessionStart": {}}}',      # object where an array belongs
-            '{"hooks": {"SessionStart": null}}',    # rendered ✅ with hooks dead
+            '{"hooks": {"SessionStart": {}}}',  # object where an array belongs
+            '{"hooks": {"SessionStart": null}}',  # rendered ✅ with hooks dead
             '{"hooks": {"SessionStart": "x"}}',
             '{"hooks": {"SessionStart": [null]}}',
             '{"hooks": {"SessionStart": ["str"]}}',
@@ -921,6 +984,7 @@ class TestInterpreterValidation:
         conftest's `_isolate_install_root` stub, and keep the probe memo clean so a
         cached verdict from a sibling test can't decide the outcome."""
         from techne.platforms.claude_code import hooks as hooks_mod
+
         monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
         hooks_mod._IMPORT_PROBE.clear()
         yield
@@ -1003,9 +1067,7 @@ class TestInterpreterValidation:
         script.chmod(0o755)
         monkeypatch.setattr(hooks_mod.shutil, "which", lambda _n: str(script))
 
-        assert hooks_mod._console_script_interpreter() == Path(
-            "/opt/venvs/techne/bin/python"
-        )
+        assert hooks_mod._console_script_interpreter() == Path("/opt/venvs/techne/bin/python")
 
     def test_console_script_interpreter_tolerates_a_non_script(self, tmp_path, monkeypatch):
         """A Windows launcher .exe has no shebang — return None, never raise."""
@@ -1029,6 +1091,7 @@ class TestProbeMaskingChannels:
     @pytest.fixture(autouse=True)
     def _real_interpreter_and_clean_cache(self, monkeypatch):
         from techne.platforms.claude_code import hooks as hooks_mod
+
         monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
         hooks_mod._IMPORT_PROBE.clear()
         yield
@@ -1045,9 +1108,7 @@ class TestProbeMaskingChannels:
         assert str(root) not in env.get("PYTHONPATH", ""), "masking entry must be stripped"
         assert innocent in env["PYTHONPATH"], "unrelated entries must survive"
 
-    def test_probe_env_strips_a_relative_entry_resolving_into_the_root(
-        self, monkeypatch, tmp_path
-    ):
+    def test_probe_env_strips_a_relative_entry_resolving_into_the_root(self, monkeypatch, tmp_path):
         """`PYTHONPATH=.` is the realistic shape — it resolves against cwd, which in
         the incident IS the checkout."""
         from techne.platforms.claude_code import hooks as hooks_mod
@@ -1105,6 +1166,7 @@ class TestVenvStateFollowsTheChosenInterpreter:
 
     def test_venv_state_of_the_running_interpreter_uses_sys(self, monkeypatch):
         from techne.platforms.claude_code import hooks as hooks_mod
+
         hooks_mod._VENV_PROBE.clear()
         in_venv, prefix = hooks_mod._venv_state(Path(sys.executable))
         assert in_venv == (sys.prefix != sys.base_prefix)
@@ -1112,6 +1174,7 @@ class TestVenvStateFollowsTheChosenInterpreter:
 
     def test_heal_message_names_the_chosen_venv_not_ours(self, monkeypatch, tmp_path):
         from techne.platforms.claude_code import hooks as hooks_mod
+
         chosen = tmp_path / "their-venv"
         monkeypatch.setattr(hooks_mod, "_interpreter", lambda: chosen / "bin" / "python")
         monkeypatch.setattr(hooks_mod, "_venv_state", lambda _e: (True, str(chosen)))
@@ -1134,6 +1197,7 @@ class TestNamespacePackageChannel:
     @pytest.fixture(autouse=True)
     def _real_interpreter_and_clean_cache(self, monkeypatch):
         from techne.platforms.claude_code import hooks as hooks_mod
+
         monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
         hooks_mod._IMPORT_PROBE.clear()
         yield
@@ -1150,11 +1214,7 @@ class TestNamespacePackageChannel:
         # cut read $3, which is always empty — so it exited 1 for BOTH the weak and
         # the real claim and the test passed under mutation without testing anything.
         py.write_text(
-            '#!/bin/sh\n'
-            'case "$2" in\n'
-            '  "import techne") exit 0 ;;\n'
-            '  *) exit 1 ;;\n'
-            'esac\n'
+            '#!/bin/sh\ncase "$2" in\n  "import techne") exit 0 ;;\n  *) exit 1 ;;\nesac\n'
         )
         py.chmod(0o755)
         assert hooks_mod._can_import_techne(py) is False, (
@@ -1169,7 +1229,7 @@ class TestNamespacePackageChannel:
         from techne.platforms.claude_code import hooks as hooks_mod
 
         parent = tmp_path / "tenishai"
-        root = parent / "techne"        # repo root, literally named `techne`
+        root = parent / "techne"  # repo root, literally named `techne`
         root.mkdir(parents=True)
         monkeypatch.setattr(hooks_mod, "_install_root", lambda: root)
         monkeypatch.setenv("PYTHONPATH", str(parent))
@@ -1210,7 +1270,7 @@ class TestVenvStateSubprocessPath:
         hooks_mod._VENV_PROBE.clear()
         fake = tmp_path / "other-python"
         # Reports a venv whose prefix is deliberately unlike ours.
-        fake.write_text('#!/bin/sh\necho 1\necho /somewhere/else/venv\n')
+        fake.write_text("#!/bin/sh\necho 1\necho /somewhere/else/venv\n")
         fake.chmod(0o755)
 
         in_venv, prefix = hooks_mod._venv_state(fake)
@@ -1239,9 +1299,7 @@ class TestBakedInModulesStaysInSync:
     def test_every_registered_module_is_in_the_probe_list(self, fake_home, cfg):
         from techne.platforms.claude_code import hooks as hooks_mod
 
-        cfg.hooks = HookConfig(
-            post_tool_use=True, codex_grep_assist=True, per_turn_recall=True
-        )
+        cfg.hooks = HookConfig(post_tool_use=True, codex_grep_assist=True, per_turn_recall=True)
         claude_code.register_hooks(cfg)
         claude_code.register_mcp(cfg)
 
@@ -1269,11 +1327,11 @@ class TestBakedInModulesStaysInSync:
         py = tmp_path / "partial-python"
         # Satisfies session_start alone; fails the union.
         py.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'case "$2" in\n'
             '  "import techne.hooks.session_start") exit 0 ;;\n'
-            '  *) exit 1 ;;\n'
-            'esac\n'
+            "  *) exit 1 ;;\n"
+            "esac\n"
         )
         py.chmod(0o755)
         assert hooks_mod._can_import_techne(py) is False
@@ -1294,6 +1352,7 @@ class TestPythonpathOnlyInstallIsDiagnosed:
         exercises the real one. Without this the test passes vacuously — the stub
         returns a path and never probes, so it can never raise."""
         from techne.platforms.claude_code import hooks as hooks_mod
+
         monkeypatch.setattr(hooks_mod, "_interpreter", _REAL_INTERPRETER)
         hooks_mod._IMPORT_PROBE.clear()
         yield
@@ -1316,6 +1375,8 @@ class TestPythonpathOnlyInstallIsDiagnosed:
         with pytest.raises(RuntimeError, match="importable only via PYTHONPATH"):
             hooks_mod._interpreter()
         hooks_mod._IMPORT_PROBE.clear()
+
+
 class TestDriftSurfacedInBanner:
     """techne#452: the drift check must appear where the operator already looks.
 
@@ -1423,8 +1484,14 @@ class TestDriftReachesTheOperator:
         techne_home.mkdir(parents=True)
 
         # codex_grep_assist ON in config...
+        # `defer_session_start_context: false` pins the INLINE path here (techne#562
+        # defers the model-facing half to the first prompt by default). This test is
+        # about WHERE drift appears, not when — the deferred path is covered by its
+        # own test below, so both routes stay asserted rather than one silently
+        # dropping out of coverage.
         (techne_home / "config.yaml").write_text(
-            "platform: claude-code\nhooks:\n  post_tool_use: true\n  codex_grep_assist: true\n"
+            "platform: claude-code\nhooks:\n  post_tool_use: true\n"
+            "  codex_grep_assist: true\n  defer_session_start_context: false\n"
         )
         # ...and NOTHING registered in settings.json => guaranteed drift.
         (cc_dir / "settings.json").write_text("{}")
@@ -1437,7 +1504,11 @@ class TestDriftReachesTheOperator:
         }
         r = _sp.run(
             [_sys.executable, "-m", "techne.hooks.session_start"],
-            input="{}", capture_output=True, text=True, env=env, timeout=60,
+            input="{}",
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
         )
         assert r.returncode == 0, r.stderr
 
@@ -1450,6 +1521,69 @@ class TestDriftReachesTheOperator:
         )
         # Still useful to the agent too — but that alone is what the bug was.
         assert "hook drift" in additional, additional
+
+    def test_deferred_drift_still_reaches_both_parties(self, tmp_path):
+        """techne#562 defers the model-facing half; #452's invariant must survive it.
+
+        The OPERATOR still learns about drift immediately — `systemMessage` was
+        never deferred, and the journal shows it as a separate carrier
+        (`hook_system_message`) from `hook_additional_context`. The AGENT gets the
+        same content on the first prompt, out of the stash. What must not happen is
+        drift reaching neither, or the stash silently omitting it.
+        """
+        import json as _json
+        import os as _os
+        import subprocess as _sp
+        import sys as _sys
+
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state
+        from techne.hooks.session_start import DEFERRED_CONTEXT_KEY
+
+        home = tmp_path / "home2"
+        cc_dir = home / ".claude"
+        techne_home = home / ".techne"
+        cc_dir.mkdir(parents=True)
+        techne_home.mkdir(parents=True)
+        (techne_home / "config.yaml").write_text(
+            "platform: claude-code\nhooks:\n  post_tool_use: true\n  codex_grep_assist: true\n"
+        )
+        (cc_dir / "settings.json").write_text("{}")
+
+        env = {
+            **_os.environ,
+            "HOME": str(home),
+            "CLAUDE_CONFIG_DIR": str(cc_dir),
+            "TECHNE_HOME": str(techne_home),
+        }
+        r = _sp.run(
+            [_sys.executable, "-m", "techne.hooks.session_start"],
+            input=_json.dumps({"session_id": "drift-562"}),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
+        payload = _json.loads(r.stdout)
+
+        assert "hook drift" in payload.get("systemMessage", ""), (
+            "deferral must NOT delay the operator's copy — drift is only actionable "
+            "by a human, so telling the model alone is telling the wrong party"
+        )
+        assert "hookSpecificOutput" not in payload, (
+            "the model-facing half should be deferred, not emitted inline"
+        )
+
+        conn = connect(techne_home / "techne.db")
+        try:
+            stashed = get_state(conn, f"{DEFERRED_CONTEXT_KEY}:drift-562") or {}
+        finally:
+            conn.close()
+        assert "hook drift" in (stashed.get("summary") or ""), (
+            "the deferred stash dropped the drift block — the agent would never "
+            "learn about it even after prompting"
+        )
 
 
 class TestUnusableSettingsIsAConditionNotProse:
@@ -1569,7 +1703,7 @@ class TestMatcherIsALeafToo:
 
     @pytest.mark.parametrize(
         "matcher",
-        ['["Grep"]', '{"a": 1}', '5', 'true', '1.5', '[]', '{}', 'null'],
+        ['["Grep"]', '{"a": 1}', "5", "true", "1.5", "[]", "{}", "null"],
     )
     def test_non_string_matcher_does_not_raise(self, fake_home, cfg, matcher):
         from techne.platforms.claude_code import hooks as hooks_mod
