@@ -76,7 +76,30 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _APPLY_RE = re.compile(
     r"where\s+(?:to|it might|this)\s+appl\w*\s+in\s+([a-z][a-z0-9-]*)", re.IGNORECASE
 )
-_KNOWN_TARGETS = {"techne", "cabal", "limenal", "agent-infra"}
+# The projects a pattern may declare itself relevant to. NOT hardcoded prose:
+# every name here is a real target named in the /investigate-url skill's context
+# block, so a pattern that says "apply in prudence" resolves instead of being
+# silently dropped (techne#674 — 14 pattern bodies named Prudence and none could
+# ever link, which made `architect applies prudence` read as "we hold nothing").
+_KNOWN_TARGETS = {
+    "techne",
+    "cabal",
+    "liminal",
+    "agent-infra",
+    "prudence",
+    "daedalus",
+    "kaminos",
+    "argus",
+    "ladon",
+    "agora",
+}
+
+# Pre-rename spellings still present in older pattern bodies. Extraction
+# canonicalises through this map so ONE PROJECT CANNOT OCCUPY TWO TARGETS —
+# `limenal` was renamed to `liminal` on 2026-08-11 and the set was not updated,
+# so backfill emitted `limenal` while the direct-tag path wrote `liminal`,
+# leaving 11 patterns double-listed under both (techne#674).
+_TARGET_ALIASES = {"limenal": "liminal"}
 
 
 def _wikilink_targets(body: str) -> list[str]:
@@ -104,7 +127,7 @@ def _apply_targets(body: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw in _APPLY_RE.findall(body or ""):
-        t = raw.lower()
+        t = _TARGET_ALIASES.get(raw.lower(), raw.lower())
         if t in _KNOWN_TARGETS and t not in seen:
             seen.add(t)
             out.append(t)

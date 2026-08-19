@@ -23,7 +23,7 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 3  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 4  # PRAGMA user_version on architect.db
 
 ARCHITECT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS investigations (
@@ -173,6 +173,40 @@ def _step_v2_to_v3_validity_window(conn) -> None:
         conn.execute("ALTER TABLE patterns ADD COLUMN invalid_at TEXT")
 
 
+def _step_v3_to_v4_canonicalise_liminal(conn) -> None:
+    """v3 → v4 step (techne#674; collapse the pre-rename `limenal` target).
+
+    `liminal` was renamed from `limenal` on 2026-08-11 and `_KNOWN_TARGETS` was
+    not updated, so `backfill_graph` could only ever emit the OLD spelling while
+    the direct-tag path wrote the new one. The live store ended up with the same
+    11 patterns listed under BOTH targets — one project, two rows, and a read
+    that answers half the truth depending on which spelling you ask for.
+
+    Fixing the extractor alone does not repair existing rows: backfill re-derives
+    from pattern BODIES, and those still carry the old word. So the rows are
+    rewritten here, once.
+
+    `INSERT OR IGNORE`-then-`DELETE` rather than `UPDATE`: the primary key is
+    (pattern_id, target), so a straight UPDATE collides on every pattern that
+    already carries both spellings — which is all 11 of them. Idempotent by
+    construction; a second run finds no `limenal` rows and does nothing.
+
+    TABLE-PRESENCE GUARD, not decoration: this ladder is re-applied from
+    `user_version = 0` on retrofit-versioned stores, so the step can run against
+    a db predating `pattern_applies` entirely. Every other step guards on column
+    presence for the same reason; this one guards on the table."""
+    have = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pattern_applies'"
+    ).fetchone()
+    if not have:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO pattern_applies (pattern_id, target) "
+        "SELECT pattern_id, 'liminal' FROM pattern_applies WHERE target = 'limenal'"
+    )
+    conn.execute("DELETE FROM pattern_applies WHERE target = 'limenal'")
+
+
 def _architect_run_steps(conn, current: int, target: int) -> None:
     """Apply architect.db migration steps from *current* up to *target*.
 
@@ -187,6 +221,8 @@ def _architect_run_steps(conn, current: int, target: int) -> None:
         _step_v1_to_v2_topic_absorbed(conn)
     if current < 3:
         _step_v2_to_v3_validity_window(conn)
+    if current < 4:
+        _step_v3_to_v4_canonicalise_liminal(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
