@@ -15,7 +15,7 @@ from techne.core.search import _mmr_reorder, _rerank
 def _row(id: str, combined: float, content: str) -> dict:
     """Build a minimal candidate dict with a pre-computed _combined score."""
     return {
-        "type": "knowledge",
+        "source_table": "knowledge",
         "id": id,
         "rank": -1.0,  # placeholder — _rerank normalises this
         "content": content,
@@ -208,7 +208,7 @@ class TestMmrReorder:
 class TestRerankMmrParam:
     def _make_row(self, rank: float, content: str = "text", ts=None) -> dict:
         return {
-            "type": "knowledge",
+            "source_table": "knowledge",
             "id": f"k{rank}",
             "rank": rank,
             "content": content,

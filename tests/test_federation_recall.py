@@ -210,14 +210,14 @@ class TestMergesTeamResults:
 
         local_results = [
             # fts+vec overlap — Layer 1 restores `rank` from the FTS row.
-            {"type": "knowledge", "id": 1, "content": "overlap hit",
+            {"source_table": "knowledge", "id": 1, "content": "overlap hit",
              "rank": -2.0, "distance": 0.10, "match_source": "fts+vec",
              "fusion": "vec_first"},
             # pure vector-only hit — NO `rank`; Layer 2 gives it a neutral norm.
-            {"type": "knowledge", "id": 2, "content": "vector-only hit",
+            {"source_table": "knowledge", "id": 2, "content": "vector-only hit",
              "distance": 0.15, "match_source": "vec", "fusion": "vec_first"},
             # plain FTS-only hit — has `rank`, unchanged path.
-            {"type": "knowledge", "id": 3, "content": "lexical hit",
+            {"source_table": "knowledge", "id": 3, "content": "lexical hit",
              "rank": -1.0, "match_source": "fts", "fusion": "vec_first"},
         ]
 
@@ -277,7 +277,7 @@ class TestMergesTeamResults:
 
         # All remote results must be type='knowledge' (never thread or observation)
         for r in remote_results:
-            assert r.get("type") == "knowledge", (
+            assert r.get("source_table") == "knowledge", (
                 f"Remote result type must be 'knowledge', got {r.get('type')!r}"
             )
 

@@ -232,9 +232,7 @@ def _supersede_in_conn(conn, old_id: int, new_content: str, source: str) -> int:
         (new_id, old_id),
     )
     if cur.rowcount == 0:
-        won = conn.execute(
-            "SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)
-        ).fetchone()
+        won = conn.execute("SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)).fetchone()
         won_by = won["superseded_by"] if won else None
         raise ValueError(
             f"Knowledge entry {old_id} was concurrently superseded"
@@ -274,9 +272,7 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
     """
     if old_id == survivor_id:
         raise ValueError("cannot retire a knowledge entry into itself")
-    old = conn.execute(
-        "SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)
-    ).fetchone()
+    old = conn.execute("SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)).fetchone()
     if old is None:
         raise ValueError(f"Knowledge entry {old_id} not found")
     if old["superseded_by"] is not None:
@@ -305,9 +301,7 @@ def _retire_in_conn(conn, old_id: int, survivor_id: int) -> int:
         (survivor_id, old_id),
     )
     if cur.rowcount == 0:
-        won = conn.execute(
-            "SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)
-        ).fetchone()
+        won = conn.execute("SELECT superseded_by FROM knowledge WHERE id = ?", (old_id,)).fetchone()
         won_by = won["superseded_by"] if won else None
         raise ValueError(
             f"Knowledge entry {old_id} was concurrently superseded"
@@ -416,9 +410,7 @@ def _merge_in_conn(
 # --- dependency-driven staleness (techne#117) -------------------------------
 
 
-def _add_dep_in_conn(
-    conn, dependent_id: int, trigger_id: int, kind: str = "derived_from"
-) -> None:
+def _add_dep_in_conn(conn, dependent_id: int, trigger_id: int, kind: str = "derived_from") -> None:
     """Write one dependency edge inside a caller-owned transaction (no commit/close).
 
     Idempotent (INSERT OR IGNORE). The sole mechanism for writing dep edges — called
@@ -435,8 +427,7 @@ def _add_dep_in_conn(
     if dependent_id == trigger_id:
         return  # no self-edges; silent skip mirrors INSERT OR IGNORE spirit
     conn.execute(
-        "INSERT OR IGNORE INTO knowledge_deps (dependent_id, trigger_id, kind) "
-        "VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO knowledge_deps (dependent_id, trigger_id, kind) VALUES (?, ?, ?)",
         (dependent_id, trigger_id, kind),
     )
 
@@ -533,7 +524,7 @@ def annotate_uncertain(db_path, rows: Iterable[dict]) -> list[dict]:
 
     rows = list(rows)
     knowledge_ids = [
-        r["id"] for r in rows if r.get("type") == "knowledge" and r.get("id") is not None
+        r["id"] for r in rows if r.get("source_table") == "knowledge" and r.get("id") is not None
     ]
     if not knowledge_ids:
         return rows
@@ -556,7 +547,7 @@ def annotate_uncertain(db_path, rows: Iterable[dict]) -> list[dict]:
         return rows
 
     for r in rows:
-        if r.get("type") == "knowledge" and r.get("id") in uncertain_ids:
+        if r.get("source_table") == "knowledge" and r.get("id") in uncertain_ids:
             r["uncertainty"] = _uncertainty_payload()
     return rows
 
@@ -834,12 +825,14 @@ def archive_scan(
             now=_now,
         )
         if eff < confidence_floor:
-            to_archive.append({
-                "id": row["id"],
-                "content": row["content"],
-                "status": row["status"],
-                "effective_confidence": eff,
-            })
+            to_archive.append(
+                {
+                    "id": row["id"],
+                    "content": row["content"],
+                    "status": row["status"],
+                    "effective_confidence": eff,
+                }
+            )
 
     if not to_archive or dry_run:
         return to_archive

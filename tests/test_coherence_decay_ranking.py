@@ -94,7 +94,7 @@ class TestKnowledgeDecayScore:
 
     def test_absent_confidence_numeric_returns_neutral_one(self):
         """Rows without confidence_numeric (threads, observations) return 1.0."""
-        row = {"type": "thread", "label": "some thread"}
+        row = {"source_table": "thread", "label": "some thread"}
         assert _knowledge_decay_score(row, half_life_days=30.0) == 1.0
 
     def test_uncertain_status_applies_penalty(self):
@@ -142,7 +142,7 @@ class TestRerankDecay:
         """Build a candidate dict as _fts_match_rows produces for knowledge."""
         last = datetime.now(timezone.utc) - timedelta(days=days_old)
         return {
-            "type": "knowledge",
+            "source_table": "knowledge",
             "id": row_id,
             "content": "some content",
             "rank": rank,
@@ -265,12 +265,12 @@ class TestConfigHalfLifeWired:
     def test_zero_half_life_disables_time_decay(self):
         """half_life_days=0 disables time decay in _rerank (returns raw confidence_numeric)."""
         old = {
-            "type": "knowledge", "id": "old", "rank": -5.0, "updated_at": None,
+            "source_table": "knowledge", "id": "old", "rank": -5.0, "updated_at": None,
             "confidence_numeric": 0.9, "last_confirmed_at": "2020-01-01 00:00:00",
             "status": "current",
         }
         fresh = {
-            "type": "knowledge", "id": "fresh", "rank": -5.0, "updated_at": None,
+            "source_table": "knowledge", "id": "fresh", "rank": -5.0, "updated_at": None,
             "confidence_numeric": 0.6, "last_confirmed_at": datetime.now(timezone.utc).isoformat(),
             "status": "current",
         }

@@ -272,7 +272,11 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     # Filtering here rather than asserting: the function already discriminates on
     # `type` elsewhere, a non-knowledge row simply is not this guard's business,
     # and passing it through is the correct answer rather than a crash.
-    ids = [r.get("id") for r in rows if r.get("id") is not None and r.get("type") == "knowledge"]
+    ids = [
+        r.get("id")
+        for r in rows
+        if r.get("id") is not None and r.get("source_table") == "knowledge"
+    ]
     if not ids:
         return rows
     from techne.core.knowledge import PULL_ONLY_TYPES
@@ -293,7 +297,9 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     # The DROP is scoped too, not just the id collection (techne#608). Filtering
     # on id alone re-introduces the collision one line later: a same-id row from
     # another table would still be removed by a verdict computed from `knowledge`.
-    return [r for r in rows if not (r.get("type") == "knowledge" and r.get("id") in excluded)]
+    return [
+        r for r in rows if not (r.get("source_table") == "knowledge" and r.get("id") in excluded)
+    ]
 
 
 def _build_context(rows: list[dict]) -> str:
@@ -342,7 +348,7 @@ def _build_context(rows: list[dict]) -> str:
         # `type` remains the fallback because non-knowledge rows (thread,
         # observation) carry no `knowledge_type`, and for those the table IS the
         # most honest label available.
-        rtype = r.get("knowledge_type") or r.get("type") or "note"
+        rtype = r.get("knowledge_type") or r.get("source_table") or "note"
         content = (r.get("content") or "")[:200]
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
     return "\n".join(lines)

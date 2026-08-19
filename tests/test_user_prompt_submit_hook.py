@@ -418,8 +418,8 @@ class TestInjectedTypeLabel:
     def test_the_row_kind_is_shown_not_the_table(self):
         out = self._ctx(
             [
-                {"id": 1, "type": "knowledge", "knowledge_type": "decision", "content": "d"},
-                {"id": 2, "type": "knowledge", "knowledge_type": "procedure", "content": "p"},
+                {"id": 1, "source_table": "knowledge", "knowledge_type": "decision", "content": "d"},
+                {"id": 2, "source_table": "knowledge", "knowledge_type": "procedure", "content": "p"},
             ]
         )
         assert "[decision]" in out
@@ -438,7 +438,7 @@ class TestInjectedTypeLabel:
         # could not tell a correct render from one that swapped label and content,
         # because both strings were the same (#566 r1 Nit).
         rows = [
-            {"id": i, "type": "knowledge", "knowledge_type": k, "content": f"body-{i}"}
+            {"id": i, "source_table": "knowledge", "knowledge_type": k, "content": f"body-{i}"}
             for i, k in enumerate(kinds)
         ]
         out = self._ctx(rows)
@@ -456,7 +456,7 @@ class TestInjectedTypeLabel:
         what makes it correct for whatever the filter's contents become; it is not
         evidence about what this rail currently emits."""
         out = self._ctx(
-            [{"id": 9, "type": "knowledge", "knowledge_type": "pattern", "content": "x"}]
+            [{"id": 9, "source_table": "knowledge", "knowledge_type": "pattern", "content": "x"}]
         )
         assert "[pattern]" in out
 
@@ -465,8 +465,8 @@ class TestInjectedTypeLabel:
         IS the most honest label available, so the fallback must survive."""
         out = self._ctx(
             [
-                {"id": 3, "type": "observation", "content": "o"},
-                {"id": 4, "type": "thread", "content": "t"},
+                {"id": 3, "source_table": "observation", "content": "o"},
+                {"id": 4, "source_table": "thread", "content": "t"},
             ]
         )
         assert "[observation]" in out
@@ -481,7 +481,7 @@ class TestInjectedTypeLabel:
         rests on it. An unbounded line here is a per-turn injection whose size is
         set by whatever the longest matching row happens to be."""
         out = self._ctx(
-            [{"id": 1, "type": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
+            [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
         )
         assert "x" * 200 in out
         assert "x" * 201 not in out
@@ -491,7 +491,7 @@ class TestInjectedTypeLabel:
         suite green (#566 r1 Nit). It is what makes an injected line citable, and
         citation is what `recall_attribution` measures, so losing it silently
         would take the attribution rail's only signal with it."""
-        out = self._ctx([{"id": 42, "type": "knowledge", "knowledge_type": "fact", "content": "z"}])
+        out = self._ctx([{"id": 42, "source_table": "knowledge", "knowledge_type": "fact", "content": "z"}])
         assert "- ⟦techne#42⟧ [fact] z" in out
 
 
@@ -623,13 +623,13 @@ def test_drop_pull_only_ignores_rows_from_other_tables(tmp_path):
     doc_id = store(db, "a pull-only document row", type="document")
 
     rows = [
-        {"type": "knowledge", "id": doc_id, "content": "the document"},
+        {"source_table": "knowledge", "id": doc_id, "content": "the document"},
         # An observation that merely SHARES the id. Not this guard's business.
-        {"type": "observation", "id": doc_id, "content": "an unrelated observation"},
+        {"source_table": "observation", "id": doc_id, "content": "an unrelated observation"},
     ]
     kept = _drop_pull_only(db, rows)
 
-    kept_kinds = {(r["type"], r["id"]) for r in kept}
+    kept_kinds = {(r["source_table"], r["id"]) for r in kept}
     assert ("knowledge", doc_id) not in kept_kinds, "the pull-only knowledge row must go"
     assert ("observation", doc_id) in kept_kinds, (
         "an observation was dropped because a KNOWLEDGE row shares its id (#608)"

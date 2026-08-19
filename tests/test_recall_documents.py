@@ -62,7 +62,7 @@ def test_fold_in_labels_memory_and_appends_library(config):
     from techne.mcp_server import _fold_in_documents
 
     _seed(config, "u1", "folding keyword content here", title="Doc")
-    memory = [{"type": "knowledge", "id": 1, "content": "m"}]
+    memory = [{"source_table": "knowledge", "id": 1, "content": "m"}]
     merged = _fold_in_documents(config, "folding keyword", memory)
 
     origins = [r["origin"] for r in merged]

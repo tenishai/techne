@@ -104,11 +104,22 @@ def _open_remote_readonly(db_path: Path) -> sqlite3.Connection:
 # "silently wrong ranking" case where a drifted schema causes a partially-populated
 # row to be returned without error — e.g. a renamed column that SQLite silently
 # returns as NULL instead of raising.
-_REQUIRED_KNOWLEDGE_COLUMNS: frozenset[str] = frozenset({
-    "id", "type", "content", "tags", "confidence",
-    "confidence_numeric", "last_confirmed_at", "status",
-    "source", "updated_at", "superseded_by", "event_at",
-})
+_REQUIRED_KNOWLEDGE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "id",
+        "type",
+        "content",
+        "tags",
+        "confidence",
+        "confidence_numeric",
+        "last_confirmed_at",
+        "status",
+        "source",
+        "updated_at",
+        "superseded_by",
+        "event_at",
+    }
+)
 
 
 def _check_remote_schema_compat(conn: sqlite3.Connection) -> tuple[bool, str]:
@@ -324,9 +335,7 @@ def _cross_store_dedup(
 
     local_fps = {content_fingerprint(r.get("content") or "") for r in local_results}
     return [
-        r
-        for r in remote_results
-        if content_fingerprint(r.get("content") or "") not in local_fps
+        r for r in remote_results if content_fingerprint(r.get("content") or "") not in local_fps
     ]
 
 
@@ -381,7 +390,11 @@ def detect_cross_store_contradictions(
         "prompt":         str,        # conflict prompt for agent to answer
       }
     """
-    from techne.core.conflict import _already_proposed, run_conflict_check, select_conflict_candidates
+    from techne.core.conflict import (
+        _already_proposed,
+        run_conflict_check,
+        select_conflict_candidates,
+    )
     from techne.core.database import connect as _connect
     from techne.core.knowledge import content_fingerprint
 
@@ -389,7 +402,7 @@ def detect_cross_store_contradictions(
     conn = _connect(local_db)
     try:
         for r in remote_deduped:
-            if r.get("type") != "knowledge":
+            if r.get("source_table") != "knowledge":
                 # Only knowledge rows can contradict local knowledge
                 continue
 
@@ -424,10 +437,8 @@ def detect_cross_store_contradictions(
             remote_fp = content_fingerprint(r_proxy["content"])
             check_hash = _cluster_hash_cross(remote_fp, local_ids)
 
-            if _already_proposed(conn, check_hash, 'federation-conflict'):
-                log.debug(
-                    "federation: skipping already-proposed conflict hash=%s", check_hash
-                )
+            if _already_proposed(conn, check_hash, "federation-conflict"):
+                log.debug("federation: skipping already-proposed conflict hash=%s", check_hash)
                 continue
 
             # Build prompt with namespaced focus_id for display; comparison_set is local
@@ -446,9 +457,7 @@ def detect_cross_store_contradictions(
                     "prompt": prompt,
                 }
             )
-            log.debug(
-                "federation: conflict detected %s vs local_ids=%s", namespaced_id, local_ids
-            )
+            log.debug("federation: conflict detected %s vs local_ids=%s", namespaced_id, local_ids)
     finally:
         conn.close()
 
@@ -547,7 +556,7 @@ def federation_conflict_ingest(
 
     conn = connect(config.db_path)
     try:
-        if _already_proposed(conn, ch, 'federation-conflict'):
+        if _already_proposed(conn, ch, "federation-conflict"):
             counts["skipped"] += 1
             return counts
 
@@ -573,7 +582,7 @@ def federation_conflict_ingest(
                 decided_by="agent-triage",
                 decision_reason="no-verdicts",
                 raw=None,
-                origin='federation-conflict',
+                origin="federation-conflict",
             )
             conn.commit()
             return counts
@@ -636,7 +645,7 @@ def federation_conflict_ingest(
                         decided_by=None,
                         decision_reason=decision_reason,
                         raw=response,
-                        origin='federation-conflict',
+                        origin="federation-conflict",
                     )
                     log.debug(
                         "federation_ingest: staged pending SUPERSEDE for local id=%s"
@@ -662,7 +671,7 @@ def federation_conflict_ingest(
                         decided_by="agent-triage",
                         decision_reason=decision_reason,
                         raw=response,
-                        origin='federation-conflict',
+                        origin="federation-conflict",
                     )
                     log.debug(
                         "federation_ingest: discarded (local newer, team=%s stale)", focus_store
@@ -682,7 +691,7 @@ def federation_conflict_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"noop: {reason or ''}",
                     raw=response,
-                    origin='federation-conflict',
+                    origin="federation-conflict",
                 )
                 counts["noop"] += 1
 
@@ -699,7 +708,7 @@ def federation_conflict_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"distinct: {reason or ''}",
                     raw=response,
-                    origin='federation-conflict',
+                    origin="federation-conflict",
                 )
                 counts["distinct"] += 1
 
@@ -719,7 +728,7 @@ def federation_conflict_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"update deferred (federation read-only path): {reason or ''}",
                     raw=response,
-                    origin='federation-conflict',
+                    origin="federation-conflict",
                 )
                 counts["update"] += 1
 
