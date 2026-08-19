@@ -79,9 +79,7 @@ def test_apply_targets_ignores_prose_bold_false_positives():
 def test_apply_targets_prose_after_colon_not_extracted():
     # Honest under-reach: a target mentioned only in the prose AFTER the bold
     # heading (e.g. a comparison) is not turned into an apply.
-    assert _apply_targets("**Where to apply in techne**: similar to limenal's gate.") == [
-        "techne"
-    ]
+    assert _apply_targets("**Where to apply in techne**: similar to limenal's gate.") == ["techne"]
 
 
 def test_norm_collapses_noise():
@@ -159,7 +157,14 @@ def test_backfill_graph_counts_and_queries(db):
     assert rb["inbound"][0]["src_pattern_id"] == a
 
     assert [p["name"] for p in patterns_for_target(db, "techne")] == ["Alpha"]
-    assert [p["name"] for p in patterns_for_target(db, "limenal")] == ["Beta"]
+    # techne#674 — THIS ASSERTION CHANGED DELIBERATELY. Beta's body carries the
+    # pre-rename spelling (`apply in limenal`), which now canonicalises at
+    # extraction, so it lands under the CURRENT project name. Querying the old
+    # spelling returns nothing, which is the point: before this, backfill wrote
+    # `limenal` while the direct-tag path wrote `liminal` and 11 live patterns
+    # sat under both targets for one project.
+    assert [p["name"] for p in patterns_for_target(db, "liminal")] == ["Beta"]
+    assert list(patterns_for_target(db, "limenal")) == []
 
 
 def test_backfill_graph_idempotent(db):
@@ -265,7 +270,9 @@ def test_schema_apply_then_reconcile_on_existing_v1_db(tmp_path):
                resolution_status TEXT NOT NULL DEFAULT 'unresolved',
                PRIMARY KEY (src_pattern_id, dst_name, kind));"""
     )
-    conn.execute("INSERT INTO patterns (id, name, source_url, body) VALUES ('p1','A','http://x','b')")
+    conn.execute(
+        "INSERT INTO patterns (id, name, source_url, body) VALUES ('p1','A','http://x','b')"
+    )
     conn.execute("PRAGMA user_version = 1")
     conn.commit()
     conn.close()
@@ -291,13 +298,17 @@ def test_reconcile_relations_noop_on_fresh_schema(db):
     before = {r[1] for r in plain_connect(db).execute("PRAGMA table_info(pattern_relations)")}
     architect._reconcile_relations(db)
     after = {r[1] for r in plain_connect(db).execute("PRAGMA table_info(pattern_relations)")}
-    assert before == after == {
-        "src_pattern_id",
-        "dst_name",
-        "dst_pattern_id",
-        "kind",
-        "resolution_status",
-    }
+    assert (
+        before
+        == after
+        == {
+            "src_pattern_id",
+            "dst_name",
+            "dst_pattern_id",
+            "kind",
+            "resolution_status",
+        }
+    )
 
 
 # --- ingest populates the graph ---------------------------------------------
@@ -432,9 +443,7 @@ def test_ingest_writes_typed_relation_edges(db):
     )
     ingest_patterns_md(db, md)
     new = search_by_name(db, "New Way")
-    kinds = {
-        e["kind"]: e for e in related_patterns(db, new)["outbound"]
-    }
+    kinds = {e["kind"]: e for e in related_patterns(db, new)["outbound"]}
     assert "composes-with" in kinds and "variant-of" in kinds
     assert kinds["composes-with"]["resolution_status"] == "resolved"
     assert kinds["composes-with"]["dst_pattern_name"] == "Base Pattern"
@@ -486,8 +495,14 @@ def test_migrate_v2_to_v3_adds_validity_window(tmp_path):
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(patterns)")}
         assert {"valid_at", "invalid_at"} <= cols
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-        row = conn.execute("SELECT topic, valid_at, invalid_at FROM patterns WHERE id='p1'").fetchone()
+        # Assert the CONSTANT, not a literal — this line hardcoded `3` and broke on
+        # the v4 bump (techne#674) while the three sibling assertions in this file
+        # already tracked ARCHITECT_VERSION. A version stamp that must be
+        # hand-edited on every ladder step is a test that fails for the wrong reason.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == ARCHITECT_VERSION
+        row = conn.execute(
+            "SELECT topic, valid_at, invalid_at FROM patterns WHERE id='p1'"
+        ).fetchone()
         assert (row["topic"], row["valid_at"], row["invalid_at"]) == ("t", None, None)
     finally:
         conn.close()
@@ -605,7 +620,10 @@ def test_render_dot_structure():
 def test_render_escapes_quotes():
     from techne.core.pattern_graph import render_dot, render_mermaid
 
-    data = {"nodes": [{"id": "1", "name": 'Quote " here', "topic": "t", "status": "active"}], "edges": []}
+    data = {
+        "nodes": [{"id": "1", "name": 'Quote " here', "topic": "t", "status": "active"}],
+        "edges": [],
+    }
     assert "&quot;" in render_mermaid(data)
     assert '\\"' in render_dot(data)
 
@@ -634,9 +652,9 @@ def test_retire_legacy_pattern_knowledge(tmp_path):
     def _count(typ):
         conn = connect(techne_db)
         try:
-            return conn.execute(
-                "SELECT COUNT(*) FROM knowledge WHERE type = ?", (typ,)
-            ).fetchone()[0]
+            return conn.execute("SELECT COUNT(*) FROM knowledge WHERE type = ?", (typ,)).fetchone()[
+                0
+            ]
         finally:
             conn.close()
 
@@ -651,3 +669,55 @@ def test_retire_legacy_pattern_knowledge(tmp_path):
 
     # Idempotent: nothing left to delete.
     assert retire_legacy_pattern_knowledge(techne_db) == 0
+
+
+# --- techne#674: the applies graph could not see new patterns -----------------
+#
+# Three causes, all measured on the live store before the fix: the skill's
+# template emitted an unparseable form, `_KNOWN_TARGETS` still held the
+# pre-rename `limenal` and not `liminal`, and real projects named in the
+# investigate-url context block (Prudence chief among them) were absent from the
+# set entirely. These pin the second and third; the template is documentation.
+
+
+def test_apply_targets_accepts_the_projects_the_skill_actually_names():
+    """14 pattern bodies named Prudence and none could link (techne#674).
+
+    Every name here appears in the /investigate-url context block as a real
+    "where might this apply" target, so a pattern naming one must resolve.
+    """
+    for target in ("prudence", "daedalus", "kaminos", "argus", "ladon", "agora"):
+        body = f"**Where to apply in {target}**: the reviewer's own audit surface."
+        assert _apply_targets(body) == [target], target
+
+
+def test_apply_targets_canonicalises_the_pre_rename_spelling():
+    """`limenal` -> `liminal` (renamed 2026-08-11).
+
+    THE BUG THIS PINS: the set held only the misspelling, so backfill emitted
+    `limenal` while the direct-tag path wrote `liminal` — 11 patterns ended up
+    double-listed under two targets for one project. Canonicalising at
+    extraction is what stops one project occupying two rows.
+    """
+    assert _apply_targets("**Where to apply in limenal**: gate it.") == ["liminal"]
+    assert _apply_targets("**Where to apply in liminal**: gate it.") == ["liminal"]
+
+
+def test_apply_targets_dedupes_across_the_alias():
+    """Both spellings in one body collapse to a single target, not two."""
+    body = (
+        "**Where to apply in liminal**: the dispatch chokepoint.\n"
+        "**Where to apply in limenal**: the same gateway, older spelling."
+    )
+    assert _apply_targets(body) == ["liminal"]
+
+
+def test_widening_the_target_set_did_not_weaken_the_pr130_guard():
+    """The under-reach is DELIBERATE — do not loosen `_APPLY_RE` to fix coverage.
+
+    Prudence caught these in PR#130. Adding targets must not let bold prose or a
+    trailing comparison manufacture an apply row.
+    """
+    assert _apply_targets("This was **built in techne** last year.") == []
+    assert _apply_targets("**Where to apply in widgets**: still unknown.") == []
+    assert _apply_targets("**Where to apply in techne**: similar to liminal's gate.") == ["techne"]

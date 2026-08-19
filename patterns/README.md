@@ -25,12 +25,21 @@ cat > /tmp/p.md <<'EOF'
 
 **Why interesting**: <the non-obvious design choice / trade-off>.
 
-**Where to apply**: <where in our stack it fits>.
+**Where to apply in <target>**: <where in our stack it fits>.
 
 ---
 EOF
 techne architect ingest /tmp/p.md --verdict patterns-only   # idempotent (content-hash dedup)
 ```
+
+> **The `in <target>` is load-bearing, not style.** `backfill_graph` anchors on the
+> literal phrase `apply in <target>` and takes only the token that follows it, so
+> `**Where to apply**: techne, ...` (target after the colon) produces NO
+> `pattern_applies` row — the parser documents that case as an intentional
+> under-reach. The narrowness is deliberate: it is what stops `**built in techne**`
+> and `...in techne (vs cabal)` manufacturing false links (PR#130). Write the
+> target inside the heading. Valid targets are `_KNOWN_TARGETS` in
+> `techne/core/patterns.py`.
 
 `--verdict` records *your judgment* about the URL — `skip` / `skip-with-flag` /
 `patterns-only` / `full-eval`. Omit it and the ingest records `patterns-only`, the
