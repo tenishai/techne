@@ -759,7 +759,9 @@ TOOLS = [
             "tests/fixtures/** nodes are excluded by default (name-collision noise in the "
             "v1 name-based edge model; set include_fixtures=true to keep them). Scoped to "
             "one repo (db-per-repo, techne#209): pass `repo` to pick it, else the "
-            "server's working directory's repo is used. Experimental: the index is built "
+            "server's working directory's repo is used. Each node carries `proven`: "
+            "false means it is reached only by matching a bare call name and may not be "
+            "a real dependent (techne#606) — see only_proven. Experimental: the index is built "
             "manually and may be stale — re-run `techne codex index` after code changes."
         ),
         "inputSchema": {
@@ -788,6 +790,15 @@ TOOLS = [
                     "default": False,
                     "description": (
                         "Include tests/fixtures/** nodes (excluded by default; techne#325)."
+                    ),
+                },
+                "only_proven": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Return only nodes reached entirely through edges resolved to a "
+                        "real symbol. Off by default, because most edges are still "
+                        "name-matched and this would empty the radius (techne#606)."
                     ),
                 },
             },
@@ -1512,6 +1523,7 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     depth = args.get("depth", 5)
     direction = args.get("direction", "in")
     include_fixtures = args.get("include_fixtures", False)
+    only_proven = args.get("only_proven", False)
     db_path = _codex_repo_db(args, config)
     if db_path is None:
         return {
@@ -1541,6 +1553,11 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             if len(exc.candidates) > 10:
                 result["candidates_truncated"] = True
         return result
+    # techne#606: blast radius is where the bare-name fallback does the most
+    # damage — one invented hop drags in that phantom's whole upstream cone, and
+    # the caller cannot tell it from a real dependent. So compute the radius
+    # TWICE: the permissive walk, and the walk over proven (to_symbol) edges only.
+    # Every node is then labelled, and the count resting on a guess is stated.
     raw = reachable(
         db_path,
         symbol_id,
@@ -1548,13 +1565,38 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
         max_depth=depth,
         exclude_fixtures=not include_fixtures,
     )
+    proven_ids = {
+        r["id"]
+        for r in reachable(
+            db_path,
+            symbol_id,
+            direction=direction,
+            max_depth=depth,
+            exclude_fixtures=not include_fixtures,
+            include_inferred=False,
+        )
+    }
+    if only_proven:
+        raw = [r for r in raw if r["id"] in proven_ids]
+    for r in raw:
+        r["proven"] = r["id"] in proven_ids
     rows = annotate_freshness(db_path, raw)
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
+    inferred_count = sum(1 for r in rows if not r["proven"])
     result: dict = {"symbol_id": symbol_id, "direction": direction, "depth": depth, "nodes": rows}
+    notices = []
     if stale_count:
-        result["notice"] = (
+        notices.append(
             f"{stale_count} node(s) may be outdated — re-run `techne codex index` to refresh."
         )
+    if inferred_count:
+        notices.append(
+            f"{inferred_count} of {len(rows)} node(s) are reached only by matching a bare "
+            "call name, not a resolved symbol — treat them as candidates, not confirmed "
+            "dependents. Pass only_proven=true for the resolved-only radius."
+        )
+    if notices:
+        result["notice"] = " ".join(notices)
     return result
 
 

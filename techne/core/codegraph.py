@@ -238,13 +238,41 @@ def search_symbols(db_path: Path, query: str, *, limit: int = 20) -> list[dict]:
         conn.close()
 
 
-def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> list[dict]:
+def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
+    include_inferred: bool = True) -> list[dict]:
     """Direct callers — which symbols call this one.
 
     Finds edges where to_symbol = symbol_id (resolved) OR
     to_name = symbol.name (unresolved name match).
 
     exclude_fixtures drops tests/fixtures/** noise by default (techne#325).
+    
+    THE NAME FALLBACK CAN INVENT A CALL, AND EVERY ROW NOW SAYS WHICH KIND IT IS
+    (techne#606). When an edge has ``to_symbol IS NULL`` the target is matched by
+    bare ``to_name`` against ``symbols.name`` — so a call into code we deliberately
+    do not index (a vendored import) is silently reattributed to whatever local
+    symbol happens to share the name. Reproduced on a FRESH index: `app/main.py`
+    doing ``from aiohttp.web import get`` makes ``callers("app/util.py::get")``
+    return ``handler``, which never called it.
+
+    Each row carries ``resolution``: ``"exact"`` (matched on ``to_symbol``) or
+    ``"name-inferred"`` (matched on the bare name, and therefore a guess). Pass
+    ``include_inferred=False`` to get only edges the graph can actually prove.
+
+    THE DEFAULT STAYS PERMISSIVE, and that is a deliberate, uncomfortable choice.
+    Measured on this repo's live index 2026-08-19: 19,345 call edges, ALL with
+    ``to_symbol IS NULL``, of which 11,114 (57%) name-match some symbol — and 99
+    ambiguous names account for 4,177 of them. Defaulting to ``False`` would empty
+    the call graph for every store that has never run a resolver pass, which is all
+    of them today. So the fix here is HONESTY, not suppression: the caller can now
+    tell a proven edge from a guessed one and choose.
+
+    WHAT WOULD ACTUALLY FIX IT is qualifying the fallback by import context — and
+    it is NOT achievable in the query layer. Import edges record only the MODULE
+    (`os`, `sys`, `aiohttp.web`), never which names it brought in, so nothing here
+    can know that ``get`` came from outside the repo. Closing that needs the
+    INDEXER to record name→module bindings. Measured, not assumed: 3,049 import
+    edges over 852 distinct module names, none carrying imported symbol names.
     """
     fixture_clause = " AND s.file NOT LIKE ?" if exclude_fixtures else ""
     params: list = [symbol_id, symbol_id]
@@ -253,7 +281,9 @@ def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> 
     conn = plain_connect(db_path)
     try:
         rows = conn.execute(
-            f"""SELECT s.*
+            f"""SELECT s.*,
+                      CASE WHEN e.to_symbol = ? THEN 'exact' ELSE 'name-inferred' END
+                        AS resolution
                FROM edges e
                JOIN symbols s ON s.id = e.from_symbol
                WHERE e.kind = 'call'
@@ -262,20 +292,49 @@ def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> 
                      OR (e.to_symbol IS NULL
                          AND e.to_name = (SELECT name FROM symbols WHERE id = ?))
                  ){fixture_clause}""",
-            params,
+            [symbol_id, *params],
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        return out if include_inferred else [r for r in out if r["resolution"] == "exact"]
     finally:
         conn.close()
 
 
-def callees(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> list[dict]:
+def callees(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
+    include_inferred: bool = True) -> list[dict]:
     """Direct callees — which symbols this one calls.
 
     Resolves targets by to_symbol when set, else by symbols.name = to_name.
     Multiple symbols may share a name; all are returned.
 
     exclude_fixtures drops tests/fixtures/** noise by default (techne#325).
+    
+    THE NAME FALLBACK CAN INVENT A CALL, AND EVERY ROW NOW SAYS WHICH KIND IT IS
+    (techne#606). When an edge has ``to_symbol IS NULL`` the target is matched by
+    bare ``to_name`` against ``symbols.name`` — so a call into code we deliberately
+    do not index (a vendored import) is silently reattributed to whatever local
+    symbol happens to share the name. Reproduced on a FRESH index: `app/main.py`
+    doing ``from aiohttp.web import get`` makes ``callers("app/util.py::get")``
+    return ``handler``, which never called it.
+
+    Each row carries ``resolution``: ``"exact"`` (matched on ``to_symbol``) or
+    ``"name-inferred"`` (matched on the bare name, and therefore a guess). Pass
+    ``include_inferred=False`` to get only edges the graph can actually prove.
+
+    THE DEFAULT STAYS PERMISSIVE, and that is a deliberate, uncomfortable choice.
+    Measured on this repo's live index 2026-08-19: 19,345 call edges, ALL with
+    ``to_symbol IS NULL``, of which 11,114 (57%) name-match some symbol — and 99
+    ambiguous names account for 4,177 of them. Defaulting to ``False`` would empty
+    the call graph for every store that has never run a resolver pass, which is all
+    of them today. So the fix here is HONESTY, not suppression: the caller can now
+    tell a proven edge from a guessed one and choose.
+
+    WHAT WOULD ACTUALLY FIX IT is qualifying the fallback by import context — and
+    it is NOT achievable in the query layer. Import edges record only the MODULE
+    (`os`, `sys`, `aiohttp.web`), never which names it brought in, so nothing here
+    can know that ``get`` came from outside the repo. Closing that needs the
+    INDEXER to record name→module bindings. Measured, not assumed: 3,049 import
+    edges over 852 distinct module names, none carrying imported symbol names.
     """
     fixture_clause = " AND s.file NOT LIKE ?" if exclude_fixtures else ""
     params: list = [symbol_id]
@@ -284,7 +343,9 @@ def callees(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> 
     conn = plain_connect(db_path)
     try:
         rows = conn.execute(
-            f"""SELECT s.*
+            f"""SELECT s.*,
+                      CASE WHEN s.id = e.to_symbol THEN 'exact' ELSE 'name-inferred' END
+                        AS resolution
                FROM edges e
                JOIN symbols s ON (
                    s.id = e.to_symbol
@@ -294,7 +355,8 @@ def callees(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True) -> 
                  AND e.kind = 'call'{fixture_clause}""",
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        return out if include_inferred else [r for r in out if r["resolution"] == "exact"]
     finally:
         conn.close()
 
@@ -308,6 +370,7 @@ def reachable(
     max_depth: int = 5,
     limit: int = 500,
     exclude_fixtures: bool = True,
+    include_inferred: bool = True,
 ) -> list[dict]:
     """Transitive reachability via a recursive CTE, dep-free.
 
@@ -326,8 +389,25 @@ def reachable(
 
     UNION (not UNION ALL) deduplicates (id, depth) pairs, which naturally
     terminates cycles without requiring explicit visited-set tracking.
+
+    include_inferred=False WALKS ONLY PROVEN EDGES (techne#606). The name-based
+    traversal above can invent a hop: an edge with to_symbol IS NULL matches any
+    symbol sharing the bare name, so a call into unindexed vendored code gets
+    reattributed to an unrelated local function. Setting this False restricts the
+    recursive step to edges resolved on to_symbol, so every node returned is
+    reached by an ALL-EXACT path.
+
+    Unlike callers()/callees(), rows here carry NO ``resolution`` field, and that
+    is deliberate: a node can be reached by a proven path AND a guessed one at the
+    same depth, so a per-row label would have to pick one and would lie about the
+    other. The honest control at this layer is the path filter, not a tag.
     """
     params: list = [symbol_id, max_depth]
+    # techne#606: drop the name-fallback arm entirely when only proven edges are
+    # wanted. '0' (never true) is used rather than removing the OR arm so the two
+    # SQL shapes stay textually parallel and diffable.
+    inferred_clause_out = "" if include_inferred else " AND e.to_symbol IS NOT NULL"
+    inferred_join_in = "e.to_symbol IS NULL" if include_inferred else "0"
     kind_filter = ""
     if kinds:
         kind_filter = " AND e.kind IN (%s)" % ", ".join("?" * len(kinds))
@@ -341,7 +421,7 @@ def reachable(
             JOIN edges e ON e.from_symbol = r.id
             LEFT JOIN symbols s2 ON s2.name = e.to_name AND e.to_symbol IS NULL
             WHERE r.depth < ?{kind_filter}
-              AND COALESCE(e.to_symbol, s2.id) IS NOT NULL
+              AND COALESCE(e.to_symbol, s2.id) IS NOT NULL{inferred_clause_out}
         """
     else:
         # Step: from anchor id, walk edges backwards, caller is from_symbol.
@@ -351,7 +431,7 @@ def reachable(
             JOIN symbols rs ON rs.id = r.id
             JOIN edges e ON (
                 e.to_symbol = r.id
-                OR (e.to_symbol IS NULL AND e.to_name = rs.name)
+                OR ({inferred_join_in} AND e.to_name = rs.name)
             )
             WHERE r.depth < ?{kind_filter}
         """
