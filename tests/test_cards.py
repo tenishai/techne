@@ -220,6 +220,130 @@ def test_find_dangling_cards_reports_stale_version(db, config):
 
 
 # ---------------------------------------------------------------------------
+# techne#684 — repairing cards that never had a pointer
+# ---------------------------------------------------------------------------
+
+
+def _pointerless_card(db, content="real durable knowledge"):
+    """A document_card with NO doc: tag — the shape #633's producer bug minted."""
+    from techne.core.cards import CARD_TYPE
+    from techne.core.database import connect
+
+    conn = connect(db)
+    try:
+        cur = conn.execute(
+            "INSERT INTO knowledge (type, content, confidence, source, tags) "
+            "VALUES (?, ?, 'high', 'consolidate-merge:1', '')",
+            (CARD_TYPE, content),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def test_repair_is_dry_run_by_default(db, config):
+    """A repair that writes without being asked is not a repair, it is a surprise."""
+    from techne.core.cards import CARD_TYPE, repair_pointerless_cards
+    from techne.core.database import connect
+
+    kid = _pointerless_card(db)
+    result = repair_pointerless_cards(config)
+
+    assert result["retyped"] == [kid]
+    assert result["applied"] is False
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT type FROM knowledge WHERE id=?", (kid,)).fetchone()[0] == CARD_TYPE
+    finally:
+        conn.close()
+
+
+def test_repair_retypes_and_clears_fsck(db, config):
+    """The whole point: fsck can go green. It had been red since June because the
+    #633 producer fix cleared the cause and left the debris."""
+    from techne.core.cards import find_dangling_cards, repair_pointerless_cards
+    from techne.core.database import connect
+
+    kid = _pointerless_card(db, content="db-per-domain: one store file per persona")
+    assert len(find_dangling_cards(config)["dangling"]) == 1
+
+    result = repair_pointerless_cards(config, apply=True)
+    assert result["applied"] is True and result["retyped"] == [kid]
+
+    conn = connect(db)
+    try:
+        row = conn.execute("SELECT type, content FROM knowledge WHERE id=?", (kid,)).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "fact"
+    # THE CONTENT SURVIVES. These rows are real knowledge wearing the wrong type;
+    # deleting them would have been the easy way to a green check and a real loss.
+    assert row[1] == "db-per-domain: one store file per persona"
+    assert find_dangling_cards(config)["dangling"] == []
+
+
+def test_repair_refuses_to_touch_a_card_with_an_unresolvable_pointer(db, config):
+    """THE DISTINCTION THAT MATTERS. A pointer that EXISTS and does not resolve is
+    librarian.db out of sync — retyping would destroy the pointer and the evidence
+    of the fault. Restoring the doc and superseding the card are both valid; only a
+    human knows which, so this reports and never guesses."""
+    from techne.core.cards import CARD_TYPE, repair_pointerless_cards
+    from techne.core.database import connect
+
+    upsert_document_card(db, source_url="u", doc_id=9999, source_version="v1", title="x")
+    result = repair_pointerless_cards(config, apply=True)
+
+    assert result["retyped"] == []
+    assert len(result["needs_human"]) == 1
+    assert result["needs_human"][0]["doc_id"] == 9999
+
+    conn = connect(db)
+    try:
+        types = [r[0] for r in conn.execute("SELECT type FROM knowledge")]
+    finally:
+        conn.close()
+    assert CARD_TYPE in types, "the card must survive untouched"
+
+
+def test_repair_separates_the_two_faults_in_one_pass(db, config):
+    from techne.core.cards import repair_pointerless_cards
+
+    kid = _pointerless_card(db)
+    upsert_document_card(db, source_url="u", doc_id=9999, source_version="v1", title="x")
+
+    result = repair_pointerless_cards(config, apply=True)
+    assert result["retyped"] == [kid]
+    assert [d["doc_id"] for d in result["needs_human"]] == [9999]
+
+
+def test_fsck_names_a_remedy_for_a_repairable_fault(db, config):
+    """techne#684's actual defect: fsck could name a structural fault and offer the
+    operator nothing. A check that can never go green trains them to ignore it."""
+    from techne.core.maintenance import run_fsck
+
+    _doc(config, content="anything — this exists only to bring librarian.db into being,\n"
+         "which _check_dangling_cards requires before it will run at all")
+    _pointerless_card(db)
+    report = run_fsck(config)
+    check = next(c for c in report.checks if c.name == "dangling_cards")
+    assert check.ok is False
+    assert check.remedy and "cards repair" in check.remedy
+
+
+def test_fsck_does_not_offer_the_repair_for_a_fault_it_cannot_fix(db, config):
+    """Naming `cards repair` for an unresolvable pointer would promise a fix that
+    command deliberately refuses to perform."""
+    from techne.core.maintenance import run_fsck
+
+    _doc(config, content="brings librarian.db into being")
+    upsert_document_card(db, source_url="u", doc_id=9999, source_version="v1", title="x")
+    check = next(c for c in run_fsck(config).checks if c.name == "dangling_cards")
+    assert check.ok is False
+    assert check.remedy and "cards repair" not in check.remedy
+
+
+# ---------------------------------------------------------------------------
 # #244 — write-site redaction: fill_card_summary
 # ---------------------------------------------------------------------------
 

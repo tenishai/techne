@@ -239,6 +239,49 @@ def find_dangling_cards(config: Config) -> dict:
     return {"total": len(cards), "dangling": dangling, "stale": stale}
 
 
+def repair_pointerless_cards(config: Config, *, apply: bool = False) -> dict:
+    """Retype `document_card` rows that never had a doc pointer (techne#684).
+
+    THE TWO DANGLING REASONS ARE NOT THE SAME FAULT, and conflating them would
+    destroy information:
+
+    * ``no doc pointer`` — the row was NEVER a card. A document_card is a pointer
+      at a librarian document and this one has none, so the type is simply wrong;
+      #633's producer bug picked it when there was no document to point at. The
+      content is real, durable knowledge. Retyping to `fact` preserves it and
+      drops the false type. Mechanical and safe.
+    * ``missing`` — the pointer EXISTS and does not resolve. That is librarian.db
+      rebuilt or restored out of sync with techne.db. Retyping would be wrong: the
+      remedy is to restore the document or supersede the card, and only a human
+      knows which. THIS FUNCTION NEVER TOUCHES THOSE — it reports them.
+
+    Dry-run by default. `apply=True` performs the retype. Returns
+    {retyped, needs_human, applied}.
+    """
+    from techne.core.database import connect
+
+    report = find_dangling_cards(config)
+    pointerless = [d for d in report["dangling"] if d.get("reason") == "no doc pointer"]
+    needs_human = [d for d in report["dangling"] if d.get("reason") != "no doc pointer"]
+
+    if apply and pointerless:
+        conn = connect(config.db_path)
+        try:
+            conn.executemany(
+                "UPDATE knowledge SET type = 'fact' WHERE id = ? AND type = ?",
+                [(d["card_id"], CARD_TYPE) for d in pointerless],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    return {
+        "retyped": [d["card_id"] for d in pointerless],
+        "needs_human": needs_human,
+        "applied": bool(apply and pointerless),
+    }
+
+
 # --- agent-assisted gist fill (emit/ingest, same shape as reflect) -------------
 
 _SUMMARY_PROMPT = (
