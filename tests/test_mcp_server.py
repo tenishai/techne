@@ -475,3 +475,26 @@ def test_status_keeps_checks_deferred_when_it_is_none(db_path, monkeypatch):
 
     assert "checks_deferred" in payload, "key vanished on the MCP surface"
     assert payload["checks_deferred"] is None
+
+
+def test_mcp_tools_doc_is_complete():
+    """docs/mcp-tools.md must name every registered tool (techne#647).
+
+    A generated reference drifts the moment someone adds a tool and forgets the
+    doc, which is exactly how 10 of 33 tools came to appear in no document at
+    all. This makes the omission a test failure rather than a discovery months
+    later. Regenerate the doc when this fails; do not delete the assertion.
+    """
+    from pathlib import Path
+
+    from techne.mcp_server import TOOLS
+
+    doc = Path(__file__).resolve().parent.parent / "docs" / "mcp-tools.md"
+    assert doc.exists(), "docs/mcp-tools.md is missing"
+    text = doc.read_text(encoding="utf-8")
+    # MATCH THE HEADING, NOT A MENTION. A bare-name search passes on any prose
+    # reference — the preamble names `techne_capabilities` in passing, so deleting
+    # its actual entry still read as documented. Found by mutation-probing this
+    # test, which is the only reason it is worth having.
+    missing = [t["name"] for t in TOOLS if f"### `{t['name']}`" not in text]
+    assert not missing, f"tools registered but undocumented in docs/mcp-tools.md: {missing}"
