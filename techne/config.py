@@ -163,6 +163,29 @@ class HookConfig:
     # way (source="session_start"). Observability of the feature, not a new
     # feature, so it's ON by default whenever per_turn_recall is on.
     per_turn_recall_log: bool = True
+    #: RELEVANCE FLOOR (techne#414) — make "inject nothing" a legal outcome.
+    #: DEFAULT None = NO FLOOR, and that default is the deliberate part. #414 says
+    #: the threshold "should come from the replay harness (#415), not from a
+    #: guess", and #415 is unbuilt. So this ships the MECHANISM and leaves the
+    #: VALUE unset: behaviour is unchanged until someone sets it from evidence.
+    #:
+    #: PER-KIND, because the two scales are opposite-signed and #402's review
+    #: rejected merging them. Reject a hit when:
+    #:   vec_distance > per_turn_recall_floor_vec_distance   (higher = farther)
+    #:   bm25         > per_turn_recall_floor_bm25           (more-negative = better)
+    #:
+    #: MEASURED on 6,457 live delivered hits, 2026-08-18, to anchor whoever sets it:
+    #: vec_distance ranges 0.546 (nearest) to 1.351 (farthest), mean 0.99. The worst
+    #: decile is 1.168-1.351. A floor of 1.168 would therefore reject roughly the
+    #: worst 10% of what is delivered today. That is an ANCHOR, not a recommendation.
+    #:
+    #: THE BM25 FLOOR IS A WEAKER CLAIM and _injection_log's docstring says why:
+    #: for FTS rows `rank` is an INPUT to placement, not placement itself — the
+    #: real ordering value (`_combined`) is popped before the row is returned. Raw
+    #: BM25 is at least stable across queries, which the normalized blend is not.
+    #: Set it knowing that. Live traffic is ~99% vec_distance, so it rarely applies.
+    per_turn_recall_floor_vec_distance: float | None = None
+    per_turn_recall_floor_bm25: float | None = None
     # Per-turn SEED nudge (techne#277): on each turn, remind the in-session
     # agent to techne_store a durable fact/decision/correction if one emerged —
     # the interactive complement to end-of-session reflect. Best-effort, rides
@@ -692,6 +715,16 @@ class Config:
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
+                per_turn_recall_floor_vec_distance=(
+                    float(h["per_turn_recall_floor_vec_distance"])
+                    if h.get("per_turn_recall_floor_vec_distance") is not None
+                    else None
+                ),
+                per_turn_recall_floor_bm25=(
+                    float(h["per_turn_recall_floor_bm25"])
+                    if h.get("per_turn_recall_floor_bm25") is not None
+                    else None
+                ),
                 per_turn_seed=h.get("per_turn_seed", False),
                 startup_directive=h.get("startup_directive", False),
             )
@@ -855,6 +888,10 @@ class Config:
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
                 "per_turn_recall_log": self.hooks.per_turn_recall_log,
+                "per_turn_recall_floor_vec_distance": (
+                    self.hooks.per_turn_recall_floor_vec_distance
+                ),
+                "per_turn_recall_floor_bm25": self.hooks.per_turn_recall_floor_bm25,
                 "per_turn_seed": self.hooks.per_turn_seed,
                 "startup_directive": self.hooks.startup_directive,
             },

@@ -221,6 +221,59 @@ def _startup_block(config, session_id: str | None) -> str | None:
 # re-ranking to backfill, which would change what the rail selects.
 
 
+def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
+    """Drop hits that do not clear their channel's floor (techne#414).
+
+    THE POINT IS THAT "INJECT NOTHING" BECOMES POSSIBLE. Measured across all 1,430
+    live per_turn_recall rows: hit_count was 5 on essentially every one, and the
+    zero-hit rate was 0% — the rail never declined. So the cost was unconditional
+    (~316 tok/turn, every turn) and "five relevant hits" was indistinguishable from
+    "five barrel-scraped ones".
+
+    PER-KIND, NEVER MERGED. BM25 `rank` (more-negative = better) and vec `distance`
+    (lower = nearer) are opposite-signed; #402's review rejected collapsing them
+    into one comparable column, and this floor honours that by thresholding each
+    scale separately via `_retrieval_signal`, which is the contract that records
+    the discriminator.
+
+    THE TWO FLOORS ARE NOT EQUALLY SOUND, and _injection_log's docstring says so
+    outright — "do not build a floor without reading it". For a VEC row, distance
+    IS the placement value: search_vec sorts by ascending distance and the union
+    preserves that order, so a distance floor rejects exactly what ranked worst.
+    For an FTS row, `rank` is an INPUT to placement — the real ordering value
+    (`_combined`) is popped before the row is returned and is not observable at
+    all. Raw BM25 is at least stable across queries, which the normalized blend is
+    not, so a raw-rank floor is defensible; it is simply a weaker claim than the
+    vec one. Live traffic is ~99% vec_distance, so this rarely arises.
+
+    A row whose signal is unreadable is KEPT. A floor exists to reject hits it can
+    judge, not to silently drop ones it cannot — dropping the unmeasurable would
+    make the floor look effective by discarding its own blind spot.
+    """
+    from techne.hooks._injection_log import _retrieval_signal
+
+    floors = {
+        "vec_distance": config.hooks.per_turn_recall_floor_vec_distance,
+        "bm25": config.hooks.per_turn_recall_floor_bm25,
+    }
+    if not any(v is not None for v in floors.values()):
+        return rows  # no floor configured — the shipped default
+
+    kept = []
+    for r in rows:
+        score, kind = _retrieval_signal(r)
+        threshold = floors.get(kind) if kind else None
+        if score is None or threshold is None:
+            kept.append(r)  # unjudgeable by this floor; keep rather than hide
+            continue
+        # Both scales are "higher = worse" at this point: vec distance grows with
+        # dissimilarity, and BM25 rank is negative with more-negative = better.
+        if score > threshold:
+            continue
+        kept.append(r)
+    return kept
+
+
 #: How many candidates to fetch per requested slot before re-send suppression.
 #: 3x is a guess bounded by cost, not a tuned value: at the default k=5 it is 15
 #: rows from an already-indexed query, and it only has to survive the worst
@@ -530,6 +583,9 @@ def main() -> None:
                     # must be legal. Do NOT fall back to the duplicates here; that
                     # would restore exactly the waste this suppresses.
                     rows = fresh
+                # AFTER suppression, BEFORE the k-cut: a floored-out row should not
+                # consume one of the k slots that a clearing row could have used.
+                rows = _apply_relevance_floor(rows, config)
                 rows = rows[:k]
             recall_block = _build_context(rows) if rows else ""
             if recall_block:

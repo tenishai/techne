@@ -746,3 +746,101 @@ def test_suppression_failure_degrades_to_resending_not_to_silence(home):
     from techne.hooks.user_prompt_submit import _already_sent_this_session
 
     assert _already_sent_this_session(home / "does-not-exist.db", "s") == set()
+
+
+# ---------------------------------------------------------------------------
+# techne#414 — "inject nothing" becomes a legal, logged outcome.
+# ---------------------------------------------------------------------------
+
+
+def _vec_row(id_: int, distance: float) -> dict:
+    """A vec-channel hit as search() returns it on the union path."""
+    return {
+        "source_table": "knowledge",
+        "id": id_,
+        "knowledge_type": "fact",
+        "content": "x",
+        "distance": distance,
+        "match_source": "vec",
+    }
+
+
+def _fts_row(id_: int, rank: float) -> dict:
+    """An FTS-only hit. `match_source` is deliberately absent — search() stamps it
+    only on the union path, so an FTS-only fallback reads None (see the NB in
+    _injection_log._retrieval_signal)."""
+    return {
+        "source_table": "knowledge",
+        "id": id_,
+        "knowledge_type": "fact",
+        "content": "x",
+        "rank": rank,
+    }
+
+
+def _cfg(**floors):
+    from techne.config import Config
+
+    c = Config()
+    for k, v in floors.items():
+        setattr(c.hooks, k, v)
+    return c
+
+
+def test_no_floor_configured_changes_nothing(home):
+    """The SHIPPED default. #414 says the threshold must come from the replay
+    harness (#415), which is unbuilt — so this ships the mechanism with the value
+    unset, and behaviour is identical until someone sets it from evidence."""
+    from techne.hooks.user_prompt_submit import _apply_relevance_floor
+
+    rows = [_vec_row(1, 0.6), _vec_row(2, 1.34)]
+    assert _apply_relevance_floor(rows, _cfg()) == rows
+
+
+def test_a_vec_hit_beyond_the_floor_is_dropped(home):
+    """Measured anchor: 6,457 live delivered hits span distance 0.546-1.351,
+    mean 0.99, worst decile 1.168-1.351. A floor of 1.168 rejects about that
+    worst decile."""
+    from techne.hooks.user_prompt_submit import _apply_relevance_floor
+
+    rows = [_vec_row(1, 0.75), _vec_row(2, 1.30)]
+    kept = _apply_relevance_floor(rows, _cfg(per_turn_recall_floor_vec_distance=1.168))
+
+    assert [r["id"] for r in kept] == [1], "the far hit must not clear a 1.168 floor"
+
+
+def test_the_floor_can_empty_the_block_entirely(home):
+    """THE WHOLE POINT (#414): across all 1,430 live per_turn_recall rows the
+    zero-hit rate was 0% — the rail never declined to inject. It must be able to."""
+    from techne.hooks.user_prompt_submit import _apply_relevance_floor
+
+    rows = [_vec_row(1, 1.30), _vec_row(2, 1.35)]
+    assert _apply_relevance_floor(rows, _cfg(per_turn_recall_floor_vec_distance=1.0)) == []
+
+
+def test_the_two_scales_are_thresholded_separately(home):
+    """BM25 rank (more-negative = better) and vec distance (lower = nearer) are
+    OPPOSITE-SIGNED. #402's review rejected merging them into one comparable
+    column; a floor that shared a threshold would silently mis-judge one channel."""
+    from techne.hooks.user_prompt_submit import _apply_relevance_floor
+
+    rows = [_vec_row(1, 0.7), _fts_row(2, -8.0), _fts_row(3, -0.5)]
+    kept = _apply_relevance_floor(
+        rows, _cfg(per_turn_recall_floor_vec_distance=1.0, per_turn_recall_floor_bm25=-1.0)
+    )
+
+    ids = [r["id"] for r in kept]
+    assert 1 in ids, "a near vec hit is unaffected by the bm25 floor"
+    assert 2 in ids, "rank -8.0 is a STRONG bm25 hit and clears a -1.0 floor"
+    assert 3 not in ids, "rank -0.5 is weak and must not clear it"
+
+
+def test_a_hit_with_no_readable_signal_is_kept(home):
+    """A floor rejects what it can JUDGE. Dropping the unmeasurable would make the
+    floor look effective by discarding its own blind spot — and session-start and
+    edit-rail rows legitimately carry no retrieval score at all."""
+    from techne.hooks.user_prompt_submit import _apply_relevance_floor
+
+    rows = [{"source_table": "knowledge", "id": 9, "content": "x"}]
+    kept = _apply_relevance_floor(rows, _cfg(per_turn_recall_floor_vec_distance=0.1))
+    assert [r["id"] for r in kept] == [9]
