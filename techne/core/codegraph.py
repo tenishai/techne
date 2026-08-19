@@ -268,11 +268,16 @@ def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
     tell a proven edge from a guessed one and choose.
 
     WHAT WOULD ACTUALLY FIX IT is qualifying the fallback by import context — and
-    it is NOT achievable in the query layer. Import edges record only the MODULE
-    (`os`, `sys`, `aiohttp.web`), never which names it brought in, so nothing here
-    can know that ``get`` came from outside the repo. Closing that needs the
-    INDEXER to record name→module bindings. Measured, not assumed: 3,049 import
-    edges over 852 distinct module names, none carrying imported symbol names.
+    it is NOT achievable in the query layer, because the BINDING is not recorded.
+    An import edge stores one bare string in ``to_name`` and nothing else: for
+    ``import os`` that is the module `os`, and for ``from aiohttp.web import get``
+    it is the name `get`. There is no column separating the two cases and no
+    record of the SOURCE MODULE a from-imported name came from — so nothing here
+    can know that ``get`` arrived from outside the repo rather than being defined
+    in it. Closing that needs the INDEXER to record name→module bindings.
+    Measured on the live index, not assumed: 3,049 import edges, 852 distinct
+    ``to_name`` values mixing modules and imported names, 0 with ``to_symbol``
+    set. Follow-up filed as techne#679.
     """
     fixture_clause = " AND s.file NOT LIKE ?" if exclude_fixtures else ""
     params: list = [symbol_id, symbol_id]
@@ -330,11 +335,16 @@ def callees(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
     tell a proven edge from a guessed one and choose.
 
     WHAT WOULD ACTUALLY FIX IT is qualifying the fallback by import context — and
-    it is NOT achievable in the query layer. Import edges record only the MODULE
-    (`os`, `sys`, `aiohttp.web`), never which names it brought in, so nothing here
-    can know that ``get`` came from outside the repo. Closing that needs the
-    INDEXER to record name→module bindings. Measured, not assumed: 3,049 import
-    edges over 852 distinct module names, none carrying imported symbol names.
+    it is NOT achievable in the query layer, because the BINDING is not recorded.
+    An import edge stores one bare string in ``to_name`` and nothing else: for
+    ``import os`` that is the module `os`, and for ``from aiohttp.web import get``
+    it is the name `get`. There is no column separating the two cases and no
+    record of the SOURCE MODULE a from-imported name came from — so nothing here
+    can know that ``get`` arrived from outside the repo rather than being defined
+    in it. Closing that needs the INDEXER to record name→module bindings.
+    Measured on the live index, not assumed: 3,049 import edges, 852 distinct
+    ``to_name`` values mixing modules and imported names, 0 with ``to_symbol``
+    set. Follow-up filed as techne#679.
     """
     fixture_clause = " AND s.file NOT LIKE ?" if exclude_fixtures else ""
     params: list = [symbol_id]
