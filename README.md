@@ -239,11 +239,20 @@ print(techne.identity.list_entries(config.db_path, prefix="team."))
 
 ---
 
+## MCP tools
+
+The complete agent-facing surface — 33 tools, grouped by purpose — is documented in
+**[`docs/mcp-tools.md`](docs/mcp-tools.md)**, generated from the live registry and
+pinned by a test so a new tool cannot ship undocumented.
+
 ## CLI reference
 
 ```
 techne init [--platform claude-code|codex|standalone] [--identity-dir DIR]
 techne status                              # session and storage stats
+techne capabilities [--json]               # what techne can do on THIS install and what is
+                                           # switched off, grounded in your own store — the
+                                           # operator twin of the techne_capabilities MCP tool
 techne serve                               # run as a stdio MCP server (non-Claude-Code clients)
 
 # Threads
@@ -298,6 +307,17 @@ techne session-end SESSION_ID [--summary TEXT]
 techne context [--project-path PATH] [--limit N]
                                            # emit a compact memory block for injecting into a
                                            # client's system prompt (e.g. opencode transform)
+
+# Instruments — measuring whether the read path earns its tokens
+techne audit [--since-days N] [--json]     # utilization audit (techne#329): which injection
+                                           # sources fire, at what token cost, and whether the
+                                           # injected item was used. Attribution is a PROXY and
+                                           # biased in both directions — read the caveat it prints
+techne profile [...]                       # profile the hot paths: import cost, thread detection
+techne prompts [...]                       # view/edit the maintenance prompts (reflect,
+                                           # consolidate, dream) — operator-owned, techne#219
+techne deposit [...]                       # deposit a raw observation into a FOREIGN techne store
+                                           # (cross-store handoff; not the normal capture path)
 
 # Memory hygiene (reflect · evidence · claims — no API key; uses your own model)
 #

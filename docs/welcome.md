@@ -26,6 +26,29 @@ itself on your own tokens.
 
 ---
 
+## Don't read this — ask it
+
+This guide is a snapshot; your install is the truth. techne can tell you what it does
+**on your machine**, using your own store:
+
+```
+techne capabilities
+```
+
+Or just ask your agent — *"what can techne do?"* — and it calls `techne_capabilities`
+and talks you through it.
+
+It answers the question a document cannot: not "what does techne have", but **what is
+switched off here, and what would turning it on buy you**, with the numbers from your
+own ledger attached. A fresh install reports **8 of 8 capabilities off**, because
+nearly everything below is opt-in by design. That is the honest starting point, and
+this guide exists to tell you which of the eight are worth it.
+
+It also reports the bundled workflows that aren't on your disk — something no config
+flag can see.
+
+---
+
 ## Your memory, in four verbs
 
 Everything techne does reduces to a loop. Learn the loop and you understand the tool.
@@ -158,6 +181,38 @@ techne is opinionated that a confident wrong memory is worse than no memory:
   merged text didn't quietly drop a load-bearing claim before you promote it.
 - **Freshness markers** — recalled memory anchored to a file that has since changed,
   moved, or been deleted comes back flagged *verify before relying*, not as fact.
+- **Uncertain memory is filtered, not merely ranked down** — an entry marked
+  `status='uncertain'` is something techne is on record as *not believing*. It stays
+  out of what gets injected rather than being quietly pushed to the bottom, so
+  "we wrote this down but don't trust it" is a state the store can actually express.
+- **The code graph marks its guesses** — when a call can't be resolved to a real
+  symbol, techne matches it by bare name, which can attach a call to an unrelated
+  function that happens to share it. Those rows now come back tagged
+  `resolution: name-inferred`, and `codex_blast_radius` tells you how many of its
+  results rest on a guess. Ask for only what it can prove with `only_proven`.
+- **Checks that can go green** — `techne doctor` and `techne fsck` name a remedy
+  command instead of just reporting a fault, because a check that can never pass
+  trains you to ignore it. `techne fsck` also refuses to guess: it will repair the
+  faults with one safe answer and hand you the ones that need a judgment call.
+
+### 🧹 Two workflows that ship with the tool
+
+Installed into `~/.claude/commands/` by `techne init`, and versioned **with** techne
+rather than through a skills marketplace — they drive its CLI and know the store
+layout of the release they came from, so a procedure written for 0.12 can be wrong
+for 0.15.
+
+- **`/self-care`** — the periodic hygiene pass. Sweeps the outbox, drains the rails,
+  prunes backups and snapshots, reclaims disk, and reschedules itself. Dry-run first;
+  the destructive halves are gated behind an explicit preview. One early run swept
+  4,447 outbox rows and reclaimed 843 MB.
+- **`/techne-promote`** — turns accumulated observations into durable knowledge. Your
+  agent answers techne's reflection prompts with its own model, so no API key is
+  involved. This is the one that grows the store.
+
+**An upgrade does not re-run `techne init`**, so after upgrading run `techne skills
+install` to refresh them. `techne skills status` tells you where you stand, and it
+never overwrites a copy you have edited yourself.
 
 ---
 
@@ -198,8 +253,13 @@ was the whole point.
 
 - **[README](../README.md)** — the full reference: every CLI command, config key, and
   the library API for embedding techne in a non-Claude-Code runtime.
+- **`techne capabilities`** — what is on, what is off, and what each would buy you,
+  measured against *your* store. Start here rather than with any document, this one
+  included.
 - **[`docs/modules.md`](./modules.md)** — a short sales-pitch for each module (what it
   does, why it's different, how to enable it).
+- **[`docs/mcp-tools.md`](./mcp-tools.md)** — every MCP tool your agent can call,
+  grouped by purpose. The complete agent-facing surface in one place.
 - **[`docs/codex-usage.md`](./codex-usage.md)** — when to reach for the code graph and,
   just as important, when *not* to.
 - **[`docs/memory-system-architecture.md`](./memory-system-architecture.md)** — how the
