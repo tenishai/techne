@@ -141,6 +141,11 @@ def render_drift_block(config) -> str:
     return "\n".join(lines)
 
 
+#: extension_state key prefix holding a session's deferred SessionStart context
+#: until its first UserPromptSubmit claims it (techne#562).
+DEFERRED_CONTEXT_KEY = "session_start:deferred"
+
+
 def main() -> None:
     run_ts = _now_iso()
     db_path = None
@@ -595,17 +600,44 @@ def _run_phases_2_to_9(
         # context FOR the model and stays where it is. (techne#452 / PR #457.)
         if operator_drift:
             banner = f"{banner}\n{operator_drift}"
-        print(
-            json.dumps(
-                {
-                    "systemMessage": banner,
-                    "hookSpecificOutput": {
-                        "hookEventName": "SessionStart",
-                        "additionalContext": summary,
-                    },
-                }
-            )
-        )
+        # DEFER THE MODEL-FACING HALF TO THE FIRST PROMPT (techne#562).
+        #
+        # 132,177 of 177,302 session_start tokens (74.5%) went to sessions that
+        # produced zero observations — programmatic launches that fire SessionStart
+        # and exit. No classifier can spot them in advance (project_path, identity
+        # and lifetime were all measured and rejected), but 94% of them never
+        # submit a prompt. So the saving comes from PLACEMENT: stash the context
+        # and let the first UserPromptSubmit claim it. A session that never asks a
+        # question never arrives to be charged.
+        #
+        # THE OPERATOR'S BANNER IS UNAFFECTED — it rides `systemMessage`, which the
+        # journal shows is a SEPARATE carrier (`hook_system_message`) from the
+        # `additionalContext` being deferred (`hook_additional_context`). The human
+        # still sees session state at startup; only the model's copy waits.
+        deferred = False
+        if config.hooks.defer_session_start_context and session_id:
+            try:
+                from techne.core.database import connect
+                from techne.core.extension_state import set_state
+
+                conn = connect(config.db_path)
+                try:
+                    set_state(conn, f"{DEFERRED_CONTEXT_KEY}:{session_id}", {"summary": summary})
+                    deferred = True
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001 — never cost the session its context
+                print(f"techne: could not defer session context: {e}", file=sys.stderr)
+
+        payload: dict = {"systemMessage": banner}
+        if not deferred:
+            # Stash failed, or deferral is off: emit inline exactly as before, so a
+            # broken stash degrades to the OLD behaviour rather than to no context.
+            payload["hookSpecificOutput"] = {
+                "hookEventName": "SessionStart",
+                "additionalContext": summary,
+            }
+        print(json.dumps(payload))
 
 
 if __name__ == "__main__":

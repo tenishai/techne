@@ -186,6 +186,27 @@ class HookConfig:
     #: Set it knowing that. Live traffic is ~99% vec_distance, so it rarely applies.
     per_turn_recall_floor_vec_distance: float | None = None
     per_turn_recall_floor_bm25: float | None = None
+    #: DEFER THE SESSION-START CONTEXT TO THE FIRST PROMPT (techne#562).
+    #: MEASURED 2026-08-18: 132,177 of 177,302 session_start tokens — 74.5% — went
+    #: to sessions that produced ZERO observations. 278 blind sessions vs 82 seeing.
+    #: They are programmatic short-lived launches (review agents in temp worktrees,
+    #: permission checks, headless one-shots) that fire SessionStart and exit.
+    #:
+    #: NO CLASSIFIER EXISTS TO SKIP THEM. Measured and rejected: project_path (the
+    #: top blind path is the MAIN repo, 163 of 278), agent_identity (Prudence is 15
+    #: of 278), and session lifetime — which looks decisive and is a DERIVED
+    #: ARTIFACT, since ended_at falls back to started_at when there are no
+    #: observations (the trap techne#580 already recorded).
+    #:
+    #: What IS true: 94% of blind sessions never submit a prompt. So the fix is
+    #: PLACEMENT, not detection — a session that never asks a question never
+    #: arrives to be charged. The operator's banner is unaffected either way: it
+    #: rides `systemMessage`, a separate carrier from the `additionalContext` this
+    #: defers (verified in the journal — hook_system_message vs
+    #: hook_additional_context are distinct attachment types).
+    #:
+    #: Cost of being wrong is one turn of latency on the context, not its loss.
+    defer_session_start_context: bool = True
     # Per-turn SEED nudge (techne#277): on each turn, remind the in-session
     # agent to techne_store a durable fact/decision/correction if one emerged —
     # the interactive complement to end-of-session reflect. Best-effort, rides
@@ -725,6 +746,7 @@ class Config:
                     if h.get("per_turn_recall_floor_bm25") is not None
                     else None
                 ),
+                defer_session_start_context=h.get("defer_session_start_context", True),
                 per_turn_seed=h.get("per_turn_seed", False),
                 startup_directive=h.get("startup_directive", False),
             )
@@ -892,6 +914,7 @@ class Config:
                     self.hooks.per_turn_recall_floor_vec_distance
                 ),
                 "per_turn_recall_floor_bm25": self.hooks.per_turn_recall_floor_bm25,
+                "defer_session_start_context": self.hooks.defer_session_start_context,
                 "per_turn_seed": self.hooks.per_turn_seed,
                 "startup_directive": self.hooks.startup_directive,
             },
