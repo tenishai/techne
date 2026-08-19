@@ -123,6 +123,12 @@ def _techne_search(args: dict, config: Config) -> dict:
         table=table,
         limit=limit,
         half_life_days=config.knowledge_confidence_half_life_days,
+        # techne#501: an EXPLICIT search SHOWS untrusted rows rather than hiding
+        # them — the reader asked for them. They arrive carrying `status`, so the
+        # agent sees "on record, not believed" instead of inferring trust from
+        # rank position. The automatic injection rails filter instead, because
+        # nobody CHOSE to look at what those surface.
+        include_uncertain=True,
     )
     return {"results": results, "count": len(results)}
 
