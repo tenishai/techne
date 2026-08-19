@@ -24,7 +24,10 @@ and they are biased in OPPOSITE directions — read them accordingly:
     is — without the agent ever typing the id. It is a floor, not a rate.
 
 A true counterfactual ("would it have happened WITHOUT the injection") remains
-techne#105 for both.
+UNMEASURED for both, and is tracked by techne#682. It was cited here as #105
+(the evidence gate, which asks whether an agent's CLAIM has ledger backing — a
+different question) and as #416 in _injection_log (which shipped the PROXY and
+deferred the judge).
 """
 
 from __future__ import annotations

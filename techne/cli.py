@@ -1519,7 +1519,7 @@ def audit(ctx, since_days, as_json):
     Two descriptive panels — which injection sources fire and at what token cost,
     and the read-vs-write balance per memory domain — plus two attribution panels
     ("was the injected item actually used"), one per rail family. Neither is
-    causation; the true counterfactual is techne#105.
+    causation; the true counterfactual is UNMEASURED and tracked by techne#682.
     """
     config = ctx.obj["config"]
     from techne.core.utilization import (
@@ -1683,7 +1683,7 @@ def audit(ctx, since_days, as_json):
         "directions: the edit rail's is PROXIMITY (over-credits — the edit may have "
         "happened anyway); recall's is CITATION (under-credits — memory is usually "
         'used without naming an id). The counterfactual ("would it have happened '
-        'WITHOUT the injection") is techne#105.'
+        'WITHOUT the injection") is unmeasured — techne#682.'
     )
 
 
