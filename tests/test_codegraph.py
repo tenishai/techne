@@ -220,3 +220,89 @@ def test_resolve_symbol_id_ambiguous_lists_candidates(db):
         "a.py::verify::function::1",
         "b.py::verify::method::5",
     }
+
+
+# --- techne#606: the name fallback can invent a call ------------------------
+
+
+def _vendored_import_shape(db):
+    """The exact shape from techne#606.
+
+    app/main.py does `from aiohttp.web import get` and calls get(). aiohttp is a
+    dependency, deliberately NOT indexed, so the edge lands with to_symbol NULL
+    and to_name='get'. app/util.py happens to define its own unrelated get().
+    Nothing connects handler to app/util.py::get — but the bare-name fallback
+    matches them, and the graph asserts a call that does not exist.
+    """
+    add_symbol(db, id="app/util.py::get::function::1", file="app/util.py", name="get", kind="function")
+    add_symbol(
+        db, id="app/main.py::handler::function::3", file="app/main.py", name="handler", kind="function"
+    )
+    add_edge(db, from_symbol="app/main.py::handler::function::3", to_name="get", kind="call")
+    return "app/util.py::get::function::1", "app/main.py::handler::function::3"
+
+
+def test_name_fallback_caller_is_marked_inferred_not_asserted(db):
+    """#606's invariant: the graph must not ASSERT a repo-local call it cannot
+    resolve. The permissive default still surfaces the edge — but it is now
+    labelled a guess rather than presented as fact."""
+    target, caller = _vendored_import_shape(db)
+
+    rows = callers(db, target)
+    assert [r["id"] for r in rows] == [caller]
+    assert rows[0]["resolution"] == "name-inferred"
+
+    # And the caller can ask for only what the graph can prove.
+    assert callers(db, target, include_inferred=False) == []
+
+
+def test_name_fallback_callee_is_marked_inferred(db):
+    target, caller = _vendored_import_shape(db)
+
+    rows = callees(db, caller)
+    assert [r["id"] for r in rows] == [target]
+    assert rows[0]["resolution"] == "name-inferred"
+    assert callees(db, caller, include_inferred=False) == []
+
+
+def test_resolved_edges_are_marked_exact(db):
+    """The other half of the contract: a real, resolved edge must NOT be tarred
+    with the inferred brush, and must survive include_inferred=False."""
+    _sym(db, "a", "main")
+    _sym(db, "b", "load")
+    add_edge(db, from_symbol="a", to_symbol="b", to_name="load", kind="call")
+
+    up = callers(db, "b")
+    assert [r["id"] for r in up] == ["a"]
+    assert up[0]["resolution"] == "exact"
+    assert [r["id"] for r in callers(db, "b", include_inferred=False)] == ["a"]
+
+    down = callees(db, "a")
+    assert [r["id"] for r in down] == ["b"]
+    assert down[0]["resolution"] == "exact"
+    assert [r["id"] for r in callees(db, "a", include_inferred=False)] == ["b"]
+
+
+def test_reachable_include_inferred_false_walks_only_proven_edges(db):
+    """Blast radius is where #606 bites hardest, because one invented hop drags
+    in that phantom's entire upstream cone. real → target is proven; phantom
+    reaches target only through the bare-name fallback."""
+    target, phantom = _vendored_import_shape(db)
+    add_symbol(db, id="app/real.py::caller::function::7", file="app/real.py", name="caller", kind="function")
+    add_edge(db, from_symbol="app/real.py::caller::function::7", to_symbol=target, to_name="get", kind="call")
+    # Something upstream of the phantom, to prove the cone collapses too.
+    add_symbol(db, id="app/main.py::boot::function::9", file="app/main.py", name="boot", kind="function")
+    add_edge(db, from_symbol="app/main.py::boot::function::9", to_symbol=phantom, to_name="handler", kind="call")
+
+    permissive = {r["id"] for r in reachable(db, target, direction="in")}
+    assert permissive == {phantom, "app/real.py::caller::function::7", "app/main.py::boot::function::9"}
+
+    proven = {r["id"] for r in reachable(db, target, direction="in", include_inferred=False)}
+    assert proven == {"app/real.py::caller::function::7"}
+
+
+def test_reachable_out_include_inferred_false_drops_invented_hop(db):
+    target, phantom = _vendored_import_shape(db)
+
+    assert {r["id"] for r in reachable(db, phantom, direction="out")} == {target}
+    assert reachable(db, phantom, direction="out", include_inferred=False) == []

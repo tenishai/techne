@@ -3793,12 +3793,22 @@ def codex_callers(ctx, symbol_id, repo, include_fixtures):
 
     _root, db_path = _active_codex_db(config, repo)
     symbol_id = _resolve_codex_symbol_or_exit(db_path, symbol_id)
-    for s in annotate_freshness(
+    rows = annotate_freshness(
         db_path, callers(db_path, symbol_id, exclude_fixtures=not include_fixtures)
-    ):
+    )
+    for s in rows:
         freshness = s.get("freshness", "unknown")
         marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
-        click.echo(f"  {s['id']}  {s['name']}  ({s['file']}){marker}")
+        # techne#606: '?' marks a caller matched only on the bare call name, which
+        # may not call this symbol at all. Shown, but not asserted.
+        guess = " ?" if s.get("resolution") == "name-inferred" else ""
+        click.echo(f"  {s['id']}  {s['name']}  ({s['file']}){marker}{guess}")
+    inferred = sum(1 for s in rows if s.get("resolution") == "name-inferred")
+    if inferred:
+        click.echo(
+            f"  ({inferred} of {len(rows)} marked ? — matched by call name only, "
+            "not a resolved symbol; may not be real callers)"
+        )
 
 
 @codex.command("blast-radius")
@@ -3820,8 +3830,14 @@ def codex_callers(ctx, symbol_id, repo, include_fixtures):
     default=False,
     help="Include tests/fixtures/** nodes (excluded by default; techne#325).",
 )
+@click.option(
+    "--only-proven",
+    is_flag=True,
+    default=False,
+    help="Only nodes reached through resolved edges, never a bare-name match (techne#606).",
+)
 @click.pass_context
-def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures):
+def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures, only_proven):
     """Transitive reachability via recursive CTE — in=dependents (blast radius), out=dependencies.
 
     The default `in` answers "what breaks if I change this symbol". SYMBOL_ID is
@@ -3839,7 +3855,21 @@ def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures):
         direction=direction,
         max_depth=depth,
         exclude_fixtures=not include_fixtures,
+        include_inferred=not only_proven,
     )
+    # techne#606: walk again over resolved edges only, so each node can say whether
+    # it is a proven dependent or one reached by a bare-name guess.
+    proven_ids = {
+        r["id"]
+        for r in reachable(
+            db_path,
+            symbol_id,
+            direction=direction,
+            max_depth=depth,
+            exclude_fixtures=not include_fixtures,
+            include_inferred=False,
+        )
+    }
     rows = annotate_freshness(db_path, raw)
     if not rows:
         click.echo("(nothing reachable)")
@@ -3847,7 +3877,14 @@ def codex_blast(ctx, symbol_id, repo, direction, depth, include_fixtures):
     for s in rows:
         freshness = s.get("freshness", "unknown")
         marker = f" [{freshness}]" if freshness not in ("fresh", "unknown") else ""
-        click.echo(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']}){marker}")
+        guess = "" if s["id"] in proven_ids else " ?"
+        click.echo(f"  d{s['depth']}  {s['name']}  [{s['kind']}]  ({s['file']}){marker}{guess}")
+    inferred = sum(1 for s in rows if s["id"] not in proven_ids)
+    if inferred:
+        click.echo(
+            f"  ({inferred} of {len(rows)} marked ? — reached only by matching a bare call "
+            "name; re-run with --only-proven for the resolved-only radius)"
+        )
 
 
 @codex.command("watch")
