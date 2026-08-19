@@ -100,7 +100,7 @@ class TestRerankerEventAtPreference:
         event_at: str | None = None,
     ) -> dict:
         return {
-            "type": "observation",
+            "source_table": "observation",
             "id": f"obs-{rank}",
             "rank": rank,
             "timestamp": timestamp,
@@ -146,8 +146,8 @@ class TestRerankerEventAtPreference:
         new_ts = datetime.now(timezone.utc).isoformat()
 
         rows = [
-            {"type": "t", "id": "old", "rank": -5.0, "event_at": None, "updated_at": old_ts, "timestamp": None},
-            {"type": "t", "id": "new", "rank": -5.0, "event_at": None, "updated_at": new_ts, "timestamp": None},
+            {"source_table": "t", "id": "old", "rank": -5.0, "event_at": None, "updated_at": old_ts, "timestamp": None},
+            {"source_table": "t", "id": "new", "rank": -5.0, "event_at": None, "updated_at": new_ts, "timestamp": None},
         ]
 
         result = _rerank(rows, limit=2, recency_weight=1.0, bm25_weight=0.0)

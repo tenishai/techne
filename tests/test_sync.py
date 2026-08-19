@@ -151,7 +151,7 @@ class TestFilesystemAdapter:
                 target="threads",
                 data={
                     "content": "thread entry",
-                    "type": "thread",
+                    "source_table": "thread",
                     "tags": "chat",
                     "confidence": "low",
                 },

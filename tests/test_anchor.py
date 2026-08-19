@@ -270,7 +270,7 @@ def test_annotate_freshness_unchanged_no_tag(tmp_path, git_repo):
     _repo, f = git_repo
     db = tmp_path / "techne.db"
     kid = knowledge.store(db, "fact", anchor=str(f))
-    rows = [{"type": "knowledge", "id": kid, "content": "fact"}]
+    rows = [{"source_table": "knowledge", "id": kid, "content": "fact"}]
     annotate_freshness(db, rows)
     assert "freshness" not in rows[0]  # unchanged → no special tag
 
@@ -280,7 +280,7 @@ def test_annotate_freshness_modified_tag(tmp_path, git_repo):
     db = tmp_path / "techne.db"
     kid = knowledge.store(db, "fact", anchor=str(f))
     f.write_text("changed\n")
-    rows = [{"type": "knowledge", "id": kid, "content": "fact"}]
+    rows = [{"source_table": "knowledge", "id": kid, "content": "fact"}]
     annotate_freshness(db, rows)
     assert rows[0]["freshness"]["state"] == "modified"
     assert "re-read before quoting" in rows[0]["freshness"]["tag"]
@@ -303,7 +303,7 @@ def test_non_anchored_no_freshness_check(tmp_path):
     assert row["anchor_path"] is None
     assert row["content_hash"] is None
 
-    rows = [{"type": "knowledge", "id": kid, "content": "behavioral: prefers concise replies"}]
+    rows = [{"source_table": "knowledge", "id": kid, "content": "behavioral: prefers concise replies"}]
     annotate_freshness(db, rows)
     assert "freshness" not in rows[0]
     assert "anchor_path" not in rows[0]

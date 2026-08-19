@@ -81,12 +81,12 @@ def _simple_hybrid(db_path: Path, query: str, table: str, limit: int = _LIMIT) -
     seen: set[tuple] = set()
     merged: list[dict] = []
     for r in vec_results:
-        key = (r["type"], r["id"])
+        key = (r["source_table"], r["id"])
         if key not in seen:
             seen.add(key)
             merged.append(r)
     for r in fts_results:
-        key = (r["type"], r["id"])
+        key = (r["source_table"], r["id"])
         if key not in seen:
             seen.add(key)
             merged.append(r)
@@ -112,11 +112,11 @@ def _rrf_hybrid(db_path: Path, query: str, table: str, limit: int = _LIMIT) -> l
     fts_channel: list[tuple[tuple, int]] = []
     vec_channel: list[tuple[tuple, int]] = []
     for rank, r in enumerate(fts_results, start=1):
-        key = (r["type"], r["id"])
+        key = (r["source_table"], r["id"])
         by_key.setdefault(key, r)
         fts_channel.append((key, rank))
     for rank, r in enumerate(vec_results, start=1):
-        key = (r["type"], r["id"])
+        key = (r["source_table"], r["id"])
         by_key.setdefault(key, r)
         vec_channel.append((key, rank))
 

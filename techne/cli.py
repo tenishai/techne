@@ -722,7 +722,10 @@ def search(ctx, query, table, limit):
 
     for r in results:
         source = r.get("source", "fts")
-        type_tag = r["type"]
+        # `source_table` since techne#579 — the row's own kind, when it has one,
+        # is `knowledge_type`. This surface wants the TABLE, because it is
+        # branching on which shape the row is (thread/observation/knowledge).
+        type_tag = r["source_table"]
         click.echo(f"  [{type_tag}] ({source})")
         if type_tag == "thread":
             click.echo(f"    {r.get('label', '')} — {r.get('summary', '')[:200]}")

@@ -265,7 +265,7 @@ def annotate_freshness(db_path, rows: Iterable[dict]) -> list[dict]:
 
     rows = list(rows)
     knowledge_ids = [
-        r["id"] for r in rows if r.get("type") == "knowledge" and r.get("id") is not None
+        r["id"] for r in rows if r.get("source_table") == "knowledge" and r.get("id") is not None
     ]
     if not knowledge_ids:
         return rows
@@ -289,7 +289,7 @@ def annotate_freshness(db_path, rows: Iterable[dict]) -> list[dict]:
         return rows
 
     for r in rows:
-        if r.get("type") != "knowledge":
+        if r.get("source_table") != "knowledge":
             continue
         meta = anchored.get(r.get("id"))
         if meta is None:  # non-anchored row — untouched

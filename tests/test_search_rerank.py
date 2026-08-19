@@ -48,7 +48,7 @@ class TestRerank:
     def _make_row(self, rank: float, ts: str | None = None) -> dict:
         """Build a minimal candidate dict as search_fts produces."""
         return {
-            "type": "knowledge",
+            "source_table": "knowledge",
             "id": f"k-{rank}",
             "rank": rank,
             "updated_at": ts,
@@ -87,8 +87,8 @@ class TestRerank:
         old_ts = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         new_ts = datetime.now(timezone.utc).isoformat()
         rows = [
-            {"type": "t", "id": "old", "rank": -5.0, "updated_at": old_ts},
-            {"type": "t", "id": "new", "rank": -5.0, "updated_at": new_ts},
+            {"source_table": "t", "id": "old", "rank": -5.0, "updated_at": old_ts},
+            {"source_table": "t", "id": "new", "rank": -5.0, "updated_at": new_ts},
         ]
         result = _rerank(rows, limit=2, recency_weight=0.3, bm25_weight=0.7)
         assert result[0]["id"] == "new"
