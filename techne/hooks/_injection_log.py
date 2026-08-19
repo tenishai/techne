@@ -24,7 +24,8 @@ Design:
   runtime), so ``_field`` reads both via ``.get``; its ``getattr`` fallback is
   defensive for any future non-dict row type.
 - **Attribution-ready** — ``hit_ids`` recorded so a later pass can join "was the
-  injected item actually used" (the counterfactual — deferred, techne#416).
+  injected item actually used". #416 shipped the behavioral PROXY over this and
+  deferred the judge; the true counterfactual is techne#682.
 - **Retrieval signal recorded** (techne#413) — ``hit_ids`` alone said WHAT was
   injected but not WHY. Each hit also carries its raw retrieval score, the scale
   that score is on, and which channel produced it, so retrieval quality is

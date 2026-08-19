@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-utilization
-updated: 2026-08-16
-anchor: techne/core/utilization.py sha=402701a2b6d32e1dd0a71075bbb18a54ccdfcb4f
+updated: 2026-08-19
+anchor: techne/core/utilization.py sha=8e21ea4e654e4be10466004c4d67ae0147c002c1
 ---
 # utilization — is the read path earning its tokens? (techne#329)
 
@@ -29,6 +29,7 @@ Live figures as of 2026-08-16 (all-time): 1,601 injections analysed, 28 cited in
 
 ## KNOWN GAPS
 
+- **THE COUNTERFACTUAL IS UNMEASURED AND IS techne#682 — not #105, not #416 (corrected 2026-08-19).** "Would it have happened WITHOUT the injection" is the question both attribution figures fail to answer, and four source sites claimed it was tracked, by two different numbers, neither of which is it. #105 is the EVIDENCE GATE (does an agent's CLAIM have ledger backing — a different question, and shipped); #416 is closed and built the PROXY, deferring the judge. One of the wrong pointers was in `techne audit`'s operator-facing output. Found while closing #105 for the #647 Tier 8 pass, which would otherwise have left three comments citing a closed issue for a live problem.
 - The LLM-judge half of #416 is deliberately unbuilt. The proxy is free, deterministic and CI-runnable; the judge costs model calls and should be reached for only where the proxy is ambiguous (relevant injection, turn happened not to act on it).
 - Nothing here scores the SESSION-START rail's prose blocks — only id-bearing hits.
 - `recall_attribution` was invisible to `codex_search` when this card was written (#595), which is part of why it was nearly rebuilt from scratch. If you are reading this card INSTEAD of grepping, that is the intended path (techne#812).
