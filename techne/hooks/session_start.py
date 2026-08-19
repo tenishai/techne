@@ -588,6 +588,31 @@ def _run_phases_2_to_9(
     _persist_hook_state(db_path, last_run=_now_iso(), error=hook_error)
 
     # ------------------------------------------------------------------
+    # Phase 8b: Capability invitation — ONCE per version (techne#638)
+    # ------------------------------------------------------------------
+    # An upgrade is the only moment "here is what is new" is both true and news.
+    # It rides the OPERATOR surface (systemMessage) for the same reason hook drift
+    # does: the party who can act on it is the human, not the model. That also
+    # means it survives the #562 deferral, which only moves the model's copy.
+    #
+    # ONE-SHOT, and that is the mitigation, not a nicety. #562 measured 74.5% of
+    # SessionStart's budget going to sessions that produce nothing; a recurring
+    # "let me tell you what I can do" is exactly how a real signal gets trained
+    # into noise. `invitation` records the version whether or not it speaks.
+    capability_invite = ""
+    try:
+        from techne.core.capabilities import invitation
+        from techne.core.database import connect
+
+        conn = connect(config.db_path)
+        try:
+            capability_invite = invitation(config, conn) or ""
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 — never break session start over a banner
+        print(f"techne: capability invitation skipped: {exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
     # Phase 9: Emit output
     # ------------------------------------------------------------------
     if output_parts:
@@ -600,6 +625,8 @@ def _run_phases_2_to_9(
         # context FOR the model and stays where it is. (techne#452 / PR #457.)
         if operator_drift:
             banner = f"{banner}\n{operator_drift}"
+        if capability_invite:
+            banner = f"{banner}\n> {capability_invite}"
         # DEFER THE MODEL-FACING HALF TO THE FIRST PROMPT (techne#562).
         #
         # 132,177 of 177,302 session_start tokens (74.5%) went to sessions that
