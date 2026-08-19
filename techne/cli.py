@@ -715,7 +715,10 @@ def search(ctx, query, table, limit):
         click.echo("techne not initialized. Run: techne init")
         return
 
-    results = do_search(config.db_path, query, table=table, limit=limit)
+    # techne#501: `techne search` is an EXPLICIT query, so untrusted rows are
+    # SHOWN and tagged rather than filtered. The automatic injection rails do the
+    # opposite — see the contract note in core/search.py.
+    results = do_search(config.db_path, query, table=table, limit=limit, include_uncertain=True)
     if not results:
         click.echo("No results.")
         return
@@ -726,7 +729,11 @@ def search(ctx, query, table, limit):
         # is `knowledge_type`. This surface wants the TABLE, because it is
         # branching on which shape the row is (thread/observation/knowledge).
         type_tag = r["source_table"]
-        click.echo(f"  [{type_tag}] ({source})")
+        # An untrusted row is LABELLED, not silently ranked lower (techne#501).
+        # `status` is the trust STATE; `confidence` answers the different question
+        # of how sure we were when we wrote it.
+        trust = " ⚠ UNCERTAIN" if r.get("status") == "uncertain" else ""
+        click.echo(f"  [{type_tag}]{trust} ({source})")
         if type_tag == "thread":
             click.echo(f"    {r.get('label', '')} — {r.get('summary', '')[:200]}")
         elif type_tag == "observation":

@@ -52,9 +52,9 @@ def _insert(
     """Store an entry then back-date / set status as needed for tests."""
     entry_id = store(db_path, content, type="fact", confidence=confidence)
     if status != "current" or confirmed_days_ago > 0:
-        confirmed_at = (
-            datetime.now(timezone.utc) - timedelta(days=confirmed_days_ago)
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        confirmed_at = (datetime.now(timezone.utc) - timedelta(days=confirmed_days_ago)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         conn = connect(db_path)
         try:
             conn.execute(
@@ -81,9 +81,9 @@ class TestArchiveScanCriteria:
         entry_id = _insert(
             db,
             "stale uncertain fact about an old API",
-            confidence="low",        # confidence_numeric=0.3; with decay+penalty → well below 0.1
+            confidence="low",  # confidence_numeric=0.3; with decay+penalty → well below 0.1
             status="uncertain",
-            confirmed_days_ago=400,   # well beyond the 180-day default window
+            confirmed_days_ago=400,  # well beyond the 180-day default window
         )
 
         archived = archive_scan(
@@ -115,14 +115,12 @@ class TestArchiveScanCriteria:
         )
         archive_scan(
             db,
-            confidence_floor=0.5,      # wide floor to catch it easily
+            confidence_floor=0.5,  # wide floor to catch it easily
             reaffirmation_window_days=30,
             half_life_days=30.0,
         )
         conn = connect(db)
-        row = conn.execute(
-            "SELECT status FROM knowledge WHERE content LIKE '%zxqvnm%'"
-        ).fetchone()
+        row = conn.execute("SELECT status FROM knowledge WHERE content LIKE '%zxqvnm%'").fetchone()
         conn.close()
         assert row["status"] == "archived"
 
@@ -137,7 +135,7 @@ class TestArchiveScanNegatives:
             db,
             "current entry even if old alpha1beta2",
             confidence="low",
-            status="current",        # NOT 'uncertain'
+            status="current",  # NOT 'uncertain'
             confirmed_days_ago=400,
         )
         archived = archive_scan(
@@ -160,7 +158,7 @@ class TestArchiveScanNegatives:
         entry_id = _insert(
             db,
             "uncertain but high-confidence entry gamma3delta4",
-            confidence="high",       # confidence_numeric=0.9 → eff_conf 0.45 with penalty
+            confidence="high",  # confidence_numeric=0.9 → eff_conf 0.45 with penalty
             status="uncertain",
             confirmed_days_ago=400,  # past the window, but decay is off below
         )
@@ -168,7 +166,7 @@ class TestArchiveScanNegatives:
             db,
             confidence_floor=DEFAULT_ARCHIVE_CONFIDENCE_FLOOR,  # 0.1
             reaffirmation_window_days=DEFAULT_ARCHIVE_REAFFIRMATION_WINDOW_DAYS,
-            half_life_days=0.0,      # decay disabled → floor is the only gate that matters
+            half_life_days=0.0,  # decay disabled → floor is the only gate that matters
         )
         assert not any(r["id"] == entry_id for r in archived), (
             "A high-confidence entry (eff_conf 0.45) must stay above the 0.1 floor"
@@ -182,7 +180,7 @@ class TestArchiveScanNegatives:
             "recently reaffirmed uncertain entry zeta6",
             confidence="low",
             status="uncertain",
-            confirmed_days_ago=10,   # < 180d default window
+            confirmed_days_ago=10,  # < 180d default window
         )
         archived = archive_scan(
             db,
@@ -206,7 +204,7 @@ class TestArchiveScanNegatives:
         )
         archived = archive_scan(
             db,
-            confidence_floor=0.9,    # even a very high floor
+            confidence_floor=0.9,  # even a very high floor
             reaffirmation_window_days=1,
             half_life_days=30.0,
         )
@@ -241,18 +239,14 @@ class TestArchivedExcludedFromEgress:
 
         # Manually flip to 'archived' (simulating what archive_scan() does).
         conn = connect(db)
-        conn.execute(
-            "UPDATE knowledge SET status = 'archived' WHERE id = ?", (entry_id,)
-        )
+        conn.execute("UPDATE knowledge SET status = 'archived' WHERE id = ?", (entry_id,))
         conn.commit()
         conn.close()
 
         # Must be absent after archiving.
         rows_after = select_tier0_injection(db, char_budget=10_000)
         ids_after = [r["id"] for r in rows_after]
-        assert entry_id not in ids_after, (
-            "Archived entry must be excluded from Tier-0 egress"
-        )
+        assert entry_id not in ids_after, "Archived entry must be excluded from Tier-0 egress"
 
     def test_non_archived_entries_unaffected_in_egress(self, tmp_path):
         """Archiving one entry does not remove unrelated entries from Tier-0."""
@@ -263,9 +257,7 @@ class TestArchivedExcludedFromEgress:
         archive_id = _insert(db, "archive this high-conf fact kappa10", confidence="high")
 
         conn = connect(db)
-        conn.execute(
-            "UPDATE knowledge SET status = 'archived' WHERE id = ?", (archive_id,)
-        )
+        conn.execute("UPDATE knowledge SET status = 'archived' WHERE id = ?", (archive_id,))
         conn.commit()
         conn.close()
 
@@ -299,7 +291,7 @@ class TestArchivedInExplicitSearch:
         # Archive it.
         archived = archive_scan(
             db,
-            confidence_floor=0.9,    # cast wide to catch it
+            confidence_floor=0.9,  # cast wide to catch it
             reaffirmation_window_days=30,
             half_life_days=30.0,
         )
@@ -313,9 +305,7 @@ class TestArchivedInExplicitSearch:
             limit=20,
         )
         result_ids = [r["id"] for r in results]
-        assert entry_id in result_ids, (
-            "Archived entry must still appear in explicit FTS search"
-        )
+        assert entry_id in result_ids, "Archived entry must still appear in explicit FTS search"
 
     def test_archived_entry_absent_from_tier0_but_in_search(self, tmp_path):
         """Full three-way assertion: archived state + absent from Tier-0 + present in search."""
@@ -326,7 +316,7 @@ class TestArchivedInExplicitSearch:
         entry_id = _insert(
             db,
             "unique_soft_archive_triple_check_mu12 old uncertain fact",
-            confidence="high",      # high-conf so it would normally appear in Tier-0
+            confidence="high",  # high-conf so it would normally appear in Tier-0
             status="uncertain",
             confirmed_days_ago=400,
         )
@@ -400,8 +390,7 @@ class TestRecallExclusionVsSearchInclusion:
             include_archived=False,
         )
         assert entry_id not in [r["id"] for r in recall_results], (
-            "Archived entry must be EXCLUDED from default recall "
-            "(search(include_archived=False))"
+            "Archived entry must be EXCLUDED from default recall (search(include_archived=False))"
         )
 
         # EXPLICIT search (default include_archived=True) — MUST INCLUDE.
@@ -446,9 +435,7 @@ class TestRecallExclusionVsSearchInclusion:
         )
 
         # _techne_search — EXPLICIT search — must still return it.
-        found = _techne_search(
-            {"query": "unique_mcp_recall_term_xi19", "table": "knowledge"}, cfg
-        )
+        found = _techne_search({"query": "unique_mcp_recall_term_xi19", "table": "knowledge"}, cfg)
         found_ids = [r["id"] for r in found["results"]]
         assert entry_id in found_ids, (
             "techne_search (explicit search) must still return archived entries"
@@ -471,16 +458,16 @@ class TestDecayFormulaDriftGuard:
         entry_id = _insert(
             db,
             "drift guard sampled uncertain row omicron20",
-            confidence="low",         # 0.3 base
+            confidence="low",  # 0.3 base
             status="uncertain",
-            confirmed_days_ago=250,   # past window, decayed but computable
+            confirmed_days_ago=250,  # past window, decayed but computable
         )
 
         # dry_run so the row's status stays 'uncertain' — effective_confidence()
         # applies the uncertain penalty, which archive_scan must also apply.
         candidates = archive_scan(
             db,
-            confidence_floor=1.0,     # floor=1.0 → every uncertain past-window row qualifies
+            confidence_floor=1.0,  # floor=1.0 → every uncertain past-window row qualifies
             reaffirmation_window_days=180,
             half_life_days=30.0,
             dry_run=True,
@@ -558,15 +545,13 @@ class TestUnarchive:
         conn.commit()
         conn.close()
 
-        assert entry_id not in [
-            r["id"] for r in select_tier0_injection(db, char_budget=50_000)
-        ]
+        assert entry_id not in [r["id"] for r in select_tier0_injection(db, char_budget=50_000)]
 
         unarchive(db, entry_id)
 
-        assert entry_id in [
-            r["id"] for r in select_tier0_injection(db, char_budget=50_000)
-        ], "Unarchived entry must reappear in Tier-0 egress"
+        assert entry_id in [r["id"] for r in select_tier0_injection(db, char_budget=50_000)], (
+            "Unarchived entry must reappear in Tier-0 egress"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -627,9 +612,7 @@ class TestArchiveConfig:
 
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(
-            yaml.dump(
-                {"archive": {"confidence_floor": 0.05, "reaffirmation_window_days": 90}}
-            )
+            yaml.dump({"archive": {"confidence_floor": 0.05, "reaffirmation_window_days": 90}})
         )
         cfg = Config.load(cfg_file)
         assert cfg.archive.confidence_floor == pytest.approx(0.05)
@@ -652,3 +635,87 @@ class TestArchiveConfig:
         reloaded = Config.load(cfg_path)
         assert reloaded.archive.confidence_floor == pytest.approx(0.07)
         assert reloaded.archive.reaffirmation_window_days == 120
+
+
+class TestUncertainIsAStateNotARankPenalty:
+    """techne#501 — `uncertain` filtered nothing; it only nudged rank.
+
+    `status` has a three-value vocabulary (current/uncertain/archived) and
+    `_cascade_uncertain` flips live dependents to `uncertain` when a trigger is
+    superseded. But on the read path only `archived` ever filtered. `uncertain`
+    fed `decay_score` as, in search.py's own words, "a tiebreak/penalty, not a
+    primary signal" — default weight 0.1.
+
+    So a memory we are ON RECORD AS NOT BELIEVING still surfaced, still injected,
+    and still read to the agent as true. Just slightly lower down.
+
+    That is the collapse the distinction exists to prevent: a confidence answers
+    "how sure" and belongs in ranking; a STATE answers "may this be acted on" and
+    belongs in a filter. techne already has `confidence` and `confidence_numeric`
+    doing the first job.
+
+    These mirror the archived invariant asserted above — default recall must not
+    surface it, explicit search must still return it — because that is the
+    precedent #501 asked to follow.
+    """
+
+    def _uncertain_entry(self, db, term: str) -> int:
+        from techne.core.database import connect
+        from techne.core.knowledge import store
+
+        entry_id = store(db, f"a memory about {term} we no longer believe", type="fact")
+        conn = connect(db)
+        conn.execute("UPDATE knowledge SET status = 'uncertain' WHERE id = ?", (entry_id,))
+        conn.commit()
+        conn.close()
+        return entry_id
+
+    def test_default_recall_does_not_surface_an_uncertain_entry(self, tmp_path):
+        """THE INVARIANT #501 NAMES. Automatic injection is where an unbelieved
+        memory does damage, because nobody chose to look at it."""
+        from techne.core.database import init_db
+        from techne.core.search import search
+
+        db = tmp_path / "t.db"
+        init_db(db).close()
+        entry_id = self._uncertain_entry(db, "unique_uncertain_term_zz501")
+
+        rows = search(db, "unique_uncertain_term_zz501", table="knowledge")
+
+        assert entry_id not in [r["id"] for r in rows], (
+            "default recall surfaced an entry whose status is `uncertain` — that is "
+            "a trust STATE being used as a rank penalty instead of a filter (#501)"
+        )
+
+    def test_explicit_search_still_returns_it_and_tags_it(self, tmp_path):
+        """Surface, do not hide: the reader ASKED. But it arrives labelled, so
+        trust is read off the tag rather than inferred from rank position."""
+        from techne.core.database import init_db
+        from techne.core.search import search
+
+        db = tmp_path / "t.db"
+        init_db(db).close()
+        entry_id = self._uncertain_entry(db, "unique_uncertain_term_zz502")
+
+        rows = search(db, "unique_uncertain_term_zz502", table="knowledge", include_uncertain=True)
+
+        hit = next((r for r in rows if r["id"] == entry_id), None)
+        assert hit is not None, "explicit search must still return an uncertain entry"
+        assert hit["status"] == "uncertain", (
+            "the row must carry its trust state, or the caller can only infer it "
+            "from rank — which is the defect"
+        )
+
+    def test_a_current_entry_is_unaffected(self, tmp_path):
+        """The filter must not become a general suppressor. 1091 of 1091 rows on
+        the live store are `current`, so a bug here would hide everything."""
+        from techne.core.database import init_db
+        from techne.core.knowledge import store
+        from techne.core.search import search
+
+        db = tmp_path / "t.db"
+        init_db(db).close()
+        entry_id = store(db, "a believed memory about unique_current_term_zz503", type="fact")
+
+        rows = search(db, "unique_current_term_zz503", table="knowledge")
+        assert entry_id in [r["id"] for r in rows], "a `current` row must still recall"
