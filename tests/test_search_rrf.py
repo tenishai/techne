@@ -104,7 +104,7 @@ def db_path(tmp_path: Path) -> Path:
 def test_search_use_vectors_false_returns_no_rrf_score(db_path, monkeypatch) -> None:
     """use_vectors=False is the legacy path — no RRF, no rrf_score field."""
     fake_fts = [
-        {"type": "knowledge", "id": 1, "content": "hello", "rank": -1.0},
+        {"source_table": "knowledge", "id": 1, "content": "hello", "rank": -1.0},
     ]
     monkeypatch.setattr(
         "techne.core.search.search_fts", lambda *a, **kw: fake_fts
@@ -118,7 +118,7 @@ def test_search_use_vectors_true_but_no_vec_results_falls_back(db_path, monkeypa
     """When vec returns nothing (extras not installed, etc.), falls back
     to FTS-only — preserves legacy behavior."""
     fake_fts = [
-        {"type": "knowledge", "id": 1, "content": "hello", "rank": -1.0},
+        {"source_table": "knowledge", "id": 1, "content": "hello", "rank": -1.0},
     ]
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
     monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: [])
@@ -135,12 +135,12 @@ def test_search_hybrid_vec_first_union(db_path, monkeypatch) -> None:
     ``fusion="vec_first"`` and NO ``rrf_score``.
     """
     fake_fts = [
-        {"type": "knowledge", "id": 1, "content": "a", "rank": -1.0},
-        {"type": "knowledge", "id": 2, "content": "b", "rank": -0.5},
+        {"source_table": "knowledge", "id": 1, "content": "a", "rank": -1.0},
+        {"source_table": "knowledge", "id": 2, "content": "b", "rank": -0.5},
     ]
     fake_vec = [
-        {"type": "knowledge", "id": 3, "content": "c", "distance": 0.1},
-        {"type": "knowledge", "id": 1, "content": "a", "distance": 0.2},
+        {"source_table": "knowledge", "id": 3, "content": "c", "distance": 0.1},
+        {"source_table": "knowledge", "id": 1, "content": "a", "distance": 0.2},
     ]
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
     monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
@@ -167,10 +167,10 @@ def test_search_hybrid_vec_first_union(db_path, monkeypatch) -> None:
 def test_search_hybrid_marks_match_source_per_channel(db_path, monkeypatch) -> None:
     """match_source reflects which channel(s) contributed."""
     fake_fts = [
-        {"type": "knowledge", "id": 1, "content": "a", "rank": -1.0},
+        {"source_table": "knowledge", "id": 1, "content": "a", "rank": -1.0},
     ]
     fake_vec = [
-        {"type": "knowledge", "id": 2, "content": "b", "distance": 0.1},
+        {"source_table": "knowledge", "id": 2, "content": "b", "distance": 0.1},
     ]
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
     monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
@@ -186,8 +186,8 @@ def test_search_hybrid_does_not_mutate_caller_dicts(db_path, monkeypatch) -> Non
     """Fusion must copy rows before stamping match_source / fusion so the
     underlying search_fts / search_vec results stay clean for any other
     caller."""
-    fake_fts_row = {"type": "knowledge", "id": 1, "content": "a", "rank": -1.0}
-    fake_vec_row = {"type": "knowledge", "id": 2, "content": "b", "distance": 0.1}
+    fake_fts_row = {"source_table": "knowledge", "id": 1, "content": "a", "rank": -1.0}
+    fake_vec_row = {"source_table": "knowledge", "id": 2, "content": "b", "distance": 0.1}
     fake_fts = [fake_fts_row]
     fake_vec = [fake_vec_row]
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
@@ -203,11 +203,11 @@ def test_search_hybrid_does_not_mutate_caller_dicts(db_path, monkeypatch) -> Non
 def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
     """Limit applies to the fused output when both channels return results."""
     fake_fts = [
-        {"type": "knowledge", "id": i, "content": str(i), "rank": -float(i)}
+        {"source_table": "knowledge", "id": i, "content": str(i), "rank": -float(i)}
         for i in range(1, 11)
     ]
     fake_vec = [
-        {"type": "knowledge", "id": i + 100, "content": str(i + 100), "distance": 0.1}
+        {"source_table": "knowledge", "id": i + 100, "content": str(i + 100), "distance": 0.1}
         for i in range(1, 11)
     ]
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
@@ -239,11 +239,11 @@ def test_vec_channel_preserves_knowledge_type_through_fusion(db_path, monkeypatc
     from techne.hooks.user_prompt_submit import _build_context
 
     fake_fts = [
-        {"type": "knowledge", "id": 1, "knowledge_type": "fact", "content": "a", "rank": -1.0}
+        {"source_table": "knowledge", "id": 1, "knowledge_type": "fact", "content": "a", "rank": -1.0}
     ]
     fake_vec = [
         {
-            "type": "knowledge",
+            "source_table": "knowledge",
             "id": 2,
             "knowledge_type": "decision",
             "content": "b",

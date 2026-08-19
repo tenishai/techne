@@ -128,7 +128,7 @@ def test_answer_no_context_contains_no_memory_message():
 
 def test_answer_with_context_rows_included():
     _CAPTURED.clear()
-    rows = [{"type": "knowledge", "id": 1, "content": "techne uses sqlite-vec"}]
+    rows = [{"source_table": "knowledge", "id": 1, "content": "techne uses sqlite-vec"}]
     answer("What vector store does techne use?", rows, _fake_gen)
     assert "sqlite-vec" in _CAPTURED[-1]
 
@@ -137,7 +137,7 @@ def test_answer_uncertain_row_flagged_in_prompt():
     _CAPTURED.clear()
     rows = [
         {
-            "type": "knowledge",
+            "source_table": "knowledge",
             "id": 2,
             "content": "the eval deploy path is /opt/eval/v1/logs",
             "uncertainty": {
@@ -155,7 +155,7 @@ def test_answer_uncertain_row_flagged_in_prompt():
 def test_answer_current_row_not_flagged():
     """A current (non-uncertain) row must not receive the [UNCERTAIN] marker."""
     _CAPTURED.clear()
-    rows = [{"type": "knowledge", "id": 3, "content": "canonical remote is github"}]
+    rows = [{"source_table": "knowledge", "id": 3, "content": "canonical remote is github"}]
     answer("What is the canonical remote?", rows, _fake_gen)
     prompt = _CAPTURED[-1]
     # The instructions mention "UNCERTAIN" in general; check only the memory

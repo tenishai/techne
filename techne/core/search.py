@@ -12,6 +12,30 @@ from techne.core.embeddings import _get_embedding_model
 from techne.core.knowledge import decay_score
 
 
+#: THE RESULT-ROW CONTRACT (techne#579), and why `type` is deliberately ABSENT.
+#:
+#: A search row carries TWO different notions of kind and they were once the same
+#: key, which made the wrong reading the obvious one:
+#:
+#:   source_table    — which table the row came from: thread | observation | knowledge
+#:   knowledge_type  — the knowledge row's OWN kind: fact | decision | procedure |
+#:                     evaluation | document_card | pattern. Knowledge rows only.
+#:
+#: `type` used to hold the FIRST of those, and it cost two live bugs. #565: the
+#: per-turn pull-only guard was written `[r for r in rows if r.get("type") not in
+#: PULL_ONLY_TYPES]` — it passed nothing and blocked nothing, because `type` was
+#: always the literal "knowledge". Only a fail-without-fix test caught it; review
+#: did not. #566: `_build_context` rendered `[{r.get("type")}]`, so EVERY injected
+#: line read `[knowledge]` regardless of kind, collapsing decision-vs-evaluation
+#: exactly where the agent decides how much to trust the line.
+#:
+#: `type` is REMOVED rather than kept as an alias. An alias preserves the trap for
+#: whoever reaches for the obvious name first, and the natural code being the
+#: broken code is the whole defect. Now a stale consumer raises KeyError at its own
+#: call site — loud, and at the right place — instead of silently comparing against
+#: a plausible wrong string.
+
+
 def _cosine_similarity(a, b) -> float:
     """Cosine similarity between two array-like objects. Returns 0.0 on zero vectors."""
     import numpy as np
@@ -218,14 +242,14 @@ def _rerank(
         # min-max spread. (techne#401 / #402 review — Prudence.)
         rank = r.get("rank")
         if rank is not None:
-            ranks_by_type.setdefault(r["type"], []).append(rank)
+            ranks_by_type.setdefault(r["source_table"], []).append(rank)
     for t, ranks in ranks_by_type.items():
         mn, mx = min(ranks), max(ranks)
         spread_by_type[t] = (mx, mx - mn)  # (max_r, spread); spread >= 0
 
     for r in candidates:
         rank = r.get("rank")
-        if rank is None or r["type"] not in spread_by_type:
+        if rank is None or r["source_table"] not in spread_by_type:
             # No BM25 signal (a pure vector-only hit reaching the merge path).
             # 0.0 is the per-type FLOOR on the [0,1] norm scale, not a midpoint,
             # so such a row leans entirely on recency/decay and can be demoted
@@ -236,7 +260,7 @@ def _rerank(
             # FTS rank (Layer 1). (techne#401 / #402 review — Prudence.)
             r["_norm_bm25"] = 0.0
             continue
-        max_r, spread = spread_by_type[r["type"]]
+        max_r, spread = spread_by_type[r["source_table"]]
         # norm_bm25=1 for this table's best match (most-negative rank), 0 for worst.
         r["_norm_bm25"] = (max_r - rank) / spread if spread else 1.0
 
@@ -302,7 +326,7 @@ def _fts_match_rows(
         for r in rows:
             results.append(
                 {
-                    "type": "thread",
+                    "source_table": "thread",
                     "id": r["id"],
                     "label": r["label"],
                     "summary": r["summary"][:500],
@@ -329,7 +353,7 @@ def _fts_match_rows(
         for r in rows:
             results.append(
                 {
-                    "type": "observation",
+                    "source_table": "observation",
                     "id": r["id"],
                     "content": r["content"][:500],
                     "tool_name": r["tool_name"],
@@ -363,7 +387,7 @@ def _fts_match_rows(
         for r in rows:
             results.append(
                 {
-                    "type": "knowledge",
+                    "source_table": "knowledge",
                     "id": r["id"],
                     "knowledge_type": r["type"],
                     "content": r["content"][:500],
@@ -611,7 +635,7 @@ def search_vec(
                     if thread:
                         results.append(
                             {
-                                "type": "thread",
+                                "source_table": "thread",
                                 "id": thread[0],
                                 "label": thread[1],
                                 "summary": thread[2][:500],
@@ -640,7 +664,7 @@ def search_vec(
                     if obs:
                         results.append(
                             {
-                                "type": "observation",
+                                "source_table": "observation",
                                 "id": obs[0],
                                 "content": obs[1][:500],
                                 "tool_name": obs[2],
@@ -677,7 +701,7 @@ def search_vec(
                     if k:
                         results.append(
                             {
-                                "type": "knowledge",
+                                "source_table": "knowledge",
                                 "id": k[0],
                                 "knowledge_type": k[1],
                                 "content": k[2][:500],
@@ -808,12 +832,12 @@ def search(
     # NB: _rrf_fuse / RRF_K are intentionally retained as a library primitive —
     # the #399 ablation's RRF arm and a possible single-channel-floor fallback
     # (#401 candidate 4) reference them; they are simply no longer the default.
-    fts_by_key = {(r["type"], r["id"]): r for r in fts_results}
+    fts_by_key = {(r["source_table"], r["id"]): r for r in fts_results}
     seen: set[tuple] = set()
     out: list[dict] = []
 
     for r in vec_results:
-        key = (r["type"], r["id"])
+        key = (r["source_table"], r["id"])
         if key in seen:
             continue
         seen.add(key)
@@ -834,7 +858,7 @@ def search(
         out.append(row)
 
     for r in fts_results:
-        key = (r["type"], r["id"])
+        key = (r["source_table"], r["id"])
         if key in seen:
             continue
         seen.add(key)

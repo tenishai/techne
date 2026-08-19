@@ -83,7 +83,7 @@ class TestSearchFtsObservations:
         results = search_fts(db_path, "zymurgy", table="observations")
 
         assert len(results) >= 1
-        types = [r["type"] for r in results]
+        types = [r["source_table"] for r in results]
         assert "observation" in types
         contents = [r["content"] for r in results]
         assert any("zymurgy" in c for c in contents)
@@ -105,7 +105,7 @@ class TestSearchFtsObservations:
 
         assert len(results) >= 1
         r = results[0]
-        assert r["type"] == "observation"
+        assert r["source_table"] == "observation"
         for key in ("id", "content", "tool_name", "session_id", "timestamp", "tier", "rank"):
             assert key in r, f"Missing key: {key}"
 
@@ -118,7 +118,7 @@ class TestSearchFtsKnowledge:
         results = search_fts(db_path, "quidditch", table="knowledge")
 
         assert len(results) >= 1
-        types = [r["type"] for r in results]
+        types = [r["source_table"] for r in results]
         assert "knowledge" in types
         contents = [r["content"] for r in results]
         assert any("quidditch" in c for c in contents)
@@ -142,7 +142,7 @@ class TestSearchFtsKnowledge:
 
         assert len(results) >= 1
         r = results[0]
-        assert r["type"] == "knowledge"
+        assert r["source_table"] == "knowledge"
         for key in (
             "id",
             "knowledge_type",
@@ -182,10 +182,10 @@ class TestRerankCrossTableNormalization:
         # type A (observation): large-magnitude BM25 (-10..-1);
         # type B (knowledge): small-magnitude BM25 (-0.5..-0.1).
         candidates = [
-            {"type": "observation", "id": "A_best", "rank": -10.0},
-            {"type": "observation", "id": "A_worst", "rank": -1.0},
-            {"type": "knowledge", "id": "B_best", "rank": -0.5},
-            {"type": "knowledge", "id": "B_worst", "rank": -0.1},
+            {"source_table": "observation", "id": "A_best", "rank": -10.0},
+            {"source_table": "observation", "id": "A_worst", "rank": -1.0},
+            {"source_table": "knowledge", "id": "B_best", "rank": -0.5},
+            {"source_table": "knowledge", "id": "B_worst", "rank": -0.1},
         ]
         # recency_weight=0 isolates the BM25 component; bm25_weight=1.
         out = _rerank(candidates, limit=4, recency_weight=0.0, bm25_weight=1.0, mmr_lambda=0.0)
@@ -199,9 +199,9 @@ class TestRerankCrossTableNormalization:
     def test_single_table_unchanged(self):
         # One source table → one group → global == per-table normalisation.
         candidates = [
-            {"type": "knowledge", "id": "k1", "rank": -8.0},
-            {"type": "knowledge", "id": "k2", "rank": -4.0},
-            {"type": "knowledge", "id": "k3", "rank": -1.0},
+            {"source_table": "knowledge", "id": "k1", "rank": -8.0},
+            {"source_table": "knowledge", "id": "k2", "rank": -4.0},
+            {"source_table": "knowledge", "id": "k3", "rank": -1.0},
         ]
         out = _rerank(candidates, limit=3, recency_weight=0.0, bm25_weight=1.0, mmr_lambda=0.0)
         assert [r["id"] for r in out] == ["k1", "k2", "k3"]
@@ -238,7 +238,7 @@ class TestSearchFtsAll:
         results = search_fts(db_path, shared_term, table="all")
 
         assert len(results) >= 2
-        result_types = {r["type"] for r in results}
+        result_types = {r["source_table"] for r in results}
         # Should have at least two distinct types
         assert len(result_types) >= 2
 
@@ -756,7 +756,7 @@ class TestSearchVec:
         # Collect (type, id) pairs and check for duplicates
         seen = set()
         for r in results:
-            key = (r["type"], r.get("id"))
+            key = (r["source_table"], r.get("id"))
             assert key not in seen, f"Duplicate result found: {key}"
             seen.add(key)
 
@@ -1139,7 +1139,7 @@ class TestSearchNoMutation:
 
         fts_after = search_fts(db_path, "mutation", table="threads", limit=5)
         for orig, after in zip(original_source_values, fts_after):
-            assert orig.get("type") == after.get("type")
+            assert orig.get("source_table") == after.get("source_table")
             # The 'source' column (provenance) must not have been overwritten
             assert orig.get("source") == after.get("source")
 
@@ -1182,10 +1182,102 @@ class TestVecChannelCarriesKnowledgeType:
 
         results = search(db_path, "vector retrieval preserve kind", use_vectors=True)
 
-        knowledge_rows = [r for r in results if r.get("type") == "knowledge"]
+        knowledge_rows = [r for r in results if r.get("source_table") == "knowledge"]
         assert knowledge_rows, "no knowledge row came back; the query matched nothing"
         assert all(r.get("knowledge_type") for r in knowledge_rows), (
             "a knowledge row reached a consumer without its own kind — "
             "every line it renders would read [knowledge]"
         )
         assert any(r.get("knowledge_type") == "decision" for r in knowledge_rows)
+
+
+class TestResultRowContract:
+    """techne#579 — the row contract that cost two live bugs before it was named.
+
+    `search()` set `type` to the SOURCE TABLE, never the knowledge row's own kind.
+    Nothing errored; the value was just wrong in a way that read as plausible, and
+    the natural code was the broken code:
+
+      #565 — the per-turn pull-only guard shipped as
+             `[r for r in rows if r.get("type") not in PULL_ONLY_TYPES]`.
+             It passed nothing and blocked nothing, because `type` was always the
+             literal "knowledge". A fail-without-fix test caught it; review did not.
+      #566 — `_build_context` rendered `[{r.get("type")}]`, so EVERY injected line
+             read `[knowledge]` regardless of kind, collapsing decision-vs-evaluation
+             exactly where the agent decides how much to trust the line.
+
+    `type` is REMOVED rather than aliased, deliberately: an alias keeps the trap for
+    whoever reaches for the obvious name first. A stale consumer now raises KeyError
+    at its own call site instead of silently comparing against a wrong string.
+    """
+
+    def test_no_result_row_carries_a_bare_type_key(self, db_path):
+        """The guard. If `type` returns, #565's shape becomes writable again."""
+        from techne.core.state import add_observation, ensure_session
+
+        store_knowledge(db_path, "a durable fact about contracts", type="fact")
+        ensure_session(db_path, "s-579")
+        add_observation(db_path, "s-579", "Bash", "an observation about contracts")
+
+        results = search(db_path, "contracts", table="all")
+
+        assert results, "precondition: the query matched something"
+        offenders = [r for r in results if "type" in r]
+        assert not offenders, (
+            "a search result carries a bare `type` key again (techne#579). It is "
+            "ambiguous between the source table and the row's own kind, and that "
+            "ambiguity cost #565 and #566. Use `source_table` or `knowledge_type`."
+        )
+
+    def test_source_table_names_the_table_and_knowledge_type_names_the_kind(self, db_path):
+        """Both halves, on one query, so their DIFFERENCE is pinned rather than
+        each being asserted in isolation."""
+        from techne.core.state import add_observation, ensure_session
+
+        store_knowledge(db_path, "a decision about retrieval contracts", type="decision")
+        ensure_session(db_path, "s-579b")
+        add_observation(db_path, "s-579b", "Bash", "an observation about retrieval")
+
+        results = search(db_path, "retrieval", table="all")
+        by_table = {}
+        for r in results:
+            by_table.setdefault(r["source_table"], []).append(r)
+
+        assert "knowledge" in by_table, "no knowledge row came back"
+        k = by_table["knowledge"][0]
+        assert k["source_table"] == "knowledge", "source_table must name the TABLE"
+        assert k["knowledge_type"] == "decision", (
+            "knowledge_type must name the ROW'S OWN KIND — this is the distinction "
+            "the old single `type` key destroyed"
+        )
+        assert k["source_table"] != k["knowledge_type"], (
+            "the two fields must be able to disagree; if they cannot, the contract "
+            "has collapsed back into one value"
+        )
+
+        for r in by_table.get("observation", []):
+            assert r.get("knowledge_type") is None, (
+                "only knowledge rows have a kind; an observation claiming one would "
+                "invite the same conflation from the other direction"
+            )
+
+    def test_the_565_filter_shape_is_now_impossible_to_write_silently(self, db_path):
+        """#565's exact broken line, re-run against today's rows.
+
+        It filtered on `type` against PULL_ONLY_TYPES and matched nothing, because
+        `type` held a table name. That line now raises instead of quietly passing
+        everything — which is the entire point of removing the key rather than
+        aliasing it.
+        """
+        from techne.core.knowledge import PULL_ONLY_TYPES
+
+        store_knowledge(db_path, "a pull-only document row", type="document")
+        results = search(db_path, "pull-only document", table="knowledge")
+        assert results, "precondition: the row is findable"
+
+        with pytest.raises(KeyError):
+            _ = [r for r in results if r["type"] not in PULL_ONLY_TYPES]
+
+        # And the CORRECT spelling actually discriminates, rather than passing all.
+        excluded = [r for r in results if r.get("knowledge_type") in PULL_ONLY_TYPES]
+        assert excluded, "the document row must be identifiable by its real kind"

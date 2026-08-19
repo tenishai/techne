@@ -53,11 +53,11 @@ def _all_rows(db_path: Path, cap: int = 500) -> list[dict]:
     try:
         rows: list[dict] = []
         for r in conn.execute("SELECT id, content FROM knowledge"):
-            rows.append({"type": "knowledge", "id": r["id"], "content": r["content"]})
+            rows.append({"source_table": "knowledge", "id": r["id"], "content": r["content"]})
         for r in conn.execute("SELECT id, content FROM observations"):
-            rows.append({"type": "observation", "id": r["id"], "content": r["content"]})
+            rows.append({"source_table": "observation", "id": r["id"], "content": r["content"]})
         for r in conn.execute("SELECT id, label, summary FROM threads"):
-            rows.append({"type": "thread", "id": r["id"], "label": r["label"],
+            rows.append({"source_table": "thread", "id": r["id"], "label": r["label"],
                          "summary": r["summary"]})
         # No silent cap: if the corpus ever outgrows `cap`, raw-dump would drop rows
         # (maybe gold), silently shifting the precision ratio + token_cost. Fail loud.

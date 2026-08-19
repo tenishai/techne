@@ -19,7 +19,7 @@ def score_task(
 ) -> tuple[float, dict]:
     """Score one task's retrieved results. Returns (score, detail)."""
     gold_ids = {gold_resolver[k] for k in task.get("gold_keys", [])}
-    got_ids = {f"{r['type']}:{r['id']}" for r in retrieved}
+    got_ids = {f"{r['source_table']}:{r['id']}" for r in retrieved}
     hits = gold_ids & got_ids
     recall = len(hits) / len(gold_ids) if gold_ids else 1.0
 
@@ -118,7 +118,7 @@ def score_answer(
 # equally). These are pure, order-sensitive metrics for the retrieval-gate:
 # recall@k truncates to the top k before scoring, and mrr rewards hits that
 # rank higher. All three take `ranked: list[str]` — result ids in the exact
-# order search() returned them, built as f"{r['type']}:{r['id']}" (same
+# order search() returned them, built as f"{r['source_table']}:{r['id']}" (same
 # pattern as score_task's got_ids) — never raw dict rows, so these stay pure
 # and don't re-derive the id-building convention.
 # ---------------------------------------------------------------------------

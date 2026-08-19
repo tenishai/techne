@@ -146,7 +146,7 @@ def test_annotate_uncertain_marks_uncertain_rows(db):
     """A recalled row whose status is uncertain gains an `uncertainty` payload —
     the recall-side mirror of #90's annotate_freshness."""
     kid = _make_uncertain(db)
-    rows = [{"type": "knowledge", "id": kid, "content": "derived fact"}]
+    rows = [{"source_table": "knowledge", "id": kid, "content": "derived fact"}]
     annotate_uncertain(db, rows)
     assert "uncertainty" in rows[0]
     assert rows[0]["uncertainty"]["state"] == "uncertain"
@@ -155,7 +155,7 @@ def test_annotate_uncertain_marks_uncertain_rows(db):
 
 def test_annotate_uncertain_leaves_current_rows_clean(db):
     kid = store(db, "a current fact", type="fact")
-    rows = [{"type": "knowledge", "id": kid, "content": "a current fact"}]
+    rows = [{"source_table": "knowledge", "id": kid, "content": "a current fact"}]
     annotate_uncertain(db, rows)
     assert "uncertainty" not in rows[0]
 
@@ -163,7 +163,7 @@ def test_annotate_uncertain_leaves_current_rows_clean(db):
 def test_annotate_uncertain_ignores_non_knowledge_rows(db):
     """Observation/thread rows are never touched, even if an id collides."""
     kid = _make_uncertain(db)
-    rows = [{"type": "observation", "id": kid, "content": "an observation"}]
+    rows = [{"source_table": "observation", "id": kid, "content": "an observation"}]
     annotate_uncertain(db, rows)
     assert "uncertainty" not in rows[0]
 
@@ -171,7 +171,7 @@ def test_annotate_uncertain_ignores_non_knowledge_rows(db):
 def test_annotate_uncertain_reconfirm_clears_marker(db):
     kid = _make_uncertain(db)
     assert reconfirm(db, kid) is True
-    rows = [{"type": "knowledge", "id": kid, "content": "derived fact"}]
+    rows = [{"source_table": "knowledge", "id": kid, "content": "derived fact"}]
     annotate_uncertain(db, rows)
     assert "uncertainty" not in rows[0]  # reconfirmed → current → no marker
 
