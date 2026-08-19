@@ -19,6 +19,64 @@ def main(ctx):
 
 
 @main.command()
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw report.")
+@click.pass_context
+def capabilities(ctx, as_json):
+    """What techne can do here, and what is switched off (techne#638).
+
+    The operator-facing twin of the techne_capabilities MCP tool. Same report;
+    this one renders it, the agent narrates it. Exists so "what is off on this
+    box" is answerable without an agent in the loop.
+    """
+    import json as _json
+
+    from techne.core.capabilities import capability_report
+
+    report = capability_report(ctx.obj["config"])
+    if as_json:
+        click.echo(_json.dumps(report, indent=2, default=str))
+        return
+
+    store = report["store"]
+    click.echo(f"techne {report['version']}")
+    click.echo(
+        f"  {store['observations']} observations · {store['knowledge']} knowledge · "
+        f"{store['sessions']} sessions · {store['identity']} identity"
+    )
+    if store["codex_repos"]:
+        click.echo(f"  {store['codex_symbols']} symbols indexed across {store['codex_repos']} repo(s)")
+    click.echo(f"  search: {store['vectors']}")
+    click.echo("")
+
+    on = [c for c in report["capabilities"] if c["on"]]
+    off = [c for c in report["capabilities"] if not c["on"]]
+    if on:
+        click.echo(f"ON ({len(on)})")
+        for c in on:
+            click.echo(f"  ✓ {c['flag']}  — {c['title']}")
+        click.echo("")
+    if off:
+        click.echo(f"OFF ({len(off)}) — each line goes in config.yaml")
+        for c in off:
+            click.echo(f"  ✗ {c['flag']}  — {c['title']}")
+            click.echo(f"      {c['buys']}")
+            if c["evidence"]:
+                click.echo(f"      on this install: {c['evidence']}")
+            click.echo("      enable:")
+            for line in c["enable"].splitlines():
+                click.echo(f"        {line}")
+        click.echo("")
+
+    click.echo("Bundled workflows")
+    for w in report["workflows"]:
+        mark = "✓" if w["state"] == "current" else "✗"
+        detail = f"  ({w['detail']})" if w["detail"] else ""
+        click.echo(f"  {mark} {w['name']}: {w['state']}{detail}")
+    if report["install_hint"]:
+        click.echo(f"\n{report['install_hint']}")
+
+
+@main.command()
 @click.pass_context
 def status(ctx):
     """Show current state: active threads, session info, database stats."""

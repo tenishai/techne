@@ -705,6 +705,20 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "techne_capabilities",
+        "description": (
+            "What techne can do on THIS install, and what is switched OFF — grounded in "
+            "the user's own store. Call this when the user asks what techne is, what it "
+            "can do, what changed after an upgrade, or why a feature they heard about "
+            "does not seem to happen. Returns data, not prose: narrate it as a short "
+            "conversation, lead with what is off and what it would buy THEM, and quote "
+            "the evidence counts — they are real numbers from their ledger. Also reports "
+            "bundled workflows that are ABSENT FROM DISK, which no config flag can "
+            "reveal. Not a feature list; do not read it out verbatim."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "techne_recall",
         "description": (
             "Call this before relying on an assumption about this project, person, or past "
@@ -1510,6 +1524,19 @@ def _codex_search(args: dict, config: Config) -> dict:
     return result
 
 
+def _techne_capabilities(args: dict, config: Config) -> dict:
+    """What is on, what is off, and what is not installed (techne#638).
+
+    Vendor-neutral by construction: this returns structured data and the client's
+    model does the narrating, so it works in any MCP client rather than being a
+    Claude-only skill (techne#499). It also needs no new install step — techne
+    already registers its MCP server.
+    """
+    from techne.core.capabilities import capability_report
+
+    return capability_report(config)
+
+
 def _codex_blast_radius(args: dict, config: Config) -> dict:
     """Transitive reachability for a symbol, scoped to the active repo (techne#209)."""
     from techne.core.codegraph import (
@@ -1954,6 +1981,7 @@ TOOL_HANDLERS = {
     "techne_recall": _techne_recall,
     "codex_search": _codex_search,
     "codex_blast_radius": _codex_blast_radius,
+    "techne_capabilities": _techne_capabilities,
     "pattern_search": _pattern_search,
     "pattern_related": _pattern_related,
     "techne_reflect_emit": _techne_reflect_emit,
