@@ -1314,7 +1314,10 @@ def has_direct_match(db_path: Path, query: str, table: SearchTable = "all") -> b
     row contains all these terms — which is exactly the "we have no direct experience
     of this" that S5 has to tell apart from "we know nothing" and "it is documented".
 
-    One `MATCH` with `LIMIT 1`; it does not rank, rerank, or fetch content.
+    Scoped by `table`, which defaults to `"all"` and therefore fans across every FTS
+    table — callers wanting the S5 semantics must pass `table="knowledge"` explicitly.
+    `_fts_match_rows` builds ordinary result rows, so this does select content and does
+    order by rank; the cost is bounded by `LIMIT 1` rather than by doing less work.
     """
     fts_query = prepare_fts_query(query)
     if fts_query is None:

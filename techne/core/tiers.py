@@ -54,8 +54,7 @@ class Rung:
 
 #: The ladder, in order. Order is from knowledge#1085 and is not arbitrary:
 #: 1-3 are the same question against widening scopes of experience, which is what
-#: makes cross-tier contradiction detection meaningful (S3). 4 changes the
-#: question.
+#: makes cross-tier contradiction detection meaningful (S3). 4 changes the question.
 LADDER: tuple[Rung, ...] = (
     Rung(1, "memory", "what this agent has learned here"),
     Rung(2, "archivist:local", "what the team knows, on this machine"),
@@ -70,6 +69,13 @@ STATE_HIT = "hit"
 STATE_EMPTY = "empty"
 STATE_UNCONFIGURED = "unconfigured"
 STATE_UNAVAILABLE = "unavailable"
+
+#: How tier 2 is bound, as a THREE-valued thing. It was a bool, and the missing
+#: third value was the default install: `standalone: True` means no archivist exists
+#: at all, which is neither "local mirror" nor "some other store".
+ARCHIVIST_ABSENT = "absent"
+ARCHIVIST_LOCAL = "local"
+ARCHIVIST_STORE = "store"
 
 #: S5's three distinguishable outcomes, plus the ordinary one.
 OUTCOME_FOUND = "found"
@@ -191,7 +197,7 @@ def build_reports(
     rows: list[dict],
     connections: dict,
     archivist_name: str,
-    archivist_is_local: bool,
+    archivist_binding: str,
     librarian_available: bool,
 ) -> list[RungReport]:
     """Report every rung, hit or not — the S1 requirement in one function.
@@ -222,7 +228,24 @@ def build_reports(
             # deliverable, and an agent that only ever reads team knowledge through
             # an archivist call keeps that habit when a real team store appears
             # behind it. Naming the sharing is honest; hiding the rung is not.
-            if archivist_is_local:
+            if archivist_binding == ARCHIVIST_ABSENT:
+                # THE DEFAULT INSTALL LANDS HERE (`standalone: True`), and a boolean
+                # could not say so. Reporting `empty` against `store:archivist` was a
+                # POSITIVE claim that a team store was consulted and had nothing —
+                # strictly worse than the flat list this replaces, because an omission
+                # is silent while a false `empty` recruits the reader. Tier 3 always
+                # got this right two branches down; tier 2 could not, because the
+                # parameter had no way to express "there is no archivist".
+                reports.append(
+                    RungReport(
+                        rung,
+                        STATE_UNCONFIGURED,
+                        "none",
+                        0,
+                        detail="no archivist is configured (standalone)",
+                    )
+                )
+            elif archivist_binding == ARCHIVIST_LOCAL:
                 reports.append(
                     RungReport(
                         rung,
@@ -230,8 +253,8 @@ def build_reports(
                         "local:knowledge",
                         counts[1],
                         detail=(
-                            "bound to the same local knowledge as tier 1 (n=1) — one store, "
-                            "two rungs, no second file and no duplicated rows"
+                            "bound to the same local knowledge as tier 1 (n=1) — one store "
+                            "read once, reported as two rungs; the rows below are tier 1's"
                         ),
                     )
                 )
@@ -276,6 +299,14 @@ def annotate_rows(rows: list[dict], archivist_name: str) -> list[dict]:
     by_number = {r.number: r for r in LADDER}
     for row in rows:
         n = tier_of(row, archivist_name)
-        row["tier"] = n
-        row["tier_name"] = by_number[n].name
+        # `recall_tier`, NOT `tier`: observation rows already carry a `tier` column
+        # (hot|warm|cold, database.py) which search surfaces verbatim, so writing an
+        # int 1-4 there replaced an existing key AND changed its meaning. That is the
+        # #579 one-key-two-meanings shape — documented at length in the very card this
+        # change re-blesses, where the chosen fix was to REMOVE the ambiguous name so a
+        # stale consumer fails loudly rather than compare against a plausible wrong
+        # value. Colliding with it again, silently, in a shape about to be frozen, is
+        # the one thing that card asks the next person not to do.
+        row["recall_tier"] = n
+        row["recall_tier_name"] = by_number[n].name
     return rows

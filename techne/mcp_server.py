@@ -399,7 +399,7 @@ def _with_ladder(
     rows: list[dict],
     fan_out_connections: dict,
     archivist_name: str,
-    archivist_is_local: bool,
+    archivist_binding: str,
     extra: dict,
 ) -> dict:
     """Attach the stated ladder to a recall response (techne#552, S1/S4/S5).
@@ -422,7 +422,7 @@ def _with_ladder(
             rows=rows,
             connections=fan_out_connections,
             archivist_name=archivist_name,
-            archivist_is_local=archivist_is_local,
+            archivist_binding=archivist_binding,
             librarian_available=_librarian_available(config),
         )
         out["tiers"] = [r.as_dict() for r in reports]
@@ -447,6 +447,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
     with an identical shape — no behaviour change for unconfigured instances.
     """
     from techne.core.anchor import annotate_freshness
+    from techne.core import tiers as tier_model
     from techne.core.archivist import ARCHIVIST_CONNECTION_NAME
     from techne.core.identity import list_entries as list_identity
     from techne.core.knowledge import annotate_uncertain
@@ -474,11 +475,20 @@ def _techne_recall(args: dict, config: Config) -> dict:
     #     break team recall. An existing end-to-end test caught exactly that when this
     #     gate checked only `connections`; the default-path case is the ONLY one S2
     #     is about.
-    archivist_is_local = (
-        ARCHIVIST_CONNECTION_NAME in connections
-        and ARCHIVIST_CONNECTION_NAME not in config.connections
-        and not config.archivist_db_path
-    )
+    if ARCHIVIST_CONNECTION_NAME not in connections:
+        # `standalone: True` — the DEFAULT. archivist_connection() returned None, so
+        # no archivist exists to bind to, and the ladder must say so rather than
+        # report an empty read of a store nobody opened.
+        archivist_binding = tier_model.ARCHIVIST_ABSENT
+    elif ARCHIVIST_CONNECTION_NAME in config.connections or config.archivist_db_path:
+        # An operator expressed a binding, either way it can be expressed: a
+        # `connections` entry names a federated peer, and a non-empty
+        # `archivist_db_path` points this instance at a SHARED store (techne#346).
+        # Both are real other stores; skipping either silently breaks team recall.
+        archivist_binding = tier_model.ARCHIVIST_STORE
+    else:
+        archivist_binding = tier_model.ARCHIVIST_LOCAL
+    archivist_is_local = archivist_binding == tier_model.ARCHIVIST_LOCAL
     fan_out_connections = dict(connections)
     if archivist_is_local:
         fan_out_connections.pop(ARCHIVIST_CONNECTION_NAME, None)
@@ -518,7 +528,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
             _fold_in_documents(config, topic, results),
             {},
             ARCHIVIST_CONNECTION_NAME,
-            archivist_is_local,
+            archivist_binding,
             {"identity_matches": _identity_matches()},
         )
 
@@ -608,7 +618,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         _fold_in_documents(config, topic, merged),
         fan_out_connections,
         ARCHIVIST_CONNECTION_NAME,
-        archivist_is_local,
+        archivist_binding,
         {"identity_matches": _identity_matches()},
     )
 

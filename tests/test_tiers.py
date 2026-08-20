@@ -12,7 +12,7 @@ def _reports(**kw):
         rows=[],
         connections={},
         archivist_name="archivist",
-        archivist_is_local=True,
+        archivist_binding=tiers.ARCHIVIST_LOCAL,
         librarian_available=True,
     )
     base.update(kw)
@@ -54,19 +54,19 @@ def test_tier_2_stays_visible_while_resolving_to_tier_1s_store():
     that only ever reaches team knowledge through an archivist call keeps that habit
     when a real team store appears behind it. The interface is the deliverable."""
     rows = [{"origin": "memory"}, {"origin": "memory"}]
-    reports = _reports(rows=rows, archivist_is_local=True)
+    reports = _reports(rows=rows, archivist_binding=tiers.ARCHIVIST_LOCAL)
     t1, t2 = reports[0], reports[1]
     assert t2.state == tiers.STATE_HIT
     assert t2.results == t1.results == 2
     assert t2.binding == t1.binding == "local:knowledge"
-    assert "no second file" in t2.detail
+    assert "read once" in t2.detail
 
 
 def test_a_shared_archivist_is_not_reported_as_local():
     """The multi-agent case (techne#346): pointed at a shared store, tier 2 is a real
     rung over a real other store and must be labelled as one."""
     rows = [{"_store": "archivist"}]
-    t2 = _reports(rows=rows, archivist_is_local=False)[1]
+    t2 = _reports(rows=rows, archivist_binding=tiers.ARCHIVIST_STORE)[1]
     assert t2.binding == "store:archivist"
     assert t2.results == 1
 
@@ -76,8 +76,8 @@ def test_rows_carry_the_rung_they_came_from():
     our experience or somebody's document."""
     rows = [{"origin": "memory"}, {"origin": "library"}, {"_store": "team-b"}]
     tiers.annotate_rows(rows, "archivist")
-    assert [r["tier"] for r in rows] == [1, 4, 3]
-    assert rows[1]["tier_name"] == "librarian"
+    assert [r["recall_tier"] for r in rows] == [1, 4, 3]
+    assert rows[1]["recall_tier_name"] == "librarian"
 
 
 @pytest.mark.parametrize(
@@ -146,3 +146,103 @@ def test_has_direct_match_survives_a_store_with_no_fts(tmp_path):
 
     assert has_direct_match(tmp_path / "does-not-exist.db", "anything") is False
     assert has_direct_match(tmp_path / "does-not-exist.db", "") is False
+
+
+def test_no_archivist_reads_unconfigured_not_empty():
+    """Prudence r1, Important 1 — and it lands on the DEFAULT install.
+
+    `standalone: True` is the default, so `archivist_connection()` returns None and no
+    archivist exists. Tier 2 used to emit `state="empty"` against `binding="store:archivist"`
+    — a POSITIVE claim that a team store was consulted and had nothing, which is strictly
+    worse than the flat list it replaces: an omission is silent, a false `empty` recruits
+    the reader. Tier 3 always got this right; tier 2 could not, because the parameter was
+    a bool with no way to say "there is no archivist".
+    """
+    t2 = _reports(archivist_binding=tiers.ARCHIVIST_ABSENT)[1]
+    assert t2.state == tiers.STATE_UNCONFIGURED
+    assert t2.binding == "none"
+    assert t2.results == 0
+    assert "archivist" not in t2.binding
+
+
+def test_the_row_tier_key_does_not_collide_with_the_observation_tier_column():
+    """Prudence r1, Important 2. `observations.tier` is hot|warm|cold and search surfaces
+    it verbatim, so writing an int there replaced a key AND changed its meaning — the #579
+    one-key-two-meanings shape, documented in the very card this change re-blesses."""
+    rows = [{"source_table": "observation", "tier": "warm", "origin": "memory"}]
+    tiers.annotate_rows(rows, "archivist")
+    assert rows[0]["tier"] == "warm", "the observation tier column must survive untouched"
+    assert rows[0]["recall_tier"] == 1
+
+
+def _cfg(tmp_path, name="local.db"):
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    cfg = Config.load()
+    cfg.db_path = tmp_path / name
+    cfg.data_dir = tmp_path
+    cfg.connections = {}
+    cfg.archivist_db_path = ""
+    init_db(cfg.db_path)
+    return cfg
+
+
+def test_default_standalone_install_reports_no_archivist(tmp_path):
+    """Prudence r1, Important 1, at the gate rather than the branch. `standalone: True`
+    is the DEFAULT, and this is the shape the majority of installs will actually see."""
+    from techne.mcp_server import _techne_recall
+
+    cfg = _cfg(tmp_path)
+    cfg.standalone = True
+    t2 = _techne_recall({"topic": "anything"}, cfg)["tiers"][1]
+    assert t2["state"] == "unconfigured"
+    assert t2["binding"] == "none"
+
+
+def test_an_explicitly_configured_archivist_peer_is_still_queried(tmp_path):
+    """Prudence r1, Important 3(b) — the mutant that survived all 3048 tests.
+
+    Dropping `ARCHIVIST_CONNECTION_NAME not in config.connections` from the gate left
+    an operator-configured archivist peer silently unqueried: 0 team rows instead of 1,
+    no error and no log. That is the same silent team-recall loss that 3(a) already cost
+    once, and nothing was under it. Asserts the ROWS, not the binding label, because the
+    harm is missing data rather than a mislabelled rung.
+    """
+    from techne.config import FederationConnectionSpec
+    from techne.core.knowledge import store as store_knowledge
+    from techne.mcp_server import _techne_recall
+
+    peer = _cfg(tmp_path, "peer.db")
+    store_knowledge(peer.db_path, "the deploy runbook lives in ops/deploy.md", type="fact")
+
+    cfg = _cfg(tmp_path)
+    cfg.standalone = False
+    cfg.connections = {
+        "archivist": FederationConnectionSpec(role="team", db_path=str(peer.db_path))
+    }
+    result = _techne_recall({"topic": "deploy runbook"}, cfg)
+    team = [r for r in result["search_results"] if r.get("_store") == "archivist"]
+    assert len(team) == 1, "an explicitly configured archivist peer must still be read"
+    assert result["tiers"][1]["binding"] == "store:archivist"
+
+
+def test_the_outcome_signal_is_asked_of_knowledge_at_the_call_site(tmp_path):
+    """Prudence r1, Important 3(c) — one keyword, unguarded, three prose blocks deep.
+
+    Deleting `table="knowledge"` from the `has_direct_match` call in `_with_ladder`
+    passed the ENTIRE suite while flipping `loose-match-only` to `found`. With
+    capture_bash on, `all` matches the operator's own probe commands, so the check
+    silently answers "yes we have experience" for a term that exists only because
+    somebody typed it. This pins the call site, not just the helper.
+    """
+    from techne.core.state import record_observation
+    from techne.mcp_server import _techne_recall
+
+    cfg = _cfg(tmp_path)
+    cfg.standalone = True
+    # The term exists ONLY as a captured command, never as anything learned.
+    record_observation(cfg, "s1", "grep plinthwaggle vortex ./src", tool_name="Bash")
+
+    outcome = _techne_recall({"topic": "plinthwaggle vortex"}, cfg)["outcome"]["code"]
+    assert outcome != "found", "an observed command is not prior experience"
