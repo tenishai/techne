@@ -254,6 +254,11 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
 #: writer the only truth.
 STATE_DIRNAME = "runtime-state"
 
+#: How old a `.tmp` must be before a reader may delete it. Generous on purpose: the
+#: only cost of waiting is a few stray bytes, while reaping one mid-write destroys a
+#: report that will never be re-announced.
+TMP_REAP_AFTER_SECONDS = 300.0
+
 
 def _state_dir() -> Path:
     """The publish/read directory. Takes no `config` — it is derived from
@@ -356,14 +361,30 @@ def live_reports() -> list[dict]:
         d = _state_dir()
         if not d.is_dir():
             return out
+        # A crash between write and rename leaves these behind. Reaping them is
+        # housekeeping — but ONLY WHEN THEY ARE OLD, and that qualifier is the whole
+        # correctness of it. `publish` writes the tmp then renames; a scan landing in
+        # that window deleted the tmp, `replace` then raised, `publish`'s blanket except
+        # swallowed it, and the report was LOST — permanently, because `poll` records
+        # `_reported` before returning, so that deployment is never announced again.
+        # Two servers plus a SessionStart is ordinary operation, not a hostile case.
+        cutoff = time.time() - TMP_REAP_AFTER_SECONDS
         for stale_tmp in d.glob(".*.json.tmp"):
-            # A crash between write and rename leaves these. Nothing reads them, but an
-            # unbounded pile of debris in a directory we own is our litter.
             try:
-                stale_tmp.unlink(missing_ok=True)
+                if stale_tmp.stat().st_mtime < cutoff:
+                    stale_tmp.unlink(missing_ok=True)
             except OSError:
                 pass
         for f in sorted(d.glob("*.json")):
+            # WHAT THE FILE IS, before what is in it. Every other guard here inspects
+            # CONTENT; none asked whether the path is a regular file. A FIFO named
+            # `*.json` blocks `read_text()` forever — and the resulting `HookTimeout` is
+            # a RuntimeError, so the per-file handler below swallows it while
+            # `setitimer` (one-shot) has already spent the SessionStart budget. Measured
+            # 6.0s against a 2.0s budget. One check closes FIFO, directory and symlink
+            # together; `is_file()` follows symlinks, so a link to a FIFO is caught too.
+            if not f.is_file():
+                continue
             # PER-FILE, so one bad file cannot end the scan. It used to be possible for
             # a single unparseable pid to raise past this loop into the outer handler,
             # which returned early — leaving a genuinely torn server unreported and

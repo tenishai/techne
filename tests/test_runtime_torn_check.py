@@ -40,7 +40,12 @@ def test_the_expensive_checks_are_still_deferred():
     """Pins the damage I actually did while adding this: inserting between the stacked
     `@register_check` / `@expensive` decorators double-registered the new check AND
     silently stripped `check_runtime_loaded`'s registration, so it stopped running at
-    all. The banner's deferred count dropped from 2 to 1 and nothing else complained."""
+    all.
+
+    "AND NOTHING ELSE COMPLAINED" IS RETRACTED — it was in this docstring, and pytest
+    printed it directly above the failure of the very test it belongs to. The full suite
+    fails FOUR tests on that accident, two of them pre-existing in test_runtime_loaded.py.
+    The author had run one test file and generalised. See docs/arch/liveness.md."""
     from techne.core.checks import deferred_check_names, registered_checks
 
     names = [f.__name__ for f in registered_checks()]
@@ -236,3 +241,68 @@ def test_torn_entries_that_are_not_strings_cannot_poison_the_check(home):
     # ...and a genuine report alongside it still works.
     _write(home, "zzz_good", {"pid": os.getpid(), "torn": ["techne.core.search"]})
     assert check_runtime_torn(None).verdict == Verdict.STALE
+
+
+def test_a_fifo_cannot_block_the_scan(home):
+    """Prudence r2, Important 3 — the CLASS, not another instance.
+
+    Every other guard here asks what is IN the file. None asked what the file IS. A FIFO
+    named `*.json` blocks `read_text()` indefinitely; the resulting `HookTimeout` is a
+    RuntimeError, so the per-file handler swallows it while `setitimer` — one-shot — has
+    already spent the SessionStart budget. She measured 6.0s against a 2.0s budget with
+    `bounded_hook` reporting "300% — approaching timeout".
+    """
+    import os as _os
+
+    d = home / rd.STATE_DIRNAME
+    d.mkdir(parents=True)
+    _os.mkfifo(d / "blocker.json")
+    _write(home, "zzz_real", {"pid": os.getpid(), "torn": ["techne.core.search"]})
+
+    reports = rd.live_reports()  # must not block
+    assert [r["pid"] for r in reports] == [os.getpid()]
+
+
+def test_a_directory_named_like_a_state_file_is_skipped(home):
+    """Same guard, second shape — `read_text()` on a directory raises IsADirectoryError,
+    which the per-file handler would then try to `unlink`, failing again."""
+    d = home / rd.STATE_DIRNAME
+    d.mkdir(parents=True)
+    (d / "adir.json").mkdir()
+    _write(home, "zzz_real", {"pid": os.getpid(), "torn": ["techne.core.search"]})
+    assert [r["pid"] for r in rd.live_reports()] == [os.getpid()]
+    assert (d / "adir.json").is_dir(), "a directory must be skipped, never unlinked"
+
+
+def test_a_fresh_tmp_file_is_not_reaped_mid_publish(home):
+    """Prudence r2, Important 2 — introduced by a NIT I applied, not by the hardening.
+
+    `publish` writes `.{pid}.json.tmp` then renames. A scan landing in that window
+    deleted the tmp; `replace` then raised, `publish`'s blanket except swallowed it, and
+    the report was LOST — permanently, because `poll` records `_reported` before
+    returning, so that deployment is never announced again. Two servers plus a
+    SessionStart is ordinary operation.
+    """
+    d = home / rd.STATE_DIRNAME
+    d.mkdir(parents=True)
+    fresh = d / ".12345.json.tmp"
+    fresh.write_text("{}")
+
+    rd.live_reports()
+    assert fresh.exists(), "a tmp mid-write must survive a concurrent scan"
+
+    # ...and a genuinely old one is still reaped.
+    os.utime(fresh, (0, 0))
+    rd.live_reports()
+    assert not fresh.exists()
+
+
+def test_publish_survives_a_concurrent_scan(home):
+    """The end-to-end form of the same race, driven through the real functions rather
+    than an imitation of them."""
+    watch = _watch()
+    rd.live_reports()  # scanner runs first, directory may not exist yet
+    rd.publish(watch, rd.Drift(torn=("techne.core.search",), moved_at=1.0))
+    rd.live_reports()
+    reports = rd.live_reports()
+    assert [r["torn"] for r in reports] == [["techne.core.search"]]
