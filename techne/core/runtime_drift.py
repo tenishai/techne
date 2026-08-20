@@ -51,14 +51,16 @@ DEFAULT_TTL_SECONDS = 30.0
 class RuntimeWatch:
     """One process's view of itself. Created once, at serve start."""
 
-    started_at: float
+    #: mtime of each loaded `techne.*` module's file AT SNAPSHOT. A per-module
+    #: baseline, not a single process timestamp — see `_torn_modules` for why the
+    #: single timestamp was wrong in BOTH directions.
+    baseline: dict
     marker_path: Path | None
     #: mtime of `marker_path` when this process started, or None when there is no
     #: deployment marker to watch (a packaged install — see `begin`).
     marker_at: float | None
     ttl: float = DEFAULT_TTL_SECONDS
     _checked_at: float = field(default=0.0, repr=False)
-    _cached: "Drift | None" = field(default=None, repr=False)
     #: Marker mtimes already reported. One warning per deployment, not per call —
     #: the same discipline `capabilities.invitation` uses for the same reason.
     _reported: set = field(default_factory=set, repr=False)
@@ -84,9 +86,10 @@ class Drift:
         return (
             f"techne runtime drift: {n} module(s) this server loaded have changed on "
             f"disk since it started, so it is still serving the OLD definitions "
-            f"({shown}). Anything imported from now on comes from the NEW source, so "
-            f"this process is running mixed code. Restart the techne MCP server (or "
-            f"the session that owns it) before trusting results that depend on it."
+            f"({shown}) — Python will not re-read a module already in sys.modules, so "
+            f"these stay old for the life of the process, while anything NOT yet "
+            f"imported will load from the new source. Restart the techne MCP server "
+            f"(or the session that owns it) before trusting results that depend on it."
         )
 
 
@@ -108,19 +111,16 @@ def begin(config, *, ttl: float = DEFAULT_TTL_SECONDS) -> RuntimeWatch:
             marker_at = candidate.stat().st_mtime
     except Exception:  # noqa: BLE001 — a diagnostic must never cost a server its start
         marker, marker_at = None, None
-    return RuntimeWatch(started_at=time.time(), marker_path=marker, marker_at=marker_at, ttl=ttl)
+    return RuntimeWatch(baseline=_module_mtimes(), marker_path=marker, marker_at=marker_at, ttl=ttl)
 
 
-def _torn_modules(started_at: float) -> tuple[str, ...]:
-    """Loaded `techne.*` modules whose file is newer than this process.
+def _module_mtimes() -> dict:
+    """`{module name: file mtime}` for every loaded `techne.*` module, right now.
 
-    Tier 2. Only ever called after the marker moved, so the `sys.modules` walk is paid
-    once per deployment rather than once per call.
-
-    A module with no `__file__` (namespace packages, frozen imports) is skipped rather
-    than guessed at: absence of a path is not evidence of staleness.
+    Modules with no `__file__` (namespace packages, frozen imports) and files that
+    cannot be stat'd are omitted: absence of a path is not evidence of anything.
     """
-    out = []
+    out = {}
     for name, mod in list(sys.modules.items()):
         if not name.startswith("techne"):
             continue
@@ -128,14 +128,41 @@ def _torn_modules(started_at: float) -> tuple[str, ...]:
         if not path:
             continue
         try:
-            if Path(path).stat().st_mtime > started_at:
-                out.append(name)
+            out[name] = Path(path).stat().st_mtime
         except OSError:
-            # Deleted or unreadable underneath us. Real, but "the file is gone" is a
-            # different fault than "the file changed", and this function claims only
-            # the latter.
             continue
-    return tuple(sorted(out))
+    return out
+
+
+def _torn_modules(baseline: dict) -> tuple[str, ...]:
+    """Loaded modules whose file differs from what it was when we loaded them.
+
+    COMPARES EACH MODULE AGAINST ITS OWN BASELINE, not against a process start time.
+    The single-timestamp version (`mtime > started_at`) was wrong in BOTH directions
+    and Prudence reproduced both end-to-end:
+
+      * FALSE POSITIVE — a module imported LATE, from a file written after startup,
+        has `mtime > started_at` while being the NEWEST code in the process. The
+        server named `techne.core.health` as one it was "still serving the OLD
+        definitions" of, milliseconds after loading it from the new source in that
+        same call. It also broke the silence property, since a lazily-imported module
+        made a harmless deployment look torn.
+      * FALSE NEGATIVE — it compared a filesystem mtime against a `time.time()` taken
+        in this process. Different clock sources, and coarse filesystem timestamps,
+        with nothing making the comparison meaningful at the boundary.
+
+    A per-module baseline needs no clock comparison at all: either the file is what it
+    was when we read it, or it is not. A module absent from the baseline was imported
+    AFTER the snapshot — so it came from the current disk and is by definition not
+    torn. It is recorded on sight so a LATER change to it is still caught.
+    """
+    torn = []
+    for name, current in _module_mtimes().items():
+        if name not in baseline:
+            baseline[name] = current  # newly imported: this IS its baseline
+        elif current != baseline[name]:
+            torn.append(name)
+    return tuple(sorted(torn))
 
 
 def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
@@ -151,21 +178,24 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
         return None
     t = time.time() if now is None else now
     if t - watch._checked_at < watch.ttl:
-        return watch._cached
+        # NOTHING NEW inside the window, so say nothing. This previously returned a
+        # cached `Drift`, which meant the notice repeated on EVERY tool call for the
+        # whole TTL — and the test that was supposed to pin "one warning per
+        # deployment" passed `ttl=0.0`, making this branch unreachable. A fixture
+        # argument switched off the path that broke the property it was guarding.
+        return None
     watch._checked_at = t
-    watch._cached = None
     try:
         current = watch.marker_path.stat().st_mtime
     except OSError:
         return None
     if current == watch.marker_at or current in watch._reported:
         return None
-    torn = _torn_modules(watch.started_at)
+    torn = _torn_modules(watch.baseline)
     if not torn:
         # The deployment moved but nothing this process holds differs — the pull
         # touched files we never loaded. Consistent, and not worth a line.
         watch._reported.add(current)
         return None
     watch._reported.add(current)
-    watch._cached = Drift(torn=torn, moved_at=current)
-    return watch._cached
+    return Drift(torn=torn, moved_at=current)

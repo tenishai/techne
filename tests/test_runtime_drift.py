@@ -22,6 +22,20 @@ def marker(tmp_path, monkeypatch):
     return p
 
 
+MOD = "techne.core.runtime_drift"
+
+
+def _change(watch, path: Path) -> None:
+    """Make `path` differ from the baseline `watch` recorded for it.
+
+    Sets an explicit mtime relative to the RECORDED value rather than calling
+    `os.utime(path, None)`: this feature is about mtimes, so a test that relies on
+    wall-clock advancing far enough to be visible at filesystem granularity is a test
+    that can pass or fail for reasons unrelated to the code.
+    """
+    os.utime(path, (0, watch.baseline[MOD] + 10))
+
+
 def _move(path: Path) -> None:
     """A pull: the ref moves, so the reflog's mtime changes."""
     time.sleep(0.01)
@@ -64,7 +78,8 @@ def test_a_module_changing_under_us_is_a_tear(marker):
     function-local `from techne…` imports."""
     watch = rd.begin(None, ttl=0.0)
     _move(marker)
-    os.utime(Path(sys.modules["techne.core.runtime_drift"].__file__), None)
+    mod = Path(sys.modules["techne.core.runtime_drift"].__file__)
+    _change(watch, mod)
 
     drift = rd.poll(watch)
     assert drift is not None
@@ -127,7 +142,7 @@ def test_a_deleted_module_file_is_not_reported_as_changed(marker, tmp_path):
     ghost.__file__ = str(tmp_path / "vanished.py")
     sys.modules["techne_ghost_module"] = ghost
     try:
-        assert "techne_ghost_module" not in rd._torn_modules(0.0)
+        assert "techne_ghost_module" not in rd._torn_modules({})
     finally:
         del sys.modules["techne_ghost_module"]
 
@@ -140,9 +155,76 @@ def test_a_module_without_a_file_is_skipped():
     ns = types.ModuleType("techne_namespace_like")
     sys.modules["techne_namespace_like"] = ns
     try:
-        assert "techne_namespace_like" not in rd._torn_modules(0.0)
+        assert "techne_namespace_like" not in rd._torn_modules({})
     finally:
         del sys.modules["techne_namespace_like"]
+
+
+def test_one_warning_per_deployment_at_the_SHIPPED_ttl(marker):
+    """Prudence r1, the finding I did not ask about — and the reason it survived.
+
+    `test_one_warning_per_deployment` passes `ttl=0.0`, which makes the TTL branch
+    unreachable. Inside that branch `poll` returned a CACHED `Drift`, so at the shipped
+    30s default the notice repeated on EVERY tool call for thirty seconds. The fixture
+    argument switched off the very path that broke the property the test names — a
+    guard's precondition used as a way to switch the guard off, in my own test.
+
+    So this one runs at `DEFAULT_TTL_SECONDS` and polls again immediately.
+    """
+    watch = rd.begin(None)
+    assert watch.ttl == rd.DEFAULT_TTL_SECONDS
+    _move(marker)
+    _change(watch, Path(sys.modules[MOD].__file__))
+
+    watch._checked_at = 0.0  # allow the first real poll
+    assert rd.poll(watch) is not None
+    assert rd.poll(watch) is None, "a cached Drift would repeat on every call for 30s"
+    assert rd.poll(watch) is None
+
+
+def test_a_module_imported_after_the_snapshot_is_not_torn(marker, tmp_path):
+    """Prudence r1, Important — my aim point 3, confirmed and worse than I guessed.
+
+    Under the old `mtime > started_at` rule, a module imported LATE from a file written
+    after startup read as torn while being the NEWEST code in the process. She got the
+    server to name `techne.core.health` as one it was "still serving the OLD definitions"
+    of, milliseconds after loading it from the new source in the same call. It also broke
+    the silence property, since one lazy import made a harmless deployment look torn.
+
+    A per-module baseline cannot express that error: a module absent from the baseline
+    came from the current disk, by construction.
+    """
+    import types
+
+    watch = rd.begin(None, ttl=0.0)
+    late = tmp_path / "late_module.py"
+    late.write_text("x = 1")
+    os.utime(late, (0, time.time() + 3600))  # a file newer than any process timestamp
+
+    mod = types.ModuleType("techne_late_import")
+    mod.__file__ = str(late)
+    sys.modules["techne_late_import"] = mod
+    try:
+        assert "techne_late_import" not in rd._torn_modules(watch.baseline)
+        # ...and now that it IS baselined, a later change to it IS caught.
+        os.utime(late, (0, time.time() + 7200))
+        assert "techne_late_import" in rd._torn_modules(watch.baseline)
+    finally:
+        del sys.modules["techne_late_import"]
+
+
+def test_the_message_does_not_overclaim_about_reimport(marker):
+    """Prudence r1 — the sentence was false of precisely the modules `torn` names.
+
+    It said "anything imported from now on comes from the NEW source". Python will not
+    re-read a module already in `sys.modules`, so for the torn modules themselves the
+    OLD definition persists for the life of the process. Only NOT-yet-imported modules
+    load new code.
+    """
+    drift = rd.Drift(torn=("techne.core.thing",), moved_at=1.0)
+    msg = drift.message()
+    assert "sys.modules" in msg
+    assert "NOT yet imported" in msg
 
 
 # --- the dispatch seam ------------------------------------------------------

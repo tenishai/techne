@@ -2175,6 +2175,20 @@ def main():
     """Run the MCP server over stdio."""
     config = Config.load()
 
+    # techne#696 — take the module baseline HERE, before serving anything. Building it
+    # lazily on the first tool call was wrong: `mcp_server` alone carries 46
+    # function-local `from techne…` imports, so by the first call the process has
+    # already pulled in modules whose files may have changed, and each would be
+    # baselined at its POST-change mtime and never reported. One stat-walk of the
+    # modules already loaded (~21, measured 0.29 ms), once, at startup.
+    global _RUNTIME_WATCH
+    try:
+        from techne.core import runtime_drift
+
+        _RUNTIME_WATCH = runtime_drift.begin(config)
+    except Exception:  # noqa: BLE001 — a diagnostic must never cost the server its start
+        _RUNTIME_WATCH = None
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
