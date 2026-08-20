@@ -35,7 +35,7 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from techne.config import Config
+from techne.config import Config, techne_home
 
 #: extension_state key holding the last version we invited this install to ask
 #: about. One-shot per version change — see `invitation`.
@@ -51,7 +51,8 @@ class Capability:
     title: str
     #: Plain language, present tense, what the USER gets. Not what the code does.
     buys: str
-    #: The exact YAML to add. Rendered as a path so the reader can find the block.
+    #: The exact YAML to add, as the bare block. Never surfaced raw — the report
+    #: frames it via `_enable_snippet` so it cannot be misread as current state.
     enable: str
     #: Which store counts make this capability's case. See `_evidence_for`.
     evidence_key: str = ""
@@ -299,6 +300,27 @@ def workflow_state(config: Config) -> list[dict]:
         return [{"name": "?", "state": "unknown", "path": "", "detail": str(exc)}]
 
 
+def _enable_snippet(cap: Capability, config: Config, on: bool) -> str:
+    """The change to make, written so it cannot be read as the current state.
+
+    A bare ``hooks:\n  per_turn_seed: true`` is ambiguous the moment it leaves
+    this report: it is valid YAML describing a config, so a reader who sees
+    ``true`` concludes the flag IS true. That misread is not hypothetical — an
+    agent narrating this report quoted the snippet for an OFF flag and the
+    operator, reading it as status, believed the exact opposite of what the
+    report said. The `on` bool was right there in the same row and lost anyway,
+    because a config-shaped block outranks a sibling field in the reading.
+
+    So the snippet carries its own frame: the state it changes FROM, and the
+    file it goes in. And an ON capability gets nothing — an "enable" line for
+    something already enabled is the ambiguity with no upside.
+    """
+    if on:
+        return ""
+    path = config.loaded_from or (techne_home() / "config.yaml")
+    return f"# {cap.flag} is currently OFF — to turn it on, add to {path}:\n{cap.enable}"
+
+
 def capability_report(config: Config) -> dict:
     """The whole picture, as data. The agent turns this into a conversation."""
     from techne import __version__
@@ -310,6 +332,7 @@ def capability_report(config: Config) -> dict:
         on = bool(getattr(hooks, cap.flag, False))
         row = asdict(cap)
         row["on"] = on
+        row["enable"] = _enable_snippet(cap, config, on)
         row["evidence"] = "" if on else _evidence_for(cap.evidence_key, facts)
         caps.append(row)
 
@@ -333,7 +356,10 @@ def capability_report(config: Config) -> dict:
             "Turn this into a short conversation, not a feature list. Lead with what "
             "is OFF and what it would buy THEM, using the evidence counts — those are "
             "real numbers from their store, so quote them. Name the config lines "
-            "exactly. If workflows_missing is non-empty say so plainly; a config flag "
+            "exactly, and quote the `enable` text INTACT — it is the change to MAKE, "
+            "not the current state, and stripping its comment line has already led a "
+            "reader to take the `true` in it as status. A capability that is ON has no "
+            "enable text at all. If workflows_missing is non-empty say so plainly; a config flag "
             "cannot reveal a procedure that is absent from disk. Do not oversell: if "
             "a capability's evidence is empty, its case is weak on this install, and "
             "saying less is better than inventing a reason."
