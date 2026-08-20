@@ -19,8 +19,12 @@ TWO TIERS, because the cheap question is the common one:
      That file's mtime is when the ref last MOVED HERE — the same signal
      `_runtime_deployed_at` uses, and deliberately not committer time, which would
      re-arm on every upstream commit rather than on the pulls that actually matter.
-  2. WHAT DID WE ACTUALLY LOAD? Only ever runs after (1) fires. Walks the `techne.*`
-     entries already in `sys.modules` and stats each one's file.
+  2. WHAT DID WE ACTUALLY LOAD? Walks the `techne.*` entries already in `sys.modules`
+     and stats each one's file. Runs on every poll that clears the TTL — NOT only after
+     (1) fires, which is what it did until r2 found the hole: nothing was baselined
+     until a pull had already happened, so a module imported after `begin()` and changed
+     by that first pull was recorded at its post-change mtime and never torn. Measured
+     0.495 ms for 41 modules, 0.0017% of a 30-second TTL.
 
 WHAT (2) BUYS THAT THE ORDERING CHECK STRUCTURALLY CANNOT: it separates
 
@@ -33,6 +37,16 @@ WHAT (2) BUYS THAT THE ORDERING CHECK STRUCTURALLY CANNOT: it separates
 
 `check_runtime_loaded` is careful to say it is "ordering only… not a tear detector".
 This is the tear detector, and it is cheap only because it runs inside the tear.
+
+THE BOUNDED RESIDUAL, STATED RATHER THAN IMPLIED. Both tiers sit behind ONE TTL gate,
+so a module imported AND changed by a pull entirely within a single 30-second window,
+with no intervening poll, is baselined post-change and stays silent — permanently, for
+that module. Verified by probe, not reasoned about. The full fix is to walk ahead of the
+TTL gate too, which costs 0.47 ms on EVERY tool call (3% of a `techne_status`, 21% of a
+`techne_search`) instead of once per window, and it breaks the TTL property that
+`test_the_ttl_actually_suppresses_the_stat` exists to hold. The trade was taken
+deliberately: this is a diagnostic, and a diagnostic that taxes every call to close its
+own last corner is worse than one that says where its edge is.
 """
 
 from __future__ import annotations
@@ -166,7 +180,11 @@ def _torn_modules(baseline: dict) -> tuple[str, ...]:
 
 
 def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
-    """Tier 1, then tier 2 only if tier 1 fires. Returns None when nothing to say.
+    """Walk, then check the marker. Returns None when there is nothing to say.
+
+    ORDER MATTERS AND IS NOT THE OBVIOUS ONE: the module walk runs BEFORE the marker
+    stat, so a module is baselined before a pull can change it. Reading the marker first
+    and walking only on a hit was the r2 defect — see the walk's own comment below.
 
     ONE WARNING PER DEPLOYMENT. A warning repeated on every tool call is how a true
     signal becomes something the reader learns to skip — and the condition here does
@@ -196,8 +214,9 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
     # `knowledge`, `identity`, `health`). It even landed on the branch below whose comment
     # says "the pull touched files we never loaded" when we demonstrably had.
     #
-    # Walking every poll costs 0.31 ms against a 30-second TTL — 0.001% — and buys the
-    # property that every loaded module is baselined BEFORE any pull can change it.
+    # Measured on a real server rather than a harness: 22 modules at `begin()`, 41 after
+    # tool calls, 0.495 ms to walk them — 0.0017% of a 30-second TTL. (An earlier comment
+    # said 0.31 ms and the commit said 0.085; both were small-harness numbers.)
     torn = _torn_modules(watch.baseline)
 
     try:
@@ -207,10 +226,14 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
     if current == watch.marker_at or current in watch._reported:
         return None
     if not torn:
-        # The deployment moved but nothing this process holds differs — the pull
-        # touched files we never loaded. Consistent, and not worth a line. Recorded as
-        # reported so a later poll does not re-evaluate this same marker value.
-        watch._reported.add(current)
+        # The deployment moved but nothing this process holds differs. Usually that
+        # means the pull touched files we never loaded — consistent, not worth a line.
+        #
+        # DELIBERATELY NOT RECORDED AS REPORTED. It used to be, which permanently
+        # suppressed a marker value whose files had not settled yet: git normally writes
+        # the worktree before the reflog, but a ref that moves first would be read as
+        # "nothing differs" and never re-examined. Leaving it unrecorded costs one more
+        # walk per window and lets a late-settling deployment still be caught.
         return None
     watch._reported.add(current)
     return Drift(torn=torn, moved_at=current)

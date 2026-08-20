@@ -366,3 +366,62 @@ def test_a_module_imported_after_begin_is_still_caught(marker, tmp_path):
         assert "techne_late_arrival" in drift.torn
     finally:
         del sys.modules["techne_late_arrival"]
+
+
+def test_the_single_ttl_gate_residual_is_real_and_deliberate(marker, tmp_path):
+    """Prudence r3 — PINS A KNOWN LIMITATION so it cannot be lost or quietly widened.
+
+    THE RESIDUAL, precisely: both tiers sit behind ONE TTL gate, so a poll that lands
+    inside an open window does no walk at all. A module imported before that suppressed
+    poll and changed after it is first seen only on the next poll AFTER the window — by
+    which time it is baselined at its POST-change mtime, and stays silent for that
+    module, permanently.
+
+    (An earlier version of this test modelled "no poll at all between import and pull".
+    That is not the residual and no fix can address it — nothing observed the module
+    before it changed. It also passed under both variants, so it discriminated nothing.
+    The discriminator is a poll that HAPPENS and is suppressed.)
+
+    THE TRADE, taken deliberately: the full fix is to walk ahead of the TTL gate too, so
+    even a suppressed poll baselines. That moves the walk from once-per-window to
+    once-per-TOOL-CALL — 0.47 ms, 3% of a `techne_status` and 21% of a `techne_search` —
+    and it breaks `test_the_ttl_actually_suppresses_the_stat`. A diagnostic that taxes
+    every call to close its own last corner is worse than one that says where its edge is.
+
+    This asserts the CURRENT behaviour, so it FAILS if someone applies the full fix —
+    forcing them to re-read the trade rather than meet the cost in production.
+    """
+    import types
+
+    watch = rd.begin(None)  # shipped TTL; the window is what creates the residual
+    assert watch.ttl == rd.DEFAULT_TTL_SECONDS
+
+    late = tmp_path / "inside_window.py"
+    late.write_text("x = 1")
+    os.utime(late, (0, 1000.0))
+
+    rd.poll(watch, now=1000.0)  # opens the window
+
+    mod = types.ModuleType("techne_inside_window")
+    mod.__file__ = str(late)
+    sys.modules["techne_inside_window"] = mod
+    try:
+        # A real poll, INSIDE the window: suppressed, so no walk, so no baseline.
+        assert rd.poll(watch, now=1005.0) is None
+        assert "techne_inside_window" not in watch.baseline
+
+        # Now it changes, and the deployment moves.
+        os.utime(late, (0, 2000.0))
+        _move(marker)
+
+        drift = rd.poll(watch, now=1100.0)  # window expired; first walk sees it changed
+        torn = drift.torn if drift else ()
+        assert "techne_inside_window" not in torn, (
+            "KNOWN RESIDUAL (Prudence r3): a TTL-suppressed poll does no walk, so a "
+            "module imported before it and changed after is baselined post-change. If "
+            "this now FAILS, someone moved the walk ahead of the TTL gate — the full "
+            "fix, costing 0.47 ms on EVERY tool call. Re-read the trade in the module "
+            "docstring before keeping it."
+        )
+    finally:
+        del sys.modules["techne_inside_window"]
