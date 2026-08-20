@@ -150,3 +150,67 @@ def test_the_server_publishes_only_on_a_finding(home, monkeypatch):
         )
     finally:
         ms._RUNTIME_WATCH = None
+
+
+# --- untrusted input: these files are written by ANOTHER process ----------------
+
+
+def _write(home, name, payload):
+    import json
+
+    d = home / rd.STATE_DIRNAME
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.json").write_text(payload if isinstance(payload, str) else json.dumps(payload))
+    return d
+
+
+def test_a_fractional_pid_is_rejected_not_truncated(home):
+    """`int(1.5)` is 1, and pid 1 (init/launchd) ALWAYS exists — so a state file claiming
+    pid 1.5 read as a live server forever and produced a permanent false STALE banner.
+    Measured before the fix. Reject rather than coerce."""
+    _write(home, "frac", {"pid": 1.5, "torn": ["x"]})
+    assert rd.live_reports(None) == []
+
+
+def test_pid_zero_is_refused_explicitly(home):
+    """`os.kill(0, sig)` addresses the caller's ENTIRE PROCESS GROUP, not one process.
+    With signal 0 that is only an existence probe and harmless — but a guard that relies
+    on the signal number staying 0 is a guard waiting for someone to reuse the helper."""
+    killed = []
+    real = os.kill
+    os.kill = lambda p, s: (killed.append(p), real(p, s))[1]
+    try:
+        _write(home, "zero", {"pid": 0, "torn": ["x"]})
+        assert rd.live_reports(None) == []
+    finally:
+        os.kill = real
+    assert 0 not in killed, "pid 0 must never reach os.kill"
+
+
+def test_one_malformed_file_cannot_disable_the_whole_check(home):
+    """THE WORST OF THE THREE, and the reason this section exists.
+
+    `os.kill(2**63, 0)` raises OverflowError, which is NOT an OSError. It escaped
+    `_alive`, hit `live_reports`' outer handler, and returned early — so ONE junk file
+    left a genuinely torn server unreported and every later file unexamined and unreaped.
+    A detector that a single bad file switches off is exactly the shape #696 exists to
+    avoid, reproduced inside the fix for it.
+
+    The real report is written LAST alphabetically so it is only reachable if the scan
+    survives everything before it.
+    """
+    for name, payload in {
+        "a_corrupt": "{{{not json",
+        "b_huge": {"pid": 2**63, "torn": ["x"]},
+        "c_string": {"pid": "rm -rf /", "torn": ["x"]},
+        "d_negative": {"pid": -1, "torn": ["x"]},
+        "e_null": {"pid": None, "torn": ["x"]},
+        "f_notdict": [1, 2, 3],
+        "g_bool": {"pid": True, "torn": ["x"]},
+    }.items():
+        _write(home, name, payload)
+    _write(home, "zzz_real", {"pid": os.getpid(), "torn": ["techne.core.search"]})
+
+    reports = rd.live_reports(None)
+    assert [r["pid"] for r in reports] == [os.getpid()], "the real report must survive"
+    assert reports[0]["torn"] == ["techne.core.search"]

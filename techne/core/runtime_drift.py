@@ -297,6 +297,17 @@ def _alive(pid: int) -> bool:
 
     A dead server's verdict is not a stale warning to soften; it is a FALSE one. The
     condition it described ended when the process did.
+
+    THE ARGUMENT IS UNTRUSTED — it comes from a file another process wrote — so every
+    exception is caught here, not only `OSError`. `os.kill(2**63, 0)` raises
+    OverflowError, which is not an OSError; measured, after it escaped and aborted the
+    caller's whole scan.
+
+    BELT AND BRACES, NOT THE LOAD-BEARING GUARD, and saying so because the distinction
+    is testable: `live_reports` now wraps each file individually, so reverting this to
+    `except OSError` no longer breaks anything and no test fails. The per-file handler
+    is what holds the property. This stays because a helper that raises on a hostile
+    argument is a trap for the next caller, not because it is currently reachable.
     """
     import os
 
@@ -306,9 +317,26 @@ def _alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists, owned by someone else
-    except OSError:
+    except Exception:  # noqa: BLE001 — OverflowError, TypeError, anything
         return False
     return True
+
+
+def _valid_pid(raw) -> int | None:
+    """A real, positive, integral pid — or None. Rejects rather than coerces.
+
+    `int(raw)` was the first version and it is wrong in a way that matters: `int(1.5)`
+    is 1, and pid 1 (init/launchd) ALWAYS exists, so a state file claiming pid 1.5 read
+    as a live server forever and produced a permanent false STALE banner. Measured.
+
+    Zero is refused explicitly. `os.kill(0, sig)` addresses the caller's ENTIRE PROCESS
+    GROUP rather than one process; with signal 0 that is only an existence probe and
+    harmless, but a guard that depends on the signal number staying 0 is a guard waiting
+    for someone to reuse this helper.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if raw > 0 else None
 
 
 def live_reports(config=None) -> list[dict]:
@@ -327,17 +355,26 @@ def live_reports(config=None) -> list[dict]:
         if not d.is_dir():
             return out
         for f in sorted(d.glob("*.json")):
+            # PER-FILE, so one bad file cannot end the scan. It used to be possible for
+            # a single unparseable pid to raise past this loop into the outer handler,
+            # which returned early — leaving a genuinely torn server unreported and
+            # every later file unreaped. A detector that one junk file can switch off is
+            # the shape this whole issue exists to avoid.
             try:
                 data = json.loads(f.read_text())
-                pid = int(data.get("pid", 0))
+                pid = _valid_pid(data.get("pid")) if isinstance(data, dict) else None
+                if pid is None or not _alive(pid):
+                    f.unlink(missing_ok=True)
+                    continue
+                torn = data.get("torn")
+                if isinstance(torn, list) and torn:
+                    out.append(data)
             except Exception:  # noqa: BLE001
-                f.unlink(missing_ok=True)
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 continue
-            if not _alive(pid):
-                f.unlink(missing_ok=True)  # the condition ended with the process
-                continue
-            if data.get("torn"):
-                out.append(data)
     except Exception:  # noqa: BLE001
         return out
     return out
