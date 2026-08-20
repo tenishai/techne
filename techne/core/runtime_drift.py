@@ -38,12 +38,21 @@ WHAT (2) BUYS THAT THE ORDERING CHECK STRUCTURALLY CANNOT: it separates
 `check_runtime_loaded` is careful to say it is "ordering only… not a tear detector".
 This is the tear detector, and it is cheap only because it runs inside the tear.
 
-THE BOUNDED RESIDUAL, STATED RATHER THAN IMPLIED. Both tiers sit behind ONE TTL gate,
-so a module imported AND changed by a pull entirely within a single 30-second window,
-with no intervening poll, is baselined post-change and stays silent — permanently, for
-that module. Verified by probe, not reasoned about. The full fix is to walk ahead of the
-TTL gate too, which costs 0.47 ms on EVERY tool call (3% of a `techne_status`, 21% of a
-`techne_search`) instead of once per window, and it breaks the TTL property that
+THE BOUNDED RESIDUAL, STATED RATHER THAN IMPLIED. Both tiers sit behind ONE TTL gate, so
+a poll landing inside an open window does no walk at all. A module imported before that
+suppressed poll and changed after it is therefore first seen on the next poll AFTER the
+window, by which time it is baselined at its POST-change mtime — silent, permanently,
+for that module. Verified by probe, not reasoned about.
+
+(NOT "with no intervening poll", which an earlier draft of this paragraph said. With no
+poll at all the TTL gate is not the cause — nothing observed the module before it
+changed — and the full fix below would not close it either. The discriminator is a poll
+that HAPPENS and is suppressed; `test_the_single_ttl_gate_residual_is_real_and_deliberate`
+has said so thirty lines away since it was written.) The full fix is to walk ahead of the
+TTL gate too, which costs 0.47 ms on EVERY tool call instead of once per window — 3% of
+a `techne_status` and 21% of a `techne_search`, both measured against an EMPTY store, so
+the share shrinks as a real store makes the tools themselves slower. It also breaks the
+TTL property that
 `test_the_ttl_actually_suppresses_the_stat` exists to hold. The trade was taken
 deliberately: this is a diagnostic, and a diagnostic that taxes every call to close its
 own last corner is worse than one that says where its edge is.
@@ -232,8 +241,9 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
         # DELIBERATELY NOT RECORDED AS REPORTED. It used to be, which permanently
         # suppressed a marker value whose files had not settled yet: git normally writes
         # the worktree before the reflog, but a ref that moves first would be read as
-        # "nothing differs" and never re-examined. Leaving it unrecorded costs one more
-        # walk per window and lets a late-settling deployment still be caught.
+        # "nothing differs" and never re-examined. Leaving it unrecorded costs NOTHING:
+        # the walk above runs before both the marker stat and this check, so it was never
+        # conditional on the `add`. Measured both ways — 20 stats per poll either.
         return None
     watch._reported.add(current)
     return Drift(torn=torn, moved_at=current)

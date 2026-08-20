@@ -407,14 +407,23 @@ def test_the_single_ttl_gate_residual_is_real_and_deliberate(marker, tmp_path):
     sys.modules["techne_inside_window"] = mod
     try:
         # A real poll, INSIDE the window: suppressed, so no walk, so no baseline.
+        # This intermediate assert IS the mechanism — without it the test could pass
+        # because the marker never moved, rather than because the walk was skipped.
         assert rd.poll(watch, now=1005.0) is None
-        assert "techne_inside_window" not in watch.baseline
+        assert "techne_inside_window" not in watch.baseline, (
+            "the TTL-suppressed poll must do no walk — if it baselined here, the walk "
+            "has been moved ahead of the TTL gate (the full fix); see this test's "
+            "docstring for the 0.47 ms/call trade before keeping that change"
+        )
 
         # Now it changes, and the deployment moves.
         os.utime(late, (0, 2000.0))
         _move(marker)
 
         drift = rd.poll(watch, now=1100.0)  # window expired; first walk sees it changed
+        # ...and the mechanism, asserted rather than implied: it is recorded at the
+        # POST-change mtime, which is precisely why it can never read as torn.
+        assert watch.baseline["techne_inside_window"] == 2000.0
         torn = drift.torn if drift else ()
         assert "techne_inside_window" not in torn, (
             "KNOWN RESIDUAL (Prudence r3): a TTL-suppressed poll does no walk, so a "
@@ -425,3 +434,45 @@ def test_the_single_ttl_gate_residual_is_real_and_deliberate(marker, tmp_path):
         )
     finally:
         del sys.modules["techne_inside_window"]
+
+
+def test_a_quiet_deployment_stays_re_examinable(marker, tmp_path):
+    """Prudence r4, Important — the behaviour change shipped with nothing holding it.
+
+    She restored the one-line `_reported.add` on the not-torn branch and got 18 passed,
+    then 144 on a widened selection. THE PATTERN IS THE FINDING: this is the fourth fix
+    on this PR to ship unguarded, after the `ttl=0.0` fixture, the deleted `begin()`
+    block, and the vacuous pin.
+
+    What it protects: a deployment whose ref moves before its files settle reads as
+    "nothing differs". Recording that marker value suppressed it permanently, so the tear
+    was never found once the files landed. Not recording it costs nothing — the walk runs
+    before both the marker stat and the `_reported` check, so it was never conditional on
+    the add (measured: 20 stats per poll either way).
+    """
+    import types
+
+    watch = rd.begin(None, ttl=0.0)
+    late = tmp_path / "settles_late.py"
+    late.write_text("x = 1")
+    os.utime(late, (0, 1000.0))
+    mod = types.ModuleType("techne_settles_late")
+    mod.__file__ = str(late)
+    sys.modules["techne_settles_late"] = mod
+    try:
+        assert rd.poll(watch) is None  # baseline it
+
+        # The ref moves, but the file has not settled yet: reads as "nothing differs".
+        _move(marker)
+        assert rd.poll(watch) is None
+        assert not watch._reported, (
+            "a marker value we did NOT report on must stay re-examinable; recording it "
+            "here permanently suppresses a deployment whose files settle afterwards"
+        )
+
+        # The file settles. The SAME marker value must still be able to speak.
+        os.utime(late, (0, 2000.0))
+        drift = rd.poll(watch)
+        assert drift is not None and "techne_settles_late" in drift.torn
+    finally:
+        del sys.modules["techne_settles_late"]
