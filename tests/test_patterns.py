@@ -706,3 +706,106 @@ def test_unrealized_excludes_patterns_with_outcomes(db, pattern):
     record_outcome(db, pattern_id=pattern, ref="o/r#1")
     ids = {p["id"] for p in unrealized_patterns(db)}
     assert pattern not in ids and other in ids
+
+
+# --- the ladder itself (Prudence r1 on #702) --------------------------------
+#
+# She deleted the new v4->v5 step entirely and the full suite stayed green at 3104,
+# exit 0; `if current < 4` instead of `< 5` also left 78/78 green. #674's step was
+# equally uncovered, so this is pre-existing practice rather than something the
+# renumbering introduced — which is why it is worth closing now.
+#
+# Uses SqliteStore().migrate() like the `db` fixture above: `_reconcile_relations`
+# runs the LADDER only, so a bare path has no `patterns` table for the steps to alter.
+
+
+def _laddered(path, start_version):
+    """A store at the current shape, re-stamped to `start_version`, then re-migrated."""
+    import sqlite3
+
+    from techne.core import architect
+
+    SqliteStore("architect", path).migrate(ARCHITECT_SCHEMA)
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version = {start_version}")
+    conn.commit()
+    conn.close()
+    architect._reconcile_relations(path)
+    return sqlite3.connect(path)
+
+
+@pytest.mark.parametrize("start", [0, 1, 2, 3, 4])
+def test_every_starting_stamp_reaches_the_current_shape(tmp_path, start):
+    """ASSERTS BY EFFECT, NOT BY STAMP. `_architect_run_steps` writes the version
+    unconditionally after running, so a store that skipped a step still ends up stamped
+    correctly — the stamp cannot tell you the step ran. Check what each step leaves."""
+    from techne.core import architect
+
+    conn = _laddered(tmp_path / "architect.db", start)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(patterns)")}
+        assert {"topic", "absorbed", "valid_at", "invalid_at"} <= cols
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == architect.ARCHITECT_VERSION
+    finally:
+        conn.close()
+
+
+def test_the_v4_to_v5_step_is_gated_at_5_not_4(tmp_path):
+    """The realistic slip in a renumbering: `if current < 4` for a v5 step. A store
+    stamped exactly 4 must still receive it — and that store is the live one.
+
+    `pattern_outcomes` is dropped AFTER the base schema is applied, so only the ladder
+    step can put it back. Without that drop the base schema creates it and the assertion
+    passes whether or not the step ran.
+    """
+    import sqlite3
+
+    from techne.core import architect
+
+    db_path = tmp_path / "architect.db"
+    SqliteStore("architect", db_path).migrate(ARCHITECT_SCHEMA)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE IF EXISTS pattern_outcomes")
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    architect._reconcile_relations(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pattern_outcomes'"
+        ).fetchone(), "a store stamped 4 is exactly the live case; it must migrate"
+    finally:
+        conn.close()
+
+
+def test_outcome_stats_counts_one_population(db):
+    """Prudence r1 on #702: the denominator filtered `status='active'` and neither
+    numerator did, so a SUPERSEDED pattern carrying an outcome inflated the rate —
+    demonstrated at realized_rate 2.0. `unrealized_patterns` right beside it does
+    filter, so the two were presented as complements while counting different sets."""
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO patterns (id,name,source_url,body,status,created_at)"
+        " VALUES ('live','a','u','b','active','2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO patterns (id,name,source_url,body,status,created_at)"
+        " VALUES ('dead','b','u','b','superseded','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    record_outcome(db, pattern_id="dead", ref="r1", state="shipped")
+    stats = outcome_stats(db)
+    assert stats["active_patterns"] == 1
+    assert stats["realized_patterns"] == 0, "a superseded pattern is not a realized active one"
+    assert stats["realized_rate"] <= 1.0
+
+    record_outcome(db, pattern_id="live", ref="r2", state="shipped")
+    stats = outcome_stats(db)
+    assert stats["realized_patterns"] == 1 and stats["realized_rate"] == 1.0

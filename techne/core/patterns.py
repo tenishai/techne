@@ -424,7 +424,7 @@ def record_outcome(
         if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone() is None:
             raise ValueError(f"unknown pattern id: {pattern_id}")
         before = conn.execute(
-            "SELECT state, note FROM pattern_outcomes WHERE pattern_id = ? AND ref = ?",
+            "SELECT state, note, kind FROM pattern_outcomes WHERE pattern_id = ? AND ref = ?",
             (pattern_id, ref),
         ).fetchone()
         now = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
@@ -434,13 +434,22 @@ def record_outcome(
             " ON CONFLICT(pattern_id, ref) DO UPDATE SET"
             "   state = excluded.state,"
             "   kind = excluded.kind,"
-            "   note = COALESCE(excluded.note, pattern_outcomes.note)",
+            "   note = COALESCE(excluded.note, pattern_outcomes.note),"
+            # Refreshed on promotion: `filed` -> `shipped` is a NEW event, and leaving
+            # the original timestamp made `[shipped] … (date)` show the date it was filed.
+            "   recorded_at = excluded.recorded_at",
             (pattern_id, ref, kind, state, now, note),
         )
         conn.commit()
         if before is None:
             return True
-        return before[0] != state or (note is not None and before[1] != note)
+        # `kind` counts as a change too — it was written but not reported, so the CLI
+        # said "unchanged" for a row it had just modified.
+        return (
+            before[0] != state
+            or before[2] != kind
+            or (note is not None and before[1] != note)
+        )
     finally:
         conn.close()
 
@@ -472,11 +481,19 @@ def outcome_stats(db_path: Path) -> dict:
     conn = plain_connect(db_path)
     try:
         active = conn.execute("SELECT COUNT(*) FROM patterns WHERE status = 'active'").fetchone()[0]
+        # JOIN + the SAME status filter as the denominator. Without it a superseded
+        # pattern carrying an outcome counted in the numerator only, so the rate could
+        # exceed 1.0 (demonstrated: realized_rate 2.0). `unrealized_patterns` below
+        # already filters, so the two read as complements while counting different
+        # populations — the more misleading half of the bug.
         realized = conn.execute(
-            "SELECT COUNT(DISTINCT pattern_id) FROM pattern_outcomes"
+            "SELECT COUNT(DISTINCT o.pattern_id) FROM pattern_outcomes o"
+            " JOIN patterns p ON p.id = o.pattern_id WHERE p.status = 'active'"
         ).fetchone()[0]
         shipped = conn.execute(
-            "SELECT COUNT(DISTINCT pattern_id) FROM pattern_outcomes WHERE state = 'shipped'"
+            "SELECT COUNT(DISTINCT o.pattern_id) FROM pattern_outcomes o"
+            " JOIN patterns p ON p.id = o.pattern_id"
+            " WHERE p.status = 'active' AND o.state = 'shipped'"
         ).fetchone()[0]
         by_state = dict(
             conn.execute("SELECT state, COUNT(*) FROM pattern_outcomes GROUP BY state").fetchall()
