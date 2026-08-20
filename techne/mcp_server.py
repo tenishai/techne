@@ -446,8 +446,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
     returns a merged ranked set. When empty (the common case), returns local-only
     with an identical shape — no behaviour change for unconfigured instances.
     """
-    from techne.core.anchor import annotate_freshness
     from techne.core import tiers as tier_model
+    from techne.core.anchor import annotate_freshness
     from techne.core.archivist import ARCHIVIST_CONNECTION_NAME
     from techne.core.identity import list_entries as list_identity
     from techne.core.knowledge import annotate_uncertain

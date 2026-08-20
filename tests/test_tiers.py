@@ -25,7 +25,14 @@ def test_every_rung_is_reported_even_when_nothing_matched():
     four, always, in order — that invariant IS the feature."""
     reports = _reports()
     assert [r.rung.number for r in reports] == [1, 2, 3, 4]
-    assert all(r.state for r in reports)
+    # Not `all(r.state ...)`: every state string is truthy, so that assertion cannot
+    # fail and reports success by silence. Pin the resolved values instead.
+    assert [r.state for r in reports] == [
+        tiers.STATE_EMPTY,
+        tiers.STATE_EMPTY,
+        tiers.STATE_UNCONFIGURED,
+        tiers.STATE_EMPTY,
+    ]
 
 
 def test_an_empty_tier_is_empty_not_absent():
@@ -244,8 +251,14 @@ def test_the_outcome_signal_is_asked_of_knowledge_at_the_call_site(tmp_path):
     # The term exists ONLY as a captured command, never as anything learned.
     record_observation(cfg, "s1", "grep plinthwaggle vortex ./src", tool_name="Bash")
 
-    outcome = _techne_recall({"topic": "plinthwaggle vortex"}, cfg)["outcome"]["code"]
-    assert outcome != "found", "an observed command is not prior experience"
+    result = _techne_recall({"topic": "plinthwaggle vortex"}, cfg)
+    # `!= "found"` alone is too weak, and Prudence r2 demonstrated it rather than
+    # asserting it: break the precondition AND leave the regression live and the test
+    # still passes green, because `nothing-known` also satisfies it. Pinning that the
+    # row IS present keeps the assertion about the outcome CLASSIFIER rather than
+    # about whether anything matched at all.
+    assert result["tiers"][0]["results"] == 1, "the observation must actually be found"
+    assert result["outcome"]["code"] != "found", "an observed command is not experience"
 
 
 def test_an_explicit_connection_outranks_the_standalone_default(tmp_path):
@@ -288,3 +301,56 @@ def test_standalone_suppresses_an_archivist_path_and_says_so(tmp_path):
     t2 = _techne_recall({"topic": "anything"}, cfg)["tiers"][1]
     assert t2["state"] == "unconfigured"
     assert t2["binding"] == "none"
+
+
+def test_the_local_binding_arm_is_pinned_end_to_end(tmp_path):
+    """Prudence r2, Important — the third arm of the gate, and the `pop` it drives.
+
+    Two arms were pinned; this one (`standalone=False`, no `connections["archivist"]`,
+    no `archivist_db_path` — the F/–/– row) was not, and both its mutants survived all
+    3059 tests. The harms she demonstrated:
+
+    * flipping this arm to ABSENT yields a response where tier 2 reports "no archivist
+      is configured" while a row tagged `_store: archivist` sits in the SAME payload —
+      the r1 defect recurring under a new shape;
+    * disabling the `fan_out_connections.pop` makes the tier-2 detail string ("one store
+      read once… the rows below are tier 1's") a falsehood, because a second store IS
+      then read.
+
+    Asserted end-to-end rather than on `build_reports`, because the second harm lives in
+    `_techne_recall`'s fan-out and a unit-level report cannot see it.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store as store_knowledge
+    from techne.mcp_server import _techne_recall
+
+    cfg = _cfg(tmp_path)
+    cfg.standalone = False
+    cfg.archivist_db_path = ""
+    cfg.connections = {}
+    store_knowledge(cfg.db_path, "the deploy runbook lives in ops/deploy.md", type="fact")
+
+    # THE ARCHIVIST STORE MUST EXIST AND HOLD A MATCHING ROW, or this test cannot see
+    # the pop at all. Without it `fan_out_search` skips a missing store and the "no row
+    # tagged archivist" assertion passes whether or not the pop happened — a test that
+    # reads as rigorous and bites nothing. Verified: with this row planted, disabling
+    # the pop fails here; without it, the mutant survives.
+    # DISTINCT content, deliberately: `_cross_store_dedup` strips a remote row whose
+    # content hash matches a local one, so planting the SAME text here is invisible even
+    # when the store IS read. First attempt did exactly that and the mutant survived.
+    archivist = tmp_path / "archivist.db"
+    init_db(archivist)
+    store_knowledge(archivist, "deploy runbook rotation is owned by the platform team", type="fact")
+
+    result = _techne_recall({"topic": "deploy runbook"}, cfg)
+    t1, t2 = result["tiers"][0], result["tiers"][1]
+
+    # The arm itself: tier 2 is a VISIBLE rung bound to tier 1's store, not absent.
+    assert t2["state"] == tiers.STATE_HIT
+    assert t2["binding"] == "local:knowledge" == t1["binding"]
+    assert t2["results"] == t1["results"] >= 1
+
+    # The pop: no second store was read, so nothing is tagged as coming from one.
+    assert not [r for r in result["search_results"] if r.get("_store") == "archivist"]
+    # ...and the detail string that claims exactly that is therefore true.
+    assert "read once" in t2["detail"]

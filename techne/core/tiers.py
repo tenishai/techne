@@ -22,9 +22,10 @@ the model is learned by seeing the shape on every call — not by reading docs. 
 is the same move as liminal prefixing tool names with `{target}.`.
 
 TIMING. Open-sourcing freezes a response shape in a way it never freezes a storage
-binding: strangers write against the shape. At n=1 this whole ladder is a no-op —
-same queries, same rows, no duplication — which is exactly why now is the only free
-window to state it. See knowledge#1267 (go-public paused) and #692.
+binding: strangers write against the shape. At n=1 stating the ladder costs nothing —
+the same stores are read the same number of times, and tiers 1 and 2 report one read
+rather than performing two — which is exactly why now is the only free window to say
+it out loud. See knowledge#1267 (go-public paused) and #692.
 """
 
 from __future__ import annotations
