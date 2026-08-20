@@ -10,6 +10,7 @@ import sys
 
 from techne import __version__
 from techne.config import Config
+from techne.core.patterns import _KNOWN_TARGETS as _PATTERN_TARGETS
 
 log = logging.getLogger(__name__)
 
@@ -576,6 +577,16 @@ def _parse_due_at(s: str) -> str:
 
 # --- Tool definitions ---
 
+#: The project targets `pattern_search` advertises, DERIVED from the write-side
+#: authority rather than spelled again here (techne#674). The literal used to read
+#: `techne|cabal|limenal|agent-infra`: it named a target that had been RENAMED
+#: (`limenal` -> `liminal` on 2026-08-11), so an agent following this description
+#: passed a value `_KNOWN_TARGETS` rejects and got ZERO patterns with no error —
+#: absence reported as fact. It also omitted the six targets #674 added, so those
+#: were undiscoverable from the tool surface. Deriving it means the description
+#: cannot drift from the set again.
+_KNOWN_TARGET_HINT = "|".join(sorted(_PATTERN_TARGETS))
+
 TOOLS = [
     {
         "name": "techne_search",
@@ -825,7 +836,7 @@ TOOLS = [
             "Search the Architect's architectural-pattern corpus (architect.db) — design "
             "patterns lifted from other projects' code, the team-shared 'what's worth "
             "stealing' store. Optionally scope to patterns that apply to a project "
-            "(target=techne|cabal|limenal|agent-infra); with a target and no query, lists "
+            f"(target={_KNOWN_TARGET_HINT}); with a target and no query, lists "
             "all patterns for that project."
         ),
         "inputSchema": {

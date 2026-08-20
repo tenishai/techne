@@ -38,7 +38,6 @@ System health and database statistics
 
 What techne can do on THIS install, and what is switched OFF — grounded in the user's own store. Call this when the user asks what techne is, what it can do, what changed after an upgrade, or why a feature they heard about does not seem to happen. Returns data, not prose: narrate it as a short conversation, lead with what is off and what it would buy THEM, and quote the evidence counts — they…
 
-
 ## Store — write the conclusion, not the transcript
 
 ### `techne_store`
@@ -48,7 +47,6 @@ Call this when you learn a durable fact, make or are given a decision, get user 
 ### `techne_observe`
 
 Record an observation into memory from any client. The platform-agnostic capture path — call this on each turn/tool-use when no native hook exists. Supply your own session_id; techne ensures the session and tags its platform.
-
 
 ## Reflect & sleep — emit/ingest pairs answered by YOUR model, no API key
 
@@ -104,13 +102,11 @@ Extract claims from curated memory and judge each against the deed-log using YOU
 
 Feed back the claim-judgement JSON array from techne_memory_claims_emit. `response` is your JSON array of claim objects (each with `claim`, `status`, `evidence`). Returns an ephemeral report with per-claim verdicts and counts (corroborated / uncorroborated / contradicted). Nothing is persisted.
 
-
 ## Honesty — check a claim before making it
 
 ### `techne_check_evidence`
 
 Call this before asserting you did something (committed, ran tests, wrote a file) to verify the claim against the observation ledger — enforces 'no unbacked word'. Returns per-claim backed/unbacked/unverifiable verdicts by parsing what the agent actually DID (Write/Edit/Bash tool records) in the given session window. Advisory — does not block; use unbacked_count > 0 as the flag. Structured…
-
 
 ## Coordination — talk to peer sessions on this machine
 
@@ -130,7 +126,6 @@ Mark coordination messages read so they stop surfacing. With 'message_ids' marks
 
 List coordination conversation threads you're party to (messages grouped by thread), most-recently-active first. Reply into one with techne_send(reply_to=<message id>). (techne#376)
 
-
 ## Reminders
 
 ### `techne_reminder_add`
@@ -145,7 +140,6 @@ List all ACTIVE reminders (including future ones) for in-session management. Ret
 
 Dismiss a reminder by id so it no longer surfaces. The row is kept as status='done' for audit; it will not appear in future hook injections. (techne#207)
 
-
 ## Code graph (codex)
 
 ### `codex_search`
@@ -156,12 +150,11 @@ Search Codex symbols (functions, classes, methods) by name or signature. Require
 
 Compute the transitive reachability (blast radius) of a Codex symbol. direction defaults to `in`=what reaches this symbol (dependents) — the "what breaks if I change this" impact set; `out`=what this symbol reaches (dependencies). Uses recursive CTE BFS over the call/import graph. tests/fixtures/** nodes are excluded by default (name-collision noise in the v1 name-based edge model; set…
 
-
 ## Patterns (architect)
 
 ### `pattern_search`
 
-Search the Architect's architectural-pattern corpus (architect.db) — design patterns lifted from other projects' code, the team-shared 'what's worth stealing' store. Optionally scope to patterns that apply to a project (target=techne|cabal|limenal|agent-infra); with a target and no query, lists all patterns for that project.
+Search the Architect's architectural-pattern corpus (architect.db) — design patterns lifted from other projects' code, the team-shared 'what's worth stealing' store. Optionally scope to patterns that apply to a project (target=agent-infra|agora|argus|cabal|daedalus|kaminos|ladon|liminal|prudence|techne); with a target and no query, lists all patterns for that project.
 
 ### `pattern_related`
 

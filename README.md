@@ -23,7 +23,7 @@ techne init
 > across interpreter changes:
 >
 > ```bash
-> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.14.0"
+> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.15.0"
 > techne init
 > ```
 >
@@ -101,7 +101,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
-`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.14.0"`.
+`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.15.0"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 
@@ -117,7 +117,7 @@ search:
 
 `model2vec` works on **every supported Python (3.11+)**, not only 3.14 — the `<3.14` fastembed default exists because `onnxruntime` had no 3.14 wheel, which is a fact about *onnxruntime*, not a judgment that fastembed is better below it. Verified 2026-08-17: `model2vec` 0.9.0 installs and runs on 3.13.
 
-**It costs disk, and the difference is large.** Measured on a clean venv installing `techne[recommended] @ v0.14.0`:
+**It costs disk, and the difference is large.** Measured on a clean venv installing `techne[recommended] @ v0.14.0` (not re-measured for 0.15.0):
 
 | backend | install | why |
 |---|---|---|
