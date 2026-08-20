@@ -378,6 +378,66 @@ def _effective_connections(config: Config) -> dict:
     return conns
 
 
+def _librarian_available(config: Config) -> bool:
+    """Does a librarian store exist to escalate TO? (S4)
+
+    Distinguishes tier 4 `empty` from tier 4 `unavailable`. "The library has
+    nothing on this" and "there is no library" are different answers, and S5's
+    middle outcome depends on being able to say which one happened.
+    """
+    try:
+        from techne.core.librarian import librarian_db
+
+        return librarian_db(config).exists()
+    except Exception:  # noqa: BLE001 — a diagnostic must never break recall
+        return False
+
+
+def _with_ladder(
+    config: Config,
+    topic: str,
+    rows: list[dict],
+    fan_out_connections: dict,
+    archivist_name: str,
+    archivist_binding: str,
+    extra: dict,
+) -> dict:
+    """Attach the stated ladder to a recall response (techne#552, S1/S4/S5).
+
+    ADDITIVE BY CONSTRUCTION. `search_results` keeps its exact prior contents and
+    ordering; the ladder is new keys alongside it. That matters more than usual
+    here — the argument for doing this NOW is that open-sourcing freezes a response
+    shape, so this is the last cheap moment to ADD to it, and the change is only
+    cheap if nothing existing moves.
+
+    Wrapped so a fault in the diagnostic can never cost the caller their results:
+    the ladder is what teaches, but the rows are what was asked for.
+    """
+    from techne.core import tiers
+
+    out = {"search_results": rows, **extra}
+    try:
+        tiers.annotate_rows(rows, archivist_name)
+        reports = tiers.build_reports(
+            rows=rows,
+            connections=fan_out_connections,
+            archivist_name=archivist_name,
+            archivist_binding=archivist_binding,
+            librarian_available=_librarian_available(config),
+        )
+        out["tiers"] = [r.as_dict() for r in reports]
+        # S5's experience signal, asked of the knowledge layer directly — see
+        # tiers.OUTCOME_LOOSE_ONLY for why neither distance nor match_source works.
+        from techne.core.search import has_direct_match
+
+        out["outcome"] = tiers.classify_outcome(
+            reports, direct=has_direct_match(config.db_path, topic, table="knowledge")
+        )
+    except Exception:  # noqa: BLE001
+        log.warning("recall: tier ladder failed — returning results without it", exc_info=True)
+    return out
+
+
 def _techne_recall(args: dict, config: Config) -> dict:
     """Retrieve context for a specific topic — searches all layers.
 
@@ -386,7 +446,9 @@ def _techne_recall(args: dict, config: Config) -> dict:
     returns a merged ranked set. When empty (the common case), returns local-only
     with an identical shape — no behaviour change for unconfigured instances.
     """
+    from techne.core import tiers as tier_model
     from techne.core.anchor import annotate_freshness
+    from techne.core.archivist import ARCHIVIST_CONNECTION_NAME
     from techne.core.identity import list_entries as list_identity
     from techne.core.knowledge import annotate_uncertain
     from techne.core.search import search
@@ -398,6 +460,39 @@ def _techne_recall(args: dict, config: Config) -> dict:
     # instance recalls over its own archivist.db without manual config.
     connections = _effective_connections(config)
 
+    # S2 (knowledge#1085) — THE LOCAL ARCHIVIST IS A RUNG, NOT A SECOND FILE.
+    # `_effective_connections` auto-registers this machine's own archivist.db as a
+    # `team` connection, so at n=1 recall was opening a store measured to be a 98.9%
+    # MIRROR of local knowledge, with drift — paying a second read to answer the same
+    # question slightly worse. The rung stays fully visible in the ladder below; only
+    # the redundant file read goes away. An archivist the operator configured
+    # EXPLICITLY is a real binding and is fanned out to as before, which is why this
+    # tests for BOTH ways an operator can express that intent:
+    #   * a `connections` entry named `archivist` — a federated peer, and
+    #   * a non-empty `archivist_db_path` — this instance pointed at a SHARED store,
+    #     which is the whole multi-agent team-recall case (techne#346). That store is
+    #     emphatically not a mirror of local knowledge, and skipping it would silently
+    #     break team recall. An existing end-to-end test caught exactly that when this
+    #     gate checked only `connections`; the default-path case is the ONLY one S2
+    #     is about.
+    if ARCHIVIST_CONNECTION_NAME not in connections:
+        # `standalone: True` — the DEFAULT. archivist_connection() returned None, so
+        # no archivist exists to bind to, and the ladder must say so rather than
+        # report an empty read of a store nobody opened.
+        archivist_binding = tier_model.ARCHIVIST_ABSENT
+    elif ARCHIVIST_CONNECTION_NAME in config.connections or config.archivist_db_path:
+        # An operator expressed a binding, either way it can be expressed: a
+        # `connections` entry names a federated peer, and a non-empty
+        # `archivist_db_path` points this instance at a SHARED store (techne#346).
+        # Both are real other stores; skipping either silently breaks team recall.
+        archivist_binding = tier_model.ARCHIVIST_STORE
+    else:
+        archivist_binding = tier_model.ARCHIVIST_LOCAL
+    archivist_is_local = archivist_binding == tier_model.ARCHIVIST_LOCAL
+    fan_out_connections = dict(connections)
+    if archivist_is_local:
+        fan_out_connections.pop(ARCHIVIST_CONNECTION_NAME, None)
+
     # Helper: shared identity search (same in both paths)
     def _identity_matches() -> list[dict]:
         results_i = []
@@ -406,8 +501,8 @@ def _techne_recall(args: dict, config: Config) -> dict:
                 results_i.append(entry)
         return results_i[:5]
 
-    # ---- Noop gate (techne#222 §2): no connections → local-only, unchanged shape ----
-    if not connections:
+    # ---- Noop gate (techne#222 §2): nothing to fan out to → local-only ----
+    if not fan_out_connections:
         # techne#216: DEFAULT recall excludes soft-archived knowledge.
         results = search(
             config.db_path,
@@ -427,10 +522,15 @@ def _techne_recall(args: dict, config: Config) -> dict:
         # attach an `uncertainty` marker. Distinct key from `freshness`; a row can
         # carry both.
         annotate_uncertain(config.db_path, results)
-        return {
-            "search_results": _fold_in_documents(config, topic, results),
-            "identity_matches": _identity_matches(),
-        }
+        return _with_ladder(
+            config,
+            topic,
+            _fold_in_documents(config, topic, results),
+            {},
+            ARCHIVIST_CONNECTION_NAME,
+            archivist_binding,
+            {"identity_matches": _identity_matches()},
+        )
 
     # ---- Federation path (techne#222) ----
     from techne.core.federation import (
@@ -467,7 +567,7 @@ def _techne_recall(args: dict, config: Config) -> dict:
         # but we already hold it — we only need remote_results here.
         _, remote_results = fan_out_search(
             config.db_path,
-            connections,
+            fan_out_connections,
             topic,
             limit=10,
             half_life_days=config.knowledge_confidence_half_life_days,
@@ -512,10 +612,15 @@ def _techne_recall(args: dict, config: Config) -> dict:
     annotate_freshness(config.db_path, local_only)
     annotate_uncertain(config.db_path, local_only)
 
-    out: dict = {
-        "search_results": _fold_in_documents(config, topic, merged),
-        "identity_matches": _identity_matches(),
-    }
+    out: dict = _with_ladder(
+        config,
+        topic,
+        _fold_in_documents(config, topic, merged),
+        fan_out_connections,
+        ARCHIVIST_CONNECTION_NAME,
+        archivist_binding,
+        {"identity_matches": _identity_matches()},
+    )
 
     # Step E — surface conflict prompts; recall itself does NOT write
     if conflicts:
