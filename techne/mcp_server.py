@@ -81,7 +81,15 @@ def _drift_notice(config) -> str | None:
         if _RUNTIME_WATCH is None:
             _RUNTIME_WATCH = runtime_drift.begin(config)
         drift = runtime_drift.poll(_RUNTIME_WATCH)
-        return drift.message() if drift else None
+        if drift:
+            # Publish for OTHER processes (techne#696 part A). ONLY on a real finding:
+            # `poll` reports once per deployment, so this writes once too, and the
+            # presence of a state file therefore means something is actually wrong
+            # rather than merely "a server ran". Writing unconditionally would litter
+            # one file per process forever and destroy that signal.
+            runtime_drift.publish(_RUNTIME_WATCH, drift)
+            return drift.message()
+        return None
     except Exception:  # noqa: BLE001
         return None
 

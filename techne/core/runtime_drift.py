@@ -247,3 +247,97 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
         return None
     watch._reported.add(current)
     return Drift(torn=torn, moved_at=current)
+
+
+#: Where a serving process leaves its verdict for OTHER processes to read. One file
+#: per pid: several servers can run at once, and a shared file would make the last
+#: writer the only truth.
+STATE_DIRNAME = "runtime-state"
+
+
+def _state_dir(config=None) -> Path:
+    from techne.config import techne_home
+
+    return techne_home() / STATE_DIRNAME
+
+
+def publish(watch: RuntimeWatch, drift: "Drift | None", *, pid: int | None = None) -> None:
+    """Record this process's verdict where a DIFFERENT process can read it.
+
+    THE WHOLE REASON PART A NEEDED PART B FIRST. `poll` answers cheaply because the
+    process asks itself — but the answer lives in memory, and SessionStart is not that
+    process. Asking from outside is what costs `ps` plus git and got #697 withdrawn. So
+    the server writes the one thing only it knows, and the reader does an `open()`.
+
+    Best-effort and never raises: failing to publish a diagnostic must not affect
+    serving. Written whole then renamed, so a reader never sees a half-file.
+    """
+    import json
+    import os
+
+    pid = os.getpid() if pid is None else pid
+    try:
+        d = _state_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": pid,
+            "torn": list(drift.torn) if drift else [],
+            "moved_at": drift.moved_at if drift else None,
+            "modules": len(watch.baseline),
+        }
+        tmp = d / f".{pid}.json.tmp"
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(d / f"{pid}.json")
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _alive(pid: int) -> bool:
+    """Is this pid still running? `os.kill(pid, 0)` — a signal check, not a spawn.
+
+    A dead server's verdict is not a stale warning to soften; it is a FALSE one. The
+    condition it described ended when the process did.
+    """
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except OSError:
+        return False
+    return True
+
+
+def live_reports(config=None) -> list[dict]:
+    """Verdicts published by servers that are STILL RUNNING. Reaps the rest.
+
+    Cheap by construction — a directory listing, one `open()` each, and a signal check
+    per pid. No `ps`, no git, no subprocess. That is what makes the SessionStart check
+    an ordinary registered check rather than an `@expensive` one reached around
+    `cheap_only`, which is precisely how #697 went wrong.
+    """
+    import json
+
+    out: list[dict] = []
+    try:
+        d = _state_dir()
+        if not d.is_dir():
+            return out
+        for f in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(f.read_text())
+                pid = int(data.get("pid", 0))
+            except Exception:  # noqa: BLE001
+                f.unlink(missing_ok=True)
+                continue
+            if not _alive(pid):
+                f.unlink(missing_ok=True)  # the condition ended with the process
+                continue
+            if data.get("torn"):
+                out.append(data)
+    except Exception:  # noqa: BLE001
+        return out
+    return out
