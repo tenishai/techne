@@ -22,10 +22,20 @@ the model is learned by seeing the shape on every call — not by reading docs. 
 is the same move as liminal prefixing tool names with `{target}.`.
 
 TIMING. Open-sourcing freezes a response shape in a way it never freezes a storage
-binding: strangers write against the shape. At n=1 stating the ladder costs nothing —
-the same stores are read the same number of times, and tiers 1 and 2 report one read
-rather than performing two — which is exactly why now is the only free window to say
-it out loud. See knowledge#1267 (go-public paused) and #692.
+binding: strangers write against the shape. Two measured facts about what stating it
+costs, rather than a claim that it is free (an earlier draft said "costs nothing" and
+"the same stores are read the same number of times"; Prudence counted `sqlite3.connect`
+per db across one recall and falsified BOTH, in opposite directions):
+
+  * ONE MORE READ PER RECALL, in every arm — `has_direct_match` in `_with_ladder` is a
+    new MATCH that did not exist before. Measured local.db 4->5 (ABSENT), 6->7 (STORE).
+  * ONE FEWER STORE, in the LOCAL arm — S2 stops opening archivist.db at all, so the
+    set of stores read is strictly SMALLER, not the same. Measured 6 + archivist.db x1
+    -> 5, the pop moving that read off the federation path entirely.
+
+No rows are duplicated and no existing row moves, which is what "additive" claims and
+all this shape freezing is about. The cost is one index probe.
+See knowledge#1267 (go-public paused) and #692.
 """
 
 from __future__ import annotations

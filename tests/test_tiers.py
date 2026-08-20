@@ -151,8 +151,18 @@ def test_has_direct_match_survives_a_store_with_no_fts(tmp_path):
     louder and more misleading answer than declining to characterise the result."""
     from techne.core.search import has_direct_match
 
+    # The OUTER handler: connect() itself fails.
     assert has_direct_match(tmp_path / "does-not-exist.db", "anything") is False
     assert has_direct_match(tmp_path / "does-not-exist.db", "") is False
+
+    # The INNER handler, which the above never reached — a db that OPENS cleanly and
+    # has no FTS table, so the MATCH raises rather than the connect. Carry-forward Nit
+    # from Prudence r2/r3: the load-bearing guard was the untested one.
+    import sqlite3
+
+    empty = tmp_path / "empty-but-valid.db"
+    sqlite3.connect(empty).close()
+    assert has_direct_match(empty, "anything at all") is False
 
 
 def test_no_archivist_reads_unconfigured_not_empty():
@@ -349,6 +359,25 @@ def test_the_local_binding_arm_is_pinned_end_to_end(tmp_path):
     assert t2["state"] == tiers.STATE_HIT
     assert t2["binding"] == "local:knowledge" == t1["binding"]
     assert t2["results"] == t1["results"] >= 1
+
+    # POSITIVE CONTROL, and the test is hollow without it. Everything below asserts an
+    # ABSENCE, and an absence is satisfied by any silent breakage of the setup — a moved
+    # default path, content that dedup strips, a query the planted text stops matching.
+    # Prudence held the `pop` mutant live and broke each precondition: two of the three
+    # turned the guard green. So prove the presence is ACHIEVABLE on the same path with
+    # the same store, where only the arm differs.
+    from techne.core.archivist import _resolve_archivist_path
+
+    assert _resolve_archivist_path(cfg) == archivist, "recall must look where we planted"
+    control = _cfg(tmp_path, "control.db")
+    control.standalone = False
+    control.archivist_db_path = str(archivist)  # same store, STORE arm, no pop
+    store_knowledge(control.db_path, "the deploy runbook lives in ops/deploy.md", type="fact")
+    control_rows = _techne_recall({"topic": "deploy runbook"}, control)["search_results"]
+    assert [r for r in control_rows if r.get("_store") == "archivist"], (
+        "the planted archivist row must be reachable when the arm does NOT pop — "
+        "if this fails, the absence assertion below proves nothing"
+    )
 
     # The pop: no second store was read, so nothing is tagged as coming from one.
     assert not [r for r in result["search_results"] if r.get("_store") == "archivist"]
