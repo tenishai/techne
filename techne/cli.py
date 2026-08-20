@@ -56,13 +56,13 @@ def capabilities(ctx, as_json):
             click.echo(f"  ✓ {c['flag']}  — {c['title']}")
         click.echo("")
     if off:
-        click.echo(f"OFF ({len(off)}) — each line goes in config.yaml")
+        click.echo(f"OFF ({len(off)})")
         for c in off:
             click.echo(f"  ✗ {c['flag']}  — {c['title']}")
             click.echo(f"      {c['buys']}")
             if c["evidence"]:
                 click.echo(f"      on this install: {c['evidence']}")
-            click.echo("      enable:")
+            click.echo("      to enable:")
             for line in c["enable"].splitlines():
                 click.echo(f"        {line}")
         click.echo("")
