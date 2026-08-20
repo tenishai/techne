@@ -185,16 +185,31 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
         # argument switched off the path that broke the property it was guarding.
         return None
     watch._checked_at = t
+
+    # WALK BEFORE THE MARKER GATE, and this ordering is the whole correctness of tier 2.
+    # It used to run only AFTER a pull was detected, which meant nothing was baselined
+    # until a pull had already happened — so a module imported after `begin()` and
+    # changed by that first pull got baselined at its POST-change mtime and was never
+    # torn, for the life of the process. Permanently silent, and not a corner: `begin()`
+    # sees ~22 modules and four real tool calls take the process to ~43, with the 21 late
+    # arrivals being exactly the function-local imports tier 2 exists to watch (`search`,
+    # `knowledge`, `identity`, `health`). It even landed on the branch below whose comment
+    # says "the pull touched files we never loaded" when we demonstrably had.
+    #
+    # Walking every poll costs 0.31 ms against a 30-second TTL — 0.001% — and buys the
+    # property that every loaded module is baselined BEFORE any pull can change it.
+    torn = _torn_modules(watch.baseline)
+
     try:
         current = watch.marker_path.stat().st_mtime
     except OSError:
         return None
     if current == watch.marker_at or current in watch._reported:
         return None
-    torn = _torn_modules(watch.baseline)
     if not torn:
         # The deployment moved but nothing this process holds differs — the pull
-        # touched files we never loaded. Consistent, and not worth a line.
+        # touched files we never loaded. Consistent, and not worth a line. Recorded as
+        # reported so a later poll does not re-evaluate this same marker value.
         watch._reported.add(current)
         return None
     watch._reported.add(current)

@@ -142,7 +142,11 @@ def test_a_deleted_module_file_is_not_reported_as_changed(marker, tmp_path):
     ghost.__file__ = str(tmp_path / "vanished.py")
     sys.modules["techne_ghost_module"] = ghost
     try:
-        assert "techne_ghost_module" not in rd._torn_modules({})
+        # A baseline that WOULD make it torn if the guard were absent. With `{}` every
+        # module is "newly imported" and the function cannot return anything at all, so
+        # the assertion held for a reason unrelated to the guard: Prudence mutated out
+        # BOTH guards and all 15 tests still passed.
+        assert "techne_ghost_module" not in rd._torn_modules({"techne_ghost_module": 0.0})
     finally:
         del sys.modules["techne_ghost_module"]
 
@@ -155,7 +159,7 @@ def test_a_module_without_a_file_is_skipped():
     ns = types.ModuleType("techne_namespace_like")
     sys.modules["techne_namespace_like"] = ns
     try:
-        assert "techne_namespace_like" not in rd._torn_modules({})
+        assert "techne_namespace_like" not in rd._torn_modules({"techne_namespace_like": 0.0})
     finally:
         del sys.modules["techne_namespace_like"]
 
@@ -303,3 +307,62 @@ def test_a_failing_drift_check_cannot_fail_a_tool_call(cfg, monkeypatch):
         assert "result" in resp and resp["result"]["content"]
     finally:
         ms._RUNTIME_WATCH = None
+
+
+def test_the_baseline_is_taken_at_server_start(monkeypatch, tmp_path):
+    """Prudence r2 — she deleted the whole `begin()` block from `main()` and 40 tests
+    still passed. The r1 fix had nothing holding it in place.
+
+    It matters because `mcp_server` carries 46 function-local imports: baselining lazily
+    on the first tool call means the modules those imports pull in are recorded at
+    whatever mtime they have BY THEN, which may already be post-pull.
+    """
+    import io
+
+    import techne.mcp_server as ms
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    marker = tmp_path / "runtime" / ".git" / "logs" / "HEAD"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("initial")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))  # serve nothing, exit at once
+    ms._RUNTIME_WATCH = None
+    try:
+        ms.main()
+        assert ms._RUNTIME_WATCH is not None, "main() must baseline before serving"
+        assert ms._RUNTIME_WATCH.baseline, "the baseline must be populated, not empty"
+    finally:
+        ms._RUNTIME_WATCH = None
+
+
+def test_a_module_imported_after_begin_is_still_caught(marker, tmp_path):
+    """Prudence r2, Important 1 — the permanent-silence path, and the common case.
+
+    `_torn_modules` used to run only AFTER the marker gate, so nothing was baselined
+    until a pull had already happened: a module imported after `begin()` and changed by
+    that first pull was baselined at its POST-change mtime and never torn, for the life
+    of the process. She demonstrated it on a real module, really imported and really
+    rewritten — drift None, and still None after three more pulls.
+    """
+    import types
+
+    watch = rd.begin(None, ttl=0.0)
+    late = tmp_path / "late.py"
+    late.write_text("x = 1")
+    os.utime(late, (0, 1000.0))
+    mod = types.ModuleType("techne_late_arrival")
+    mod.__file__ = str(late)
+    sys.modules["techne_late_arrival"] = mod
+    try:
+        # A poll BEFORE any pull must baseline the late arrival.
+        assert rd.poll(watch) is None
+        assert "techne_late_arrival" in watch.baseline
+
+        # Now the pull changes it — that is a tear, and must be reported.
+        _move(marker)
+        os.utime(late, (0, 2000.0))
+        drift = rd.poll(watch)
+        assert drift is not None, "a module imported after begin() must still be watched"
+        assert "techne_late_arrival" in drift.torn
+    finally:
+        del sys.modules["techne_late_arrival"]
