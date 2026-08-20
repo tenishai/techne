@@ -1291,6 +1291,52 @@ def prepare_fts_query(query: str) -> str | None:
     return fts or None
 
 
+def has_direct_match(db_path: Path, query: str, table: SearchTable = "all") -> bool:
+    """Does ANY row contain ALL of these terms? (techne#552 S5)
+
+    THIS EXISTS BECAUSE NEITHER EXISTING SIGNAL COULD ANSWER IT, and both failures
+    were measured rather than assumed:
+
+    * **Distance cannot.** `search()` is hybrid (techne#401) and a nearest-neighbour
+      query returns k rows however far away they are. On the live store the nonsense
+      query "zzzqqxx" produced a NEARER top neighbour (0.961) than a real query about
+      work done that same day (0.974). There is no cutoff between them, so any
+      threshold would have been a number invented to make the feature look like it
+      worked.
+    * **`match_source` cannot.** It reports which channel a row came from, and
+      `vec_first` fusion fills the page from the vector channel before appending
+      FTS-only hits. Measured: "tier ladder recall archivist" returns 10 FTS rows on
+      its own, yet 10/10 `vec` through the hybrid path — the lexical evidence is real
+      and simply crowded out. `match_source` therefore measures fusion, not matching.
+
+    So this asks the question directly: the implicit-AND FTS pass, with **no #70 OR
+    fallback and no vector channel**. An empty result is a fact about the store — no
+    row contains all these terms — which is exactly the "we have no direct experience
+    of this" that S5 has to tell apart from "we know nothing" and "it is documented".
+
+    Scoped by `table`, which defaults to `"all"` and therefore fans across every FTS
+    table — callers wanting the S5 semantics must pass `table="knowledge"` explicitly.
+    `_fts_match_rows` builds ordinary result rows, so this does select content and does
+    order by rank; the cost is bounded by `LIMIT 1` rather than by doing less work.
+    """
+    fts_query = prepare_fts_query(query)
+    if fts_query is None:
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        conn.row_factory = sqlite3.Row
+        return bool(_fts_match_rows(conn, fts_query, table, 1))
+    except sqlite3.Error:
+        # A missing FTS table must not make recall claim "no experience" — that is a
+        # louder, more misleading answer than declining to characterise the result.
+        return False
+    finally:
+        conn.close()
+
+
 def build_or_fts_query(query: str) -> str:
     """Build an OR-of-terms FTS5 query for the #70 empty-result fallback.
 
