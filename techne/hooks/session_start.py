@@ -146,6 +146,46 @@ def render_drift_block(config) -> str:
 DEFERRED_CONTEXT_KEY = "session_start:deferred"
 
 
+def _stale_runtime_notice(config) -> str | None:
+    """The banner line for "a live process is holding pre-pull modules", or None.
+
+    RETURNS A VALUE RATHER THAN APPENDING, so a test can assert the CONDITION instead
+    of grepping the prose. `hooks.py` already carries that lesson in a comment: a
+    reworded message once left the suite 56/56 green while the banner was broken.
+
+    STALE ONLY, DELIBERATELY. `check_runtime_loaded` (#491) has detected this since it
+    shipped and NOTHING consumed it — reachable only by running `techne doctor`, i.e. by
+    someone who already suspects. That is the #468 shape the check was itself written
+    against. But #562 measured 74.5% of SessionStart's all-time budget going to sessions
+    that produced zero observations, and a line that appears when nothing is wrong trains
+    the reader to skip the line. So: emit on `stale`, silence on everything else. The
+    condition self-clears at the next restart, so it cannot become wallpaper on its own.
+
+    The check's own detail is careful to say this is ORDERING, not a tear detector, and
+    it is quoted rather than paraphrased. Restating it loosely ("your session is running
+    old code") would put the claim-stronger-than-the-code defect in the banner.
+
+    Never raises: the caller wraps it too, but a diagnostic that can cost a session is
+    worse than no diagnostic.
+    """
+    try:
+        from techne.core.checks import Verdict, check_runtime_loaded
+
+        loaded = check_runtime_loaded(config)
+        if getattr(loaded.verdict, "value", loaded.verdict) != Verdict.STALE.value:
+            return None
+        return (
+            "\n## techne — the runtime moved under a running process (techne#696)\n"
+            f"> {loaded.detail}\n"
+            f"> Evidence: {loaded.evidence}\n"
+            "> Restart the techne MCP server (or the session that owns it) to reload. "
+            "Until then a tool result may come from code that predates the last "
+            "`git -C ~/.techne/runtime pull`."
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def main() -> None:
     run_ts = _now_iso()
     db_path = None
@@ -349,6 +389,17 @@ def _run_phases_2_to_9(
         print(f"techne: health banner failed: {exc}", file=sys.stderr)
         output_parts.append("\n## techne ⚠️\n> Banner generation failed")
         output_parts.append("")
+
+    # ------------------------------------------------------------------
+    # Phase 5.35: A live process holding pre-pull modules (techne#696) — non-fatal.
+    try:
+        notice = _stale_runtime_notice(config)
+        if notice:
+            output_parts.append(notice)
+            output_parts.append("")
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never cost a session
+        failures.append(f"runtime staleness: {exc}")
+        print(f"techne: runtime staleness check failed: {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Phase 5.4: Hook-registration drift (techne#452) — non-fatal.
