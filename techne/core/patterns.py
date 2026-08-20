@@ -378,7 +378,7 @@ def add_relation(
 
 
 def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
-    """Tag a pattern as applying to a project target (techne|cabal|limenal|…).
+    """Tag a pattern as applying to a project target (see _KNOWN_TARGETS).
     Idempotent. Returns True if a new row was inserted."""
     conn = plain_connect(db_path)
     try:
@@ -596,7 +596,13 @@ def related_patterns(db_path: Path, pattern_id: str) -> dict:
 
 
 def patterns_for_target(db_path: Path, target: str, *, limit: int = 100) -> list[dict]:
-    """All active patterns tagged as applying to *target* (techne|cabal|limenal|…)."""
+    """All active patterns tagged as applying to *target* (see _KNOWN_TARGETS).
+
+    Takes the target VERBATIM — no aliasing. A pre-rename spelling such as
+    `limenal` therefore returns [] rather than `liminal`'s rows; canonicalisation
+    happens on the WRITE side (`_apply_targets`), so the stored value is already
+    canonical and a miss here means the caller asked for something real that is
+    not tagged, which is a true answer (techne#674)."""
     conn = plain_connect(db_path)
     try:
         return [
