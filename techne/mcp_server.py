@@ -57,6 +57,35 @@ SERVER_INSTRUCTIONS = (
 )
 
 
+#: This process's view of itself (techne#696). Built lazily on the first tool call
+#: rather than at import, so importing `mcp_server` (tests, the CLI) costs nothing.
+#: Module-level because it is genuinely per-process state — the thing being measured.
+_RUNTIME_WATCH = None
+
+
+def _drift_notice(config) -> str | None:
+    """One line when this server is serving code that no longer matches disk.
+
+    THE SERVER IS THE RIGHT PLACE TO ASK, and that is the whole design. Answering this
+    from outside costs `ps` plus git (`check_runtime_loaded`, `@expensive`, and the
+    reason PR #697 was withdrawn). Answering it from inside costs one `stat` behind a
+    TTL, because a process already knows when it started and what it imported.
+
+    Never raises and never blocks a tool result: a diagnostic that can fail a call is
+    worse than no diagnostic.
+    """
+    global _RUNTIME_WATCH
+    try:
+        from techne.core import runtime_drift
+
+        if _RUNTIME_WATCH is None:
+            _RUNTIME_WATCH = runtime_drift.begin(config)
+        drift = runtime_drift.poll(_RUNTIME_WATCH)
+        return drift.message() if drift else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def handle_request(request: dict, config: Config) -> dict:
     """Route a JSON-RPC request to the appropriate handler."""
     method = request.get("method", "")
@@ -87,9 +116,16 @@ def handle_request(request: dict, config: Config) -> dict:
         if handler:
             try:
                 result = handler(arguments, config)
-                return _response(
-                    req_id, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
-                )
+                content = [{"type": "text", "text": json.dumps(result, indent=2)}]
+                # techne#696 — a SEPARATE content block, never a key inside `result`.
+                # The drift notice is about the SERVER, not about what the tool
+                # returned; folding it into the payload would change 34 tools' response
+                # shapes to say something none of them is about, and #695 spent three
+                # review rounds on how expensive a response-shape change is.
+                notice = _drift_notice(config)
+                if notice:
+                    content.append({"type": "text", "text": notice})
+                return _response(req_id, {"content": content})
             except Exception as e:
                 return _response(
                     req_id,
@@ -2138,6 +2174,20 @@ def _error(req_id, code, message):
 def main():
     """Run the MCP server over stdio."""
     config = Config.load()
+
+    # techne#696 — take the module baseline HERE, before serving anything. Building it
+    # lazily on the first tool call was wrong: `mcp_server` alone carries 46
+    # function-local `from techne…` imports, so by the first call the process has
+    # already pulled in modules whose files may have changed, and each would be
+    # baselined at its POST-change mtime and never reported. One stat-walk of the
+    # modules already loaded (~21, measured 0.29 ms), once, at startup.
+    global _RUNTIME_WATCH
+    try:
+        from techne.core import runtime_drift
+
+        _RUNTIME_WATCH = runtime_drift.begin(config)
+    except Exception:  # noqa: BLE001 — a diagnostic must never cost the server its start
+        _RUNTIME_WATCH = None
 
     for line in sys.stdin:
         line = line.strip()
