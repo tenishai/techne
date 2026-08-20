@@ -53,7 +53,30 @@ def test_every_capability_carries_all_three_required_parts(config):
         assert isinstance(cap["on"], bool)
         assert cap["buys"].strip(), f"{cap['flag']} has no plain-language benefit"
         assert cap["flag"] in cap["enable"], f"{cap['flag']}'s enable line is not actionable"
-        assert cap["enable"].startswith("hooks:"), f"{cap['flag']} must say WHERE the line goes"
+        assert "hooks:" in cap["enable"], f"{cap['flag']} must say WHERE the line goes"
+
+
+def test_enable_snippet_cannot_be_read_as_current_state(config):
+    """The snippet says `<flag>: true` about a flag that is FALSE. Handed over
+    bare it is just valid YAML, and a reader takes it as status — which happened:
+    an agent quoted it for an OFF flag and the operator concluded the flag was on.
+    So the frame (which file, and that it is currently OFF) travels WITH it."""
+    report = capability_report(config)
+    for cap in report["capabilities"]:
+        assert not cap["on"]
+        first = cap["enable"].splitlines()[0]
+        assert first.startswith("#"), f"{cap['flag']}'s snippet opens as bare config"
+        assert "OFF" in first, f"{cap['flag']}'s snippet does not state the current state"
+        assert "config.yaml" in first, f"{cap['flag']}'s snippet does not name the file"
+
+
+def test_enabled_capability_offers_nothing_to_enable(config):
+    """An "enable" block for something already enabled is the same ambiguity with
+    none of the payoff — there is no change for the reader to make."""
+    config.hooks.per_turn_recall = True
+    report = capability_report(config)
+    recall = next(c for c in report["capabilities"] if c["flag"] == "per_turn_recall")
+    assert recall["enable"] == ""
 
 
 def test_flags_are_real_config_attributes(config):
