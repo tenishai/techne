@@ -246,3 +246,45 @@ def test_the_outcome_signal_is_asked_of_knowledge_at_the_call_site(tmp_path):
 
     outcome = _techne_recall({"topic": "plinthwaggle vortex"}, cfg)["outcome"]["code"]
     assert outcome != "found", "an observed command is not prior experience"
+
+
+def test_an_explicit_connection_outranks_the_standalone_default(tmp_path):
+    """The tri-state gate's precedence, verified rather than reasoned about.
+
+    `standalone: True` suppresses the AUTO-registered archivist, but an operator who
+    wrote a `connections["archivist"]` entry has stated a binding explicitly, and that
+    must win — otherwise the default flag silently disables a store somebody configured
+    by hand. `_effective_connections` uses `setdefault`, so config already wins there;
+    this pins that the ladder agrees with it.
+    """
+    from techne.config import FederationConnectionSpec
+    from techne.mcp_server import _techne_recall
+
+    peer = _cfg(tmp_path, "peer2.db")
+    cfg = _cfg(tmp_path)
+    cfg.standalone = True
+    cfg.connections = {
+        "archivist": FederationConnectionSpec(role="team", db_path=str(peer.db_path))
+    }
+    t2 = _techne_recall({"topic": "anything"}, cfg)["tiers"][1]
+    assert t2["state"] != "unconfigured", "an explicit connection must not read as absent"
+    assert t2["binding"] == "store:archivist"
+
+
+def test_standalone_suppresses_an_archivist_path_and_says_so(tmp_path):
+    """The contradictory config: `archivist_db_path` set while `standalone: True`.
+
+    `archivist_connection()` returns None on standalone REGARDLESS of the path, so the
+    store genuinely is not read. The ladder must report `unconfigured` — matching what
+    actually happened — rather than describing a binding to a file it never opened. This
+    is the #552 `standalone`-as-lane-selector fork showing through; the ladder's job here
+    is to be honest about it, not to paper over it.
+    """
+    from techne.mcp_server import _techne_recall
+
+    cfg = _cfg(tmp_path)
+    cfg.standalone = True
+    cfg.archivist_db_path = str(tmp_path / "some-archivist.db")
+    t2 = _techne_recall({"topic": "anything"}, cfg)["tiers"][1]
+    assert t2["state"] == "unconfigured"
+    assert t2["binding"] == "none"
