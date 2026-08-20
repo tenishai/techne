@@ -3252,7 +3252,7 @@ def architect_related(ctx, pattern_id):
 @click.option("--limit", default=100)
 @click.pass_context
 def architect_applies(ctx, target, limit):
-    """List patterns tagged as applying to TARGET (techne|cabal|limenal|agent-infra)."""
+    """List patterns tagged as applying to TARGET (see techne.core.patterns._KNOWN_TARGETS)."""
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
     from techne.core.patterns import patterns_for_target

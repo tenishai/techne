@@ -117,7 +117,7 @@ search:
 
 `model2vec` works on **every supported Python (3.11+)**, not only 3.14 — the `<3.14` fastembed default exists because `onnxruntime` had no 3.14 wheel, which is a fact about *onnxruntime*, not a judgment that fastembed is better below it. Verified 2026-08-17: `model2vec` 0.9.0 installs and runs on 3.13.
 
-**It costs disk, and the difference is large.** Measured on a clean venv installing `techne[recommended] @ v0.14.0`:
+**It costs disk, and the difference is large.** Measured on a clean venv installing `techne[recommended] @ v0.14.0` (not re-measured for 0.15.0):
 
 | backend | install | why |
 |---|---|---|

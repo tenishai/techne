@@ -45,8 +45,9 @@ that makes any of it reach you: techne can now introduce itself. **29 changes.**
   consumer reading it was misled. The row now says which table *and* which kind.
 - **`status='uncertain'` ranked instead of filtering** (#501) — we were injecting what
   we are on record as not believing. "Written down but not trusted" is now expressible.
-- **The per-turn rail re-sent what the session already had** (#576) — 45% of
-  deliveries, with compaction-aware suppression now in place.
+- **The per-turn rail re-sent what the session already had** (#576) — **46.1%** of
+  deliveries (3,227 of 7,004, re-measured 2026-08-18; #576 was filed at 45.4%), with
+  compaction-aware suppression now in place.
 - **SessionStart spent 74.5% of its budget on sessions that produce nothing** (#562 —
   re-measured 2026-08-18; the issue title's 76% is the original, smaller sample).
   No classifier can spot them in advance — project path, identity and lifetime were all
@@ -103,6 +104,20 @@ release's notes, which remain accurate.
 into `liminal`. It is `INSERT OR IGNORE` + `DELETE`, not `UPDATE`, because the primary key
 is `(pattern_id, target)` and a straight update collides on every pattern carrying both
 spellings. `guarded_migrate` takes a backup first.
+
+**If your `architect.db` is ALREADY stamped at 4, the step is skipped and the `limenal`
+rows survive.** `guarded_migrate` returns at `current == target` before any step runs, so
+a store that reached 4 by another route never sees this one — and because the code
+constant has now caught up, `techne doctor` will report `schema:architect` **healthy**,
+because the stamp finally matches. That is the honest state of the stamp, not of the data.
+Check with `sqlite3 ~/.techne/architect.db "SELECT target, count(*) FROM pattern_applies
+GROUP BY target"`; if `limenal` is present, reset the stamp to 3 and re-open techne to let
+the step run. See #676.
+
+**A merged fix is not a deployed fix.** If you run techne from an editable checkout
+(`~/.techne/runtime`), `git pull` it too — otherwise the CLI keeps running the old
+extractor and re-derives the rows this step just removed. That happened on the machine
+that cut this release; see #690.
 
 **If `techne doctor` reports `schema:<store>` BROKEN after upgrading, read it.** That
 check is new in this release and it can only fire on a store *ahead* of its code —
