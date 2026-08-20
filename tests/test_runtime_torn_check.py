@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 
 import pytest
 
@@ -263,15 +264,30 @@ def test_a_fifo_cannot_block_the_scan(home):
     assert [r["pid"] for r in reports] == [os.getpid()]
 
 
-def test_a_directory_named_like_a_state_file_is_skipped(home):
-    """Same guard, second shape — `read_text()` on a directory raises IsADirectoryError,
-    which the per-file handler would then try to `unlink`, failing again."""
+def test_a_directory_is_skipped_rather_than_read_and_reaped(home):
+    """Prudence r3: asserting "we survived" passed with `is_file()` removed, because the
+    per-file handler already tolerated directories. The guard's distinct effect is that
+    the entry is never OPENED and never reaped — assert that instead."""
     d = home / rd.STATE_DIRNAME
     d.mkdir(parents=True)
     (d / "adir.json").mkdir()
-    _write(home, "zzz_real", {"pid": os.getpid(), "torn": ["techne.core.search"]})
-    assert [r["pid"] for r in rd.live_reports()] == [os.getpid()]
-    assert (d / "adir.json").is_dir(), "a directory must be skipped, never unlinked"
+
+    opened = []
+    real_read = pathlib.Path.read_text
+    import techne.core.runtime_drift  # noqa: F401
+
+    def spy(self, *a, **k):
+        opened.append(self.name)
+        return real_read(self, *a, **k)
+
+    pathlib.Path.read_text = spy
+    try:
+        rd.live_reports()
+    finally:
+        pathlib.Path.read_text = real_read
+
+    assert "adir.json" not in opened, "is_file() must stop it before read_text()"
+    assert (d / "adir.json").is_dir(), "and it must not be reaped"
 
 
 def test_a_fresh_tmp_file_is_not_reaped_mid_publish(home):
@@ -297,12 +313,29 @@ def test_a_fresh_tmp_file_is_not_reaped_mid_publish(home):
     assert not fresh.exists()
 
 
-def test_publish_survives_a_concurrent_scan(home):
-    """The end-to-end form of the same race, driven through the real functions rather
-    than an imitation of them."""
+def test_publish_survives_a_scan_landing_mid_write(home, monkeypatch):
+    """The race, actually interleaved. Prudence r3: the previous version let `publish`
+    finish write+rename before scanning, so it passed on the report-losing code too."""
     watch = _watch()
-    rd.live_reports()  # scanner runs first, directory may not exist yet
+    real_replace = pathlib.Path.replace
+
+    def scan_then_replace(self, target):
+        rd.live_reports()  # the scanner, mid-write — this is the window
+        return real_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", scan_then_replace)
     rd.publish(watch, rd.Drift(torn=("techne.core.search",), moved_at=1.0))
-    rd.live_reports()
-    reports = rd.live_reports()
-    assert [r["torn"] for r in reports] == [["techne.core.search"]]
+
+    assert [r["torn"] for r in rd.live_reports()] == [["techne.core.search"]], (
+        "a scan landing between write_text and replace must not destroy the report"
+    )
+
+
+def test_an_oversized_state_file_is_skipped(home):
+    """Prudence r3 nit: `is_file()` bounds the kind, not the bytes. 512 MB reads in
+    0.78s, so ~1.3 GB spends the SessionStart budget with no race needed."""
+    d = home / rd.STATE_DIRNAME
+    d.mkdir(parents=True)
+    (d / "fat.json").write_text("x" * (rd.MAX_STATE_FILE_BYTES + 1))
+    _write(home, "zzz_real", {"pid": os.getpid(), "torn": ["techne.core.search"]})
+    assert [r["pid"] for r in rd.live_reports()] == [os.getpid()]

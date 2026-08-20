@@ -254,10 +254,15 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
 #: writer the only truth.
 STATE_DIRNAME = "runtime-state"
 
-#: How old a `.tmp` must be before a reader may delete it. Generous on purpose: the
-#: only cost of waiting is a few stray bytes, while reaping one mid-write destroys a
-#: report that will never be re-announced.
+#: How old a `.tmp` must be before a reader may delete it. Generous on purpose: waiting
+#: costs a few stray bytes; reaping one mid-write destroys a report that is never
+#: re-announced. The tests pin that this is >0, not that it is 300 — any value clearing
+#: a write+rename works.
 TMP_REAP_AFTER_SECONDS = 300.0
+
+#: A state file is a pid and a short module list. Anything larger is not ours to read
+#: inside the SessionStart budget — measured 512 MB in 0.78s, so ~1.3 GB spends it.
+MAX_STATE_FILE_BYTES = 64 * 1024
 
 
 def _state_dir() -> Path:
@@ -384,6 +389,11 @@ def live_reports() -> list[dict]:
             # 6.0s against a 2.0s budget. One check closes FIFO, directory and symlink
             # together; `is_file()` follows symlinks, so a link to a FIFO is caught too.
             if not f.is_file():
+                continue  # FIFO/dir/symlink: a FIFO blocks read_text() forever (#696)
+            try:
+                if f.stat().st_size > MAX_STATE_FILE_BYTES:
+                    continue  # is_file() bounds the kind, not the bytes
+            except OSError:
                 continue
             # PER-FILE, so one bad file cannot end the scan. It used to be possible for
             # a single unparseable pid to raise past this loop into the outer handler,
