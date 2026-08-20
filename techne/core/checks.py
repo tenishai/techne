@@ -1131,7 +1131,7 @@ def check_runtime_torn(config) -> CheckResult | None:
     """
     from techne.core.runtime_drift import live_reports
 
-    reports = live_reports(config)
+    reports = live_reports()
     if not reports:
         return CheckResult(
             name="runtime:torn",

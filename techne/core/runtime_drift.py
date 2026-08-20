@@ -255,7 +255,9 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
 STATE_DIRNAME = "runtime-state"
 
 
-def _state_dir(config=None) -> Path:
+def _state_dir() -> Path:
+    """The publish/read directory. Takes no `config` — it is derived from
+    `techne_home()`, and an ignored parameter invites a caller to believe otherwise."""
     from techne.config import techne_home
 
     return techne_home() / STATE_DIRNAME
@@ -339,7 +341,7 @@ def _valid_pid(raw) -> int | None:
     return raw if raw > 0 else None
 
 
-def live_reports(config=None) -> list[dict]:
+def live_reports() -> list[dict]:
     """Verdicts published by servers that are STILL RUNNING. Reaps the rest.
 
     Cheap by construction — a directory listing, one `open()` each, and a signal check
@@ -354,6 +356,13 @@ def live_reports(config=None) -> list[dict]:
         d = _state_dir()
         if not d.is_dir():
             return out
+        for stale_tmp in d.glob(".*.json.tmp"):
+            # A crash between write and rename leaves these. Nothing reads them, but an
+            # unbounded pile of debris in a directory we own is our litter.
+            try:
+                stale_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         for f in sorted(d.glob("*.json")):
             # PER-FILE, so one bad file cannot end the scan. It used to be possible for
             # a single unparseable pid to raise past this loop into the outer handler,
@@ -366,9 +375,14 @@ def live_reports(config=None) -> list[dict]:
                 if pid is None or not _alive(pid):
                     f.unlink(missing_ok=True)
                     continue
+                # ELEMENTS, not just the container. `torn: [1, 2]` is a non-empty list
+                # and passes a shape check, then `", ".join(...)` raises TypeError in
+                # `check_runtime_torn` — OUTSIDE this function's guard — for a permanent
+                # ⚠️ UNKNOWN row that the stated remedy does not clear. Validating here
+                # keeps the consumer's contract honest: what it gets is a list of str.
                 torn = data.get("torn")
-                if isinstance(torn, list) and torn:
-                    out.append(data)
+                if isinstance(torn, list) and torn and all(isinstance(m, str) for m in torn):
+                    out.append({**data, "torn": torn})
             except Exception:  # noqa: BLE001
                 try:
                     f.unlink(missing_ok=True)

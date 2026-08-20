@@ -45,7 +45,10 @@ def test_the_expensive_checks_are_still_deferred():
 
     names = [f.__name__ for f in registered_checks()]
     assert names.count("check_runtime_loaded") == 1
-    assert set(deferred_check_names()) >= {"check_runtime_loaded", "check_runtime_revision"}
+    # EXACT SET, not a superset. Prudence added a third `@expensive` check with its
+    # registration stripped and got 120 passed — `>=` cannot notice an absence, which is
+    # the very failure mode this test exists for.
+    assert set(deferred_check_names()) == {"check_runtime_loaded", "check_runtime_revision"}
 
 
 def test_silent_when_no_server_has_published(home):
@@ -169,7 +172,7 @@ def test_a_fractional_pid_is_rejected_not_truncated(home):
     pid 1.5 read as a live server forever and produced a permanent false STALE banner.
     Measured before the fix. Reject rather than coerce."""
     _write(home, "frac", {"pid": 1.5, "torn": ["x"]})
-    assert rd.live_reports(None) == []
+    assert rd.live_reports() == []
 
 
 def test_pid_zero_is_refused_explicitly(home):
@@ -181,7 +184,7 @@ def test_pid_zero_is_refused_explicitly(home):
     os.kill = lambda p, s: (killed.append(p), real(p, s))[1]
     try:
         _write(home, "zero", {"pid": 0, "torn": ["x"]})
-        assert rd.live_reports(None) == []
+        assert rd.live_reports() == []
     finally:
         os.kill = real
     assert 0 not in killed, "pid 0 must never reach os.kill"
@@ -211,6 +214,25 @@ def test_one_malformed_file_cannot_disable_the_whole_check(home):
         _write(home, name, payload)
     _write(home, "zzz_real", {"pid": os.getpid(), "torn": ["techne.core.search"]})
 
-    reports = rd.live_reports(None)
+    reports = rd.live_reports()
     assert [r["pid"] for r in reports] == [os.getpid()], "the real report must survive"
     assert reports[0]["torn"] == ["techne.core.search"]
+
+
+def test_torn_entries_that_are_not_strings_cannot_poison_the_check(home):
+    """Prudence r1, Important 2 — the half my own hardening missed.
+
+    `torn: [1, 2]` is a non-empty list, so a shape check passes it, and then
+    `", ".join(...)` raises TypeError inside `check_runtime_torn` — OUTSIDE
+    `live_reports`' guard. The result is a permanent ⚠️ UNKNOWN row that the check's
+    own stated remedy does not clear: the never-green shape the liveness card forbids.
+    """
+    from techne.core.checks import check_runtime_torn
+
+    _write(home, "poison", {"pid": os.getpid(), "torn": [1, 2]})
+    r = check_runtime_torn(None)  # must not raise
+    assert r.verdict == Verdict.LIVE
+
+    # ...and a genuine report alongside it still works.
+    _write(home, "zzz_good", {"pid": os.getpid(), "torn": ["techne.core.search"]})
+    assert check_runtime_torn(None).verdict == Verdict.STALE
