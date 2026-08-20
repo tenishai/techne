@@ -247,3 +247,179 @@ def poll(watch: RuntimeWatch, *, now: float | None = None) -> Drift | None:
         return None
     watch._reported.add(current)
     return Drift(torn=torn, moved_at=current)
+
+
+#: Where a serving process leaves its verdict for OTHER processes to read. One file
+#: per pid: several servers can run at once, and a shared file would make the last
+#: writer the only truth.
+STATE_DIRNAME = "runtime-state"
+
+#: How old a `.tmp` must be before a reader may delete it. Generous on purpose: waiting
+#: costs a few stray bytes; reaping one mid-write destroys a report that is never
+#: re-announced. The tests pin that this is >0, not that it is 300 — any value clearing
+#: a write+rename works.
+TMP_REAP_AFTER_SECONDS = 300.0
+
+#: A state file is a pid and a short module list. Anything larger is not ours to read
+#: inside the SessionStart budget — measured 512 MB in 0.78s, so ~1.3 GB spends it.
+MAX_STATE_FILE_BYTES = 64 * 1024
+
+
+def _state_dir() -> Path:
+    """The publish/read directory. Takes no `config` — it is derived from
+    `techne_home()`, and an ignored parameter invites a caller to believe otherwise."""
+    from techne.config import techne_home
+
+    return techne_home() / STATE_DIRNAME
+
+
+def publish(watch: RuntimeWatch, drift: "Drift | None", *, pid: int | None = None) -> None:
+    """Record this process's verdict where a DIFFERENT process can read it.
+
+    THE WHOLE REASON PART A NEEDED PART B FIRST. `poll` answers cheaply because the
+    process asks itself — but the answer lives in memory, and SessionStart is not that
+    process. Asking from outside is what costs `ps` plus git and got #697 withdrawn. So
+    the server writes the one thing only it knows, and the reader does an `open()`.
+
+    Best-effort and never raises: failing to publish a diagnostic must not affect
+    serving. Written whole then renamed, so a reader never sees a half-file.
+    """
+    import json
+    import os
+
+    pid = os.getpid() if pid is None else pid
+    try:
+        d = _state_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": pid,
+            "torn": list(drift.torn) if drift else [],
+            "moved_at": drift.moved_at if drift else None,
+            "modules": len(watch.baseline),
+        }
+        tmp = d / f".{pid}.json.tmp"
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(d / f"{pid}.json")
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _alive(pid: int) -> bool:
+    """Is this pid still running? `os.kill(pid, 0)` — a signal check, not a spawn.
+
+    A dead server's verdict is not a stale warning to soften; it is a FALSE one. The
+    condition it described ended when the process did.
+
+    THE ARGUMENT IS UNTRUSTED — it comes from a file another process wrote — so every
+    exception is caught here, not only `OSError`. `os.kill(2**63, 0)` raises
+    OverflowError, which is not an OSError; measured, after it escaped and aborted the
+    caller's whole scan.
+
+    BELT AND BRACES, NOT THE LOAD-BEARING GUARD, and saying so because the distinction
+    is testable: `live_reports` now wraps each file individually, so reverting this to
+    `except OSError` no longer breaks anything and no test fails. The per-file handler
+    is what holds the property. This stays because a helper that raises on a hostile
+    argument is a trap for the next caller, not because it is currently reachable.
+    """
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except Exception:  # noqa: BLE001 — OverflowError, TypeError, anything
+        return False
+    return True
+
+
+def _valid_pid(raw) -> int | None:
+    """A real, positive, integral pid — or None. Rejects rather than coerces.
+
+    `int(raw)` was the first version and it is wrong in a way that matters: `int(1.5)`
+    is 1, and pid 1 (init/launchd) ALWAYS exists, so a state file claiming pid 1.5 read
+    as a live server forever and produced a permanent false STALE banner. Measured.
+
+    Zero is refused explicitly. `os.kill(0, sig)` addresses the caller's ENTIRE PROCESS
+    GROUP rather than one process; with signal 0 that is only an existence probe and
+    harmless, but a guard that depends on the signal number staying 0 is a guard waiting
+    for someone to reuse this helper.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if raw > 0 else None
+
+
+def live_reports() -> list[dict]:
+    """Verdicts published by servers that are STILL RUNNING. Reaps the rest.
+
+    Cheap by construction — a directory listing, one `open()` each, and a signal check
+    per pid. No `ps`, no git, no subprocess. That is what makes the SessionStart check
+    an ordinary registered check rather than an `@expensive` one reached around
+    `cheap_only`, which is precisely how #697 went wrong.
+    """
+    import json
+
+    out: list[dict] = []
+    try:
+        d = _state_dir()
+        if not d.is_dir():
+            return out
+        # A crash between write and rename leaves these behind. Reaping them is
+        # housekeeping — but ONLY WHEN THEY ARE OLD, and that qualifier is the whole
+        # correctness of it. `publish` writes the tmp then renames; a scan landing in
+        # that window deleted the tmp, `replace` then raised, `publish`'s blanket except
+        # swallowed it, and the report was LOST — permanently, because `poll` records
+        # `_reported` before returning, so that deployment is never announced again.
+        # Two servers plus a SessionStart is ordinary operation, not a hostile case.
+        cutoff = time.time() - TMP_REAP_AFTER_SECONDS
+        for stale_tmp in d.glob(".*.json.tmp"):
+            try:
+                if stale_tmp.stat().st_mtime < cutoff:
+                    stale_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for f in sorted(d.glob("*.json")):
+            # WHAT THE FILE IS, before what is in it. Every other guard here inspects
+            # CONTENT; none asked whether the path is a regular file. A FIFO named
+            # `*.json` blocks `read_text()` forever — and the resulting `HookTimeout` is
+            # a RuntimeError, so the per-file handler below swallows it while
+            # `setitimer` (one-shot) has already spent the SessionStart budget. Measured
+            # 6.0s against a 2.0s budget. One check closes FIFO, directory and symlink
+            # together; `is_file()` follows symlinks, so a link to a FIFO is caught too.
+            if not f.is_file():
+                continue  # FIFO/dir/symlink: a FIFO blocks read_text() forever (#696)
+            try:
+                if f.stat().st_size > MAX_STATE_FILE_BYTES:
+                    continue  # is_file() bounds the kind, not the bytes
+            except OSError:
+                continue
+            # PER-FILE, so one bad file cannot end the scan. It used to be possible for
+            # a single unparseable pid to raise past this loop into the outer handler,
+            # which returned early — leaving a genuinely torn server unreported and
+            # every later file unreaped. A detector that one junk file can switch off is
+            # the shape this whole issue exists to avoid.
+            try:
+                data = json.loads(f.read_text())
+                pid = _valid_pid(data.get("pid")) if isinstance(data, dict) else None
+                if pid is None or not _alive(pid):
+                    f.unlink(missing_ok=True)
+                    continue
+                # ELEMENTS, not just the container. `torn: [1, 2]` is a non-empty list
+                # and passes a shape check, then `", ".join(...)` raises TypeError in
+                # `check_runtime_torn` — OUTSIDE this function's guard — for a permanent
+                # ⚠️ UNKNOWN row that the stated remedy does not clear. Validating here
+                # keeps the consumer's contract honest: what it gets is a list of str.
+                torn = data.get("torn")
+                if isinstance(torn, list) and torn and all(isinstance(m, str) for m in torn):
+                    out.append({**data, "torn": torn})
+            except Exception:  # noqa: BLE001
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+    except Exception:  # noqa: BLE001
+        return out
+    return out

@@ -1111,6 +1111,54 @@ def _runtime_deployed_at(runtime) -> tuple[int, str] | None:
 
 
 @register_check
+def check_runtime_torn(config) -> CheckResult | None:
+    """A LIVE server has told us it is serving stale code (techne#696 part A).
+
+    NOT `@expensive`, and that is the entire point of the shape. `check_runtime_loaded`
+    below has to ask the process table who is running and ask git when the deployment
+    landed, because it interrogates OTHER processes from outside — which is why it is
+    deferred out of the SessionStart budget, and why PR #697 was withdrawn for calling
+    it from there anyway while the banner four lines above said it was deferred.
+
+    Here the servers do the knowing. Each one compares its own `sys.modules` against a
+    baseline it took at startup and publishes the verdict; this reads it. A directory
+    listing, one `open()` each, and `os.kill(pid, 0)` to drop the dead. No subprocess,
+    so it goes through `run_checks` like everything else instead of around it.
+
+    It is also STRICTLY BETTER than the ordering signal it sits beside: `runtime:loaded`
+    says "a process started before the deployment landed", and says of itself that this
+    is "ordering only… not a tear detector". This one names the modules.
+    """
+    from techne.core.runtime_drift import live_reports
+
+    reports = live_reports()
+    if not reports:
+        return CheckResult(
+            name="runtime:torn",
+            subsystem="runtime",
+            kind=Kind.FRESHNESS,
+            verdict=Verdict.LIVE,
+            detail="no live server reports serving stale modules",
+            evidence="no runtime-state file from a running pid carries torn modules",
+        )
+    torn = sorted({m for r in reports for m in r.get("torn", [])})
+    pids = ", ".join(str(r.get("pid")) for r in reports)
+    shown = ", ".join(torn[:3]) + (f", +{len(torn) - 3} more" if len(torn) > 3 else "")
+    return CheckResult(
+        name="runtime:torn",
+        subsystem="runtime",
+        kind=Kind.FRESHNESS,
+        verdict=Verdict.STALE,
+        detail=(
+            f"{len(reports)} live server(s) are serving {len(torn)} module(s) that have "
+            f"changed on disk since they were loaded ({shown})"
+        ),
+        evidence=f"published by pid(s) {pids}",
+        remedy="restart the techne MCP server (or the session that owns it)",
+    )
+
+
+@register_check
 @expensive
 def check_runtime_loaded(config) -> CheckResult | None:
     """DEPLOYED IS NOT LOADED — the corollary of #473 (techne#491).
