@@ -45,7 +45,8 @@ class TestWrapperInterface:
         fastembed_is_the_live_backend(),
         strict=True,
         reason="techne#536: EmbeddingModel.embed() passes fastembed output through "
-        "unchanged, so the documented float32 contract (embeddings.py:16/:92) holds "
+        "unchanged, so the documented float32 contract (embeddings.py module docstring, "
+        "`EmbeddingBackend.embed`) holds "
         "only on the model2vec path. Deferred from PR #532 so the #535 coverage lands; "
         "strict=True means fixing #536 turns this red until the marker is removed.",
     )
@@ -65,7 +66,8 @@ class TestWrapperInterface:
         fastembed_is_the_live_backend(),
         strict=True,
         reason="techne#536: EmbeddingModel.embed() passes fastembed output through "
-        "unchanged, so the documented float32 contract (embeddings.py:16/:92) holds "
+        "unchanged, so the documented float32 contract (embeddings.py module docstring, "
+        "`EmbeddingBackend.embed`) holds "
         "only on the model2vec path. Deferred from PR #532 so the #535 coverage lands; "
         "strict=True means fixing #536 turns this red until the marker is removed.",
     )

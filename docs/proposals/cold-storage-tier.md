@@ -55,7 +55,7 @@ Source read, canonical checkout `tenishai/techne` @ `ffcb1a6`:
 | **`observations.tier`** — `hot\|warm\|cold` column | ⚠️ **dead stub**: write-once at capture, no promotion/demotion, zero consuming logic | `database.py:91` |
 | **Decay formula** — `confidence_numeric × 0.5^(age/half_life)`, `reaffirm()`, `last_confirmed_at` clock | ✅ built; now wired into egress ranking (coherence D2) | `knowledge.py:544-595` |
 | **Two-tier egress** — Tier-0 (SessionStart, always-on, budget-bounded) + Tier-1 (UserPromptSubmit, relevance-ranked, opt-in) | ✅ built; `PULL_ONLY_TYPES` already keeps patterns/documents/cards out of both | `egress.py`, `hooks/user_prompt_submit.py` |
-| **Index** — FTS5 over **full body** for every table; optional `sqlite-vec` over full content (manual backfill, not auto-run) | ✅ built; gist/pointer split exists **only** at the card level | `database.py:278-291`, `search.py:930-946` |
+| **Index** — FTS5 over **full body** for every table; optional `sqlite-vec` over full content (backfill is a separate step, not part of the write path; whether anything auto-invokes it is a deployment question — techne#704) | ✅ built; gist/pointer split exists **only** at the card level | `database.py:278-291`, `search.py:930-946` |
 
 **The one-line reading:** techne already *demotes* stale knowledge (archive flag) and already *evicts-to-document-with-pointer* for transcripts (Librarian). It has never *connected demotion to eviction*. Archived rows just accumulate, fat, in the active DB.
 

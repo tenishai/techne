@@ -25,11 +25,16 @@ Cold-cache downloads and hooks (techne#601/#602)
 --------------------------------------------------
 Building either backend for the FIRST time on a machine with no local HF cache
 triggers a real network download (fastembed: onnx model + tokenizer; model2vec:
-safetensors + tokenizer — both from the Hugging Face Hub). That's fine for an
-explicit, operator-initiated action (CLI `backfill_vectors`), but
-`_get_embedding_model()` is also reached from inference.py's `infer()`, which
-runs inside techne's `post_tool_use` hook — wrapped in a SIGALRM-based
-`bounded_hook` (hooks/_timeout.py) with a tight default 5s budget. A blocking
+safetensors + tokenizer — both from the Hugging Face Hub). That is fine for an
+explicit, operator-initiated action (CLI `backfill_vectors`) — BUT SEE THE
+CAVEAT AT THE END OF THIS SECTION: a deployment can wire that CLI into a hook,
+at which point "operator-initiated" stops being true and this dichotomy is the
+thing that breaks.
+
+Separately, `_get_embedding_model()` is also reached from inference.py's
+`infer()`, which runs inside techne's `post_tool_use` hook — and that is NOT
+the only such path, see the second caveat below. It is wrapped in a
+SIGALRM-based `bounded_hook` (hooks/_timeout.py) with a tight 5s default. A blocking
 HTTP download is EXACTLY the case that guard's own docstring flags as
 unpreemptable ("blocked inside a single long, signal-deaf C call isn't
 interrupted until that call returns") — confirmed empirically: with a cold
@@ -42,9 +47,67 @@ never reaching bounded_hook's graceful exit-0 path at all.
 ImportError-like unavailability (caller's existing try/except treats it the
 same as "not installed") instead of blocking on a network call. inference.py
 passes `allow_download=False` since it's the hook-reachable path; search.py's
-`backfill_vectors` (never hook-invoked — "nothing auto-runs backfill_vectors
-in production today") keeps the default `allow_download=True` so an operator's
+`backfill_vectors` keeps the default `allow_download=True` so an operator's
 first explicit backfill can still fetch the model.
+
+CAVEAT ON THAT DEFAULT (techne#704). This docstring used to justify
+`allow_download=True` on the grounds that `backfill_vectors` is "never
+hook-invoked". That premise is only safe for the code in THIS repo, where the
+`techne vectors backfill` CLI command is the sole non-test caller. A deployment
+is free to chain that CLI into a hook as a shell string — one observed
+SessionStart hook does exactly that:
+
+    preflight_guard.py ; techne vectors backfill ; -m techne.hooks.session_start
+
+and settings.json wiring is invisible to the Python call graph. In that shape the
+cold-cache download this section exists to prevent is reachable from session
+startup — startup simply blocks on the Hub fetch. The `allow_download` default
+is therefore a deployment-shape decision, not a settled invariant.
+
+DO NOT REASON ABOUT THESE PATHS VIA THE SIGALRM BUDGET (PR #705 review r3, which
+caught an earlier draft of this paragraph doing exactly that). It is tempting to
+rank the shell chain as worse because it carries no `bounded_hook`, but that
+ranking contradicts the finding above: a Hub fetch is signal-deaf, so the budget
+does not bound it on ANY path. That is precisely why inference.py passes
+`allow_download=False` even though it already runs under `bounded_hook`. Having
+a budget and lacking one are equally exposed; only the kwarg helps.
+
+AND THE OBVIOUS FIX DOES NOT EXIST YET FOR THIS PATH — read the scope
+carefully, it is `backfill_vectors` ONLY (PR #705 review r1). "Make the
+auto-invoked path pass `allow_download=False`" is not actionable HERE: both
+the operator's shell and the hook chain invoke the identical string `techne
+vectors backfill`, landing on the same `cli.py` command, so
+in-process there is NO signal to branch on. Flipping the default instead would
+break README.md's documented cold-cache recovery, which REQUIRES the download —
+rebuilding the never-green #496 defect from the other side (a documented remedy
+that provably cannot work). A real fix needs a new opt-in surface — a
+`--no-download` flag or an env var the hook sets — which is its own change.
+
+SECOND HOOK-REACHABLE PATH, AND THIS ONE *DOES* HAVE A BRANCH POINT (PR #705
+review r2). Do not read the paragraph above as covering the whole module. The
+per-turn recall rail reaches an UNGUARDED `_get_embedding_model()`:
+
+    hooks/user_prompt_submit.py -> search() [use_vectors=True by default]
+      -> search_vec() -> `_get_embedding_model()`   <- no kwarg
+
+ONE live site, not two. `_mmr_reorder` also calls it unguarded, but that call
+sits below a `mmr_lambda == 0.0` short-circuit that NO live caller lifts (the
+config knob was removed) — see docs/arch/search-embeddings.md, "MMR — CODE
+EXISTS, NO CONFIG SURFACE". An earlier draft of this note counted it; #705
+review r3 caught that, and the card had already said so.
+
+The live site takes the permissive `allow_download=True` default, and
+`backend_available()` does not save it: that is an IMPORT probe, so it passes
+on a cold HF cache and the download is attempted anyway.
+
+Unlike backfill this is an in-repo call site with no CLI in between, so there
+IS an in-process branch point. It is NOT a free one-liner, though — see #708:
+every other in-process site already passes `allow_download=False`, so guarding
+this one too leaves the CLI as the ONLY thing that can ever warm the cache, and
+an operator who installs `[vectors]` and never runs backfill gets permanently
+FTS-only recall with `backend_available()` still reporting True. That is #496's
+never-green shape on the query side, and it is why the fix needs its own change
+rather than riding along here.
 """
 
 from __future__ import annotations

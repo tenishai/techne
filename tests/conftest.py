@@ -245,8 +245,9 @@ def fastembed_is_the_live_backend() -> bool:
 
     Used to scope xfails for the float32-contract violation, which is
     backend-specific: `EmbeddingModel.embed()` casts on the model2vec path
-    (embeddings.py:109) and passes fastembed's output through unchanged, so the
-    documented float32 contract holds on py>=3.14 and breaks below it.
+    (`EmbeddingBackend.embed` in embeddings.py) and passes fastembed's output
+    through unchanged, so the documented float32 contract holds on py>=3.14 and
+    breaks below it.
 
     CONDITIONED, NOT BLANKET, and that matters for `strict=True`: an unconditional
     xfail would FAIL on the 3.14/model2vec leg, where these tests legitimately

@@ -594,9 +594,11 @@ def search_knowledge_conn(
 # Knowledge is the only vec table whose rows can be superseded after embedding,
 # and search_vec drops superseded rows AFTER the ANN k-nearest cut — so a stale
 # embedding eats a top-k slot and starves a live result. backfill_vectors purges
-# stale embeddings, but nothing auto-runs it in production, so this query-time
-# over-fetch is the guarantee that actually fires: pull k×factor neighbours, then
-# keep the closest `limit` LIVE ones. (techne#168)
+# stale embeddings, but nothing in this repo auto-runs it and a deployment that
+# does (see the note in backfill_vectors, techne#704) still only purges at
+# backfill time — so this query-time over-fetch is the guarantee that actually
+# fires on every search: pull k×factor neighbours, then keep the closest `limit`
+# LIVE ones. (techne#168)
 _VEC_SUPERSEDE_OVERFETCH = 3
 
 
@@ -1011,10 +1013,20 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             # never loads sqlite_vec); backfill_vectors is the one place the extension is
             # loaded, so the index-side cleanup lives here: sweep existing stale embeddings
             # and skip superseded rows when embedding so they're never (re-)added.
-            # NB: nothing auto-runs backfill_vectors in production today, so this cleanup
-            # only fires on a manual/explicit backfill — the query-time over-fetch in
-            # search_vec (_VEC_SUPERSEDE_OVERFETCH) is the always-on guard, sound up to
-            # that factor of stale neighbours.
+            # NB: this cleanup fires only when backfill_vectors runs, which is NOT on
+            # every write — the query-time over-fetch in search_vec
+            # (_VEC_SUPERSEDE_OVERFETCH) is the always-on guard, sound up to that factor
+            # of stale neighbours. That much is unchanged.
+            # WHAT CHANGED (techne#704): this used to say "nothing auto-runs
+            # backfill_vectors in production today". That is a claim about THIS REPO —
+            # where cli.py's `techne vectors backfill` is the only non-test caller — and
+            # it was wrongly stated as a claim about the deployed system. At least one
+            # real deployment chains the CLI into its SessionStart hook as a shell string:
+            #     preflight_guard.py ; techne vectors backfill ; -m techne.hooks.session_start
+            # Deployment wiring lives in the host's settings.json, which no amount of
+            # grepping this repo can see. So: do not re-derive "nothing calls this in
+            # production" from the Python call graph. It can only tell you that nothing
+            # in THIS REPO calls it, which is a strictly weaker statement.
             if tbl == "knowledge" and _purge_superseded_knowledge_vec(conn):
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"

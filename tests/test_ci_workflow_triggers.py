@@ -219,7 +219,7 @@ def test_eval_vec_keeps_force_download_False():
     eval-vec's protection with it as collateral.
 
     eval-vec still depends on it: model2vec 0.8.2 defaults force_download=True
-    (embeddings.py:271), so without the flag the actions/cache restore above it is
+    (`_build_backend` in embeddings.py), so without the flag the actions/cache restore above it is
     dead weight and the model re-downloads every run. That is Prudence's #403
     finding, and it was unguarded between #532's rewrite and this commit.
     """
