@@ -329,6 +329,12 @@ CREATE TABLE IF NOT EXISTS knowledge (
     vec_stale INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge(type);
+-- techne#553. DECLARED HERE AS WELL AS IN THE v25 STEP, following idx_outbox_dedup's
+-- convention: `_reconcile_indexes` diffs against SCHEMA_SQL, so an index that exists
+-- only in a migration never lands on a fresh db and cannot be healed by
+-- `force_reconcile`. A brand-new team archivist is exactly the install that wants the
+-- contributor query, and it was the one getting a full scan.
+CREATE INDEX IF NOT EXISTS idx_knowledge_written_by ON knowledge(written_by);
 CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by);
 
 -- Dependency edges between knowledge entries (techne#117). A junction table, NOT

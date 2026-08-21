@@ -132,3 +132,92 @@ def test_the_columns_land_on_a_plain_techne_db_too(tmp_path):
         assert {"written_by", "origin_source", "origin_session"} <= cols
     finally:
         conn.close()
+
+
+def test_a_session_id_containing_colons_is_not_truncated(pair):
+    """Prudence r1 — this PR's own defect class, one column over.
+
+    `reflect-promote:<session>:<id>` and a session id MAY CONTAIN COLONS:
+    `init_session_for_external_id` stores caller ids verbatim and tells callers to
+    namespace them. `split(':')[1]` turned `slack:C0427:1699` into `slack` — so
+    `written_by` refused to guess while `origin_session` confidently recorded a
+    session that does not exist.
+    """
+    store(
+        pair.db_path,
+        "from a namespaced caller",
+        type="fact",
+        source="reflect-promote:slack:C0427:1699:7",
+    )
+    conn = _push(pair)
+    try:
+        assert conn.execute("SELECT origin_session FROM knowledge").fetchone()[0] == (
+            "slack:C0427:1699"
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "reflect-promote:",
+        "reflect-promote:onlyone",
+        "reflect-promote::",
+        "reflect-promote:sess:notanid",
+    ],
+)
+def test_a_malformed_reflect_promote_records_nothing_rather_than_half(pair, source):
+    """Recording part of a malformed id is the same failure as guessing one."""
+    store(pair.db_path, f"malformed {source}", type="fact", source=source)
+    conn = _push(pair)
+    try:
+        assert conn.execute("SELECT origin_session FROM knowledge").fetchone()[0] is None
+    finally:
+        conn.close()
+
+
+def test_the_contributor_index_exists_on_a_fresh_db(tmp_path):
+    """Prudence r1: the index was created ONLY in the v25 step, and `_reconcile_indexes`
+    diffs against SCHEMA_SQL — so a fresh db never got it and `force_reconcile` could
+    not heal it. A brand-new team archivist is exactly the install that wants the
+    contributor query. `idx_outbox_dedup` is the convention: declared in both places."""
+    db = tmp_path / "fresh.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_knowledge_written_by'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_provenance_is_written_in_the_same_statement_as_the_row(pair):
+    """Prudence r1: the stamp used to be a follow-up UPDATE on a second connection. She
+    injected "database is locked" there — the row committed unattributed, the retry hit
+    the content dedup, and the outbox recorded `synced` with no error. NULL rather than
+    a wrong name is the right ordering, but it made "unattributed" ambiguous between
+    LEGITIMATELY UNATTRIBUTABLE and WE DROPPED IT — the distinction the column exists
+    for. Asserts the resolved property: no second write can be interposed."""
+    from techne.core import knowledge as kmod
+
+    calls = []
+    real_store = kmod.store
+
+    def counting_store(*a, **kw):
+        calls.append(kw.get("provenance"))
+        return real_store(*a, **kw)
+
+    kmod.store = counting_store
+    try:
+        store(pair.db_path, "atomic", type="fact", source="manual")
+        conn = _push(pair)
+    finally:
+        kmod.store = real_store
+    try:
+        row = conn.execute("SELECT written_by, origin_source FROM knowledge").fetchone()
+    finally:
+        conn.close()
+    assert row == ("poe@dev04", "manual")
+    assert calls and calls[-1]["written_by"] == "poe@dev04", "provenance rides the INSERT"

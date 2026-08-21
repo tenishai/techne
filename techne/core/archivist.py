@@ -187,33 +187,26 @@ def _archivist_knowledge_handler(payload: dict) -> DeliveryResult:
     if exists:
         return DeliveryResult(ok=True)  # already present — idempotent no-op
 
-    # `source='team'` STAYS — the read edge and 1,094 existing rows depend on it,
-    # and it answers a different question ("which lane") than the new columns
-    # ("which writer"). techne#553 is about adding the second, not replacing the first.
-    new_id = store(
+    # `source='team'` STAYS — the read edge and 1,094 existing rows depend on it, and
+    # it answers a different question ("which lane") than the new columns ("which
+    # writer"). techne#553 adds the second rather than replacing the first.
+    #
+    # ONE STATEMENT: provenance goes in the INSERT, not a follow-up UPDATE. See
+    # `store()` — a failed second write left the row unattributed while reporting
+    # success, making a NULL ambiguous between "unattributable" and "we dropped it".
+    store(
         db,
         content=content,
         type=payload.get("type", "fact"),
         tags=payload.get("tags", ""),
         confidence=payload.get("confidence", "medium"),
         source="team",
+        provenance={
+            "written_by": payload.get("written_by") or None,
+            "origin_source": payload.get("origin_source") or None,
+            "origin_session": payload.get("origin_session") or None,
+        },
     )
-    provenance = {
-        "written_by": payload.get("written_by") or None,
-        "origin_source": payload.get("origin_source") or None,
-        "origin_session": payload.get("origin_session") or None,
-    }
-    if any(provenance.values()):
-        conn = plain_connect(db)
-        try:
-            conn.execute(
-                "UPDATE knowledge SET written_by = ?, origin_source = ?, origin_session = ?"
-                " WHERE id = ?",
-                (*provenance.values(), new_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
     return DeliveryResult(ok=True)
 
 
@@ -354,9 +347,20 @@ def push_knowledge_to_archivist(config) -> int:
         local_source = k.get("source") or ""
         origin_session = ""
         if local_source.startswith("reflect-promote:"):
-            parts = local_source.split(":")
-            if len(parts) >= 2:
-                origin_session = parts[1]
+            # rpartition, NOT split(':')[1]. The form is
+            # `reflect-promote:<session>:<id>` and a SESSION ID MAY CONTAIN COLONS —
+            # `init_session_for_external_id` stores caller ids verbatim and tells
+            # callers to namespace them, so `reflect-promote:slack:C0427:1699:7`
+            # truncated to 'slack'. That is this PR's own defect class one column
+            # over: `written_by` refuses to guess while `origin_session` was
+            # confidently recording a wrong session. Split off the trailing id and
+            # keep everything between.
+            rest = local_source[len("reflect-promote:") :]
+            session, sep, tail = rest.rpartition(":")
+            # No separator, or a non-numeric tail, means this is not the documented
+            # shape — record nothing rather than half of it.
+            if sep and session and tail.isdigit():
+                origin_session = session
         data = {
             "content": k["content"],
             "type": k["type"],
