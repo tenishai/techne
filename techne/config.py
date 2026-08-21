@@ -432,6 +432,22 @@ class Config:
     # Base Archivist store (techne#346): the techne-schema SQLite db a non-standalone
     # instance's sink:archivist writes team memory into. "" → <data_dir>/archivist.db.
     archivist_db_path: str = ""
+    #: WHO this instance is, when it writes into a shared store (techne#553). Stamped
+    #: on federated knowledge as `written_by`. Empty means NULL rather than a guess —
+    #: an unattributed row is honest, a wrongly-attributed one is worse than none in
+    #: the very table whose job is to say who said what. Not derived from hostname
+    #: for that reason: a machine name is not an author.
+    #:
+    #: QUALIFY IT: `<agent>@<cabal>`, e.g. `archivist@dimartin`. A bare persona name
+    #: is GUARANTEED to collide, not merely likely to — cabal's
+    #: `identity.toml.example`, which every new cabal starts from, ships `archivist`,
+    #: `architect`, `librarian`, `mason` and `wright`. Three operators sharing one
+    #: archivist store therefore contribute three different agents all called
+    #: `archivist`, in the one table whose purpose is telling contributors apart.
+    #: The machine is the wrong scope: two cabals can share a host and one cabal can
+    #: span several. `check_instance_identity` reports an unqualified name rather
+    #: than leaving this as advice — prose does not enforce a namespace.
+    instance_name: str = ""
     # Staleness alarm: if the prior last_session is older than this many hours,
     # the banner and collect_health emit a visible warning. Default 12h.
     staleness_hours: int = 12
@@ -618,6 +634,8 @@ class Config:
             cfg.standalone = bool(raw["standalone"])
         if "archivist_db_path" in raw:
             cfg.archivist_db_path = str(raw["archivist_db_path"])
+        if "instance_name" in raw:
+            cfg.instance_name = str(raw["instance_name"])
         if "model" in raw:
             cfg.model = raw["model"]
         if "llm_api_base" in raw:
@@ -884,6 +902,7 @@ class Config:
             "platform": self.platform,
             "standalone": self.standalone,
             "archivist_db_path": self.archivist_db_path,
+            "instance_name": self.instance_name,
             "model": self.model,
             "sync": {
                 "adapter": self.sync.adapter,

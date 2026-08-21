@@ -6,7 +6,7 @@ from pathlib import Path
 
 from techne.core import migrator
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 # THE ONE ON-DISK TIMESTAMP SHAPE (#515). Every TEXT timestamp column is compared
 # LEXICALLY by SQLite, so the storage format IS the ordering primitive — a second
@@ -289,6 +289,14 @@ CREATE TABLE IF NOT EXISTS knowledge (
     type TEXT NOT NULL,
     content TEXT NOT NULL,
     source TEXT,
+    -- Writer provenance (techne#553). Nullable, and the NULLs are the point: an
+    -- unattributed row stays honestly unattributed rather than guessed at.
+    -- `written_by` is the INSTANCE that pushed it, `origin_source` the local
+    -- `source` that federated writes used to overwrite with 'team', and
+    -- `origin_session` the session it was distilled in where recoverable.
+    written_by TEXT,
+    origin_source TEXT,
+    origin_session TEXT,
     tags TEXT,
     confidence TEXT NOT NULL DEFAULT 'medium',
     confidence_numeric REAL NOT NULL DEFAULT 0.6,
@@ -321,6 +329,12 @@ CREATE TABLE IF NOT EXISTS knowledge (
     vec_stale INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge(type);
+-- techne#553. DECLARED HERE AS WELL AS IN THE v25 STEP, following idx_outbox_dedup's
+-- convention: `_reconcile_indexes` diffs against SCHEMA_SQL, so an index that exists
+-- only in a migration never lands on a fresh db and cannot be healed by
+-- `force_reconcile`. A brand-new team archivist is exactly the install that wants the
+-- contributor query, and it was the one getting a full scan.
+CREATE INDEX IF NOT EXISTS idx_knowledge_written_by ON knowledge(written_by);
 CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by);
 
 -- Dependency edges between knowledge entries (techne#117). A junction table, NOT
@@ -1434,4 +1448,38 @@ END;
             _add_column_if_missing(conn, "sessions", "ended_at_source", "TEXT")
         close_abandoned_sessions_in_conn(conn)
         conn.execute("INSERT INTO schema_version (version) VALUES (24)")
+    if from_version < 25 and to_version >= 25:
+        # techne#553: archivist.db held 1,094 rows and every one carried
+        # source='team' and nothing else. At one contributor that is survivable; a
+        # store whose whole purpose is sharing cannot name its second. Blocks
+        # conflict resolution, trust weighting, "who should I ask", and retracting
+        # one contributor's bad week.
+        #
+        # ONE SCHEMA EVERYWHERE (techne#220), so these land on techne.db as well,
+        # where they are simply NULL. archivist.db IS a techne-schema db —
+        # `archivist_db()` calls `init_db` — so an archivist-only column is not
+        # available even in principle without forking the shape the read edge
+        # depends on.
+        #
+        # DELIBERATELY NOT BACKFILLED. Existing rows are unattributable: the local
+        # `source` was discarded at write time, not stored anywhere. Filling them
+        # with the only instance we have ever run would encode a guess as a fact,
+        # in the one table whose job is to say who said what.
+        # TABLE-PRESENCE GUARD. Old fixtures (v9, v13, v15) reach this step before
+        # `knowledge` exists — the reconciler creates it AFTER _migrate. The v24 step
+        # above carries the same guard and calls itself "the THIRD instance of this
+        # exact trap in this milestone"; this was the fourth, caught by 16 failing
+        # migration tests. A migration step owns every precondition it needs.
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge'"
+        ).fetchone():
+            conn.execute("INSERT INTO schema_version (version) VALUES (25)")
+        else:
+            _add_column_if_missing(conn, "knowledge", "written_by", "TEXT")
+            _add_column_if_missing(conn, "knowledge", "origin_source", "TEXT")
+            _add_column_if_missing(conn, "knowledge", "origin_session", "TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_written_by ON knowledge(written_by)"
+            )
+            conn.execute("INSERT INTO schema_version (version) VALUES (25)")
     conn.commit()

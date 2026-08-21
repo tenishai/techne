@@ -154,6 +154,11 @@ class KnowledgePayload:
     type: str = "fact"
     tags: str = ""
     confidence: str = "medium"
+    #: Writer provenance (techne#553). Defaulted so an older enqueued payload still
+    #: validates — rows already in the outbox predate these fields.
+    written_by: str = ""
+    origin_source: str = ""
+    origin_session: str = ""
 
 
 def _archivist_knowledge_handler(payload: dict) -> DeliveryResult:
@@ -182,6 +187,13 @@ def _archivist_knowledge_handler(payload: dict) -> DeliveryResult:
     if exists:
         return DeliveryResult(ok=True)  # already present — idempotent no-op
 
+    # `source='team'` STAYS — the read edge and 1,094 existing rows depend on it, and
+    # it answers a different question ("which lane") than the new columns ("which
+    # writer"). techne#553 adds the second rather than replacing the first.
+    #
+    # ONE STATEMENT: provenance goes in the INSERT, not a follow-up UPDATE. See
+    # `store()` — a failed second write left the row unattributed while reporting
+    # success, making a NULL ambiguous between "unattributable" and "we dropped it".
     store(
         db,
         content=content,
@@ -189,6 +201,11 @@ def _archivist_knowledge_handler(payload: dict) -> DeliveryResult:
         tags=payload.get("tags", ""),
         confidence=payload.get("confidence", "medium"),
         source="team",
+        provenance={
+            "written_by": payload.get("written_by") or None,
+            "origin_source": payload.get("origin_source") or None,
+            "origin_session": payload.get("origin_session") or None,
+        },
     )
     return DeliveryResult(ok=True)
 
@@ -323,11 +340,35 @@ def push_knowledge_to_archivist(config) -> int:
         if k["type"] in REDIRECTED_TYPES:
             skipped += 1
             continue
+        # `source` is the LOCAL provenance ('agent' | 'manual' |
+        # 'reflect-promote:<session>:<id>') and the federated write used to discard
+        # it. Carried across as `origin_source`, with the session recovered from the
+        # reflect-promote form where it is encoded.
+        local_source = k.get("source") or ""
+        origin_session = ""
+        if local_source.startswith("reflect-promote:"):
+            # rpartition, NOT split(':')[1]. The form is
+            # `reflect-promote:<session>:<id>` and a SESSION ID MAY CONTAIN COLONS —
+            # `init_session_for_external_id` stores caller ids verbatim and tells
+            # callers to namespace them, so `reflect-promote:slack:C0427:1699:7`
+            # truncated to 'slack'. That is this PR's own defect class one column
+            # over: `written_by` refuses to guess while `origin_session` was
+            # confidently recording a wrong session. Split off the trailing id and
+            # keep everything between.
+            rest = local_source[len("reflect-promote:") :]
+            session, sep, tail = rest.rpartition(":")
+            # No separator, or a non-numeric tail, means this is not the documented
+            # shape — record nothing rather than half of it.
+            if sep and session and tail.isdigit():
+                origin_session = session
         data = {
             "content": k["content"],
             "type": k["type"],
             "tags": k.get("tags") or "",
             "confidence": k.get("confidence") or "medium",
+            "written_by": config.instance_name or "",
+            "origin_source": local_source,
+            "origin_session": origin_session,
         }
         # Hash computed by the OUTBOX's own helper, never re-derived here — a
         # second copy of the formula stops matching the moment either side
