@@ -1488,6 +1488,109 @@ def _rail_consumption(conn, rail: str) -> tuple[int, str | None]:
 
 
 @register_check
+def check_model_bound_rails(config) -> list[CheckResult]:
+    """Did a MODEL-BOUND rail actually produce, or did it fail where nobody was looking?
+
+    THE BLIND SPOT THIS CLOSES (techne#555). `check_maintenance_rails` above keys on
+    `knowledge_candidates.origin` — the rail's OUTPUT — which was the right call when it
+    was written and is still right for what it answers. But `origin` does not record
+    WHO produced the row, and two different producers write it: the resident
+    emit→ingest route (`model_used='agent-assisted'`) and the model-bound automatic
+    route (`model_used=<the model id>`).
+
+    MEASURED 2026-08-21 on the operator's store: `rail:reflect` read LIVE off 420
+    all-time candidates while the automatic rail had produced **zero, ever**, since
+    2026-06-20. Every one of those 420 came from the resident route. The automatic pass
+    was raising `AuthenticationError` on every session — `config.model` is an Anthropic
+    id and the operator holds no Console API key — and `reflect_on_session` caught it,
+    incremented a counter nobody reads, and let teardown proceed. Two months of a rail
+    reporting healthy while doing nothing.
+
+    So this check reads the MARKER, not the output: `rail:<name>:last_run`, written by
+    `custodian.record_rail_marker` on every automatic or headless run, success and
+    failure alike, with the reason.
+
+    NO MARKER IS DORMANT, NOT BROKEN. An instance that only ever uses the resident
+    route never writes one, and that is the default and correct posture — crying wolf
+    at every install that has not opted in is how a check gets trained into noise. The
+    finding is a marker that EXISTS and says the run failed: that is a rail someone
+    switched on which is not working.
+    """
+    from techne.core.custodian import MARKER_PREFIX, RAILS
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    results: list[CheckResult] = []
+    conn = connect(config.db_path)
+    try:
+        # `reflect` is included alongside the five custodian rails because it is the
+        # one that HAS an automatic path today, and it is the rail the finding came
+        # from. It is not in the custodian registry (it has its own runner), so it is
+        # named explicitly rather than inferred.
+        for rail in [*sorted(RAILS), "reflect"]:
+            marker = get_state(conn, f"{MARKER_PREFIX}:{rail}:last_run") or {}
+            outcome = str(marker.get("outcome", ""))
+            ts = marker.get("ts")
+            detail = str(marker.get("detail", ""))
+
+            if not marker:
+                results.append(
+                    CheckResult(
+                        name=f"rail:{rail}:bound",
+                        subsystem="custodian",
+                        kind=Kind.FAIL_OPEN,
+                        verdict=Verdict.DORMANT,
+                        detail="no model-bound run recorded — answered by a resident agent",
+                        evidence=f"extension_state has no {MARKER_PREFIX}:{rail}:last_run",
+                    )
+                )
+                continue
+
+            if outcome in ("error", "partial"):
+                # `partial` is BROKEN deliberately, and the noise hazard is real and
+                # accepted: one refusal in twenty marks the rail until the next fully
+                # clean run. Kept because "ran and reported trouble" has no other
+                # verdict in this vocabulary — DORMANT ties with LIVE, UNKNOWN means a
+                # probe that could not run, STALE means overdue. A rail answering some
+                # of its prompts is not healthy, and the detail carries the ratio so an
+                # operator can judge severity. Revisit with a policy about acceptable
+                # failure fractions, not by quietly greening it. (Prudence, #709.)
+                verdict = Verdict.BROKEN
+                remedy = "techne custodian status"
+            elif outcome == "ok" or outcome.startswith("noop:"):
+                # `noop:` is a healthy steady state for consolidate/dream/conflict —
+                # nothing to chew on is not a fault. The rail's resolved-inputs note
+                # rides in `detail`, which is what makes "found nothing" separable from
+                # "looked in the wrong place".
+                verdict, remedy = Verdict.LIVE, None
+            else:
+                # FAIL CLOSED ON AN OUTCOME WE DO NOT RECOGNISE (Prudence, #709). The
+                # previous shape mapped everything that was not literally "error" or
+                # "partial" to LIVE — including a missing, empty or garbled outcome,
+                # since `str(marker.get("outcome", ""))` yields "". That is fail-OPEN
+                # in the one check whose entire job is to catch silent nothing, and it
+                # is the same defect class as the rail this check exists to expose.
+                verdict = Verdict.UNKNOWN
+                remedy = "techne custodian status"
+
+            results.append(
+                CheckResult(
+                    name=f"rail:{rail}:bound",
+                    subsystem="custodian",
+                    kind=Kind.FAIL_OPEN,
+                    verdict=verdict,
+                    last_fired=ts,
+                    detail=detail or outcome,
+                    evidence=f"{MARKER_PREFIX}:{rail}:last_run outcome={outcome!r}",
+                    remedy=remedy,
+                )
+            )
+    finally:
+        conn.close()
+    return results
+
+
+@register_check
 def check_outbox_targets(config) -> list[CheckResult]:
     """Per-target sync liveness — deliberately NOT aggregated.
 

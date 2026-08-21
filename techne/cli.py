@@ -1181,6 +1181,207 @@ def archivist_query(ctx, sql, limit, as_json):
 
 @main.group()
 @click.pass_context
+def custodian(ctx):
+    """Run the emit→ingest rails headlessly (techne#555)."""
+    pass
+
+
+@custodian.command("status")
+@click.pass_context
+def custodian_status(ctx):
+    """What is bound, what each rail does, and what it last did.
+
+    Answers the question the #555 finding turned on: not "is the rail configured"
+    but "did it last run, and did that run work". A rail that has never had a
+    model-bound run says so, rather than reading as healthy off work a resident
+    agent did.
+    """
+    from techne.core.custodian import (
+        MARKER_PREFIX,
+        RAILS,
+        effective_model,
+        resolve_generate_fn,
+    )
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    config = ctx.obj["config"]
+    cu = config.custodian
+    # "(unset)", NOT "(unbound — rails stay resident)". `rail_models` WITHOUT a global
+    # `custodian.model` is a legal, validated config — config.py checks the keys against
+    # the registry and nothing requires a base model alongside them — so the old
+    # parenthetical made a BEHAVIOURAL claim about rails from a fact about one key, and
+    # the runner agreed with the per-rail block four lines below rather than with this
+    # line. Reading it as the config echo it is ("custodian model:" is the key name,
+    # sitting beside "rails enabled:" and "max per run:"), the value was true; only the
+    # gloss overreached. The per-rail `bound:` lines below are the authority.
+    # (Prudence, #709 round 5.)
+    click.echo(f"custodian model: {cu.model or '(unset — per-rail overrides may still bind)'}")
+    if cu.rails:
+        click.echo(f"rails enabled:   {', '.join(cu.rails)}")
+    click.echo(f"max per run:     {cu.max_items_per_rail}")
+    click.echo("")
+
+    conn = connect(config.db_path)
+    try:
+        for name in sorted(RAILS):
+            rail = RAILS[name]
+            bound = resolve_generate_fn(config, rail=name) is not None
+            # THE MODEL THE RUNNER WILL ACTUALLY USE, per rail — not the global one.
+            # `custodian status` is THE surface built to answer "what is bound", and it
+            # never read `rail_models`: a rail carrying a per-rail override reported the
+            # global model and a bare `bound: yes`. In this feature specifically that is
+            # a wrong belief about `model_used`, the one column that records which
+            # producer judged a candidate and the column the whole techne#555 finding
+            # turned on. `effective_model` already computes the right answer; status was
+            # re-deriving a less specific one, which is rounds 2 and 3's shape again.
+            # (Prudence, #709 round 4.)
+            model = effective_model(config, rail=name)
+            marker = get_state(conn, f"{MARKER_PREFIX}:{name}:last_run") or {}
+            click.echo(f"{name}")
+            click.echo(f"  {rail.what}")
+            click.echo(
+                f"  bound: {f'yes — {model}' if bound else 'no (resident)'}"
+            )
+            if marker:
+                click.echo(
+                    f"  last run: {marker.get('ts', '?')} "
+                    f"{marker.get('outcome', '?')} — {marker.get('detail', '')}"
+                )
+            else:
+                click.echo("  last run: never (no model-bound run recorded)")
+    finally:
+        conn.close()
+
+
+@custodian.command("run")
+@click.option("--rail", "rail_names", multiple=True, help="Rail to run (repeatable). Default: all.")
+@click.option("--limit", type=int, default=None, help="Max prompts per rail this run.")
+@click.option("--dry-run", is_flag=True, default=False, help="Emit prompts; call no model.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw report.")
+@click.pass_context
+def custodian_run(ctx, rail_names, limit, dry_run, as_json):
+    """Run the rails with the bound model. The headless entry point.
+
+    THIS IS WHAT A SCHEDULER CALLS. Installing that schedule is deliberately not done
+    here: switching it on means spending tokens or GPU on a timer with nobody watching,
+    which is the operator's decision to make once, explicitly.
+    """
+    import json as _json
+
+    from techne.core.custodian import RAILS, run_custodian
+
+    config = ctx.obj["config"]
+    selected = list(rail_names) or None
+    # `limit` and the rail selection both pass straight through to `custodian`'s
+    # resolvers — `effective_limit` and `effective_rails` — so neither the cap nor the
+    # selection is re-derived here. The dry-run branch below calls the SAME two
+    # functions rather than falling back to its own defaults, which is what makes
+    # "one owner" true on both axes (Prudence, #709 rounds 2-3).
+    cap = limit
+
+    # A TYPO'D --rail IS AN OPERATOR ERROR, NOT A CRASH (Prudence, #709). Both paths
+    # raised a bare KeyError traceback — RAILS[name] on the dry-run path, run_custodian's
+    # own raise otherwise. The message was good; the presentation was a stack trace, in
+    # a command the operator is expected to wire into cron.
+    unknown = [r for r in (selected or []) if r not in RAILS]
+    if unknown:
+        raise click.BadParameter(
+            f"unknown rail(s): {', '.join(unknown)}. Known: {', '.join(sorted(RAILS))}.",
+            param_hint="--rail",
+        )
+
+    # The bound guard lives in `effective_limit` so programmatic callers get it too;
+    # here it is re-raised as a click error so the operator sees the message rather
+    # than a traceback. Both paths below (dry-run and real) resolve through it.
+    from techne.core.custodian import effective_limit as _effective_limit
+
+    try:
+        _effective_limit(config, cap)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--limit") from e
+
+    if dry_run:
+        # Emit only — shows exactly what WOULD be sent, and to which model, without
+        # spending anything. The honest way to answer "what will this cost me".
+        #
+        # THE CAP IS APPLIED HERE TOO, through the same `effective_limit` the runners
+        # use (Prudence, #709 round 2). This branch bypasses both run_custodian and
+        # run_rail, so it was the one surface that disagreed with the runner about what
+        # the runner would do — and it is the surface an operator reads BEFORE wiring
+        # cron. It over-reported (cap 5, dry-run said 50) so nobody would have
+        # overspent, but a number you would trust being wrong is worse than a missing
+        # one. Read from the shared function rather than re-derived here, so the
+        # ownership consolidated above is not quietly re-copied.
+        from techne.core.custodian import (
+            effective_limit,
+            effective_model,
+            effective_rails,
+            resolve_generate_fn,
+        )
+
+        allowed = effective_limit(config, cap)
+        for name in effective_rails(config, selected):
+            bound = resolve_generate_fn(config, rail=name)
+            try:
+                batch = RAILS[name].emit(config)[:allowed]
+            except Exception as e:  # noqa: BLE001
+                # The real run catches emit failures, records an error marker, and
+                # carries on to the next rail. Dry-run did not — one raising rail
+                # exited 1 with a traceback and the remaining rails went unreported,
+                # on a command meant for cron. It fails loudly rather than lying, which
+                # is why this is the smaller of the two. (Prudence, #709 round 3.)
+                click.echo(f"{name}: emit failed — {type(e).__name__}: {e}")
+                continue
+            # NAMES THE MODEL, because the docstring above claims it does ("shows
+            # exactly what WOULD be sent, and to which model") and it did not — it
+            # printed bound/unbound only. A claim a surface does not honour is the
+            # same defect as a number it gets wrong. (Prudence, #709 round 4.)
+            target = effective_model(config, rail=name) if bound else ""
+            click.echo(
+                f"{name}: {len(batch)} prompt(s) would be sent"
+                f"{f' to {target}' if bound else ' — but NO MODEL IS BOUND, so nothing would run'}"
+            )
+        return
+
+    report = run_custodian(config, rails=selected, limit=cap)
+
+    if as_json:
+        click.echo(_json.dumps(report, indent=2, default=str))
+        return
+
+    if not report["bound"]:
+        # Exit 0: unbound is the DEFAULT posture, not a failure. The rails are answered
+        # by a resident agent and that has always been the working path.
+        click.echo(
+            "No model bound — every rail stays resident. "
+            "Set custodian.model to run headless."
+        )
+        return
+
+    failures = 0
+    for run in report["rails"]:
+        line = (
+            f"{run['rail']}: emitted {run['emitted']}, "
+            f"answered {run['answered']}, failed {run['failed']}"
+        )
+        if run["counts"]:
+            line += "  " + ", ".join(f"{k}={v}" for k, v in sorted(run["counts"].items()))
+        click.echo(line)
+        # ANSWERED-ZERO-OF-N IS A FAILURE AND MUST EXIT NON-ZERO. A scheduled run whose
+        # only signal is exit status has to be able to say "I did nothing" — reporting
+        # success while producing nothing is the exact #555 failure, one layer up.
+        if run["error"]:
+            click.echo(f"  error: {run['error']}")
+        if run["emitted"] and run["answered"] == 0:
+            failures += 1
+
+    if failures:
+        raise SystemExit(1)
+
+
+@main.group()
+@click.pass_context
 def outbox(ctx):
     """Manage the sync outbox."""
     pass

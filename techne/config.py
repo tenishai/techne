@@ -334,6 +334,45 @@ class ReflectConfig:
 
 
 @dataclass
+class CustodianConfig:
+    """Headless custodian — bind a model to the emit→ingest rails (techne#555).
+
+    UNBOUND BY DEFAULT, and `model: ""` is load-bearing rather than a placeholder.
+    An unbound custodian runs nothing and reads as dormant, which is correct: the
+    rails are answered by a resident agent, as they always have been. Setting a model
+    here is the operator deciding to spend tokens (or GPU) unattended.
+
+    THERE IS DELIBERATELY NO FALLBACK TO `Config.model`. Inheriting the session-wide
+    model is precisely how the automatic reflect rail came to be bound to a credential
+    plane this operator does not hold, and it then failed silently on every session
+    from 2026-06-20 onward — 444 candidates in the store, not one of them from that
+    rail. An absent binding must read as ABSENT, never as a binding to something
+    unreachable.
+
+    `rail_models` overrides the model per rail, because the passes are not alike: dedup
+    and contradiction classification are classification work a small local model does
+    adequately, while a merge-faithfulness judgement is not.
+    """
+
+    #: Any LiteLLM identifier — "ollama/llama3", "vertex_ai/claude-...", an OpenAI id.
+    #: Empty means unbound.
+    model: str = ""
+    #: Which rails the headless runner drives. Empty = every registered rail.
+    rails: list[str] = field(default_factory=list)
+    #: Per-rail model override, e.g. {"faithfulness": "vertex_ai/claude-..."}.
+    rail_models: dict[str, str] = field(default_factory=dict)
+    #: Max prompts answered per rail per run. Bounds an unattended run's spend — the
+    #: whole point of a cap here is that nobody is watching it.
+    max_items_per_rail: int = 20
+    #: Per-call timeout, seconds. NOT optional in spirit: an unattended run has no
+    #: operator to notice a model that never answers. Measured on the author's box, a
+    #: 1,748-char conflict prompt against a local llama3.2 had not returned after 240s
+    #: while a trivial prompt answered in 1.3s — so "it works interactively" is not
+    #: evidence that it terminates headlessly.
+    timeout_seconds: int = 120
+
+
+@dataclass
 class ConflictConfig:
     """Configuration for contradiction detection → supersession (techne#213, D1).
 
@@ -417,6 +456,7 @@ class Config:
     hooks: HookConfig = field(default_factory=HookConfig)
     heuristic: HeuristicConfig = field(default_factory=HeuristicConfig)
     reflect: ReflectConfig = field(default_factory=ReflectConfig)
+    custodian: CustodianConfig = field(default_factory=CustodianConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     injection: InjectionConfig = field(default_factory=InjectionConfig)
     posture: PostureConfig = field(default_factory=PostureConfig)
@@ -776,6 +816,55 @@ class Config:
                 user_prompt_score=float(h.get("user_prompt_score", 0.3)),
             )
 
+        if "custodian" in raw and isinstance(raw["custodian"], dict):
+            cu = raw["custodian"]
+            rails = cu.get("rails", []) or []
+            if not isinstance(rails, list) or not all(isinstance(r, str) for r in rails):
+                raise ValueError("custodian.rails must be a list of rail names.")
+            rail_models = cu.get("rail_models", {}) or {}
+            if not isinstance(rail_models, dict):
+                raise ValueError("custodian.rail_models must be a mapping of rail -> model.")
+            # VALIDATED AGAINST THE REGISTRY, not just for type. A typo'd rail name in
+            # config is otherwise a rail that silently never runs — which is the exact
+            # class of failure techne#555 is about, reproduced in its own config.
+            from techne.core.custodian import RAILS
+
+            unknown = sorted({*rails, *rail_models} - set(RAILS))
+            if unknown:
+                raise ValueError(
+                    f"Unknown custodian rail(s): {', '.join(unknown)}. "
+                    f"Known rails: {', '.join(sorted(RAILS))}."
+                )
+            # BOUNDS VALIDATED, NOT MERELY COERCED (Prudence, #709). Both of these
+            # silently disable a guard their own docstrings call load-bearing:
+            # `max_items_per_rail: 0` makes every rail a permanent no-op — which now
+            # reads LIVE — and a negative value becomes `batch[:-1]`, quietly dropping
+            # the last item of every batch. `timeout_seconds: 0` is FALSY, so
+            # `_make_generate_fn`'s `if getattr(config, "llm_timeout", 0)` skips the
+            # timeout kwarg entirely and an unattended run can hang forever. A config
+            # that turns off a protection must say so, not imply it.
+            max_items = int(cu.get("max_items_per_rail", 20))
+            timeout = int(cu.get("timeout_seconds", 120))
+            if max_items < 1:
+                raise ValueError(
+                    f"custodian.max_items_per_rail must be >= 1, got {max_items}. "
+                    "0 makes every rail a permanent no-op; a negative value silently "
+                    "drops the last item of each batch."
+                )
+            if timeout < 1:
+                raise ValueError(
+                    f"custodian.timeout_seconds must be >= 1, got {timeout}. "
+                    "0 disables the per-call timeout entirely, so an unattended run "
+                    "can hang forever with nobody watching."
+                )
+            cfg.custodian = CustodianConfig(
+                model=cu.get("model", ""),
+                rails=rails,
+                rail_models={str(k): str(v) for k, v in rail_models.items()},
+                max_items_per_rail=max_items,
+                timeout_seconds=timeout,
+            )
+
         if "reflect" in raw and isinstance(raw["reflect"], dict):
             r = raw["reflect"]
             write_to = r.get("write_to", "candidates")
@@ -940,6 +1029,13 @@ class Config:
             "heuristic": {
                 "boundary_threshold": self.heuristic.boundary_threshold,
                 "user_prompt_score": self.heuristic.user_prompt_score,
+            },
+            "custodian": {
+                "model": self.custodian.model,
+                "rails": list(self.custodian.rails),
+                "rail_models": dict(self.custodian.rail_models),
+                "max_items_per_rail": self.custodian.max_items_per_rail,
+                "timeout_seconds": self.custodian.timeout_seconds,
             },
             "reflect": {
                 "enabled": self.reflect.enabled,

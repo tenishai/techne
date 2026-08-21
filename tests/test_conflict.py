@@ -850,7 +850,7 @@ def test_insert_candidate_redacts_both_fields_for_both_origins(config):
     Now one function covers both — this test pins that invariant for the shared seam.
     """
     from techne.core.conflict import _insert_candidate
-    from techne.core.sleepdream import _ensure_system_session
+    from techne.core.sleepdream import RESIDENT_PRODUCER, _ensure_system_session
 
     db = config.db_path
     _ensure_system_session(db)
@@ -872,6 +872,7 @@ def test_insert_candidate_redacts_both_fields_for_both_origins(config):
             decision_reason=f"reason with credential {secret} here",
             raw=None,
             origin=origin,
+            model_used=RESIDENT_PRODUCER,
         )
     conn.commit()
 
