@@ -25,6 +25,7 @@ SEAMS → card:
 - config-trust   techne/security/config_trust.py (operator-vs-agent gate over egress-selecting config) → docs/arch/config-trust.md
 - utilization    techne/core/utilization.py   (is the READ path earning its tokens?)     → docs/arch/utilization.md
 - archivist-query techne/core/archivist_query.py (guarded read-only SQL over team memory)  → docs/arch/archivist-query.md
+- custodian      techne/core/custodian.py     (headless emit→ingest rails)              → docs/arch/custodian.md
 - (uncarded) mcp_server.py (33-tool surface); core/federation.py (fan-out recall over local+remote); core/evidence.py (claim-vs-ledger check behind techne_check_evidence)
 
 DEPS: imported/hosted by siblings cabal (orchestrator) + liminal (MCP gateway; liminal.handlers.memory imports techne.VALID_TYPES; renamed from `limenal` 2026-08-11). techne itself has NO cross-repo runtime deps (local-first).

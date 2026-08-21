@@ -1177,6 +1177,119 @@ def archivist_query(ctx, sql, limit, as_json):
     if result["truncated"]:
         tail += " — TRUNCATED, more rows matched than were returned; raise --limit"
     click.echo(tail)
+def custodian(ctx):
+    """Run the emit→ingest rails headlessly (techne#555)."""
+    pass
+
+
+@custodian.command("status")
+@click.pass_context
+def custodian_status(ctx):
+    """What is bound, what each rail does, and what it last did.
+
+    Answers the question the #555 finding turned on: not "is the rail configured"
+    but "did it last run, and did that run work". A rail that has never had a
+    model-bound run says so, rather than reading as healthy off work a resident
+    agent did.
+    """
+    from techne.core.custodian import MARKER_PREFIX, RAILS, resolve_generate_fn
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    config = ctx.obj["config"]
+    cu = config.custodian
+    click.echo(f"custodian model: {cu.model or '(unbound — rails stay resident)'}")
+    if cu.rails:
+        click.echo(f"rails enabled:   {', '.join(cu.rails)}")
+    click.echo(f"max per run:     {cu.max_items_per_rail}")
+    click.echo("")
+
+    conn = connect(config.db_path)
+    try:
+        for name in sorted(RAILS):
+            rail = RAILS[name]
+            bound = resolve_generate_fn(config, rail=name) is not None
+            marker = get_state(conn, f"{MARKER_PREFIX}:{name}:last_run") or {}
+            click.echo(f"{name}")
+            click.echo(f"  {rail.what}")
+            click.echo(f"  bound: {'yes' if bound else 'no (resident)'}")
+            if marker:
+                click.echo(
+                    f"  last run: {marker.get('ts', '?')} "
+                    f"{marker.get('outcome', '?')} — {marker.get('detail', '')}"
+                )
+            else:
+                click.echo("  last run: never (no model-bound run recorded)")
+    finally:
+        conn.close()
+
+
+@custodian.command("run")
+@click.option("--rail", "rail_names", multiple=True, help="Rail to run (repeatable). Default: all.")
+@click.option("--limit", type=int, default=None, help="Max prompts per rail this run.")
+@click.option("--dry-run", is_flag=True, default=False, help="Emit prompts; call no model.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw report.")
+@click.pass_context
+def custodian_run(ctx, rail_names, limit, dry_run, as_json):
+    """Run the rails with the bound model. The headless entry point.
+
+    THIS IS WHAT A SCHEDULER CALLS. Installing that schedule is deliberately not done
+    here: switching it on means spending tokens or GPU on a timer with nobody watching,
+    which is the operator's decision to make once, explicitly.
+    """
+    import json as _json
+
+    from techne.core.custodian import RAILS, run_custodian
+
+    config = ctx.obj["config"]
+    selected = list(rail_names) or None
+    cap = limit if limit is not None else config.custodian.max_items_per_rail
+
+    if dry_run:
+        # Emit only — shows exactly what WOULD be sent, and to which model, without
+        # spending anything. The honest way to answer "what will this cost me".
+        from techne.core.custodian import resolve_generate_fn
+
+        for name in selected or sorted(RAILS):
+            batch = RAILS[name].emit(config)
+            bound = resolve_generate_fn(config, rail=name)
+            click.echo(
+                f"{name}: {len(batch)} prompt(s) would be sent"
+                f"{'' if bound else ' — but NO MODEL IS BOUND, so nothing would run'}"
+            )
+        return
+
+    report = run_custodian(config, rails=selected, limit=cap)
+
+    if as_json:
+        click.echo(_json.dumps(report, indent=2, default=str))
+        return
+
+    if not report["bound"]:
+        # Exit 0: unbound is the DEFAULT posture, not a failure. The rails are answered
+        # by a resident agent and that has always been the working path.
+        click.echo("No model bound — every rail stays resident. Set custodian.model to run headless.")
+        return
+
+    failures = 0
+    for run in report["rails"]:
+        line = (
+            f"{run['rail']}: emitted {run['emitted']}, "
+            f"answered {run['answered']}, failed {run['failed']}"
+        )
+        if run["counts"]:
+            line += "  " + ", ".join(f"{k}={v}" for k, v in sorted(run["counts"].items()))
+        click.echo(line)
+        # ANSWERED-ZERO-OF-N IS A FAILURE AND MUST EXIT NON-ZERO. A scheduled run whose
+        # only signal is exit status has to be able to say "I did nothing" — reporting
+        # success while producing nothing is the exact #555 failure, one layer up.
+        if run["error"]:
+            click.echo(f"  error: {run['error']}")
+        if run["emitted"] and run["answered"] == 0:
+            failures += 1
+
+    if failures:
+        raise SystemExit(1)
 
 
 @main.group()

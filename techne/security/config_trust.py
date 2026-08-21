@@ -88,6 +88,15 @@ EGRESS_KEYS: tuple[str, ...] = (
     "model",
     "reflect.model",
     "conflict.model",
+    # techne#555. The custodian binds a model to the emit→ingest rails and runs them
+    # UNATTENDED, so these are the highest-value destination keys in the file: a
+    # compromised agent that set `custodian.model` to its own endpoint would ship the
+    # distilled knowledge tier out on a timer, with nobody present to notice. Both the
+    # default and the per-rail overrides are listed — pinning only `custodian.model`
+    # would leave `rail_models` as an unpinned way to repoint the same traffic, which
+    # is the exact gap the reflect/conflict entries above exist to close.
+    "custodian.model",
+    "custodian.rail_models",
     # standalone=false routes team memory to the archivist sink at this path.
     "archivist_db_path",
     "standalone",
@@ -149,6 +158,15 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     # it can misattribute a row, which is an integrity concern for the receiving
     # store, but it cannot send memory anywhere new.
     "instance_name",
+    # techne#555 — the rest of the custodian block, judged field by field because
+    # `custodian.model` and `custodian.rail_models` are in EGRESS_KEYS and a prefix is
+    # not a judgment (techne#588). These three are VOLUME, not destination: which rails
+    # run, how many prompts each answers, and how long a call may take. They change how
+    # much traffic reaches the endpoint; they cannot change which endpoint it is. That
+    # is the same line `reflect.enabled` sits on.
+    "custodian.rails",
+    "custodian.max_items_per_rail",
+    "custodian.timeout_seconds",
     # Behaviour tuning. These change what memory is kept, ranked or surfaced;
     # none of them names a place it goes.
     "threads",

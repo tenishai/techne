@@ -1096,16 +1096,24 @@ def reflect_on_session(
     if generate_fn is None:
         try:
             generate_fn = _make_generate_fn(reflect_config)
-        except Exception:
+        except Exception as e:
             log.exception(
                 "reflect_on_session: could not build generate_fn (session=%s)", session_id
             )
             result["errors"] += 1
+            _record_reflect_marker(
+                config, outcome="error", detail=f"could not build generate_fn: {_why(e)}"
+            )
             return result
 
     from techne.core.thread_orchestrator import persisted_thread_id
 
     obs_by_thread = _bucket_observations(threads, observations)
+
+    #: First LLM failure reason, kept so the marker can say WHY rather than just that
+    #: the count was non-zero. `result["errors"]` was already being incremented before
+    #: techne#555; a number nobody reads is what let this rail fail for two months.
+    first_error = ""
 
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
@@ -1117,13 +1125,15 @@ def reflect_on_session(
 
         try:
             raw = generate_fn(prompt)
-        except Exception:
+        except Exception as e:
             log.exception(
                 "reflect_on_session: LLM call failed (session=%s thread_num=%s)",
                 session_id,
                 t.thread_num,
             )
             result["errors"] += 1
+            if not first_error:
+                first_error = _why(e)
             continue
         result["threads_reflected"] += 1
 
@@ -1139,7 +1149,55 @@ def reflect_on_session(
         for key, val in counts.items():
             result[key] += val
 
+    # RECORD WHAT ACTUALLY HAPPENED (techne#555). Before this, an automatic reflect
+    # pass that reached zero threads and one that failed on every LLM call were
+    # indistinguishable from outside: both returned, both logged, both left
+    # `check_maintenance_rails` reporting GREEN off candidates the RESIDENT route had
+    # written. Measured on the operator's store: this rail produced 0 candidates in its
+    # entire history while reading healthy.
+    if result["errors"] and result["threads_reflected"] == 0:
+        _record_reflect_marker(
+            config,
+            outcome="error",
+            detail=f"{result['errors']} error(s), 0 threads reflected: "
+            f"{first_error or 'see log'}",
+        )
+    elif result["errors"]:
+        _record_reflect_marker(
+            config,
+            outcome="partial",
+            detail=f"{result['threads_reflected']} thread(s) reflected, "
+            f"{result['errors']} error(s): {first_error or 'see log'}",
+        )
+    elif result["threads_reflected"]:
+        _record_reflect_marker(
+            config, outcome="ok", detail=f"{result['threads_reflected']} thread(s) reflected"
+        )
+    else:
+        _record_reflect_marker(config, outcome="noop:no-eligible-threads")
+
     return result
+
+
+def _why(e: Exception) -> str:
+    """One-line reason for a marker. Type plus message, truncated.
+
+    The TYPE matters as much as the text: `AuthenticationError` tells the operator this
+    is a credential problem in one word, which is the difference between "the rail is
+    broken" and "the rail needs a key it was never given".
+    """
+    msg = str(e).strip().splitlines()[0] if str(e).strip() else ""
+    return f"{type(e).__name__}: {msg}"[:300]
+
+
+def _record_reflect_marker(config, *, outcome: str, detail: str = "") -> None:
+    """Record the automatic rail's outcome. Best-effort; never raises into teardown."""
+    try:
+        from techne.core.custodian import record_rail_marker
+
+        record_rail_marker(config, "reflect", outcome=outcome, detail=detail)
+    except Exception:  # noqa: BLE001
+        log.warning("reflect: could not record liveness marker", exc_info=True)
 
 
 def _mark_promoted(db_path: Path, candidate_id: int, promoted_to_id: int | None) -> None:

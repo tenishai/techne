@@ -1,8 +1,8 @@
 ---
 card: arch-card:techne-reflect-pipeline
 updated: 2026-08-18
-anchor: techne/core/reflect.py sha=17b0e3a1637879472f5b27916c3571188e29d661
-anchor: techne/core/sleepdream.py sha=7ce4df8e9da1353e9a6edec3e205d75f13bf409f
+anchor: techne/core/reflect.py sha=5a4d077dcb95c9a324c4b6f57850bb5764e21ec2
+anchor: techne/core/sleepdream.py sha=fa629d589f34d30f5edb51fb7682b897bc3ead04
 ---
 # reflect / consolidate / dream — self-maintenance
 
@@ -26,3 +26,7 @@ INVARIANTS:
 - reflection_queue.thread_id is `REFERENCES threads(id) ON DELETE CASCADE` and the CASCADE is REQUIRED: re-detection deletes and re-inserts a session's whole thread set in one transaction (lifecycle.py), so a plain reference makes the queue BLOCK re-detection with a FOREIGN KEY failure.
 - Every consolidate cluster has a stable cluster_hash (prompt_hash col) → a cluster already proposed (pending, promoted, OR kept-distinct) is never re-judged (_already_proposed) — stops the anti-bloat feature from bloating its own review queue.
 - _FAITHFULNESS_GATED_ACTIONS={'merge','supersede'}: promoting a merge/supersede candidate needs a prior faithfulness check (raises FaithfulnessGateError unless force=True); keep this gate in sync with faithfulness_emit's SQL filter.
+
+**THE AUTOMATIC PATH RECORDS A LIVENESS MARKER NOW (techne#555).** `reflect_on_session` catches every LLM failure, counts it in `result["errors"]`, and lets teardown proceed — correct, because teardown must not fail on reflection. But a counter nobody reads is not a signal: MEASURED 2026-08-21, this rail had produced ZERO candidates since 2026-06-20 (every one of the 444 in the store came from the RESIDENT emit→ingest route, `model_used='agent-assisted'`), because `config.model` is an Anthropic id and the operator holds no Console API key. `AuthenticationError` on every session, for two months, while `check_maintenance_rails` read the rail LIVE off the resident route's output. It now writes `rail:reflect:last_run` via `custodian.record_rail_marker` on EVERY outcome — ok / partial / error / noop — carrying the exception TYPE, because "AuthenticationError" says *needs a credential it was never given* where a generic failure says only *broken*. Never raises into teardown.
+
+**CANDIDATE ROWS NOW NAME THEIR PRODUCER (techne#555).** `_insert_consolidation_candidate` / `_insert_dream_candidate` hardcoded `model_used='agent-assisted'` in their VALUES clause. That was correct while the RESIDENT agent was the only thing answering these prompts; the custodian makes a second producer real, and a headless row claiming a resident agent judged it destroys the one column that distinguishes them — the same blindness that hid the automatic reflect rail for two months. Now a bound parameter, REQUIRED on the private inserters (no default, so a missed forward is a TypeError rather than a silent lie) and defaulted to `RESIDENT_PRODUCER` on the public `*_ingest` entry points, which is what leaves the resident path byte-for-byte unchanged. `RESIDENT_PRODUCER` is defined here ONCE; conflict.py and federation.py import it rather than re-typing the literal (techne#518).
