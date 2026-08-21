@@ -29,10 +29,12 @@ safetensors + tokenizer — both from the Hugging Face Hub). That is fine for an
 explicit, operator-initiated action (CLI `backfill_vectors`) — BUT SEE THE
 CAVEAT AT THE END OF THIS SECTION: a deployment can wire that CLI into a hook,
 at which point "operator-initiated" stops being true and this dichotomy is the
-thing that breaks. Meanwhile
-`_get_embedding_model()` is also reached from inference.py's `infer()`, which
-runs inside techne's `post_tool_use` hook — wrapped in a SIGALRM-based
-`bounded_hook` (hooks/_timeout.py) with a tight default 5s budget. A blocking
+thing that breaks.
+
+Separately, `_get_embedding_model()` is also reached from inference.py's
+`infer()`, which runs inside techne's `post_tool_use` hook — and that is NOT
+the only such path, see the second caveat below. It is wrapped in a
+SIGALRM-based `bounded_hook` (hooks/_timeout.py) with a tight 5s default. A blocking
 HTTP download is EXACTLY the case that guard's own docstring flags as
 unpreemptable ("blocked inside a single long, signal-deaf C call isn't
 interrupted until that call returns") — confirmed empirically: with a cold
@@ -64,15 +66,34 @@ command gets no `bounded_hook` SIGALRM budget at all, so there is nothing to
 degrade gracefully — startup simply blocks on the Hub fetch. The `allow_download`
 default is therefore a deployment-shape decision, not a settled invariant.
 
-AND THE OBVIOUS FIX DOES NOT EXIST YET — do not go looking for it (PR #705
-review). "Make the auto-invoked path pass `allow_download=False`" is not
-actionable: both the operator's shell and the hook chain invoke the identical
+AND THE OBVIOUS FIX DOES NOT EXIST YET FOR THIS PATH — read the scope
+carefully, it is `backfill_vectors` ONLY (PR #705 review r1). "Make the
+auto-invoked path pass `allow_download=False`" is not actionable HERE: both the operator's shell and the hook chain invoke the identical
 string `techne vectors backfill`, landing on the same `cli.py` command, so
 in-process there is NO signal to branch on. Flipping the default instead would
 break README.md's documented cold-cache recovery, which REQUIRES the download —
 rebuilding the never-green #496 defect from the other side (a documented remedy
 that provably cannot work). A real fix needs a new opt-in surface — a
 `--no-download` flag or an env var the hook sets — which is its own change.
+
+SECOND HOOK-REACHABLE PATH, AND THIS ONE *DOES* HAVE A BRANCH POINT (PR #705
+review r2). Do not read the paragraph above as covering the whole module. The
+per-turn recall rail reaches an UNGUARDED `_get_embedding_model()`:
+
+    hooks/user_prompt_submit.py -> search() [use_vectors=True by default]
+      -> search_vec() -> search.py:631 `_get_embedding_model()`   <- no kwarg
+    and the same shape at search.py:88 (the rerank path).
+
+Both take the permissive `allow_download=True` default. `backend_available()`
+does not save them: it is an IMPORT probe, so it passes on a cold HF cache and
+the download is attempted anyway. Being inside `bounded_hook` does not save
+them either — that is the whole point of this section: a blocking Hub fetch is
+signal-deaf, which is exactly why inference.py passes `allow_download=False`
+though it too runs under `bounded_hook`.
+
+Unlike backfill, these are in-repo call sites with no CLI in between, so the
+one-liner inference.py already uses twice applies directly. NOT changed here
+because #705 is a comments-and-docs change; tracked separately.
 """
 
 from __future__ import annotations
