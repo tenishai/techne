@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-custodian
 updated: 2026-08-21
-anchor: techne/core/custodian.py sha=4b111e13dcf65752587e94914a7e0a4f19d2c326
+anchor: techne/core/custodian.py sha=603e5f37ae10944d83d935b58f913f9ead34abe0
 ---
 # custodian — headless emit→ingest rails (techne#555)
 
@@ -30,9 +30,11 @@ INVARIANTS — the ones a diff will not show you:
 - **A TYPO'D RAIL NAME IS REJECTED AT CONFIG LOAD**, against the registry. Otherwise it is a rail that silently never runs — #555's own failure class reproduced inside its own config.
 - **NOT SCHEDULED FROM HERE.** `run_custodian` is what a scheduler calls; installing the schedule is a separate deliberate act, because switching it on means spending tokens or GPU on a timer with nobody watching.
 
-MEASURED, so nobody re-derives it (2026-08-21, author's box, ollama llama3.2 on an i7 CPU):
-- A 20-char prompt answers in 1.3s; a real 1,748-char `conflict` prompt had NOT returned after 240s. #555's premise that "a small local model is adequate for the mechanical passes" DID NOT HOLD on this hardware at real prompt sizes — the model is not the only variable, prompt length is.
-- With `timeout_seconds: 60` the run terminated at 63.7s, exited 1, and recorded `error — APIConnectionError … Timeout` where before it would have hung indefinitely.
+MEASURED, so nobody re-derives it (2026-08-21). TEST AGAINST THE INFERENCE HOST, NOT THE DEV BOX — the first round of these numbers was taken on the author's laptop CPU and produced a WRONG CONCLUSION, retracted below.
+- ON THE INFERENCE HOST (192.168.10.118, `ornith:9b`): a real 1,568-char `conflict` prompt answers in **11.6s** (`ornith:9b-q8_0`: 22.3s), with a well-formed JSON verdict. Full CLI run: 2 prompts, 23s wall, `supersede=1 distinct=2`, rows labelled `ollama/ornith:9b`.
+- ON THE DEV LAPTOP (ollama llama3.2, i7 CPU): a 20-char prompt answers in 1.3s but the same class of real prompt had NOT returned after 240s.
+- **RETRACTED**: an earlier draft of this card concluded that #555's premise — "a small local model is adequate for the mechanical passes" — did not hold at real prompt sizes. THAT CONCLUSION WAS WRONG, and it was wrong because the measurement was taken on hardware that cannot serve a model, not because the premise is. Ornith 9B answers the same prompt in 11.6s. THE LESSON IS ABOUT THE TEST BED, NOT THE MODEL: a latency number measured on the wrong host is not evidence about the model, and generalising from it produced a confident, load-bearing, false claim in a design document.
+- With `timeout_seconds: 60` (against the slow local model) the run terminated at 63.7s, exited 1, and recorded `error — APIConnectionError … Timeout` where before it would have hung indefinitely. THE TIMEOUT DEFECT IS UNAFFECTED BY THE RETRACTION ABOVE: it is about a hung call not being an exception, which is true at any latency — the slow host only made it visible.
 - With a 900s timeout the same rail completed end-to-end: `emitted 1, answered 1, failed 0`, verdicts `supersede=3, noop=2`, marker `ok — answered 1/1`, and the 5 written rows carry `model_used='ollama/llama3.2'` rather than 'agent-assisted'.
 CONSUMERS: `techne custodian run|status` (cli.py); `checks.check_model_bound_rails` (subsystem `custodian`, one CheckResult per rail plus `reflect`).
 FAIL-MODES: unbound → runs nothing, exit 0, no marker (correct, not a failure). Bound + answered-zero-of-N → exit 1 so a scheduler whose only signal is exit status can tell it did nothing.

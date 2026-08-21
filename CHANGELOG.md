@@ -74,9 +74,9 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **`_make_generate_fn` accepts an optional per-call timeout**, unset for every existing
   caller. A call that never returns is not an exception, so a per-item `try/except` cannot
-  catch it — an unattended runner would hang forever and never report. Measured: a 1,748-char
-  conflict prompt against a local llama3.2 had not returned after 240s while a 20-char prompt
-  answered in 1.3s.
+  catch it — an unattended runner would hang forever and never report. The defect holds at any
+  latency; a CPU-bound dev box merely made it visible (a real conflict prompt had not returned
+  after 240s there, against 11.6s for the same prompt on the inference host).
 
 
 ## [0.15.0] — 2026-08-19

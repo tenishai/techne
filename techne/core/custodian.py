@@ -31,8 +31,15 @@ caller gets it too.
 
 The intended tiering, recorded so the config makes sense to a reader:
 mechanical passes (dedup, contradiction classification — classification, not
-architecture) run fine on a small local model; judgment passes deserve a better one;
-work the operator is present for should stay resident and cost nothing.
+architecture) run fine on a small model; judgment passes deserve a better one; work the
+operator is present for should stay resident and cost nothing.
+
+MEASURE THAT TIERING ON THE INFERENCE HOST, NOT THE DEV BOX. `llm_api_base` points at
+wherever the model actually runs (a LAN ollama host, a proxy), and the difference is not
+a detail: the same real `conflict` prompt answers in 11.6s on a 9B served properly and
+had not returned after 240s on a laptop CPU. A latency number taken on a machine that
+cannot serve a model is not evidence about the model — measuring that way once already
+produced a confidently wrong claim about this exact tiering.
 
 === THE FAILURE THIS MODULE EXISTS TO NOT REPEAT ===
 

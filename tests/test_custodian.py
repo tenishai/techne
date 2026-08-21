@@ -871,3 +871,30 @@ def test_federation_conflict_rows_carry_the_producer_too(config, verdict):
     assert {r[0] for r in rows} == {"ollama/llama3.2"}, (
         f"a federation-conflict row claims the wrong producer: {[r[0] for r in rows]}"
     )
+
+
+def test_the_bound_model_keeps_the_configured_api_base(config, monkeypatch):
+    """THE ACTUAL DEPLOYMENT SHAPE. The model does not run on the box techne runs on —
+    it is served over the LAN (or via a proxy), selected by `llm_api_base`. The scoped
+    copy must carry it, or the custodian silently tries to reach a model on localhost
+    and reports a connection error that looks like a broken rail.
+
+    Verified live against a real host: ornith:9b over llm_api_base answered a real
+    conflict prompt in 11.6s, where the same prompt on the dev laptop had not returned
+    after 240s.
+    """
+    captured = {}
+
+    def fake_make(cfg):
+        captured["api_base"] = cfg.llm_api_base
+        captured["model"] = cfg.model
+        return lambda p: "x"
+
+    monkeypatch.setattr("techne.core.thread_orchestrator._make_generate_fn", fake_make)
+    config.llm_api_base = "http://inference-host:11434"
+    config.custodian.model = "ollama/ornith:9b"
+
+    resolve_generate_fn(config)
+
+    assert captured["api_base"] == "http://inference-host:11434"
+    assert captured["model"] == "ollama/ornith:9b"
