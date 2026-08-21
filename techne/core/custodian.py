@@ -379,8 +379,20 @@ def effective_rails(config, rails: list[str] | None) -> list[str]:
     50 vs 5), and invisible to the round-2 guard test BY CONSTRUCTION: that test pins
     both paths to the same explicit `--rail`, so the one axis where they still diverged
     was the axis it held constant. (Prudence, #709 round 3.)
+
+    THREE CASES, and the middle one is easy to collapse by accident:
+      rails=None  → the configured selection, else every registered rail.
+      rails=[]    → NOTHING. An explicit empty list is a decision, not an absence.
+      rails=[...] → exactly those, validated.
     """
-    selected = rails if rails else (config.custodian.rails or sorted(RAILS))
+    # `rails is not None`, NOT `if rails` — AN EXPLICIT EMPTY LIST MEANS "RUN NOTHING".
+    # Moving the selection logic here in round 3 silently flipped that: `rails=[]` went
+    # from running zero rails to running every registered one. No in-tree caller reaches
+    # it (the CLI passes `list(rail_names) or None`), so it was latent — but it is
+    # fail-open in the TOKEN-SPENDING direction, which is the wrong way for a headless
+    # runner to be wrong: a programmatic caller that filters its rail list down to empty
+    # would have run the full set against the bound model. (Prudence, #709 round 4.)
+    selected = rails if rails is not None else (config.custodian.rails or sorted(RAILS))
     unknown = [r for r in selected if r not in RAILS]
     if unknown:
         raise KeyError(

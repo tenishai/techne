@@ -1196,7 +1196,12 @@ def custodian_status(ctx):
     model-bound run says so, rather than reading as healthy off work a resident
     agent did.
     """
-    from techne.core.custodian import MARKER_PREFIX, RAILS, resolve_generate_fn
+    from techne.core.custodian import (
+        MARKER_PREFIX,
+        RAILS,
+        effective_model,
+        resolve_generate_fn,
+    )
     from techne.core.database import connect
     from techne.core.extension_state import get_state
 
@@ -1213,10 +1218,22 @@ def custodian_status(ctx):
         for name in sorted(RAILS):
             rail = RAILS[name]
             bound = resolve_generate_fn(config, rail=name) is not None
+            # THE MODEL THE RUNNER WILL ACTUALLY USE, per rail — not the global one.
+            # `custodian status` is THE surface built to answer "what is bound", and it
+            # never read `rail_models`: a rail carrying a per-rail override reported the
+            # global model and a bare `bound: yes`. In this feature specifically that is
+            # a wrong belief about `model_used`, the one column that records which
+            # producer judged a candidate and the column the whole techne#555 finding
+            # turned on. `effective_model` already computes the right answer; status was
+            # re-deriving a less specific one, which is rounds 2 and 3's shape again.
+            # (Prudence, #709 round 4.)
+            model = effective_model(config, rail=name)
             marker = get_state(conn, f"{MARKER_PREFIX}:{name}:last_run") or {}
             click.echo(f"{name}")
             click.echo(f"  {rail.what}")
-            click.echo(f"  bound: {'yes' if bound else 'no (resident)'}")
+            click.echo(
+                f"  bound: {f'yes — {model}' if bound else 'no (resident)'}"
+            )
             if marker:
                 click.echo(
                     f"  last run: {marker.get('ts', '?')} "
@@ -1289,6 +1306,7 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
         # ownership consolidated above is not quietly re-copied.
         from techne.core.custodian import (
             effective_limit,
+            effective_model,
             effective_rails,
             resolve_generate_fn,
         )
@@ -1306,9 +1324,14 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
                 # is why this is the smaller of the two. (Prudence, #709 round 3.)
                 click.echo(f"{name}: emit failed — {type(e).__name__}: {e}")
                 continue
+            # NAMES THE MODEL, because the docstring above claims it does ("shows
+            # exactly what WOULD be sent, and to which model") and it did not — it
+            # printed bound/unbound only. A claim a surface does not honour is the
+            # same defect as a number it gets wrong. (Prudence, #709 round 4.)
+            target = effective_model(config, rail=name) if bound else ""
             click.echo(
                 f"{name}: {len(batch)} prompt(s) would be sent"
-                f"{'' if bound else ' — but NO MODEL IS BOUND, so nothing would run'}"
+                f"{f' to {target}' if bound else ' — but NO MODEL IS BOUND, so nothing would run'}"
             )
         return
 

@@ -17,6 +17,7 @@ from techne.core.custodian import (
     RAILS,
     Rail,
     effective_limit,
+    effective_model,
     effective_rails,
     record_rail_marker,
     resolve_generate_fn,
@@ -1280,3 +1281,107 @@ def test_dry_run_survives_a_rail_whose_emit_raises(config, monkeypatch):
     assert "Traceback" not in result.output
     assert "boom: emit failed" in result.output
     assert "fine: 1 prompt(s)" in result.output, "a raising rail suppressed the rest"
+
+
+# ---- Prudence #709 round 4: the model axis ------------------------------------
+
+
+def test_status_reports_the_model_the_runner_will_actually_use(config, monkeypatch):
+    """THE FOURTH AXIS. `custodian status` is THE surface built to answer "what is
+    bound", and it never read `rail_models`: a rail carrying a per-rail override
+    reported the GLOBAL model and a bare `bound: yes`, while the runner would use the
+    override. In this feature that is a wrong belief about `model_used` — the one column
+    recording which producer judged a candidate, and the column the whole techne#555
+    finding turned on. (Prudence, #709 round 4.)
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    config.custodian.model = "vertex_ai/MODEL-A"
+    config.custodian.rail_models = {"conflict": "vertex_ai/MODEL-B"}
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+
+    out = CliRunner().invoke(main, ["custodian", "status"]).output
+    conflict_block = out.split("conflict\n")[1].split("consolidate")[0]
+
+    assert "vertex_ai/MODEL-B" in conflict_block, (
+        f"status named the wrong model for a rail with an override:\n{conflict_block}"
+    )
+    assert effective_model(config, rail="conflict") == "vertex_ai/MODEL-B"
+
+
+def test_dry_run_names_the_model_it_claims_to_name(config, monkeypatch):
+    """The docstring says dry-run "shows exactly what WOULD be sent, and to which
+    model". It printed bound/unbound only. A claim a surface does not honour is the same
+    defect as a number it gets wrong."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setitem(
+        RAILS, "probe",
+        Rail(name="probe", what="p", emit=lambda c: [{"prompt": "p"}],
+             ingest=lambda c, i, r, m: {}),
+    )
+    config.custodian.model = "ollama/small"
+    config.custodian.rail_models = {"probe": "vertex_ai/big"}
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+
+    out = CliRunner().invoke(main, ["custodian", "run", "--rail", "probe", "--dry-run"]).output
+
+    assert "vertex_ai/big" in out, out
+
+
+def test_all_three_surfaces_agree_on_the_model(config, monkeypatch):
+    """The whole point of the axis enumeration: status, dry-run and the producer label
+    the runner writes must name ONE model for a given rail."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    seen = []
+    monkeypatch.setitem(
+        RAILS, "probe",
+        Rail(name="probe", what="p", emit=lambda c: [{"prompt": "p"}],
+             ingest=lambda c, i, r, m: seen.append(m) or {}),
+    )
+    config.custodian.model = "ollama/small"
+    config.custodian.rail_models = {"probe": "vertex_ai/big"}
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+    monkeypatch.setattr(
+        "techne.core.thread_orchestrator._make_generate_fn", lambda cfg: (lambda p: "ok")
+    )
+
+    runner = CliRunner()
+    status = runner.invoke(main, ["custodian", "status"]).output
+    dry = runner.invoke(main, ["custodian", "run", "--rail", "probe", "--dry-run"]).output
+    run_rail(config, "probe", generate_fn=lambda p: "ok")
+
+    assert "vertex_ai/big" in status
+    assert "vertex_ai/big" in dry
+    assert seen == ["vertex_ai/big"], f"the runner labelled rows {seen}"
+
+
+def test_an_explicit_empty_rail_list_runs_nothing(config, monkeypatch):
+    """`rails=[]` IS A DECISION, NOT AN ABSENCE. Moving the selection logic in round 3
+    flipped `rails is not None` to `if rails`, so an explicit empty list went from
+    running zero rails to running every registered one — fail-open in the
+    token-spending direction, which is the wrong way for a headless runner to be wrong.
+    Latent (no in-tree caller reaches it) and caught by review, not by the suite.
+    (Prudence, #709 round 4.)
+    """
+    monkeypatch.setitem(
+        RAILS, "probe",
+        Rail(name="probe", what="p", emit=lambda c: [{"prompt": "p"}],
+             ingest=lambda c, i, r, m: {}),
+    )
+    report = run_custodian(config, rails=[], generate_fn=lambda p: "ok")
+
+    assert report["rails"] == [], f"an explicit empty selection ran {len(report['rails'])} rail(s)"
+
+
+def test_none_still_means_the_configured_selection(config):
+    config.custodian.rails = ["dream"]
+    assert effective_rails(config, None) == ["dream"]
+    assert effective_rails(config, []) == []
