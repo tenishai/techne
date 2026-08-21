@@ -754,6 +754,12 @@ def _laddered(path, start_version):
         # primary key, and `pattern_applies` has a foreign key onto `patterns(id)`, so
         # the next step fails with "foreign key mismatch" — a fault in the harness that
         # looks exactly like a fault in the ladder.
+        #
+        # ALSO LOST, and named so nobody trusts this to be a faithful copy: the FK to
+        # `investigations` (PRAGMA table_info cannot see FKs), the three FTS triggers,
+        # and the two schema indexes. The rebuilt table is strictly LAXER, and no ladder
+        # step writes to `patterns`, so none of that can manufacture a pass — but a
+        # future step that does write here would not be exercised faithfully.
         info = [r for r in conn.execute("PRAGMA table_info(patterns)") if r[1] not in drop_cols]
         defs = ", ".join(
             f"{r[1]} {r[2]}"
