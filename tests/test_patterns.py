@@ -12,10 +12,14 @@ from techne.core.patterns import (
     investigation_exists,
     investigations_for_url,
     list_patterns,
+    outcome_stats,
+    outcomes_for_pattern,
+    record_outcome,
     search_patterns,
     set_verdict,
     stats,
     sweep_legacy_verdicts,
+    unrealized_patterns,
     upsert_investigation,
 )
 from techne.core.stores import SqliteStore
@@ -623,3 +627,273 @@ def test_demotion_to_no_lift_keeps_the_pattern_era_verdict(db):
 
     ingest_patterns_md(db, nolift)  # demoted later
     assert _verdict_for(db, url) == "patterns-only", "frozen by design — see techne#433"
+
+
+# --- outcome provenance (techne#426) ----------------------------------------
+
+
+@pytest.fixture()
+def pattern(db):
+    """One stored pattern to hang outcomes off."""
+    inv = upsert_investigation(
+        db, url="https://example.test/x", surveyed_at="2026-07-28", verdict="patterns-only"
+    )
+    pid, _ = add_pattern(
+        db, investigation_id=inv, name="P", source_url="https://example.test/x", body="b"
+    )
+    return pid
+
+
+def test_record_outcome_inserts_then_promotes_state(db, pattern):
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1") is True
+    rows = outcomes_for_pattern(db, pattern)
+    assert len(rows) == 1 and rows[0]["state"] == "filed" and rows[0]["kind"] == "issue"
+
+    # same ref, new state → upsert promotes rather than duplicating
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped") is True
+    rows = outcomes_for_pattern(db, pattern)
+    assert len(rows) == 1 and rows[0]["state"] == "shipped"
+
+    # identical re-record is a no-op
+    assert record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped") is False
+
+
+def test_record_outcome_is_many_to_many(db, pattern):
+    """One pattern can become several things — that's why it's a junction."""
+    record_outcome(db, pattern_id=pattern, ref="o/techne#1")
+    record_outcome(db, pattern_id=pattern, ref="o/limenal#2", state="shipped")
+    refs = {r["ref"] for r in outcomes_for_pattern(db, pattern)}
+    assert refs == {"o/techne#1", "o/limenal#2"}
+
+
+def test_record_outcome_note_is_preserved_when_omitted(db, pattern):
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", note="why it mattered")
+    record_outcome(db, pattern_id=pattern, ref="o/r#1", state="shipped")  # no note passed
+    assert outcomes_for_pattern(db, pattern)[0]["note"] == "why it mattered"
+
+
+def test_record_outcome_rejects_unknown_pattern_and_state(db, pattern):
+    with pytest.raises(ValueError, match="unknown pattern id"):
+        record_outcome(db, pattern_id="deadbeefdeadbeef", ref="o/r#1")
+    with pytest.raises(ValueError, match="unknown outcome state"):
+        record_outcome(db, pattern_id=pattern, ref="o/r#2", state="bogus")
+
+
+def test_outcome_stats_counts_distinct_patterns_not_rows(db, pattern):
+    """A pattern that spawned three issues is ONE realized pattern, not three."""
+    for i in range(3):
+        record_outcome(db, pattern_id=pattern, ref=f"o/r#{i}")
+    s = outcome_stats(db)
+    assert s["realized_patterns"] == 1
+    assert s["shipped_patterns"] == 0
+    assert s["outcome_rows_by_state"] == {"filed": 3}
+
+    record_outcome(db, pattern_id=pattern, ref="o/r#0", state="shipped")
+    assert outcome_stats(db)["shipped_patterns"] == 1
+
+
+def test_unrealized_excludes_patterns_with_outcomes(db, pattern):
+    inv = upsert_investigation(
+        db, url="https://example.test/y", surveyed_at="2026-07-28", verdict="patterns-only"
+    )
+    other, _ = add_pattern(
+        db, investigation_id=inv, name="Q", source_url="https://example.test/y", body="b2"
+    )
+
+    ids = {p["id"] for p in unrealized_patterns(db)}
+    assert {pattern, other} <= ids
+
+    record_outcome(db, pattern_id=pattern, ref="o/r#1")
+    ids = {p["id"] for p in unrealized_patterns(db)}
+    assert pattern not in ids and other in ids
+
+
+# --- the ladder itself (Prudence r1 on #702) --------------------------------
+#
+# She deleted the new v4->v5 step entirely and the full suite stayed green at 3104,
+# exit 0; `if current < 4` instead of `< 5` also left 78/78 green. #674's step was
+# equally uncovered, so this is pre-existing practice rather than something the
+# renumbering introduced — which is why it is worth closing now.
+#
+# Uses SqliteStore().migrate() like the `db` fixture above: `_reconcile_relations`
+# runs the LADDER only, so a bare path has no `patterns` table for the steps to alter.
+
+
+def _laddered(path, start_version):
+    """A store as it would REALLY look at `start_version`, then re-migrated.
+
+    Removes only the artifacts of steps ABOVE the stamp. That fidelity is the point in
+    both directions:
+
+    * Asserting straight after `migrate()` proves nothing — `ARCHITECT_SCHEMA` already
+      creates every column and table the ladder adds (architect.py:57-61), so Prudence
+      r2 replaced the whole body of `_architect_run_steps` with `pass` and all five
+      parameters still passed.
+    * Stripping EVERYTHING and then claiming stamp 3 is equally wrong in the other
+      direction — a store at 3 legitimately has the v1-v3 columns, and steps 1-3 are
+      correctly skipped, so the assertion would fail against correct code.
+
+    SQLite cannot DROP COLUMN on these files, so columns go by rebuilding `patterns`.
+    """
+    import sqlite3
+
+    from techne.core import architect
+
+    SqliteStore("architect", path).migrate(ARCHITECT_SCHEMA)
+    conn = sqlite3.connect(path)
+    # step -> what it leaves behind, so we can remove exactly the future ones
+    drop_cols: set[str] = set()
+    if start_version < 2:
+        drop_cols |= {"topic", "absorbed"}
+    if start_version < 3:
+        drop_cols |= {"valid_at", "invalid_at"}
+    if start_version < 5:
+        conn.execute("DROP TABLE IF EXISTS pattern_outcomes")
+    if drop_cols:
+        # Rebuild with EXPLICIT DDL, not `CREATE TABLE AS SELECT`: the latter drops the
+        # primary key, and `pattern_applies` has a foreign key onto `patterns(id)`, so
+        # the next step fails with "foreign key mismatch" — a fault in the harness that
+        # looks exactly like a fault in the ladder.
+        #
+        # ALSO LOST, and named so nobody trusts this to be a faithful copy: the FK to
+        # `investigations` (PRAGMA table_info cannot see FKs), the three FTS triggers,
+        # and the two schema indexes. The rebuilt table is strictly LAXER, and no ladder
+        # step writes to `patterns`, so none of that can manufacture a pass — but a
+        # future step that does write here would not be exercised faithfully.
+        info = [r for r in conn.execute("PRAGMA table_info(patterns)") if r[1] not in drop_cols]
+        defs = ", ".join(
+            f"{r[1]} {r[2]}"
+            + (" NOT NULL" if r[3] else "")
+            + (f" DEFAULT {r[4]}" if r[4] is not None else "")
+            + (" PRIMARY KEY" if r[5] else "")
+            for r in info
+        )
+        names = ", ".join(r[1] for r in info)
+        conn.execute(f"CREATE TABLE _p ({defs})")
+        conn.execute(f"INSERT INTO _p ({names}) SELECT {names} FROM patterns")
+        conn.execute("DROP TABLE patterns")
+        conn.execute("ALTER TABLE _p RENAME TO patterns")
+    conn.execute(f"PRAGMA user_version = {start_version}")
+    conn.commit()
+    conn.close()
+    architect._reconcile_relations(path)
+    return sqlite3.connect(path)
+
+
+@pytest.mark.parametrize("start", [0, 1, 2, 3, 4])
+def test_every_starting_stamp_reaches_the_current_shape(tmp_path, start):
+    """ASSERTS BY EFFECT, NOT BY STAMP. `_architect_run_steps` writes the version
+    unconditionally after running, so a store that skipped a step still ends up stamped
+    correctly — the stamp cannot tell you the step ran. Check what each step leaves."""
+    from techne.core import architect
+
+    conn = _laddered(tmp_path / "architect.db", start)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(patterns)")}
+        assert {"topic", "absorbed", "valid_at", "invalid_at"} <= cols, "v1-v3 steps"
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pattern_outcomes'"
+        ).fetchone(), "v4->v5 step"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == architect.ARCHITECT_VERSION
+    finally:
+        conn.close()
+
+
+def test_the_v4_to_v5_step_is_gated_at_5_not_4(tmp_path):
+    """The realistic slip in a renumbering: `if current < 4` for a v5 step. A store
+    stamped exactly 4 must still receive it — and that store is the live one.
+
+    `pattern_outcomes` is dropped AFTER the base schema is applied, so only the ladder
+    step can put it back. Without that drop the base schema creates it and the assertion
+    passes whether or not the step ran.
+    """
+    import sqlite3
+
+    from techne.core import architect
+
+    db_path = tmp_path / "architect.db"
+    SqliteStore("architect", db_path).migrate(ARCHITECT_SCHEMA)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE IF EXISTS pattern_outcomes")
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    architect._reconcile_relations(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pattern_outcomes'"
+        ).fetchone(), "a store stamped 4 is exactly the live case; it must migrate"
+    finally:
+        conn.close()
+
+
+def test_outcome_stats_counts_one_population(db):
+    """Prudence r1 on #702: the denominator filtered `status='active'` and neither
+    numerator did, so a SUPERSEDED pattern carrying an outcome inflated the rate —
+    demonstrated at realized_rate 2.0. `unrealized_patterns` right beside it does
+    filter, so the two were presented as complements while counting different sets."""
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO patterns (id,name,source_url,body,status,created_at)"
+        " VALUES ('live','a','u','b','active','2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO patterns (id,name,source_url,body,status,created_at)"
+        " VALUES ('dead','b','u','b','superseded','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    record_outcome(db, pattern_id="dead", ref="r1", state="shipped")
+    stats = outcome_stats(db)
+    assert stats["active_patterns"] == 1
+    assert stats["realized_patterns"] == 0, "a superseded pattern is not a realized active one"
+    # BOTH numerators. Prudence r2 reverted only the `shipped` one and the full suite
+    # passed 3111 — the fix guarded in half. #427's tests do assert shipped_patterns,
+    # but every pattern in that fixture is active, so status is the one axis they
+    # structurally cannot see.
+    assert stats["shipped_patterns"] == 0
+    assert stats["realized_rate"] <= 1.0 and stats["shipped_rate"] <= 1.0
+
+    record_outcome(db, pattern_id="live", ref="r2", state="shipped")
+    stats = outcome_stats(db)
+    assert stats["realized_patterns"] == 1 and stats["realized_rate"] == 1.0
+    assert stats["shipped_patterns"] == 1 and stats["shipped_rate"] == 1.0
+
+
+def test_the_v3_to_v4_step_collapses_the_pre_rename_target(tmp_path):
+    """#674's step was uncovered too — Prudence r2 stubbed it and 84 tests passed.
+    Pre-existing rather than introduced here, but the harness above makes it one test.
+
+    The step is DATA, not schema: it folds `limenal` rows into `liminal` after the
+    2026-08-11 rename. So the fixture plants the old spelling at a stamp below 4."""
+    import sqlite3
+
+    from techne.core import architect
+
+    db_path = tmp_path / "architect.db"
+    SqliteStore("architect", db_path).migrate(ARCHITECT_SCHEMA)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO patterns (id,name,source_url,body,status,created_at)"
+        " VALUES ('p1','a','u','b','active','2026-01-01')"
+    )
+    conn.execute("INSERT INTO pattern_applies (pattern_id, target) VALUES ('p1','limenal')")
+    conn.execute("INSERT INTO pattern_applies (pattern_id, target) VALUES ('p1','liminal')")
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+    architect._reconcile_relations(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        targets = {r[0] for r in conn.execute("SELECT target FROM pattern_applies")}
+        assert targets == {"liminal"}, "the pre-rename spelling must be collapsed, not kept"
+    finally:
+        conn.close()
