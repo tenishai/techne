@@ -1110,6 +1110,109 @@ def _runtime_deployed_at(runtime) -> tuple[int, str] | None:
         return None
 
 
+def _real_or(part: str, fallback: str) -> str:
+    """The operator's own value when it is usable, else a concrete word.
+
+    Never echoes a placeholder back: a remedy the guard rejects is a dead loop, and
+    `agent or '<agent>'` produced exactly that for four forms (techne#553, Prudence r3).
+    """
+    return part if part and not part.startswith("<") else fallback
+
+
+@register_check
+def check_instance_identity(config) -> CheckResult | None:
+    """Is this instance's `written_by` name unambiguous in a shared store? (techne#553)
+
+    Cheap: reads config, touches no db. Fires only when this instance actually writes
+    to a shared archivist — a standalone install attributes nothing and has nothing to
+    collide with.
+
+    FAIL_OPEN, not a fifth kind: the write SUCCEEDS and the row lands — it is the
+    ATTRIBUTION that silently degrades to something that cannot discriminate, which is
+    this taxonomy's "degrades silently to a no-op when a dependency is missing" with
+    the dependency being a unique name. (An earlier draft invented `Kind.CONFIG`; the
+    four kinds came out of the 2026-08-03 audit and adding a fifth to fit one check is
+    how a taxonomy stops meaning anything.)
+
+    THE COLLISION IS GUARANTEED, NOT LIKELY. cabal's `identity.toml.example` — the file
+    every new cabal starts from — ships `archivist`, `architect`, `librarian`, `mason`
+    and `wright`. Three operators federating into one store contribute three different
+    agents all named `archivist`, which is precisely the ambiguity `written_by` exists
+    to remove. `<agent>@<cabal>` qualifies it; the machine is the wrong scope, since two
+    cabals can share a host and one cabal can span several.
+    """
+    if config.standalone:
+        return CheckResult(
+            name="identity:instance",
+            subsystem="archivist",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.DORMANT,
+            detail="standalone — this instance attributes nothing to a shared store",
+            evidence="standalone=true",
+        )
+    name = (getattr(config, "instance_name", "") or "").strip()
+    if not name:
+        return CheckResult(
+            name="identity:instance",
+            subsystem="archivist",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.STALE,
+            detail=(
+                "writing to a shared archivist with no instance_name — every row lands "
+                "unattributed and cannot be attributed later"
+            ),
+            evidence="instance_name is empty",
+            remedy="set instance_name: your-agent@your-cabal in config.yaml",
+        )
+    agent, sep, cabal = name.partition("@")
+    # BOTH SIDES MUST BE REAL. `"@" in name` blessed `archivist@`, `@dimartin` and `@`
+    # — an empty qualifier qualifies nothing, so `archivist@` collides with every other
+    # cabal's `archivist@` exactly as `archivist` does. It also blessed
+    # `archivist@<cabal>`: an operator following this check's own remedy literally lands
+    # on a value containing '@', is told LIVE, and writes a string byte-identical to
+    # what every other operator following the same instruction writes.
+    #
+    # This does NOT constrain the operator's scheme, which was the reason for keeping
+    # the test loose — it only requires that the qualifier is actually there. The
+    # placeholder test is the second guard; the two-sides test is the load-bearing one.
+    placeholder = agent.startswith("<") or cabal.startswith("<")
+    if not (sep and agent and cabal) or placeholder:
+        return CheckResult(
+            name="identity:instance",
+            subsystem="archivist",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.STALE,
+            detail=(
+                f"instance_name {name!r} does not identify a writer — cabal's persona "
+                "roster is shared, so a name without a real qualifier on BOTH sides of "
+                "'@' collides with the same persona in every other cabal writing here"
+            ),
+            # NOT "has no '@'" — this branch fires for six names that HAVE one
+            # (`archivist@`, `@dimartin`, `@`, and the placeholder forms). That string
+            # was left over from the presence-only test and was the last place the
+            # check contradicted its own rule.
+            evidence=f"instance_name={name!r} lacks a real value on both sides of '@'",
+            # NEVER SUBSTITUTE A PLACEHOLDER BACK IN. `agent or '<agent>'` printed
+            # `<agent>@your-cabal` whenever the agent side was empty or itself a
+            # placeholder — a remedy the guard three lines above rejects, so
+            # `@dimartin`, `@`, `<agent>@<cabal>` and `<agent>@dimartin` dead-looped.
+            # Closing "the check blesses its own remedy" opened its mirror image.
+            # Reuse the operator's own agent side only when it is real.
+            remedy=(
+                f"set instance_name: {_real_or(agent, 'your-agent')}@your-cabal"
+                " in config.yaml (both sides real, no placeholders)"
+            ),
+        )
+    return CheckResult(
+        name="identity:instance",
+        subsystem="archivist",
+        kind=Kind.FAIL_OPEN,
+        verdict=Verdict.LIVE,
+        detail=f"attributing federated writes as {name!r}",
+        evidence=f"instance_name={name!r}",
+    )
+
+
 @register_check
 def check_runtime_torn(config) -> CheckResult | None:
     """A LIVE server has told us it is serving stale code (techne#696 part A).

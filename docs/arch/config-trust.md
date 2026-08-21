@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-config-trust
-updated: 2026-08-17
-anchor: techne/security/config_trust.py sha=7def639388f6d6f28e4d1a8ae504a8dc9d7a692f
+updated: 2026-08-20
+anchor: techne/security/config_trust.py sha=102ba91682287fa1d0797f565f7f861e52839f4d
 ---
 # config-trust — operator-vs-agent boundary over egress-selecting config (techne#393)
 
@@ -38,3 +38,5 @@ INVARIANTS:
 - **SAY "BUILT-IN DEFAULT DESTINATIONS", NEVER "CLOSED DEFAULTS".** `model` defaults to `claude-haiku-4-5-20251001` and, with `llm_api_base`/`llm_api_key` empty, litellm falls back to env-var provider routing — so an enforcing verdict still makes outbound LLM calls. The guarantee is that the agent cannot REPOINT that traffic, not that nothing leaves. "Closed" reads as "no traffic" to an operator, and that is false.
 - **THE PERMISSIVE `absent` DEFAULT IS BACKED BY A DOCTOR-ONLY SIGNAL — for the HUMAN. There is a third reader, and it is the agent.** `absent` is DORMANT, DORMANT ties with LIVE, and `format_banner` is warnings-only, so "this install's egress selector is agent-writable" reaches only an operator who runs `techne doctor`. That is uniform with every other DORMANT check and is not changed here. BUT THE DETAIL STRING HAS A SURFACE THIS CARD PREVIOUSLY MISSED: `mcp_server.py` returns `collect_health(config)` verbatim, `health.py` copies `r.detail` into it, and `check_config_trust` carries no `@expensive` marker — so every destination this check names is read by THE VERY AGENT THE SEAM CONSTRAINS. Nothing leaks today, and that is `_describe_destination`'s default-deny earning its keep rather than a comfort: the renderer is the thing standing between a governed credential and the constrained party's context. (Prudence, PR #508 r4.)
 - A malformed operator layer parses to `{}` and therefore grants nothing — fail closed — while still reporting as present, so it never reads as `absent`.
+
+A LABEL IS NOT A ROUTE, and the distinction is the classification's whole job (techne#553). `instance_name` is stamped onto federated knowledge as `written_by` so a shared archivist can name its contributors. It is `_NOT_A_DESTINATION`: it selects no path, endpoint, model or sink, and where the memory goes is decided entirely by `standalone` and `archivist_db_path`, both already EGRESS_KEYS. The failure mode it DOES carry is misattribution — a wrong `instance_name` writes a wrong author into the receiving store — which is an integrity concern for the reader, not an egress one for the writer. Worth stating because "it affects what another party ends up believing" is a tempting reason to classify something as egress, and it is not the line #508 drew. Note also that the guard works: the field was caught by `test_every_config_field_is_classified_as_destination_or_not` the moment it was added, before it could ship unjudged.

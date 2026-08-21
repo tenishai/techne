@@ -63,8 +63,19 @@ def store(
     confidence: str = "medium",
     source: str = "session",
     anchor: str | None = None,
+    provenance: dict | None = None,
 ) -> int:
     """Store a knowledge entry. Returns the new entry's id.
+
+    `provenance` (techne#553) carries `written_by` / `origin_source` /
+    `origin_session` for a federated write. IN THE SAME INSERT, deliberately: the
+    first version stamped them with a follow-up UPDATE, and Prudence injected a
+    "database is locked" on that second connection — the row committed
+    unattributed, the retry hit the handler's content dedup, and the outbox
+    recorded `synced` with no error. It degraded to NULL rather than a wrong name,
+    which is the right ordering, but it made "unattributed" ambiguous between
+    LEGITIMATELY UNATTRIBUTABLE and WE DROPPED IT — the exact distinction this
+    column exists to draw. One statement cannot half-succeed.
 
     Writes both the legacy `confidence` text enum (for display + backward
     compat) and the canonical `confidence_numeric` derived from it. The
@@ -112,8 +123,9 @@ def store(
         cur = conn.execute(
             """INSERT INTO knowledge
                  (type, content, source, tags, confidence, confidence_numeric,
-                  anchor_path, anchor_symbol, content_hash, anchor_git_sha)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  anchor_path, anchor_symbol, content_hash, anchor_git_sha,
+                  written_by, origin_source, origin_session)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 type,
                 redact_credentials(content),
@@ -125,6 +137,9 @@ def store(
                 anchor_symbol,
                 anchor_content_hash,
                 anchor_git_sha,
+                (provenance or {}).get("written_by"),
+                (provenance or {}).get("origin_source"),
+                (provenance or {}).get("origin_session"),
             ),
         )
         conn.commit()
