@@ -1110,6 +1110,15 @@ def _runtime_deployed_at(runtime) -> tuple[int, str] | None:
         return None
 
 
+def _real_or(part: str, fallback: str) -> str:
+    """The operator's own value when it is usable, else a concrete word.
+
+    Never echoes a placeholder back: a remedy the guard rejects is a dead loop, and
+    `agent or '<agent>'` produced exactly that for four forms (techne#553, Prudence r3).
+    """
+    return part if part and not part.startswith("<") else fallback
+
+
 @register_check
 def check_instance_identity(config) -> CheckResult | None:
     """Is this instance's `written_by` name unambiguous in a shared store? (techne#553)
@@ -1179,9 +1188,15 @@ def check_instance_identity(config) -> CheckResult | None:
                 "'@' collides with the same persona in every other cabal writing here"
             ),
             evidence=f"instance_name={name!r} has no '@'",
+            # NEVER SUBSTITUTE A PLACEHOLDER BACK IN. `agent or '<agent>'` printed
+            # `<agent>@your-cabal` whenever the agent side was empty or itself a
+            # placeholder — a remedy the guard three lines above rejects, so
+            # `@dimartin`, `@`, `<agent>@<cabal>` and `<agent>@dimartin` dead-looped.
+            # Closing "the check blesses its own remedy" opened its mirror image.
+            # Reuse the operator's own agent side only when it is real.
             remedy=(
-                f"set instance_name: {agent or '<agent>'}@your-cabal in config.yaml "
-                "(both sides real; not a literal placeholder)"
+                f"set instance_name: {_real_or(agent, 'your-agent')}@your-cabal"
+                " in config.yaml (both sides real, no placeholders)"
             ),
         )
     return CheckResult(

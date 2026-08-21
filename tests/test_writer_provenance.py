@@ -269,16 +269,38 @@ def test_any_scheme_with_two_real_parts_is_accepted(tmp_path, name):
     assert _identity(False, name, tmp_path).verdict == Verdict.LIVE
 
 
-def test_the_remedy_it_prints_would_actually_pass_the_check(tmp_path):
-    """The r2 finding in one assertion: guidance that produces a value the check
-    rejects is worse than no guidance, and guidance that produces one it wrongly
-    blesses is worse still."""
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "archivist",
+        "archivist@",
+        "@dimartin",
+        "@",
+        "archivist@<cabal>",
+        "<agent>@<cabal>",
+        "<agent>@dimartin",
+    ],
+)
+def test_the_remedy_it_prints_would_actually_pass_the_check(tmp_path, name):
+    """A REMEDY THAT THE GUARD REJECTS IS A DEAD LOOP, and this must hold for EVERY
+    rejected form, not one.
+
+    Prudence r3: the earlier version named this general property and ran a single
+    input, so it passed against code where `@dimartin`, `@`, `<agent>@<cabal>` and
+    `<agent>@dimartin` all printed `<agent>@your-cabal` — a value the guard three
+    lines above rejects. Two of those forms were already sitting in the parametrize
+    one screen up.
+    """
     from techne.core.checks import Verdict
 
-    remedy = _identity(False, "archivist", tmp_path).remedy
-    suggested = remedy.split("instance_name: ")[1].split(" ")[0]
-    assert _identity(False, suggested, tmp_path).verdict == Verdict.LIVE
-    assert "<" not in suggested, "a placeholder is not a remedy"
+    result = _identity(False, name, tmp_path)
+    assert result.verdict == Verdict.STALE
+    suggested = result.remedy.split("instance_name: ")[1].split(" ")[0]
+    assert "<" not in suggested, f"remedy for {name!r} echoes a placeholder: {suggested}"
+    assert _identity(False, suggested, tmp_path).verdict == Verdict.LIVE, (
+        f"remedy for {name!r} is {suggested!r}, which the check itself rejects"
+    )
 
 
 def test_an_unqualified_instance_name_is_reported(tmp_path):
