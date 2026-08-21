@@ -1111,6 +1111,75 @@ def _runtime_deployed_at(runtime) -> tuple[int, str] | None:
 
 
 @register_check
+def check_instance_identity(config) -> CheckResult | None:
+    """Is this instance's `written_by` name unambiguous in a shared store? (techne#553)
+
+    Cheap: reads config, touches no db. Fires only when this instance actually writes
+    to a shared archivist — a standalone install attributes nothing and has nothing to
+    collide with.
+
+    FAIL_OPEN, not a fifth kind: the write SUCCEEDS and the row lands — it is the
+    ATTRIBUTION that silently degrades to something that cannot discriminate, which is
+    this taxonomy's "degrades silently to a no-op when a dependency is missing" with
+    the dependency being a unique name. (An earlier draft invented `Kind.CONFIG`; the
+    four kinds came out of the 2026-08-03 audit and adding a fifth to fit one check is
+    how a taxonomy stops meaning anything.)
+
+    THE COLLISION IS GUARANTEED, NOT LIKELY. cabal's `identity.toml.example` — the file
+    every new cabal starts from — ships `archivist`, `architect`, `librarian`, `mason`
+    and `wright`. Three operators federating into one store contribute three different
+    agents all named `archivist`, which is precisely the ambiguity `written_by` exists
+    to remove. `<agent>@<cabal>` qualifies it; the machine is the wrong scope, since two
+    cabals can share a host and one cabal can span several.
+    """
+    if config.standalone:
+        return CheckResult(
+            name="identity:instance",
+            subsystem="archivist",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.DORMANT,
+            detail="standalone — this instance attributes nothing to a shared store",
+            evidence="standalone=true",
+        )
+    name = (getattr(config, "instance_name", "") or "").strip()
+    if not name:
+        return CheckResult(
+            name="identity:instance",
+            subsystem="archivist",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.STALE,
+            detail=(
+                "writing to a shared archivist with no instance_name — every row lands "
+                "unattributed and cannot be attributed later"
+            ),
+            evidence="instance_name is empty",
+            remedy="set instance_name: <agent>@<cabal> in config.yaml",
+        )
+    if "@" not in name:
+        return CheckResult(
+            name="identity:instance",
+            subsystem="archivist",
+            kind=Kind.FAIL_OPEN,
+            verdict=Verdict.STALE,
+            detail=(
+                f"instance_name {name!r} is unqualified — cabal's persona roster is "
+                "shared, so a bare name collides with the same persona in every other "
+                "cabal writing to this store"
+            ),
+            evidence=f"instance_name={name!r} has no '@'",
+            remedy=f"set instance_name: {name}@<cabal> in config.yaml",
+        )
+    return CheckResult(
+        name="identity:instance",
+        subsystem="archivist",
+        kind=Kind.FAIL_OPEN,
+        verdict=Verdict.LIVE,
+        detail=f"attributing federated writes as {name!r}",
+        evidence=f"instance_name={name!r}",
+    )
+
+
+@register_check
 def check_runtime_torn(config) -> CheckResult | None:
     """A LIVE server has told us it is serving stale code (techne#696 part A).
 

@@ -221,3 +221,63 @@ def test_provenance_is_written_in_the_same_statement_as_the_row(pair):
         conn.close()
     assert row == ("poe@dev04", "manual")
     assert calls and calls[-1]["written_by"] == "poe@dev04", "provenance rides the INSERT"
+
+
+# --- the name has to be unambiguous, not just present (Richard, 2026-08-20) ---
+
+
+def _identity(standalone, name, tmp_path):
+    from techne.core.checks import check_instance_identity
+
+    cfg = Config.load()
+    cfg.data_dir = tmp_path
+    cfg.standalone = standalone
+    cfg.instance_name = name
+    return check_instance_identity(cfg)
+
+
+def test_an_unqualified_instance_name_is_reported(tmp_path):
+    """A BARE PERSONA NAME COLLIDES BY CONSTRUCTION, not by bad luck. cabal's
+    `identity.toml.example` — the file every new cabal starts from — ships `archivist`,
+    `architect`, `librarian`, `mason` and `wright`. Three operators federating into one
+    store contribute three different agents all called `archivist`, which is exactly the
+    ambiguity `written_by` exists to remove. And `archivist` is the persona that writes
+    to the shared store."""
+    from techne.core.checks import Verdict
+
+    r = _identity(False, "archivist", tmp_path)
+    assert r.verdict == Verdict.STALE
+    assert "archivist@" in r.remedy
+
+
+def test_a_qualified_name_is_accepted(tmp_path):
+    from techne.core.checks import Verdict
+
+    assert _identity(False, "archivist@dimartin", tmp_path).verdict == Verdict.LIVE
+
+
+def test_a_standalone_instance_is_not_nagged(tmp_path):
+    """It attributes nothing to a shared store, so it has nothing to collide with —
+    and a check that fires where there is no problem is how a true signal is trained
+    into noise (techne#562)."""
+    from techne.core.checks import Verdict
+
+    assert _identity(True, "", tmp_path).verdict == Verdict.DORMANT
+
+
+def test_a_shared_writer_with_no_name_at_all_is_reported(tmp_path):
+    """Every row it writes lands unattributed and cannot be attributed later — the
+    issue's own "the cost is not constant" argument, live."""
+    from techne.core.checks import Verdict
+
+    assert _identity(False, "", tmp_path).verdict == Verdict.STALE
+
+
+def test_the_identity_check_is_cheap(tmp_path):
+    """Reads config, touches no db, spawns nothing — so it registers as an ordinary
+    check rather than @expensive (techne#696's lesson, one issue later)."""
+    from techne.core.checks import deferred_check_names, registered_checks
+
+    names = [f.__name__ for f in registered_checks()]
+    assert names.count("check_instance_identity") == 1
+    assert "check_instance_identity" not in deferred_check_names()

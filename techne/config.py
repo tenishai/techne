@@ -437,6 +437,16 @@ class Config:
     #: an unattributed row is honest, a wrongly-attributed one is worse than none in
     #: the very table whose job is to say who said what. Not derived from hostname
     #: for that reason: a machine name is not an author.
+    #:
+    #: QUALIFY IT: `<agent>@<cabal>`, e.g. `archivist@dimartin`. A bare persona name
+    #: is GUARANTEED to collide, not merely likely to — cabal's
+    #: `identity.toml.example`, which every new cabal starts from, ships `archivist`,
+    #: `architect`, `librarian`, `mason` and `wright`. Three operators sharing one
+    #: archivist store therefore contribute three different agents all called
+    #: `archivist`, in the one table whose purpose is telling contributors apart.
+    #: The machine is the wrong scope: two cabals can share a host and one cabal can
+    #: span several. `check_instance_identity` reports an unqualified name rather
+    #: than leaving this as advice — prose does not enforce a namespace.
     instance_name: str = ""
     # Staleness alarm: if the prior last_session is older than this many hours,
     # the banner and collect_health emit a visible warning. Default 12h.
