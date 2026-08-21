@@ -1207,7 +1207,16 @@ def custodian_status(ctx):
 
     config = ctx.obj["config"]
     cu = config.custodian
-    click.echo(f"custodian model: {cu.model or '(unbound — rails stay resident)'}")
+    # "(unset)", NOT "(unbound — rails stay resident)". `rail_models` WITHOUT a global
+    # `custodian.model` is a legal, validated config — config.py checks the keys against
+    # the registry and nothing requires a base model alongside them — so the old
+    # parenthetical made a BEHAVIOURAL claim about rails from a fact about one key, and
+    # the runner agreed with the per-rail block four lines below rather than with this
+    # line. Reading it as the config echo it is ("custodian model:" is the key name,
+    # sitting beside "rails enabled:" and "max per run:"), the value was true; only the
+    # gloss overreached. The per-rail `bound:` lines below are the authority.
+    # (Prudence, #709 round 5.)
+    click.echo(f"custodian model: {cu.model or '(unset — per-rail overrides may still bind)'}")
     if cu.rails:
         click.echo(f"rails enabled:   {', '.join(cu.rails)}")
     click.echo(f"max per run:     {cu.max_items_per_rail}")

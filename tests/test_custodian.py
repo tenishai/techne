@@ -534,7 +534,9 @@ def test_cli_status_reports_never_run(config, monkeypatch):
     result = CliRunner().invoke(main, ["custodian", "status"])
     assert result.exit_code == 0
     assert "never" in result.output
-    assert "unbound" in result.output
+    # "unset", not "unbound": the header is a config echo and must not make a
+    # behavioural claim about rails (Prudence, #709 round 5).
+    assert "unset" in result.output
 
 
 # ---- the timeout, which only running it for real revealed --------------------
@@ -1385,3 +1387,24 @@ def test_none_still_means_the_configured_selection(config):
     config.custodian.rails = ["dream"]
     assert effective_rails(config, None) == ["dream"]
     assert effective_rails(config, []) == []
+
+
+def test_status_header_does_not_claim_resident_when_a_rail_override_binds(config, monkeypatch):
+    """`rail_models` WITHOUT a global `custodian.model` is a legal, validated config,
+    and the header said "unbound — rails stay resident" four lines above a rail
+    reporting "bound: yes — vertex_ai/MODEL-B". The runner agreed with the second.
+    A fact about one config key had been glossed into a behavioural claim about rails.
+    (Prudence, #709 round 5.)
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    config.custodian.model = ""
+    config.custodian.rail_models = {"conflict": "vertex_ai/MODEL-B"}
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+
+    out = CliRunner().invoke(main, ["custodian", "status"]).output
+
+    assert "rails stay resident" not in out, out
+    assert "vertex_ai/MODEL-B" in out
