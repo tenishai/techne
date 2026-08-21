@@ -42,9 +42,26 @@ never reaching bounded_hook's graceful exit-0 path at all.
 ImportError-like unavailability (caller's existing try/except treats it the
 same as "not installed") instead of blocking on a network call. inference.py
 passes `allow_download=False` since it's the hook-reachable path; search.py's
-`backfill_vectors` (never hook-invoked — "nothing auto-runs backfill_vectors
-in production today") keeps the default `allow_download=True` so an operator's
+`backfill_vectors` keeps the default `allow_download=True` so an operator's
 first explicit backfill can still fetch the model.
+
+CAVEAT ON THAT DEFAULT (techne#704). This docstring used to justify
+`allow_download=True` on the grounds that `backfill_vectors` is "never
+hook-invoked". That premise is only safe for the code in THIS repo, where the
+`techne vectors backfill` CLI command is the sole non-test caller. A deployment
+is free to chain that CLI into a hook as a shell string — one observed
+SessionStart hook does exactly that:
+
+    preflight_guard.py ; techne vectors backfill ; -m techne.hooks.session_start
+
+and settings.json wiring is invisible to the Python call graph. In that shape the
+cold-cache download this section exists to prevent is reachable from session
+startup, and WORSE than the inference.py case it was written about: a bare shell
+command gets no `bounded_hook` SIGALRM budget at all, so there is nothing to
+degrade gracefully — startup simply blocks on the Hub fetch. The `allow_download`
+default is therefore a deployment-shape decision, not a settled invariant; if
+this becomes a real hang, the fix is to make the auto-invoked path pass
+`allow_download=False` rather than to reword this paragraph.
 """
 
 from __future__ import annotations
