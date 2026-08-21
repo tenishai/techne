@@ -1048,6 +1048,14 @@ _EGRESS_PROBES: dict[str, object] = {
     "model": "openai/probe-model",
     "reflect.model": "openai/probe-reflect",
     "conflict.model": "openai/probe-conflict",
+    # techne#555. The custodian's bindings run UNATTENDED, so a probe here is not
+    # ceremony: it is what proves a locked operator layer can actually deny an agent
+    # that tries to repoint headless traffic at its own endpoint.
+    "custodian.model": "openai/probe-custodian",
+    # Must name a REAL rail — the loader validates rail names against the registry
+    # (techne#555), so a made-up rail raises rather than silently probing nothing,
+    # exactly like `connections`' role above.
+    "custodian.rail_models": {"faithfulness": "openai/probe-rail"},
     "archivist_db_path": "/tmp/probe-archivist.db",
     "standalone": False,
     "stores": {"librarian": {"adapter": "sqlite", "dsn": "/tmp/probe-lib.db"}},

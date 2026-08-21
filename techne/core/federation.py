@@ -504,6 +504,13 @@ def merge_and_rank(
 # ---------------------------------------------------------------------------
 
 
+#: Producer label for a candidate written by a RESIDENT agent (techne#555). ONE shared
+#: definition — `model_used` is the only record of which producer judged a row, so a
+#: second copy of the literal here would drift from the rails' and re-open the exact
+#: blindness that let the automatic reflect rail fail unnoticed for two months.
+from techne.core.sleepdream import RESIDENT_PRODUCER  # noqa: E402
+
+
 def federation_conflict_ingest(
     config,  # techne.config.Config — typed loosely to avoid Config import in module
     focus_content: str,
@@ -512,6 +519,8 @@ def federation_conflict_ingest(
     comparison_ids: list[int],
     check_hash: str,  # advisory; recomputed from content+ids
     response: str,
+    *,
+    model_used: str = RESIDENT_PRODUCER,
 ) -> dict:
     """Process the agent's verdict on a cross-store contradiction.
 
@@ -583,6 +592,7 @@ def federation_conflict_ingest(
                 decision_reason="no-verdicts",
                 raw=None,
                 origin="federation-conflict",
+                model_used=model_used,
             )
             conn.commit()
             return counts
@@ -646,6 +656,7 @@ def federation_conflict_ingest(
                         decision_reason=decision_reason,
                         raw=response,
                         origin="federation-conflict",
+                        model_used=model_used,
                     )
                     log.debug(
                         "federation_ingest: staged pending SUPERSEDE for local id=%s"
@@ -672,6 +683,7 @@ def federation_conflict_ingest(
                         decision_reason=decision_reason,
                         raw=response,
                         origin="federation-conflict",
+                        model_used=model_used,
                     )
                     log.debug(
                         "federation_ingest: discarded (local newer, team=%s stale)", focus_store
@@ -692,6 +704,7 @@ def federation_conflict_ingest(
                     decision_reason=f"noop: {reason or ''}",
                     raw=response,
                     origin="federation-conflict",
+                    model_used=model_used,
                 )
                 counts["noop"] += 1
 
@@ -709,6 +722,7 @@ def federation_conflict_ingest(
                     decision_reason=f"distinct: {reason or ''}",
                     raw=response,
                     origin="federation-conflict",
+                    model_used=model_used,
                 )
                 counts["distinct"] += 1
 
@@ -729,6 +743,7 @@ def federation_conflict_ingest(
                     decision_reason=f"update deferred (federation read-only path): {reason or ''}",
                     raw=response,
                     origin="federation-conflict",
+                    model_used=model_used,
                 )
                 counts["update"] += 1
 

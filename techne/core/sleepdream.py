@@ -52,6 +52,15 @@ SYSTEM_SLEEP_SESSION = "system:sleep"
 MAX_ENTRY_CHARS = 300
 
 
+#: Default producer label. A candidate written by a RESIDENT agent answering an emitted
+#: prompt carries this; one written by a model-bound headless run carries that model's id.
+#: THE COLUMN IS THE ONLY RECORD OF WHICH PRODUCER JUDGED THE ROW (techne#555). When the
+#: automatic reflect rail failed for two months, `model_used` was the one field that could
+#: have distinguished it from the resident route — hardcoding this literal for a second
+#: producer would destroy that signal for every rail the custodian now drives.
+RESIDENT_PRODUCER = "agent-assisted"
+
+
 def _ensure_system_session(db_path) -> None:
     conn = connect(db_path)
     try:
@@ -238,19 +247,23 @@ def _insert_consolidation_candidate(
     decided_by: str | None,
     decision_reason: str | None,
     raw: str | None,
+    # REQUIRED, NO DEFAULT — see the note on conflict._insert_candidate. A defaulted
+    # producer label lets a headless row claim a resident agent judged it, silently.
+    model_used: str,
 ) -> None:
     conn.execute(
         """INSERT INTO knowledge_candidates
              (scope, type, content, tags, confidence, source_session_id,
               source_thread_id, model_used, prompt_hash, raw_response,
               action, target_ids, origin, status, decided_by, decision_reason)
-           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
+           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, ?, ?, ?,
                    'merge', ?, 'consolidate', ?, ?, ?)""",
         (
             ktype,
             redact_credentials(content),
             confidence,
             SYSTEM_SLEEP_SESSION,
+            model_used,
             cluster_hash,
             redact_credentials(raw) if raw else None,
             json.dumps(sorted(target_ids)),
@@ -262,7 +275,12 @@ def _insert_consolidation_candidate(
 
 
 def consolidate_ingest(
-    config: Config, target_ids: list[int], cluster_hash: str, response: str
+    config: Config,
+    target_ids: list[int],
+    cluster_hash: str,
+    response: str,
+    *,
+    model_used: str = RESIDENT_PRODUCER,
 ) -> dict:
     """Process one cluster's agent verdict.
 
@@ -301,6 +319,7 @@ def consolidate_ingest(
                 decided_by="agent-triage",
                 decision_reason="keep",
                 raw=raw_for_store,
+                model_used=model_used,
             )
             counts["kept"] += 1
         else:
@@ -315,6 +334,7 @@ def consolidate_ingest(
                 decided_by=None,
                 decision_reason=None,
                 raw=raw_for_store,
+                model_used=model_used,
             )
             counts["proposed"] += 1
             counts["written"] += 1
@@ -551,6 +571,9 @@ def _insert_dream_candidate(
     decided_by: str | None,
     decision_reason: str | None,
     raw: str | None,
+    # REQUIRED, NO DEFAULT — see the note on conflict._insert_candidate. A defaulted
+    # producer label lets a headless row claim a resident agent judged it, silently.
+    model_used: str,
 ) -> None:
     """Insert a dream candidate row.
 
@@ -564,13 +587,14 @@ def _insert_dream_candidate(
              (scope, type, content, tags, confidence, source_session_id,
               source_thread_id, model_used, prompt_hash, raw_response,
               action, target_ids, origin, status, decided_by, decision_reason)
-           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
+           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, ?, ?, ?,
                    'add', ?, 'dream', ?, ?, ?)""",
         (
             ktype,
             redact_credentials(content),
             confidence,
             SYSTEM_SLEEP_SESSION,
+            model_used,
             group_hash,
             redact_credentials(raw) if raw else None,
             json.dumps(sorted(group_ids)),
@@ -581,7 +605,14 @@ def _insert_dream_candidate(
     )
 
 
-def dream_ingest(config: Config, group_ids: list[int], group_hash: str, response: str) -> dict:
+def dream_ingest(
+    config: Config,
+    group_ids: list[int],
+    group_hash: str,
+    response: str,
+    *,
+    model_used: str = RESIDENT_PRODUCER,
+) -> dict:
     """Process one group's agent dream verdict.
 
     A 'connect' verdict writes a PENDING action='add' candidate (origin='dream',
@@ -619,6 +650,7 @@ def dream_ingest(config: Config, group_ids: list[int], group_hash: str, response
                 decided_by="agent-triage",
                 decision_reason="none",
                 raw=raw_for_store,
+                model_used=model_used,
             )
             counts["kept"] += 1
         else:
@@ -635,6 +667,7 @@ def dream_ingest(config: Config, group_ids: list[int], group_hash: str, response
                 decided_by=None,
                 decision_reason=None,
                 raw=raw_for_store,
+                model_used=model_used,
             )
             counts["proposed"] += 1
             counts["written"] += 1

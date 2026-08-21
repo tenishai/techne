@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-config-trust
 updated: 2026-08-20
-anchor: techne/security/config_trust.py sha=102ba91682287fa1d0797f565f7f861e52839f4d
+anchor: techne/security/config_trust.py sha=544120ae37ecf92e7d4c002cf4cc42a9f6fa3996
 ---
 # config-trust — operator-vs-agent boundary over egress-selecting config (techne#393)
 
@@ -40,3 +40,5 @@ INVARIANTS:
 - A malformed operator layer parses to `{}` and therefore grants nothing — fail closed — while still reporting as present, so it never reads as `absent`.
 
 A LABEL IS NOT A ROUTE, and the distinction is the classification's whole job (techne#553). `instance_name` is stamped onto federated knowledge as `written_by` so a shared archivist can name its contributors. It is `_NOT_A_DESTINATION`: it selects no path, endpoint, model or sink, and where the memory goes is decided entirely by `standalone` and `archivist_db_path`, both already EGRESS_KEYS. The failure mode it DOES carry is misattribution — a wrong `instance_name` writes a wrong author into the receiving store — which is an integrity concern for the reader, not an egress one for the writer. Worth stating because "it affects what another party ends up believing" is a tempting reason to classify something as egress, and it is not the line #508 drew. Note also that the guard works: the field was caught by `test_every_config_field_is_classified_as_destination_or_not` the moment it was added, before it could ship unjudged.
+
+**techne#555 — THE CUSTODIAN'S BINDINGS ARE THE HIGHEST-VALUE DESTINATION KEYS IN THE FILE.** `custodian.model` and `custodian.rail_models` are in EGRESS_KEYS because the custodian answers emitted prompts with a bound model and runs UNATTENDED: an agent that repointed either would ship the distilled knowledge tier to its own endpoint on a timer, with nobody present to notice. Both are listed for the reason `reflect.model`/`conflict.model` both are — pinning only the default leaves the per-rail overrides as an unpinned way to repoint the same traffic. The block's other three fields (`rails`, `max_items_per_rail`, `timeout_seconds`) are in `_NOT_A_DESTINATION`: they change HOW MUCH reaches the endpoint, never WHICH endpoint — the same line `reflect.enabled` sits on. Judged field by field because a prefix is not a judgment (techne#588).

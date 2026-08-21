@@ -30,6 +30,53 @@ All notable changes to techne are documented here. Format loosely follows
   "the team knows nothing"). Collapsing the third is how a standalone install comes to
   report that the team knows nothing; it is the same failure the recall ladder's
   `loose-match-only` exists to prevent.
+- **`techne custodian run|status` — the emit→ingest rails can run headless** (#555). The
+  passes that are actually custodial — dedup, merge/supersede, the faithfulness check on
+  rewrites, contradiction classification — all sat on the resident path, which requires an
+  agent sitting there to answer emitted prompts. A custodian that only works while you are
+  watching is not a custodian. Rails now take an optional model binding and run unattended;
+  unbound (the default) every rail behaves exactly as before.
+
+  Provider-agnostic by construction: the binding is a `str -> str` callable resolved through
+  the same `_make_generate_fn` as the operator-model path, so any LiteLLM identifier works —
+  local Ollama, Vertex via ADC, a proxy. The credential question lives in config, not in the
+  code path.
+
+### Fixed
+
+- **The automatic session-end reflect rail had never produced a single candidate** (#555).
+  Not since a regression — *ever*, since 2026-06-20. Measured on the author's store: all 444
+  candidates carry `model_used='agent-assisted'` (the resident route); zero came from the
+  operator-model path, which was raising `AuthenticationError` on every session because
+  `config.model` is an Anthropic id and the operator holds no Console API key.
+  `reflect_on_session` caught it, incremented a counter nobody reads, and let teardown
+  proceed — for two months.
+
+  It stayed invisible because `check_maintenance_rails` reported the rail **live** the whole
+  time: that check keys on `knowledge_candidates.origin`, the rail's *output*, and `origin`
+  does not record which of the two producers wrote the row. The liveness subsystem built to
+  stop "an absent result is indistinguishable from a working one" contained that exact hole.
+
+  Every automatic and headless run now records `rail:<name>:last_run` — ok / partial / error /
+  noop, with the exception *type*, because `AuthenticationError` says *needs a credential it
+  was never given* where a generic failure says only *broken*. New `check_model_bound_rails`
+  reads those markers. No marker reads dormant, not broken: an install that only uses the
+  resident route has not opted in and must not be nagged.
+
+- **Candidate rows now name the model that judged them** (#555). Three insert sites
+  hardcoded `model_used='agent-assisted'` in their SQL, so the first working headless run
+  wrote six rows claiming a resident agent had judged them — the feature would have
+  manufactured, for five rails at once, the exact blindness it exists to fix. The label is
+  now a required keyword on the private inserters (a missed forward is a `TypeError`, not a
+  silent lie) and defaults to the resident value on the public entry points, so the resident
+  path is unchanged. Making it required immediately surfaced a third producer nobody had
+  threaded: `federation_conflict_ingest` has six insert sites of its own.
+
+- **`_make_generate_fn` accepts an optional per-call timeout**, unset for every existing
+  caller. A call that never returns is not an exception, so a per-item `try/except` cannot
+  catch it — an unattended runner would hang forever and never report. The defect holds at any
+  latency; a CPU-bound dev box merely made it visible (a real conflict prompt had not returned
+  after 240s there, against 11.6s for the same prompt on the inference host).
 
 
 ## [0.15.0] — 2026-08-19

@@ -565,6 +565,14 @@ def _make_generate_fn(config: Config):
             kwargs["api_base"] = config.llm_api_base
         if config.llm_api_key:
             kwargs["api_key"] = config.llm_api_key
+        # OPTIONAL PER-CALL TIMEOUT (techne#555). Defaults to unset, so every existing
+        # caller behaves exactly as before. It exists because an UNATTENDED caller has
+        # no operator to notice a call that never returns: measured on this box, a
+        # 1,748-char conflict prompt against a local llama3.2 had not returned after
+        # 240s, while a 20-char prompt answered in 1.3s. Interactive callers can wait;
+        # a scheduled custodian would simply never finish, and would never say so.
+        if getattr(config, "llm_timeout", 0):
+            kwargs["timeout"] = config.llm_timeout
         resp = litellm.completion(**kwargs)
         return resp.choices[0].message.content.strip()
 

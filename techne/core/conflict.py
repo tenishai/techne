@@ -83,6 +83,12 @@ Output the JSON array and nothing else.
 # ---------------------------------------------------------------------------
 
 
+#: Producer label for a candidate written by a RESIDENT agent. Imported from sleepdream
+#: so ONE definition governs every rail — a second copy of this literal drifts the moment
+#: either side moves (the copy-not-mechanism shape techne#518 found five times).
+from techne.core.sleepdream import RESIDENT_PRODUCER  # noqa: E402
+
+
 def _parse_tags(tags: str | None) -> frozenset[str]:
     """Split a comma-separated tag string into a frozenset of stripped tokens."""
     if not tags:
@@ -328,6 +334,12 @@ def _insert_candidate(
     decided_by: str | None,
     decision_reason: str | None,
     raw: str | None,
+    # REQUIRED, NO DEFAULT, and that is the mechanism rather than the discipline
+    # (techne#555). A defaulted producer label is a silent lie: the row claims a
+    # resident agent judged it. Mutation found FOUR call sites that could drop the
+    # forward with the whole suite green, so the guard cannot be "remember to pass it"
+    # — omitting it must be a TypeError at the call, which is what no default buys.
+    model_used: str,
     origin: str,
 ) -> None:
     """Insert one ingest result into knowledge_candidates for operator review.
@@ -351,13 +363,14 @@ def _insert_candidate(
              (scope, type, content, tags, confidence, source_session_id,
               source_thread_id, model_used, prompt_hash, raw_response,
               action, target_ids, origin, status, decided_by, decision_reason)
-           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, 'agent-assisted', ?, ?,
+           VALUES ('knowledge', ?, ?, '', ?, ?, NULL, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?)""",
         (
             ktype,
             redact_credentials(content),
             confidence,
             SYSTEM_SLEEP_SESSION,
+            model_used,
             check_hash,
             redact_credentials(raw) if raw else None,
             action,
@@ -494,6 +507,8 @@ def conflict_check_ingest(
     comparison_ids: list[int],
     check_hash: str,
     response: str,
+    *,
+    model_used: str = RESIDENT_PRODUCER,
 ) -> dict:
     """Process the agent's conflict verdict and stage candidates.
 
@@ -554,6 +569,7 @@ def conflict_check_ingest(
                 decision_reason="no-verdicts",
                 raw=raw_for_store,
                 origin='conflict',
+                model_used=model_used,
             )
             conn.commit()
             return counts
@@ -586,6 +602,7 @@ def conflict_check_ingest(
                     check_hash=ch,
                     reason=reason,
                     raw=raw_for_store,
+                    model_used=model_used,
                 )
                 counts["supersede"] += 1
 
@@ -598,6 +615,7 @@ def conflict_check_ingest(
                     check_hash=ch,
                     reason=reason,
                     raw=raw_for_store,
+                    model_used=model_used,
                 )
                 counts["update"] += 1
 
@@ -614,6 +632,7 @@ def conflict_check_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"noop: {reason or ''}",
                     raw=raw_for_store,
+                    model_used=model_used,
                     origin='conflict',
                 )
                 counts["noop"] += 1
@@ -631,6 +650,7 @@ def conflict_check_ingest(
                     decided_by="agent-triage",
                     decision_reason=f"distinct: {reason or ''}",
                     raw=raw_for_store,
+                    model_used=model_used,
                     origin='conflict',
                 )
                 counts["distinct"] += 1
@@ -670,6 +690,7 @@ def _handle_supersede(
     check_hash: str,
     reason: str | None,
     raw: str | None,
+    model_used: str,
 ) -> None:
     """Stage a RETIRE-LINK candidate: the older entry is retired into the newer one.
 
@@ -730,6 +751,7 @@ def _handle_supersede(
         decision_reason=reason,
         raw=raw,
         origin='conflict',
+        model_used=model_used,
     )
 
 
@@ -742,6 +764,7 @@ def _handle_update(
     check_hash: str,
     reason: str | None,
     raw: str | None,
+    model_used: str,
 ) -> None:
     """Stage a RETIRE-LINK candidate for an UPDATE verdict: the focus (the augmenting
     NEW entry) is retired into the comparison (the canonical EXISTING entry it refines).
@@ -786,6 +809,7 @@ def _handle_update(
         f"{reason or ''}",
         raw=raw,
         origin='conflict',
+        model_used=model_used,
     )
 
 
