@@ -835,12 +835,34 @@ class Config:
                     f"Unknown custodian rail(s): {', '.join(unknown)}. "
                     f"Known rails: {', '.join(sorted(RAILS))}."
                 )
+            # BOUNDS VALIDATED, NOT MERELY COERCED (Prudence, #709). Both of these
+            # silently disable a guard their own docstrings call load-bearing:
+            # `max_items_per_rail: 0` makes every rail a permanent no-op — which now
+            # reads LIVE — and a negative value becomes `batch[:-1]`, quietly dropping
+            # the last item of every batch. `timeout_seconds: 0` is FALSY, so
+            # `_make_generate_fn`'s `if getattr(config, "llm_timeout", 0)` skips the
+            # timeout kwarg entirely and an unattended run can hang forever. A config
+            # that turns off a protection must say so, not imply it.
+            max_items = int(cu.get("max_items_per_rail", 20))
+            timeout = int(cu.get("timeout_seconds", 120))
+            if max_items < 1:
+                raise ValueError(
+                    f"custodian.max_items_per_rail must be >= 1, got {max_items}. "
+                    "0 makes every rail a permanent no-op; a negative value silently "
+                    "drops the last item of each batch."
+                )
+            if timeout < 1:
+                raise ValueError(
+                    f"custodian.timeout_seconds must be >= 1, got {timeout}. "
+                    "0 disables the per-call timeout entirely, so an unattended run "
+                    "can hang forever with nobody watching."
+                )
             cfg.custodian = CustodianConfig(
                 model=cu.get("model", ""),
                 rails=rails,
                 rail_models={str(k): str(v) for k, v in rail_models.items()},
-                max_items_per_rail=int(cu.get("max_items_per_rail", 20)),
-                timeout_seconds=int(cu.get("timeout_seconds", 120)),
+                max_items_per_rail=max_items,
+                timeout_seconds=timeout,
             )
 
         if "reflect" in raw and isinstance(raw["reflect"], dict):

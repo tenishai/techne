@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 log = logging.getLogger(__name__)
@@ -96,14 +97,45 @@ class Rail:
     #: Human-readable note for `techne custodian status`, so an operator can tell what
     #: they are switching on without reading the source.
     what: str
+    #: Optional: what this rail RESOLVED for the run, recorded in the marker.
+    #: Exists because "found nothing" and "looked in the wrong place" are the same
+    #: empty batch (Prudence, #709). Only `memory_claims` needs it today — it resolves
+    #: its project from ambient cwd, which headless has no reason to get right.
+    context: Callable | None = None
+
+
+def _claims_slug(config) -> str:
+    """Which project this rail will resolve, from ambient cwd.
+
+    SURFACED BECAUSE HEADLESS HAS NO REASON TO GET IT RIGHT (Prudence, #709).
+    `claims_emit` falls through to `Path.cwd()` when given no `cwd`, and a scheduled
+    run's cwd is whatever the scheduler hands it. When the slug does not match a
+    project with curated memory, the batch is empty and the rail records
+    `noop` — indistinguishable from the healthy "nothing to reconcile" case.
+    Measured: from a non-project cwd the rail made ZERO model calls and the liveness
+    check still reported LIVE, which is techne#555's own shape reproduced inside the
+    check written to close it.
+
+    This does not FIX the resolution — binding the project properly is a design
+    question about where a headless run learns its project, and it is not this PR's
+    to answer. It makes the ambiguity VISIBLE, which is the part that must not wait.
+    """
+    try:
+        from techne.platforms.claude_code.paths import memory_project_slug
+
+        return memory_project_slug(Path.cwd())
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def _claims_emit(config):
     """Normalise claims_emit's single-dict return into the list shape.
 
-    `memory_present=False` means there is no curated memory for this project — nothing
-    to reconcile, which is a legitimate no-op and must not read as a failure. Returning
-    an empty batch says exactly that.
+    `memory_present=False` means there is no curated memory for THE RESOLVED PROJECT —
+    which is a legitimate no-op when that project is the one you meant, and a silent
+    misfire when it is not. The rail cannot tell those apart, so it reports which
+    project it resolved (see `_claims_slug`) rather than pretending the distinction
+    does not exist.
     """
     from techne.core.memory_claims import claims_emit
 
@@ -219,6 +251,7 @@ RAILS: dict[str, Rail] = {
         what="evidence-check curated memory against the observation ledger",
         emit=_claims_emit,
         ingest=_claims_ingest,
+        context=_claims_slug,
     ),
 }
 
@@ -298,6 +331,22 @@ def record_rail_marker(config, rail: str, *, outcome: str, detail: str = "") -> 
         log.warning("custodian: could not record marker for rail %s", rail, exc_info=True)
 
 
+def _context_note(rail, config) -> str:
+    """The rail's resolved-inputs note, as a marker suffix.
+
+    NEVER RAISES. A diagnostic that can fail the run it describes is worse than no
+    diagnostic — same rule as `record_rail_marker`.
+    """
+    if rail.context is None:
+        return ""
+    try:
+        value = rail.context(config)
+    except Exception:  # noqa: BLE001
+        log.warning("custodian: context probe failed for rail %s", rail.name, exc_info=True)
+        return ""
+    return f" [resolved: {value}]" if value else ""
+
+
 def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = None) -> dict:
     """Emit one rail's prompts, answer them with the bound model, ingest the answers.
 
@@ -340,6 +389,7 @@ def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = No
     # wrote rows labelled 'agent-assisted' would recreate that blindness for all five
     # rails at once — this feature would have manufactured the very hole it exists to fix.
     producer = effective_model(config, rail=rail_name) or "custodian"
+    note = _context_note(rail, config)
 
     try:
         batch = rail.emit(config)
@@ -356,8 +406,16 @@ def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = No
     if not batch:
         # Nothing to do is a real outcome and is recorded as one — `noop:` names it,
         # matching the hook vocabulary, so "ran and found nothing" stays distinct from
-        # "did not run".
-        record_rail_marker(config, rail_name, outcome="noop:nothing-to-do")
+        # "did not run". AND, when the rail can say what it resolved, WHAT it found
+        # nothing FOR: an empty batch because the project resolved wrong looks
+        # identical to an empty batch because there is genuinely nothing to do
+        # (Prudence, #709).
+        record_rail_marker(
+            config,
+            rail_name,
+            outcome="noop:nothing-to-do",
+            detail=_context_note(rail, config).strip(),
+        )
         return result
 
     totals: dict[str, int] = {}
@@ -385,13 +443,17 @@ def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = No
     # they were indistinguishable: answered everything / answered some / answered none.
     if result["answered"] == 0:
         outcome = "error"
-        detail = f"emitted {result['emitted']}, answered 0 — {first_error or 'all items failed'}"
+        reason = first_error or "all items failed"
+        detail = f"emitted {result['emitted']}, answered 0 — {reason}{note}"
     elif result["failed"]:
         outcome = "partial"
-        detail = f"answered {result['answered']}/{result['emitted']} — first error: {first_error}"
+        detail = (
+            f"answered {result['answered']}/{result['emitted']} — "
+            f"first error: {first_error}{note}"
+        )
     else:
         outcome = "ok"
-        detail = f"answered {result['answered']}/{result['emitted']}"
+        detail = f"answered {result['answered']}/{result['emitted']}{note}"
     record_rail_marker(config, rail_name, outcome=outcome, detail=detail)
     return result
 
@@ -408,6 +470,15 @@ def run_custodian(
     installing the schedule is a separate, deliberate act by the operator, because
     switching it on means spending money (or GPU) on a timer with nobody watching.
     """
+    # THE CAP IS HONOURED HERE, not only in the CLI (Prudence, #709). This function's
+    # own docstring calls itself "the headless entry point" and "the thing a scheduler
+    # calls" — and it was the one path that ignored `max_items_per_rail`, so an
+    # operator who lowered it to bound unattended spend did not get what they set,
+    # on exactly the entry point the documentation points them at. Measured before the
+    # fix: max_items_per_rail=5 answered 50 of 50. Bounded in practice only because
+    # each rail's own emit caps itself at 10-20, which is luck, not a guarantee.
+    if limit is None:
+        limit = config.custodian.max_items_per_rail
     selected = rails if rails is not None else (config.custodian.rails or sorted(RAILS))
     unknown = [r for r in selected if r not in RAILS]
     if unknown:

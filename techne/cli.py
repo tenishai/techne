@@ -1247,7 +1247,20 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
 
     config = ctx.obj["config"]
     selected = list(rail_names) or None
-    cap = limit if limit is not None else config.custodian.max_items_per_rail
+    # `limit` passes straight through: run_custodian applies custodian.max_items_per_rail
+    # when it is None, so the cap has ONE owner rather than a copy here (Prudence, #709).
+    cap = limit
+
+    # A TYPO'D --rail IS AN OPERATOR ERROR, NOT A CRASH (Prudence, #709). Both paths
+    # raised a bare KeyError traceback — RAILS[name] on the dry-run path, run_custodian's
+    # own raise otherwise. The message was good; the presentation was a stack trace, in
+    # a command the operator is expected to wire into cron.
+    unknown = [r for r in (selected or []) if r not in RAILS]
+    if unknown:
+        raise click.BadParameter(
+            f"unknown rail(s): {', '.join(unknown)}. Known: {', '.join(sorted(RAILS))}.",
+            param_hint="--rail",
+        )
 
     if dry_run:
         # Emit only — shows exactly what WOULD be sent, and to which model, without
@@ -1272,7 +1285,10 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
     if not report["bound"]:
         # Exit 0: unbound is the DEFAULT posture, not a failure. The rails are answered
         # by a resident agent and that has always been the working path.
-        click.echo("No model bound — every rail stays resident. Set custodian.model to run headless.")
+        click.echo(
+            "No model bound — every rail stays resident. "
+            "Set custodian.model to run headless."
+        )
         return
 
     failures = 0

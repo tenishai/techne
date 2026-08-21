@@ -640,7 +640,7 @@ def test_the_model_bindings_are_governed_as_egress_destinations():
     CLASSIFIED somehow; this one pins WHICH WAY, so the judgement cannot be quietly
     downgraded to 'not a destination' later.
     """
-    from techne.security.config_trust import EGRESS_KEYS, _NOT_A_DESTINATION
+    from techne.security.config_trust import _NOT_A_DESTINATION, EGRESS_KEYS
 
     assert "custodian.model" in EGRESS_KEYS
     assert "custodian.rail_models" in EGRESS_KEYS
@@ -706,9 +706,18 @@ def test_resident_ingest_still_labels_rows_agent_assisted(config):
     import inspect
 
     from techne.core.conflict import conflict_check_ingest
+    from techne.core.federation import federation_conflict_ingest
     from techne.core.sleepdream import consolidate_ingest, dream_ingest
 
-    for fn in (consolidate_ingest, dream_ingest, conflict_check_ingest):
+    # federation_conflict_ingest WAS THE ONE OMISSION, and it survived a full 3,240-test
+    # sweep when its default was mutated (Prudence, #709). Its behaviour in-tree is
+    # correct — it imports conflict's `_insert_candidate`, so the required-kwarg
+    # mechanism protects its five forwards, and the headless direction is pinned
+    # elsewhere in this file. What was unguarded is the RESIDENT direction: nothing
+    # would have noticed if this public default drifted. In a PR whose thesis is that
+    # a mislabelled producer is invisible, an unpinned public default is the gap.
+    for fn in (consolidate_ingest, dream_ingest, conflict_check_ingest,
+               federation_conflict_ingest):
         default = inspect.signature(fn).parameters["model_used"].default
         assert default == "agent-assisted", f"{fn.__name__} changed the resident default"
 
@@ -898,3 +907,130 @@ def test_the_bound_model_keeps_the_configured_api_base(config, monkeypatch):
 
     assert captured["api_base"] == "http://inference-host:11434"
     assert captured["model"] == "ollama/ornith:9b"
+
+
+# ---- what Prudence found in #709 ---------------------------------------------
+
+
+def test_run_custodian_honours_the_configured_cap(config, monkeypatch):
+    """`run_custodian` calls ITSELF the headless entry point and "the thing a scheduler
+    calls" — and it was the one path that ignored `max_items_per_rail`. An operator who
+    lowered it to bound unattended spend did not get what they set, on exactly the entry
+    point the docs point them at. Measured before the fix: cap 5, answered 50 of 50.
+    """
+    monkeypatch.setitem(
+        RAILS, "probe",
+        Rail(name="probe", what="probe",
+             emit=lambda c: [{"prompt": f"p{i}"} for i in range(50)],
+             ingest=lambda c, i, r, m: {"written": 1}),
+    )
+    config.custodian.max_items_per_rail = 5
+
+    report = run_custodian(config, rails=["probe"], generate_fn=lambda p: "ok")
+
+    assert report["rails"][0]["answered"] == 5, (
+        f"max_items_per_rail ignored: answered {report['rails'][0]['answered']} of 50"
+    )
+
+
+def test_an_explicit_limit_still_beats_the_configured_cap(config, monkeypatch):
+    monkeypatch.setitem(
+        RAILS, "probe",
+        Rail(name="probe", what="probe",
+             emit=lambda c: [{"prompt": f"p{i}"} for i in range(50)],
+             ingest=lambda c, i, r, m: {"written": 1}),
+    )
+    config.custodian.max_items_per_rail = 5
+
+    report = run_custodian(config, rails=["probe"], generate_fn=lambda p: "ok", limit=2)
+
+    assert report["rails"][0]["answered"] == 2
+
+
+def test_an_unrecognised_marker_outcome_fails_closed(config):
+    """THE FAIL-OPEN THIS CHECK EXISTED TO NOT HAVE. Everything that was not literally
+    'error' or 'partial' mapped to LIVE — including a missing, empty or garbled outcome,
+    because `str(marker.get("outcome", ""))` yields "". Fail-open in the one check whose
+    entire job is catching silent nothing. (Prudence, #709.)
+    """
+    from techne.core.checks import Verdict, check_model_bound_rails
+
+    record_rail_marker(config, "dream", outcome="", detail="garbled")
+    record_rail_marker(config, "conflict", outcome="something-new-from-the-future")
+
+    results = {r.name: r for r in check_model_bound_rails(config)}
+    assert results["rail:dream:bound"].verdict is Verdict.UNKNOWN
+    assert results["rail:conflict:bound"].verdict is Verdict.UNKNOWN
+
+
+def test_a_noop_is_still_healthy(config):
+    """Nothing to chew on is not a fault for consolidate/dream/conflict — the
+    fail-closed branch above must not sweep the legitimate steady state with it."""
+    from techne.core.checks import Verdict, check_model_bound_rails
+
+    record_rail_marker(config, "consolidate", outcome="noop:nothing-to-do")
+
+    results = {r.name: r for r in check_model_bound_rails(config)}
+    assert results["rail:consolidate:bound"].verdict is Verdict.LIVE
+
+
+def test_memory_claims_records_which_project_it_resolved(config, monkeypatch, tmp_path):
+    """'Found nothing' and 'looked in the wrong place' are the SAME empty batch. A
+    headless run's cwd is whatever the scheduler hands it, and `claims_emit` falls
+    through to `Path.cwd()`. Measured before the fix: from a non-project cwd the rail
+    made ZERO model calls and the check reported LIVE — techne#555's own shape,
+    reproduced inside the check written to close it. (Prudence, #709.)
+    """
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    run_rail(config, "memory_claims", generate_fn=lambda p: calls.append(p) or "x")
+
+    assert calls == [], "fixture unexpectedly had curated memory"
+    marker = _marker(config, "memory_claims")
+    assert marker["outcome"] == "noop:nothing-to-do"
+    assert "resolved:" in marker["detail"], (
+        f"the rail found nothing and did not say what it looked for: {marker['detail']!r}"
+    )
+
+
+def test_a_context_probe_failure_cannot_break_the_run(config, monkeypatch):
+    """A diagnostic that can fail the run it describes is worse than no diagnostic."""
+    monkeypatch.setitem(
+        RAILS, "ctxrail",
+        Rail(name="ctxrail", what="probe", emit=lambda c: [],
+             ingest=lambda c, i, r, m: {},
+             context=lambda c: (_ for _ in ()).throw(RuntimeError("probe exploded"))),
+    )
+    result = run_rail(config, "ctxrail", generate_fn=lambda p: "ok")
+    assert result["error"] == ""
+    assert _marker(config, "ctxrail")["outcome"] == "noop:nothing-to-do"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("max_items_per_rail", 0), ("max_items_per_rail", -1),
+    ("timeout_seconds", 0), ("timeout_seconds", -5),
+])
+def test_bounds_that_disable_a_guard_are_rejected(field, value):
+    """Both silently switch off a protection their own docstrings call load-bearing:
+    a 0 cap makes every rail a permanent no-op, and `timeout_seconds: 0` is FALSY so
+    `_make_generate_fn` skips the timeout kwarg and an unattended run can hang."""
+    from techne.config import Config
+
+    with pytest.raises(ValueError) as e:
+        Config._from_dict({"custodian": {field: value}})
+    assert field in str(e.value)
+
+
+def test_cli_rejects_an_unknown_rail_without_a_traceback(config, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+    for argv in (["custodian", "run", "--rail", "typo"],
+                 ["custodian", "run", "--rail", "typo", "--dry-run"]):
+        result = CliRunner().invoke(main, argv)
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output, argv
+        assert "typo" in result.output

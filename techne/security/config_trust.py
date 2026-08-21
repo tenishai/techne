@@ -158,6 +158,14 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     # it can misattribute a row, which is an integrity concern for the receiving
     # store, but it cannot send memory anywhere new.
     "instance_name",
+    # NUANCE WORTH THE NEXT READER'S TIME (Prudence, #709): `custodian.rails` changes
+    # the KIND of data leaving, not merely the volume — switching on `faithfulness`
+    # ships candidate content plus source rows, and `memory_claims` ships curated
+    # memory plus the deed log. The classification still holds, because none of that
+    # changes WHERE it goes: under a locked layer the operator's pinned endpoint
+    # receives it. But "volume, not destination" undersells it, and this comment is the
+    # precedent someone will cite when tiering a sibling field.
+    #
     # techne#555 — the rest of the custodian block, judged field by field because
     # `custodian.model` and `custodian.rail_models` are in EGRESS_KEYS and a prefix is
     # not a judgment (techne#588). These three are VOLUME, not destination: which rails

@@ -1546,14 +1546,32 @@ def check_model_bound_rails(config) -> list[CheckResult]:
                 )
                 continue
 
-            if outcome == "error":
+            if outcome in ("error", "partial"):
+                # `partial` is BROKEN deliberately, and the noise hazard is real and
+                # accepted: one refusal in twenty marks the rail until the next fully
+                # clean run. Kept because "ran and reported trouble" has no other
+                # verdict in this vocabulary — DORMANT ties with LIVE, UNKNOWN means a
+                # probe that could not run, STALE means overdue. A rail answering some
+                # of its prompts is not healthy, and the detail carries the ratio so an
+                # operator can judge severity. Revisit with a policy about acceptable
+                # failure fractions, not by quietly greening it. (Prudence, #709.)
                 verdict = Verdict.BROKEN
                 remedy = "techne custodian status"
-            elif outcome == "partial":
-                verdict = Verdict.BROKEN
-                remedy = "techne custodian status"
-            else:
+            elif outcome == "ok" or outcome.startswith("noop:"):
+                # `noop:` is a healthy steady state for consolidate/dream/conflict —
+                # nothing to chew on is not a fault. The rail's resolved-inputs note
+                # rides in `detail`, which is what makes "found nothing" separable from
+                # "looked in the wrong place".
                 verdict, remedy = Verdict.LIVE, None
+            else:
+                # FAIL CLOSED ON AN OUTCOME WE DO NOT RECOGNISE (Prudence, #709). The
+                # previous shape mapped everything that was not literally "error" or
+                # "partial" to LIVE — including a missing, empty or garbled outcome,
+                # since `str(marker.get("outcome", ""))` yields "". That is fail-OPEN
+                # in the one check whose entire job is to catch silent nothing, and it
+                # is the same defect class as the rail this check exists to expose.
+                verdict = Verdict.UNKNOWN
+                remedy = "techne custodian status"
 
             results.append(
                 CheckResult(
