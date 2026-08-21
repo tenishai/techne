@@ -1153,21 +1153,36 @@ def check_instance_identity(config) -> CheckResult | None:
                 "unattributed and cannot be attributed later"
             ),
             evidence="instance_name is empty",
-            remedy="set instance_name: <agent>@<cabal> in config.yaml",
+            remedy="set instance_name: your-agent@your-cabal in config.yaml",
         )
-    if "@" not in name:
+    agent, sep, cabal = name.partition("@")
+    # BOTH SIDES MUST BE REAL. `"@" in name` blessed `archivist@`, `@dimartin` and `@`
+    # — an empty qualifier qualifies nothing, so `archivist@` collides with every other
+    # cabal's `archivist@` exactly as `archivist` does. It also blessed
+    # `archivist@<cabal>`: an operator following this check's own remedy literally lands
+    # on a value containing '@', is told LIVE, and writes a string byte-identical to
+    # what every other operator following the same instruction writes.
+    #
+    # This does NOT constrain the operator's scheme, which was the reason for keeping
+    # the test loose — it only requires that the qualifier is actually there. The
+    # placeholder test is the second guard; the two-sides test is the load-bearing one.
+    placeholder = agent.startswith("<") or cabal.startswith("<")
+    if not (sep and agent and cabal) or placeholder:
         return CheckResult(
             name="identity:instance",
             subsystem="archivist",
             kind=Kind.FAIL_OPEN,
             verdict=Verdict.STALE,
             detail=(
-                f"instance_name {name!r} is unqualified — cabal's persona roster is "
-                "shared, so a bare name collides with the same persona in every other "
-                "cabal writing to this store"
+                f"instance_name {name!r} does not identify a writer — cabal's persona "
+                "roster is shared, so a name without a real qualifier on BOTH sides of "
+                "'@' collides with the same persona in every other cabal writing here"
             ),
             evidence=f"instance_name={name!r} has no '@'",
-            remedy=f"set instance_name: {name}@<cabal> in config.yaml",
+            remedy=(
+                f"set instance_name: {agent or '<agent>'}@your-cabal in config.yaml "
+                "(both sides real; not a literal placeholder)"
+            ),
         )
     return CheckResult(
         name="identity:instance",

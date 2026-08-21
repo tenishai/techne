@@ -236,6 +236,51 @@ def _identity(standalone, name, tmp_path):
     return check_instance_identity(cfg)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "archivist",  # bare — the original case
+        "archivist@",  # empty cabal: qualifies nothing
+        "@dimartin",  # empty agent
+        "@",
+        "archivist@<cabal>",  # the remedy string, taken literally
+        "<agent>@<cabal>",  # ...and the other remedy string
+    ],
+)
+def test_a_name_that_discriminates_nothing_is_rejected(tmp_path, name):
+    """Prudence r2: `"@" in name` blessed all of these, INCLUDING the value the check's
+    own remedy told the operator to write. Every operator following
+    `set instance_name: <agent>@<cabal>` literally would write the same string — a
+    harder collision than the bare name it replaced.
+
+    Requiring both sides to be non-empty does not constrain the operator's scheme,
+    which was the reason for keeping the test loose. It only requires that the
+    qualifier is actually there."""
+    from techne.core.checks import Verdict
+
+    assert _identity(False, name, tmp_path).verdict == Verdict.STALE
+
+
+@pytest.mark.parametrize("name", ["archivist@dimartin", "poe@tenish-2", "a@b"])
+def test_any_scheme_with_two_real_parts_is_accepted(tmp_path, name):
+    """The loose-on-form intent survives: no opinion about what a cabal is called."""
+    from techne.core.checks import Verdict
+
+    assert _identity(False, name, tmp_path).verdict == Verdict.LIVE
+
+
+def test_the_remedy_it_prints_would_actually_pass_the_check(tmp_path):
+    """The r2 finding in one assertion: guidance that produces a value the check
+    rejects is worse than no guidance, and guidance that produces one it wrongly
+    blesses is worse still."""
+    from techne.core.checks import Verdict
+
+    remedy = _identity(False, "archivist", tmp_path).remedy
+    suggested = remedy.split("instance_name: ")[1].split(" ")[0]
+    assert _identity(False, suggested, tmp_path).verdict == Verdict.LIVE
+    assert "<" not in suggested, "a placeholder is not a remedy"
+
+
 def test_an_unqualified_instance_name_is_reported(tmp_path):
     """A BARE PERSONA NAME COLLIDES BY CONSTRUCTION, not by bad luck. cabal's
     `identity.toml.example` — the file every new cabal starts from — ships `archivist`,
@@ -281,3 +326,18 @@ def test_the_identity_check_is_cheap(tmp_path):
     names = [f.__name__ for f in registered_checks()]
     assert names.count("check_instance_identity") == 1
     assert "check_instance_identity" not in deferred_check_names()
+
+
+def test_an_empty_parsed_session_never_reaches_the_column(pair):
+    """Prudence r2 Nit: `session and` in the parse guard is redundant TODAY only because
+    the handler's `payload.get(...) or None` collapses "" downstream. Neither layer was
+    pinned, so a later reader simplifying either one would ship a '' into the column.
+    This pins the RESOLVED property — NULL, not empty string — so whichever layer is
+    removed, the other has to hold it."""
+    store(pair.db_path, "empty session field", type="fact", source="reflect-promote::7")
+    conn = _push(pair)
+    try:
+        value = conn.execute("SELECT origin_session FROM knowledge").fetchone()[0]
+    finally:
+        conn.close()
+    assert value is None, "an empty session must be NULL, never ''"
