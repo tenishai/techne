@@ -1177,6 +1177,10 @@ def archivist_query(ctx, sql, limit, as_json):
     if result["truncated"]:
         tail += " — TRUNCATED, more rows matched than were returned; raise --limit"
     click.echo(tail)
+
+
+@main.group()
+@click.pass_context
 def custodian(ctx):
     """Run the emit→ingest rails headlessly (techne#555)."""
     pass
