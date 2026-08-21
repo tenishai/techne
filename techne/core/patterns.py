@@ -101,6 +101,10 @@ _KNOWN_TARGETS = {
 # leaving 11 patterns double-listed under both (techne#674).
 _TARGET_ALIASES = {"limenal": "liminal"}
 
+# Outcome lifecycle (techne#426). 'filed' → work exists; 'shipped' → it landed;
+# 'rejected' → considered and declined, which is a real signal, not an absence.
+_OUTCOME_STATES = {"filed", "shipped", "rejected"}
+
 
 def _wikilink_targets(body: str) -> list[str]:
     """Extract the referenced pattern names from `[[...]]` links in *body*.
@@ -388,6 +392,147 @@ def add_apply(db_path: Path, *, pattern_id: str, target: str) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def record_outcome(
+    db_path: Path,
+    *,
+    pattern_id: str,
+    ref: str,
+    kind: str = "issue",
+    state: str = "filed",
+    note: str | None = None,
+) -> bool:
+    """Record what a pattern BECAME — the return path of provenance (techne#426).
+
+    A pattern already carries where it came from (`source_url`, `investigation_id`).
+    This carries the other direction: the issue/PR/commit it turned into and whether
+    that shipped. *ref* is free-form but conventionally `owner/repo#123` for issues.
+
+    Upserts on (pattern_id, ref) so re-recording promotes state — the normal
+    lifecycle is 'filed' at file-time, then 'shipped' when the issue closes as
+    completed. Returns True if a row was inserted or its state/note changed.
+    Raises ValueError on unknown pattern id."""
+    if state not in _OUTCOME_STATES:
+        raise ValueError(
+            f"unknown outcome state: {state} (expected one of {sorted(_OUTCOME_STATES)})"
+        )
+    conn = plain_connect(db_path)
+    try:
+        if conn.execute("SELECT 1 FROM patterns WHERE id = ?", (pattern_id,)).fetchone() is None:
+            raise ValueError(f"unknown pattern id: {pattern_id}")
+        before = conn.execute(
+            "SELECT state, note, kind FROM pattern_outcomes WHERE pattern_id = ? AND ref = ?",
+            (pattern_id, ref),
+        ).fetchone()
+        now = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+        conn.execute(
+            "INSERT INTO pattern_outcomes (pattern_id, ref, kind, state, recorded_at, note)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(pattern_id, ref) DO UPDATE SET"
+            "   state = excluded.state,"
+            "   kind = excluded.kind,"
+            "   note = COALESCE(excluded.note, pattern_outcomes.note),"
+            # Refreshed on promotion: `filed` -> `shipped` is a NEW event, and leaving
+            # the original timestamp made `[shipped] … (date)` show the date it was filed.
+            "   recorded_at = excluded.recorded_at",
+            (pattern_id, ref, kind, state, now, note),
+        )
+        conn.commit()
+        if before is None:
+            return True
+        # `kind` counts as a change too — it was written but not reported, so the CLI
+        # said "unchanged" for a row it had just modified.
+        return (
+            before[0] != state
+            or before[2] != kind
+            or (note is not None and before[1] != note)
+        )
+    finally:
+        conn.close()
+
+
+def outcomes_for_pattern(db_path: Path, pattern_id: str) -> list[dict]:
+    """Every recorded outcome for one pattern, newest first."""
+    conn = plain_connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT ref, kind, state, recorded_at, note FROM pattern_outcomes"
+            " WHERE pattern_id = ? ORDER BY recorded_at DESC",
+            (pattern_id,),
+        ).fetchall()
+        return [
+            {"ref": r[0], "kind": r[1], "state": r[2], "recorded_at": r[3], "note": r[4]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def outcome_stats(db_path: Path) -> dict:
+    """Corpus-level conversion: did this investigation programme actually pay?
+
+    `realized` counts DISTINCT patterns with at least one outcome — not outcome
+    rows — so a pattern that spawned three issues counts once. `shipped` is the
+    subset with at least one outcome in state 'shipped'. The rate is the number
+    that matters: what fraction of the corpus produced downstream work."""
+    conn = plain_connect(db_path)
+    try:
+        active = conn.execute("SELECT COUNT(*) FROM patterns WHERE status = 'active'").fetchone()[0]
+        # JOIN + the SAME status filter as the denominator. Without it a superseded
+        # pattern carrying an outcome counted in the numerator only, so the rate could
+        # exceed 1.0 (demonstrated: realized_rate 2.0). `unrealized_patterns` below
+        # already filters, so the two read as complements while counting different
+        # populations — the more misleading half of the bug.
+        realized = conn.execute(
+            "SELECT COUNT(DISTINCT o.pattern_id) FROM pattern_outcomes o"
+            " JOIN patterns p ON p.id = o.pattern_id WHERE p.status = 'active'"
+        ).fetchone()[0]
+        shipped = conn.execute(
+            "SELECT COUNT(DISTINCT o.pattern_id) FROM pattern_outcomes o"
+            " JOIN patterns p ON p.id = o.pattern_id"
+            " WHERE p.status = 'active' AND o.state = 'shipped'"
+        ).fetchone()[0]
+        by_state = dict(
+            conn.execute("SELECT state, COUNT(*) FROM pattern_outcomes GROUP BY state").fetchall()
+        )
+        return {
+            "active_patterns": active,
+            "realized_patterns": realized,
+            "shipped_patterns": shipped,
+            "realized_rate": round(realized / active, 3) if active else 0.0,
+            "shipped_rate": round(shipped / active, 3) if active else 0.0,
+            "outcome_rows_by_state": by_state,
+        }
+    finally:
+        conn.close()
+
+
+def unrealized_patterns(db_path: Path, *, topic: str | None = None, limit: int = 100) -> list[dict]:
+    """Active patterns with no recorded outcome — the candidate queue.
+
+    These are patterns we lifted and then never turned into anything. Not
+    inherently waste (a pattern can be reference material), but this is the list
+    to read when asking "what did we learn and never act on?"."""
+    conn = plain_connect(db_path)
+    try:
+        sql = (
+            "SELECT p.id, p.name, p.topic, p.source_url FROM patterns p"
+            " LEFT JOIN pattern_outcomes o ON o.pattern_id = p.id"
+            " WHERE p.status = 'active' AND o.pattern_id IS NULL"
+        )
+        args: list = []
+        if topic:
+            sql += " AND p.topic = ?"
+            args.append(topic)
+        sql += " ORDER BY p.created_at DESC LIMIT ?"
+        args.append(limit)
+        return [
+            {"id": r[0], "name": r[1], "topic": r[2], "source_url": r[3]}
+            for r in conn.execute(sql, args).fetchall()
+        ]
     finally:
         conn.close()
 
