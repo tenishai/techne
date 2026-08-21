@@ -1187,7 +1187,11 @@ def check_instance_identity(config) -> CheckResult | None:
                 "roster is shared, so a name without a real qualifier on BOTH sides of "
                 "'@' collides with the same persona in every other cabal writing here"
             ),
-            evidence=f"instance_name={name!r} has no '@'",
+            # NOT "has no '@'" — this branch fires for six names that HAVE one
+            # (`archivist@`, `@dimartin`, `@`, and the placeholder forms). That string
+            # was left over from the presence-only test and was the last place the
+            # check contradicted its own rule.
+            evidence=f"instance_name={name!r} lacks a real value on both sides of '@'",
             # NEVER SUBSTITUTE A PLACEHOLDER BACK IN. `agent or '<agent>'` printed
             # `<agent>@your-cabal` whenever the agent side was empty or itself a
             # placeholder — a remedy the guard three lines above rejects, so
