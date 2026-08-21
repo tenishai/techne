@@ -1247,8 +1247,11 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
 
     config = ctx.obj["config"]
     selected = list(rail_names) or None
-    # `limit` passes straight through: run_custodian applies custodian.max_items_per_rail
-    # when it is None, so the cap has ONE owner rather than a copy here (Prudence, #709).
+    # `limit` and the rail selection both pass straight through to `custodian`'s
+    # resolvers — `effective_limit` and `effective_rails` — so neither the cap nor the
+    # selection is re-derived here. The dry-run branch below calls the SAME two
+    # functions rather than falling back to its own defaults, which is what makes
+    # "one owner" true on both axes (Prudence, #709 rounds 2-3).
     cap = limit
 
     # A TYPO'D --rail IS AN OPERATOR ERROR, NOT A CRASH (Prudence, #709). Both paths
@@ -1262,6 +1265,16 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
             param_hint="--rail",
         )
 
+    # The bound guard lives in `effective_limit` so programmatic callers get it too;
+    # here it is re-raised as a click error so the operator sees the message rather
+    # than a traceback. Both paths below (dry-run and real) resolve through it.
+    from techne.core.custodian import effective_limit as _effective_limit
+
+    try:
+        _effective_limit(config, cap)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--limit") from e
+
     if dry_run:
         # Emit only — shows exactly what WOULD be sent, and to which model, without
         # spending anything. The honest way to answer "what will this cost me".
@@ -1274,12 +1287,25 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
         # overspent, but a number you would trust being wrong is worse than a missing
         # one. Read from the shared function rather than re-derived here, so the
         # ownership consolidated above is not quietly re-copied.
-        from techne.core.custodian import effective_limit, resolve_generate_fn
+        from techne.core.custodian import (
+            effective_limit,
+            effective_rails,
+            resolve_generate_fn,
+        )
 
         allowed = effective_limit(config, cap)
-        for name in selected or sorted(RAILS):
-            batch = RAILS[name].emit(config)[:allowed]
+        for name in effective_rails(config, selected):
             bound = resolve_generate_fn(config, rail=name)
+            try:
+                batch = RAILS[name].emit(config)[:allowed]
+            except Exception as e:  # noqa: BLE001
+                # The real run catches emit failures, records an error marker, and
+                # carries on to the next rail. Dry-run did not — one raising rail
+                # exited 1 with a traceback and the remaining rails went unreported,
+                # on a command meant for cron. It fails loudly rather than lying, which
+                # is why this is the smaller of the two. (Prudence, #709 round 3.)
+                click.echo(f"{name}: emit failed — {type(e).__name__}: {e}")
+                continue
             click.echo(
                 f"{name}: {len(batch)} prompt(s) would be sent"
                 f"{'' if bound else ' — but NO MODEL IS BOUND, so nothing would run'}"

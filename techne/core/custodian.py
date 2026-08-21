@@ -347,16 +347,46 @@ def record_rail_marker(config, rail: str, *, outcome: str, detail: str = "") -> 
         log.warning("custodian: could not record marker for rail %s", rail, exc_info=True)
 
 
-def _empty_outcome(rail) -> str:
+def _empty_outcome(rail, config) -> str:
     """The `noop:` reason for an empty batch — rail-specific when it can say, generic
-    otherwise. Never raises; a diagnostic must not fail the run it describes."""
+    otherwise. Never raises; a diagnostic must not fail the run it describes.
+
+    TAKES `config`, LIKE ITS SIBLING `context` HOOK. The two are advertised side by side
+    on the `Rail` dataclass, so a hook author will reasonably write one that reads
+    config — and passing None would raise AttributeError, be swallowed by the except
+    below, and silently degrade to the generic reason. Losing the discriminator quietly
+    is the exact failure this hook exists to prevent. (Prudence, #709 round 3.)
+    """
     if rail.empty_outcome is None:
         return "noop:nothing-to-do"
     try:
-        return rail.empty_outcome(None) or "noop:nothing-to-do"
+        return rail.empty_outcome(config) or "noop:nothing-to-do"
     except Exception:  # noqa: BLE001
         log.warning("custodian: empty-outcome probe failed for %s", rail.name, exc_info=True)
         return "noop:nothing-to-do"
+
+
+def effective_rails(config, rails: list[str] | None) -> list[str]:
+    """Which rails run — THE ONE PLACE THAT DECIDES, matching `effective_limit`.
+
+    Round 2 gave the COUNT axis one owner and left the SELECTION axis with two. The
+    CLI's dry-run branch fell back to every registered rail while the runner honours
+    `config.custodian.rails` — the documented way to choose what the headless runner
+    drives. Measured with `custodian.rails = ["conflict"]` and no `--rail`: dry-run
+    promised five rails' worth of prompts, the runner sent one.
+
+    Quantitatively the larger over-report of the two (5 rails vs 1, against the cap's
+    50 vs 5), and invisible to the round-2 guard test BY CONSTRUCTION: that test pins
+    both paths to the same explicit `--rail`, so the one axis where they still diverged
+    was the axis it held constant. (Prudence, #709 round 3.)
+    """
+    selected = rails if rails else (config.custodian.rails or sorted(RAILS))
+    unknown = [r for r in selected if r not in RAILS]
+    if unknown:
+        raise KeyError(
+            f"unknown rail(s): {', '.join(unknown)} (known: {', '.join(sorted(RAILS))})"
+        )
+    return list(selected)
 
 
 def effective_limit(config, limit: int | None) -> int:
@@ -376,8 +406,34 @@ def effective_limit(config, limit: int | None) -> int:
     Exported rather than re-derived per caller — re-copying
     `config.custodian.max_items_per_rail` into the CLI is exactly the ownership this
     consolidates.
+
+    AND IT VALIDATES, because deciding WHICH number without deciding WHETHER THE NUMBER
+    IS USABLE is only half an owner (Prudence, #709 round 3). The config path already
+    rejects `0` and negatives at load; `--limit` reached the identical `batch[:limit]`
+    slice with no guard at all, and both failures are silent:
+
+      --limit -1  → `batch[:-1]`, i.e. ALL BUT THE LAST ITEM of every batch. "-1 means
+                    no cap" is a common CLI idiom, so this is a reading an operator
+                    would plausibly expect to be safe. Measured: emitted 49 of 50 — and
+                    since round 2 made dry-run agree with the runner, dry-run now
+                    CONFIRMS the wrong number rather than contradicting it.
+      --limit 0   → a rail that never runs, records `noop:` (which maps to LIVE), and
+                    exits 0 because the CLI's failure check is `if run["emitted"] and
+                    run["answered"] == 0`. A cron line wired with `--limit 0` is a rail
+                    that never runs, reports healthy, and goes green: techne#555's own
+                    failure shape, reproduced through a flag on the command written to
+                    close it.
     """
-    return config.custodian.max_items_per_rail if limit is None else limit
+    if limit is None:
+        return config.custodian.max_items_per_rail
+    if limit < 1:
+        raise ValueError(
+            f"limit must be >= 1, got {limit}. 0 means the rail never runs — and it "
+            "would still record a healthy outcome and exit 0. A negative value slices "
+            "batch[:limit], silently dropping items from the end of every batch; it "
+            "does NOT mean 'no cap'."
+        )
+    return limit
 
 
 def _context_note(rail, config) -> str:
@@ -468,7 +524,12 @@ def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = No
         # nothing FOR: an empty batch because the project resolved wrong looks
         # identical to an empty batch because there is genuinely nothing to do
         # (Prudence, #709).
-        record_rail_marker(config, rail_name, outcome=_empty_outcome(rail), detail=note.strip())
+        record_rail_marker(
+            config,
+            rail_name,
+            outcome=_empty_outcome(rail, config),
+            detail=note.strip(),
+        )
         return result
 
     totals: dict[str, int] = {}
@@ -531,10 +592,7 @@ def run_custodian(
     # fix: max_items_per_rail=5 answered 50 of 50. Bounded in practice only because
     # each rail's own emit caps itself at 10-20, which is luck, not a guarantee.
     limit = effective_limit(config, limit)
-    selected = rails if rails is not None else (config.custodian.rails or sorted(RAILS))
-    unknown = [r for r in selected if r not in RAILS]
-    if unknown:
-        raise KeyError(f"unknown rail(s): {', '.join(unknown)} (known: {', '.join(sorted(RAILS))})")
+    selected = effective_rails(config, rails)
 
     runs = [run_rail(config, name, generate_fn, limit=limit) for name in selected]
     return {"rails": runs, "bound": any(r["bound"] for r in runs)}

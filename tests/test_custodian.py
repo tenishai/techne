@@ -16,6 +16,8 @@ from techne.core.custodian import (
     MARKER_PREFIX,
     RAILS,
     Rail,
+    effective_limit,
+    effective_rails,
     record_rail_marker,
     resolve_generate_fn,
     run_custodian,
@@ -1142,3 +1144,139 @@ def test_the_context_probe_runs_once_per_rail_run(config, monkeypatch):
     )
     run_rail(config, "countrail", generate_fn=lambda p: "ok")
     assert len(calls) == 1, f"context probe ran {len(calls)} times"
+
+
+# ---- Prudence #709 round 3 ----------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [0, -1, -5])
+def test_an_unusable_limit_is_rejected_rather_than_sliced(config, bad):
+    """`effective_limit` decides WHICH number; deciding whether the number is USABLE is
+    the other half of being its owner. The config path already rejected these at load
+    and `--limit` walked straight past the same guard into `batch[:limit]`.
+
+    Both failures are silent and one is a common idiom: `--limit -1` reads as "no cap"
+    and actually means "all but the last item of every batch" (measured: 49 of 50),
+    while `--limit 0` is a rail that never runs, records a noop that maps to LIVE, and
+    exits 0 — techne#555's shape through a flag on the command written to close it.
+    """
+    with pytest.raises(ValueError) as e:
+        effective_limit(config, bad)
+    assert ">= 1" in str(e.value)
+
+
+def test_a_valid_limit_and_the_configured_default_both_resolve(config):
+    config.custodian.max_items_per_rail = 7
+    assert effective_limit(config, None) == 7
+    assert effective_limit(config, 3) == 3
+
+
+def test_the_cli_rejects_a_bad_limit_without_a_traceback(config, monkeypatch):
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+    for argv in (["custodian", "run", "--limit", "0"],
+                 ["custodian", "run", "--limit", "-1", "--dry-run"]):
+        result = CliRunner().invoke(main, argv)
+        assert result.exit_code != 0, argv
+        assert "Traceback" not in result.output, argv
+        assert ">= 1" in result.output, f"{argv}: {result.output}"
+
+
+def test_dry_run_and_the_runner_agree_on_WHICH_RAILS_TOO(config, monkeypatch):
+    """THE AXIS THE ROUND-2 GUARD HELD CONSTANT. That test passes `--rail probe` and
+    `rails=["probe"]`, pinning both paths to the same explicit selection — so the one
+    axis where they still diverged was the one it could not see. Measured before the
+    fix: `custodian.rails = ["conflict"]`, dry-run promised five rails, the runner ran
+    one. Quantitatively the larger over-report of the two. (Prudence, #709 round 3.)
+
+    This test deliberately passes NO --rail, so the equality assertion covers selection
+    and count at once.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    for name in ("alpha", "beta"):
+        monkeypatch.setitem(
+            RAILS, name,
+            Rail(name=name, what=name,
+                 emit=lambda c, n=name: [{"prompt": f"{n}-{i}"} for i in range(4)],
+                 ingest=lambda c, i, r, m: {"written": 1}),
+        )
+    config.custodian.rails = ["alpha"]
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+
+    dry = CliRunner().invoke(main, ["custodian", "run", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    dry_rails = sorted(
+        line.split(":")[0] for line in dry.output.strip().splitlines() if ":" in line
+    )
+
+    real = run_custodian(config, generate_fn=lambda p: "ok")
+    real_rails = sorted(r["rail"] for r in real["rails"])
+
+    assert dry_rails == real_rails, (
+        f"dry-run promised rails {dry_rails}, the runner ran {real_rails}"
+    )
+
+
+def test_effective_rails_honours_the_configured_selection(config):
+    config.custodian.rails = ["conflict"]
+    assert effective_rails(config, None) == ["conflict"]
+    assert effective_rails(config, ["dream"]) == ["dream"]
+    config.custodian.rails = []
+    assert effective_rails(config, None) == sorted(RAILS)
+
+
+def test_effective_rails_rejects_an_unknown_name(config):
+    with pytest.raises(KeyError):
+        effective_rails(config, ["no-such-rail"])
+
+
+def test_the_empty_outcome_hook_receives_config(config, monkeypatch):
+    """Its sibling `context` hook gets config, and the two are advertised side by side
+    on the dataclass — so a hook author will reasonably write one that reads config.
+    With None it would raise AttributeError, be swallowed, and silently degrade to the
+    generic reason. Losing the discriminator quietly is what the hook exists to
+    prevent. (Prudence, #709 round 3.)"""
+    seen = {}
+    monkeypatch.setitem(
+        RAILS, "cfgrail",
+        Rail(name="cfgrail", what="c", emit=lambda c: [], ingest=lambda c, i, r, m: {},
+             empty_outcome=lambda c: (seen.update(got=c is not None), "noop:saw-config")[1]),
+    )
+    run_rail(config, "cfgrail", generate_fn=lambda p: "ok")
+
+    assert seen.get("got") is True, "the hook was handed None where its sibling gets config"
+    assert _marker(config, "cfgrail")["outcome"] == "noop:saw-config"
+
+
+def test_dry_run_survives_a_rail_whose_emit_raises(config, monkeypatch):
+    """The real run records an error marker and continues; dry-run exited 1 with a
+    traceback and left the remaining rails unreported, on a command meant for cron."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setitem(
+        RAILS, "boom",
+        Rail(name="boom", what="b",
+             emit=lambda c: (_ for _ in ()).throw(RuntimeError("emit exploded")),
+             ingest=lambda c, i, r, m: {}),
+    )
+    monkeypatch.setitem(
+        RAILS, "fine",
+        Rail(name="fine", what="f", emit=lambda c: [{"prompt": "p"}],
+             ingest=lambda c, i, r, m: {}),
+    )
+    config.custodian.rails = ["boom", "fine"]
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+
+    result = CliRunner().invoke(main, ["custodian", "run", "--dry-run"])
+
+    assert "Traceback" not in result.output
+    assert "boom: emit failed" in result.output
+    assert "fine: 1 prompt(s)" in result.output, "a raising rail suppressed the rest"
