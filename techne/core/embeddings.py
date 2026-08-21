@@ -25,8 +25,11 @@ Cold-cache downloads and hooks (techne#601/#602)
 --------------------------------------------------
 Building either backend for the FIRST time on a machine with no local HF cache
 triggers a real network download (fastembed: onnx model + tokenizer; model2vec:
-safetensors + tokenizer — both from the Hugging Face Hub). That's fine for an
-explicit, operator-initiated action (CLI `backfill_vectors`), but
+safetensors + tokenizer — both from the Hugging Face Hub). That is fine for an
+explicit, operator-initiated action (CLI `backfill_vectors`) — BUT SEE THE
+CAVEAT AT THE END OF THIS SECTION: a deployment can wire that CLI into a hook,
+at which point "operator-initiated" stops being true and this dichotomy is the
+thing that breaks. Meanwhile
 `_get_embedding_model()` is also reached from inference.py's `infer()`, which
 runs inside techne's `post_tool_use` hook — wrapped in a SIGALRM-based
 `bounded_hook` (hooks/_timeout.py) with a tight default 5s budget. A blocking
@@ -59,9 +62,17 @@ cold-cache download this section exists to prevent is reachable from session
 startup, and WORSE than the inference.py case it was written about: a bare shell
 command gets no `bounded_hook` SIGALRM budget at all, so there is nothing to
 degrade gracefully — startup simply blocks on the Hub fetch. The `allow_download`
-default is therefore a deployment-shape decision, not a settled invariant; if
-this becomes a real hang, the fix is to make the auto-invoked path pass
-`allow_download=False` rather than to reword this paragraph.
+default is therefore a deployment-shape decision, not a settled invariant.
+
+AND THE OBVIOUS FIX DOES NOT EXIST YET — do not go looking for it (PR #705
+review). "Make the auto-invoked path pass `allow_download=False`" is not
+actionable: both the operator's shell and the hook chain invoke the identical
+string `techne vectors backfill`, landing on the same `cli.py` command, so
+in-process there is NO signal to branch on. Flipping the default instead would
+break README.md's documented cold-cache recovery, which REQUIRES the download —
+rebuilding the never-green #496 defect from the other side (a documented remedy
+that provably cannot work). A real fix needs a new opt-in surface — a
+`--no-download` flag or an env var the hook sets — which is its own change.
 """
 
 from __future__ import annotations

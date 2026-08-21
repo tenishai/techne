@@ -581,9 +581,11 @@ class TestNoFalseGreens:
     def test_a_superseded_row_that_kept_its_embedding_is_reported(self, config):
         """The other half of techne#496: scoping must not HIDE an orphan.
 
-        Nothing auto-runs backfill in production, so a row superseded AFTER being
-        embedded keeps a live ANN vector until the next explicit run. Scoping both
-        counts to live rows would make that invisible. It is counted separately
+        Backfill runs only when something invokes it — nothing in this repo does,
+        and a deployment that wires the CLI into a hook (techne#704) still purges
+        only at backfill time, never on supersede. So a row superseded AFTER being
+        embedded keeps a live ANN vector until the next run. Scoping both counts
+        to live rows would make that invisible. It is counted separately
         and fails the check, because the same remedy genuinely fixes it — the
         purge runs at the head of backfill's knowledge pass.
         """
