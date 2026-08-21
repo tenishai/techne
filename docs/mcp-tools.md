@@ -38,6 +38,14 @@ System health and database statistics
 
 What techne can do on THIS install, and what is switched OFF — grounded in the user's own store. Call this when the user asks what techne is, what it can do, what changed after an upgrade, or why a feature they heard about does not seem to happen. Returns data, not prose: narrate it as a short conversation, lead with what is off and what it would buy THEM, and quote the evidence counts — they…
 
+## Interrogate — ask team memory a question nobody wrote an endpoint for
+
+### `techne_archivist_query`
+
+Call this to INTERROGATE team memory — ask the Archivist a question nobody wrote an endpoint for, as read-only SQL. `techne_recall` pushes results at you for a topic string; this lets you ask precisely: which decisions touch a project, what was written last week that superseded something, how many procedures are anchored to files that moved, who wrote what (`written_by`, techne#553). Call with NO `sql` first to get the readable schema.
+
+Read-only and guarded (techne#554): one `SELECT`, over the distilled knowledge tables only — `knowledge`, `knowledge_deps`, `knowledge_fts`. The raw observation tier and the personal store are out of reach, writes and `ATTACH` are denied, and a runaway query is stopped by a work budget. Three outcomes are distinguishable on purpose: `rows`, `no-rows` (the query ran and matched nothing — an ANSWER), and `store-absent` (no team store is bound here — NOT "the team knows nothing").
+
 ## Store — write the conclusion, not the transcript
 
 ### `techne_store`

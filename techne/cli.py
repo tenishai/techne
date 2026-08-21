@@ -1085,6 +1085,87 @@ def identity_show(ctx, prefix):
 
 @main.group()
 @click.pass_context
+def archivist(ctx):
+    """Interrogate the team Archivist (read-only)."""
+    pass
+
+
+@archivist.command("schema")
+@click.pass_context
+def archivist_schema(ctx):
+    """Show the tables and columns `archivist query` can read."""
+    from techne.core.archivist_query import readable_schema
+
+    report = readable_schema(ctx.obj["config"])
+    if not report["tables"]:
+        click.echo(report["outcome"]["summary"])
+        return
+    for table, cols in report["tables"].items():
+        click.echo(f"{table}")
+        click.echo(f"  {', '.join(cols)}")
+    limits = report["row_limit"]
+    click.echo(f"\nrows: {limits['default']} by default, {limits['max']} max")
+
+
+@archivist.command("query")
+@click.argument("sql")
+@click.option("--limit", type=int, default=None, help="Max rows (default 100).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw result.")
+@click.pass_context
+def archivist_query(ctx, sql, limit, as_json):
+    """Run one read-only SELECT against the Archivist (techne#554).
+
+    The operator-facing twin of the techne_archivist_query MCP tool — same guarded
+    path, same three outcomes. Exists so "what does the team store actually hold"
+    is answerable without an agent in the loop, which is how you check whether the
+    agent's answer was true.
+    """
+    import json as _json
+    import sqlite3
+
+    from techne.core.archivist_query import QueryDenied, query
+
+    try:
+        result = query(ctx.obj["config"], sql=sql, limit=limit)
+    except QueryDenied as e:
+        # Exit 2, not 1: a denial is a statement about the SURFACE — learn it and
+        # re-ask — where exit 1 below means the SQL itself was wrong. A script that
+        # pipes this wants to tell those two apart, and so does a person.
+        click.echo(f"denied: {e}")
+        raise SystemExit(2) from e
+    except sqlite3.Error as e:
+        # The caller's SQL is malformed. sqlite's own message is the best available
+        # description of it, so print that rather than a traceback — a stack dump
+        # tells the operator about OUR call stack when the mistake was in their query.
+        click.echo(f"error: {e}")
+        raise SystemExit(1) from e
+
+    if as_json:
+        click.echo(_json.dumps(result, indent=2, default=str))
+        return
+
+    # The outcome line prints FIRST and ALWAYS — including for zero rows, which is
+    # the whole point of #554's first design constraint. A silent empty table is
+    # exactly the "no results reads as nothing exists" failure.
+    click.echo(result["outcome"]["summary"])
+    if not result["rows"]:
+        return
+    click.echo("")
+    for row in result["rows"]:
+        for k, v in row.items():
+            text = "" if v is None else str(v)
+            if len(text) > 300:
+                text = text[:300] + f"… (+{len(text) - 300} chars)"
+            click.echo(f"  {k}: {text}")
+        click.echo("")
+    tail = f"{result['row_count']} row(s)"
+    if result["truncated"]:
+        tail += " — TRUNCATED, more rows matched than were returned; raise --limit"
+    click.echo(tail)
+
+
+@main.group()
+@click.pass_context
 def outbox(ctx):
     """Manage the sync outbox."""
     pass
