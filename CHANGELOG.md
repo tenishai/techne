@@ -5,6 +5,33 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`techne archivist query` and the `techne_archivist_query` MCP tool** (#554) — a
+  guarded read-only SQL surface over team memory. The Archivist could hand you things
+  but you could not interrogate it: `archivist.db` was reachable only through
+  federation fan-out inside recall, which pushes results at you for a topic string.
+  "Which decisions touch cabal?", "what was written last week that superseded
+  something?", "who wrote what?" are plain reads, and every one was impossible without
+  opening the sqlite file by hand. Pairs with #553 — a query surface without writer
+  provenance answers *what do we know* but never *who says so*.
+
+  **Distilled only**: `knowledge`, `knowledge_deps`, `knowledge_fts`. The raw
+  observation tier is not readable here, deliberately and separately from whatever the
+  distilled-only egress decision concludes. Enforced by SQLite itself, not by
+  convention — a `?mode=ro` connection, a `set_authorizer` callback checked during
+  prepare (which denies `ATTACH`, because a read-only connection can otherwise attach
+  and read the *personal* store out through the team surface), a work budget that
+  stops a runaway query, and one statement per call. No write verbs on this path ever,
+  for any caller.
+
+  Three outcomes are distinguishable on purpose: `rows`, `no-rows` (the query ran and
+  matched nothing — an answer), and `store-absent` (no team store is bound — *not*
+  "the team knows nothing"). Collapsing the third is how a standalone install comes to
+  report that the team knows nothing; it is the same failure the recall ladder's
+  `loose-match-only` exists to prevent.
+
+
 ## [0.15.0] — 2026-08-19
 
 The release about what the store is willing to claim. 0.14.0 stopped the instruments
