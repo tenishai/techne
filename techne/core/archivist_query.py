@@ -37,7 +37,7 @@ database and read it — so without an ATTACH deny, this "team store" surface is
 to read the operator's PERSONAL techne.db out through it. mode=ro does not stop that;
 only the authorizer does.
 
-=== THREE MEASURED FACTS THAT A NAIVE VERSION OF THIS FILE GETS WRONG ===
+=== FOUR MEASURED FACTS THAT A NAIVE VERSION OF THIS FILE GETS WRONG ===
 
 All three fail SILENTLY or read as a bad query rather than as a broken guard, which is
 why they are recorded here rather than left to the next reader to rediscover. Probed
@@ -62,6 +62,13 @@ against a copy of the real 25MB archivist.db, python 3.14.7 / sqlite 3.53.4.
    x+1 FROM c WHERE x<200000000)` and a three-way cross join over `knowledge` both run
    unbounded on a connection that cannot write a byte. The progress handler is the
    only thing that stops them: measured, interrupted at 0.64s and 0.31s respectively.
+
+4. THE AUTHORIZER'S DEFAULT BRANCH MUST RECORD WHAT IT DENIED, not merely deny it.
+   Without that, ATTACH — the single most important thing here — escaped as a bare
+   `sqlite3.DatabaseError: not authorized` traceback rather than a QueryDenied naming
+   the surface. The guard worked; the REPORTING of it did not, and the tests could not
+   tell the difference because they accepted either exception type. Found by running
+   the CLI once. See `_authorizer`.
 
 === WHAT IS NOT HERE, ON PURPOSE ===
 
@@ -191,6 +198,35 @@ class QueryDenied(Exception):
     """
 
 
+def _jsonable(row: dict) -> dict:
+    """Render a row so it survives JSON serialisation.
+
+    BLOBS ARE REACHABLE ON THE PERMITTED SURFACE, which is why this is not defensive
+    programming: `knowledge_fts_data.block` is a BLOB and that table is in
+    ALLOWED_TABLES, so `SELECT * FROM knowledge_fts_data` is an ALLOWED query that
+    succeeded and then had its rows thrown away — the MCP dispatcher serialises with
+    `json.dumps(..., indent=2)` and no `default=`, so `bytes` raised TypeError, its
+    blanket `except Exception` caught it, and the caller got
+    `Error: Object of type bytes is not JSON serializable`.
+
+    That is a THIRD failure category in a surface whose contract has two (QueryDenied =
+    learn the interface; sqlite3.Error = your SQL is wrong), and it reads to a caller as
+    a server bug. Exactly the shape of this module's own finding 4: the guard worked,
+    the reporting did not.
+
+    FIXED HERE, IN THE SEAM THAT OWNS THE ROWS, rather than in the dispatcher — that
+    response path is shared by 34 other tools and techne#695 spent three review rounds
+    establishing how expensive changing it is. Coercing at the source also fixes the CLI
+    and any future consumer at once. A marker rather than a decoded string on purpose:
+    an index block is not text, and mojibake would be less useful to a caller than its
+    size. (Prudence, #707 review.)
+    """
+    return {
+        k: (f"<blob, {len(v)} bytes>" if isinstance(v, (bytes, bytearray, memoryview)) else v)
+        for k, v in row.items()
+    }
+
+
 def _archivist_path(config) -> Path | None:
     """The Archivist db path, or None when this instance has no team store.
 
@@ -226,6 +262,15 @@ def _authorizer(denied: list[str], ops: list[str]):
 
     def authorize(action, arg1, _arg2, dbname, _trigger):
         if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION):
+            # SQLITE_FUNCTION is allowed unconditionally, which INVERTS this callback's
+            # default-DENY principle, so the assumption it rests on is stated rather
+            # than left implicit: THERE ARE NO APPLICATION-DEFINED FUNCTIONS ON THIS
+            # CONNECTION. Verified — nothing registers `create_function` /
+            # `create_aggregate` on the `_open_remote_readonly` path, and SQLite itself
+            # refuses `load_extension` (Python leaves extension loading disabled). But
+            # that opener belongs to federation, not to this module: if federation ever
+            # registers a helper on it, this surface inherits it silently. If you add
+            # one, this branch needs an allow-list. (Prudence, #707 review.)
             return sqlite3.SQLITE_OK
         # Recursive CTEs are allowed; their cost is bounded by OP_BUDGET, not by
         # forbidding them. `knowledge_deps` is a graph and walking a supersession
@@ -344,7 +389,18 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
             },
         }
 
-    cap = DEFAULT_LIMIT if limit is None else max(1, min(int(limit), MAX_LIMIT))
+    try:
+        cap = DEFAULT_LIMIT if limit is None else max(1, min(int(limit), MAX_LIMIT))
+    except (TypeError, ValueError) as e:
+        # The inputSchema says `integer`, but NOTHING IN THIS SERVER VALIDATES ARGUMENTS
+        # AGAINST IT — the schema is documentation to the client, not a gate. So a
+        # caller that sends "abc" gets int()'s message verbatim, which describes our
+        # internals rather than their mistake. Same class as the ValueError escaping
+        # the CLI below: a third failure mode in a surface whose contract says two.
+        raise QueryDenied(
+            f"limit must be a whole number, got {limit!r}. "
+            f"Omit it for {DEFAULT_LIMIT}, or pass 1-{MAX_LIMIT}."
+        ) from e
     denied: list[str] = []
     ops: list[str] = []
     conn = _connect(path, denied, ops)
@@ -380,7 +436,7 @@ def query(config, sql: str | None = None, limit: int | None = None) -> dict:
                     "out of reach (techne#554)."
                 ) from e
             raise
-        rows = [dict(r) for r in cur.fetchmany(cap + 1)]
+        rows = [_jsonable(dict(r)) for r in cur.fetchmany(cap + 1)]
         columns = [d[0] for d in (cur.description or [])]
     except sqlite3.OperationalError as e:
         if "interrupted" in str(e).lower():

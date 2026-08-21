@@ -1096,7 +1096,12 @@ def archivist_schema(ctx):
     """Show the tables and columns `archivist query` can read."""
     from techne.core.archivist_query import readable_schema
 
-    report = readable_schema(ctx.obj["config"])
+    try:
+        report = readable_schema(ctx.obj["config"])
+    except ValueError as e:
+        # Same techne#346 misconfiguration, same reason it must not traceback.
+        click.echo(f"error: {e}")
+        raise SystemExit(1) from e
     if not report["tables"]:
         click.echo(report["outcome"]["summary"])
         return
@@ -1137,6 +1142,16 @@ def archivist_query(ctx, sql, limit, as_json):
         # The caller's SQL is malformed. sqlite's own message is the best available
         # description of it, so print that rather than a traceback — a stack dump
         # tells the operator about OUR call stack when the mistake was in their query.
+        click.echo(f"error: {e}")
+        raise SystemExit(1) from e
+    except ValueError as e:
+        # CONFIGURATION, not query: `_resolve_archivist_path` raises when
+        # archivist_db_path resolves to the personal db (techne#346). The message is
+        # good and says exactly what is wrong; only the packaging was broken — click
+        # let it out, so the command printed NOTHING to stdout and dumped a traceback
+        # to stderr, contradicting the card's "neither error path prints a traceback".
+        # CliRunner intercepts it, which is why 31 tests could not see this and a
+        # terminal could. (Prudence, #707 review.)
         click.echo(f"error: {e}")
         raise SystemExit(1) from e
 

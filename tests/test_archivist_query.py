@@ -461,3 +461,97 @@ def test_cli_always_prints_the_outcome_even_with_zero_rows(team, monkeypatch):
     assert result.exit_code == 0
     assert result.output.strip(), "zero rows printed nothing at all"
     assert "matched nothing" in result.output
+
+
+# ---- what Prudence found in #707 ---------------------------------------------
+
+
+def test_a_blob_result_does_not_break_the_response(team):
+    """A BLOB IS REACHABLE ON THE PERMITTED SURFACE, so this is not defensive coding.
+    `knowledge_fts_data.block` is a BLOB and that table is in ALLOWED_TABLES, so this
+    is an ALLOWED query that ran successfully and then had its rows discarded: the MCP
+    dispatcher serialises with `json.dumps` and no `default=`, `bytes` raised
+    TypeError, and the caller got `Error: Object of type bytes is not JSON
+    serializable` — a third failure category in a surface whose contract has two, and
+    one that reads as a server bug. Nothing in the original 31 tests selected a BLOB.
+    """
+    result = query(team, "SELECT randomblob(8) AS b")
+
+    assert result["outcome"]["code"] == OUTCOME_ROWS
+    assert result["rows"][0]["b"] == "<blob, 8 bytes>"
+
+
+def test_the_allow_listed_blob_table_is_actually_queryable(team):
+    """The specific reachable path, not a synthetic one: a permitted table whose column
+    is a BLOB must survive the whole round trip."""
+    result = query(team, "SELECT * FROM knowledge_fts_data LIMIT 1")
+
+    assert result["outcome"]["code"] == OUTCOME_ROWS
+    assert any(str(v).startswith("<blob,") for v in result["rows"][0].values())
+
+
+def test_the_mcp_tool_serialises_a_blob_row(team):
+    """END TO END THROUGH THE REAL DISPATCHER, because that is where it broke — the
+    seam is fine in isolation and the failure only appears once json.dumps runs."""
+    import json
+
+    from techne.mcp_server import handle_request
+
+    response = handle_request(
+        {"id": 1, "method": "tools/call",
+         "params": {"name": "techne_archivist_query",
+                    "arguments": {"sql": "SELECT randomblob(4) AS b"}}},
+        team,
+    )
+    result = response["result"]
+    assert not result.get("isError"), result["content"][0]["text"]
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["rows"][0]["b"] == "<blob, 4 bytes>"
+
+
+def test_a_non_numeric_limit_is_a_denial_not_a_stack_trace(team):
+    """The inputSchema declares `integer` but nothing in this server validates against
+    it — the schema is documentation to the client, not a gate. int()'s own message
+    describes OUR internals rather than the caller's mistake."""
+    with pytest.raises(QueryDenied) as e:
+        query(team, "SELECT id FROM knowledge", limit="abc")
+    assert "whole number" in str(e.value)
+
+
+def test_a_misconfigured_archivist_path_does_not_traceback_out_of_the_cli(team, monkeypatch, tmp_path):
+    """techne#346: archivist_db_path pointing at the PERSONAL db raises ValueError.
+    The message is right; the packaging was not — click let it out, so the command
+    printed nothing to stdout and dumped a traceback to stderr. CliRunner intercepts
+    the exception, which is exactly why the suite could not see this and a terminal
+    could. Asserted on BOTH subcommands.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    team.archivist_db_path = str(team.db_path)  # the misconfiguration itself
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: team)
+    runner = CliRunner()
+
+    for argv in (["archivist", "query", "SELECT 1"], ["archivist", "schema"]):
+        result = runner.invoke(main, argv)
+        assert result.exit_code == 1, f"{argv}: {result.output}"
+        assert "error:" in result.output, f"{argv} printed nothing to stdout"
+        assert "Traceback" not in result.output
+
+
+def test_an_unmapped_authorizer_action_is_denied(team):
+    """THE DEFAULT BRANCH, tested by BEHAVIOUR rather than by source shape.
+
+    Prudence's point: the load-bearing property is that an action code this module has
+    never heard of is refused, so a future SQLite cannot be waved through — and only
+    two tests currently depend on it. This asserts it directly: hand the callback an
+    action code that does not exist and require DENY.
+    """
+    from techne.core.archivist_query import _authorizer
+
+    denied, ops = [], []
+    callback = _authorizer(denied, ops)
+
+    assert callback(9999, "whatever", None, "main", None) == sqlite3.SQLITE_DENY
+    assert ops, "an unknown action was denied but recorded nothing to tell the caller"
