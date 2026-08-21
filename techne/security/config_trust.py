@@ -142,6 +142,13 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     "db_path",
     "data_dir",
     "identity_dir",
+    # A LABEL, NOT A ROUTE (techne#553). `instance_name` is stamped onto federated
+    # rows as `written_by` so a shared store can name its contributors. It selects no
+    # path, endpoint or sink — where the memory goes is decided entirely by
+    # `standalone` and `archivist_db_path`, both classified as egress above. Changing
+    # it can misattribute a row, which is an integrity concern for the receiving
+    # store, but it cannot send memory anywhere new.
+    "instance_name",
     # Behaviour tuning. These change what memory is kept, ranked or surfaced;
     # none of them names a place it goes.
     "threads",

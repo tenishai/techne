@@ -154,6 +154,11 @@ class KnowledgePayload:
     type: str = "fact"
     tags: str = ""
     confidence: str = "medium"
+    #: Writer provenance (techne#553). Defaulted so an older enqueued payload still
+    #: validates — rows already in the outbox predate these fields.
+    written_by: str = ""
+    origin_source: str = ""
+    origin_session: str = ""
 
 
 def _archivist_knowledge_handler(payload: dict) -> DeliveryResult:
@@ -182,7 +187,10 @@ def _archivist_knowledge_handler(payload: dict) -> DeliveryResult:
     if exists:
         return DeliveryResult(ok=True)  # already present — idempotent no-op
 
-    store(
+    # `source='team'` STAYS — the read edge and 1,094 existing rows depend on it,
+    # and it answers a different question ("which lane") than the new columns
+    # ("which writer"). techne#553 is about adding the second, not replacing the first.
+    new_id = store(
         db,
         content=content,
         type=payload.get("type", "fact"),
@@ -190,6 +198,22 @@ def _archivist_knowledge_handler(payload: dict) -> DeliveryResult:
         confidence=payload.get("confidence", "medium"),
         source="team",
     )
+    provenance = {
+        "written_by": payload.get("written_by") or None,
+        "origin_source": payload.get("origin_source") or None,
+        "origin_session": payload.get("origin_session") or None,
+    }
+    if any(provenance.values()):
+        conn = plain_connect(db)
+        try:
+            conn.execute(
+                "UPDATE knowledge SET written_by = ?, origin_source = ?, origin_session = ?"
+                " WHERE id = ?",
+                (*provenance.values(), new_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     return DeliveryResult(ok=True)
 
 
@@ -323,11 +347,24 @@ def push_knowledge_to_archivist(config) -> int:
         if k["type"] in REDIRECTED_TYPES:
             skipped += 1
             continue
+        # `source` is the LOCAL provenance ('agent' | 'manual' |
+        # 'reflect-promote:<session>:<id>') and the federated write used to discard
+        # it. Carried across as `origin_source`, with the session recovered from the
+        # reflect-promote form where it is encoded.
+        local_source = k.get("source") or ""
+        origin_session = ""
+        if local_source.startswith("reflect-promote:"):
+            parts = local_source.split(":")
+            if len(parts) >= 2:
+                origin_session = parts[1]
         data = {
             "content": k["content"],
             "type": k["type"],
             "tags": k.get("tags") or "",
             "confidence": k.get("confidence") or "medium",
+            "written_by": config.instance_name or "",
+            "origin_source": local_source,
+            "origin_session": origin_session,
         }
         # Hash computed by the OUTBOX's own helper, never re-derived here — a
         # second copy of the formula stops matching the moment either side
