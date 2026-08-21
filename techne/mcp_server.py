@@ -865,6 +865,31 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "techne_archivist_query",
+        "description": (
+            "Call this to INTERROGATE team memory — ask the Archivist a question nobody "
+            "wrote an endpoint for, as read-only SQL. techne_recall pushes results at you "
+            "for a topic string; this lets you ask precisely: which decisions touch a "
+            "project, what was written last week that superseded something, how many "
+            "procedures are anchored to files that moved, who wrote what (written_by, "
+            "techne#553). Call with NO sql first to get the readable schema. Read-only and "
+            "guarded: one SELECT, over the distilled knowledge tables only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": (
+                        "One SELECT (CTEs and FTS5 MATCH on knowledge_fts are fine). "
+                        "Omit to get the readable schema instead of a result set."
+                    ),
+                },
+                "limit": {"type": "integer", "default": 100},
+            },
+        },
+    },
+    {
         "name": "techne_capabilities",
         "description": (
             "What techne can do on THIS install, and what is switched OFF — grounded in "
@@ -1684,6 +1709,30 @@ def _codex_search(args: dict, config: Config) -> dict:
     return result
 
 
+def _techne_archivist_query(args: dict, config: Config) -> dict:
+    """Guarded read-only SQL against the team Archivist (techne#554).
+
+    A denial is returned as a RESULT, not raised. The dispatcher turns an exception
+    into `Error: <str>` with isError set, which tells a caller that something went
+    wrong but not what the surface is — and "you may read these three tables" is the
+    single most useful thing to say to someone who just asked for a fourth. Genuine
+    SQL errors still raise: those ARE the caller's bug and the sqlite message is the
+    best description of it.
+    """
+    from techne.core.archivist_query import QueryDenied, query
+
+    try:
+        return query(config, sql=args.get("sql"), limit=args.get("limit"))
+    except QueryDenied as e:
+        return {
+            "columns": [],
+            "rows": [],
+            "row_count": 0,
+            "truncated": False,
+            "outcome": {"code": "denied", "summary": str(e)},
+        }
+
+
 def _techne_capabilities(args: dict, config: Config) -> dict:
     """What is on, what is off, and what is not installed (techne#638).
 
@@ -2141,6 +2190,7 @@ TOOL_HANDLERS = {
     "techne_recall": _techne_recall,
     "codex_search": _codex_search,
     "codex_blast_radius": _codex_blast_radius,
+    "techne_archivist_query": _techne_archivist_query,
     "techne_capabilities": _techne_capabilities,
     "pattern_search": _pattern_search,
     "pattern_related": _pattern_related,

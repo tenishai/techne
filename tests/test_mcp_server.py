@@ -85,6 +85,7 @@ class TestHandleRequest:
             "techne_resume",
             "techne_status",
             "techne_capabilities",
+            "techne_archivist_query",
             "techne_recall",
             "codex_search",
             "codex_blast_radius",
