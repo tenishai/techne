@@ -1265,10 +1265,20 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
     if dry_run:
         # Emit only — shows exactly what WOULD be sent, and to which model, without
         # spending anything. The honest way to answer "what will this cost me".
-        from techne.core.custodian import resolve_generate_fn
+        #
+        # THE CAP IS APPLIED HERE TOO, through the same `effective_limit` the runners
+        # use (Prudence, #709 round 2). This branch bypasses both run_custodian and
+        # run_rail, so it was the one surface that disagreed with the runner about what
+        # the runner would do — and it is the surface an operator reads BEFORE wiring
+        # cron. It over-reported (cap 5, dry-run said 50) so nobody would have
+        # overspent, but a number you would trust being wrong is worse than a missing
+        # one. Read from the shared function rather than re-derived here, so the
+        # ownership consolidated above is not quietly re-copied.
+        from techne.core.custodian import effective_limit, resolve_generate_fn
 
+        allowed = effective_limit(config, cap)
         for name in selected or sorted(RAILS):
-            batch = RAILS[name].emit(config)
+            batch = RAILS[name].emit(config)[:allowed]
             bound = resolve_generate_fn(config, rail=name)
             click.echo(
                 f"{name}: {len(batch)} prompt(s) would be sent"

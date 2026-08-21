@@ -102,6 +102,9 @@ class Rail:
     #: empty batch (Prudence, #709). Only `memory_claims` needs it today — it resolves
     #: its project from ambient cwd, which headless has no reason to get right.
     context: Callable | None = None
+    #: Optional: a rail-specific `noop:<reason>` for an empty batch, so the
+    #: discriminator lives in the MACHINE-READABLE field rather than in free text.
+    empty_outcome: Callable | None = None
 
 
 def _claims_slug(config) -> str:
@@ -143,6 +146,18 @@ def _claims_emit(config):
     if not report.get("memory_present") or not report.get("prompt"):
         return []
     return [{"prompt": report["prompt"], "prompt_hash": report.get("prompt_hash", "")}]
+
+
+def _claims_empty_outcome(config) -> str:
+    """Why THIS rail's batch was empty, as a machine-readable outcome.
+
+    `outcome` is the field the liveness check keys on; `detail` is free text. Putting
+    the discriminator only in `detail` made the ambiguity visible to a READER and not
+    to a PROGRAM, so the follow-up design work would have had to parse prose to act on
+    it. `noop:no-memory-for-project` costs nothing today — every `noop:*` still maps to
+    LIVE — and gives that work something to key on. (Prudence, #709 round 2.)
+    """
+    return "noop:no-memory-for-project"
 
 
 def _claims_ingest(config, item, response, model_used):
@@ -252,6 +267,7 @@ RAILS: dict[str, Rail] = {
         emit=_claims_emit,
         ingest=_claims_ingest,
         context=_claims_slug,
+        empty_outcome=_claims_empty_outcome,
     ),
 }
 
@@ -331,6 +347,39 @@ def record_rail_marker(config, rail: str, *, outcome: str, detail: str = "") -> 
         log.warning("custodian: could not record marker for rail %s", rail, exc_info=True)
 
 
+def _empty_outcome(rail) -> str:
+    """The `noop:` reason for an empty batch — rail-specific when it can say, generic
+    otherwise. Never raises; a diagnostic must not fail the run it describes."""
+    if rail.empty_outcome is None:
+        return "noop:nothing-to-do"
+    try:
+        return rail.empty_outcome(None) or "noop:nothing-to-do"
+    except Exception:  # noqa: BLE001
+        log.warning("custodian: empty-outcome probe failed for %s", rail.name, exc_info=True)
+        return "noop:nothing-to-do"
+
+
+def effective_limit(config, limit: int | None) -> int:
+    """How many prompts a rail may send this run — THE ONE PLACE THAT DECIDES.
+
+    Three surfaces answer "how many prompts leave the box": `run_custodian`, `run_rail`,
+    and the CLI's `--dry-run` branch. They were one function short of agreeing, and the
+    one that disagreed was the ONLY surface an operator consults BEFORE wiring cron:
+    dry-run called `rail.emit()` directly, bypassing both runners, and reported the
+    uncapped batch length. Measured: cap 5, dry-run said 50, the real run answered 5 —
+    and `--limit 3` was silently inert on a flag the same command accepts.
+
+    It over-reported, so nobody would have overspent. But "shows exactly what WOULD be
+    sent" is the docstring's own claim and it was false, which is worse than a wrong
+    number: it is a number you would trust. (Prudence, #709 round 2.)
+
+    Exported rather than re-derived per caller — re-copying
+    `config.custodian.max_items_per_rail` into the CLI is exactly the ownership this
+    consolidates.
+    """
+    return config.custodian.max_items_per_rail if limit is None else limit
+
+
 def _context_note(rail, config) -> str:
     """The rail's resolved-inputs note, as a marker suffix.
 
@@ -352,6 +401,11 @@ def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = No
 
     Returns ``{rail, emitted, answered, failed, counts, bound, error}``. NEVER RAISES —
     an unattended run must not die on one bad prompt, and the counts are the report.
+
+    THE CAP IS THE CALLER'S. `limit=None` here means NO cap — `run_custodian` resolves
+    it through `effective_limit` before calling in. `run_rail` is exported and directly
+    tested, so this is stated rather than left to be inferred from the one in-tree
+    caller that happens to do it right. (Prudence, #709 round 2.)
 
     ONE FAILED PROMPT DOES NOT ABORT THE RAIL. A model that refuses or times out on a
     single cluster should not cost the other nineteen; each item is attempted, failures
@@ -389,14 +443,18 @@ def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = No
     # wrote rows labelled 'agent-assisted' would recreate that blindness for all five
     # rails at once — this feature would have manufactured the very hole it exists to fix.
     producer = effective_model(config, rail=rail_name) or "custodian"
-    note = _context_note(rail, config)
+    note = _context_note(rail, config)  # computed ONCE; every marker below reuses it
 
     try:
         batch = rail.emit(config)
     except Exception as e:  # noqa: BLE001
         log.exception("custodian: emit failed for rail %s", rail_name)
         result["error"] = f"emit failed: {type(e).__name__}: {e}"
-        record_rail_marker(config, rail_name, outcome="error", detail=result["error"])
+        # WITH the context note: if emit RAISED, "which project was it looking at" is
+        # arguably at its most useful, and this was the one outcome not getting it.
+        record_rail_marker(
+            config, rail_name, outcome="error", detail=f"{result['error']}{note}"
+        )
         return result
 
     if limit is not None:
@@ -410,12 +468,7 @@ def run_rail(config, rail_name: str, generate_fn=None, *, limit: int | None = No
         # nothing FOR: an empty batch because the project resolved wrong looks
         # identical to an empty batch because there is genuinely nothing to do
         # (Prudence, #709).
-        record_rail_marker(
-            config,
-            rail_name,
-            outcome="noop:nothing-to-do",
-            detail=_context_note(rail, config).strip(),
-        )
+        record_rail_marker(config, rail_name, outcome=_empty_outcome(rail), detail=note.strip())
         return result
 
     totals: dict[str, int] = {}
@@ -477,8 +530,7 @@ def run_custodian(
     # on exactly the entry point the documentation points them at. Measured before the
     # fix: max_items_per_rail=5 answered 50 of 50. Bounded in practice only because
     # each rail's own emit caps itself at 10-20, which is luck, not a guarantee.
-    if limit is None:
-        limit = config.custodian.max_items_per_rail
+    limit = effective_limit(config, limit)
     selected = rails if rails is not None else (config.custodian.rails or sorted(RAILS))
     unknown = [r for r in selected if r not in RAILS]
     if unknown:

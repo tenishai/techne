@@ -988,7 +988,8 @@ def test_memory_claims_records_which_project_it_resolved(config, monkeypatch, tm
 
     assert calls == [], "fixture unexpectedly had curated memory"
     marker = _marker(config, "memory_claims")
-    assert marker["outcome"] == "noop:nothing-to-do"
+    # The reason is rail-specific now — see test_memory_claims_names_its_empty_reason.
+    assert marker["outcome"] == "noop:no-memory-for-project"
     assert "resolved:" in marker["detail"], (
         f"the rail found nothing and did not say what it looked for: {marker['detail']!r}"
     )
@@ -1034,3 +1035,110 @@ def test_cli_rejects_an_unknown_rail_without_a_traceback(config, monkeypatch):
         assert result.exit_code != 0
         assert "Traceback" not in result.output, argv
         assert "typo" in result.output
+
+
+# ---- Prudence #709 round 2 ----------------------------------------------------
+
+
+def test_dry_run_reports_what_the_real_run_would_actually_send(config, monkeypatch):
+    """THE ASSERTION THAT STOPS THE THREE PATHS DRIFTING APART. run_custodian, run_rail
+    and the CLI's --dry-run branch each decide how many prompts leave the box, and
+    dry-run was the one that disagreed — it called rail.emit() directly, bypassing both
+    runners, and printed the uncapped length. It is also the ONLY surface an operator
+    consults before wiring cron. Measured before the fix: cap 5, dry-run said 50, the
+    real run answered 5. (Prudence, #709 round 2.)
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setitem(
+        RAILS, "probe",
+        Rail(name="probe", what="probe",
+             emit=lambda c: [{"prompt": f"p{i}"} for i in range(50)],
+             ingest=lambda c, i, r, m: {"written": 1}),
+    )
+    config.custodian.max_items_per_rail = 5
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+
+    dry = CliRunner().invoke(main, ["custodian", "run", "--rail", "probe", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    reported = int(dry.output.split("probe: ")[1].split(" ")[0])
+
+    real = run_custodian(config, rails=["probe"], generate_fn=lambda p: "ok")
+
+    assert reported == real["rails"][0]["emitted"], (
+        f"dry-run promised {reported} prompts, the real run emitted "
+        f"{real['rails'][0]['emitted']}"
+    )
+
+
+def test_dry_run_honours_an_explicit_limit(config, monkeypatch):
+    """--limit was silently inert on a flag the same command accepts."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setitem(
+        RAILS, "probe",
+        Rail(name="probe", what="probe",
+             emit=lambda c: [{"prompt": f"p{i}"} for i in range(50)],
+             ingest=lambda c, i, r, m: {"written": 1}),
+    )
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: config)
+
+    result = CliRunner().invoke(
+        main, ["custodian", "run", "--rail", "probe", "--dry-run", "--limit", "3"]
+    )
+    assert "probe: 3 prompt(s)" in result.output, result.output
+
+
+def test_memory_claims_names_its_empty_reason_in_the_outcome(config, monkeypatch, tmp_path):
+    """The discriminator belongs in `outcome` — the field the CHECK keys on — not only
+    in free-text `detail`, or the follow-up design work has to parse prose to act on
+    it. Every noop:* still maps to LIVE, so this costs nothing today."""
+    monkeypatch.chdir(tmp_path)
+
+    run_rail(config, "memory_claims", generate_fn=lambda p: "x")
+
+    marker = _marker(config, "memory_claims")
+    assert marker["outcome"] == "noop:no-memory-for-project"
+    assert "resolved:" in marker["detail"]
+
+
+def test_a_generic_rail_still_reports_the_plain_noop(config, monkeypatch):
+    monkeypatch.setitem(
+        RAILS, "emptyrail2",
+        Rail(name="emptyrail2", what="e", emit=lambda c: [], ingest=lambda c, i, r, m: {}),
+    )
+    run_rail(config, "emptyrail2", generate_fn=lambda p: "ok")
+    assert _marker(config, "emptyrail2")["outcome"] == "noop:nothing-to-do"
+
+
+def test_an_emit_failure_marker_keeps_the_context_note(config, monkeypatch):
+    """If emit RAISED, 'which project was it looking at' is at its most useful — and it
+    was the one outcome that did not carry it."""
+    monkeypatch.setitem(
+        RAILS, "boomrail",
+        Rail(name="boomrail", what="b",
+             emit=lambda c: (_ for _ in ()).throw(RuntimeError("emit exploded")),
+             ingest=lambda c, i, r, m: {},
+             context=lambda c: "some-project"),
+    )
+    run_rail(config, "boomrail", generate_fn=lambda p: "ok")
+    marker = _marker(config, "boomrail")
+    assert marker["outcome"] == "error"
+    assert "some-project" in marker["detail"]
+
+
+def test_the_context_probe_runs_once_per_rail_run(config, monkeypatch):
+    """Two Path.cwd() + slug resolutions for one marker is waste on a rail that runs
+    on a timer."""
+    calls = []
+    monkeypatch.setitem(
+        RAILS, "countrail",
+        Rail(name="countrail", what="c", emit=lambda c: [], ingest=lambda c, i, r, m: {},
+             context=lambda c: (calls.append(1), "proj")[1]),
+    )
+    run_rail(config, "countrail", generate_fn=lambda p: "ok")
+    assert len(calls) == 1, f"context probe ran {len(calls)} times"
