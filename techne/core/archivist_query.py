@@ -39,7 +39,7 @@ only the authorizer does.
 
 === FOUR MEASURED FACTS THAT A NAIVE VERSION OF THIS FILE GETS WRONG ===
 
-All three fail SILENTLY or read as a bad query rather than as a broken guard, which is
+All of them fail SILENTLY or read as a bad query rather than as a broken guard, which is
 why they are recorded here rather than left to the next reader to rediscover. Probed
 against a copy of the real 25MB archivist.db, python 3.14.7 / sqlite 3.53.4.
 
@@ -221,10 +221,37 @@ def _jsonable(row: dict) -> dict:
     an index block is not text, and mojibake would be less useful to a caller than its
     size. (Prudence, #707 review.)
     """
-    return {
-        k: (f"<blob, {len(v)} bytes>" if isinstance(v, (bytes, bytearray, memoryview)) else v)
-        for k, v in row.items()
-    }
+    return {k: _cell(v) for k, v in row.items()}
+
+
+def _cell(v):
+    """Coerce one value to something a CONFORMANT JSON parser will accept.
+
+    TWO CASES, and the second is worse than the first even though it looks milder.
+
+    BLOBS raise on the way out — loud, catchable, and the caller at least learns
+    something went wrong (see `_jsonable`).
+
+    NON-FINITE FLOATS DO NOT. `json.dumps` emits bare `Infinity` / `NaN` quite happily,
+    so no exception is raised and `isError` is never set — but those tokens are NOT
+    valid JSON (RFC 8259) and a conformant client rejects the WHOLE response. Python's
+    own `json.loads` is lenient, which is exactly why a Python-side test does not see
+    it; parsing with `parse_constant` set to raise gives
+    `ValueError: Infinity is not valid JSON`. So the failure travels all the way to a
+    non-Python client and presents there as a corrupt response from us.
+
+    Reaching it takes an out-of-range literal (`SELECT 1e400`) — no honest question
+    does that, and `confidence_numeric` is bounded — so this is a nit, not a bug. It is
+    fixed anyway because it is the same family as the BLOB case, its reporting is
+    strictly worse, and this is now the obvious home for it. (Prudence, #707 round 2.)
+    """
+    import math
+
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return f"<blob, {len(v)} bytes>"
+    if isinstance(v, float) and not math.isfinite(v):
+        return str(v)  # "inf" / "-inf" / "nan" — a string is valid JSON; the token was not
+    return v
 
 
 def _archivist_path(config) -> Path | None:
@@ -271,6 +298,13 @@ def _authorizer(denied: list[str], ops: list[str]):
             # that opener belongs to federation, not to this module: if federation ever
             # registers a helper on it, this surface inherits it silently. If you add
             # one, this branch needs an allow-list. (Prudence, #707 review.)
+            #
+            # SECOND INHERITED ASSUMPTION, same opener (Prudence, #707 round 2):
+            # `_open_remote_readonly` sets neither `detect_types` nor `text_factory`,
+            # so sqlite3 can only ever hand back NoneType/int/float/str/bytes — which
+            # is why `_cell` has exactly two cases to handle. If federation ever adds
+            # `detect_types=PARSE_DECLTYPES`, columns declared TIMESTAMP arrive as
+            # `datetime` objects and pass straight through uncoerced.
             return sqlite3.SQLITE_OK
         # Recursive CTEs are allowed; their cost is bounded by OP_BUDGET, not by
         # forbidding them. `knowledge_deps` is a graph and walking a supersession

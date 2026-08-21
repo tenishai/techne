@@ -518,7 +518,9 @@ def test_a_non_numeric_limit_is_a_denial_not_a_stack_trace(team):
     assert "whole number" in str(e.value)
 
 
-def test_a_misconfigured_archivist_path_does_not_traceback_out_of_the_cli(team, monkeypatch, tmp_path):
+def test_a_misconfigured_archivist_path_does_not_traceback_out_of_the_cli(
+    team, monkeypatch, tmp_path
+):
     """techne#346: archivist_db_path pointing at the PERSONAL db raises ValueError.
     The message is right; the packaging was not — click let it out, so the command
     printed nothing to stdout and dumped a traceback to stderr. CliRunner intercepts
@@ -555,3 +557,29 @@ def test_an_unmapped_authorizer_action_is_denied(team):
 
     assert callback(9999, "whatever", None, "main", None) == sqlite3.SQLITE_DENY
     assert ops, "an unknown action was denied but recorded nothing to tell the caller"
+
+
+def test_a_non_finite_float_does_not_leave_as_invalid_json(team):
+    """`json.dumps` emits bare `Infinity` without raising, so NOTHING announces this —
+    unlike the BLOB case, which at least errored. The token is not valid JSON (RFC
+    8259) and a conformant client rejects the whole response; Python's own `json.loads`
+    is lenient, which is precisely why a naive Python-side assertion would miss it.
+    Parsed here with `parse_constant` set to raise, so the test sees what a strict
+    client sees. (Prudence, #707 round 2.)
+    """
+    import json
+
+    from techne.mcp_server import handle_request
+
+    response = handle_request(
+        {"id": 1, "method": "tools/call",
+         "params": {"name": "techne_archivist_query", "arguments": {"sql": "SELECT 1e400 AS a"}}},
+        team,
+    )
+    text = response["result"]["content"][0]["text"]
+
+    def reject(token):
+        raise ValueError(f"{token} is not valid JSON (RFC 8259)")
+
+    payload = json.loads(text, parse_constant=reject)
+    assert payload["rows"][0]["a"] == "inf"
