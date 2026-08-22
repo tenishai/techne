@@ -1725,6 +1725,15 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # being to configure a sync adapter they do not want or to set `standalone: true`.
     # The comment above exists to prevent exactly "a verdict the operator cannot act on
     # and cannot clear".
+    # ONE import, above BOTH branches that state the prefix rule. The r3 nit was that
+    # `missing.startswith("sink:")` re-spelled a constant imported 21 lines below it;
+    # removing the duplicate in r4 deleted the hoisted copy rather than the lower one
+    # and restored the literal. Hoisting the surviving import is the resolution that
+    # satisfies both rounds — the literal is the copy that would go stale silently if
+    # the constant ever moved, which is the failure mode this PR has spent four rounds
+    # closing elsewhere. (Prudence, #714 r3 + r5.)
+    from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
+
     for missing in sorted(_declared_outbox_targets(config) - seen):
         # PER LANE, BECAUSE THE TWO DECLARED LANES HAVE TWO DIFFERENT DRAINS. Collapsing
         # them to one predicate re-made the #469 r5 Critical on the other branch of this
@@ -1735,7 +1744,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # typical noop adapter read DORMANT/healthy instead of UNOBSERVABLE.
         # TestNoopExcusesOnlySyncLanes pins this for the PENDING-BACKLOG branch; this is
         # the never-enqueued branch twenty lines up, which was unpinned. (Prudence, #714.)
-        has_consumer = True if missing.startswith("sink:") else config.sync.adapter != "noop"
+        has_consumer = True if missing.startswith(SINK_PREFIX) else config.sync.adapter != "noop"
         if not has_consumer:
             verdict = Verdict.DORMANT
             detail = "no live consumer (sync.adapter=noop) — correctly idle"
@@ -1760,7 +1769,6 @@ def check_outbox_targets(config) -> list[CheckResult]:
         )
 
     from techne.lifecycle import RETIRED_PRODUCER_TARGETS
-    from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
 
     for target, total, last_synced, pending, last_enqueued in rows:
         pending = pending or 0

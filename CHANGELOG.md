@@ -45,6 +45,12 @@ All notable changes to techne are documented here. Format loosely follows
   target is what `outbox prune-orphans` marks permanently dead. The gate belongs on
   enqueue, not on registration.
 
+  **Operator-visible after upgrade:** `techne doctor` grows an
+  `outbox:sink:archivist — dormant — retired by techne#552` line on any box that ran
+  `standalone: false`. That line is the fix, not a symptom: the lane's delivered rows are
+  kept readable on purpose, and marking it retired is what stops it reporting a dead
+  producer forever with no operator action able to clear it.
+
 
 ### Added
 
