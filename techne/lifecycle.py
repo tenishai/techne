@@ -20,6 +20,18 @@ ARCHIVIST_SINK_TARGET = "sink:archivist"
 # Back-compat alias (was the only, sync-only, target before #224).
 THREAD_SUMMARY_TARGET = THREAD_SUMMARY_SYNC_TARGET
 
+#: LANES THAT NO LONGER HAVE A PRODUCER, declared HERE because this is where the
+#: retirement happens (techne#552 part 3). Delivered rows stay — they must remain
+#: drainable and readable — so the lane keeps appearing in the outbox forever with a
+#: frozen MAX(created_at), and anything that judges liveness by "has this enqueued
+#: lately" will call a correctly-retired lane a dead producer.
+#:
+#: DECLARED NEXT TO THE RETIREMENT, AND IMPORTED BY THE CHECKER, rather than the checker
+#: re-spelling the literal: a copy of this fact would go stale the moment either side
+#: moved, which is the shape techne#518 found five times and the one this PR's own card
+#: entry ends on. (Prudence, #714 r4.)
+RETIRED_PRODUCER_TARGETS = frozenset({ARCHIVIST_SINK_TARGET})
+
 
 def _thread_summary_target(config) -> str:
     """The outbox lane for thread summaries.

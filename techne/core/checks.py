@@ -1725,11 +1725,6 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # being to configure a sync adapter they do not want or to set `standalone: true`.
     # The comment above exists to prevent exactly "a verdict the operator cannot act on
     # and cannot clear".
-    # Hoisted so the two branches of this function spell the same rule the same way —
-    # `missing.startswith("sink:")` sat 21 lines above the import of the constant that
-    # defines it, while the sibling branch already used SYNC_PREFIX. (Prudence, #714 r3.)
-    from techne.sync.outbox import SINK_PREFIX
-
     for missing in sorted(_declared_outbox_targets(config) - seen):
         # PER LANE, BECAUSE THE TWO DECLARED LANES HAVE TWO DIFFERENT DRAINS. Collapsing
         # them to one predicate re-made the #469 r5 Critical on the other branch of this
@@ -1740,7 +1735,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # typical noop adapter read DORMANT/healthy instead of UNOBSERVABLE.
         # TestNoopExcusesOnlySyncLanes pins this for the PENDING-BACKLOG branch; this is
         # the never-enqueued branch twenty lines up, which was unpinned. (Prudence, #714.)
-        has_consumer = True if missing.startswith(SINK_PREFIX) else config.sync.adapter != "noop"
+        has_consumer = True if missing.startswith("sink:") else config.sync.adapter != "noop"
         if not has_consumer:
             verdict = Verdict.DORMANT
             detail = "no live consumer (sync.adapter=noop) — correctly idle"
@@ -1764,6 +1759,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
             )
         )
 
+    from techne.lifecycle import RETIRED_PRODUCER_TARGETS
     from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
 
     for target, total, last_synced, pending, last_enqueued in rows:
@@ -1776,6 +1772,45 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # Reporting it as "producer may be dead" is technically true and
         # permanently un-actionable, which is the nag that teaches an operator
         # to skip the whole report (#469 review 3).
+        # A LANE THIS RELEASE RETIRED IS ALSO A RETIRED LANE (techne#552 part 3,
+        # Prudence #714 r4). `sink:archivist` stopped having a producer when thread
+        # summaries moved to the sync lane, but its delivered rows stay — deliberately,
+        # so they remain drainable — so `GROUP BY target` keeps returning it forever
+        # with MAX(created_at) frozen at the upgrade. Seven days later
+        # _PRODUCER_SILENT_AFTER elapses and it takes the producer-silence branch
+        # below: STALE, ok=False, remedy=None, feeding worst() and the banner headline.
+        #
+        # PERMANENT AND UNCLEARABLE, on exactly the cohort #552 exists to migrate. flush
+        # and flush-sinks do not move MAX(created_at); prune-orphans cannot help since
+        # the sink is now registered unconditionally; nothing deletes a synced row. The
+        # only exit was hand-editing SQLite, destroying the rows this PR preserves.
+        #
+        # The rule and its reasoning were already twelve lines below, for un-namespaced
+        # targets — "no operator action can ever clear it… the nag that teaches an
+        # operator to skip the whole report". A lane retired by THIS release walked
+        # straight past it because it is namespaced.
+        # PENDING ROWS STILL COUNT. Retirement means "no new producer", NOT "ignore
+        # what is owed" — a retired lane with an undrained backlog still needs
+        # draining, and short-circuiting before the backlog branch would hide it. The
+        # frozen-MAX(created_at) problem this fixes only arises once the lane is fully
+        # drained, which is exactly when `pending == 0`.
+        if target in RETIRED_PRODUCER_TARGETS and pending == 0:
+            results.append(
+                CheckResult(
+                    name=f"outbox:{target}",
+                    subsystem="sync",
+                    kind=Kind.TEMPORAL,
+                    verdict=Verdict.DORMANT,
+                    last_fired=last_synced,
+                    evidence=f"target={target!r} in lifecycle.RETIRED_PRODUCER_TARGETS",
+                    detail=(
+                        f"retired by techne#552 ({total} delivered rows kept readable) — "
+                        "no producer by design, not a dead one"
+                    ),
+                )
+            )
+            continue
+
         if not target.startswith((SINK_PREFIX, SYNC_PREFIX)):
             results.append(
                 CheckResult(

@@ -1195,7 +1195,13 @@ class TestProducerSilenceIsNotWallClock:
 
         cfg = Config()
         cfg.db_path = tmp_path / f"t{ended_days_ago}-{enq_days_ago}-{inflight}.db"
-        cfg.standalone = False
+        # A lane that STILL HAS A PRODUCER. These tests are about the producer-silence
+        # RULE and merely needed a drained sink lane as an example; `sink:archivist` was
+        # retired by techne#552 part 3, so it now reports DORMANT by design and is no
+        # longer a valid example of a live lane. `sink:archivist_knowledge` is fed by
+        # push_knowledge_to_archivist under a store binding, which is what these
+        # assertions actually need.
+        cfg.archivist_db_path = str(tmp_path / "team.db")
         cfg.sync.adapter = "noop"
         init_db(cfg.db_path)
         conn = sqlite3.connect(cfg.db_path)
@@ -1212,8 +1218,8 @@ class TestProducerSilenceIsNotWallClock:
             )
         conn.execute(
             "INSERT INTO outbox (target, data_json, status, synced_at, created_at) VALUES "
-            f"('sink:archivist', '{{}}', 'synced', datetime('now','-{enq_days_ago} days'),"
-            f" datetime('now','-{enq_days_ago} days'))"
+            f"('sink:archivist_knowledge', '{{}}', 'synced', "
+            f"datetime('now','-{enq_days_ago} days'), datetime('now','-{enq_days_ago} days'))"
         )
         conn.commit()
         conn.close()
@@ -1223,7 +1229,7 @@ class TestProducerSilenceIsNotWallClock:
         from techne.core.checks import check_outbox_targets
 
         for r in check_outbox_targets(cfg):
-            if r.name == "outbox:sink:archivist":
+            if r.name == "outbox:sink:archivist_knowledge":
                 return r.verdict
         raise AssertionError("lane not reported")
 
@@ -2319,3 +2325,84 @@ class TestIdentityEvidenceNamesWhatItRead:
             f"evidence cites a flag the check no longer reads: {r.evidence!r}"
         )
         assert "archivist_binding=" in (r.evidence or "")
+
+
+class TestRetiredProducerLane:
+    """techne#552 part 3 retired `sink:archivist` as a PRODUCER while deliberately
+    keeping its delivered rows drainable — so `GROUP BY target` returns it forever with
+    MAX(created_at) frozen at the upgrade. Seven days later _PRODUCER_SILENT_AFTER
+    elapses and it took the producer-silence branch: STALE, ok=False, remedy=None,
+    feeding worst() and the banner headline, permanently, on exactly the cohort #552
+    exists to migrate. No operator action could clear it — flush and flush-sinks do not
+    move MAX(created_at), prune-orphans cannot help now the sink registers
+    unconditionally, and nothing deletes a synced row.
+
+    Drainability was the question asked in lifecycle.py. OBSERVABILITY was the one
+    nobody asked. (Prudence, #714 r4.)
+    """
+
+    def _drained_lane(self, config, target, *, ts="2026-06-01T00:00:00+00:00"):
+        from techne.core.database import connect
+        from techne.core.state import ensure_session
+
+        conn = connect(config.db_path)
+        try:
+            for _ in range(3):
+                conn.execute(
+                    "INSERT INTO outbox (target, data_json, status, created_at, synced_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (target, "{}", "synced", ts, ts),
+                )
+            conn.execute("UPDATE schema_version SET applied_at = ?", (ts,))
+            conn.commit()
+        finally:
+            conn.close()
+        ensure_session(config.db_path, "sess-since")
+        conn = connect(config.db_path)
+        try:  # a session that ENDED after the last enqueue — the producer-silence signal
+            conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ?", (ts, _iso(timedelta(0)))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_a_lane_this_release_retired_is_dormant_not_stale(self, config):
+        from techne.lifecycle import ARCHIVIST_SINK_TARGET
+
+        self._drained_lane(config, ARCHIVIST_SINK_TARGET)
+
+        lanes = [r for r in run_checks(config) if r.name == f"outbox:{ARCHIVIST_SINK_TARGET}"]
+        assert lanes, "the retired lane produced no result at all"
+        assert lanes[0].verdict is Verdict.DORMANT, (
+            f"a lane retired by design reported {lanes[0].verdict.value} with "
+            f"remedy={lanes[0].remedy!r} — permanently unclearable: {lanes[0].detail}"
+        )
+        assert lanes[0].ok is True
+
+    def test_a_live_lane_with_a_silent_producer_is_still_stale(self, config):
+        """THE COUNTERFACTUAL, so the fix cannot go vacuously green by suppressing the
+        producer-silence branch for everyone. A lane that is NOT retired, with drained
+        rows and sessions since, must still report a possibly-dead producer."""
+        self._drained_lane(config, "sync:thread_summary")
+
+        lanes = [r for r in run_checks(config) if r.name == "outbox:sync:thread_summary"]
+        assert lanes, "the sync lane produced no result"
+        assert lanes[0].verdict is not Verdict.DORMANT or "retired" not in (
+            lanes[0].detail or ""
+        ), "a live lane was treated as retired"
+
+    def test_the_retired_set_is_derived_from_lifecycle(self):
+        """Derived, not re-spelled: a copy of this fact goes stale the moment either
+        side moves, which is the shape techne#518 found five times."""
+        import inspect
+
+        from techne.core import checks
+        from techne.lifecycle import ARCHIVIST_SINK_TARGET, RETIRED_PRODUCER_TARGETS
+
+        assert ARCHIVIST_SINK_TARGET in RETIRED_PRODUCER_TARGETS
+        src = inspect.getsource(checks.check_outbox_targets)
+        assert "RETIRED_PRODUCER_TARGETS" in src
+        assert '"sink:archivist"' not in src, (
+            "checks.py re-spelled the retired target instead of importing it"
+        )
