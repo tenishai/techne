@@ -354,7 +354,7 @@ def run_session_end(
         )
 
     # Team topology: egress live knowledge to the base Archivist AFTER reflection
-    # (which may have promoted new live knowledge). No-op when standalone; the
+    # (which may have promoted new live knowledge). No-op unless bound to a store; the
     # outbox dedups so re-pushing is cheap (techne#346 PR2).
     knowledge_pushed = 0
     try:

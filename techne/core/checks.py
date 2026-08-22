@@ -436,7 +436,7 @@ def _declared_outbox_targets(config) -> set[str]:
       declared — so when it had never enqueued it still vanished, which is the
       absence-reads-as-healthy bug the declaration was added to close, left open
       on the very lane the incident was about.
-    * the ``sink:`` lanes are no-ops when ``standalone`` (the default), so on a
+    * the ``sink:`` lanes are fed only under a STORE binding (techne#552), so on a
       default install all three declared lanes were structurally unreachable.
 
     ``lifecycle._thread_summary_target`` is the single source of truth for which
@@ -1165,8 +1165,11 @@ def check_instance_identity(config) -> CheckResult | None:
             subsystem="archivist",
             kind=Kind.FAIL_OPEN,
             verdict=Verdict.DORMANT,
-            detail="standalone — this instance attributes nothing to a shared store",
-            evidence="standalone=true",
+            detail="not bound to a shared store — this instance attributes nothing",
+            # Report the thing actually consulted. This said `standalone=true`, which on
+            # a `standalone: false` + local box states a config value that is FALSE and
+            # points the operator at a flag saying the opposite. (Prudence, #714.)
+            evidence=f"archivist_binding={archivist_binding(config)}",
         )
     name = (getattr(config, "instance_name", "") or "").strip()
     if not name:
@@ -1722,8 +1725,17 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # being to configure a sync adapter they do not want or to set `standalone: true`.
     # The comment above exists to prevent exactly "a verdict the operator cannot act on
     # and cannot clear".
-    has_consumer = config.sync.adapter != "noop"
     for missing in sorted(_declared_outbox_targets(config) - seen):
+        # PER LANE, BECAUSE THE TWO DECLARED LANES HAVE TWO DIFFERENT DRAINS. Collapsing
+        # them to one predicate re-made the #469 r5 Critical on the other branch of this
+        # function: `sink:archivist_knowledge` is drained by `flush_sinks`, which
+        # `sync.adapter` does not govern, and a sink lane is DECLARED only because
+        # something feeds it — so it has a consumer by construction. With one shared
+        # predicate an eight-week-dead knowledge lane on a store-bound box with the
+        # typical noop adapter read DORMANT/healthy instead of UNOBSERVABLE.
+        # TestNoopExcusesOnlySyncLanes pins this for the PENDING-BACKLOG branch; this is
+        # the never-enqueued branch twenty lines up, which was unpinned. (Prudence, #714.)
+        has_consumer = True if missing.startswith("sink:") else config.sync.adapter != "noop"
         if not has_consumer:
             verdict = Verdict.DORMANT
             detail = "no live consumer (sync.adapter=noop / no registered sink) — correctly idle"
@@ -1877,7 +1889,13 @@ def _dotted_attr(obj, dotted: str):
 #: guard and rendered "model set" — the useless string, on the one key where
 #: naming the destination is the entire job. The fix was to DELETE the
 #: heuristic, not sharpen it. (Prudence, PR #508 r5, found while approving.)
-_PRINTABLE_DESTINATIONS = frozenset({"model", "reflect.model", "conflict.model", "standalone"})
+_PRINTABLE_DESTINATIONS = frozenset(
+    # `archivist` joins by the same structural argument that admits `standalone`,
+    # its predecessor: its entire value space is four validated literals, and it is
+    # the one key that NAMES the destination. Default-deny made omitting it safe but
+    # uninformative — doctor rendered "archivist set" for a four-value enum.
+    {"model", "reflect.model", "conflict.model", "standalone", "archivist"}
+)
 
 
 def _describe_destination(key: str, value, default=None) -> str:

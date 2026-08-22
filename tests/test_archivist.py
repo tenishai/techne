@@ -754,68 +754,89 @@ def test_a_store_binding_still_egresses(config, tmp_path):
         assert push_knowledge_to_archivist(config) == 1
 
 
-def _seam_modules() -> list[str]:
-    """Every module in the archivist seam, DERIVED.
+#: The ONE legitimate reader of `config.standalone`: `config.py` DEFINES the field, so
+#: parsing and serialising it there is not a private opinion about the archivist.
+_STANDALONE_ALLOWED = {"techne/config.py"}
 
-    ONE definition, used by both the tripwire and the test that guards the tripwire.
-    An earlier revision had the guard recompute this independently, which meant
-    narrowing the tripwire's own list broke nothing — the test-of-the-test could not
-    see the change because it was not reading the same list. That is the hand-
-    maintained-list defect recurring one level up, inside the guard against it.
+
+def _standalone_readers() -> list[str]:
+    """Every module under `techne/` that BRANCHES on `standalone`.
+
+    SELECTS ON THE DEFECT, NOT ON THE COUPLING, and that distinction is the whole
+    guard. The previous version selected modules whose text mentioned `core.archivist`
+    or `core.tiers` — i.e. "the module already asks the right question", which is
+    exactly the property a REGRESSED module lacks. Prudence demonstrated it two ways:
+
+      * checking out `checks.py` from the parent commit, with all three live
+        `config.standalone` branches, left this tripwire GREEN — the only thing that
+        caught it was a hand-typed two-module list in a second test, i.e. the mechanism
+        this derivation was supposed to replace;
+      * a live module could LEAVE the seam without regressing at all, just by spelling
+        its import `from techne.core import archivist as _archivist`.
+
+      * and `techne/core/tiers.py` — which DEFINES ARCHIVIST_LOCAL/_STORE/_ABSENT — was
+        never in it, because it does not import itself.
+
+    Membership can no longer be dropped by editing an import, because membership IS the
+    defect. (Prudence, #714 round 2.)
     """
     import pathlib as _p
 
     out = []
     for path in sorted(_p.Path("techne").rglob("*.py")):
-        # config.py DEFINES the field; reading it there is not a private opinion.
-        if path.name == "config.py":
+        rel = str(path)
+        if rel in _STANDALONE_ALLOWED:
             continue
-        text = path.read_text()
-        if "core.archivist" in text or "core.tiers" in text:
-            out.append(str(path))
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "config.standalone" in code or "cfg.standalone" in code:
+                out.append(f"{rel}:{i}")
     return out
 
 
 def test_the_seam_has_exactly_one_decision_point():
     """A TRIPWIRE ON THE DEFECT ITSELF. #552's finding was not a wrong default, it was
-    six call sites each deciding for themselves what the archivist is. If a module in
-    the seam branches on `standalone` again, the fork is growing back.
-
-    THE SEAM LIST IS DERIVED, NOT TYPED, AND THAT IS THE WHOLE FIX. The first version
-    named three files by hand and MISSED `checks.py`, which held three surviving
-    `config.standalone` branches that all disagreed with the new binding — two of them
-    false GREENS on guards whose own card calls the failure they prevent guaranteed.
-    Prudence found them and named the cause exactly: the guard covered "the modules you
-    remembered" rather than the seam. A hand-maintained list of what to check is the
-    same class of defect as a hand-maintained list of what the archivist is.
+    six call sites each deciding for themselves what the archivist is. Any module that
+    branches on `standalone` again is a seventh, wherever it lives — and the previous
+    revisions of this guard could not see the modules that mattered, first because the
+    list was typed by hand and then because the derivation selected on coupling.
     """
-    import pathlib as _p
-
-    seam = _seam_modules()
-    assert seam, "derivation found no seam modules at all — the heuristic broke"
-
-    offenders = []
-    for path in seam:
-        for i, line in enumerate(_p.Path(path).read_text().splitlines(), 1):
-            code = line.split("#", 1)[0]
-            if "config.standalone" in code or "cfg.standalone" in code:
-                offenders.append(f"{path}:{i}")
+    offenders = _standalone_readers()
     assert not offenders, (
         f"the seam branches on `standalone` again at {offenders} — ask "
-        f"`archivist_binding(config)` instead (techne#552). Seam scanned: {seam}"
+        "`archivist_binding(config)` instead (techne#552). If a new module has a "
+        "legitimate reason to read the raw flag, add it to _STANDALONE_ALLOWED with "
+        "the reason, so the exemption is a decision rather than an omission."
     )
 
 
-def test_the_tripwire_reaches_where_the_typed_list_did_not():
-    """Reads the SAME derivation the tripwire uses, so narrowing it fails here. The two
-    modules named are where the Critical actually lived: `checks.py` held all three
-    stale branches, and `mcp_server.py` held the seventh private opinion."""
-    covered = _seam_modules()
-    for required in ("techne/core/checks.py", "techne/mcp_server.py"):
-        assert required in covered, (
-            f"{required} is outside the seam derivation — the tripwire is back to "
-            f"guarding remembered modules. Covered: {covered}"
-        )
+def test_the_guard_would_have_caught_the_regression_it_missed():
+    """THE GUARD'S OWN REGRESSION TEST. `checks.py` held three live `config.standalone`
+    branches while an earlier version of this tripwire reported green. Rather than
+    trusting that the new derivation would catch them, this reconstructs the shape:
+    a module outside the allow-list containing the branch must be reported.
+    """
+    import pathlib as _p
+    import tempfile
+
+    scratch = _p.Path(tempfile.mkdtemp()) / "regressed.py"
+    scratch.write_text("def f(config):\n    if config.standalone:\n        return 1\n")
+
+    found = [
+        i
+        for i, line in enumerate(scratch.read_text().splitlines(), 1)
+        if "config.standalone" in line.split("#", 1)[0]
+    ]
+    assert found, "the detection predicate itself does not match a live branch"
+
+    # And the real scan reaches modules the import-based derivation could not: tiers.py
+    # defines the binding constants, and checks.py is where the Critical lived.
+    import techne.core.checks  # noqa: F401
+    import techne.core.tiers  # noqa: F401
+
+    scanned = {p for p in _p.Path("techne").rglob("*.py")}
+    for required in ("techne/core/checks.py", "techne/core/tiers.py", "techne/mcp_server.py"):
+        assert _p.Path(required) in scanned, f"{required} is outside the scan"
 
 
 def test_registration_opens_no_store_unless_one_is_bound(config, tmp_path):

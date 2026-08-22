@@ -20,9 +20,10 @@ from techne.sync.sinks import DeliveryResult, OutboxSink
 
 log = logging.getLogger(__name__)
 
-# The name under which the local base Archivist appears in recall's federation
-# fan-out (techne#346 PR2). A non-standalone instance recalls over its own
-# archivist.db as a `team` connection.
+# The name under which a bound Archivist appears in recall's federation fan-out
+# (techne#346 PR2). Only a STORE binding produces that connection (techne#552) — a
+# `local` binding adds none, because tier 2 IS tier 1's table and fanning out to it
+# would read the same rows twice and report one source as two.
 ARCHIVIST_CONNECTION_NAME = "archivist"
 
 

@@ -2250,3 +2250,68 @@ def test_init_remedy_is_the_only_place_the_init_hint_is_spelled():
         "these modules spell the `techne init --posture …` hint by hand instead of "
         f"calling init_remedy(), so they do not inherit its platform/posture guards: {offenders}"
     )
+
+
+class TestPerLaneConsumer:
+    """techne#714 r2 — one predicate applied to two lanes with two different drains.
+
+    `sink:archivist_knowledge` is drained by `flush_sinks`; `sync.adapter` does not
+    govern it, and the lane is DECLARED only because something feeds it. Collapsing both
+    lanes onto `sync.adapter != "noop"` re-made the #469 r5 Critical on the OTHER branch
+    of the same function: TestNoopExcusesOnlySyncLanes pins the pending-backlog branch,
+    while this landed on the never-enqueued branch twenty lines up.
+    """
+
+    def _aged(self, config):
+        from techne.core.database import connect
+
+        conn = connect(config.db_path)
+        try:
+            conn.execute("UPDATE schema_version SET applied_at = ?", (_iso(timedelta(days=60)),))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_a_dead_sink_lane_is_unobservable_even_with_a_noop_adapter(self, config):
+        """The typical store-bound box: it routed via the sink and never needed a sync
+        adapter, so `noop` is its NORMAL configuration — not a corner case. An
+        eight-week-dead knowledge lane there must FAIL, not read correctly-idle."""
+        config.archivist_db_path = str(config.data_dir / "team.db")
+        config.sync.adapter = "noop"
+        self._aged(config)
+
+        lanes = [r for r in run_checks(config) if r.name == "outbox:sink:archivist_knowledge"]
+        assert lanes, "the knowledge lane was not declared for a store binding"
+        assert lanes[0].verdict is Verdict.UNOBSERVABLE, (
+            f"a dead sink lane read {lanes[0].verdict.value} — sync.adapter must not "
+            f"excuse a lane it does not drain: {lanes[0].detail}"
+        )
+
+    def test_a_noop_adapter_still_excuses_the_sync_lane(self, config):
+        """The half of the fix that was right, kept honest: nothing drains `sync:` under
+        a noop adapter, so that lane IS correctly idle."""
+        config.sync.adapter = "noop"
+        self._aged(config)
+
+        lanes = [r for r in run_checks(config) if r.name == "outbox:sync:thread_summary"]
+        if lanes:
+            assert lanes[0].verdict is Verdict.DORMANT, lanes[0].detail
+
+
+class TestIdentityEvidenceNamesWhatItRead:
+    """techne#714 r2 nit 4 — the DORMANT arm reported `standalone=true` after it stopped
+    reading that flag, so on a `standalone: false` + local box the evidence stated a
+    config value that is FALSE and pointed the operator at a flag saying the opposite."""
+
+    def test_evidence_cites_the_binding_not_the_legacy_flag(self, config):
+        from techne.core.checks import check_instance_identity
+
+        config.standalone = False  # deliberately the value the old evidence would deny
+        config.archivist = "none"
+        config.archivist_db_path = ""
+
+        r = check_instance_identity(config)
+        assert "standalone" not in (r.evidence or ""), (
+            f"evidence cites a flag the check no longer reads: {r.evidence!r}"
+        )
+        assert "archivist_binding=" in (r.evidence or "")

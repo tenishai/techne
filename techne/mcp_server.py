@@ -410,9 +410,14 @@ def _fold_in_documents(config: Config, topic: str, memory_results: list[dict]) -
 
 
 def _effective_connections(config: Config) -> dict:
-    """config.connections plus the local base Archivist as a `team` connection when
-    not standalone (techne#346 PR2) — a non-standalone instance recalls over its own
-    archivist.db without manual config. setdefault so an explicit config entry wins."""
+    """config.connections plus the base Archivist as a `team` connection WHEN IT IS
+    BOUND TO A STORE (techne#346 PR2, rebound by techne#552).
+
+    THIS DOCSTRING USED TO SAY "a non-standalone instance recalls over its own
+    archivist.db without manual config", which is now false for exactly the
+    default-path case it described: a `local` binding contributes NO connection,
+    because tier 2 is tier 1's own table and fanning out to it would read the same rows
+    twice and report one source as two. setdefault so an explicit config entry wins."""
     from techne.core.archivist import ARCHIVIST_CONNECTION_NAME, archivist_connection
 
     conns = dict(config.connections)
@@ -499,9 +504,10 @@ def _techne_recall(args: dict, config: Config) -> dict:
 
     topic = args.get("topic", "")
 
-    # Effective connections = configured remotes + the local base Archivist as a
-    # `team` store when not standalone (techne#346 PR2), so a non-standalone
-    # instance recalls over its own archivist.db without manual config.
+    # Effective connections = configured remotes + the base Archivist as a `team`
+    # store WHEN IT IS BOUND TO ONE (techne#346 PR2, rebound by techne#552). A `local`
+    # binding contributes NO connection: tier 2 is tier 1's own table, so fanning out
+    # to it would read the same rows twice and report one source as two.
     connections = _effective_connections(config)
 
     # S2 (knowledge#1085) — THE LOCAL ARCHIVIST IS A RUNG, NOT A SECOND FILE.
