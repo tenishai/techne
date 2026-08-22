@@ -410,9 +410,14 @@ def _fold_in_documents(config: Config, topic: str, memory_results: list[dict]) -
 
 
 def _effective_connections(config: Config) -> dict:
-    """config.connections plus the local base Archivist as a `team` connection when
-    not standalone (techne#346 PR2) — a non-standalone instance recalls over its own
-    archivist.db without manual config. setdefault so an explicit config entry wins."""
+    """config.connections plus the base Archivist as a `team` connection WHEN IT IS
+    BOUND TO A STORE (techne#346 PR2, rebound by techne#552).
+
+    THIS DOCSTRING USED TO SAY "a non-standalone instance recalls over its own
+    archivist.db without manual config", which is now false for exactly the
+    default-path case it described: a `local` binding contributes NO connection,
+    because tier 2 is tier 1's own table and fanning out to it would read the same rows
+    twice and report one source as two. setdefault so an explicit config entry wins."""
     from techne.core.archivist import ARCHIVIST_CONNECTION_NAME, archivist_connection
 
     conns = dict(config.connections)
@@ -499,9 +504,10 @@ def _techne_recall(args: dict, config: Config) -> dict:
 
     topic = args.get("topic", "")
 
-    # Effective connections = configured remotes + the local base Archivist as a
-    # `team` store when not standalone (techne#346 PR2), so a non-standalone
-    # instance recalls over its own archivist.db without manual config.
+    # Effective connections = configured remotes + the base Archivist as a `team`
+    # store WHEN IT IS BOUND TO ONE (techne#346 PR2, rebound by techne#552). A `local`
+    # binding contributes NO connection: tier 2 is tier 1's own table, so fanning out
+    # to it would read the same rows twice and report one source as two.
     connections = _effective_connections(config)
 
     # S2 (knowledge#1085) — THE LOCAL ARCHIVIST IS A RUNG, NOT A SECOND FILE.
@@ -519,19 +525,15 @@ def _techne_recall(args: dict, config: Config) -> dict:
     #     break team recall. An existing end-to-end test caught exactly that when this
     #     gate checked only `connections`; the default-path case is the ONLY one S2
     #     is about.
-    if ARCHIVIST_CONNECTION_NAME not in connections:
-        # `standalone: True` — the DEFAULT. archivist_connection() returned None, so
-        # no archivist exists to bind to, and the ladder must say so rather than
-        # report an empty read of a store nobody opened.
-        archivist_binding = tier_model.ARCHIVIST_ABSENT
-    elif ARCHIVIST_CONNECTION_NAME in config.connections or config.archivist_db_path:
-        # An operator expressed a binding, either way it can be expressed: a
-        # `connections` entry names a federated peer, and a non-empty
-        # `archivist_db_path` points this instance at a SHARED store (techne#346).
-        # Both are real other stores; skipping either silently breaks team recall.
-        archivist_binding = tier_model.ARCHIVIST_STORE
-    else:
-        archivist_binding = tier_model.ARCHIVIST_LOCAL
+    # ASK THE RESOLVER; DO NOT RE-DERIVE (techne#552). This block used to work the
+    # binding out from `standalone` + `connections` + `archivist_db_path` itself, which
+    # made it the seventh place with an opinion about what the archivist is — and the
+    # only one the WRITE path could disagree with. `core.archivist.archivist_binding`
+    # is now the single answer, and read, write, the query surface and this ladder all
+    # read it. That is the whole of the issue: one seam, one decision, several bindings.
+    from techne.core.archivist import archivist_binding as _resolve_binding
+
+    archivist_binding = _resolve_binding(config)
     archivist_is_local = archivist_binding == tier_model.ARCHIVIST_LOCAL
     fan_out_connections = dict(connections)
     if archivist_is_local:

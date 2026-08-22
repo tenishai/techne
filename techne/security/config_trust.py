@@ -100,6 +100,14 @@ EGRESS_KEYS: tuple[str, ...] = (
     # standalone=false routes team memory to the archivist sink at this path.
     "archivist_db_path",
     "standalone",
+    # techne#552. `archivist` SELECTS WHICH STORE THE SEAM IS BOUND TO — "store" routes
+    # distilled knowledge into a separate db, "local" keeps it in this instance's own
+    # table, "none" opts out. That is a destination choice by definition, and it is the
+    # successor to `standalone` directly above, which is governed for the same reason.
+    # Governing the successor and not the predecessor would leave the new spelling as
+    # an unpinned way to repoint what the old spelling cannot — the exact gap the
+    # reflect.model/conflict.model pair exists to close.
+    "archivist",
     # Domain-store DSNs (librarian/codex/architect/documents). Structurally
     # identical to archivist_db_path — an arbitrary path that domain memory is
     # written to (`core/stores.py:store_path`) — so the "destination, not

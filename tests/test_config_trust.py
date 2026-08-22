@@ -1048,6 +1048,11 @@ _EGRESS_PROBES: dict[str, object] = {
     "model": "openai/probe-model",
     "reflect.model": "openai/probe-reflect",
     "conflict.model": "openai/probe-conflict",
+    # techne#552. `archivist` selects WHICH STORE the seam is bound to. Probes "local"
+    # rather than "store" because the loader rejects `store` with no target — a probe
+    # that raises would prove the key validates, not that stripping it denies anything,
+    # which is what this guard is for.
+    "archivist": "local",
     # techne#555. The custodian's bindings run UNATTENDED, so a probe here is not
     # ceremony: it is what proves a locked operator layer can actually deny an agent
     # that tries to repoint headless traffic at its own endpoint.
@@ -1159,3 +1164,17 @@ def test_the_read_surface_guard_catches_an_entry_the_loader_cannot_read(tmp_path
         "a field-name rename the YAML never adopted must change NOTHING — that is "
         "exactly the green-test/broken-gate case techne#586 exists to close"
     )
+
+
+def test_the_archivist_binding_is_rendered_not_just_flagged():
+    """`archivist` was added to _PRINTABLE_DESTINATIONS with nothing pinning it, so the
+    blast radius of losing it was `techne doctor` printing "archivist set" instead of
+    "archivist=local" — uninformative rather than wrong, which is exactly the kind of
+    regression that never gets noticed. Its entire value space is four validated
+    literals, which is the structural argument that admits it. (Prudence, #714 r3.)
+    """
+    from techne.core.checks import _PRINTABLE_DESTINATIONS
+
+    assert "archivist" in _PRINTABLE_DESTINATIONS
+    # Its predecessor is printable by the same argument; losing either is a regression.
+    assert "standalone" in _PRINTABLE_DESTINATIONS

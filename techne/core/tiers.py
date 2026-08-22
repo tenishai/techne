@@ -240,8 +240,12 @@ def build_reports(
             # an archivist call keeps that habit when a real team store appears
             # behind it. Naming the sharing is honest; hiding the rung is not.
             if archivist_binding == ARCHIVIST_ABSENT:
-                # THE DEFAULT INSTALL LANDS HERE (`standalone: True`), and a boolean
-                # could not say so. Reporting `empty` against `store:archivist` was a
+                # NO LONGER THE DEFAULT (techne#552) — reached only when an operator
+                # writes `archivist: none` to opt out explicitly. A default install now
+                # lands on the LOCAL arm below, because the archivist is a CALL rather
+                # than a deployment mode and a lone agent still makes it. Kept because
+                # opting out must remain sayable, and a boolean still could not
+                # say it. Reporting `empty` against `store:archivist` was a
                 # POSITIVE claim that a team store was consulted and had nothing —
                 # strictly worse than the flat list this replaces, because an omission
                 # is silent while a false `empty` recruits the reader. Tier 3 always
@@ -253,7 +257,7 @@ def build_reports(
                         STATE_UNCONFIGURED,
                         "none",
                         0,
-                        detail="no archivist is configured (standalone)",
+                        detail="no archivist is configured (archivist: none)",
                     )
                 )
             elif archivist_binding == ARCHIVIST_LOCAL:

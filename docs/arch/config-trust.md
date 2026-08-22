@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-config-trust
 updated: 2026-08-20
-anchor: techne/security/config_trust.py sha=544120ae37ecf92e7d4c002cf4cc42a9f6fa3996
+anchor: techne/security/config_trust.py sha=f3828797cd8066be8b042030c887875b8c931c4c
 ---
 # config-trust — operator-vs-agent boundary over egress-selecting config (techne#393)
 
@@ -42,3 +42,5 @@ INVARIANTS:
 A LABEL IS NOT A ROUTE, and the distinction is the classification's whole job (techne#553). `instance_name` is stamped onto federated knowledge as `written_by` so a shared archivist can name its contributors. It is `_NOT_A_DESTINATION`: it selects no path, endpoint, model or sink, and where the memory goes is decided entirely by `standalone` and `archivist_db_path`, both already EGRESS_KEYS. The failure mode it DOES carry is misattribution — a wrong `instance_name` writes a wrong author into the receiving store — which is an integrity concern for the reader, not an egress one for the writer. Worth stating because "it affects what another party ends up believing" is a tempting reason to classify something as egress, and it is not the line #508 drew. Note also that the guard works: the field was caught by `test_every_config_field_is_classified_as_destination_or_not` the moment it was added, before it could ship unjudged.
 
 **techne#555 — THE CUSTODIAN'S BINDINGS ARE THE HIGHEST-VALUE DESTINATION KEYS IN THE FILE.** `custodian.model` and `custodian.rail_models` are in EGRESS_KEYS because the custodian answers emitted prompts with a bound model and runs UNATTENDED: an agent that repointed either would ship the distilled knowledge tier to its own endpoint on a timer, with nobody present to notice. Both are listed for the reason `reflect.model`/`conflict.model` both are — pinning only the default leaves the per-rail overrides as an unpinned way to repoint the same traffic. The block's other three fields (`rails`, `max_items_per_rail`, `timeout_seconds`) are in `_NOT_A_DESTINATION`: they change HOW MUCH reaches the endpoint, never WHICH endpoint — the same line `reflect.enabled` sits on. Judged field by field because a prefix is not a judgment (techne#588).
+
+**techne#552 — `archivist` IS THE SUCCESSOR TO `standalone` AND IS GOVERNED FOR THE SAME REASON.** It selects WHICH STORE the seam is bound to: `store` routes distilled knowledge into a separate db, `local` keeps it in this instance's own table, `none` opts out. That is a destination choice by definition. Governing the predecessor and not the successor would leave the new spelling as an unpinned way to repoint what the old spelling cannot — the exact gap the `reflect.model` / `conflict.model` pair exists to close. NOTE the probe in `_EGRESS_PROBES` uses `local`, not `store`: the loader rejects `store` with no target, and a probe that raises would prove the key VALIDATES rather than that stripping it DENIES anything, which is what that guard is for.

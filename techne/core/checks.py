@@ -436,7 +436,7 @@ def _declared_outbox_targets(config) -> set[str]:
       declared — so when it had never enqueued it still vanished, which is the
       absence-reads-as-healthy bug the declaration was added to close, left open
       on the very lane the incident was about.
-    * the ``sink:`` lanes are no-ops when ``standalone`` (the default), so on a
+    * the ``sink:`` lanes are fed only under a STORE binding (techne#552), so on a
       default install all three declared lanes were structurally unreachable.
 
     ``lifecycle._thread_summary_target`` is the single source of truth for which
@@ -445,9 +445,17 @@ def _declared_outbox_targets(config) -> set[str]:
     from techne.lifecycle import _thread_summary_target
 
     targets = {_thread_summary_target(config)}
-    if not config.standalone:
-        # Team topology also drains the knowledge sink. Only meaningful when the
-        # sink lane is the live one — standalone never registers these.
+    # DECLARE THE KNOWLEDGE LANE IFF SOMETHING FEEDS IT (techne#552). This asked
+    # `not config.standalone`, which mirrored the OLD fork; what decides whether the
+    # lane is fed is now `push_knowledge_to_archivist`, which egresses only for a STORE
+    # binding. The two came apart in BOTH directions — a team box with no store named
+    # declared a lane nothing writes (false red), and a lone box WITH a store named
+    # fed a lane that was never declared, so it produced no result at all. That second
+    # one is the absence-reads-as-healthy bug the docstring above says this declaration
+    # was added to close, reopened on the very binding #552 introduces.
+    from techne.core.archivist import ARCHIVIST_STORE, archivist_binding
+
+    if archivist_binding(config) == ARCHIVIST_STORE:
         targets.add("sink:archivist_knowledge")
     return targets
 
@@ -1141,14 +1149,27 @@ def check_instance_identity(config) -> CheckResult | None:
     to remove. `<agent>@<cabal>` qualifies it; the machine is the wrong scope, since two
     cabals can share a host and one cabal can span several.
     """
-    if config.standalone:
+    # KEYED ON THE BINDING, NOT THE LEGACY FLAG (techne#552). This asked
+    # `config.standalone`, which DEFAULTS TO TRUE — so an operator who adopted
+    # `archivist: store` (and had no reason to touch `standalone`) got DORMANT
+    # "attributes nothing to a shared store" while writing distilled knowledge into a
+    # shared store under an empty instance_name. That is a false GREEN on precisely the
+    # configuration this guard exists for, and liveness.md records the collision it
+    # prevents as GUARANTEED rather than likely — cabal ships `archivist` as a persona
+    # name. The inverse fired too: a local-bound box reported STALE for writing nowhere.
+    from techne.core.archivist import ARCHIVIST_STORE, archivist_binding
+
+    if archivist_binding(config) != ARCHIVIST_STORE:
         return CheckResult(
             name="identity:instance",
             subsystem="archivist",
             kind=Kind.FAIL_OPEN,
             verdict=Verdict.DORMANT,
-            detail="standalone — this instance attributes nothing to a shared store",
-            evidence="standalone=true",
+            detail="not bound to a shared store — this instance attributes nothing",
+            # Report the thing actually consulted. This said `standalone=true`, which on
+            # a `standalone: false` + local box states a config value that is FALSE and
+            # points the operator at a flag saying the opposite. (Prudence, #714.)
+            evidence=f"archivist_binding={archivist_binding(config)}",
         )
     name = (getattr(config, "instance_name", "") or "").strip()
     if not name:
@@ -1691,14 +1712,45 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # the test to kill it exposed this.
     #
     # The question here is topological, and answerable from config alone:
-    #   standalone -> the sync adapter drains; "noop" means nothing does.
-    #   team       -> the archivist sink ships with the product; the lane HAS a
-    #                 consumer whether or not this particular process wired it.
-    has_consumer = (config.sync.adapter != "noop") if config.standalone else True
+    #   Thread summaries always take the sync lane since techne#552, so the sync
+    #   adapter is the only consumer that decides; "noop" means nothing drains.
+    #
+    # MIRRORS `lifecycle._has_live_consumer` AND MUST KEEP MIRRORING IT. This branched
+    # on `config.standalone` and returned True for a team box — matching the OLD
+    # lifecycle. After #552 that combination (standalone: false + sync.adapter: noop,
+    # the typical team box, which routed via the sink and never needed a sync adapter)
+    # produced a PERMANENT UNCLEARABLE FALSE FAILURE: lifecycle correctly enqueues
+    # nothing while this believed a consumer existed, so the lane rendered
+    # UNOBSERVABLE — a failing state under RULE 1 — with the operator's only escapes
+    # being to configure a sync adapter they do not want or to set `standalone: true`.
+    # The comment above exists to prevent exactly "a verdict the operator cannot act on
+    # and cannot clear".
+    # ONE import, above BOTH branches that state the prefix rule. The r3 nit was that
+    # `missing.startswith("sink:")` re-spelled a constant imported 21 lines below it;
+    # removing the duplicate in r4 deleted the hoisted copy rather than the lower one
+    # and restored the literal. Hoisting the surviving import is the resolution that
+    # satisfies both rounds — the literal is the copy that would go stale silently if
+    # the constant ever moved, which is the failure mode this PR has spent four rounds
+    # closing elsewhere. (Prudence, #714 r3 + r5.)
+    from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
+
     for missing in sorted(_declared_outbox_targets(config) - seen):
+        # PER LANE, BECAUSE THE TWO DECLARED LANES HAVE TWO DIFFERENT DRAINS. Collapsing
+        # them to one predicate re-made the #469 r5 Critical on the other branch of this
+        # function: `sink:archivist_knowledge` is drained by `flush_sinks`, which
+        # `sync.adapter` does not govern, and a sink lane is DECLARED only because
+        # something feeds it — so it has a consumer by construction. With one shared
+        # predicate an eight-week-dead knowledge lane on a store-bound box with the
+        # typical noop adapter read DORMANT/healthy instead of UNOBSERVABLE.
+        # TestNoopExcusesOnlySyncLanes pins this for the PENDING-BACKLOG branch; this is
+        # the never-enqueued branch twenty lines up, which was unpinned. (Prudence, #714.)
+        has_consumer = True if missing.startswith(SINK_PREFIX) else config.sync.adapter != "noop"
         if not has_consumer:
             verdict = Verdict.DORMANT
-            detail = "no live consumer (sync.adapter=noop / no registered sink) — correctly idle"
+            detail = "no live consumer (sync.adapter=noop) — correctly idle"
+            # "/ no registered sink" removed: after the per-lane fix this branch is
+            # reachable only for `sync:` lanes, so that clause named a cause that
+            # cannot produce this verdict. (Prudence, #714 r3.)
         elif store_is_new:
             verdict = Verdict.DORMANT
             detail = "store created <7d ago — nothing enqueued yet"
@@ -1716,7 +1768,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
             )
         )
 
-    from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
+    from techne.lifecycle import RETIRED_PRODUCER_TARGETS
 
     for target, total, last_synced, pending, last_enqueued in rows:
         pending = pending or 0
@@ -1728,6 +1780,45 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # Reporting it as "producer may be dead" is technically true and
         # permanently un-actionable, which is the nag that teaches an operator
         # to skip the whole report (#469 review 3).
+        # A LANE THIS RELEASE RETIRED IS ALSO A RETIRED LANE (techne#552 part 3,
+        # Prudence #714 r4). `sink:archivist` stopped having a producer when thread
+        # summaries moved to the sync lane, but its delivered rows stay — deliberately,
+        # so they remain drainable — so `GROUP BY target` keeps returning it forever
+        # with MAX(created_at) frozen at the upgrade. Seven days later
+        # _PRODUCER_SILENT_AFTER elapses and it takes the producer-silence branch
+        # below: STALE, ok=False, remedy=None, feeding worst() and the banner headline.
+        #
+        # PERMANENT AND UNCLEARABLE, on exactly the cohort #552 exists to migrate. flush
+        # and flush-sinks do not move MAX(created_at); prune-orphans cannot help since
+        # the sink is now registered unconditionally; nothing deletes a synced row. The
+        # only exit was hand-editing SQLite, destroying the rows this PR preserves.
+        #
+        # The rule and its reasoning were already twelve lines below, for un-namespaced
+        # targets — "no operator action can ever clear it… the nag that teaches an
+        # operator to skip the whole report". A lane retired by THIS release walked
+        # straight past it because it is namespaced.
+        # PENDING ROWS STILL COUNT. Retirement means "no new producer", NOT "ignore
+        # what is owed" — a retired lane with an undrained backlog still needs
+        # draining, and short-circuiting before the backlog branch would hide it. The
+        # frozen-MAX(created_at) problem this fixes only arises once the lane is fully
+        # drained, which is exactly when `pending == 0`.
+        if target in RETIRED_PRODUCER_TARGETS and pending == 0:
+            results.append(
+                CheckResult(
+                    name=f"outbox:{target}",
+                    subsystem="sync",
+                    kind=Kind.TEMPORAL,
+                    verdict=Verdict.DORMANT,
+                    last_fired=last_synced,
+                    evidence=f"target={target!r} in lifecycle.RETIRED_PRODUCER_TARGETS",
+                    detail=(
+                        f"retired by techne#552 ({total} delivered rows kept readable) — "
+                        "no producer by design, not a dead one"
+                    ),
+                )
+            )
+            continue
+
         if not target.startswith((SINK_PREFIX, SYNC_PREFIX)):
             results.append(
                 CheckResult(
@@ -1849,7 +1940,13 @@ def _dotted_attr(obj, dotted: str):
 #: guard and rendered "model set" — the useless string, on the one key where
 #: naming the destination is the entire job. The fix was to DELETE the
 #: heuristic, not sharpen it. (Prudence, PR #508 r5, found while approving.)
-_PRINTABLE_DESTINATIONS = frozenset({"model", "reflect.model", "conflict.model", "standalone"})
+_PRINTABLE_DESTINATIONS = frozenset(
+    # `archivist` joins by the same structural argument that admits `standalone`,
+    # its predecessor: its entire value space is four validated literals, and it is
+    # the one key that NAMES the destination. Default-deny made omitting it safe but
+    # uninformative — doctor rendered "archivist set" for a four-value enum.
+    {"model", "reflect.model", "conflict.model", "standalone", "archivist"}
+)
 
 
 def _describe_destination(key: str, value, default=None) -> str:

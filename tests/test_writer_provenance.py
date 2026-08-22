@@ -227,12 +227,39 @@ def test_provenance_is_written_in_the_same_statement_as_the_row(pair):
 
 
 def _identity(standalone, name, tmp_path):
+    """`standalone` here means "is this instance writing to a SHARED store" — inverted,
+    because that is what the flag used to imply and what every caller below reads it as.
+
+    IT IS NOW EXPRESSED AS A BINDING (techne#552). `check_instance_identity` keyed on
+    `config.standalone`, which defaults to True, so an operator adopting `archivist:
+    store` got DORMANT "attributes nothing to a shared store" while writing
+    unattributable rows into one — a false GREEN on exactly the config the guard exists
+    for. The check now asks `archivist_binding`, so a test that says "shared" has to
+    NAME a store; setting the legacy flag alone resolves `local` and the guard
+    correctly declines to nag. Callers are unchanged: False still reads as "shared".
+    """
     from techne.core.checks import check_instance_identity
 
     cfg = Config.load()
     cfg.data_dir = tmp_path
-    cfg.standalone = standalone
     cfg.instance_name = name
+    if standalone:
+        cfg.archivist = "none"
+        # AND CLEAR THE PATH: `archivist_binding`'s FIRST branch is the named store,
+        # which outranks the explicit key, and `Config.load()` carries whatever
+        # `archivist_db_path` the ambient config.yaml holds — so on a box that names one
+        # (the cabal deployment this guard exists for) the "standalone" arm resolved to
+        # `store` and the test failed. The old `cfg.standalone = standalone` was immune
+        # because it overwrote the deciding field; the restatement was not.
+        #
+        # NOTE WHAT THIS IS: the helper builds BY ASSIGNMENT exactly the contradictory
+        # pair `_from_dict` now rejects, and the resolver silently prefers the store.
+        # Validation lives at load while every consumer asks the resolver, and that
+        # asymmetry is the gap the helper fell into. Not a production hole — config.py
+        # is the sole writer of `archivist_db_path` outside tests. (Prudence, #714.)
+        cfg.archivist_db_path = ""
+    else:
+        cfg.archivist_db_path = str(tmp_path / "shared-archivist.db")
     return check_instance_identity(cfg)
 
 
@@ -363,3 +390,36 @@ def test_an_empty_parsed_session_never_reaches_the_column(pair):
     finally:
         conn.close()
     assert value is None, "an empty session must be NULL, never ''"
+
+
+def test_the_standalone_arm_is_immune_to_an_ambient_store_path(tmp_path, monkeypatch):
+    """techne#714 r2 — `_identity`'s standalone arm must control what the check reads.
+
+    `archivist_binding`'s FIRST branch is the named store, which outranks the explicit
+    key, and `Config.load()` carries whatever `archivist_db_path` the ambient config.yaml
+    holds. So on a box that names one — the cabal deployment this guard exists for — the
+    "standalone" arm resolved to `store` and `test_a_standalone_instance_is_not_nagged`
+    failed. The old `cfg.standalone = standalone` was immune because it overwrote the
+    deciding field; the restatement had to clear it explicitly.
+
+    EXERCISES THE HELPER, not a hand-built config. A first version of this test
+    constructed the configs itself and therefore could not see the helper change at all
+    — the mutant survived. A guard that bypasses the thing it guards is not a guard.
+    """
+    from techne.core.checks import Verdict
+
+    real_load = Config.load
+
+    def load_with_ambient_store(*a, **k):
+        cfg = real_load(*a, **k)
+        cfg.archivist_db_path = str(tmp_path / "ambient-team.db")
+        return cfg
+
+    monkeypatch.setattr(Config, "load", staticmethod(load_with_ambient_store))
+
+    assert _identity(True, "", tmp_path).verdict == Verdict.DORMANT, (
+        "the standalone arm resolved to `store` because an ambient archivist_db_path "
+        "outranked `archivist: none` — the helper must clear the ranked field"
+    )
+    # The inverse still nags, so clearing has not disabled the guard itself.
+    assert _identity(False, "", tmp_path).verdict == Verdict.STALE

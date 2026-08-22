@@ -179,7 +179,7 @@ _OUTCOME_SUMMARY = {
     OUTCOME_STORE_ABSENT: (
         "No Archivist is bound on this instance, so nothing was queried. This is NOT "
         "'the team knows nothing' — no store was opened at all. A standalone instance "
-        "has no team memory by design; set archivist_db_path or standalone: false."
+        "is not bound to a separate store; set archivist_db_path, or archivist: store."
     ),
     OUTCOME_SCHEMA: (
         "No sql given — this is the readable schema, not a result set. Write a SELECT "
@@ -262,9 +262,14 @@ def _archivist_path(config) -> Path | None:
     collapses OUTCOME_STORE_ABSENT into OUTCOME_NO_ROWS. Reuses archivist.py's
     resolver so the path this reads is by construction the path the sink writes.
     """
-    if config.standalone:
+    from techne.core.archivist import ARCHIVIST_STORE, _resolve_archivist_path, archivist_binding
+
+    # Only a SEPARATE store is queryable here. Under `local` the "team" knowledge is
+    # this instance's own `knowledge` table, which `techne_search` and `techne_recall`
+    # already answer — offering a second surface onto the same rows, labelled as the
+    # team store, would report one source as two (techne#552).
+    if archivist_binding(config) != ARCHIVIST_STORE:
         return None
-    from techne.core.archivist import _resolve_archivist_path
 
     path = _resolve_archivist_path(config)
     return path if path.exists() else None

@@ -205,16 +205,28 @@ def _cfg(tmp_path, name="local.db"):
     return cfg
 
 
-def test_default_standalone_install_reports_no_archivist(tmp_path):
-    """Prudence r1, Important 1, at the gate rather than the branch. `standalone: True`
-    is the DEFAULT, and this is the shape the majority of installs will actually see."""
+def test_a_default_install_binds_the_archivist_locally(tmp_path):
+    """THE DEFAULT CHANGED, AND THAT IS techne#552's POINT. This test previously
+    asserted that the majority shape reports NO archivist — which was honest reporting
+    of a fork where a default install neither read nor wrote one, the opposite of the
+    design's intent.
+
+    The archivist is now a CALL, not a deployment mode: `standalone: true` describes a
+    TOPOLOGY ("I am a lone agent"), and a lone agent still makes the call — it simply
+    resolves to the knowledge table it already has. `local` therefore reads as a real
+    binding rather than an absence, and no second store is opened (see the detail
+    string, and `test_the_local_binding_arm_is_pinned_end_to_end` for the `pop`).
+    """
     from techne.mcp_server import _techne_recall
 
     cfg = _cfg(tmp_path)
     cfg.standalone = True
     t2 = _techne_recall({"topic": "anything"}, cfg)["tiers"][1]
-    assert t2["state"] == "unconfigured"
-    assert t2["binding"] == "none"
+    assert t2["binding"] == "local:knowledge"
+    assert t2["state"] != "unconfigured", (
+        "a default install must not report the team tier as unconfigured — the call "
+        "exists and is answered locally (techne#552)"
+    )
 
 
 def test_an_explicitly_configured_archivist_peer_is_still_queried(tmp_path):
@@ -294,14 +306,18 @@ def test_an_explicit_connection_outranks_the_standalone_default(tmp_path):
     assert t2["binding"] == "store:archivist"
 
 
-def test_standalone_suppresses_an_archivist_path_and_says_so(tmp_path):
-    """The contradictory config: `archivist_db_path` set while `standalone: True`.
+def test_a_named_store_wins_over_the_legacy_standalone_flag(tmp_path):
+    """THE CONTRADICTORY CONFIG IS NO LONGER CONTRADICTORY (techne#552).
 
-    `archivist_connection()` returns None on standalone REGARDLESS of the path, so the
-    store genuinely is not read. The ladder must report `unconfigured` — matching what
-    actually happened — rather than describing a binding to a file it never opened. This
-    is the #552 `standalone`-as-lane-selector fork showing through; the ladder's job here
-    is to be honest about it, not to paper over it.
+    `archivist_db_path` set while `standalone: True` used to be a config that could not
+    do what it said: the path was ignored because the flag forked the read path first,
+    and the honest thing the ladder could do was report `unconfigured`. The predecessor
+    of this test asserted exactly that, and its own docstring named the cause — "the
+    #552 `standalone`-as-lane-selector fork showing through".
+
+    The fork is gone. Naming a store IS the operator answering "what is the archivist
+    bound to", so it wins: an explicitly-configured store outranks a legacy topology
+    flag, and the config now means what it says.
     """
     from techne.mcp_server import _techne_recall
 
@@ -309,8 +325,10 @@ def test_standalone_suppresses_an_archivist_path_and_says_so(tmp_path):
     cfg.standalone = True
     cfg.archivist_db_path = str(tmp_path / "some-archivist.db")
     t2 = _techne_recall({"topic": "anything"}, cfg)["tiers"][1]
-    assert t2["state"] == "unconfigured"
-    assert t2["binding"] == "none"
+    assert t2["binding"].startswith("store:"), (
+        "a named archivist_db_path must bind, whatever the deprecated standalone flag "
+        f"says — got {t2['binding']!r}"
+    )
 
 
 def test_the_local_binding_arm_is_pinned_end_to_end(tmp_path):
