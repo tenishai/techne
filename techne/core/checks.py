@@ -1725,6 +1725,11 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # being to configure a sync adapter they do not want or to set `standalone: true`.
     # The comment above exists to prevent exactly "a verdict the operator cannot act on
     # and cannot clear".
+    # Hoisted so the two branches of this function spell the same rule the same way —
+    # `missing.startswith("sink:")` sat 21 lines above the import of the constant that
+    # defines it, while the sibling branch already used SYNC_PREFIX. (Prudence, #714 r3.)
+    from techne.sync.outbox import SINK_PREFIX
+
     for missing in sorted(_declared_outbox_targets(config) - seen):
         # PER LANE, BECAUSE THE TWO DECLARED LANES HAVE TWO DIFFERENT DRAINS. Collapsing
         # them to one predicate re-made the #469 r5 Critical on the other branch of this
@@ -1735,10 +1740,13 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # typical noop adapter read DORMANT/healthy instead of UNOBSERVABLE.
         # TestNoopExcusesOnlySyncLanes pins this for the PENDING-BACKLOG branch; this is
         # the never-enqueued branch twenty lines up, which was unpinned. (Prudence, #714.)
-        has_consumer = True if missing.startswith("sink:") else config.sync.adapter != "noop"
+        has_consumer = True if missing.startswith(SINK_PREFIX) else config.sync.adapter != "noop"
         if not has_consumer:
             verdict = Verdict.DORMANT
-            detail = "no live consumer (sync.adapter=noop / no registered sink) — correctly idle"
+            detail = "no live consumer (sync.adapter=noop) — correctly idle"
+            # "/ no registered sink" removed: after the per-lane fix this branch is
+            # reachable only for `sync:` lanes, so that clause named a cause that
+            # cannot produce this verdict. (Prudence, #714 r3.)
         elif store_is_new:
             verdict = Verdict.DORMANT
             detail = "store created <7d ago — nothing enqueued yet"

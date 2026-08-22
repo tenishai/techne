@@ -756,36 +756,35 @@ def test_a_store_binding_still_egresses(config, tmp_path):
 
 #: The ONE legitimate reader of `config.standalone`: `config.py` DEFINES the field, so
 #: parsing and serialising it there is not a private opinion about the archivist.
+#:
+#: WIDENING THIS IS THE MOVE THAT MAKES A RED BUILD GREEN, and the tripwire's own
+#: failure message used to invite it. `test_the_allow_list_is_exactly_one_file` pins it
+#: for that reason: adding `checks.py` here would have left all three branches of the
+#: round-1 Critical live with every test green. (Prudence, #714 r3.)
 _STANDALONE_ALLOWED = {"techne/config.py"}
 
 
-def _standalone_readers() -> list[str]:
-    """Every module under `techne/` that BRANCHES on `standalone`.
+def _standalone_readers(root: str = "techne", allowed: set[str] | None = None) -> list[str]:
+    """Every module under *root* that BRANCHES on `standalone`, as "path:line".
 
-    SELECTS ON THE DEFECT, NOT ON THE COUPLING, and that distinction is the whole
-    guard. The previous version selected modules whose text mentioned `core.archivist`
-    or `core.tiers` — i.e. "the module already asks the right question", which is
-    exactly the property a REGRESSED module lacks. Prudence demonstrated it two ways:
+    SELECTS ON THE DEFECT, NOT ON THE COUPLING. An import-based derivation selected
+    modules that already mention `core.archivist` — "the module already asks the right
+    question", which is exactly the property a REGRESSED module lacks; restoring the
+    parent's `checks.py`, with all three live branches, left that version GREEN.
 
-      * checking out `checks.py` from the parent commit, with all three live
-        `config.standalone` branches, left this tripwire GREEN — the only thing that
-        caught it was a hand-typed two-module list in a second test, i.e. the mechanism
-        this derivation was supposed to replace;
-      * a live module could LEAVE the seam without regressing at all, just by spelling
-        its import `from techne.core import archivist as _archivist`.
-
-      * and `techne/core/tiers.py` — which DEFINES ARCHIVIST_LOCAL/_STORE/_ABSENT — was
-        never in it, because it does not import itself.
-
-    Membership can no longer be dropped by editing an import, because membership IS the
-    defect. (Prudence, #714 round 2.)
+    `root` and `allowed` are parameters SO THE GUARD BELOW CAN CALL THIS FUNCTION
+    against a scratch tree instead of re-deriving it. Three consecutive revisions of
+    that guard failed to, each in a new spelling — a typed list, then a recomputed
+    derivation, then a hand-retyped predicate — so the parameters exist to remove the
+    temptation. (Prudence, #714 r1-r3.)
     """
     import pathlib as _p
 
+    allow = _STANDALONE_ALLOWED if allowed is None else allowed
     out = []
-    for path in sorted(_p.Path("techne").rglob("*.py")):
+    for path in sorted(_p.Path(root).rglob("*.py")):
         rel = str(path)
-        if rel in _STANDALONE_ALLOWED:
+        if rel in allow:
             continue
         for i, line in enumerate(path.read_text().splitlines(), 1):
             code = line.split("#", 1)[0]
@@ -797,46 +796,75 @@ def _standalone_readers() -> list[str]:
 def test_the_seam_has_exactly_one_decision_point():
     """A TRIPWIRE ON THE DEFECT ITSELF. #552's finding was not a wrong default, it was
     six call sites each deciding for themselves what the archivist is. Any module that
-    branches on `standalone` again is a seventh, wherever it lives — and the previous
-    revisions of this guard could not see the modules that mattered, first because the
-    list was typed by hand and then because the derivation selected on coupling.
+    branches on `standalone` again is a seventh, wherever it lives.
     """
     offenders = _standalone_readers()
     assert not offenders, (
         f"the seam branches on `standalone` again at {offenders} — ask "
-        "`archivist_binding(config)` instead (techne#552). If a new module has a "
-        "legitimate reason to read the raw flag, add it to _STANDALONE_ALLOWED with "
-        "the reason, so the exemption is a decision rather than an omission."
+        "`archivist_binding(config)` instead (techne#552). Do NOT silence this by "
+        "widening _STANDALONE_ALLOWED; that is pinned separately, precisely because "
+        "widening it is how this guard would be neutralised."
     )
 
 
-def test_the_guard_would_have_caught_the_regression_it_missed():
-    """THE GUARD'S OWN REGRESSION TEST. `checks.py` held three live `config.standalone`
-    branches while an earlier version of this tripwire reported green. Rather than
-    trusting that the new derivation would catch them, this reconstructs the shape:
-    a module outside the allow-list containing the branch must be reported.
+def test_the_scan_finds_a_regressed_module_and_respects_only_the_allow_list(tmp_path):
+    """THE GUARD CALLS THE FUNCTION IT GUARDS. Three revisions of this test did not —
+    a typed module list, then an independently recomputed derivation, then a
+    hand-retyped copy of the predicate applied to a scratch file. Each proved something
+    adjacent to the tripwire and nothing about it, and Prudence killed all three. The
+    third was the worst: it recomputed `rglob` and re-spelled the match, so narrowing
+    the glob, short-circuiting the loop, or widening the allow-list all left it green
+    while the original Critical's three branches were live in the tree.
+
+    So this builds a scratch tree and calls `_standalone_readers` on it.
     """
-    import pathlib as _p
-    import tempfile
+    tree = tmp_path / "techne"
+    (tree / "core").mkdir(parents=True)
+    (tree / "core" / "regressed.py").write_text(
+        "def f(config):\n    if config.standalone:\n        return 1\n"
+    )
+    (tree / "core" / "clean.py").write_text(
+        "def f(config):\n    return archivist_binding(config)\n"
+    )
+    (tree / "core" / "commented.py").write_text(
+        "def f(config):\n    # config.standalone was read here once\n    return 2\n"
+    )
+    (tree / "exempt.py").write_text("def f(config):\n    if config.standalone:\n        pass\n")
 
-    scratch = _p.Path(tempfile.mkdtemp()) / "regressed.py"
-    scratch.write_text("def f(config):\n    if config.standalone:\n        return 1\n")
+    found = _standalone_readers(root=str(tree), allowed={str(tree / "exempt.py")})
 
-    found = [
-        i
-        for i, line in enumerate(scratch.read_text().splitlines(), 1)
-        if "config.standalone" in line.split("#", 1)[0]
-    ]
-    assert found, "the detection predicate itself does not match a live branch"
+    assert found == [f"{tree / 'core' / 'regressed.py'}:2"], (
+        f"the scan did not report exactly the regressed line: {found}"
+    )
 
-    # And the real scan reaches modules the import-based derivation could not: tiers.py
-    # defines the binding constants, and checks.py is where the Critical lived.
-    import techne.core.checks  # noqa: F401
-    import techne.core.tiers  # noqa: F401
 
-    scanned = {p for p in _p.Path("techne").rglob("*.py")}
-    for required in ("techne/core/checks.py", "techne/core/tiers.py", "techne/mcp_server.py"):
-        assert _p.Path(required) in scanned, f"{required} is outside the scan"
+def test_the_scan_is_not_vacuously_green(tmp_path):
+    """EMPTINESS IS THE TRIPWIRE'S PASS CONDITION, so nothing distinguished "no module
+    branches on standalone" from "the scan broke and found nothing". Round 2 had a
+    non-emptiness anchor and the round-3 rewrite dropped it. (Prudence, #714 r3.)
+    """
+    tree = tmp_path / "techne"
+    tree.mkdir()
+    (tree / "a.py").write_text("def f(config):\n    if config.standalone:\n        pass\n")
+
+    assert _standalone_readers(root=str(tree), allowed=set()), (
+        "the scan reported nothing against a tree that plainly contains the branch — "
+        "it is broken, not clean"
+    )
+
+
+def test_the_allow_list_is_exactly_one_file():
+    """WIDENING THE ALLOW-LIST IS HOW THIS GUARD GETS NEUTRALISED, and it is not a
+    contrived mutation — it is what someone does to make a red build green, and the
+    tripwire's failure message used to suggest it. Adding `techne/core/checks.py` here
+    would have left all three branches of the round-1 Critical live with every test in
+    the suite passing. (Prudence, #714 r3.)
+    """
+    assert _STANDALONE_ALLOWED == {"techne/config.py"}, (
+        f"the allow-list grew to {_STANDALONE_ALLOWED} — config.py DEFINES the field; "
+        "every other reader is a private opinion about the archivist and the point of "
+        "techne#552 is that there are none"
+    )
 
 
 def test_registration_opens_no_store_unless_one_is_bound(config, tmp_path):

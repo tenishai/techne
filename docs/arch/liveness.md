@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-liveness
 updated: 2026-08-20
-anchor: techne/core/checks.py sha=8df66916b6ad4703c18b187e95a9bd85bb378d2e
+anchor: techne/core/checks.py sha=5e3de248984379862a1550169e920b26f372c70d
 ---
 # liveness — subsystem health checks (techne#468/#469)
 
@@ -72,3 +72,5 @@ FAIL-MODES:
 - Registration drift and liveness are blind to each other by design: drift compares by `(event, matcher)` presence only, so a hook registered under the WRONG INTERPRETER is caught by neither. Known, open gap.
 
 **techne#552 — THREE CHECKS HERE HELD PRIVATE OPINIONS ABOUT THE ARCHIVIST, AND ALL THREE WENT STALE THE MOMENT THE BINDING LANDED.** `check_outbox_targets`' consumer rule mirrored the old `_has_live_consumer` and produced a PERMANENT UNCLEARABLE UNOBSERVABLE on every previously-team box; `_declared_outbox_targets` declared the knowledge lane off `standalone` while what FEEDS it is a store binding, giving a false red one way and a false GREEN the other; and `check_instance_identity` keyed the techne#553 provenance guard on `standalone`, which defaults to True — so `archivist: store` with an empty `instance_name` reported DORMANT while writing unattributable rows into a shared store. All three now ask `core.archivist.archivist_binding`. THE TRIPWIRE THAT GUARDS THIS SELECTS ON THE DEFECT, NOT ON COUPLING (techne#714 r2). Two earlier revisions did not: a hand-typed three-file list missed `checks.py` entirely, and an import-based derivation ("modules mentioning core.archivist or core.tiers") selected for MODULES THAT ALREADY ASK THE RIGHT QUESTION — the property a regressed module lacks. Demonstrated: restoring the parent's `checks.py`, with all three live branches, left that tripwire GREEN, and `tiers.py` — which DEFINES the binding constants — was never in it. The scan is now every module under `techne/` for the branch itself, with `config.py` allow-listed as the field's definer. THE GENERAL RULE: a check that mirrors another module's branch is a COPY, and it goes stale silently — the anchor gate cannot see it, because the checked file need not change for its belief to become false.
+
+**PER-LANE CONSUMER (techne#714 r2).** `check_outbox_targets` declares TWO lanes with TWO different drains: `sync:` is drained by `flush(adapter)`, `sink:` by `flush_sinks`. One predicate across both re-made the #469 r5 Critical on the never-enqueued branch — an eight-week-dead knowledge lane on a store-bound box with the typical `noop` adapter read DORMANT/ok=True. A sink lane is DECLARED only because something feeds it, so it has a consumer by construction. `TestNoopExcusesOnlySyncLanes` pins the pending-backlog branch; `TestPerLaneConsumer` now pins this one, in both directions.

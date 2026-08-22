@@ -2294,8 +2294,12 @@ class TestPerLaneConsumer:
         self._aged(config)
 
         lanes = [r for r in run_checks(config) if r.name == "outbox:sync:thread_summary"]
-        if lanes:
-            assert lanes[0].verdict is Verdict.DORMANT, lanes[0].detail
+        # ASSERTED, NOT GUARDED BY `if lanes:` — its sibling above gets this right, and
+        # a conditional assertion goes vacuously green the day the lane stops being
+        # declared, which is exactly the absence-reads-as-healthy shape this module's
+        # docstrings are about. (Prudence, #714 r3.)
+        assert lanes, "the sync lane was not declared — the test can no longer see its subject"
+        assert lanes[0].verdict is Verdict.DORMANT, lanes[0].detail
 
 
 class TestIdentityEvidenceNamesWhatItRead:
