@@ -1048,6 +1048,11 @@ _EGRESS_PROBES: dict[str, object] = {
     "model": "openai/probe-model",
     "reflect.model": "openai/probe-reflect",
     "conflict.model": "openai/probe-conflict",
+    # techne#552. `archivist` selects WHICH STORE the seam is bound to. Probes "local"
+    # rather than "store" because the loader rejects `store` with no target — a probe
+    # that raises would prove the key validates, not that stripping it denies anything,
+    # which is what this guard is for.
+    "archivist": "local",
     # techne#555. The custodian's bindings run UNATTENDED, so a probe here is not
     # ceremony: it is what proves a locked operator layer can actually deny an agent
     # that tries to repoint headless traffic at its own endpoint.

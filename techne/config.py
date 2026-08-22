@@ -463,12 +463,23 @@ class Config:
     conflict: ConflictConfig = field(default_factory=ConflictConfig)
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     platform: Platform = "claude-code"
-    # Federation topology (techne#224): am I a lone agent that pushes memory
-    # directly, or part of a team that routes through an Archivist? standalone=true
-    # → the sync adapter pushes (the sync: outbox lane); standalone=false → route to
-    # the Archivist sink (sink:archivist owns the push). techne behaviour is
-    # otherwise identical. Default true = behaviour-preserving + the lone-agent case.
+    # DEPRECATED by techne#552 — read, honoured, never a lane selector again.
+    # It asked "do I use an archivist", and the answer forked BOTH halves of the loop
+    # (write at lifecycle._thread_summary_target, read at archivist_connection), so a
+    # default install neither read nor wrote one — the opposite of the intent. It is
+    # now one input to `core.archivist.archivist_binding`, where `standalone: true` is
+    # read as a statement about TOPOLOGY ("I am a lone agent"), not as "no archivist":
+    # a lone agent still makes the archivist call, it simply resolves locally.
+    # Kept so existing config files keep working and keep meaning what they meant.
     standalone: bool = True
+    #: WHAT THE ARCHIVIST IS BOUND TO (techne#552) — "" (resolve), "local", "store",
+    #: "none". This is the forward key; `standalone` above is its deprecated
+    #: predecessor and is still read. The distinction that matters: `standalone` asked
+    #: "do I use an archivist", which forked the call path; this asks "what is the
+    #: archivist bound to", which selects a BINDING behind one call. Resolution lives
+    #: in `core.archivist.archivist_binding` — do NOT re-derive it here or anywhere
+    #: else; six call sites each deciding for themselves is the defect #552 removes.
+    archivist: str = ""
     # Base Archivist store (techne#346): the techne-schema SQLite db a non-standalone
     # instance's sink:archivist writes team memory into. "" → <data_dir>/archivist.db.
     archivist_db_path: str = ""
@@ -672,6 +683,28 @@ class Config:
             cfg.platform = raw["platform"]
         if "standalone" in raw:
             cfg.standalone = bool(raw["standalone"])
+        if "archivist" in raw:
+            value = str(raw["archivist"] or "").strip().lower()
+            if value not in ("", "local", "store", "none"):
+                raise ValueError(
+                    f"Invalid archivist binding '{raw['archivist']}'. "
+                    "Must be 'local' (resolves to this instance's own knowledge), "
+                    "'store' (a separate archivist db), or 'none' (no archivist). "
+                    "Omit it to resolve automatically."
+                )
+            # A `store` binding with nowhere to point is a config that cannot do what
+            # it says. Caught here rather than at first use, because the failure would
+            # otherwise surface as an empty team tier — an absent result that looks
+            # exactly like a working one, which is the failure mode techne#555 exists
+            # to stop reproducing.
+            if value == "store" and not (
+                raw.get("archivist_db_path") or "archivist" in (raw.get("connections") or {})
+            ):
+                raise ValueError(
+                    "archivist: store requires somewhere to bind — set archivist_db_path "
+                    "or add an 'archivist' entry under connections."
+                )
+            cfg.archivist = value
         if "archivist_db_path" in raw:
             cfg.archivist_db_path = str(raw["archivist_db_path"])
         if "instance_name" in raw:
@@ -990,6 +1023,7 @@ class Config:
             "data_dir": str(self.data_dir),
             "platform": self.platform,
             "standalone": self.standalone,
+            "archivist": self.archivist,
             "archivist_db_path": self.archivist_db_path,
             "instance_name": self.instance_name,
             "model": self.model,

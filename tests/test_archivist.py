@@ -67,31 +67,36 @@ def test_standalone_defaults_true_and_round_trips(config, tmp_path):
 # ---- lane selector (#224) ---------------------------------------------------
 
 
-def test_lane_selector_by_topology(config):
-    config.standalone = True
-    assert _thread_summary_target(config) == THREAD_SUMMARY_SYNC_TARGET
-    config.standalone = False
-    assert _thread_summary_target(config) == ARCHIVIST_SINK_TARGET
+def test_raw_thread_summaries_never_take_the_archivist_lane(config):
+    """DISTILLED-ONLY EGRESS (techne#552 part 3). A thread summary is RAW operational
+    memory, and the Archivist federates only the distilled — but nothing enforced that
+    at write time, so `sink:archivist` carried raw across the seam for every
+    non-standalone instance. MEASURED before this change: archivist.db held 17,819
+    observations against 1,104 knowledge rows, so RAW WAS 94% OF THE TEAM STORE.
+
+    The lane is now the same whatever the topology says, which is the point: topology
+    selects a BINDING, never a lane.
+    """
+    for standalone in (True, False):
+        config.standalone = standalone
+        assert _thread_summary_target(config) == THREAD_SUMMARY_SYNC_TARGET
+
+    config.archivist_db_path = "/tmp/some-team-store.db"
+    assert _thread_summary_target(config) == THREAD_SUMMARY_SYNC_TARGET, (
+        "a store binding must not resurrect the raw lane — that is the whole of part 3"
+    )
 
 
-def test_has_live_consumer_is_lane_aware(config):
-    # standalone lane → gated on the sync adapter being non-noop.
-    config.standalone = True
+def test_live_consumer_follows_the_one_lane_summaries_actually_use(config):
+    """Summaries always take the sync lane now, so the only consumer that decides
+    whether enqueueing is safe is the sync adapter. A `noop` adapter means nobody
+    drains, and enqueueing into an undrainable lane grows a backlog nobody asked for
+    (#79, #224)."""
     config.sync.adapter = "noop"
     assert _has_live_consumer(config) is False
-    config.sync.adapter = "github_issues"
+
+    config.sync.adapter = "filesystem"
     assert _has_live_consumer(config) is True
-
-    # team lane → gated on a registered archivist sink, regardless of sync adapter.
-    config.standalone = False
-    config.sync.adapter = "noop"
-    with use_registry({}):
-        assert _has_live_consumer(config) is False
-        register_base_archivist(config)
-        assert _has_live_consumer(config) is True
-
-
-# ---- base Archivist store + sink --------------------------------------------
 
 
 def test_archivist_db_is_techne_schema(config):
@@ -155,14 +160,27 @@ def test_archivist_db_rejects_personal_db_collision(config):
         archivist_db(config)
 
 
-def test_ensure_registered_for_gates_on_standalone(config):
-    with use_registry({}):
-        config.standalone = True
-        ensure_registered_for(config)
-        assert get_sink(ARCHIVIST_SINK_TARGET) is None  # standalone → no-op
-        config.standalone = False
-        ensure_registered_for(config)
-        assert get_sink(ARCHIVIST_SINK_TARGET) is ARCHIVIST_SINK
+def test_ensure_registered_for_is_unconditional(config):
+    """REGISTRATION IS NOT A GATE, AND MAKING IT ONE WAS A REGRESSION (techne#552).
+
+    Registering a sink only makes DELIVERY POSSIBLE. An UNREGISTERED target is what
+    `techne outbox prune-orphans` treats as an orphan and marks DEAD — permanently
+    undeliverable. Every box that was non-standalone before this change has rows in
+    these lanes (11,442 on the author's), so gating registration on the binding would
+    have destroyed any pending one at the first prune after upgrade.
+
+    The gate belongs on ENQUEUE — `_thread_summary_target` and
+    `push_knowledge_to_archivist` decide whether NEW rows exist; this decides whether
+    already-promised ones can still be delivered.
+    """
+    from techne.core.archivist import ARCHIVIST_KNOWLEDGE_TARGET
+
+    for binding in ("none", "local", ""):
+        with use_registry({}):
+            config.archivist = binding
+            ensure_registered_for(config)
+            assert get_sink(ARCHIVIST_SINK_TARGET) is not None, binding
+            assert get_sink(ARCHIVIST_KNOWLEDGE_TARGET) is not None, binding
 
 
 def test_pending_sink_row_drains_from_fresh_process(config):
@@ -237,13 +255,20 @@ def test_push_knowledge_noop_when_standalone(config):
 
 
 def test_push_knowledge_is_idempotent(config):
-    """Re-pushing doesn't duplicate — the outbox dedups by content-hash (#346 PR2)."""
+    """Re-pushing doesn't duplicate — the outbox dedups by content-hash (#346 PR2).
+
+    Binds an explicit STORE rather than setting `standalone = False`: since techne#552
+    the push is a no-op unless the archivist is somewhere ELSE, because under `local`
+    the "team" knowledge IS this instance's knowledge and the copy was a measured 98.9%
+    mirror costing 93% of session teardown. The idempotence being asserted is a
+    property of the egress path, which only exists for a store.
+    """
     from techne.core.database import init_db
     from techne.core.knowledge import store
     from techne.core.stores import plain_connect
 
     init_db(config.db_path)
-    config.standalone = False
+    config.archivist_db_path = str(config.data_dir / "team-archivist.db")
     store(config.db_path, "fact one", type="fact")
     with use_registry({}):
         register_base_archivist(config)
@@ -257,18 +282,27 @@ def test_push_knowledge_is_idempotent(config):
     assert n == 1
 
 
-def test_archivist_connection_and_effective_connections_gate_on_standalone(config):
-    from techne.mcp_server import _effective_connections
+def test_archivist_connection_exists_only_for_a_separate_store(config, tmp_path):
+    """None for BOTH `absent` and `local`, for different reasons: `absent` has no
+    archivist, and `local` IS this instance's own knowledge — already tier 1, so
+    fanning out to it would read the same rows twice and report one source as two.
+    Only `store` names somewhere else.
+    """
+    from techne.core.archivist import archivist_binding
 
-    config.standalone = True
+    config.archivist = "none"
     assert archivist_connection(config) is None
-    assert "archivist" not in _effective_connections(config)
+    assert archivist_binding(config) == "absent"
 
-    config.standalone = False
+    config.archivist = "local"
+    assert archivist_connection(config) is None
+    assert archivist_binding(config) == "local"
+
+    config.archivist = ""
+    config.archivist_db_path = str(tmp_path / "team.db")
     spec = archivist_connection(config)
     assert spec is not None and spec.role == "team"
-    assert spec.db_path.endswith("archivist.db")
-    assert "archivist" in _effective_connections(config)
+    assert archivist_binding(config) == "store"
 
 
 def test_end_to_end_team_recall_loop(config, tmp_path):
@@ -648,4 +682,91 @@ def test_rows_marked_dead_are_re_enqueued_not_stranded(config, tmp_path):
 
     assert recovered == 3, (
         f"dead rows must be re-enqueued so the lane can recover; got {recovered}"
+    )
+
+
+# ---- techne#552: the binding replaces the fork -------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ({}, "local"),
+        ({"standalone": True}, "local"),
+        ({"standalone": False}, "local"),
+        ({"archivist": "local"}, "local"),
+        ({"archivist": "none"}, "absent"),
+        ({"archivist_db_path": "/tmp/team.db"}, "store"),
+        ({"archivist": "none", "archivist_db_path": "/tmp/team.db"}, "store"),
+        ({"standalone": True, "archivist_db_path": "/tmp/team.db"}, "store"),
+    ],
+)
+def test_the_binding_resolves_from_every_input(raw, expected):
+    """ONE FUNCTION DECIDES (techne#552). Six call sites used to branch on
+    `config.standalone` independently, which is how the read path and the write path
+    came to disagree about whether an archivist existed.
+
+    Two rows carry the intent that made this issue: a bare install resolves to `local`
+    rather than to nothing (the archivist is a CALL, so a lone agent still makes it),
+    and a NAMED STORE outranks the legacy flag — `standalone: true` alongside an
+    `archivist_db_path` used to be a config that could not do what it said.
+    """
+    from techne.config import Config
+    from techne.core.archivist import archivist_binding
+
+    assert archivist_binding(Config._from_dict(dict(raw))) == expected
+
+
+def test_local_never_egresses(config):
+    """THE MEASURED REASON `local` DOES NOT COPY. techne#552 S1-S5 found this
+    instance's archivist.db to be a 98.9% mirror of local knowledge and stopped READING
+    it; writing it is pointless by the same argument, and it is not free —
+    `push_knowledge_to_archivist`'s own docstring records the copy as 5.15s of a 5.52s
+    teardown (760 enqueues, 2,306 connections) against a 5.0s hook budget it then blew.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+
+    init_db(config.db_path)
+    store(config.db_path, "a fact that stays home", type="fact", confidence="high")
+
+    for binding in ("", "local", "none"):
+        config.archivist = binding
+        with use_registry({}):
+            register_base_archivist(config)
+            assert push_knowledge_to_archivist(config) == 0, binding
+
+
+def test_a_store_binding_still_egresses(config, tmp_path):
+    """The other half — binding somewhere else is exactly when data should move."""
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+
+    init_db(config.db_path)
+    store(config.db_path, "a fact worth sharing", type="fact", confidence="high")
+    config.archivist_db_path = str(tmp_path / "team.db")
+
+    with use_registry({}):
+        register_base_archivist(config)
+        assert push_knowledge_to_archivist(config) == 1
+
+
+def test_the_seam_has_exactly_one_decision_point():
+    """A TRIPWIRE ON THE DEFECT ITSELF. #552's finding was not a wrong default, it was
+    six call sites each deciding for themselves what the archivist is. If a new
+    `config.standalone` branch appears in the seam's modules, the fork is growing back
+    — whatever the docstrings say.
+    """
+    import pathlib as _p
+
+    seam = ["techne/core/archivist.py", "techne/lifecycle.py", "techne/core/archivist_query.py"]
+    offenders = []
+    for path in seam:
+        for i, line in enumerate(_p.Path(path).read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "config.standalone" in code or "cfg.standalone" in code:
+                offenders.append(f"{path}:{i}")
+    assert not offenders, (
+        f"the seam branches on `standalone` again at {offenders} — ask "
+        "`archivist_binding(config)` instead (techne#552)"
     )

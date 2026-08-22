@@ -519,19 +519,15 @@ def _techne_recall(args: dict, config: Config) -> dict:
     #     break team recall. An existing end-to-end test caught exactly that when this
     #     gate checked only `connections`; the default-path case is the ONLY one S2
     #     is about.
-    if ARCHIVIST_CONNECTION_NAME not in connections:
-        # `standalone: True` — the DEFAULT. archivist_connection() returned None, so
-        # no archivist exists to bind to, and the ladder must say so rather than
-        # report an empty read of a store nobody opened.
-        archivist_binding = tier_model.ARCHIVIST_ABSENT
-    elif ARCHIVIST_CONNECTION_NAME in config.connections or config.archivist_db_path:
-        # An operator expressed a binding, either way it can be expressed: a
-        # `connections` entry names a federated peer, and a non-empty
-        # `archivist_db_path` points this instance at a SHARED store (techne#346).
-        # Both are real other stores; skipping either silently breaks team recall.
-        archivist_binding = tier_model.ARCHIVIST_STORE
-    else:
-        archivist_binding = tier_model.ARCHIVIST_LOCAL
+    # ASK THE RESOLVER; DO NOT RE-DERIVE (techne#552). This block used to work the
+    # binding out from `standalone` + `connections` + `archivist_db_path` itself, which
+    # made it the seventh place with an opinion about what the archivist is — and the
+    # only one the WRITE path could disagree with. `core.archivist.archivist_binding`
+    # is now the single answer, and read, write, the query surface and this ladder all
+    # read it. That is the whole of the issue: one seam, one decision, several bindings.
+    from techne.core.archivist import archivist_binding as _resolve_binding
+
+    archivist_binding = _resolve_binding(config)
     archivist_is_local = archivist_binding == tier_model.ARCHIVIST_LOCAL
     fan_out_connections = dict(connections)
     if archivist_is_local:

@@ -26,6 +26,76 @@ log = logging.getLogger(__name__)
 ARCHIVIST_CONNECTION_NAME = "archivist"
 
 
+#: The three bindings, imported from tiers so ONE vocabulary governs the seam. They
+#: were introduced by techne#552 S1-S5 (PR #695) as a REPORTING concept derived inside
+#: `_techne_recall`; this module gives them authority — read and write now both resolve
+#: through `archivist_binding` instead of each branching on `config.standalone`.
+from techne.core.tiers import (  # noqa: E402
+    ARCHIVIST_ABSENT,
+    ARCHIVIST_LOCAL,
+    ARCHIVIST_STORE,
+)
+
+
+def archivist_binding(config) -> str:
+    """WHAT THE ARCHIVIST IS BOUND TO — the one place that decides (techne#552).
+
+    Returns ARCHIVIST_LOCAL / ARCHIVIST_STORE / ARCHIVIST_ABSENT.
+
+    THE POINT OF #552, IN ONE SENTENCE: the real question is "what is the archivist
+    bound to", never "do I use one". `standalone` was a LANE SELECTOR that forked both
+    halves of the loop — write at `lifecycle._thread_summary_target`, read at
+    `archivist_connection` — so a default install neither read nor wrote an archivist,
+    which is the opposite of the intent. Renaming or flipping that flag preserves the
+    fork; removing the fork is the fix. Six call sites branched on it; they now ask
+    this function instead.
+
+    === WHAT `local` MEANS, AND WHY IT DOES NOT COPY ===
+
+    `local` means THE CALL RESOLVES TO THE KNOWLEDGE TABLE THIS INSTANCE ALREADY HAS.
+    No second file, no egress, nothing crosses a seam.
+
+    That is not a shortcut, it is the measured conclusion of the work that came before.
+    techne#552 S1-S5 (PR #695) found this instance's archivist.db to be a 98.9% MIRROR
+    of local knowledge and deliberately STOPPED READING IT at n=1 — "paying a second
+    read to answer the same question slightly worse". Re-measured 2026-08-21: 1,104
+    live archivist rows against 1,109 local, 1,105 byte-identical by content. Reading
+    the mirror was already established as pointless; WRITING it is pointless by the
+    same argument, and it is not free — `push_knowledge_to_archivist`'s own docstring
+    records the copy as 5.15s of a 5.52s session teardown (760 enqueues, 2,306 SQLite
+    connections) against a 5.0s hook budget it then blew.
+
+    Nothing depends on the mirror: `push_knowledge_to_archivist` reads local
+    `knowledge`, never the archivist copy. So binding to a real STORE later loses
+    nothing by there having been no local copy in between.
+
+    === RESOLUTION ORDER ===
+
+    An explicitly-configured store wins, because pointing at a path or naming a peer
+    IS the operator saying "the archivist is over there". Then the explicit `archivist`
+    key. Then legacy `standalone`. Then the default, which is `local` — the archivist
+    call always exists.
+    """
+    # An operator who named a store has already answered the question.
+    if config.archivist_db_path or ARCHIVIST_CONNECTION_NAME in (config.connections or {}):
+        return ARCHIVIST_STORE
+
+    explicit = (getattr(config, "archivist", "") or "").strip().lower()
+    if explicit:
+        return {"none": ARCHIVIST_ABSENT, "local": ARCHIVIST_LOCAL, "store": ARCHIVIST_STORE}[
+            explicit
+        ]
+
+    # LEGACY `standalone`, deliberately NOT read as "no archivist". Someone who wrote
+    # `standalone: true` was describing their TOPOLOGY — "I am a lone agent" — and
+    # under this model a lone agent still makes the archivist call; it simply resolves
+    # locally. Mapping it to ABSENT would preserve the fork this issue exists to
+    # remove. `standalone: false` meant "route through the Archivist", which is a
+    # store binding only if they also named one — and they did not, or the first
+    # branch would have caught it — so it too resolves local.
+    return ARCHIVIST_LOCAL
+
+
 def _resolve_archivist_path(config) -> Path:
     """Resolve the base Archivist db path WITHOUT creating it. ``archivist_db_path``
     overrides; default ``<data_dir>/archivist.db``.
@@ -233,20 +303,38 @@ def register_base_archivist(config=None) -> None:
 
 
 def ensure_registered_for(config) -> None:
-    """Register the Archivist sinks iff this instance routes to them (``standalone``
-    is false). Idempotent and cheap — call at EVERY entry point that enqueues OR
-    drains sink rows (the session-end sites, the session-end hook's ``flush_sinks``,
-    and ``techne outbox flush-sinks``), so a row that failed immediate delivery is
-    still deliverable from a fresh CLI/hook process (techne#346 review). No-op when
-    standalone (the sink lane is unused)."""
-    if not config.standalone:
-        register_base_archivist(config)
+    """Register the Archivist sinks so their lanes remain DELIVERABLE.
+
+    UNCONDITIONAL, AND THAT IS THE CORRECTION (techne#552). Gating registration on the
+    binding looked right and was wrong: registering a sink has no effect beyond making
+    DELIVERY POSSIBLE, while an UNREGISTERED target is what `techne outbox
+    prune-orphans` treats as an orphan and marks DEAD — permanently undeliverable. Any
+    box that was non-standalone before this change has rows in these lanes (11,442 on
+    the author's), and a pending one would have been destroyed by the first prune after
+    upgrade. Caught by `test_pending_sink_row_drains_from_fresh_process`, which exists
+    for exactly the techne#346 recovery path this would have broken.
+
+    THE GATE BELONGS ON ENQUEUE, NOT ON REGISTRATION. `_thread_summary_target` and
+    `push_knowledge_to_archivist` decide whether NEW rows are created; this decides
+    whether EXISTING ones can still be delivered. Conflating "should we write" with
+    "can we finish writing what we already promised" is what made this a one-line
+    regression rather than an obvious one.
+
+    Idempotent and cheap — call at EVERY entry point that enqueues OR drains sink rows
+    (the session-end sites, the session-end hook's ``flush_sinks``, and ``techne outbox
+    flush-sinks``), so a row that failed immediate delivery is still deliverable from a
+    fresh CLI/hook process (techne#346 review)."""
+    register_base_archivist(config)
 
 
 def push_knowledge_to_archivist(config) -> int:
     """Egress live durable knowledge from the personal store to the Archivist
     (techne#346 PR2). Enqueues each live entry (``superseded_by IS NULL``) to
-    ``sink:archivist_knowledge``. Returns the number enqueued. No-op when standalone.
+    ``sink:archivist_knowledge``. Returns the number enqueued. NO-OP UNLESS THE
+    ARCHIVIST IS BOUND TO A SEPARATE STORE (techne#552) — under `local` the "team"
+    knowledge IS this instance's knowledge, so there is nothing to egress and the copy
+    this function used to make was a measured 98.9% mirror that cost 93% of session
+    teardown.
 
     The sink handler skips a fact already live in the Archivist, so re-pushing the
     same fact doesn't duplicate it. Two KNOWN GAPS in this v1, both requiring the
@@ -281,7 +369,7 @@ def push_knowledge_to_archivist(config) -> int:
        accident — that accident is worth naming rather than losing silently. A
        status filter cannot fix this one; it needs #223's reconcile path, which
        compares against what the SINK holds rather than what we enqueued."""
-    if config.standalone:
+    if archivist_binding(config) != ARCHIVIST_STORE:
         return 0
     from techne.core.knowledge import REDIRECTED_TYPES
     from techne.core.knowledge_export import query_live_knowledge
@@ -392,10 +480,15 @@ def push_knowledge_to_archivist(config) -> int:
 
 
 def archivist_connection(config):
-    """The base Archivist as a federation connection for recall, or None when
-    standalone (techne#346 PR2). Points at the archivist db PATH without creating
-    it — fan_out_search opens it read-only and skips a missing/empty store."""
-    if config.standalone:
+    """The base Archivist as a federation connection for recall, or None when there is
+    no SEPARATE store to fan out to (techne#346 PR2, rebound by techne#552).
+
+    None for BOTH `absent` and `local`, for different reasons: `absent` has no
+    archivist, and `local` IS this instance's own knowledge — already tier 1, so
+    fanning out to it would read the same rows twice and report them as a second
+    source. Only `store` names somewhere else. Points at the PATH without creating it;
+    fan_out_search opens it read-only and skips a missing/empty store."""
+    if archivist_binding(config) != ARCHIVIST_STORE:
         return None
     from techne.config import FederationConnectionSpec
 

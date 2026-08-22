@@ -9,10 +9,12 @@ import sys
 
 from techne.config import Config
 
-# Thread-summary outbox lanes, selected by topology (techne#224). One flag picks
-# the lane; techne behaviour is otherwise identical.
-#   standalone → sync:  — adapter-bound; flush(adapter) drains to the team backend.
-#   team       → sink:  — delivered to the Archivist sink, which owns the push.
+# Thread-summary outbox lanes. HISTORICALLY selected by topology (techne#224); since
+# techne#552 raw summaries always take the sync lane, because the Archivist federates
+# only the distilled. ARCHIVIST_SINK_TARGET is kept — delivered rows in that lane must
+# remain drainable — but nothing enqueues into it any more.
+#   sync:  — adapter-bound; flush(adapter) drains to the team backend.
+#   sink:  — the Archivist sink. Legacy for thread summaries; still used by knowledge.
 THREAD_SUMMARY_SYNC_TARGET = "sync:thread_summary"
 ARCHIVIST_SINK_TARGET = "sink:archivist"
 # Back-compat alias (was the only, sync-only, target before #224).
@@ -20,22 +22,40 @@ THREAD_SUMMARY_TARGET = THREAD_SUMMARY_SYNC_TARGET
 
 
 def _thread_summary_target(config) -> str:
-    """The outbox lane for thread summaries, by topology (techne#224)."""
-    return THREAD_SUMMARY_SYNC_TARGET if config.standalone else ARCHIVIST_SINK_TARGET
+    """The outbox lane for thread summaries.
+
+    ALWAYS THE SYNC LANE NOW — techne#552 part 3, distilled-only egress.
+
+    A thread summary is RAW operational memory. The chain the Archivist exists to
+    serve is operational -> distill -> team knowledge, and §3 of
+    memory-system-architecture.md says the Archivist "federates only the distilled" —
+    but nothing enforced that at write time, so `sink:archivist` carried raw summaries
+    across the seam whenever the instance was non-standalone. MEASURED on the author's
+    store before this change: archivist.db held 17,819 observations against 1,104
+    knowledge rows. RAW WAS 94% OF THE TEAM STORE.
+
+    Durability and sharing are different concerns and this is where they were being
+    conflated. Whether raw belongs somewhere else for durability is a separate open
+    question (techne#552 leaves it open on purpose); what is settled is that it does
+    not belong in the shared, federated, distilled tier.
+
+    ARCHIVIST_SINK_TARGET IS NOT DELETED. 11,442 delivered rows sit in that lane on the
+    author's box and must stay drainable and readable; `ensure_registered_for` still
+    registers the sink for a store binding. This function simply stops FEEDING it.
+    """
+    return THREAD_SUMMARY_SYNC_TARGET
 
 
 def _has_live_consumer(config) -> bool:
     """True when the SELECTED egress lane has a real drain — gate enqueue on it so a
     noop lane doesn't grow an undrainable backlog (#79, #224).
 
-    standalone → the sync adapter drains `sync:` rows (noop = no consumer).
-    team       → a registered `sink:archivist` delivers `sink:` rows.
+    Thread summaries now always take the `sync:` lane (see _thread_summary_target), so
+    the only consumer that matters is the sync adapter — a `noop` adapter means nobody
+    drains, and enqueueing into an undrainable lane is how a backlog grows that no one
+    asked for (#79, #224).
     """
-    if config.standalone:
-        return config.sync.adapter != "noop"
-    from techne.sync.sinks import get_sink
-
-    return get_sink(ARCHIVIST_SINK_TARGET) is not None
+    return config.sync.adapter != "noop"
 
 
 def run_session_start(
