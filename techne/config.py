@@ -697,12 +697,28 @@ class Config:
             # otherwise surface as an empty team tier — an absent result that looks
             # exactly like a working one, which is the failure mode techne#555 exists
             # to stop reproducing.
-            if value == "store" and not (
+            has_target = bool(
                 raw.get("archivist_db_path") or "archivist" in (raw.get("connections") or {})
-            ):
+            )
+            if value == "store" and not has_target:
                 raise ValueError(
                     "archivist: store requires somewhere to bind — set archivist_db_path "
                     "or add an 'archivist' entry under connections."
+                )
+            # THE MIRROR CASE, AND IT IS THE ONE THAT LOSES DATA. A leftover
+            # `archivist_db_path` outranks the explicit key in the resolver, so
+            # `archivist: none` alongside a stale path still egressed knowledge to that
+            # store — an operator opting OUT kept writing to somewhere else. tiers.py
+            # states the requirement plainly: "opting out must remain sayable", and with
+            # a stale path present it was not sayable at all. Rejected rather than
+            # silently resolved, for the same reason `store` with no target is: a config
+            # that cannot do what it says should say so at load. (Prudence, #714.)
+            if value in ("none", "local") and has_target:
+                raise ValueError(
+                    f"archivist: {value} contradicts the store you named. Remove "
+                    "archivist_db_path (and any 'archivist' entry under connections), "
+                    f"or drop `archivist: {value}` — as written, the opt-out is silently "
+                    "overridden and knowledge still egresses to that store."
                 )
             cfg.archivist = value
         if "archivist_db_path" in raw:

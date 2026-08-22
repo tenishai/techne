@@ -227,12 +227,26 @@ def test_provenance_is_written_in_the_same_statement_as_the_row(pair):
 
 
 def _identity(standalone, name, tmp_path):
+    """`standalone` here means "is this instance writing to a SHARED store" — inverted,
+    because that is what the flag used to imply and what every caller below reads it as.
+
+    IT IS NOW EXPRESSED AS A BINDING (techne#552). `check_instance_identity` keyed on
+    `config.standalone`, which defaults to True, so an operator adopting `archivist:
+    store` got DORMANT "attributes nothing to a shared store" while writing
+    unattributable rows into one — a false GREEN on exactly the config the guard exists
+    for. The check now asks `archivist_binding`, so a test that says "shared" has to
+    NAME a store; setting the legacy flag alone resolves `local` and the guard
+    correctly declines to nag. Callers are unchanged: False still reads as "shared".
+    """
     from techne.core.checks import check_instance_identity
 
     cfg = Config.load()
     cfg.data_dir = tmp_path
-    cfg.standalone = standalone
     cfg.instance_name = name
+    if standalone:
+        cfg.archivist = "none"
+    else:
+        cfg.archivist_db_path = str(tmp_path / "shared-archivist.db")
     return check_instance_identity(cfg)
 
 

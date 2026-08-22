@@ -697,7 +697,10 @@ def test_rows_marked_dead_are_re_enqueued_not_stranded(config, tmp_path):
         ({"archivist": "local"}, "local"),
         ({"archivist": "none"}, "absent"),
         ({"archivist_db_path": "/tmp/team.db"}, "store"),
-        ({"archivist": "none", "archivist_db_path": "/tmp/team.db"}, "store"),
+        # NOTE the contradictory pair — `archivist: none` beside a named store — is NOT
+        # here: an earlier revision asserted it resolved to `store`, which is the bug
+        # Prudence found in #714 (the opt-out was silently overridden). It is now
+        # rejected at load; see test_an_opt_out_beside_a_named_store_is_rejected.
         ({"standalone": True, "archivist_db_path": "/tmp/team.db"}, "store"),
     ],
 )
@@ -751,15 +754,46 @@ def test_a_store_binding_still_egresses(config, tmp_path):
         assert push_knowledge_to_archivist(config) == 1
 
 
-def test_the_seam_has_exactly_one_decision_point():
-    """A TRIPWIRE ON THE DEFECT ITSELF. #552's finding was not a wrong default, it was
-    six call sites each deciding for themselves what the archivist is. If a new
-    `config.standalone` branch appears in the seam's modules, the fork is growing back
-    — whatever the docstrings say.
+def _seam_modules() -> list[str]:
+    """Every module in the archivist seam, DERIVED.
+
+    ONE definition, used by both the tripwire and the test that guards the tripwire.
+    An earlier revision had the guard recompute this independently, which meant
+    narrowing the tripwire's own list broke nothing — the test-of-the-test could not
+    see the change because it was not reading the same list. That is the hand-
+    maintained-list defect recurring one level up, inside the guard against it.
     """
     import pathlib as _p
 
-    seam = ["techne/core/archivist.py", "techne/lifecycle.py", "techne/core/archivist_query.py"]
+    out = []
+    for path in sorted(_p.Path("techne").rglob("*.py")):
+        # config.py DEFINES the field; reading it there is not a private opinion.
+        if path.name == "config.py":
+            continue
+        text = path.read_text()
+        if "core.archivist" in text or "core.tiers" in text:
+            out.append(str(path))
+    return out
+
+
+def test_the_seam_has_exactly_one_decision_point():
+    """A TRIPWIRE ON THE DEFECT ITSELF. #552's finding was not a wrong default, it was
+    six call sites each deciding for themselves what the archivist is. If a module in
+    the seam branches on `standalone` again, the fork is growing back.
+
+    THE SEAM LIST IS DERIVED, NOT TYPED, AND THAT IS THE WHOLE FIX. The first version
+    named three files by hand and MISSED `checks.py`, which held three surviving
+    `config.standalone` branches that all disagreed with the new binding — two of them
+    false GREENS on guards whose own card calls the failure they prevent guaranteed.
+    Prudence found them and named the cause exactly: the guard covered "the modules you
+    remembered" rather than the seam. A hand-maintained list of what to check is the
+    same class of defect as a hand-maintained list of what the archivist is.
+    """
+    import pathlib as _p
+
+    seam = _seam_modules()
+    assert seam, "derivation found no seam modules at all — the heuristic broke"
+
     offenders = []
     for path in seam:
         for i, line in enumerate(_p.Path(path).read_text().splitlines(), 1):
@@ -768,5 +802,67 @@ def test_the_seam_has_exactly_one_decision_point():
                 offenders.append(f"{path}:{i}")
     assert not offenders, (
         f"the seam branches on `standalone` again at {offenders} — ask "
-        "`archivist_binding(config)` instead (techne#552)"
+        f"`archivist_binding(config)` instead (techne#552). Seam scanned: {seam}"
     )
+
+
+def test_the_tripwire_reaches_where_the_typed_list_did_not():
+    """Reads the SAME derivation the tripwire uses, so narrowing it fails here. The two
+    modules named are where the Critical actually lived: `checks.py` held all three
+    stale branches, and `mcp_server.py` held the seventh private opinion."""
+    covered = _seam_modules()
+    for required in ("techne/core/checks.py", "techne/mcp_server.py"):
+        assert required in covered, (
+            f"{required} is outside the seam derivation — the tripwire is back to "
+            f"guarding remembered modules. Covered: {covered}"
+        )
+
+
+def test_registration_opens_no_store_unless_one_is_bound(config, tmp_path):
+    """Registering a sink must not CREATE the store. `register_base_archivist(config)`
+    pins `_HANDLER_DB` via `archivist_db(config)` -> `init_db`, which creates the file —
+    so unconditional registration made `archivist.db` appear under `local` and under an
+    explicit `archivist: none`, contradicting this module's own "no second file".
+
+    The drainability fix is preserved: both sinks still register in every case. Only
+    the config pin is conditional. (Prudence, #714.)
+    """
+    from techne.core.archivist import ARCHIVIST_KNOWLEDGE_TARGET
+
+    for binding, expect_file in (("none", False), ("local", False), ("", False)):
+        data_dir = tmp_path / f"dd-{binding or 'auto'}"
+        data_dir.mkdir()
+        config.data_dir = data_dir
+        config.archivist = binding
+        config.archivist_db_path = ""
+        with use_registry({}):
+            ensure_registered_for(config)
+            assert get_sink(ARCHIVIST_SINK_TARGET) is not None, binding
+            assert get_sink(ARCHIVIST_KNOWLEDGE_TARGET) is not None, binding
+        created = [f.name for f in data_dir.iterdir() if f.name.startswith("archivist.db")]
+        assert bool(created) is expect_file, (
+            f"binding {binding!r} created {created} — `local`/`none` must open nothing"
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"archivist": "none", "archivist_db_path": "/tmp/team.db"},
+        {"archivist": "local", "archivist_db_path": "/tmp/team.db"},
+        {"archivist": "none", "connections": {"archivist": {"role": "team", "db_path": "/t.db"}}},
+    ],
+)
+def test_an_opt_out_beside_a_named_store_is_rejected(raw):
+    """OPTING OUT MUST REMAIN SAYABLE (tiers.py states it as a requirement). A leftover
+    `archivist_db_path` outranks the explicit key in the resolver, so `archivist: none`
+    plus a stale path still egressed knowledge to that store — the opt-out silently
+    overridden, writing to a destination the operator asked to stop using. Rejected at
+    load like `store`-with-no-target, because a config that cannot do what it says
+    should say so. (Prudence, #714.)
+    """
+    from techne.config import Config
+
+    with pytest.raises(ValueError) as e:
+        Config._from_dict(dict(raw))
+    assert "contradicts" in str(e.value)

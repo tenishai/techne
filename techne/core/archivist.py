@@ -323,8 +323,24 @@ def ensure_registered_for(config) -> None:
     Idempotent and cheap — call at EVERY entry point that enqueues OR drains sink rows
     (the session-end sites, the session-end hook's ``flush_sinks``, and ``techne outbox
     flush-sinks``), so a row that failed immediate delivery is still deliverable from a
-    fresh CLI/hook process (techne#346 review)."""
-    register_base_archivist(config)
+    fresh CLI/hook process (techne#346 review).
+
+    BUT PASS THE CONFIG ONLY FOR A STORE, because pinning `_HANDLER_DB` calls
+    `archivist_db(config)`, which calls `init_db` — and that CREATES THE FILE. So the
+    first version of this created `archivist.db` under `local` AND under an explicit
+    `archivist: none`, contradicting this module's own claim that `local` means "no
+    second file". No rows were written and nothing read it, so it was a stray empty
+    store rather than data loss — but an operator who wrote `archivist: none` to opt
+    out got one initialised anyway, and the live verification that missed it read clean
+    only because the file already existed on that box, which makes CREATION invisible.
+    Registering with no config still registers both sinks and opens nothing;
+    `_handler_db()`'s documented `Config.load()` fallback covers the legacy-row
+    delivery case, which is the one place creating the file is legitimate.
+    (Prudence, #714.)"""
+    if archivist_binding(config) == ARCHIVIST_STORE:
+        register_base_archivist(config)
+    else:
+        register_base_archivist()
 
 
 def push_knowledge_to_archivist(config) -> int:

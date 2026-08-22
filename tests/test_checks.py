@@ -1312,7 +1312,14 @@ class TestSurvivingMutants:
         """
         from techne.core.database import connect
 
-        config.standalone = False  # team topology -> the sink lane has a consumer
+        # A LIVE CONSUMER, EXPRESSED THE WAY THE CODE NOW DECIDES IT (techne#552). This
+        # said `config.standalone = False`, which mirrored the pre-#552 rule that a team
+        # box always had a consumer. Thread summaries now always take the sync lane, so
+        # the consumer is the sync adapter — and leaving this as the old spelling made
+        # the case DORMANT instead of UNOBSERVABLE, quietly deleting the RULE 1 coverage
+        # this test exists for. The assertion is unchanged; only how the precondition is
+        # stated moved.
+        config.sync.adapter = "filesystem"
         self._sessions(config)
         conn = connect(config.db_path)
         try:  # age the store past the fresh-install grace

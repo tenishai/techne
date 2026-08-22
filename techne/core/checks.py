@@ -445,9 +445,17 @@ def _declared_outbox_targets(config) -> set[str]:
     from techne.lifecycle import _thread_summary_target
 
     targets = {_thread_summary_target(config)}
-    if not config.standalone:
-        # Team topology also drains the knowledge sink. Only meaningful when the
-        # sink lane is the live one — standalone never registers these.
+    # DECLARE THE KNOWLEDGE LANE IFF SOMETHING FEEDS IT (techne#552). This asked
+    # `not config.standalone`, which mirrored the OLD fork; what decides whether the
+    # lane is fed is now `push_knowledge_to_archivist`, which egresses only for a STORE
+    # binding. The two came apart in BOTH directions — a team box with no store named
+    # declared a lane nothing writes (false red), and a lone box WITH a store named
+    # fed a lane that was never declared, so it produced no result at all. That second
+    # one is the absence-reads-as-healthy bug the docstring above says this declaration
+    # was added to close, reopened on the very binding #552 introduces.
+    from techne.core.archivist import ARCHIVIST_STORE, archivist_binding
+
+    if archivist_binding(config) == ARCHIVIST_STORE:
         targets.add("sink:archivist_knowledge")
     return targets
 
@@ -1141,7 +1149,17 @@ def check_instance_identity(config) -> CheckResult | None:
     to remove. `<agent>@<cabal>` qualifies it; the machine is the wrong scope, since two
     cabals can share a host and one cabal can span several.
     """
-    if config.standalone:
+    # KEYED ON THE BINDING, NOT THE LEGACY FLAG (techne#552). This asked
+    # `config.standalone`, which DEFAULTS TO TRUE — so an operator who adopted
+    # `archivist: store` (and had no reason to touch `standalone`) got DORMANT
+    # "attributes nothing to a shared store" while writing distilled knowledge into a
+    # shared store under an empty instance_name. That is a false GREEN on precisely the
+    # configuration this guard exists for, and liveness.md records the collision it
+    # prevents as GUARANTEED rather than likely — cabal ships `archivist` as a persona
+    # name. The inverse fired too: a local-bound box reported STALE for writing nowhere.
+    from techne.core.archivist import ARCHIVIST_STORE, archivist_binding
+
+    if archivist_binding(config) != ARCHIVIST_STORE:
         return CheckResult(
             name="identity:instance",
             subsystem="archivist",
@@ -1691,10 +1709,20 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # the test to kill it exposed this.
     #
     # The question here is topological, and answerable from config alone:
-    #   standalone -> the sync adapter drains; "noop" means nothing does.
-    #   team       -> the archivist sink ships with the product; the lane HAS a
-    #                 consumer whether or not this particular process wired it.
-    has_consumer = (config.sync.adapter != "noop") if config.standalone else True
+    #   Thread summaries always take the sync lane since techne#552, so the sync
+    #   adapter is the only consumer that decides; "noop" means nothing drains.
+    #
+    # MIRRORS `lifecycle._has_live_consumer` AND MUST KEEP MIRRORING IT. This branched
+    # on `config.standalone` and returned True for a team box — matching the OLD
+    # lifecycle. After #552 that combination (standalone: false + sync.adapter: noop,
+    # the typical team box, which routed via the sink and never needed a sync adapter)
+    # produced a PERMANENT UNCLEARABLE FALSE FAILURE: lifecycle correctly enqueues
+    # nothing while this believed a consumer existed, so the lane rendered
+    # UNOBSERVABLE — a failing state under RULE 1 — with the operator's only escapes
+    # being to configure a sync adapter they do not want or to set `standalone: true`.
+    # The comment above exists to prevent exactly "a verdict the operator cannot act on
+    # and cannot clear".
+    has_consumer = config.sync.adapter != "noop"
     for missing in sorted(_declared_outbox_targets(config) - seen):
         if not has_consumer:
             verdict = Verdict.DORMANT
