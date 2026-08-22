@@ -5,6 +5,53 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The archivist is a call, not a deployment mode** (#552). `standalone` was a *lane
+  selector*: it forked both halves of the loop — write at
+  `lifecycle._thread_summary_target`, read at `archivist_connection` — so a default
+  install neither read nor wrote an archivist, which is the opposite of the intent.
+  Six call sites each decided for themselves what the archivist was, and the read path
+  and write path could disagree.
+
+  One function decides now: `core.archivist.archivist_binding(config)` returns
+  `local` / `store` / `absent`, and read, write, the query surface and the recall
+  ladder all ask it. The vocabulary is not new — #695 introduced it as a *reporting*
+  concept derived inside `_techne_recall`; this gives it authority. `standalone` is
+  deprecated but still read, and still means what it meant: it describes a **topology**
+  ("I am a lone agent"), not an absence — and a lone agent still makes the archivist
+  call. A named `archivist_db_path` now outranks it, so the previously contradictory
+  config (a path set while `standalone: true`) does what it says.
+
+- **`local` resolves to the knowledge you already have — it does not copy.** Measured:
+  the local archivist was a 98.9% mirror of local knowledge (1,104 live rows against
+  1,109, 1,105 byte-identical by content). #695 measured that mirror and deliberately
+  stopped *reading* it; writing it is pointless by the same argument and was not free —
+  `push_knowledge_to_archivist`'s own docstring records the copy as **5.15s of a 5.52s
+  session teardown** (760 enqueues, 2,306 SQLite connections) against a 5.0s hook
+  budget it then blew. On the author's box this change takes that teardown from ~1,100
+  enqueues to **0**. Nothing depended on the copy: the egress path reads local
+  `knowledge`, never the mirror.
+
+### Fixed
+
+- **Raw operational memory no longer crosses the team seam** (#552). A thread summary
+  is raw; the Archivist federates only the distilled, but nothing enforced that at
+  write time, so `sink:archivist` carried raw summaries across for every non-standalone
+  instance. Measured before the change: `archivist.db` held **17,819 observations
+  against 1,104 knowledge rows — raw was 94% of the team store.** Summaries now always
+  take the sync lane. The sink is *not* deleted and registration is *unconditional*:
+  11,442 delivered rows sit in that lane on the author's box, and an unregistered
+  target is what `outbox prune-orphans` marks permanently dead. The gate belongs on
+  enqueue, not on registration.
+
+  **Operator-visible after upgrade:** `techne doctor` grows an
+  `outbox:sink:archivist — dormant — retired by techne#552` line on any box that ran
+  `standalone: false`. That line is the fix, not a symptom: the lane's delivered rows are
+  kept readable on purpose, and marking it retired is what stops it reporting a dead
+  producer forever with no operator action able to clear it.
+
+
 ### Added
 
 - **`techne archivist query` and the `techne_archivist_query` MCP tool** (#554) — a
