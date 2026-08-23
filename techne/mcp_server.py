@@ -1762,11 +1762,18 @@ def _codex_search(args: dict, config: Config) -> dict:
 
     query = args.get("query", "")
     limit = args.get("limit", 20)
+    # ONE EXPRESSION FOR "WHICH TREE ARE WE ASKING ABOUT", used by all three consumers
+    # below (the db lookup, the binding, and the freshness root). It was spelled out
+    # three times — `args["repo"] or cwd` inside `_codex_repo_db`, again for the
+    # envelope, again for `index_freshness` — and every defect in this function this
+    # week has been two of those three disagreeing. They agree today; the point is that
+    # they now CANNOT disagree.
+    import os as _os
+
+    _start = args.get("repo") or _os.getcwd()
     db_path = _codex_repo_db(args, config)
     if db_path is None:
-        return _with_binding(
-            config, {"results": [], "count": 0, "notice": _NO_REPO_HINT}, args.get("repo")
-        )
+        return _with_binding(config, {"results": [], "count": 0, "notice": _NO_REPO_HINT}, _start)
     hits = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
     # "unknown" included (techne#595 r1): a hit whose file could not be read or
     # resolved is not a trustworthy hit, and counting only stale/missing meant an
@@ -1798,7 +1805,6 @@ def _codex_search(args: dict, config: Config) -> dict:
         # before the meta key existed (or by a path that never set it) resolves
         # every RELATIVE file path to "unknown", and an all-unknown scan reported
         # as "current" would be this very bug wearing the fix's clothes.
-        import os as _os
         from pathlib import Path as _Path
 
         # PRIMARY, NOT THE WORKTREE (Prudence, #725 r3). `db_path` is the PRIMARY
@@ -1811,15 +1817,13 @@ def _codex_search(args: dict, config: Config) -> dict:
         # already added for exactly this.
         from techne.core.repo import primary_repo_root
 
-        idx = index_freshness(
-            db_path, repo_root=primary_repo_root(_Path(args.get("repo") or _os.getcwd()))
-        )
+        idx = index_freshness(db_path, repo_root=primary_repo_root(_Path(_start)))
         result["index"] = idx
         # Rendered by core.codegraph so this tool and the grep-assist HOOK say the
         # same thing about the same nothing (techne#602). A second copy would be a
         # second definition of "how much can this absence be trusted".
         result["notice"] = zero_result_notice(idx)
-    return _with_binding(config, result, args.get("repo"))
+    return _with_binding(config, result, _start)
 
 
 def _techne_archivist_query(args: dict, config: Config) -> dict:
