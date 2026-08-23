@@ -41,14 +41,61 @@ SKIP_TOOLS = {
 # vector index. Anything NOT in this set (git, gh, pytest, make, docker, uv, pip,
 # npm, terraform, …) is captured. This is what lets capture_bash be ON without the
 # noise cost that kept it OFF by default (techne#557 root-cause + capture_bash decision).
-_READONLY_BASH_HEADS = frozenset({
-    "ls", "ll", "pwd", "cd", "echo", "printf", "cat", "bat", "head", "tail",
-    "less", "more", "which", "type", "whoami", "id", "date", "env", "printenv",
-    "hostname", "uname", "clear", "true", "man", "tldr", "help",
-    "grep", "egrep", "fgrep", "rg", "ag", "find", "fd", "sed", "awk",
-    "wc", "sort", "uniq", "tr", "cut", "column", "stat", "file", "tree",
-    "du", "df", "ps", "realpath", "basename", "dirname", "readlink",
-})
+_READONLY_BASH_HEADS = frozenset(
+    {
+        "ls",
+        "ll",
+        "pwd",
+        "cd",
+        "echo",
+        "printf",
+        "cat",
+        "bat",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "which",
+        "type",
+        "whoami",
+        "id",
+        "date",
+        "env",
+        "printenv",
+        "hostname",
+        "uname",
+        "clear",
+        "true",
+        "man",
+        "tldr",
+        "help",
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "ag",
+        "find",
+        "fd",
+        "sed",
+        "awk",
+        "wc",
+        "sort",
+        "uniq",
+        "tr",
+        "cut",
+        "column",
+        "stat",
+        "file",
+        "tree",
+        "du",
+        "df",
+        "ps",
+        "realpath",
+        "basename",
+        "dirname",
+        "readlink",
+    }
+)
 
 # WHY THESE THREE SETS LOOK THE WAY THEY DO. Moved here with the constants from
 # core/evidence.py (#524); the rationale was left behind there, stranded above an
@@ -234,15 +281,15 @@ def _bash_is_readonly_noise(command: str) -> bool:
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. /bin/ls
         if head not in _READONLY_BASH_HEADS:
             return False
-        if head in ("sed", "awk") and any(t.startswith("-i") for t in tokens[i + 1:]):
+        if head in ("sed", "awk") and any(t.startswith("-i") for t in tokens[i + 1 :]):
             return False  # in-place edit mutates a file
         if head == "find" and any(
             t in ("-delete", "-exec", "-execdir", "-ok", "-okdir") or t.startswith("-fprint")
-            for t in tokens[i + 1:]
+            for t in tokens[i + 1 :]
         ):
             return False  # find action that deletes / runs a command / writes a file
         if head == "sort" and any(
-            t.startswith("-o") or t.startswith("--output") for t in tokens[i + 1:]
+            t.startswith("-o") or t.startswith("--output") for t in tokens[i + 1 :]
         ):
             return False  # `sort -o file` writes in place
     return True
@@ -532,9 +579,7 @@ def _edited_line(file_path, tool_input: dict) -> int | None:
 def _build_edit_rail_context(symbol: dict, rows: list, total: int) -> str:
     """Render the edited symbol's dependents into a compact additionalContext block."""
     shown = len(rows)
-    header = (
-        f"## Codex — editing `{symbol['name']}` may affect {total} dependent(s)"
-    )
+    header = f"## Codex — editing `{symbol['name']}` may affect {total} dependent(s)"
     lines = [
         header,
         "> Experimental blast-radius rail (techne#335); the graph may be stale — "
@@ -625,7 +670,7 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
 
         from techne.core.codegraph import annotate_freshness, reachable, symbol_at
         from techne.core.codex import resolve_repo_db_for_query
-        from techne.core.repo import find_repo_root
+        from techne.core.repo import find_repo_root, primary_repo_root
         from techne.hooks._injection_log import log_context_injection
         from techne.hooks._timeout import bounded_hook
 
@@ -635,6 +680,15 @@ def _inject_edit_blast_radius(config: Config, session_id: str, tool_name: str, t
             return None  # repo not indexed → no-op
         root = find_repo_root(p)
         if root is None:
+            return None
+        # DECLINE INSIDE A LINKED WORKTREE (Prudence, #719). `resolve_repo_db_for_query`
+        # now answers with the PRIMARY's index, deliberately — but this rail pairs that
+        # graph with a LINE NUMBER from the file in front of us. A PR-branch line looked
+        # up against the base-branch graph names a different symbol, so the rail would
+        # annotate the edit with some other function's dependents. Silence beats a
+        # confident answer about the wrong code, which is the same rule the codex
+        # binding applies when it refuses to resolve to another repo's index.
+        if root != primary_repo_root(p):
             return None
         try:
             rel = str(p.relative_to(root))
@@ -774,7 +828,10 @@ def main():
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
-        print(f"techne: post_tool_use received invalid JSON on stdin — capture skipped: {exc}", file=sys.stderr)
+        print(
+            f"techne: post_tool_use received invalid JSON on stdin — capture skipped: {exc}",
+            file=sys.stderr,
+        )
         db = resolve_db_path()
         if db:
             record_hook_run(
