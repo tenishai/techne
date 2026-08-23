@@ -336,12 +336,17 @@ class TestMainLoopNonDictGuard:
     def test_non_dict_lines_skipped_valid_request_still_served(self, tmp_path):
         # Mixed stdin: a JSON null, a JSON int, a JSON array, then a real request.
         # The server must ignore the first three and answer the initialize.
-        stdin = "\n".join([
-            "null",
-            "42",
-            "[1, 2, 3]",
-            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
-        ]) + "\n"
+        stdin = (
+            "\n".join(
+                [
+                    "null",
+                    "42",
+                    "[1, 2, 3]",
+                    json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+                ]
+            )
+            + "\n"
+        )
         env = {**os.environ, "TECHNE_HOME": str(tmp_path)}
         result = subprocess.run(
             [sys.executable, "-m", "techne.mcp_server"],
@@ -372,7 +377,9 @@ def test_codex_blast_radius_unresolvable_symbol_returns_error(tmp_path, config, 
 
     codex_db = tmp_path / "codex.db"
     SqliteStore("codex", codex_db).migrate(CODEX_SCHEMA)
-    add_symbol(codex_db, id="a.py::verify::function::1", file="a.py", name="verify", kind="function")
+    add_symbol(
+        codex_db, id="a.py::verify::function::1", file="a.py", name="verify", kind="function"
+    )
     add_symbol(codex_db, id="b.py::verify::method::5", file="b.py", name="verify", kind="method")
     add_symbol(codex_db, id="c.py::solo::function::1", file="c.py", name="solo", kind="function")
 
@@ -399,7 +406,9 @@ def test_codex_blast_radius_unresolvable_symbol_returns_error(tmp_path, config, 
 
     # Overflowing candidate list is flagged as truncated, not silently capped.
     for i in range(12):
-        add_symbol(codex_db, id=f"m{i}.py::dup::function::1", file=f"m{i}.py", name="dup", kind="function")
+        add_symbol(
+            codex_db, id=f"m{i}.py::dup::function::1", file=f"m{i}.py", name="dup", kind="function"
+        )
     r4 = mcp_server._codex_blast_radius({"symbol_id": "dup"}, config)
     assert len(r4["candidates"]) == 10
     assert r4.get("candidates_truncated") is True
@@ -499,3 +508,222 @@ def test_mcp_tools_doc_is_complete():
     # test, which is the only reason it is worth having.
     missing = [t["name"] for t in TOOLS if f"### `{t['name']}`" not in text]
     assert not missing, f"tools registered but undocumented in docs/mcp-tools.md: {missing}"
+
+
+def _codex_db_with_fan_in(tmp_path, n: int, proven: int | None = None):
+    """A hub symbol with *n* direct dependents — the shape that blew the token ceiling."""
+    from techne.core.codegraph import add_edge, add_symbol
+    from techne.core.codex import CODEX_SCHEMA
+    from techne.core.stores import SqliteStore
+
+    db = tmp_path / "codex.db"
+    SqliteStore("codex", db).migrate(CODEX_SCHEMA)
+    add_symbol(db, id="hub.py::hub::function::1", file="hub.py", name="hub", kind="function")
+    # `proven` controls how many edges RESOLVE to a real symbol. The rest carry a bare
+    # name, which is what `only_proven` filters out — the branch where the walk's own
+    # bound and the filter interact.
+    keep = n if proven is None else proven
+    for i in range(n):
+        sid = f"caller_{i}.py::caller_{i}::function::{i + 1}"
+        add_symbol(db, id=sid, file=f"caller_{i}.py", name=f"caller_{i}", kind="function")
+        if i < keep:
+            add_edge(
+                db,
+                from_symbol=sid,
+                to_name="hub",
+                kind="call",
+                to_symbol="hub.py::hub::function::1",
+                resolution_status="resolved",
+            )
+        else:
+            add_edge(db, from_symbol=sid, to_name="hub", kind="call")
+    return db
+
+
+def test_blast_radius_caps_the_response_and_says_it_did(tmp_path, config, monkeypatch):
+    """tenishai/agents#53. A hot symbol's radius exceeded the MCP tool's token ceiling
+    outright — measured on techne, `execute` returned 500 nodes / 175,020 characters,
+    about 44k tokens — so the reviewer got `Error: result exceeds maximum allowed tokens`
+    instead of an impact set. An answer too large to return is the same as no answer,
+    except it also costs the call.
+
+    `reachable` orders by (depth, name), so the head is the CLOSEST dependents — which is
+    what "what breaks if I change this" wants. The cut is stated, never silent.
+    """
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, 120)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+
+    r = mcp_server._codex_blast_radius({"symbol_id": "hub.py::hub::function::1"}, config)
+
+    assert r["returned"] == 50, "default cap not applied"
+    assert len(r["nodes"]) == 50
+    assert r["walked"] == 120, "the pre-cap size must survive into the response"
+    assert r["truncated"] is True
+    assert "Showing the 50 closest of 120" in r["notice"], (
+        "the cap was applied silently — a truncated radius that does not say so reads as "
+        "the complete impact set, which is how 'I checked every caller' gets believed"
+    )
+
+
+def test_blast_radius_does_not_flag_truncation_when_it_did_not_truncate(
+    tmp_path, config, monkeypatch
+):
+    """The other half: a small radius must not claim to be cut. A `truncated` flag that
+    is always true is the same as no flag."""
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, 3)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+
+    r = mcp_server._codex_blast_radius({"symbol_id": "hub.py::hub::function::1"}, config)
+
+    assert r["returned"] == 3
+    assert r["walked"] == 3
+    assert r["truncated"] is False
+    assert "Showing the" not in r.get("notice", "")
+
+
+def test_blast_radius_clamps_a_nonsense_limit(tmp_path, config, monkeypatch):
+    """The LOWER clamp is load-bearing: `limit=0` would otherwise return an empty node
+    list, which reads exactly like "nothing depends on this symbol" — the
+    absence-shaped answer techne#303 exists to prevent.
+
+    THE UPPER CLAMP IS NOT INDEPENDENTLY TESTABLE and is kept as belt-and-braces, which
+    is worth saying rather than pretending: `reachable`'s own `limit` already stops the
+    walk at 500, so `limit=100000` truncates a list that never exceeds 500 either way.
+    A mutation removing `min(..., _BLAST_WALK_CAP)` passes this whole file. It earns its
+    place only if that walk bound is ever raised.
+    """
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, 120)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+    sym = {"symbol_id": "hub.py::hub::function::1"}
+
+    # limit=0 is FALSY, so `args.get("limit") or DEFAULT` coalesces it to the default
+    # before any clamp runs. Asserting on 0 therefore tests the `or`, not `max(1, ...)` —
+    # a mutation removing the clamp passed that version of this test.
+    zero = mcp_server._codex_blast_radius({**sym, "limit": 0}, config)
+    assert zero["returned"] == mcp_server._BLAST_DEFAULT_LIMIT
+
+    # NEGATIVE is what reaches the lower clamp. Without it, `rows[:-5]` is a valid slice
+    # returning 115 of 120 nodes — so the cap is silently ABANDONED, which is the
+    # response-size blowout this whole change exists to prevent, reachable by one
+    # mistyped argument. (An earlier version of this assertion said `>= 1`, which 115
+    # satisfies; the mutation survived it.)
+    neg = mcp_server._codex_blast_radius({**sym, "limit": -5}, config)
+    assert neg["returned"] == 1, (
+        f"a negative limit was passed straight to a slice: returned {neg['returned']} "
+        "nodes, abandoning the cap entirely"
+    )
+
+    huge = mcp_server._codex_blast_radius({**sym, "limit": 100_000}, config)
+    assert huge["returned"] <= mcp_server._BLAST_WALK_CAP
+
+    small = mcp_server._codex_blast_radius({**sym, "limit": 5}, config)
+    assert small["returned"] == 5, "an explicit smaller limit must still be honoured"
+
+
+def test_blast_radius_reports_the_walk_cap_as_a_floor(tmp_path, config, monkeypatch):
+    """PRE-EXISTING AND PREVIOUSLY SILENT. `reachable`'s own limit defaults to 500, so a
+    500-node walk has always been indistinguishable from a complete one. Reporting that
+    floor as a total is how "covered everything" gets believed — the same defect class
+    this whole change is about, one layer down."""
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, mcp_server._BLAST_WALK_CAP + 20)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+
+    r = mcp_server._codex_blast_radius({"symbol_id": "hub.py::hub::function::1"}, config)
+
+    assert r["walked"] == mcp_server._BLAST_WALK_CAP
+    assert "floor rather than the true size" in r["notice"], (
+        "a walk that hit its own bound reported the bound as the radius size"
+    )
+
+
+def test_blast_radius_floor_notice_survives_the_only_proven_filter(tmp_path, config, monkeypatch):
+    """PRUDENCE, #722 — A FOURTH SURVIVING MUTATION, and she found it by asking which
+    variable the guard reads rather than whether it fires.
+
+    `test_blast_radius_reports_the_walk_cap_as_a_floor` passes whether the guard keys on
+    the pre-filter walk or the post-filter count, so it does not discriminate. The
+    500-node bound is hit by the WALK; `only_proven` filters AFTERWARDS. Keying on the
+    post-filter count silenced the floor notice in precisely the branch where truncation
+    does the most damage — that result is the intersection of two independently-capped
+    walks.
+
+    The regression this pins is not the empty node list, which is techne#606's and
+    predates the cap. It is that the response went from saying NOTHING to affirmatively
+    asserting `truncated: false` while missing real dependents: silence became a false
+    completeness claim.
+    """
+    from techne import mcp_server
+
+    # ONLY A FEW PROVEN, so the filter cuts the walk's 500 down to a handful. With the
+    # guard on the POST-FILTER count it sees ~5 and stays silent; the walk still hit its
+    # bound. A first version of this test made every dependent proven, so the filter
+    # removed nothing, the two counts were equal, and the mutation survived.
+    db = _codex_db_with_fan_in(tmp_path, mcp_server._BLAST_WALK_CAP + 20, proven=5)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+
+    r = mcp_server._codex_blast_radius(
+        {"symbol_id": "hub.py::hub::function::1", "only_proven": True}, config
+    )
+    assert r["walked"] < mcp_server._BLAST_WALK_CAP, (
+        "fixture did not produce a post-filter count below the walk bound"
+    )
+
+    assert "floor rather than the true size" in r.get("notice", ""), (
+        "the walk hit its bound and the response did not say so, because the guard read "
+        "the post-filter count instead of the walk"
+    )
+
+
+def test_blast_radius_names_the_depth_of_what_it_cut(tmp_path, config, monkeypatch):
+    """ "The head is the closest dependents" is not "all the closest". A hub whose
+    dependents are ALL at depth 1 loses 70 DIRECT callers to a cap of 50, and a caller
+    reading "showing 50 of 120" cannot tell that from a deep tail being trimmed."""
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, 120)  # every dependent is a direct caller
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+
+    r = mcp_server._codex_blast_radius({"symbol_id": "hub.py::hub::function::1"}, config)
+
+    assert "70 more at depth 1" in r["notice"], (
+        f"the notice did not say the cut was direct callers: {r['notice']!r}"
+    )
+
+
+def test_blast_radius_passes_its_walk_bound_rather_than_mirroring_it(tmp_path, config, monkeypatch):
+    """PRUDENCE, #722(b). `_BLAST_WALK_CAP` was a COPY of `reachable`'s own default, and
+    a copy can drift silently — the same defect class as the floor guard. Passing it
+    makes the constant true by construction, and this test is what makes that
+    observable: lower the constant and the walk must actually shrink. Mirroring cannot
+    do that, because the callee would keep using its own 500."""
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, 300)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+    monkeypatch.setattr(mcp_server, "_BLAST_WALK_CAP", 30)
+
+    r = mcp_server._codex_blast_radius(
+        {"symbol_id": "hub.py::hub::function::1", "limit": 200}, config
+    )
+
+    assert r["walked"] == 30, (
+        f"the walk ignored the module's bound and used the callee's default: {r['walked']}"
+    )
+    assert "floor rather than the true size" in r.get("notice", "")
+
+    # THE SECOND `reachable()` CALL IS NOT GUARDED BY THIS TEST, and saying so beats
+    # pretending. Prudence removed its bound and the whole file still passed. My first
+    # attempt to close it asserted `walked <= 30` on an `only_proven` call — which
+    # cannot discriminate, because `only_proven` filters the FIRST walk's already-capped
+    # rows, so that number is <= 30 either way. Detecting it needs a fixture whose
+    # proven nodes sort late enough to fall outside one cap window but not the other.
+    # Filed rather than half-built: an assertion that cannot fail is the decoration this
+    # suite keeps catching. (Prudence, #722 nit.)

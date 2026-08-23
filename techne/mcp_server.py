@@ -962,7 +962,10 @@ TOOLS = [
             "one repo (db-per-repo, techne#209): pass `repo` to pick it, else the "
             "server's working directory's repo is used. Each node carries `proven`: "
             "false means it is reached only by matching a bare call name and may not be "
-            "a real dependent (techne#606) — see only_proven. Experimental: the index is built "
+            "a real dependent (techne#606) — see only_proven. Returns the closest `limit` "
+            "nodes by depth (default 50), with `walked` and `truncated` stating what was "
+            "cut — a hot symbol's full radius exceeds the response token ceiling. "
+            "Experimental: the index is built "
             "manually and may be stale — re-run `techne codex index` after code changes."
         ),
         "inputSchema": {
@@ -1000,6 +1003,16 @@ TOOLS = [
                         "Return only nodes reached entirely through edges resolved to a "
                         "real symbol. Off by default, because most edges are still "
                         "name-matched and this would empty the radius (techne#606)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": (
+                        "Max nodes returned, closest-by-depth first; clamped to 500. "
+                        "Measured uncapped worst case on one repo: 500 nodes / ~44k "
+                        "tokens, which returns a token-ceiling ERROR instead of an "
+                        "impact set (tenishai/agents#53)."
                     ),
                 },
             },
@@ -1748,6 +1761,14 @@ def _techne_capabilities(args: dict, config: Config) -> dict:
     return capability_report(config)
 
 
+#: How many nodes a blast-radius response returns by default. 50 x ~350 chars keeps a
+#: response near 4k tokens; the measured uncapped worst case on this repo was 44k.
+_BLAST_DEFAULT_LIMIT = 50
+#: `core.codegraph.reachable`'s own default walk bound. Named here so the response can
+#: SAY when it has been hit instead of reporting a floor as a total.
+_BLAST_WALK_CAP = 500
+
+
 def _codex_blast_radius(args: dict, config: Config) -> dict:
     """Transitive reachability for a symbol, scoped to the active repo (techne#209)."""
     from techne.core.codegraph import (
@@ -1762,6 +1783,9 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     direction = args.get("direction", "in")
     include_fixtures = args.get("include_fixtures", False)
     only_proven = args.get("only_proven", False)
+    # Clamped, not trusted: a caller passing limit=100000 would recreate the exact
+    # token blowout this bound exists to prevent.
+    limit = max(1, min(int(args.get("limit") or _BLAST_DEFAULT_LIMIT), _BLAST_WALK_CAP))
     db_path = _codex_repo_db(args, config)
     if db_path is None:
         return {
@@ -1796,13 +1820,26 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     # the caller cannot tell it from a real dependent. So compute the radius
     # TWICE: the permissive walk, and the walk over proven (to_symbol) edges only.
     # Every node is then labelled, and the count resting on a guess is stated.
+    # `limit=` PASSED EXPLICITLY, NOT MIRRORED. `_BLAST_WALK_CAP` was a copy of
+    # `reachable`'s own default, and a copy can drift silently — the same defect class
+    # as the floor bug below. Passing it makes the constant true by construction and
+    # the clamp observable instead of merely labelled. (Prudence, #722.)
     raw = reachable(
         db_path,
         symbol_id,
         direction=direction,
         max_depth=depth,
         exclude_fixtures=not include_fixtures,
+        limit=_BLAST_WALK_CAP,
     )
+    # THE WALK SIZE, BEFORE ANY FILTER. The floor notice must key on this: the 500-node
+    # bound is hit by the WALK, and `only_proven` filters afterwards — so keying on the
+    # post-filter count silenced the notice in exactly the branch where truncation does
+    # the most damage, that result being the intersection of two independently-capped
+    # walks. Base said nothing there; the first version of this change affirmatively
+    # asserted `truncated: false` while missing every real dependent, turning silence
+    # into a false completeness claim. (Prudence, #722.)
+    walk_size = len(raw)
     proven_ids = {
         r["id"]
         for r in reachable(
@@ -1812,6 +1849,7 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             max_depth=depth,
             exclude_fixtures=not include_fixtures,
             include_inferred=False,
+            limit=_BLAST_WALK_CAP,
         )
     }
     if only_proven:
@@ -1821,17 +1859,60 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     rows = annotate_freshness(db_path, raw)
     stale_count = sum(1 for r in rows if r.get("freshness") in ("stale", "missing"))
     inferred_count = sum(1 for r in rows if not r["proven"])
-    result: dict = {"symbol_id": symbol_id, "direction": direction, "depth": depth, "nodes": rows}
+
+    # CAP THE RESPONSE (tenishai/agents#53). A hot symbol's radius blew the MCP tool's
+    # token ceiling outright: measured on this repo, `execute` returns 500 nodes /
+    # 175,020 characters — about 44k tokens in one response — and the reviewer who hit it
+    # got `Error: result exceeds maximum allowed tokens` instead of an impact set. An
+    # answer too large to return is the same as no answer, except it also costs the call.
+    #
+    # `reachable` orders by (depth, name), so the head is the CLOSEST dependents — which
+    # is what "what breaks if I change this" actually wants. Truncating the tail is the
+    # cheap end of the trade.
+    walked = len(rows)
+    nodes = rows[:limit]
+    result: dict = {
+        "symbol_id": symbol_id,
+        "direction": direction,
+        "depth": depth,
+        "nodes": nodes,
+        "returned": len(nodes),
+        "walked": walked,
+        "truncated": walked > limit,
+    }
     notices = []
+    # NO SILENT CAPS — state every bound, including one that predates this change.
+    if walked > limit:
+        # NAME THE DEPTH OF WHAT WAS CUT. "The head is the closest dependents" is not
+        # "all the closest": a hub with 120 dependents ALL at depth 1 loses 70 DIRECT
+        # callers to a cap of 50, and those are the highest-value nodes in the radius.
+        # Saying so is the difference between a truncated radius a caller can reason
+        # about and one they cannot. (Prudence, #722.)
+        _cut = rows[limit:]
+        _d0 = min(r["depth"] for r in _cut)
+        _n0 = sum(1 for r in _cut if r["depth"] == _d0)
+        notices.append(
+            f"Showing the {len(nodes)} closest of {walked} node(s) by depth; "
+            f"{_n0} more at depth {_d0}; pass limit= (max {_BLAST_WALK_CAP}) for more."
+        )
+    if walk_size >= _BLAST_WALK_CAP:
+        # PRE-EXISTING AND PREVIOUSLY SILENT: `reachable`'s own `limit` defaults to 500,
+        # so a 500-node walk has always been indistinguishable from a complete one. That
+        # makes `walked` a FLOOR, and a floor reported as a total is how "covered
+        # everything" gets believed.
+        notices.append(
+            f"The graph walk itself stops at {_BLAST_WALK_CAP} node(s), so {walk_size} is "
+            "a floor rather than the true size of the radius."
+        )
     if stale_count:
         notices.append(
             f"{stale_count} node(s) may be outdated — re-run `techne codex index` to refresh."
         )
     if inferred_count:
         notices.append(
-            f"{inferred_count} of {len(rows)} node(s) are reached only by matching a bare "
-            "call name, not a resolved symbol — treat them as candidates, not confirmed "
-            "dependents. Pass only_proven=true for the resolved-only radius."
+            f"{inferred_count} of {walked} walked node(s) are reached only by matching a "
+            "bare call name, not a resolved symbol — treat them as candidates, not "
+            "confirmed dependents. Pass only_proven=true for the resolved-only radius."
         )
     if notices:
         result["notice"] = " ".join(notices)
