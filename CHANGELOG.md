@@ -51,6 +51,24 @@ All notable changes to techne are documented here. Format loosely follows
   kept readable on purpose, and marking it retired is what stops it reporting a dead
   producer forever with no operator action able to clear it.
 
+- **Lane retirement follows the binding, not just the release** (#715). The same false
+  red existed one lane over: `sink:archivist_knowledge` is fed only under a `store`
+  binding, so under `local` — the new default — it has no producer either, but it is not
+  globally retired and a static set could not express it. Measured on the author's box
+  minutes after #714 merged: 2,208 delivered rows, `pending=0`, due to report `STALE`
+  seven days later. `retired_producer_targets(config)` is a predicate for that reason;
+  retirement-by-release is the special case where the answer is the same for every
+  config. The `pending == 0` gate is kept — retirement suppresses the *producer*
+  question and nothing else, so an undrained backlog still reports.
+
+  The same question, asked once per *binding* rather than once per lane, turns up a
+  **third**: `sync:thread_summary`'s only producer is gated on `sync.adapter != "noop"`,
+  and `noop` is the default. Including it also resolves a self-contradiction the check
+  carried — the declared-but-never-enqueued branch asked "does this lane have a
+  producer" and the discovered-rows loop did not, so the *same lane under the same
+  config* reported `dormant/ok` with zero rows and `stale/ok=False` with three drained
+  ones. Both branches now answer from one predicate.
+
 
 ### Added
 
