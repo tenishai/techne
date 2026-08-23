@@ -27,7 +27,7 @@ from pathlib import Path
 
 from techne.config import Config
 from techne.core import migrator
-from techne.core.repo import find_repo_root
+from techne.core.repo import find_repo_root, primary_repo_root
 from techne.core.stores import (
     SqliteStore,
     StoreAdapter,
@@ -499,7 +499,13 @@ def resolve_repo_db_for_query(config: Config, start_path: Path | str) -> Path | 
     read consumers must no-op on None rather than create an empty db.
     """
     ensure_legacy_migrated(config)
-    root = find_repo_root(Path(start_path))
+    # PRIMARY, not the worktree (tenishai/agents#53). A `git worktree` checkout has its
+    # own `.git`, so `find_repo_root` stops there — a path the codex has never indexed,
+    # which made every query from inside a review or a worktree-per-session checkout
+    # answer "no codex index for the active repo". READ PATH ONLY: the write path still
+    # uses `find_repo_root`, or an edit in a worktree would write a PR branch's symbols
+    # into the base graph other sessions query. See `primary_repo_root`.
+    root = primary_repo_root(Path(start_path))
     if root is None:
         return None
     db_path = repo_db_path(config, root)
