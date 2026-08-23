@@ -2513,3 +2513,98 @@ class TestRetirementIsAPropertyOfTheBinding:
         assert lanes and lanes[0].verdict is not Verdict.DORMANT, (
             "an undrained backlog was hidden by retirement"
         )
+
+
+class TestTheThirdLane:
+    """techne#716 — `sync:thread_summary`'s only producer is `run_session_end`, gated on
+    `_has_live_consumer` -> `sync.adapter != "noop"`, and noop is the DEFAULT.
+    Structurally identical to the knowledge lane being gated on a store binding.
+
+    THE SHARPEST FORM IS THE SELF-CONTRADICTION: `check_outbox_targets` already asked
+    this question in its declared-but-never-enqueued branch and never asked it in the
+    discovered-rows loop, so the SAME lane under the SAME config got opposite verdicts
+    decided only by whether it happened to have history.
+    """
+
+    def _drained(self, config, target, ts="2026-06-01T00:00:00+00:00"):
+        from techne.core.database import connect
+        from techne.core.state import ensure_session
+
+        conn = connect(config.db_path)
+        try:
+            for _ in range(3):
+                conn.execute(
+                    "INSERT INTO outbox (target, data_json, status, synced_at, created_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (target, "{}", "synced", ts, ts),
+                )
+            conn.execute("UPDATE schema_version SET applied_at = ?", (ts,))
+            conn.commit()
+        finally:
+            conn.close()
+        ensure_session(config.db_path, "sess-since")
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ?", (ts, _iso(timedelta(0)))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _lane(self, config):
+        from techne.lifecycle import THREAD_SUMMARY_SYNC_TARGET
+
+        return [r for r in run_checks(config) if r.name == f"outbox:{THREAD_SUMMARY_SYNC_TARGET}"]
+
+    def test_the_two_branches_agree_on_the_same_lane_and_config(self, config, tmp_path):
+        """THE FINDING ITSELF. Zero rows took the declared branch and reported DORMANT;
+        three drained rows took the discovered loop and reported STALE/ok=False — same
+        lane, same config, opposite verdicts, decided by history rather than by
+        producers. Both must now answer from one predicate."""
+        from techne.config import Config
+        from techne.core.database import init_db
+
+        empty = Config()
+        empty.db_path = tmp_path / "empty.db"
+        empty.data_dir = tmp_path
+        empty.sync.adapter = "noop"
+        init_db(empty.db_path)
+        no_rows = [r for r in run_checks(empty) if r.name.endswith("sync:thread_summary")]
+
+        config.sync.adapter = "noop"
+        self._drained(config, "sync:thread_summary")
+        with_rows = self._lane(config)
+
+        assert no_rows and with_rows, "one of the two branches produced no result"
+        assert no_rows[0].verdict == with_rows[0].verdict, (
+            f"same lane, same config, different verdicts: zero rows "
+            f"{no_rows[0].verdict.value} vs drained {with_rows[0].verdict.value}"
+        )
+        assert with_rows[0].ok is True
+
+    def test_a_live_sync_adapter_still_judges_the_lane(self, config):
+        """THE COUNTERFACTUAL. With a real adapter the lane HAS a producer, so silence
+        is evidence again — suppressing it for every config would trade a false red for
+        a false green."""
+        config.sync.adapter = "filesystem"
+        self._drained(config, "sync:thread_summary")
+
+        lanes = self._lane(config)
+        assert lanes, "no result for the sync lane"
+        assert lanes[0].verdict is not Verdict.DORMANT, (
+            "a lane with a live adapter was excused as having no producer"
+        )
+
+    def test_an_unbound_lane_is_told_how_to_revive_it(self, config):
+        """RELEASE-retired is permanent; BINDING-retired is not. Telling an operator an
+        unbound lane is "retired… not a dead one" is true about the producer and
+        misleading about the remedy."""
+        config.sync.adapter = "noop"
+        self._drained(config, "sync:thread_summary")
+
+        detail = self._lane(config)[0].detail or ""
+        assert "revive" in detail, f"no remedy hinted for an unbound lane: {detail!r}"
+        assert "retired by techne#552" not in detail, (
+            "an unbound lane was described as permanently retired"
+        )

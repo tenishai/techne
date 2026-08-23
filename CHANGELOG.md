@@ -61,6 +61,14 @@ All notable changes to techne are documented here. Format loosely follows
   config. The `pending == 0` gate is kept — retirement suppresses the *producer*
   question and nothing else, so an undrained backlog still reports.
 
+  The same question, asked once per *binding* rather than once per lane, turns up a
+  **third**: `sync:thread_summary`'s only producer is gated on `sync.adapter != "noop"`,
+  and `noop` is the default. Including it also resolves a self-contradiction the check
+  carried — the declared-but-never-enqueued branch asked "does this lane have a
+  producer" and the discovered-rows loop did not, so the *same lane under the same
+  config* reported `dormant/ok` with zero rows and `stale/ok=False` with three drained
+  ones. Both branches now answer from one predicate.
+
 
 ### Added
 

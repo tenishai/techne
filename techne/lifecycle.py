@@ -64,6 +64,21 @@ def retired_producer_targets(config) -> frozenset[str]:
         # knowledge IS this instance's knowledge, so there is nothing to push and this
         # lane has no producer — for this config, not for the product.
         retired.add(ARCHIVIST_KNOWLEDGE_TARGET)
+    if not _has_live_consumer(config):
+        # THE THIRD LANE, AND THE ONE THIS CHECK'S OWN DOCSTRING IS ABOUT (techne#715,
+        # Prudence #716). `sync:thread_summary`'s only producer is `run_session_end`,
+        # gated on `_has_live_consumer` -> `sync.adapter != "noop"` — and `noop` is the
+        # DEFAULT. Structurally identical to the knowledge lane being gated on a store
+        # binding: a producer that does not exist under a CONFIGURATION.
+        #
+        # It also resolves a self-contradiction. `check_outbox_targets` already asked
+        # this question in its declared-but-never-enqueued branch ("no live consumer
+        # (sync.adapter=noop) — correctly idle", DORMANT) while the discovered-rows loop
+        # never asked it, so the SAME lane under the SAME config got opposite verdicts
+        # decided only by whether it happened to have history:
+        #     zero rows -> dormant ok=True   3 drained rows -> stale ok=False
+        # Deriving both from this predicate is what makes them agree.
+        retired.add(THREAD_SUMMARY_SYNC_TARGET)
     return frozenset(retired)
 
 
