@@ -229,3 +229,53 @@ def test_a_connection_bound_archivist_reads_the_connection_not_a_derived_path(co
         "read the DERIVED default archivist.db — the stale mirror #552 stopped writing "
         "— while reporting the team store"
     )
+
+
+def test_codex_reports_the_binding_of_the_repo_it_actually_read(config, tmp_path, monkeypatch):
+    """PRUDENCE, #725 r2 — TWO DERIVATIONS OF ONE FACT, THE EIGHTH INSTANCE.
+
+    `_codex_repo_db` resolves `args["repo"] or cwd`; `_with_binding` derived the binding
+    from cwd alone. They disagree the moment a caller passes `repo` — and `_NO_REPO_HINT`
+    ROUTES CALLERS THERE ("pass `repo` to select an indexed repo"), so following the
+    hint returned rows labelled `absent`. The envelope denied the index it had just read
+    a row from.
+
+    NO MONKEYPATCHING OF THE RESOLVERS. My previous attempt patched BOTH
+    `_codex_repo_db` and `resolve_repo_db_for_query` to the same db, which pins the two
+    derivations to one value and makes their disagreement structurally invisible — the
+    same mistake one turn later, on a different pair. This builds a real second repo and
+    a real index, and reads with cwd pointing somewhere else entirely.
+    """
+    from techne import mcp_server
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA, repo_db_path
+    from techne.core.stores import SqliteStore
+
+    repo_b = tmp_path / "repo_b"
+    (repo_b / ".git").mkdir(parents=True)
+    db_b = repo_db_path(config, repo_b)
+    db_b.parent.mkdir(parents=True, exist_ok=True)
+    SqliteStore("codex", db_b).migrate(CODEX_SCHEMA)
+    add_symbol(
+        db_b,
+        id="b.py::kestrel_bravo::function::1",
+        file="b.py",
+        name="kestrel_bravo",
+        kind="function",
+    )
+
+    # cwd is NOT a repo — her exact reproduction. The rows can only come from `repo`.
+    elsewhere = tmp_path / "not-a-repo"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    r = mcp_server.TOOL_HANDLERS["codex_search"](
+        {"query": "kestrel_bravo", "repo": str(repo_b), "limit": 5}, config
+    )
+
+    assert r["count"] >= 1, "fixture did not read repo_b's index"
+    assert r["binding"] != "absent", (
+        "the envelope reported `absent` beside rows it had just read — the binding was "
+        "derived from cwd while the read used the `repo` argument"
+    )
+    assert r["target"] == str(db_b), f"reported {r['target']}, read {db_b}"

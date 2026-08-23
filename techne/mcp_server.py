@@ -1726,7 +1726,7 @@ _NO_REPO_HINT = (
 )
 
 
-def _with_binding(config, payload: dict) -> dict:
+def _with_binding(config, payload: dict, start_path: str | None = None) -> dict:
     """Add the codex domain's binding to an existing payload, WITHOUT changing its keys.
 
     `codex_search` predates `core.domains` and callers depend on its shape, so the
@@ -1738,7 +1738,10 @@ def _with_binding(config, payload: dict) -> dict:
     """
     from techne.core.bindings import domain_binding
 
-    report = domain_binding(config, "codex")
+    # THE SAME START PATH THE READ USED. `_codex_repo_db` resolves
+    # `args["repo"] or cwd`; deriving the binding from cwd alone made the two disagree
+    # the moment a caller passed `repo` — and the no-repo hint tells them to.
+    report = domain_binding(config, "codex", start_path)
     return {
         **payload,
         "domain": "codex",
@@ -1806,7 +1809,7 @@ def _codex_search(args: dict, config: Config) -> dict:
         # same thing about the same nothing (techne#602). A second copy would be a
         # second definition of "how much can this absence be trusted".
         result["notice"] = zero_result_notice(idx)
-    return _with_binding(config, result)
+    return _with_binding(config, result, args.get("repo"))
 
 
 def _techne_archivist_query(args: dict, config: Config) -> dict:

@@ -349,7 +349,9 @@ def test_a_resolver_that_throws_still_yields_a_row(config, monkeypatch):
     """
     import techne.core.bindings as B
 
-    def explodes(_config):
+    def explodes(_config, _start_path=None):
+        # Same shape as every real resolver (config, start_path) — see
+        # `domain_binding`, which no longer distinguishes them by arity.
         raise RuntimeError("resolver exploded")
 
     monkeypatch.setattr(B, "DOMAINS", (("archivist", explodes), *B.DOMAINS[1:]))

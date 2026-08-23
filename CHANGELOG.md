@@ -7,6 +7,28 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **The four knowledge domains are addressable by name** (#724). `archivist_search`,
+  `librarian_search`, `architect_search` and `codex_search` — the archivist, librarian,
+  architect and codex answer to their own names, in one envelope carrying the `binding`
+  each resolved to.
+
+  The recall ladder has answered across all four for months; what was missing was
+  *address*. The librarian had no tool at all (a test asserted its absence) and the
+  architect answered only to `pattern_search`, the mechanism rather than the function —
+  so operators learned `techne_*`, the one vocabulary that does not survive the move to
+  liminal and cabal.
+
+  **Every answer says what it resolved to**, which is the point rather than a nicety:
+  the same call reports `local` today and would report `store` — or whatever a cabal
+  persona or a deployed service resolves to later — without the caller changing. An
+  unreadable domain returns its *reason*, not an empty list.
+
+  `techne_recall` is unchanged and remains the default for "what do we know about X";
+  it escalates across all four rungs. These calls are for when you already know which
+  function you want. No liminal dependency is added — dot-namespacing stays liminal's
+  job.
+
+
 - **`techne bindings` — one question, four domains** (#552 part 4). What is the
   archivist / librarian / architect / codex bound to, and can I reach it, asked
   identically of each and answered in one shape. This is the "same feel" ask, answered
@@ -55,6 +77,25 @@ All notable changes to techne are documented here. Format loosely follows
   `knowledge`, never the mirror.
 
 ### Fixed
+
+- **A codex read from inside a `git worktree` resolves to the primary index** (#719,
+  tenishai/agents#53). `db-per-repo` silently meant *db-per-checkout*: a linked worktree
+  has its own `.git`, so every query from a review worktree or a worktree-per-session
+  checkout answered "no codex index for the active repo". Measured on a review agent's
+  own history: its impact pass ran on 6% of reviews, because its instructions correctly
+  say to fall back to grep when the codex returns nothing — it was following them
+  against a tool pointed at a path that had never been indexed. Read path only; the
+  write path still resolves to the worktree, or a PR branch's symbols would land in the
+  base graph other sessions query.
+
+- **`codex_blast_radius` no longer exceeds the response token ceiling** (#722). A hot
+  symbol returned 500 nodes / ~175,000 characters — about 44k tokens — and came back as
+  an error rather than an impact set. Capped at 50 closest-by-depth, with `returned`,
+  `walked` and `truncated` stating what was cut, including the *depth* of the cut
+  ("450 more at depth 1" is the difference between a truncated radius you can reason
+  about and one you cannot). It also reports `walked` as a **floor** when the graph walk
+  hits its own 500-node bound, which had always been indistinguishable from a complete
+  walk.
 
 - **Raw operational memory no longer crosses the team seam** (#552). A thread summary
   is raw; the Archivist federates only the distilled, but nothing enforced that at
