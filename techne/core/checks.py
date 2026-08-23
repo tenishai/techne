@@ -453,10 +453,14 @@ def _declared_outbox_targets(config) -> set[str]:
     # fed a lane that was never declared, so it produced no result at all. That second
     # one is the absence-reads-as-healthy bug the docstring above says this declaration
     # was added to close, reopened on the very binding #552 introduces.
-    from techne.core.archivist import ARCHIVIST_STORE, archivist_binding
+    from techne.core.archivist import (
+        ARCHIVIST_KNOWLEDGE_TARGET,
+        ARCHIVIST_STORE,
+        archivist_binding,
+    )
 
     if archivist_binding(config) == ARCHIVIST_STORE:
-        targets.add("sink:archivist_knowledge")
+        targets.add(ARCHIVIST_KNOWLEDGE_TARGET)
     return targets
 
 
@@ -1732,21 +1736,53 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # satisfies both rounds — the literal is the copy that would go stale silently if
     # the constant ever moved, which is the failure mode this PR has spent four rounds
     # closing elsewhere. (Prudence, #714 r3 + r5.)
+    from techne.lifecycle import retired_producer_targets
     from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
 
+    # Resolved ONCE, above BOTH loops, because they now share it — that sharing is the
+    # fix: the declared-but-never-enqueued branch and the discovered-rows branch used to
+    # answer "does this lane have a producer" independently, and disagreed. (#716)
+    retired_here = retired_producer_targets(config)
+
     for missing in sorted(_declared_outbox_targets(config) - seen):
-        # PER LANE, BECAUSE THE TWO DECLARED LANES HAVE TWO DIFFERENT DRAINS. Collapsing
-        # them to one predicate re-made the #469 r5 Critical on the other branch of this
-        # function: `sink:archivist_knowledge` is drained by `flush_sinks`, which
-        # `sync.adapter` does not govern, and a sink lane is DECLARED only because
-        # something feeds it — so it has a consumer by construction. With one shared
-        # predicate an eight-week-dead knowledge lane on a store-bound box with the
-        # typical noop adapter read DORMANT/healthy instead of UNOBSERVABLE.
-        # TestNoopExcusesOnlySyncLanes pins this for the PENDING-BACKLOG branch; this is
-        # the never-enqueued branch twenty lines up, which was unpinned. (Prudence, #714.)
-        has_consumer = True if missing.startswith(SINK_PREFIX) else config.sync.adapter != "noop"
-        if not has_consumer:
+        # DERIVED FROM THE SAME PREDICATE AS THE DISCOVERED-ROWS LOOP BELOW, not
+        # restated. This branch asked "does this lane have a producer" and the loop
+        # below did not, so the SAME lane under the SAME config got opposite verdicts
+        # decided only by whether it had history — dormant/ok with zero rows,
+        # stale/ok=False with three drained ones. One predicate, one answer.
+        #
+        # The per-lane distinction that #714 r2 established is preserved inside
+        # `retired_producer_targets`: a sink lane is declared only because something
+        # feeds it, and `sync.adapter` does not govern `flush_sinks`. What changed is
+        # where that reasoning lives. (Prudence, #714 r2, #716.)
+        has_producer = missing not in retired_here
+        if not has_producer:
             verdict = Verdict.DORMANT
+            # HARDCODED, AND SAFE ONLY BY A COINCIDENCE WORTH WRITING DOWN. The
+            # discovered-rows loop below reads `retired_here[target]`; this branch does
+            # not, so the same lane under the same config yields two different DETAIL
+            # strings depending on whether it has history. The verdicts agree — that was
+            # the #716 finding — but the actionable payload still does not.
+            #
+            # It is accurate in every case it can currently be reached in. Verified by
+            # sweeping the product of archivist x sync.adapter x standalone x
+            # named-store and taking `_declared_outbox_targets & retired_producer_targets`
+            # for each: EVERY overlap is `sync:thread_summary`, retired for the ADAPTER
+            # reason, and there are none for any other lane or reason. (Prudence swept
+            # the same property over a wider enumeration including loader-rejected
+            # combinations and got the same answer; the overlap COUNT differs with the
+            # enumeration, so the property is what is recorded here, not the number.)
+            #
+            # The structural reason: `sink:archivist_knowledge` is declared IFF the
+            # binding is STORE and retired IFF it is not — the same call on the same
+            # config — and `sink:archivist` is never declared at all.
+            #
+            # THAT IS THE SAME COINCIDENCE-OF-AGREEMENT THAT MAKES THE SINK MUTANT
+            # UNKILLABLE, so it protects this line for the same reason and expires the
+            # same way: THE MOMENT A FOURTH LANE IS BOTH DECLARED AND RETIRED FOR A
+            # NON-ADAPTER REASON, THIS IS THE #716 r2 BUG AGAIN — a message re-derived
+            # at the format site naming the wrong knob. Read `retired_here[missing]`
+            # then. (Prudence, #716 r3.)
             detail = "no live consumer (sync.adapter=noop) — correctly idle"
             # "/ no registered sink" removed: after the per-lane fix this branch is
             # reachable only for `sync:` lanes, so that clause named a cause that
@@ -1768,8 +1804,6 @@ def check_outbox_targets(config) -> list[CheckResult]:
             )
         )
 
-    from techne.lifecycle import RETIRED_PRODUCER_TARGETS
-
     for target, total, last_synced, pending, last_enqueued in rows:
         pending = pending or 0
 
@@ -1780,7 +1814,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # Reporting it as "producer may be dead" is technically true and
         # permanently un-actionable, which is the nag that teaches an operator
         # to skip the whole report (#469 review 3).
-        # A LANE THIS RELEASE RETIRED IS ALSO A RETIRED LANE (techne#552 part 3,
+        # A LANE WITH NO PRODUCER UNDER THIS BINDING IS A RETIRED LANE (techne#552 part 3,
         # Prudence #714 r4). `sink:archivist` stopped having a producer when thread
         # summaries moved to the sync lane, but its delivered rows stay — deliberately,
         # so they remain drainable — so `GROUP BY target` keeps returning it forever
@@ -1802,7 +1836,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # draining, and short-circuiting before the backlog branch would hide it. The
         # frozen-MAX(created_at) problem this fixes only arises once the lane is fully
         # drained, which is exactly when `pending == 0`.
-        if target in RETIRED_PRODUCER_TARGETS and pending == 0:
+        if target in retired_here and pending == 0:
             results.append(
                 CheckResult(
                     name=f"outbox:{target}",
@@ -1810,11 +1844,16 @@ def check_outbox_targets(config) -> list[CheckResult]:
                     kind=Kind.TEMPORAL,
                     verdict=Verdict.DORMANT,
                     last_fired=last_synced,
-                    evidence=f"target={target!r} in lifecycle.RETIRED_PRODUCER_TARGETS",
-                    detail=(
-                        f"retired by techne#552 ({total} delivered rows kept readable) — "
-                        "no producer by design, not a dead one"
-                    ),
+                    # THE REASON COMES FROM THE PREDICATE, not re-derived here. Each
+                    # lane is retired by a DIFFERENT knob — release, archivist binding,
+                    # sync adapter — and deriving the message at the format site named
+                    # `archivist_binding` for all of them, so a store-bound box with a
+                    # noop adapter was told its sync lane had "no producer under
+                    # binding=store": the one knob it had set correctly, and not the one
+                    # that retired the lane. `remedy` is None here, so these two strings
+                    # are the whole actionable payload. (Prudence, #716 r2.)
+                    evidence=f"target={target!r}: {retired_here[target]}",
+                    detail=f"{retired_here[target]} ({total} delivered rows kept readable)",
                 )
             )
             continue

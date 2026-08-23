@@ -2392,17 +2392,244 @@ class TestRetiredProducerLane:
             lanes[0].detail or ""
         ), "a live lane was treated as retired"
 
-    def test_the_retired_set_is_derived_from_lifecycle(self):
+    def test_the_retired_set_is_derived_from_lifecycle(self, config):
         """Derived, not re-spelled: a copy of this fact goes stale the moment either
         side moves, which is the shape techne#518 found five times."""
         import inspect
 
         from techne.core import checks
-        from techne.lifecycle import ARCHIVIST_SINK_TARGET, RETIRED_PRODUCER_TARGETS
+        from techne.lifecycle import ARCHIVIST_SINK_TARGET, retired_producer_targets
 
-        assert ARCHIVIST_SINK_TARGET in RETIRED_PRODUCER_TARGETS
+        assert ARCHIVIST_SINK_TARGET in retired_producer_targets(config)
         src = inspect.getsource(checks.check_outbox_targets)
-        assert "RETIRED_PRODUCER_TARGETS" in src
+        assert "retired_producer_targets" in src
         assert '"sink:archivist"' not in src, (
             "checks.py re-spelled the retired target instead of importing it"
+        )
+
+
+class TestRetirementIsAPropertyOfTheBinding:
+    """techne#715 — the #714 fix used a STATIC set, which is correct for a lane retired
+    by the RELEASE and wrong for one retired by the CONFIGURATION.
+
+    `sink:archivist_knowledge` is fed by `push_knowledge_to_archivist` only under a
+    STORE binding. Under `local` — the default since techne#552 — it has no producer,
+    but it is not globally retired, so a static set could not express it. Measured on
+    the author's box minutes after #714 merged: 2,208 delivered rows, pending=0, push
+    returning 0, last enqueue frozen at the upgrade — due to report STALE/ok=False/
+    remedy=None seven days later.
+    """
+
+    def _drained(self, config, target, ts="2026-06-01T00:00:00+00:00"):
+        from techne.core.database import connect
+        from techne.core.state import ensure_session
+
+        conn = connect(config.db_path)
+        try:
+            for _ in range(3):
+                conn.execute(
+                    "INSERT INTO outbox (target, data_json, status, synced_at, created_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (target, "{}", "synced", ts, ts),
+                )
+            conn.execute("UPDATE schema_version SET applied_at = ?", (ts,))
+            conn.commit()
+        finally:
+            conn.close()
+        ensure_session(config.db_path, "sess-since")
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ?", (ts, _iso(timedelta(0)))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _lane(self, config, name):
+        return [r for r in run_checks(config) if r.name == f"outbox:{name}"]
+
+    def test_the_knowledge_lane_is_dormant_under_a_local_binding(self, config):
+        """No producer under this config, so a frozen timestamp is not evidence of a
+        dead one."""
+        from techne.core.archivist import ARCHIVIST_KNOWLEDGE_TARGET
+
+        config.archivist = "local"
+        self._drained(config, ARCHIVIST_KNOWLEDGE_TARGET)
+
+        lanes = self._lane(config, ARCHIVIST_KNOWLEDGE_TARGET)
+        assert lanes, "the lane produced no result at all"
+        assert lanes[0].verdict is Verdict.DORMANT, (
+            f"a lane with no producer under `local` reported {lanes[0].verdict.value} "
+            f"with remedy={lanes[0].remedy!r}: {lanes[0].detail}"
+        )
+
+    def test_the_same_lane_is_still_judged_under_a_store_binding(self, config, tmp_path):
+        """THE COUNTERFACTUAL. Under a STORE binding this lane HAS a producer, so a
+        frozen timestamp IS evidence — suppressing it everywhere would trade a false red
+        for a false green, which is the worse direction."""
+        from techne.core.archivist import ARCHIVIST_KNOWLEDGE_TARGET
+
+        config.archivist_db_path = str(tmp_path / "team.db")
+        self._drained(config, ARCHIVIST_KNOWLEDGE_TARGET)
+
+        lanes = self._lane(config, ARCHIVIST_KNOWLEDGE_TARGET)
+        assert lanes, "the lane produced no result at all"
+        assert lanes[0].verdict is not Verdict.DORMANT, (
+            "a live lane with a silent producer was excused as retired — the fix must "
+            "suppress the producer question only where there is no producer"
+        )
+
+    def test_a_release_retired_lane_is_dormant_under_every_binding(self, config, tmp_path):
+        """`sink:archivist` is retired by the RELEASE, so no configuration revives it."""
+        from techne.lifecycle import ARCHIVIST_SINK_TARGET
+
+        config.archivist_db_path = str(tmp_path / "team.db")
+        self._drained(config, ARCHIVIST_SINK_TARGET)
+
+        lanes = self._lane(config, ARCHIVIST_SINK_TARGET)
+        assert lanes and lanes[0].verdict is Verdict.DORMANT
+
+    def test_an_undrained_retired_lane_still_reports(self, config):
+        """Retirement suppresses the PRODUCER question and nothing else — a backlog is
+        still owed whoever retired the producer."""
+        from techne.core.archivist import ARCHIVIST_KNOWLEDGE_TARGET
+        from techne.core.database import connect
+
+        config.archivist = "local"
+        self._drained(config, ARCHIVIST_KNOWLEDGE_TARGET)
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO outbox (target, data_json, status, created_at) VALUES (?,?,?,?)",
+                (ARCHIVIST_KNOWLEDGE_TARGET, "{}", "pending", _iso(timedelta(days=30))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        lanes = self._lane(config, ARCHIVIST_KNOWLEDGE_TARGET)
+        assert lanes and lanes[0].verdict is not Verdict.DORMANT, (
+            "an undrained backlog was hidden by retirement"
+        )
+
+
+class TestTheThirdLane:
+    """techne#716 — `sync:thread_summary`'s only producer is `run_session_end`, gated on
+    `_has_live_consumer` -> `sync.adapter != "noop"`, and noop is the DEFAULT.
+    Structurally identical to the knowledge lane being gated on a store binding.
+
+    THE SHARPEST FORM IS THE SELF-CONTRADICTION: `check_outbox_targets` already asked
+    this question in its declared-but-never-enqueued branch and never asked it in the
+    discovered-rows loop, so the SAME lane under the SAME config got opposite verdicts
+    decided only by whether it happened to have history.
+    """
+
+    def _drained(self, config, target, ts="2026-06-01T00:00:00+00:00"):
+        from techne.core.database import connect
+        from techne.core.state import ensure_session
+
+        conn = connect(config.db_path)
+        try:
+            for _ in range(3):
+                conn.execute(
+                    "INSERT INTO outbox (target, data_json, status, synced_at, created_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (target, "{}", "synced", ts, ts),
+                )
+            conn.execute("UPDATE schema_version SET applied_at = ?", (ts,))
+            conn.commit()
+        finally:
+            conn.close()
+        ensure_session(config.db_path, "sess-since")
+        conn = connect(config.db_path)
+        try:
+            conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ?", (ts, _iso(timedelta(0)))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _lane(self, config):
+        from techne.lifecycle import THREAD_SUMMARY_SYNC_TARGET
+
+        return [r for r in run_checks(config) if r.name == f"outbox:{THREAD_SUMMARY_SYNC_TARGET}"]
+
+    def test_the_two_branches_agree_on_the_same_lane_and_config(self, config, tmp_path):
+        """THE FINDING ITSELF. Zero rows took the declared branch and reported DORMANT;
+        three drained rows took the discovered loop and reported STALE/ok=False — same
+        lane, same config, opposite verdicts, decided by history rather than by
+        producers. Both must now answer from one predicate."""
+        from techne.config import Config
+        from techne.core.database import init_db
+
+        empty = Config()
+        empty.db_path = tmp_path / "empty.db"
+        empty.data_dir = tmp_path
+        empty.sync.adapter = "noop"
+        init_db(empty.db_path)
+        no_rows = [r for r in run_checks(empty) if r.name.endswith("sync:thread_summary")]
+
+        config.sync.adapter = "noop"
+        self._drained(config, "sync:thread_summary")
+        with_rows = self._lane(config)
+
+        assert no_rows and with_rows, "one of the two branches produced no result"
+        assert no_rows[0].verdict == with_rows[0].verdict, (
+            f"same lane, same config, different verdicts: zero rows "
+            f"{no_rows[0].verdict.value} vs drained {with_rows[0].verdict.value}"
+        )
+        assert with_rows[0].ok is True
+
+    def test_a_live_sync_adapter_still_judges_the_lane(self, config):
+        """THE COUNTERFACTUAL. With a real adapter the lane HAS a producer, so silence
+        is evidence again — suppressing it for every config would trade a false red for
+        a false green."""
+        config.sync.adapter = "filesystem"
+        self._drained(config, "sync:thread_summary")
+
+        lanes = self._lane(config)
+        assert lanes, "no result for the sync lane"
+        assert lanes[0].verdict is not Verdict.DORMANT, (
+            "a lane with a live adapter was excused as having no producer"
+        )
+
+    def test_each_lane_names_the_knob_that_actually_retired_it(self, config, tmp_path):
+        """THE PIN WAS LOOSER THAN THE CLAIM, which is why this slipped. The previous
+        version asserted only `"revive" in detail`, so a message naming ANY knob passed
+        — and the message named `archivist_binding` for every lane. On a store-bound box
+        with a noop adapter the sync lane reported "no producer under binding=store":
+        the one knob the operator had set CORRECTLY, while the knob that actually
+        retired it appeared nowhere. `remedy` is None on these results, so evidence and
+        detail are the entire actionable payload. (Prudence, #716 r2.)
+        """
+        config.archivist_db_path = str(tmp_path / "team.db")  # store IS bound
+        config.sync.adapter = "noop"  # this is the real knob
+        self._drained(config, "sync:thread_summary")
+
+        r = self._lane(config)[0]
+        blob = f"{r.evidence} {r.detail}"
+        assert "sync.adapter" in blob, f"the retiring knob is not named: {blob!r}"
+        assert "binding=store" not in blob, (
+            f"named the archivist binding, which is set correctly and did not retire "
+            f"this lane: {blob!r}"
+        )
+        assert "sync adapter" in blob, "no actionable remedy for the right subsystem"
+
+    def test_the_knowledge_lane_names_its_own_knob_not_the_adapter(self, config):
+        """The mirror case: each lane was offered two remedies of which one is a no-op
+        for it. Under `local` with a LIVE adapter, the knowledge lane must be told to
+        name a store — not to configure an adapter that is already running."""
+        from techne.core.archivist import ARCHIVIST_KNOWLEDGE_TARGET
+
+        config.archivist = "local"
+        config.sync.adapter = "filesystem"  # live, and irrelevant to this lane
+        self._drained(config, ARCHIVIST_KNOWLEDGE_TARGET)
+
+        lanes = [r for r in run_checks(config) if r.name == f"outbox:{ARCHIVIST_KNOWLEDGE_TARGET}"]
+        blob = f"{lanes[0].evidence} {lanes[0].detail}"
+        assert "archivist" in blob and "archivist_db_path" in blob, blob
+        assert "configure a sync adapter" not in blob, (
+            f"offered a remedy that cannot revive this lane: {blob!r}"
         )

@@ -20,17 +20,12 @@ ARCHIVIST_SINK_TARGET = "sink:archivist"
 # Back-compat alias (was the only, sync-only, target before #224).
 THREAD_SUMMARY_TARGET = THREAD_SUMMARY_SYNC_TARGET
 
-#: LANES THAT NO LONGER HAVE A PRODUCER, declared HERE because this is where the
-#: retirement happens (techne#552 part 3). Delivered rows stay — they must remain
-#: drainable and readable — so the lane keeps appearing in the outbox forever with a
-#: frozen MAX(created_at), and anything that judges liveness by "has this enqueued
-#: lately" will call a correctly-retired lane a dead producer.
-#:
-#: DECLARED NEXT TO THE RETIREMENT, AND IMPORTED BY THE CHECKER, rather than the checker
-#: re-spelling the literal: a copy of this fact would go stale the moment either side
-#: moved, which is the shape techne#518 found five times and the one this PR's own card
-#: entry ends on. (Prudence, #714 r4.)
-RETIRED_PRODUCER_TARGETS = frozenset({ARCHIVIST_SINK_TARGET})
+#: Lanes retired by the RELEASE — nothing can feed them under any configuration.
+#: `sink:archivist` stopped having a producer when techne#552 part 3 moved thread
+#: summaries to the sync lane. Delivered rows stay (they must remain drainable), so the
+#: lane keeps appearing in the outbox forever with a frozen MAX(created_at), and
+#: anything judging liveness by "has this enqueued lately" calls it a dead producer.
+_RELEASE_RETIRED_TARGETS = frozenset({ARCHIVIST_SINK_TARGET})
 
 
 def _thread_summary_target(config) -> str:
@@ -68,6 +63,64 @@ def _has_live_consumer(config) -> bool:
     asked for (#79, #224).
     """
     return config.sync.adapter != "noop"
+
+
+def retired_producer_targets(config) -> dict[str, str]:
+    """Lanes with NO PRODUCER UNDER THE CURRENT BINDING, mapped to WHY (techne#715/#716).
+
+    A PREDICATE, NOT A SET. techne#714 introduced a static set, correct for
+    `sink:archivist` — nothing can feed it under any configuration — and wrong for
+    `sink:archivist_knowledge`, fed only under a STORE binding, and for
+    `sync:thread_summary`, fed only when a sync adapter is live. Both have no producer
+    under a CONFIGURATION rather than under a RELEASE, which a static set cannot say.
+
+    AND IT RETURNS THE REASON, NOT JUST MEMBERSHIP, which is the second half of the same
+    lesson. The first version generalised the MECHANISM to three lanes while the caller
+    still re-derived the message from `archivist_binding` — so on a store-bound box with
+    a noop adapter the sync lane reported "no producer under binding=store", naming the
+    one knob the operator had already set correctly and omitting the knob that actually
+    retired it. `remedy` is None on these results, so evidence and detail ARE the entire
+    actionable payload. A cause that travels with the lane cannot drift from it.
+    (Prudence, #716 r2.)
+    """
+    from techne.core.archivist import (
+        ARCHIVIST_KNOWLEDGE_TARGET,
+        ARCHIVIST_STORE,
+        archivist_binding,
+    )
+
+    reasons: dict[str, str] = {
+        t: "retired by techne#552 — no producer by design, not a dead one"
+        for t in _RELEASE_RETIRED_TARGETS
+    }
+    if archivist_binding(config) != ARCHIVIST_STORE:
+        # Distilled knowledge egresses only to a SEPARATE store. Under `local` the team
+        # knowledge IS this instance's knowledge, so there is nothing to push.
+        reasons[ARCHIVIST_KNOWLEDGE_TARGET] = (
+            f"no producer under archivist binding={archivist_binding(config)} — "
+            "set archivist_db_path (or archivist: store) to revive it"
+        )
+    if not _has_live_consumer(config):
+        # THE THIRD LANE, AND THE ONE THIS CHECK'S OWN DOCSTRING IS ABOUT (techne#716).
+        # `sync:thread_summary`'s only producer is `run_session_end`, gated on
+        # `_has_live_consumer` -> `sync.adapter != "noop"` — and noop is the DEFAULT.
+        # Keyed on that function rather than restating it, so changing the gate moves
+        # both the producer and this together.
+        #
+        # Its inclusion also resolved a self-contradiction: `check_outbox_targets`
+        # asked this question in its declared-but-never-enqueued branch and not in the
+        # discovered-rows loop, so the SAME lane under the SAME config reported
+        # dormant/ok with zero rows and stale/ok=False with three drained ones — a
+        # verdict about producers decided by history.
+        reasons[THREAD_SUMMARY_SYNC_TARGET] = (
+            # NO `or "noop"` FALLBACK: this block is gated on `not _has_live_consumer`,
+            # which is `adapter == "noop"` exactly — None and "" both resolve as LIVE and
+            # never reach here. The fallback read as if it guarded an unset adapter and
+            # did not. (Prudence, #716 r3.)
+            f"no producer under sync.adapter={config.sync.adapter!r} — "
+            "configure a sync adapter to revive it"
+        )
+    return reasons
 
 
 def run_session_start(
