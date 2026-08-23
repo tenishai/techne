@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-bindings
 updated: 2026-08-22
-anchor: techne/core/bindings.py sha=81a88636c708da9dfc983e676c688ad0d16acfb1
+anchor: techne/core/bindings.py sha=d9f42ac5bbadf45a0487c128ba2a33d73f5916c3
 ---
 # bindings — the connection seam, one question over four domains (techne#552 part 4)
 
@@ -10,7 +10,7 @@ THE ASK IT ANSWERS (Richard): "connecting to the librarian, archivist, architect
 
 **IT DELIBERATELY DOES NOT ADD RECALL RUNGS, WHICH IS WHAT #552 PART 4 LITERALLY SAYS.** Two reasons, one read and one measured:
 - THE SIBLINGS ANSWER "SAME FEEL" ON THE BINDING AXIS. liminal `src/liminal/target/base.py`: a `Target` is "a named backend with a transport"; `name` is the namespace, `list_tools` returns tools UNPREFIXED and the Multiplexer adds `{name}.`; in-process / HTTP / stdio are KINDS OF TARGET. The call shape never changes. cabal `src/cabal/handlers/` already ships `patterns.py`, `code.py`, `documents.py`, `archivist.py` SIDE BY SIDE — these exact domains, as peers, each `{domain}.{verb}`. NEITHER fuses its domains into one query; both make the CONNECTION uniform and let the caller name the domain.
-- MEASURED RETRIEVAL WOULD MAKE THOSE RUNGS NOISE (2026-08-22). Patterns: FTS over name+body with an OR fallback — "archivist binding" → "Late-binding task definitions", "guarded read-only SQL over a shared store" → "Dialect-agnostic filter-DSL compiler"; the function's own docstring says the corpus is queried in problem language while patterns are titled metaphorically (techne#550 is the fix, unlanded). Codex: 166 files fresh / **83 stale**, `retired_producer_targets` (merged the same day) returned ZERO hits, and 45% of hits across six realistic topics were TEST symbols, because test names are English sentences and FTS matches them better than identifiers.
+- MEASURED RETRIEVAL WOULD MAKE THOSE RUNGS NOISE (2026-08-22). Patterns: FTS over name+body with an OR fallback — "archivist binding" → "Late-binding task definitions", "guarded read-only SQL over a shared store" → "Dialect-agnostic filter-DSL compiler"; the function's own docstring says the corpus is queried in problem language while patterns are titled metaphorically (techne#550 is the fix, unlanded). Codex: the DURABLE finding is **dilution** — 45% of hits across six realistic topics were TEST symbols, because test names are English sentences and FTS matches them better than identifiers, which follows from what FTS ranks rather than from when the index last ran. Staleness was measured too (2026-08-21: 166 fresh / 83 stale, `retired_producer_targets` merged that day returning zero hits) but is a SNAPSHOT that a reindex moves — and did, within a day. Cited as the state on that date, not a standing property (Prudence, #717).
 A rung returning noise on EVERY recall is worse than no rung, and OPEN-SOURCING FREEZES THE RESPONSE SHAPE (knowledge#1085) — so adding one is the expensive direction. Pinned by `test_the_recall_ladder_is_unchanged`, whose docstring says to update it deliberately if #550 and codex freshness ever make them answerable.
 
 INVARIANTS:

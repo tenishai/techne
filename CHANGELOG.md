@@ -18,8 +18,9 @@ All notable changes to techne are documented here. Format loosely follows
   **It deliberately does not make patterns and codex recall rungs**, which is what #552
   part 4 literally proposes. Measured first: pattern FTS falls back to OR and answers
   "archivist binding" with "Late-binding task definitions"; the codex index was 83 of
-  249 files stale, returned zero hits for a symbol merged the same day, and gave test
-  symbols for 45% of hits on realistic topics. A rung that returns noise on every recall
+  249 files stale as of 2026-08-21 (a snapshot — a reindex moves it) and returned zero
+  hits for a symbol merged that day; the durable finding is dilution, 45% of hits on
+  realistic topics being test symbols. A rung that returns noise on every recall
   is worse than no rung, and open-sourcing freezes the response shape. Revisit when
   #550 and codex freshness make them answerable — `test_the_recall_ladder_is_unchanged`
   is the guard, and says so.

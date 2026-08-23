@@ -1205,16 +1205,17 @@ def bindings(ctx, as_json):
 
     width = max(len(r.domain) for r in reports)
     for r in reports:
-        # `reachable` is reported separately from `binding` on purpose: a domain can be
-        # CONFIGURED and UNREACHABLE, and collapsing those is the same failure the
-        # recall ladder avoids by keeping `unconfigured` distinct from `empty`.
-        mark = " " if r.reachable else "!"
-        click.echo(f"{mark} {r.domain.ljust(width)}  {r.binding:6s}  {r.detail}")
+        # FLAGS ONLY THE FAULT STATE. An earlier version marked anything whose file did
+        # not exist, so a healthy fresh install reported "3 domain(s) not reachable":
+        # `absent` is unreachable by definition, and librarian/architect create their
+        # dbs lazily on first write. An operator would have chased four non-problems.
+        mark = " " if r.ok else "!"
+        click.echo(f"{mark} {r.domain.ljust(width)}  {r.binding:11s}  {r.detail}")
 
-    missing = [r for r in reports if not r.reachable]
-    if missing:
+    broken = [r for r in reports if not r.ok]
+    if broken:
         click.echo("")
-        click.echo(f"{len(missing)} domain(s) not reachable — marked ! above")
+        click.echo(f"{len(broken)} domain(s) configured but unreadable — marked ! above")
 
 
 @main.group()
