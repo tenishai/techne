@@ -2596,15 +2596,43 @@ class TestTheThirdLane:
             "a lane with a live adapter was excused as having no producer"
         )
 
-    def test_an_unbound_lane_is_told_how_to_revive_it(self, config):
-        """RELEASE-retired is permanent; BINDING-retired is not. Telling an operator an
-        unbound lane is "retired… not a dead one" is true about the producer and
-        misleading about the remedy."""
-        config.sync.adapter = "noop"
+    def test_each_lane_names_the_knob_that_actually_retired_it(self, config, tmp_path):
+        """THE PIN WAS LOOSER THAN THE CLAIM, which is why this slipped. The previous
+        version asserted only `"revive" in detail`, so a message naming ANY knob passed
+        — and the message named `archivist_binding` for every lane. On a store-bound box
+        with a noop adapter the sync lane reported "no producer under binding=store":
+        the one knob the operator had set CORRECTLY, while the knob that actually
+        retired it appeared nowhere. `remedy` is None on these results, so evidence and
+        detail are the entire actionable payload. (Prudence, #716 r2.)
+        """
+        config.archivist_db_path = str(tmp_path / "team.db")  # store IS bound
+        config.sync.adapter = "noop"                          # this is the real knob
         self._drained(config, "sync:thread_summary")
 
-        detail = self._lane(config)[0].detail or ""
-        assert "revive" in detail, f"no remedy hinted for an unbound lane: {detail!r}"
-        assert "retired by techne#552" not in detail, (
-            "an unbound lane was described as permanently retired"
+        r = self._lane(config)[0]
+        blob = f"{r.evidence} {r.detail}"
+        assert "sync.adapter" in blob, f"the retiring knob is not named: {blob!r}"
+        assert "binding=store" not in blob, (
+            f"named the archivist binding, which is set correctly and did not retire "
+            f"this lane: {blob!r}"
+        )
+        assert "sync adapter" in blob, "no actionable remedy for the right subsystem"
+
+    def test_the_knowledge_lane_names_its_own_knob_not_the_adapter(self, config):
+        """The mirror case: each lane was offered two remedies of which one is a no-op
+        for it. Under `local` with a LIVE adapter, the knowledge lane must be told to
+        name a store — not to configure an adapter that is already running."""
+        from techne.core.archivist import ARCHIVIST_KNOWLEDGE_TARGET
+
+        config.archivist = "local"
+        config.sync.adapter = "filesystem"  # live, and irrelevant to this lane
+        self._drained(config, ARCHIVIST_KNOWLEDGE_TARGET)
+
+        lanes = [
+            r for r in run_checks(config) if r.name == f"outbox:{ARCHIVIST_KNOWLEDGE_TARGET}"
+        ]
+        blob = f"{lanes[0].evidence} {lanes[0].detail}"
+        assert "archivist" in blob and "archivist_db_path" in blob, blob
+        assert "configure a sync adapter" not in blob, (
+            f"offered a remedy that cannot revive this lane: {blob!r}"
         )

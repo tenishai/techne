@@ -1736,15 +1736,13 @@ def check_outbox_targets(config) -> list[CheckResult]:
     # satisfies both rounds — the literal is the copy that would go stale silently if
     # the constant ever moved, which is the failure mode this PR has spent four rounds
     # closing elsewhere. (Prudence, #714 r3 + r5.)
-    from techne.core.archivist import archivist_binding
-    from techne.lifecycle import _RELEASE_RETIRED_TARGETS, retired_producer_targets
+    from techne.lifecycle import retired_producer_targets
     from techne.sync.outbox import SINK_PREFIX, SYNC_PREFIX
 
     # Resolved ONCE, above BOTH loops, because they now share it — that sharing is the
     # fix: the declared-but-never-enqueued branch and the discovered-rows branch used to
     # answer "does this lane have a producer" independently, and disagreed. (#716)
     retired_here = retired_producer_targets(config)
-    binding = archivist_binding(config)
 
     for missing in sorted(_declared_outbox_targets(config) - seen):
         # DERIVED FROM THE SAME PREDICATE AS THE DISCOVERED-ROWS LOOP BELOW, not
@@ -1780,7 +1778,6 @@ def check_outbox_targets(config) -> list[CheckResult]:
                 detail=detail,
             )
         )
-
 
     for target, total, last_synced, pending, last_enqueued in rows:
         pending = pending or 0
@@ -1822,20 +1819,16 @@ def check_outbox_targets(config) -> list[CheckResult]:
                     kind=Kind.TEMPORAL,
                     verdict=Verdict.DORMANT,
                     last_fired=last_synced,
-                    evidence=f"target={target!r} has no producer under binding={binding}",
-                    detail=(
-                        # RELEASE-retired is permanent; BINDING-retired is not — naming
-                        # a store revives the knowledge lane, and a real sync adapter
-                        # revives the summary lane. Telling an operator an unbound lane
-                        # is "retired… not a dead one" is true about the producer and
-                        # misleading about the remedy. (Prudence, #716.)
-                        f"retired by techne#552 ({total} delivered rows kept readable) — "
-                        "no producer by design, not a dead one"
-                        if target in _RELEASE_RETIRED_TARGETS
-                        else f"no producer under binding={binding} "
-                        f"({total} delivered rows kept readable) — bind a store or a "
-                        "sync adapter to revive it"
-                    ),
+                    # THE REASON COMES FROM THE PREDICATE, not re-derived here. Each
+                    # lane is retired by a DIFFERENT knob — release, archivist binding,
+                    # sync adapter — and deriving the message at the format site named
+                    # `archivist_binding` for all of them, so a store-bound box with a
+                    # noop adapter was told its sync lane had "no producer under
+                    # binding=store": the one knob it had set correctly, and not the one
+                    # that retired the lane. `remedy` is None here, so these two strings
+                    # are the whole actionable payload. (Prudence, #716 r2.)
+                    evidence=f"target={target!r}: {retired_here[target]}",
+                    detail=f"{retired_here[target]} ({total} delivered rows kept readable)",
                 )
             )
             continue

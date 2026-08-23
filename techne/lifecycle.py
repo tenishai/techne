@@ -28,60 +28,6 @@ THREAD_SUMMARY_TARGET = THREAD_SUMMARY_SYNC_TARGET
 _RELEASE_RETIRED_TARGETS = frozenset({ARCHIVIST_SINK_TARGET})
 
 
-def retired_producer_targets(config) -> frozenset[str]:
-    """Lanes with NO PRODUCER UNDER THE CURRENT BINDING (techne#715).
-
-    A PREDICATE, NOT A SET, AND THAT IS THE FIX. techne#714 introduced a static
-    `RETIRED_PRODUCER_TARGETS`, which is correct for `sink:archivist` — nothing can feed
-    it under any configuration. It is WRONG for `sink:archivist_knowledge`, which is fed
-    by `push_knowledge_to_archivist` only under a STORE binding: under `local` (the
-    default since techne#552) it has no producer at all, but it is not globally retired,
-    so a static set could not express it and the fix walked past it.
-
-    MEASURED on the author's box minutes after #714 merged: 2,208 delivered rows,
-    `pending=0`, `push_knowledge_to_archivist` returning 0, last enqueue frozen at the
-    upgrade — due to report STALE / ok=False / remedy=None seven days later. The same
-    permanent unclearable false red #714 r4 was raised to remove, one lane over, on the
-    same migration cohort.
-
-    THE SHARPER RULE, which is what this function encodes: RETIRING A PRODUCER IS A
-    PROPERTY OF A CONFIGURATION, NOT ONLY OF A RELEASE. Retirement-by-release is the
-    special case where the answer is the same for every config.
-
-    Declared here, beside the retirement, and imported by the checker rather than
-    re-spelled there — a copy of this fact goes stale the moment either side moves
-    (techne#518, five times).
-    """
-    from techne.core.archivist import (
-        ARCHIVIST_KNOWLEDGE_TARGET,
-        ARCHIVIST_STORE,
-        archivist_binding,
-    )
-
-    retired = set(_RELEASE_RETIRED_TARGETS)
-    if archivist_binding(config) != ARCHIVIST_STORE:
-        # Distilled knowledge egresses only to a SEPARATE store. Under `local` the team
-        # knowledge IS this instance's knowledge, so there is nothing to push and this
-        # lane has no producer — for this config, not for the product.
-        retired.add(ARCHIVIST_KNOWLEDGE_TARGET)
-    if not _has_live_consumer(config):
-        # THE THIRD LANE, AND THE ONE THIS CHECK'S OWN DOCSTRING IS ABOUT (techne#715,
-        # Prudence #716). `sync:thread_summary`'s only producer is `run_session_end`,
-        # gated on `_has_live_consumer` -> `sync.adapter != "noop"` — and `noop` is the
-        # DEFAULT. Structurally identical to the knowledge lane being gated on a store
-        # binding: a producer that does not exist under a CONFIGURATION.
-        #
-        # It also resolves a self-contradiction. `check_outbox_targets` already asked
-        # this question in its declared-but-never-enqueued branch ("no live consumer
-        # (sync.adapter=noop) — correctly idle", DORMANT) while the discovered-rows loop
-        # never asked it, so the SAME lane under the SAME config got opposite verdicts
-        # decided only by whether it happened to have history:
-        #     zero rows -> dormant ok=True   3 drained rows -> stale ok=False
-        # Deriving both from this predicate is what makes them agree.
-        retired.add(THREAD_SUMMARY_SYNC_TARGET)
-    return frozenset(retired)
-
-
 def _thread_summary_target(config) -> str:
     """The outbox lane for thread summaries.
 
@@ -117,6 +63,60 @@ def _has_live_consumer(config) -> bool:
     asked for (#79, #224).
     """
     return config.sync.adapter != "noop"
+
+
+def retired_producer_targets(config) -> dict[str, str]:
+    """Lanes with NO PRODUCER UNDER THE CURRENT BINDING, mapped to WHY (techne#715/#716).
+
+    A PREDICATE, NOT A SET. techne#714 introduced a static set, correct for
+    `sink:archivist` — nothing can feed it under any configuration — and wrong for
+    `sink:archivist_knowledge`, fed only under a STORE binding, and for
+    `sync:thread_summary`, fed only when a sync adapter is live. Both have no producer
+    under a CONFIGURATION rather than under a RELEASE, which a static set cannot say.
+
+    AND IT RETURNS THE REASON, NOT JUST MEMBERSHIP, which is the second half of the same
+    lesson. The first version generalised the MECHANISM to three lanes while the caller
+    still re-derived the message from `archivist_binding` — so on a store-bound box with
+    a noop adapter the sync lane reported "no producer under binding=store", naming the
+    one knob the operator had already set correctly and omitting the knob that actually
+    retired it. `remedy` is None on these results, so evidence and detail ARE the entire
+    actionable payload. A cause that travels with the lane cannot drift from it.
+    (Prudence, #716 r2.)
+    """
+    from techne.core.archivist import (
+        ARCHIVIST_KNOWLEDGE_TARGET,
+        ARCHIVIST_STORE,
+        archivist_binding,
+    )
+
+    reasons: dict[str, str] = {
+        t: "retired by techne#552 — no producer by design, not a dead one"
+        for t in _RELEASE_RETIRED_TARGETS
+    }
+    if archivist_binding(config) != ARCHIVIST_STORE:
+        # Distilled knowledge egresses only to a SEPARATE store. Under `local` the team
+        # knowledge IS this instance's knowledge, so there is nothing to push.
+        reasons[ARCHIVIST_KNOWLEDGE_TARGET] = (
+            f"no producer under archivist binding={archivist_binding(config)} — "
+            "set archivist_db_path (or archivist: store) to revive it"
+        )
+    if not _has_live_consumer(config):
+        # THE THIRD LANE, AND THE ONE THIS CHECK'S OWN DOCSTRING IS ABOUT (techne#716).
+        # `sync:thread_summary`'s only producer is `run_session_end`, gated on
+        # `_has_live_consumer` -> `sync.adapter != "noop"` — and noop is the DEFAULT.
+        # Keyed on that function rather than restating it, so changing the gate moves
+        # both the producer and this together.
+        #
+        # Its inclusion also resolved a self-contradiction: `check_outbox_targets`
+        # asked this question in its declared-but-never-enqueued branch and not in the
+        # discovered-rows loop, so the SAME lane under the SAME config reported
+        # dormant/ok with zero rows and stale/ok=False with three drained ones — a
+        # verdict about producers decided by history.
+        reasons[THREAD_SUMMARY_SYNC_TARGET] = (
+            f"no producer under sync.adapter={config.sync.adapter or 'noop'!r} — "
+            "configure a sync adapter to revive it"
+        )
+    return reasons
 
 
 def run_session_start(
