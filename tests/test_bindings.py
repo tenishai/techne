@@ -244,6 +244,30 @@ def test_a_connection_naming_a_missing_store_is_unavailable(config, tmp_path):
     assert "gone.db" in r.detail
 
 
+def test_a_padded_db_path_resolves_exactly_as_federation_resolves_it(config, tmp_path):
+    """PRUDENCE, #717 r4 — THE SAME SPECIES, THIRD SIGHTING. bindings stripped the
+    connection's `db_path` and federation does not, so a quoted `"  /tmp/team.db  "`
+    made this surface report a healthy store at the real path while federation resolved
+    a nonsense path under `techne_home()` and skipped it.
+
+    Asserted against federation's own resolver rather than a hardcoded expectation, so
+    the two cannot drift apart again: the guarantee is AGREEMENT, not a particular
+    path."""
+    from techne.config import FederationConnectionSpec
+    from techne.core.federation import _resolve_conn_db_path
+
+    padded = f"  {tmp_path / 'team.db'}  "
+    config.connections = {
+        "archivist": FederationConnectionSpec(role="team", db_path=padded, label="acme")
+    }
+
+    r = domain_binding(config, "archivist")
+
+    assert r.target == _resolve_conn_db_path(padded), (
+        "bindings and federation resolved the same db_path differently"
+    )
+
+
 def test_a_connection_with_no_db_path_is_a_fault_not_a_green_row(config):
     """PRUDENCE, #717 r3 — THE SAME DIVERGENCE ONE BRANCH ALONG. `config.py` coerces a
     missing `db_path` to `""`, and `_resolve_conn_db_path("")` resolves to

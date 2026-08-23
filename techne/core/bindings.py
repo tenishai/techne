@@ -159,7 +159,13 @@ class BindingReport:
         operator scanning four rows wants "is anything wrong", and `store` next to a
         `!` would make them hunt for the fault state. Presentation fuses; data does
         not."""
-        return self.state if not self.ok else (self.binding or "unknown")
+        if not self.ok:
+            return self.state
+        # No fallback. Every row is built by `_ok` or `_fault`, `_ok` types `binding`
+        # as `str`, and a `_fault` row never reaches this line — so the `or "unknown"`
+        # that used to sit here was unreachable, and replacing it with a different
+        # fallback would just rename the dead branch. (Prudence, #717 r4.)
+        return self.binding
 
     def as_dict(self) -> dict:
         return {
@@ -242,12 +248,19 @@ def _archivist(config) -> BindingReport:
         from techne.core.federation import _resolve_conn_db_path
 
         label = getattr(conn, "label", "") or ARCHIVIST_CONNECTION_NAME
-        raw = (getattr(conn, "db_path", "") or "").strip()
-        if not raw:
+        raw = getattr(conn, "db_path", "") or ""
+        if not raw.strip():
             # An empty db_path resolves to `techne_home()`, which always exists — see
             # `_present`. Named separately from "not present" because the operator's
             # mistake is different: the key is missing, not the file.
             return _fault("archivist", binding, None, f"connection '{label}' has no db_path set")
+        # THE RAW VALUE, NOT A STRIPPED ONE (Prudence, #717 r4). Federation resolves
+        # whatever the config literally says, so stripping here would make the two
+        # surfaces disagree about a padded `"  /tmp/team.db  "`: this one would report a
+        # healthy store at /tmp/team.db while federation resolved a nonsense path under
+        # `techne_home()` and skipped it. Contrived to reach, and exactly the species of
+        # divergence this PR removed twice. The `.strip()` above is a config-SHAPE check
+        # — "is the key blank" — not a path transformation.
         target = _resolve_conn_db_path(raw)
         if not _present(target):
             return _fault(
