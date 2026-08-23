@@ -1764,7 +1764,9 @@ def _codex_search(args: dict, config: Config) -> dict:
     limit = args.get("limit", 20)
     db_path = _codex_repo_db(args, config)
     if db_path is None:
-        return _with_binding(config, {"results": [], "count": 0, "notice": _NO_REPO_HINT})
+        return _with_binding(
+            config, {"results": [], "count": 0, "notice": _NO_REPO_HINT}, args.get("repo")
+        )
     hits = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
     # "unknown" included (techne#595 r1): a hit whose file could not be read or
     # resolved is not a trustworthy hit, and counting only stale/missing meant an
@@ -1799,10 +1801,18 @@ def _codex_search(args: dict, config: Config) -> dict:
         import os as _os
         from pathlib import Path as _Path
 
-        from techne.core.repo import find_repo_root
+        # PRIMARY, NOT THE WORKTREE (Prudence, #725 r3). `db_path` is the PRIMARY
+        # checkout's index — #719 made the read resolve there — while `find_repo_root`
+        # stops at the worktree, so freshness compared the primary's index against a
+        # different tree's files and called it stale. It fires on EVERY zero-result
+        # search from inside a review worktree: the envelope names the primary's db and
+        # the notice beside it calls that db stale on the strength of a tree it was
+        # never built from. Both halves predate this PR; the fix is the resolver #719
+        # already added for exactly this.
+        from techne.core.repo import primary_repo_root
 
         idx = index_freshness(
-            db_path, repo_root=find_repo_root(_Path(args.get("repo") or _os.getcwd()))
+            db_path, repo_root=primary_repo_root(_Path(args.get("repo") or _os.getcwd()))
         )
         result["index"] = idx
         # Rendered by core.codegraph so this tool and the grep-assist HOOK say the

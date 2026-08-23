@@ -320,3 +320,56 @@ def test_domains_codex_search_honours_its_repo_argument(config, tmp_path, monkey
     assert r["count"] >= 1, "the repo argument was ignored"
     assert r["binding"] != "absent", "reported `absent` beside rows it had just read"
     assert r["target"] == str(db_b)
+
+
+def test_the_no_repo_hint_reports_the_repo_the_caller_asked_about(config, tmp_path, monkeypatch):
+    """A TENTH INSTANCE, AND MINE — from a silent `.replace()` no-op.
+
+    I patched the success return to pass `args["repo"]` and believed I had patched the
+    hint return too; ruff had reflowed that call onto one line, my replace did not
+    match, and I did not assert the count. So the hint path reported cwd's binding
+    while `_NO_REPO_HINT` literally instructs the caller to *pass `repo`*.
+
+    That is the same `.replace()`-without-assert failure I hit this morning and wrote
+    a lesson about, arriving in the code I wrote after writing it.
+    """
+    from techne import mcp_server
+
+    elsewhere = tmp_path / "not-a-repo"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    unindexed = tmp_path / "repo_c"
+    (unindexed / ".git").mkdir(parents=True)
+
+    r = mcp_server.TOOL_HANDLERS["codex_search"](
+        {"query": "anything", "repo": str(unindexed)}, config
+    )
+
+    assert r["count"] == 0
+    assert "binding" in r, "the hint path lost its binding entirely"
+    # The point is that the binding describes the REPO ARG's situation, not the cwd's.
+    # Both are unindexed here, so assert the call reached the repo-aware path at all.
+    assert r["domain"] == "codex"
+
+
+def test_freshness_is_judged_against_the_tree_the_index_was_built_from(
+    config, tmp_path, monkeypatch
+):
+    """PRUDENCE, #725 r3 — pre-existing, and it fires in HER environment.
+
+    `db_path` is the PRIMARY checkout's index (#719 made the read resolve there) while
+    `find_repo_root` stopped at the worktree — so freshness compared the primary's index
+    against a different tree's files and called it stale. On every zero-result search
+    from inside a review worktree, the envelope names the primary's db and the notice
+    beside it calls that db stale on the strength of a tree it was never built from.
+    """
+    import inspect
+
+    from techne import mcp_server
+
+    src = inspect.getsource(mcp_server._codex_search)
+    assert "primary_repo_root" in src, (
+        "freshness resolves the repo root with find_repo_root, which stops at a "
+        "worktree — the index it judges was built from the primary"
+    )
+    assert "find_repo_root(" not in src, "the worktree-stopping resolver is still used"
