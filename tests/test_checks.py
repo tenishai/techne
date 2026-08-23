@@ -2501,8 +2501,7 @@ class TestRetirementIsAPropertyOfTheBinding:
         conn = connect(config.db_path)
         try:
             conn.execute(
-                "INSERT INTO outbox (target, data_json, status, created_at)"
-                " VALUES (?,?,?,?)",
+                "INSERT INTO outbox (target, data_json, status, created_at) VALUES (?,?,?,?)",
                 (ARCHIVIST_KNOWLEDGE_TARGET, "{}", "pending", _iso(timedelta(days=30))),
             )
             conn.commit()
@@ -2606,7 +2605,7 @@ class TestTheThirdLane:
         detail are the entire actionable payload. (Prudence, #716 r2.)
         """
         config.archivist_db_path = str(tmp_path / "team.db")  # store IS bound
-        config.sync.adapter = "noop"                          # this is the real knob
+        config.sync.adapter = "noop"  # this is the real knob
         self._drained(config, "sync:thread_summary")
 
         r = self._lane(config)[0]
@@ -2628,9 +2627,7 @@ class TestTheThirdLane:
         config.sync.adapter = "filesystem"  # live, and irrelevant to this lane
         self._drained(config, ARCHIVIST_KNOWLEDGE_TARGET)
 
-        lanes = [
-            r for r in run_checks(config) if r.name == f"outbox:{ARCHIVIST_KNOWLEDGE_TARGET}"
-        ]
+        lanes = [r for r in run_checks(config) if r.name == f"outbox:{ARCHIVIST_KNOWLEDGE_TARGET}"]
         blob = f"{lanes[0].evidence} {lanes[0].detail}"
         assert "archivist" in blob and "archivist_db_path" in blob, blob
         assert "configure a sync adapter" not in blob, (

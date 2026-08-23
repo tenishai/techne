@@ -113,7 +113,11 @@ def retired_producer_targets(config) -> dict[str, str]:
         # dormant/ok with zero rows and stale/ok=False with three drained ones — a
         # verdict about producers decided by history.
         reasons[THREAD_SUMMARY_SYNC_TARGET] = (
-            f"no producer under sync.adapter={config.sync.adapter or 'noop'!r} — "
+            # NO `or "noop"` FALLBACK: this block is gated on `not _has_live_consumer`,
+            # which is `adapter == "noop"` exactly — None and "" both resolve as LIVE and
+            # never reach here. The fallback read as if it guarded an unset adapter and
+            # did not. (Prudence, #716 r3.)
+            f"no producer under sync.adapter={config.sync.adapter!r} — "
             "configure a sync adapter to revive it"
         )
     return reasons

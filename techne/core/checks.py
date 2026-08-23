@@ -1755,9 +1755,34 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # `retired_producer_targets`: a sink lane is declared only because something
         # feeds it, and `sync.adapter` does not govern `flush_sinks`. What changed is
         # where that reasoning lives. (Prudence, #714 r2, #716.)
-        has_consumer = missing not in retired_here
-        if not has_consumer:
+        has_producer = missing not in retired_here
+        if not has_producer:
             verdict = Verdict.DORMANT
+            # HARDCODED, AND SAFE ONLY BY A COINCIDENCE WORTH WRITING DOWN. The
+            # discovered-rows loop below reads `retired_here[target]`; this branch does
+            # not, so the same lane under the same config yields two different DETAIL
+            # strings depending on whether it has history. The verdicts agree — that was
+            # the #716 finding — but the actionable payload still does not.
+            #
+            # It is accurate in every case it can currently be reached in. Verified by
+            # sweeping the product of archivist x sync.adapter x standalone x
+            # named-store and taking `_declared_outbox_targets & retired_producer_targets`
+            # for each: EVERY overlap is `sync:thread_summary`, retired for the ADAPTER
+            # reason, and there are none for any other lane or reason. (Prudence swept
+            # the same property over a wider enumeration including loader-rejected
+            # combinations and got the same answer; the overlap COUNT differs with the
+            # enumeration, so the property is what is recorded here, not the number.)
+            #
+            # The structural reason: `sink:archivist_knowledge` is declared IFF the
+            # binding is STORE and retired IFF it is not — the same call on the same
+            # config — and `sink:archivist` is never declared at all.
+            #
+            # THAT IS THE SAME COINCIDENCE-OF-AGREEMENT THAT MAKES THE SINK MUTANT
+            # UNKILLABLE, so it protects this line for the same reason and expires the
+            # same way: THE MOMENT A FOURTH LANE IS BOTH DECLARED AND RETIRED FOR A
+            # NON-ADAPTER REASON, THIS IS THE #716 r2 BUG AGAIN — a message re-derived
+            # at the format site naming the wrong knob. Read `retired_here[missing]`
+            # then. (Prudence, #716 r3.)
             detail = "no live consumer (sync.adapter=noop) — correctly idle"
             # "/ no registered sink" removed: after the per-lane fix this branch is
             # reachable only for `sync:` lanes, so that clause named a cause that
