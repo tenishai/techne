@@ -149,3 +149,83 @@ def test_the_mcp_surface_exposes_the_vocabulary(config):
     for domain in DOMAIN_NAMES:
         assert f"{domain}_search" in names, f"{domain} is not addressable over MCP"
         assert f"{domain}_search" in mcp_server.TOOL_HANDLERS, f"{domain}_search has no handler"
+
+
+def test_every_domain_reports_its_binding_THROUGH_MCP(config, monkeypatch, tmp_path):
+    """PRUDENCE, #725 — THE SEVENTH TEST THIS SESSION THAT COULD NOT SEE WHAT IT NAMED.
+
+    `test_every_answer_carries_its_binding` checks `domains.SEARCH`, and `codex_search`
+    is NOT wired to it — the MCP tool predates this module and returned no binding at
+    all. That test asserted the envelope of a function no MCP caller reaches, while
+    `test_the_mcp_surface_exposes_the_vocabulary` asserted only the NAME, which already
+    existed. Between them the two tests looked like coverage of a claim
+    `docs/mcp-tools.md` makes for all four domains and that codex could not back.
+
+    This one goes through `TOOL_HANDLERS` — the path an agent actually calls.
+    """
+    from techne import mcp_server
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA
+    from techne.core.stores import SqliteStore
+
+    # CODEX MUST TAKE ITS SUCCESS PATH, not the no-repo early return. A first version
+    # chdir'd to an empty dir, so every codex call short-circuited on `_NO_REPO_HINT` —
+    # which IS wrapped — and the mutation stripping the binding from the real return
+    # passed. The early return is not the path callers hit when they have an index.
+    codex_db = tmp_path / "codex.db"
+    SqliteStore("codex", codex_db).migrate(CODEX_SCHEMA)
+    add_symbol(codex_db, id="a.py::f::function::1", file="a.py", name="f", kind="function")
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: codex_db)
+    monkeypatch.setattr("techne.core.codex.resolve_repo_db_for_query", lambda *a, **k: codex_db)
+
+    for domain in DOMAIN_NAMES:
+        r = mcp_server.TOOL_HANDLERS[f"{domain}_search"]({"query": "f", "limit": 1}, config)
+        assert "binding" in r, f"{domain}_search returned no binding over MCP: {sorted(r)}"
+        assert r.get("domain") == domain
+    # and codex specifically reached its SUCCESS return, not the hint
+    r = mcp_server.TOOL_HANDLERS["codex_search"]({"query": "f", "limit": 1}, config)
+    assert r["count"] >= 1, "codex took the no-repo path; the success return is untested"
+
+
+def test_a_connection_bound_archivist_reads_the_connection_not_a_derived_path(config, tmp_path):
+    """PRUDENCE, #725 — THE SEVENTH INSTANCE OF THE #552 DEFECT, and the one I
+    reintroduced while fixing the sixth.
+
+    `archivist_binding` says `store` for TWO topologies — `archivist_db_path` OR a
+    `connections["archivist"]` entry — and `_resolve_archivist_path` knows only the
+    first. Calling it here read the DEFAULT `<data_dir>/archivist.db` while the envelope
+    named the team store: a binding that was wrong WITHOUT SAYING SO, which is worse
+    than no binding because callers trust it.
+
+    Not hypothetical. #552 measured 1,104 rows in that stale mirror and stopped writing
+    it, so a connection-bound install would have been served stale rows under a label
+    pointing somewhere else. The fixture reproduces exactly that: a row in the derived
+    default that must NOT come back, and a row in the real team store that must.
+    """
+    from techne.config import FederationConnectionSpec
+    from techne.core.database import init_db
+    from techne.core.knowledge import store
+
+    # the stale mirror at the DERIVED default path
+    stale = tmp_path / "archivist.db"
+    init_db(stale)
+    store(stale, "the kestrel has flown away and this row is stale", type="fact")
+
+    # the real team store, named only by a connection
+    team = tmp_path / "team.db"
+    init_db(team)
+    store(team, "the kestrel roosts at dusk", type="fact")
+    config.connections = {
+        "archivist": FederationConnectionSpec(role="team", db_path=str(team), label="acme")
+    }
+
+    r = SEARCH["archivist"](config, "kestrel")
+
+    assert r["binding"] == "store"
+    assert r["target"] == str(team), "the envelope named a store the read did not use"
+    joined = " ".join(str(row) for row in r["results"])
+    assert "roosts at dusk" in joined, "the connection's store was not read"
+    assert "flown away" not in joined, (
+        "read the DERIVED default archivist.db — the stale mirror #552 stopped writing "
+        "— while reporting the team store"
+    )

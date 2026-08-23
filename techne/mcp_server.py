@@ -1022,7 +1022,9 @@ TOOLS = [
     {
         "name": "archivist_search",
         "description": (
-            "What the TEAM knows. Resolves to this instance's own knowledge when the archivist is bound `local`, or to the team store when bound to one — the answer says which. "
+            "What the TEAM knows. Resolves to this instance's own knowledge when "
+            "the archivist is bound `local`, or to the team store when bound to "
+            "one — the answer says which. "
             "One of techne's four knowledge domains (archivist, librarian, architect, "
             "codex), addressable by name. Every answer carries the `binding` it "
             "resolved to, so the same call keeps working as the domain grows from a "
@@ -1041,7 +1043,9 @@ TOOLS = [
     {
         "name": "librarian_search",
         "description": (
-            "What is WRITTEN DOWN — documents, transcripts and cards. Today that is the operator's own corpus; the role is the question, not the file set. "
+            "What is WRITTEN DOWN — documents, transcripts and cards. Today that "
+            "is the operator's own corpus; the role is the question, not the "
+            "file set. "
             "One of techne's four knowledge domains (archivist, librarian, architect, "
             "codex), addressable by name. Every answer carries the `binding` it "
             "resolved to, so the same call keeps working as the domain grows from a "
@@ -1060,7 +1064,9 @@ TOOLS = [
     {
         "name": "architect_search",
         "description": (
-            "Architectural PATTERNS — the 'what is worth stealing' corpus. Same corpus as pattern_search, addressed by the domain name rather than the mechanism. "
+            "Architectural PATTERNS — the 'what is worth stealing' corpus. Same "
+            "corpus as pattern_search, addressed by the domain name rather than "
+            "the mechanism. "
             "One of techne's four knowledge domains (archivist, librarian, architect, "
             "codex), addressable by name. Every answer carries the `binding` it "
             "resolved to, so the same call keeps working as the domain grows from a "
@@ -1720,6 +1726,28 @@ _NO_REPO_HINT = (
 )
 
 
+def _with_binding(config, payload: dict) -> dict:
+    """Add the codex domain's binding to an existing payload, WITHOUT changing its keys.
+
+    `codex_search` predates `core.domains` and callers depend on its shape, so the
+    binding is added rather than the response replaced. It matters because
+    `docs/mcp-tools.md` states that all four domains report what they resolved to —
+    and codex was the one that did not, so the doc was making a claim for a tool that
+    could not back it. The domain tests asserted the envelope of `domains.codex_search`,
+    which no MCP caller reaches. (Prudence, #725.)
+    """
+    from techne.core.bindings import domain_binding
+
+    report = domain_binding(config, "codex")
+    return {
+        **payload,
+        "domain": "codex",
+        "binding": report.binding,
+        "state": report.state,
+        "target": str(report.target) if report.target else None,
+    }
+
+
 def _codex_search(args: dict, config: Config) -> dict:
     """FTS over Codex symbols, scoped to the active repo (db-per-repo, techne#209)."""
     from techne.core.codegraph import (
@@ -1733,7 +1761,7 @@ def _codex_search(args: dict, config: Config) -> dict:
     limit = args.get("limit", 20)
     db_path = _codex_repo_db(args, config)
     if db_path is None:
-        return {"results": [], "count": 0, "notice": _NO_REPO_HINT}
+        return _with_binding(config, {"results": [], "count": 0, "notice": _NO_REPO_HINT})
     hits = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
     # "unknown" included (techne#595 r1): a hit whose file could not be read or
     # resolved is not a trustworthy hit, and counting only stale/missing meant an
@@ -1778,7 +1806,7 @@ def _codex_search(args: dict, config: Config) -> dict:
         # same thing about the same nothing (techne#602). A second copy would be a
         # second definition of "how much can this absence be trusted".
         result["notice"] = zero_result_notice(idx)
-    return result
+    return _with_binding(config, result)
 
 
 def _techne_archivist_query(args: dict, config: Config) -> dict:

@@ -158,7 +158,7 @@ Search Codex symbols (functions, classes, methods) by name or signature. Require
 
 Compute the transitive reachability (blast radius) of a Codex symbol. direction defaults to `in`=what reaches this symbol (dependents) — the "what breaks if I change this" impact set; `out`=what this symbol reaches (dependencies). Uses recursive CTE BFS over the call/import graph. tests/fixtures/** nodes are excluded by default (name-collision noise in the v1 name-based edge model; set…
 
-## Patterns (architect)
+## The four domains
 
 ### `archivist_search`
 
@@ -177,8 +177,6 @@ grow without the call changing.
 Architectural PATTERNS — the "what is worth stealing" corpus. Same corpus as
 `pattern_search`, addressed by the domain name rather than the mechanism.
 
-## The four domains
-
 `archivist`, `librarian`, `architect` and `codex` are techne's four knowledge
 domains, and the vocabulary is deliberate: an operator learns these four names in
 techne and keeps them when the infrastructure grows into liminal and cabal, where a
@@ -189,6 +187,9 @@ call stays the same while the infrastructure underneath changes.
 `techne_recall` remains the default for "what do we know about X" — it escalates
 across all four rungs. The domain calls are for when you already know which function
 you want. `techne bindings` reports what each name currently resolves to.
+
+
+## Patterns (architect)
 
 ### `pattern_search`
 

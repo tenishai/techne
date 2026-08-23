@@ -49,14 +49,12 @@ def _binding_of(config, domain: str):
     return domain_binding(config, domain)
 
 
-def _envelope(domain: str, config, rows: list[dict], report=None, **extra: Any) -> dict:
+def _envelope(domain: str, config, rows: list[dict], report, **extra: Any) -> dict:
     """One shape for all four, including the binding.
 
     Shared deliberately: four domains answering in four shapes would put the burden of
     knowing which one you got back on the caller — the exact thing the seam removes.
     """
-    if report is None:
-        report = _binding_of(config, domain)
     out = {
         "domain": domain,
         "binding": report.binding,
@@ -116,9 +114,10 @@ def codex_search(config, query: str, limit: int = 20, repo: str | None = None) -
     from techne.core.codegraph import search_symbols
     from techne.core.codex import resolve_repo_db_for_query
 
+    report = _binding_of(config, "codex")
     db = resolve_repo_db_for_query(config, repo or os.getcwd())
     rows = [] if db is None else search_symbols(db, query, limit=limit)
-    return _envelope("codex", config, rows)
+    return _envelope("codex", config, rows, report=report)
 
 
 def archivist_search(config, query: str, limit: int = 20) -> dict:
@@ -130,19 +129,34 @@ def archivist_search(config, query: str, limit: int = 20) -> dict:
     knowledge — not a copy, not a second read — which is why the local branch searches
     `config.db_path` rather than opening anything else.
     """
-    from techne.core.archivist import _resolve_archivist_path, archivist_binding
     from techne.core.search import search
     from techne.core.tiers import ARCHIVIST_ABSENT, ARCHIVIST_LOCAL
 
-    binding = archivist_binding(config)
-    if binding == ARCHIVIST_ABSENT:
-        return _envelope("archivist", config, [])
-    if binding == ARCHIVIST_LOCAL:
+    # RESOLVE FIRST AND READ `report.target` — never re-derive the path.
+    # `archivist_binding` says `store` for TWO topologies (`archivist_db_path` OR a
+    # `connections["archivist"]` entry) and `_resolve_archivist_path` only knows the
+    # first. Calling it here read the DEFAULT `<data_dir>/archivist.db` while the
+    # envelope named the team store — a binding that was wrong without saying so, which
+    # is worse than no binding because callers trust it. And the file it read is not
+    # hypothetical: #552 measured 1,104 rows in exactly that stale mirror and stopped
+    # writing it, so a connection-bound install would have been served stale rows under
+    # a label pointing somewhere else.
+    #
+    # This is the SEVENTH time this defect has appeared — `bindings._archivist` already
+    # documents it as "the same defect #552 removed six times", and I reproduced it one
+    # module along while fixing the sixth. Resolving first makes the ordering guarantee
+    # STRUCTURAL rather than conventional. (Prudence, #725.)
+    report = _binding_of(config, "archivist")
+    if report.binding == ARCHIVIST_ABSENT or not report.ok:
+        return _envelope("archivist", config, [], report=report)
+    if report.binding == ARCHIVIST_LOCAL:
         rows = search(config.db_path, query, table="knowledge", limit=limit)
-        return _envelope("archivist", config, rows)
-    path = _resolve_archivist_path(config)
-    rows = search(path, query, table="knowledge", limit=limit) if path.is_file() else []
-    return _envelope("archivist", config, rows)
+        return _envelope("archivist", config, rows, report=report)
+    target = report.target
+    rows = (
+        search(target, query, table="knowledge", limit=limit) if target and target.is_file() else []
+    )
+    return _envelope("archivist", config, rows, report=report)
 
 
 #: Name -> callable, so a caller can dispatch on the vocabulary itself.
