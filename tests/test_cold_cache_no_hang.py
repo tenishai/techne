@@ -63,19 +63,49 @@ def test_search_vec_never_asks_to_download(monkeypatch, tmp_path):
     )
 
 
-def test_backfill_may_still_download():
-    """The counterpart: the CLI is the one path that MUST be able to fetch.
+def test_backfill_may_still_download(monkeypatch, tmp_path):
+    """The counterpart, pinned BEHAVIOURALLY (review of #728, Important 3).
 
-    README documents `techne vectors backfill` as the cold-cache recovery, so
-    guarding it too would leave no way to ever warm the cache — the never-green
-    shape of techne#496, on the other side.
+    An earlier version of this test grepped `inspect.getsource` for the literal
+    `_get_embedding_model()`. That failed in BOTH directions, measured: guarding
+    the real call while leaving the bare form in an adjacent comment passed
+    silently, and the benign refactor `_get_embedding_model(None)` false-alarmed.
+    A source-text assertion pins the spelling, not the behaviour.
+
+    Why it must stay permissive: README documents `techne vectors backfill` as
+    the cold-cache recovery, and after #708 this is the ONLY call in the package
+    that may download. Guard it too and a fresh install can never acquire its
+    weights — techne#496's never-green shape from the other side.
     """
-    import inspect
+    import sys
 
-    src = inspect.getsource(search_mod.backfill_vectors)
-    assert "_get_embedding_model()" in src, (
-        "backfill_vectors must keep the permissive default; it is the only "
-        "documented way to fetch the weights"
+    seen: list[dict] = []
+
+    class _StubVec:
+        @staticmethod
+        def load(conn):  # pragma: no cover - trivial
+            return None
+
+    def _spy(config=None, **kwargs):
+        seen.append(kwargs)
+        raise RuntimeError("stop here — we only care what was asked")
+
+    monkeypatch.setitem(sys.modules, "numpy", type("m", (), {})())
+    monkeypatch.setitem(sys.modules, "sqlite_vec", _StubVec())
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
+    monkeypatch.setattr(search_mod, "_get_embedding_model", _spy)
+
+    with pytest.raises(Exception):
+        search_mod.backfill_vectors(tmp_path / "x.db")
+
+    assert seen, (
+        "backfill_vectors never reached the embedding resolver — the test no "
+        "longer exercises the thing it pins"
+    )
+    assert seen[0].get("allow_download") is not False, (
+        "backfill_vectors was guarded with allow_download=False; it is the only "
+        "path that may fetch the weights, so guarding it strands every fresh "
+        "install on FTS-only forever"
     )
 
 
@@ -103,3 +133,57 @@ def test_model_cached_is_true_when_loadable(monkeypatch):
     monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
     monkeypatch.setattr(embeddings_mod, "_get_embedding_model", lambda *a, **k: object())
     assert embeddings_mod.model_cached() is True
+
+
+def test_the_degrade_is_not_silent(monkeypatch, tmp_path, capsys):
+    """Restores a signal this fix would otherwise DELETE (review of #728).
+
+    Pre-#708 there was no try/except here, so a construction failure propagated
+    to user_prompt_submit's handler, which printed to stderr and made _record
+    write outcome="failed" — the very thing _record's docstring exists to
+    guarantee. Returning [] silently would make a rail whose every search fails
+    report LIVE.
+    """
+    import sys
+
+    monkeypatch.setattr(search_mod, "_EMBED_UNAVAILABLE_WARNED", False)
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
+    monkeypatch.setattr(
+        search_mod,
+        "_get_embedding_model",
+        lambda *a, **k: (_ for _ in ()).throw(_Uncached("weights absent")),
+    )
+    monkeypatch.setitem(sys.modules, "sqlite_vec", type("m", (), {})())
+    monkeypatch.setitem(sys.modules, "numpy", type("m", (), {})())
+
+    search_mod.search_vec(tmp_path / "x.db", "q")
+    first = capsys.readouterr().err
+    assert "vector recall unavailable" in first
+    assert "techne vectors backfill" in first, "the warning must name the remedy"
+
+    # ONCE PER PROCESS, not once per turn — this is a per-prompt hook path.
+    search_mod.search_vec(tmp_path / "x.db", "q")
+    assert capsys.readouterr().err == "", "the warning repeated on a later turn"
+
+
+def test_dormant_names_the_uncached_state(monkeypatch, tmp_path):
+    """DORMANT means 'off by configuration' — it must not claim that here.
+
+    Nothing creates the vec tables until a backfill runs, so a fresh
+    `pip install techne[vectors]` hits this branch with vectors deliberately ON.
+    DORMANT sorts with LIVE, sets ok=True and never reaches the banner, so the
+    unqualified form told the operator an enabled channel was deliberately off.
+    """
+    from techne.core import checks as checks_mod
+
+    cfg = type("C", (), {"db_path": tmp_path / "empty.db"})()
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
+
+    monkeypatch.setattr(embeddings_mod, "model_cached", lambda *a, **k: False)
+    uncached = checks_mod.check_vector_coverage(cfg)
+    assert uncached.remedy == "techne vectors backfill", "no actionable remedy offered"
+    assert "NOT cached" in uncached.detail
+
+    monkeypatch.setattr(embeddings_mod, "model_cached", lambda *a, **k: True)
+    unconfigured = checks_mod.check_vector_coverage(cfg)
+    assert unconfigured.remedy is None, "a genuinely unconfigured channel gained a false remedy"

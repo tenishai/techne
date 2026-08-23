@@ -2,6 +2,7 @@
 
 import math
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -608,6 +609,15 @@ def search_knowledge_conn(
 _VEC_SUPERSEDE_OVERFETCH = 3
 
 
+# Once per process, not once per turn. The broad `except` below is correct — a
+# hook must not raise — but before techne#708 those exceptions PROPAGATED to
+# user_prompt_submit's handler, which printed to stderr and made `_record` write
+# outcome="failed". Returning [] silently would delete that signal and make a
+# rail whose every search fails report LIVE, which is the exact shape _record's
+# docstring exists to prevent. So keep the broad catch and narrow the SILENCE.
+_EMBED_UNAVAILABLE_WARNED = False
+
+
 def search_vec(
     db_path: Path,
     query: str,
@@ -646,11 +656,26 @@ def search_vec(
     # and the model absent, which is exactly the fresh-install state.
     try:
         model = _get_embedding_model(allow_download=False)
-    except Exception:
-        # Uncached model. Degrade to FTS-only, the same contract as every other
-        # exit in this function. The singleton is deliberately left unset on a
-        # failed allow_download=False attempt, so `techne vectors backfill`
-        # (which may download) can still warm the cache in the same process.
+    except Exception as exc:
+        # Degrade to FTS-only, the same contract as every other exit here. The
+        # singleton is deliberately left unset on a failed allow_download=False
+        # attempt, so `techne vectors backfill` (which may download) can still
+        # warm the cache in the same process.
+        #
+        # NOT SILENT. This catch is broad on purpose (a hook must not raise) and
+        # therefore also swallows genuine construction failures — a typo'd
+        # `search.embedding_model` reaches _build_backend unvalidated, as do a
+        # corrupt cache and an incompatible weights file. Pre-#708 those
+        # propagated and were recorded as outcome="failed"; one stderr line per
+        # process restores that signal without per-turn noise.
+        global _EMBED_UNAVAILABLE_WARNED
+        if not _EMBED_UNAVAILABLE_WARNED:
+            _EMBED_UNAVAILABLE_WARNED = True
+            print(
+                "techne: vector recall unavailable — embedding model not cached "
+                f"or not buildable ({exc}); run `techne vectors backfill`",
+                file=sys.stderr,
+            )
         return []
     q_emb = np.stack(list(model.embed([query])))[0]
     q_bytes = q_emb.astype("float32").tobytes()
