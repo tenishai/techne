@@ -1,0 +1,23 @@
+---
+card: arch-card:techne-bindings
+updated: 2026-08-22
+anchor: techne/core/bindings.py sha=81a88636c708da9dfc983e676c688ad0d16acfb1
+---
+# bindings — the connection seam, one question over four domains (techne#552 part 4)
+
+WHAT: `domain_binding(config, domain)` / `all_bindings(config)` answer ONE question — what is this domain bound to, and can I reach it — identically for the archivist, librarian, architect and codex. Surfaced as `techne bindings`.
+THE ASK IT ANSWERS (Richard): "connecting to the librarian, archivist, architect, and codex in techne had the SAME FEEL as connecting to liminal with a persona, and cabal with a local agent and with a remote agent." That is a question about CONNECTING.
+
+**IT DELIBERATELY DOES NOT ADD RECALL RUNGS, WHICH IS WHAT #552 PART 4 LITERALLY SAYS.** Two reasons, one read and one measured:
+- THE SIBLINGS ANSWER "SAME FEEL" ON THE BINDING AXIS. liminal `src/liminal/target/base.py`: a `Target` is "a named backend with a transport"; `name` is the namespace, `list_tools` returns tools UNPREFIXED and the Multiplexer adds `{name}.`; in-process / HTTP / stdio are KINDS OF TARGET. The call shape never changes. cabal `src/cabal/handlers/` already ships `patterns.py`, `code.py`, `documents.py`, `archivist.py` SIDE BY SIDE — these exact domains, as peers, each `{domain}.{verb}`. NEITHER fuses its domains into one query; both make the CONNECTION uniform and let the caller name the domain.
+- MEASURED RETRIEVAL WOULD MAKE THOSE RUNGS NOISE (2026-08-22). Patterns: FTS over name+body with an OR fallback — "archivist binding" → "Late-binding task definitions", "guarded read-only SQL over a shared store" → "Dialect-agnostic filter-DSL compiler"; the function's own docstring says the corpus is queried in problem language while patterns are titled metaphorically (techne#550 is the fix, unlanded). Codex: 166 files fresh / **83 stale**, `retired_producer_targets` (merged the same day) returned ZERO hits, and 45% of hits across six realistic topics were TEST symbols, because test names are English sentences and FTS matches them better than identifiers.
+A rung returning noise on EVERY recall is worse than no rung, and OPEN-SOURCING FREEZES THE RESPONSE SHAPE (knowledge#1085) — so adding one is the expensive direction. Pinned by `test_the_recall_ladder_is_unchanged`, whose docstring says to update it deliberately if #550 and codex freshness ever make them answerable.
+
+INVARIANTS:
+- **UNIFORM QUESTION, PER-DOMAIN MECHANISM** — the same split `checks._VERSION_REGISTRY` already carries, and for the same reason: reading one mechanism uniformly reports false problems on healthy stores. Archivist answers from `archivist_binding` (a config DECISION), architect and librarian from the `stores` registry, codex from a per-repo index that may not exist. The caller never learns which.
+- **THE ARCHIVIST DELEGATES, IT DOES NOT RE-DERIVE.** techne#552 spent a PR collapsing SIX private opinions about the archivist binding into one resolver; this module must not become the seventh. Pinned by a spy test.
+- **THE VOCABULARY IS THE LADDER'S** — `absent`/`local`/`store` are re-exported from `core.tiers`, not redefined. A second vocabulary for the same three states is how two subsystems come to disagree about what "local" means.
+- **CONFIGURED AND UNREACHABLE ARE DIFFERENT FACTS.** `binding` and `reachable` are separate fields; a named store whose file is missing is `store` + `reachable=False`. Same distinction the ladder draws between `unconfigured` and `empty`.
+- **CODEX REPORTS `absent` RATHER THAN ANSWERING ABOUT ANOTHER REPO.** db-per-repo (techne#209) means the binding is a property of WHERE YOU ARE; an unindexed repo has no codex, which is a fact rather than a fault. Resolving to some other repo's index would answer confidently about the wrong code.
+- **ONE BROKEN RESOLVER MUST NOT TAKE DOWN THE REPORT.** Its value is completeness — an operator comparing four domains needs four rows, one of which may say it could not be read. NOTE there are TWO handlers with different guarantees (the inner one in `_codex`, the outer in `all_bindings`) and a guard must raise where nothing else will catch it: a first test monkeypatched inside `_codex`, exercised the inner catch, and left the outer one unguarded.
+CONSUMERS: `techne bindings` (cli.py). Does NOT touch `_techne_recall`.

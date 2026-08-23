@@ -1179,6 +1179,44 @@ def archivist_query(ctx, sql, limit, as_json):
     click.echo(tail)
 
 
+@main.command()
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw report.")
+@click.pass_context
+def bindings(ctx, as_json):
+    """What each knowledge domain is bound to (techne#552 part 4).
+
+    Richard's "same feel" question, answered on the axis liminal and cabal answer it
+    on: the CONNECTION is uniform, whatever is behind it. One question — what is this
+    bound to, and can I reach it — asked identically of the archivist, librarian,
+    architect and codex.
+
+    Deliberately does NOT change what `techne_recall` queries. Patterns and codex are
+    not recall rungs, because measured retrieval today would put noise in a response
+    shape that open-sourcing freezes; see core/bindings.py for the numbers.
+    """
+    import json as _json
+
+    from techne.core.bindings import all_bindings
+
+    reports = all_bindings(ctx.obj["config"])
+    if as_json:
+        click.echo(_json.dumps([r.as_dict() for r in reports], indent=2))
+        return
+
+    width = max(len(r.domain) for r in reports)
+    for r in reports:
+        # `reachable` is reported separately from `binding` on purpose: a domain can be
+        # CONFIGURED and UNREACHABLE, and collapsing those is the same failure the
+        # recall ladder avoids by keeping `unconfigured` distinct from `empty`.
+        mark = " " if r.reachable else "!"
+        click.echo(f"{mark} {r.domain.ljust(width)}  {r.binding:6s}  {r.detail}")
+
+    missing = [r for r in reports if not r.reachable]
+    if missing:
+        click.echo("")
+        click.echo(f"{len(missing)} domain(s) not reachable — marked ! above")
+
+
 @main.group()
 @click.pass_context
 def custodian(ctx):
