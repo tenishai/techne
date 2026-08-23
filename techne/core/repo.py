@@ -56,7 +56,16 @@ def primary_repo_root(path: Path) -> Path | None:
     `commondir` file naming `<primary>/.git`. `coord.py` warns from experience against
     splitting on `/worktrees/` — a repo whose own path contains that segment defeats it.
     Any malformed or missing piece falls back to *path*'s own root, which is today's
-    behaviour, so this can only improve resolution and never break it.
+    behaviour.
+
+    THAT FALLBACK DOES NOT MEAN THIS "CAN ONLY IMPROVE RESOLUTION, NEVER BREAK A WORKING
+    INSTALL" — an earlier draft said so and it was false in both directions (Prudence,
+    #719). The inference is the exact fallacy that shipped the bug: breakage never came
+    from a MALFORMED piece, it came from a WELL-FORMED `commondir` in a layout where
+    `parent` is not the repo root. Hence the name guard below. It is still not a
+    totalising guarantee — a bare repo literally named `.git` clears both guards and
+    resolves to a directory holding no checkout — which is benign, and stated rather
+    than papered over.
     """
     root = find_repo_root(path)
     if root is None:

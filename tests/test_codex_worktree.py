@@ -117,8 +117,12 @@ def test_an_undecodable_commondir_falls_back_rather_than_raising(primary, worktr
 
 
 def test_a_malformed_git_pointer_falls_back_rather_than_raising(primary, worktree):
-    """FAIL SAFE. Any unreadable piece returns the worktree's own root — today's
-    behaviour — so this can only improve resolution, never break a working install."""
+    """FAIL SAFE for an UNREADABLE piece — and that is all this proves.
+
+    The docstring here used to generalise it to "can only improve resolution, never
+    break a working install". False: the breakage Prudence found came from a
+    WELL-FORMED `commondir` in a layout where `parent` is not the repo root, which no
+    amount of fail-safe-on-malformed-input prevents. See the `.bare` tests below."""
     (worktree / ".git").write_text("this is not a gitdir pointer\n")
     assert primary_repo_root(worktree) == worktree
 
