@@ -172,3 +172,155 @@ def test_an_unindexed_repo_still_answers_None_from_a_worktree(
     from techne.core.codex import resolve_repo_db_for_query
 
     assert resolve_repo_db_for_query(Config.load(), worktree) is None
+
+
+def _bare_layout(base, outer_is_repo: bool):
+    """`.bare + worktrees`: a bare repo plus linked worktrees beside it. Optionally
+    nested inside ANOTHER repo, which is the dangerous variant."""
+    base.mkdir(parents=True)
+    if outer_is_repo:
+        _git("init", "-q", "-b", "main", cwd=base)
+        _git("config", "user.email", "t@example.com", cwd=base)
+        _git("config", "user.name", "t", cwd=base)
+        (base / "outer.py").write_text("outer = 1\n")
+        _git("add", "-A", cwd=base)
+        _git("commit", "-qm", "outer", cwd=base)
+    _git("init", "-q", "--bare", ".bare", cwd=base)
+    _git("clone", "-q", str(base / ".bare"), "seed", cwd=base)
+    seed = base / "seed"
+    _git("config", "user.email", "t@example.com", cwd=seed)
+    _git("config", "user.name", "t", cwd=seed)
+    (seed / "inner.py").write_text("inner = 1\n")
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "inner", cwd=seed)
+    _git("push", "-q", "origin", "HEAD:main", cwd=seed)
+    wt = base / "wt"
+    _git("--git-dir", str(base / ".bare"), "worktree", "add", "-q", str(wt), "main", cwd=base)
+    return wt
+
+
+def test_a_bare_plus_worktrees_layout_falls_back_rather_than_guessing(tmp_path):
+    """PRUDENCE, #719. `commondir` -> `parent` is the repo root ONLY when the common dir
+    is literally `<root>/.git`. In this layout it is `<x>/.bare`, so `parent` is `<x>` —
+    not a checkout. My claim that the fallback meant this "can only improve resolution,
+    never break a working install" was FALSE: an indexed worktree here resolved fine
+    before and stopped resolving after."""
+    wt = _bare_layout(tmp_path / "proj", outer_is_repo=False)
+    assert primary_repo_root(wt) == wt
+
+
+def test_a_bare_repo_nested_in_another_repo_never_resolves_to_the_outer_one(tmp_path):
+    """THE DANGEROUS CASE, and the reason the guard checks the NAME rather than just
+    that a sibling `.git` exists. Common dir `<outer>/.bare` gives `parent == <outer>`,
+    whose `.git` DOES exist — so the inner repo's worktree resolved to the OUTER repo's
+    index. Not a missing answer: a confident wrong one, about entirely different code."""
+    outer = tmp_path / "outer"
+    wt = _bare_layout(outer, outer_is_repo=True)
+
+    got = primary_repo_root(wt)
+    assert got != outer, (
+        "resolved to the OUTER repo's index — confident answers about the wrong code"
+    )
+    assert got == wt
+
+
+def test_a_separate_git_dir_checkout_falls_back(tmp_path):
+    """`--separate-git-dir` puts the real git dir outside the checkout. It falls back
+    early (no `commondir` file), so it does NOT reach the `.exists()` arm — see the next
+    test, which does."""
+    root = tmp_path / "checkout"
+    elsewhere = tmp_path / "gitdirs" / "thing"
+    elsewhere.parent.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", f"--separate-git-dir={elsewhere}", str(root), cwd=tmp_path)
+
+    assert primary_repo_root(root) == root
+
+
+def test_an_absolute_commondir_pointing_nowhere_falls_back(primary, worktree):
+    """THE `.exists()` ARM, AND IT TOOK THREE ATTEMPTS TO REACH — worth recording,
+    because two of those attempts were tests that looked right and proved nothing.
+
+    Prudence found a bare `return primary` passed 11/11. Attempt one used
+    `--separate-git-dir`: it falls back earlier (no `commondir`), never reaching the
+    line. Attempt two deleted the primary's `.git`: that deletes the worktree's own
+    gitdir with it, so the `commondir` READ fails first. Her stated justification for
+    the arm — `--separate-git-dir` — turns out to be subsumed by the name guard she
+    proposed in the same review: that layout's common dir is named `realgitdir`, so the
+    name check fires before this line.
+
+    What reaches it is an ABSOLUTE `commondir`. Git writes `../..` by default, which is
+    why the arm looks unreachable, but absolute is a supported spelling — and a stale
+    absolute path names a `.git` that clears the NAME guard while not existing. Without
+    this arm the function returns that path's parent: a directory that is not a repo.
+    """
+    pointer = (worktree / ".git").read_text(encoding="utf-8").strip()
+    git_dir = Path(pointer.split(":", 1)[1].strip())
+    if not git_dir.is_absolute():
+        git_dir = (worktree / git_dir).resolve()
+    (git_dir / "commondir").write_text(f"{primary.parent / 'moved-away' / '.git'}\n")
+
+    assert primary_repo_root(worktree) == worktree
+
+
+def test_the_edit_rail_declines_inside_a_worktree(primary, worktree, tmp_path, monkeypatch):
+    """PRUDENCE, #719 — THE CALLER I DID NOT UPDATE. Making the query resolve to the
+    primary silently changed this rail's meaning: it pairs the PRIMARY's graph with a
+    LINE NUMBER from the file in front of it, so a PR-branch line looked up against the
+    base-branch graph names a different symbol and the rail annotates the edit with some
+    other function's dependents.
+
+    Latent when she found it (`codex_edit_rail` defaults False), which is exactly why it
+    needed a test rather than a note — the next person to enable the flag would not know.
+    """
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path / "home3"))
+    from techne.config import Config
+    from techne.core.codex import repo_db_path
+    from techne.hooks.post_tool_use import _inject_edit_blast_radius
+
+    cfg = Config.load()
+    cfg.hooks.codex_edit_rail = True  # OFF by default; this is the latent path
+    cfg.hooks.codex_edit_rail_min_deps = 1
+    db = repo_db_path(cfg, primary)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.touch()
+
+    # THE SUCCESS PATH HAS TO BE REAL OR THE GUARD IS UNOBSERVABLE. A first version
+    # asserted only `is None` for the worktree — which passed with the guard REMOVED,
+    # because the rail also returns None on an empty db. The test could not tell
+    # "declined because worktree" from "declined because there was nothing to say".
+    monkeypatch.setattr(
+        "techne.core.codegraph.symbol_at",
+        lambda *a, **k: {"id": "a.py::f::function::1", "name": "f", "kind": "function"},
+    )
+    monkeypatch.setattr(
+        "techne.core.codegraph.reachable",
+        lambda *a, **k: [
+            {
+                "id": "b.py::g::function::1",
+                "file": "b.py",
+                "name": "g",
+                "kind": "function",
+                "depth": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr("techne.core.codegraph.annotate_freshness", lambda _db, rows: rows)
+
+    # `new_string` must be PRESENT in the file: PostToolUse fires after the edit, and
+    # `_edited_line` locates it to anchor the symbol lookup. "return 2" is not in the
+    # fixture, so the rail stopped there and the primary produced nothing.
+    edit = {"old_string": "return 0", "new_string": "return 1"}
+
+    # The PRIMARY produces output — so the rail is genuinely reachable in this setup.
+    primary_out = _inject_edit_blast_radius(
+        cfg, "s1", "Edit", dict(edit, file_path=str(primary / "a.py"))
+    )
+    assert primary_out, "the rail never fired at all — the guard below would be untested"
+
+    # The WORKTREE, same everything, must decline.
+    wt_out = _inject_edit_blast_radius(
+        cfg, "s2", "Edit", dict(edit, file_path=str(worktree / "a.py"))
+    )
+    assert wt_out is None, (
+        "the edit rail ran inside a worktree — base-branch graph, PR-branch line numbers"
+    )

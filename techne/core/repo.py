@@ -76,7 +76,23 @@ def primary_repo_root(path: Path) -> Path | None:
         common_dir = Path(common)
         if not common_dir.is_absolute():
             common_dir = (git_dir / common_dir).resolve()
-        # `commondir` names the primary's `.git`; the repo root is its parent.
+        # `commondir` names the common git dir, and `parent` is the repo root ONLY when
+        # that dir is literally `<root>/.git`. THE ORIGINAL CODE ASSUMED IT ALWAYS WAS,
+        # AND THAT WAS FALSE IN BOTH DIRECTIONS (Prudence, #719):
+        #
+        #   * `.bare + worktrees` (a common layout): common dir is `<x>/.bare`, so
+        #     `parent` is `<x>` — not a checkout at all. An indexed worktree that
+        #     resolved fine before started resolving to something with no index.
+        #   * A BARE REPO NESTED INSIDE ANOTHER REPO is the dangerous one: common dir
+        #     `<outer>/.bare` gives `parent == <outer>`, whose `.git` DOES exist, so the
+        #     inner repo's worktree resolved to the OUTER REPO'S INDEX — confident
+        #     answers about the wrong code, which `_codex` elsewhere calls worse than
+        #     saying no. Reproduced before fixing.
+        #
+        # So the name is checked, not just the existence of a sibling `.git`. Anything
+        # else falls back to the worktree's own root, which is the pre-fix behaviour.
+        if common_dir.name != ".git":
+            return root
         primary = common_dir.parent
         return primary if (primary / ".git").exists() else root
     except (OSError, ValueError, IndexError):
