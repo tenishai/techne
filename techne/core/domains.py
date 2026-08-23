@@ -36,7 +36,7 @@ from typing import Any
 DOMAIN_NAMES = ("archivist", "librarian", "architect", "codex")
 
 
-def _binding_of(config, domain: str):
+def _binding_of(config, domain: str, start_path: str | None = None):
     """Resolve the binding BEFORE the read, never after.
 
     `architect_db()` and its siblings CREATE their store on access, so computing the
@@ -46,7 +46,7 @@ def _binding_of(config, domain: str):
     """
     from techne.core.bindings import domain_binding
 
-    return domain_binding(config, domain)
+    return domain_binding(config, domain, start_path)
 
 
 def _envelope(domain: str, config, rows: list[dict], report, **extra: Any) -> dict:
@@ -112,10 +112,16 @@ def codex_search(config, query: str, limit: int = 20, repo: str | None = None) -
     import os
 
     from techne.core.codegraph import search_symbols
-    from techne.core.codex import resolve_repo_db_for_query
 
-    report = _binding_of(config, "codex")
-    db = resolve_repo_db_for_query(config, repo or os.getcwd())
+    # ONE DERIVATION, NOT TWO — and this was the NINTH instance of that defect, found
+    # by asking the question Prudence's eighth prompted rather than by being told.
+    # `report` used to come from cwd while the read used `repo or cwd`, so the two
+    # disagreed exactly when a caller passed `repo`. The resolver already returns the
+    # db it resolved, so reading `report.target` removes the second derivation instead
+    # of teaching it the same input.
+    start = repo or os.getcwd()
+    report = _binding_of(config, "codex", start)
+    db = report.target
     rows = [] if db is None else search_symbols(db, query, limit=limit)
     return _envelope("codex", config, rows, report=report)
 

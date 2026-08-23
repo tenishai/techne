@@ -279,3 +279,44 @@ def test_codex_reports_the_binding_of_the_repo_it_actually_read(config, tmp_path
         "derived from cwd while the read used the `repo` argument"
     )
     assert r["target"] == str(db_b), f"reported {r['target']}, read {db_b}"
+
+
+def test_domains_codex_search_honours_its_repo_argument(config, tmp_path, monkeypatch):
+    """THE NINTH INSTANCE, and the one I found by asking rather than being told.
+
+    `domains.codex_search` takes a `repo` argument and had the identical split the MCP
+    tool did: `report` derived from cwd, the read from `repo or cwd`. Prudence's eighth
+    finding prompted the question; this is the answer to it.
+
+    Fixed by REMOVING the second derivation rather than teaching it the same input —
+    the resolver already returns the db it resolved, so the read uses `report.target`.
+    That is the difference between two derivations that agree today and one derivation
+    that cannot disagree.
+    """
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA, repo_db_path
+    from techne.core.domains import codex_search
+    from techne.core.stores import SqliteStore
+
+    repo_b = tmp_path / "repo_b"
+    (repo_b / ".git").mkdir(parents=True)
+    db_b = repo_db_path(config, repo_b)
+    db_b.parent.mkdir(parents=True, exist_ok=True)
+    SqliteStore("codex", db_b).migrate(CODEX_SCHEMA)
+    add_symbol(
+        db_b,
+        id="b.py::kestrel_delta::function::1",
+        file="b.py",
+        name="kestrel_delta",
+        kind="function",
+    )
+
+    elsewhere = tmp_path / "not-a-repo"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    r = codex_search(config, "kestrel_delta", repo=str(repo_b))
+
+    assert r["count"] >= 1, "the repo argument was ignored"
+    assert r["binding"] != "absent", "reported `absent` beside rows it had just read"
+    assert r["target"] == str(db_b)
