@@ -147,7 +147,11 @@ def _archivist(config) -> BindingReport:
     """Delegates to the archivist's own resolver — it is the one domain whose binding
     is a config DECISION rather than a path lookup, and techne#552 spent a PR making
     that single-sourced. Re-deriving it here would be the seventh private opinion."""
-    from techne.core.archivist import _resolve_archivist_path, archivist_binding
+    from techne.core.archivist import (
+        ARCHIVIST_CONNECTION_NAME,
+        _resolve_archivist_path,
+        archivist_binding,
+    )
 
     binding = archivist_binding(config)
     if binding == BOUND_ABSENT:
@@ -159,6 +163,36 @@ def _archivist(config) -> BindingReport:
             Path(config.db_path),
             "resolves to this instance's own knowledge — no second store",
         )
+    # TWO TOPOLOGIES ANSWER `store`, AND THEY RESOLVE DIFFERENTLY (Prudence, #717).
+    # `archivist_binding` returns STORE for `archivist_db_path` OR a `connections`
+    # entry, but `_resolve_archivist_path` only knows the former — so a
+    # connection-bound archivist fell through to the DEFAULT `<data_dir>/archivist.db`,
+    # which a team install has no reason to have, and this command reported
+    # `unavailable` for a store that was present and working. Recall never saw it:
+    # `mcp_server.py` does `conns.setdefault(ARCHIVIST_CONNECTION_NAME, ...)`, so the
+    # operator's own entry wins there and only this surface diverged. Delegating the
+    # binding while re-deriving the path is the same defect #552 removed six times.
+    conn = (config.connections or {}).get(ARCHIVIST_CONNECTION_NAME)
+    if conn is not None:
+        # THROUGH FEDERATION'S OWN RESOLVER, not `Path(...)`. techne#332 resolves a
+        # relative db_path against `techne_home()`; checking `exists()` on the raw
+        # string would invent a fresh false `unavailable` for exactly the portable
+        # committed-config case that rule exists to support.
+        from techne.core.federation import _resolve_conn_db_path
+
+        target = _resolve_conn_db_path(conn.db_path)
+        label = getattr(conn, "label", "") or ARCHIVIST_CONNECTION_NAME
+        if not target.exists():
+            return BindingReport(
+                "archivist",
+                BOUND_UNAVAILABLE,
+                target,
+                f"connection '{label}' names a store that is not present at {target}",
+            )
+        return BindingReport(
+            "archivist", binding, target, f"team store via connection '{label}' at {target}"
+        )
+
     # `_resolve_archivist_path` RAISES on the techne#346 misconfiguration
     # (archivist_db_path pointing at the personal db). Left to propagate to
     # `all_bindings`, which turns it into an `unavailable` row CARRYING THE MESSAGE —
@@ -223,9 +257,16 @@ def _codex(config) -> BindingReport:
 
     try:
         path = resolve_repo_db_for_query(config, os.getcwd())
-    except Exception:  # noqa: BLE001 — an unresolvable repo is a report, not a crash
-        log.warning("codex: could not resolve a repo db for the cwd", exc_info=True)
-        path = None
+    except Exception as exc:  # noqa: BLE001 — a fault is a report, not a crash
+        # UNAVAILABLE, NOT ABSENT (Prudence, #717). `resolve_repo_db_for_query`
+        # RETURNS None for both healthy absences — no repo, and a repo with no index —
+        # so nothing reaching this `except` is healthy: it is a failing legacy
+        # migration or an unreadable db. Reporting `absent` + ok=True told the operator
+        # "no index for the active repo", sending them to `techne codex index` for a
+        # fault that command does not fix. Same principle as this module's sibling
+        # test asserts for `all_bindings`.
+        log.debug("codex: could not resolve a repo db for the cwd", exc_info=True)
+        return BindingReport("codex", BOUND_UNAVAILABLE, None, f"{type(exc).__name__}: {exc}")
 
     if path is None:
         return BindingReport(

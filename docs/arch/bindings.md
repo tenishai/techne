@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-bindings
 updated: 2026-08-22
-anchor: techne/core/bindings.py sha=d9f42ac5bbadf45a0487c128ba2a33d73f5916c3
+anchor: techne/core/bindings.py sha=70b1087f7daa3e500eb25aee5924531b04d0aafe
 ---
 # bindings — the connection seam, one question over four domains (techne#552 part 4)
 
@@ -16,8 +16,11 @@ A rung returning noise on EVERY recall is worse than no rung, and OPEN-SOURCING 
 INVARIANTS:
 - **UNIFORM QUESTION, PER-DOMAIN MECHANISM** — the same split `checks._VERSION_REGISTRY` already carries, and for the same reason: reading one mechanism uniformly reports false problems on healthy stores. Archivist answers from `archivist_binding` (a config DECISION), architect and librarian from the `stores` registry, codex from a per-repo index that may not exist. The caller never learns which.
 - **THE ARCHIVIST DELEGATES, IT DOES NOT RE-DERIVE.** techne#552 spent a PR collapsing SIX private opinions about the archivist binding into one resolver; this module must not become the seventh. Pinned by a spy test.
-- **THE VOCABULARY IS THE LADDER'S** — `absent`/`local`/`store` are re-exported from `core.tiers`, not redefined. A second vocabulary for the same three states is how two subsystems come to disagree about what "local" means.
-- **CONFIGURED AND UNREACHABLE ARE DIFFERENT FACTS.** `binding` and `reachable` are separate fields; a named store whose file is missing is `store` + `reachable=False`. Same distinction the ladder draws between `unconfigured` and `empty`.
+- **THE VOCABULARY IS THE LADDER'S** — `absent`/`local`/`store` AND the fault state `unavailable` are re-exported from `core.tiers`, not redefined. A second vocabulary for the same states is how two subsystems come to disagree about what "local" means.
+- **FOUR STATES, NOT THREE PLUS A BOOL.** `reachable: bool` collapsed *absent by design*, *bound and readable* and *bound and unreadable* into one flag, so the CLI reported "3 domain(s) not reachable" on a HEALTHY fresh install — `absent` is unreachable by definition, and librarian/architect create their dbs lazily on first write. The fault case is now `unavailable`, borrowed from the ladder; `ok` is DERIVED (`binding != unavailable`), never stored. A failed resolver is `unavailable` too, carrying `str(e)` verbatim, because the techne#346 guard's refusal arriving as "could not resolve: ValueError" defeats the one command an operator runs to diagnose it.
+  - THE HONEST CAVEAT (Prudence, #717): this FUSES TWO AXES. `absent`/`local`/`store` say what a domain is bound TO; `unavailable` says what happened when we looked. Fusing them means `unavailable` OVERWRITES the binding — a `--json` consumer cannot learn that an unreachable domain was store-bound. Deliberate for a CLI whose job is "is anything wrong", and the detail string carries the lost half; revisit if a programmatic consumer needs both.
+- **BOTH `store` TOPOLOGIES RESOLVE THROUGH THEIR OWN RESOLVER.** `archivist_binding` answers `store` for `archivist_db_path` OR a `connections` entry. Delegating the binding while re-deriving the PATH — which only knew the first — made a connection-bound team install report `unavailable` for a present, working store. Recall never saw it (`mcp_server` setdefaults, so the operator's entry wins), so the divergence lived only in the surface built to diagnose bindings. Relative connection paths go through federation's `_resolve_conn_db_path` (techne#332), not `Path()`.
+- **ONLY GENUINE FAULTS REACH AN `except`.** `resolve_repo_db_for_query` RETURNS None for both healthy codex absences, so its handler catches only real failures and must report `unavailable`, not `absent`. Reporting the healthy state advised `techne codex index` for a fault that command does not fix.
 - **CODEX REPORTS `absent` RATHER THAN ANSWERING ABOUT ANOTHER REPO.** db-per-repo (techne#209) means the binding is a property of WHERE YOU ARE; an unindexed repo has no codex, which is a fact rather than a fault. Resolving to some other repo's index would answer confidently about the wrong code.
 - **ONE BROKEN RESOLVER MUST NOT TAKE DOWN THE REPORT.** Its value is completeness — an operator comparing four domains needs four rows, one of which may say it could not be read. NOTE there are TWO handlers with different guarantees (the inner one in `_codex`, the outer in `all_bindings`) and a guard must raise where nothing else will catch it: a first test monkeypatched inside `_codex`, exercised the inner catch, and left the outer one unguarded.
 CONSUMERS: `techne bindings` (cli.py). Does NOT touch `_techne_recall`.

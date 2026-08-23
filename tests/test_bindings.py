@@ -167,6 +167,84 @@ def test_the_346_misconfiguration_surfaces_here_with_its_own_message(config):
     assert "must not be the personal techne db" in row.detail
 
 
+def test_a_connection_bound_archivist_reports_the_connection_not_a_derived_path(config, tmp_path):
+    """PRUDENCE, #717: `archivist_binding` answers `store` for TWO topologies —
+    `archivist_db_path` and a `connections` entry — and `_archivist` delegated the
+    binding while re-deriving the PATH, which only knew the first. A team install bound
+    by connection fell through to the default `<data_dir>/archivist.db`, which it has no
+    reason to have, so this command reported `unavailable` for a store that was present
+    and working.
+
+    Recall never saw it (`mcp_server` setdefaults, so the operator's entry wins), which
+    is exactly what made it invisible: the divergence lived only in the surface built to
+    diagnose bindings."""
+    from techne.config import FederationConnectionSpec
+
+    team = tmp_path / "team.db"
+    team.touch()
+    config.connections = {
+        "archivist": FederationConnectionSpec(role="team", db_path=str(team), label="acme team")
+    }
+
+    r = domain_binding(config, "archivist")
+
+    assert r.binding == BOUND_STORE
+    assert r.ok is True, f"a present, working team store reported as a fault: {r.detail}"
+    assert r.target == team, "the connection's path was re-derived instead of read"
+    assert "acme team" in r.detail
+
+
+def test_a_relative_connection_path_resolves_the_way_federation_resolves_it(
+    config, tmp_path, monkeypatch
+):
+    """techne#332 resolves a relative db_path against `techne_home()` so a committed
+    config.yaml stays portable. Checking `exists()` on the raw string would invent a
+    NEW false `unavailable` for precisely that case."""
+    from techne.config import FederationConnectionSpec
+
+    (tmp_path / "rel-team.db").touch()  # tmp_path IS techne_home here (see fixture)
+    config.connections = {"archivist": FederationConnectionSpec(role="team", db_path="rel-team.db")}
+
+    r = domain_binding(config, "archivist")
+
+    assert r.ok is True, f"a relative connection path was misread as missing: {r.detail}"
+    assert r.target == tmp_path / "rel-team.db"
+
+
+def test_a_connection_naming_a_missing_store_is_unavailable(config, tmp_path):
+    from techne.config import FederationConnectionSpec
+
+    config.connections = {
+        "archivist": FederationConnectionSpec(
+            role="team", db_path=str(tmp_path / "gone.db"), label="acme team"
+        )
+    }
+
+    r = domain_binding(config, "archivist")
+    assert r.binding == BOUND_UNAVAILABLE
+    assert "gone.db" in r.detail
+
+
+def test_a_codex_fault_is_unavailable_not_absent(config, monkeypatch):
+    """PRUDENCE, #717: `resolve_repo_db_for_query` RETURNS None for both healthy
+    absences — no repo, and a repo with no index — so nothing that reaches its `except`
+    is healthy. Reporting `absent` + ok=True told the operator "no index for the active
+    repo", sending them to `techne codex index` for a fault that command does not fix."""
+    monkeypatch.setattr(
+        "techne.core.codex.resolve_repo_db_for_query",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("legacy migration failed")),
+    )
+
+    r = domain_binding(config, "codex")
+
+    assert r.binding == BOUND_UNAVAILABLE, "a real fault was reported as a healthy absence"
+    assert r.ok is False
+    assert "legacy migration failed" in r.detail, "the fault's message was discarded"
+    assert "codex index" not in r.detail, (
+        "still advising `techne codex index`, which does not fix a resolver fault"
+    )
+
+
 def test_codex_reports_absent_rather_than_answering_about_another_repo(config, monkeypatch):
     """`absent` is the common HEALTHY state for codex in a way it is not for the other
     three: an unindexed repo has no codex. Resolving to some other repo's index would
@@ -209,20 +287,6 @@ def test_a_resolver_that_throws_still_yields_a_row(config, monkeypatch):
     assert [r.domain for r in reports[1:]] == [n for n, _ in B.DOMAINS[1:]], (
         "the remaining domains were not reported after one resolver failed"
     )
-
-
-def test_the_codex_resolver_absorbs_its_own_failure(config, monkeypatch):
-    """The inner catch, tested separately from the outer one, because they are
-    different guarantees: this one keeps a codex failure from becoming an absent-row,
-    the other keeps any failure from becoming a missing row."""
-    monkeypatch.setattr(
-        "techne.core.codex.resolve_repo_db_for_query",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("index exploded")),
-    )
-
-    r = domain_binding(config, "codex")
-    assert r.binding == BOUND_ABSENT
-    assert "codex index" in r.detail
 
 
 def test_an_unknown_domain_raises_rather_than_guessing(config):
