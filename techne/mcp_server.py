@@ -1020,6 +1020,63 @@ TOOLS = [
         },
     },
     {
+        "name": "archivist_search",
+        "description": (
+            "What the TEAM knows. Resolves to this instance's own knowledge when the archivist is bound `local`, or to the team store when bound to one — the answer says which. "
+            "One of techne's four knowledge domains (archivist, librarian, architect, "
+            "codex), addressable by name. Every answer carries the `binding` it "
+            "resolved to, so the same call keeps working as the domain grows from a "
+            "local store into a persona or a service. For 'what do we know about X' "
+            "across all four, use techne_recall instead — it escalates."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text"},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "librarian_search",
+        "description": (
+            "What is WRITTEN DOWN — documents, transcripts and cards. Today that is the operator's own corpus; the role is the question, not the file set. "
+            "One of techne's four knowledge domains (archivist, librarian, architect, "
+            "codex), addressable by name. Every answer carries the `binding` it "
+            "resolved to, so the same call keeps working as the domain grows from a "
+            "local store into a persona or a service. For 'what do we know about X' "
+            "across all four, use techne_recall instead — it escalates."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text"},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "architect_search",
+        "description": (
+            "Architectural PATTERNS — the 'what is worth stealing' corpus. Same corpus as pattern_search, addressed by the domain name rather than the mechanism. "
+            "One of techne's four knowledge domains (archivist, librarian, architect, "
+            "codex), addressable by name. Every answer carries the `binding` it "
+            "resolved to, so the same call keeps working as the domain grows from a "
+            "local store into a persona or a service. For 'what do we know about X' "
+            "across all four, use techne_recall instead — it escalates."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text"},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "pattern_search",
         "description": (
             "Search the Architect's architectural-pattern corpus (architect.db) — design "
@@ -1919,6 +1976,33 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     return result
 
 
+def _domain_search(domain: str):
+    """Address one knowledge domain BY NAME (techne#552, the connection seam).
+
+    The four names — archivist, librarian, architect, codex — are the vocabulary an
+    operator learns in techne and keeps when the infrastructure grows into liminal and
+    cabal. A local librarian may become a cabal persona and later a deployed service;
+    the CALL does not change, only the `binding` in the answer.
+
+    RECALL IS STILL THE DEFAULT. `techne_recall` escalates across all four rungs and is
+    the right answer to "what do we know about X". These are for when you already know
+    which function you want.
+    """
+
+    def handler(args: dict, config: Config) -> dict:
+        from techne.core.domains import SEARCH
+
+        return SEARCH[domain](config, args.get("query", ""), limit=args.get("limit", 20))
+
+    handler.__name__ = f"_{domain}_search"
+    return handler
+
+
+_archivist_search = _domain_search("archivist")
+_librarian_search = _domain_search("librarian")
+_architect_search = _domain_search("architect")
+
+
 def _pattern_search(args: dict, config: Config) -> dict:
     """FTS over the Architect's pattern corpus (architect.db). Optionally scoped to
     patterns that apply to a given project target."""
@@ -2275,6 +2359,9 @@ TOOL_HANDLERS = {
     "codex_blast_radius": _codex_blast_radius,
     "techne_archivist_query": _techne_archivist_query,
     "techne_capabilities": _techne_capabilities,
+    "archivist_search": _archivist_search,
+    "librarian_search": _librarian_search,
+    "architect_search": _architect_search,
     "pattern_search": _pattern_search,
     "pattern_related": _pattern_related,
     "techne_reflect_emit": _techne_reflect_emit,

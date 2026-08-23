@@ -160,6 +160,36 @@ Compute the transitive reachability (blast radius) of a Codex symbol. direction 
 
 ## Patterns (architect)
 
+### `archivist_search`
+
+What the TEAM knows, addressed by name. Resolves to this instance's own knowledge
+when the archivist is bound `local`, or to the team store when bound to one — the
+answer says which in its `binding` field.
+
+### `librarian_search`
+
+What is WRITTEN DOWN — documents, transcripts and cards. The role is the question
+("what is written down"), not a particular file set, which is what lets the corpus
+grow without the call changing.
+
+### `architect_search`
+
+Architectural PATTERNS — the "what is worth stealing" corpus. Same corpus as
+`pattern_search`, addressed by the domain name rather than the mechanism.
+
+## The four domains
+
+`archivist`, `librarian`, `architect` and `codex` are techne's four knowledge
+domains, and the vocabulary is deliberate: an operator learns these four names in
+techne and keeps them when the infrastructure grows into liminal and cabal, where a
+local librarian may become a persona and later a deployed service. Every domain
+answer carries the `binding` it resolved to (`absent` / `local` / `store`), so the
+call stays the same while the infrastructure underneath changes.
+
+`techne_recall` remains the default for "what do we know about X" — it escalates
+across all four rungs. The domain calls are for when you already know which function
+you want. `techne bindings` reports what each name currently resolves to.
+
 ### `pattern_search`
 
 Search the Architect's architectural-pattern corpus (architect.db) — design patterns lifted from other projects' code, the team-shared 'what's worth stealing' store. Optionally scope to patterns that apply to a project (target=agent-infra|agora|argus|cabal|daedalus|kaminos|ladon|liminal|prudence|techne); with a target and no query, lists all patterns for that project.
