@@ -1820,13 +1820,26 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     # the caller cannot tell it from a real dependent. So compute the radius
     # TWICE: the permissive walk, and the walk over proven (to_symbol) edges only.
     # Every node is then labelled, and the count resting on a guess is stated.
+    # `limit=` PASSED EXPLICITLY, NOT MIRRORED. `_BLAST_WALK_CAP` was a copy of
+    # `reachable`'s own default, and a copy can drift silently — the same defect class
+    # as the floor bug below. Passing it makes the constant true by construction and
+    # the clamp observable instead of merely labelled. (Prudence, #722.)
     raw = reachable(
         db_path,
         symbol_id,
         direction=direction,
         max_depth=depth,
         exclude_fixtures=not include_fixtures,
+        limit=_BLAST_WALK_CAP,
     )
+    # THE WALK SIZE, BEFORE ANY FILTER. The floor notice must key on this: the 500-node
+    # bound is hit by the WALK, and `only_proven` filters afterwards — so keying on the
+    # post-filter count silenced the notice in exactly the branch where truncation does
+    # the most damage, that result being the intersection of two independently-capped
+    # walks. Base said nothing there; the first version of this change affirmatively
+    # asserted `truncated: false` while missing every real dependent, turning silence
+    # into a false completeness claim. (Prudence, #722.)
+    walk_size = len(raw)
     proven_ids = {
         r["id"]
         for r in reachable(
@@ -1836,6 +1849,7 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
             max_depth=depth,
             exclude_fixtures=not include_fixtures,
             include_inferred=False,
+            limit=_BLAST_WALK_CAP,
         )
     }
     if only_proven:
@@ -1869,18 +1883,26 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     notices = []
     # NO SILENT CAPS — state every bound, including one that predates this change.
     if walked > limit:
+        # NAME THE DEPTH OF WHAT WAS CUT. "The head is the closest dependents" is not
+        # "all the closest": a hub with 120 dependents ALL at depth 1 loses 70 DIRECT
+        # callers to a cap of 50, and those are the highest-value nodes in the radius.
+        # Saying so is the difference between a truncated radius a caller can reason
+        # about and one they cannot. (Prudence, #722.)
+        _cut = rows[limit:]
+        _d0 = min(r["depth"] for r in _cut)
+        _n0 = sum(1 for r in _cut if r["depth"] == _d0)
         notices.append(
             f"Showing the {len(nodes)} closest of {walked} node(s) by depth; "
-            f"pass limit= (max {_BLAST_WALK_CAP}) for more."
+            f"{_n0} more at depth {_d0}; pass limit= (max {_BLAST_WALK_CAP}) for more."
         )
-    if walked >= _BLAST_WALK_CAP:
+    if walk_size >= _BLAST_WALK_CAP:
         # PRE-EXISTING AND PREVIOUSLY SILENT: `reachable`'s own `limit` defaults to 500,
         # so a 500-node walk has always been indistinguishable from a complete one. That
         # makes `walked` a FLOOR, and a floor reported as a total is how "covered
         # everything" gets believed.
         notices.append(
-            f"The graph walk itself stops at {_BLAST_WALK_CAP} node(s), so {walked} is a "
-            "floor rather than the true size of the radius."
+            f"The graph walk itself stops at {_BLAST_WALK_CAP} node(s), so {walk_size} is "
+            "a floor rather than the true size of the radius."
         )
     if stale_count:
         notices.append(

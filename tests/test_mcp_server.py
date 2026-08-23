@@ -510,7 +510,7 @@ def test_mcp_tools_doc_is_complete():
     assert not missing, f"tools registered but undocumented in docs/mcp-tools.md: {missing}"
 
 
-def _codex_db_with_fan_in(tmp_path, n: int):
+def _codex_db_with_fan_in(tmp_path, n: int, proven: int | None = None):
     """A hub symbol with *n* direct dependents — the shape that blew the token ceiling."""
     from techne.core.codegraph import add_edge, add_symbol
     from techne.core.codex import CODEX_SCHEMA
@@ -519,17 +519,24 @@ def _codex_db_with_fan_in(tmp_path, n: int):
     db = tmp_path / "codex.db"
     SqliteStore("codex", db).migrate(CODEX_SCHEMA)
     add_symbol(db, id="hub.py::hub::function::1", file="hub.py", name="hub", kind="function")
+    # `proven` controls how many edges RESOLVE to a real symbol. The rest carry a bare
+    # name, which is what `only_proven` filters out — the branch where the walk's own
+    # bound and the filter interact.
+    keep = n if proven is None else proven
     for i in range(n):
         sid = f"caller_{i}.py::caller_{i}::function::{i + 1}"
         add_symbol(db, id=sid, file=f"caller_{i}.py", name=f"caller_{i}", kind="function")
-        add_edge(
-            db,
-            from_symbol=sid,
-            to_name="hub",
-            kind="call",
-            to_symbol="hub.py::hub::function::1",
-            resolution_status="resolved",
-        )
+        if i < keep:
+            add_edge(
+                db,
+                from_symbol=sid,
+                to_name="hub",
+                kind="call",
+                to_symbol="hub.py::hub::function::1",
+                resolution_status="resolved",
+            )
+        else:
+            add_edge(db, from_symbol=sid, to_name="hub", kind="call")
     return db
 
 
@@ -635,3 +642,79 @@ def test_blast_radius_reports_the_walk_cap_as_a_floor(tmp_path, config, monkeypa
     assert "floor rather than the true size" in r["notice"], (
         "a walk that hit its own bound reported the bound as the radius size"
     )
+
+
+def test_blast_radius_floor_notice_survives_the_only_proven_filter(tmp_path, config, monkeypatch):
+    """PRUDENCE, #722 — A FOURTH SURVIVING MUTATION, and she found it by asking which
+    variable the guard reads rather than whether it fires.
+
+    `test_blast_radius_reports_the_walk_cap_as_a_floor` passes whether the guard keys on
+    the pre-filter walk or the post-filter count, so it does not discriminate. The
+    500-node bound is hit by the WALK; `only_proven` filters AFTERWARDS. Keying on the
+    post-filter count silenced the floor notice in precisely the branch where truncation
+    does the most damage — that result is the intersection of two independently-capped
+    walks.
+
+    The regression this pins is not the empty node list, which is techne#606's and
+    predates the cap. It is that the response went from saying NOTHING to affirmatively
+    asserting `truncated: false` while missing real dependents: silence became a false
+    completeness claim.
+    """
+    from techne import mcp_server
+
+    # ONLY A FEW PROVEN, so the filter cuts the walk's 500 down to a handful. With the
+    # guard on the POST-FILTER count it sees ~5 and stays silent; the walk still hit its
+    # bound. A first version of this test made every dependent proven, so the filter
+    # removed nothing, the two counts were equal, and the mutation survived.
+    db = _codex_db_with_fan_in(tmp_path, mcp_server._BLAST_WALK_CAP + 20, proven=5)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+
+    r = mcp_server._codex_blast_radius(
+        {"symbol_id": "hub.py::hub::function::1", "only_proven": True}, config
+    )
+    assert r["walked"] < mcp_server._BLAST_WALK_CAP, (
+        "fixture did not produce a post-filter count below the walk bound"
+    )
+
+    assert "floor rather than the true size" in r.get("notice", ""), (
+        "the walk hit its bound and the response did not say so, because the guard read "
+        "the post-filter count instead of the walk"
+    )
+
+
+def test_blast_radius_names_the_depth_of_what_it_cut(tmp_path, config, monkeypatch):
+    """ "The head is the closest dependents" is not "all the closest". A hub whose
+    dependents are ALL at depth 1 loses 70 DIRECT callers to a cap of 50, and a caller
+    reading "showing 50 of 120" cannot tell that from a deep tail being trimmed."""
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, 120)  # every dependent is a direct caller
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+
+    r = mcp_server._codex_blast_radius({"symbol_id": "hub.py::hub::function::1"}, config)
+
+    assert "70 more at depth 1" in r["notice"], (
+        f"the notice did not say the cut was direct callers: {r['notice']!r}"
+    )
+
+
+def test_blast_radius_passes_its_walk_bound_rather_than_mirroring_it(tmp_path, config, monkeypatch):
+    """PRUDENCE, #722(b). `_BLAST_WALK_CAP` was a COPY of `reachable`'s own default, and
+    a copy can drift silently — the same defect class as the floor guard. Passing it
+    makes the constant true by construction, and this test is what makes that
+    observable: lower the constant and the walk must actually shrink. Mirroring cannot
+    do that, because the callee would keep using its own 500."""
+    from techne import mcp_server
+
+    db = _codex_db_with_fan_in(tmp_path, 300)
+    monkeypatch.setattr(mcp_server, "_codex_repo_db", lambda args, cfg: db)
+    monkeypatch.setattr(mcp_server, "_BLAST_WALK_CAP", 30)
+
+    r = mcp_server._codex_blast_radius(
+        {"symbol_id": "hub.py::hub::function::1", "limit": 200}, config
+    )
+
+    assert r["walked"] == 30, (
+        f"the walk ignored the module's bound and used the callee's default: {r['walked']}"
+    )
+    assert "floor rather than the true size" in r.get("notice", "")
