@@ -2297,33 +2297,6 @@ def check_vector_coverage(config) -> CheckResult:
                 " WHERE rowid NOT IN (SELECT id FROM knowledge)"
             ).fetchone()[0]
         except Exception:  # noqa: BLE001 — vec tables absent = channel not enabled
-            # DORMANT means "off by configuration", and this branch must not
-            # claim it when nothing turned the channel off (techne#708).
-            # Nothing creates the vec tables until a backfill runs, so a fresh
-            # `pip install techne[vectors]` lands here — vectors deliberately
-            # turned ON, paid for at 85-290MB, and silently doing nothing.
-            # DORMANT sorts with LIVE, sets ok=True and never reaches the
-            # banner, so reporting it here tells the operator a channel they
-            # enabled is deliberately disabled, and names no key because no key
-            # disabled it.
-            #
-            # This is the DOCTOR path, not the SessionStart hot path — the same
-            # probe `techne vectors status` already runs at vector_status.py.
-            from techne.core import embeddings as _embeddings
-
-            if _embeddings.backend_available() and not _embeddings.model_cached(config):
-                return CheckResult(
-                    name="vectors:coverage",
-                    subsystem="search",
-                    kind=Kind.COVERAGE,
-                    verdict=Verdict.DORMANT,
-                    evidence="knowledge_vec_rowids absent; embedding weights not in the local cache",
-                    detail=(
-                        "embedding backend installed, model weights NOT cached — "
-                        "recall is FTS-only until they are fetched"
-                    ),
-                    remedy="techne vectors backfill",
-                )
             return CheckResult(
                 name="vectors:coverage",
                 subsystem="search",

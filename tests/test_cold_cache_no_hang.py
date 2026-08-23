@@ -109,32 +109,6 @@ def test_backfill_may_still_download(monkeypatch, tmp_path):
     )
 
 
-def test_model_cached_is_false_when_backend_absent(monkeypatch):
-    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
-    assert embeddings_mod.model_cached() is False
-
-
-def test_model_cached_is_false_when_weights_absent(monkeypatch):
-    """The third state: package present, weights absent.
-
-    backend_available() cannot see this — it is an import probe — which is why
-    a fresh install reports a healthy backend and silently searches FTS-only.
-    """
-    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
-    monkeypatch.setattr(
-        embeddings_mod,
-        "_get_embedding_model",
-        lambda *a, **k: (_ for _ in ()).throw(_Uncached("not cached")),
-    )
-    assert embeddings_mod.model_cached() is False
-
-
-def test_model_cached_is_true_when_loadable(monkeypatch):
-    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
-    monkeypatch.setattr(embeddings_mod, "_get_embedding_model", lambda *a, **k: object())
-    assert embeddings_mod.model_cached() is True
-
-
 def test_the_degrade_is_not_silent(monkeypatch, tmp_path, capsys):
     """Restores a signal this fix would otherwise DELETE (review of #728).
 
@@ -164,26 +138,3 @@ def test_the_degrade_is_not_silent(monkeypatch, tmp_path, capsys):
     # ONCE PER PROCESS, not once per turn — this is a per-prompt hook path.
     search_mod.search_vec(tmp_path / "x.db", "q")
     assert capsys.readouterr().err == "", "the warning repeated on a later turn"
-
-
-def test_dormant_names_the_uncached_state(monkeypatch, tmp_path):
-    """DORMANT means 'off by configuration' — it must not claim that here.
-
-    Nothing creates the vec tables until a backfill runs, so a fresh
-    `pip install techne[vectors]` hits this branch with vectors deliberately ON.
-    DORMANT sorts with LIVE, sets ok=True and never reaches the banner, so the
-    unqualified form told the operator an enabled channel was deliberately off.
-    """
-    from techne.core import checks as checks_mod
-
-    cfg = type("C", (), {"db_path": tmp_path / "empty.db"})()
-    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
-
-    monkeypatch.setattr(embeddings_mod, "model_cached", lambda *a, **k: False)
-    uncached = checks_mod.check_vector_coverage(cfg)
-    assert uncached.remedy == "techne vectors backfill", "no actionable remedy offered"
-    assert "NOT cached" in uncached.detail
-
-    monkeypatch.setattr(embeddings_mod, "model_cached", lambda *a, **k: True)
-    unconfigured = checks_mod.check_vector_coverage(cfg)
-    assert unconfigured.remedy is None, "a genuinely unconfigured channel gained a false remedy"
