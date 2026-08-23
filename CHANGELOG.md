@@ -5,6 +5,27 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`techne bindings` — one question, four domains** (#552 part 4). What is the
+  archivist / librarian / architect / codex bound to, and can I reach it, asked
+  identically of each and answered in one shape. This is the "same feel" ask, answered
+  on the axis the sibling projects answer it on: liminal's `Target` makes transport a
+  field and never changes the call shape, and cabal already ships `patterns`, `code`,
+  `documents` and `archivist` as peer handlers. Neither fuses its domains into one
+  query.
+
+  **It deliberately does not make patterns and codex recall rungs**, which is what #552
+  part 4 literally proposes. Measured first: pattern FTS falls back to OR and answers
+  "archivist binding" with "Late-binding task definitions"; the codex index was 83 of
+  249 files stale as of 2026-08-21 (a snapshot — a reindex moves it) and returned zero
+  hits for a symbol merged that day; the durable finding is dilution, 45% of hits on
+  realistic topics being test symbols. A rung that returns noise on every recall
+  is worse than no rung, and open-sourcing freezes the response shape. Revisit when
+  #550 and codex freshness make them answerable — `test_the_recall_ladder_is_unchanged`
+  is the guard, and says so.
+
+
 ### Changed
 
 - **The archivist is a call, not a deployment mode** (#552). `standalone` was a *lane
