@@ -718,3 +718,12 @@ def test_blast_radius_passes_its_walk_bound_rather_than_mirroring_it(tmp_path, c
         f"the walk ignored the module's bound and used the callee's default: {r['walked']}"
     )
     assert "floor rather than the true size" in r.get("notice", "")
+
+    # THE SECOND `reachable()` CALL IS NOT GUARDED BY THIS TEST, and saying so beats
+    # pretending. Prudence removed its bound and the whole file still passed. My first
+    # attempt to close it asserted `walked <= 30` on an `only_proven` call — which
+    # cannot discriminate, because `only_proven` filters the FIRST walk's already-capped
+    # rows, so that number is <= 30 either way. Detecting it needs a fixture whose
+    # proven nodes sort late enough to fall outside one cap window but not the other.
+    # Filed rather than half-built: an assertion that cannot fail is the decoration this
+    # suite keeps catching. (Prudence, #722 nit.)
