@@ -1209,8 +1209,11 @@ def bindings(ctx, as_json):
         # not exist, so a healthy fresh install reported "3 domain(s) not reachable":
         # `absent` is unreachable by definition, and librarian/architect create their
         # dbs lazily on first write. An operator would have chased four non-problems.
+        # `r.label` FUSES the two axes for the human — an operator scanning four rows
+        # wants "is anything wrong", and `store` beside a `!` would send them hunting
+        # for the fault state. `--json` above keeps them separate. (Prudence, #717 r3.)
         mark = " " if r.ok else "!"
-        click.echo(f"{mark} {r.domain.ljust(width)}  {r.binding:11s}  {r.detail}")
+        click.echo(f"{mark} {r.domain.ljust(width)}  {r.label:11s}  {r.detail}")
 
     broken = [r for r in reports if not r.ok]
     if broken:

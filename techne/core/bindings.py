@@ -107,16 +107,36 @@ BOUND_STORE = ARCHIVIST_STORE
 #: three-quarters true. (Prudence, #717.)
 BOUND_UNAVAILABLE = STATE_UNAVAILABLE
 
+#: THE SECOND AXIS, SPLIT BACK OUT (Prudence, #717 r3). Fusing the two into one field
+#: was right for the CLI and wrong for `--json`: `unavailable` OVERWROTE the binding, so
+#: a consumer could not learn that an unreachable domain was store-bound. Splitting is
+#: not additive LATER — `binding` would stop taking the value `unavailable`, and a
+#: consumer keyed on it would silently start reading `"store"` where it used to read
+#: `"unavailable"`. This module's own docstring argues the response shape is the thing
+#: open-sourcing freezes; no consumer exists yet, so today it costs one key.
+#:
+#: `unavailable` is BORROWED from the ladder. `readable` is MINTED, deliberately: the
+#: ladder's positive states are RETRIEVAL outcomes (`hit` = rows came back, `empty` =
+#: none did), and this axis is about REACHABILITY — a readable store with nothing in it
+#: is `readable` here and `empty` there. Borrowing `hit` would import a meaning that
+#: does not apply, which is the drift the borrow rule exists to prevent, not an
+#: instance of following it.
+STATE_READABLE = "readable"
+
 
 @dataclass(frozen=True, slots=True)
 class BindingReport:
     """What one domain is bound to, in the caller's terms."""
 
     domain: str
-    #: absent | local | store | unavailable — ONE axis, four states.
-    #: `absent` is HEALTHY and expected for codex (unindexed repo) and for
-    #: `archivist: none`; `unavailable` is the fault state: configured and unreadable.
-    binding: str
+    #: absent | local | store — WHAT IT IS BOUND TO, and never the fault state. `absent`
+    #: is HEALTHY and expected for codex (unindexed repo) and for `archivist: none`.
+    #: None only when a resolver died before it could determine even this.
+    binding: str | None
+    #: readable | unavailable — WHAT HAPPENED WHEN WE LOOKED. Orthogonal to `binding`:
+    #: a store-bound domain whose file is missing is `store` + `unavailable`, and both
+    #: halves survive into `--json`.
+    state: str
     #: Where it resolves, when that is meaningful. None when absent or unresolvable.
     target: Path | None
     #: One operator-facing line. For `unavailable` it carries the REASON VERBATIM —
@@ -131,16 +151,57 @@ class BindingReport:
         a deliberate choice, and flagging either trains an operator to ignore the
         report — the same reasoning the liveness rail applies to DORMANT.
         """
-        return self.binding != BOUND_UNAVAILABLE
+        return self.state != BOUND_UNAVAILABLE
+
+    @property
+    def label(self) -> str:
+        """The one word a HUMAN reads. The CLI fuses the axes deliberately — an
+        operator scanning four rows wants "is anything wrong", and `store` next to a
+        `!` would make them hunt for the fault state. Presentation fuses; data does
+        not."""
+        return self.state if not self.ok else (self.binding or "unknown")
 
     def as_dict(self) -> dict:
         return {
             "domain": self.domain,
             "binding": self.binding,
+            "state": self.state,
             "target": str(self.target) if self.target else None,
             "ok": self.ok,
             "detail": self.detail,
         }
+
+
+def _ok(domain: str, binding: str, target: Path | None, detail: str) -> BindingReport:
+    """A domain we looked at and could read (or that is healthily absent)."""
+    return BindingReport(domain, binding, STATE_READABLE, target, detail)
+
+
+def _fault(domain: str, binding: str | None, target: Path | None, detail: str) -> BindingReport:
+    """A domain that is configured and unreadable.
+
+    TAKES THE BINDING TOO, deliberately: the fault does not erase what the operator
+    bound the domain to, and fusing the two is what cost `--json` that fact. `None` is
+    for the one case where we genuinely never found out — a resolver that died first.
+    """
+    return BindingReport(domain, binding, BOUND_UNAVAILABLE, target, detail)
+
+
+def _present(path: Path) -> bool:
+    """IS THERE A STORE HERE — `is_file`, not `exists`.
+
+    `config.py` coerces a missing `db_path` to `""`, and `_resolve_conn_db_path("")`
+    resolves to `techne_home()` — a DIRECTORY that always exists. So `.exists()`
+    reported `store | ok` for a connection with no db_path at all, while federation
+    handed the same spec died with `disk I/O error` and skipped past it: the exact
+    divergence-between-surfaces this PR set out to remove, one branch along.
+    (Prudence, #717 r3.)
+
+    Deliberately NOT deeper than this. Whether the file is a valid techne db is a
+    different question, and answering it here would be a design expansion rather than
+    a fix — she flagged that boundary explicitly.
+    """
+    return path.is_file()
 
 
 def _archivist(config) -> BindingReport:
@@ -155,9 +216,9 @@ def _archivist(config) -> BindingReport:
 
     binding = archivist_binding(config)
     if binding == BOUND_ABSENT:
-        return BindingReport("archivist", binding, None, "no archivist (archivist: none)")
+        return _ok("archivist", binding, None, "no archivist (archivist: none)")
     if binding == BOUND_LOCAL:
-        return BindingReport(
+        return _ok(
             "archivist",
             binding,
             Path(config.db_path),
@@ -180,32 +241,31 @@ def _archivist(config) -> BindingReport:
         # committed-config case that rule exists to support.
         from techne.core.federation import _resolve_conn_db_path
 
-        target = _resolve_conn_db_path(conn.db_path)
         label = getattr(conn, "label", "") or ARCHIVIST_CONNECTION_NAME
-        if not target.exists():
-            return BindingReport(
+        raw = (getattr(conn, "db_path", "") or "").strip()
+        if not raw:
+            # An empty db_path resolves to `techne_home()`, which always exists — see
+            # `_present`. Named separately from "not present" because the operator's
+            # mistake is different: the key is missing, not the file.
+            return _fault("archivist", binding, None, f"connection '{label}' has no db_path set")
+        target = _resolve_conn_db_path(raw)
+        if not _present(target):
+            return _fault(
                 "archivist",
-                BOUND_UNAVAILABLE,
+                binding,
                 target,
                 f"connection '{label}' names a store that is not present at {target}",
             )
-        return BindingReport(
-            "archivist", binding, target, f"team store via connection '{label}' at {target}"
-        )
+        return _ok("archivist", binding, target, f"team store via connection '{label}' at {target}")
 
     # `_resolve_archivist_path` RAISES on the techne#346 misconfiguration
     # (archivist_db_path pointing at the personal db). Left to propagate to
     # `all_bindings`, which turns it into an `unavailable` row CARRYING THE MESSAGE —
     # this is the one tool an operator would run to diagnose exactly that.
     path = _resolve_archivist_path(config)
-    if not path.exists():
-        return BindingReport(
-            "archivist",
-            BOUND_UNAVAILABLE,
-            path,
-            f"team store named but not present at {path}",
-        )
-    return BindingReport("archivist", binding, path, f"separate team store at {path}")
+    if not _present(path):
+        return _fault("archivist", binding, path, f"team store named but not present at {path}")
+    return _ok("archivist", binding, path, f"separate team store at {path}")
 
 
 def _registry_domain(domain: str, label: str) -> Callable[[object], BindingReport]:
@@ -222,23 +282,19 @@ def _registry_domain(domain: str, label: str) -> Callable[[object], BindingRepor
         spec = config.stores.get(domain)
         path = store_path(config, domain)
         named = bool(spec and spec.dsn)
-        if named and not path.exists():
-            # An operator NAMED a store and it is not there. That is the fault case.
-            return BindingReport(
-                domain, BOUND_UNAVAILABLE, path, f"{label} store named but missing: {path}"
-            )
+        if named and not _present(path):
+            # An operator NAMED a store and it is not there. That is the fault case —
+            # and it keeps BOUND_STORE, because the fault does not erase what they
+            # bound it to.
+            return _fault(domain, BOUND_STORE, path, f"{label} store named but missing: {path}")
         if named:
-            return BindingReport(
-                domain, BOUND_STORE, path, f"{label} at an operator-named store ({path})"
-            )
+            return _ok(domain, BOUND_STORE, path, f"{label} at an operator-named store ({path})")
         # A DEFAULT db that does not exist yet is NOT a fault: librarian and architect
         # create theirs lazily on first write, so a fresh install has neither file and
         # nothing is wrong. Reporting that as unreachable is what made the CLI say
         # "3 domain(s) not reachable" on a healthy box. (Prudence, #717.)
-        state = "" if path.exists() else " (created on first write)"
-        return BindingReport(
-            domain, BOUND_LOCAL, path, f"{label} at the default {path.name}{state}"
-        )
+        lazily = "" if _present(path) else " (created on first write)"
+        return _ok(domain, BOUND_LOCAL, path, f"{label} at the default {path.name}{lazily}")
 
     return resolve
 
@@ -266,10 +322,10 @@ def _codex(config) -> BindingReport:
         # fault that command does not fix. Same principle as this module's sibling
         # test asserts for `all_bindings`.
         log.debug("codex: could not resolve a repo db for the cwd", exc_info=True)
-        return BindingReport("codex", BOUND_UNAVAILABLE, None, f"{type(exc).__name__}: {exc}")
+        return _fault("codex", None, None, f"{type(exc).__name__}: {exc}")
 
     if path is None:
-        return BindingReport(
+        return _ok(
             "codex",
             BOUND_ABSENT,
             None,
@@ -285,7 +341,7 @@ def _codex(config) -> BindingReport:
     #
     # `resolve_repo_db_for_query` returns a path only if it EXISTS, so there is no
     # unavailable case here: either an index is there, or the branch above says absent.
-    return BindingReport("codex", BOUND_LOCAL, Path(path), f"index at {path}")
+    return _ok("codex", BOUND_LOCAL, Path(path), f"index at {path}")
 
 
 #: The four knowledge domains, and how each answers the one question. Order matches the
@@ -334,5 +390,5 @@ def all_bindings(config) -> list[BindingReport]:
             # message verbatim, burying the readable answer under the raw one. The
             # traceback still exists for a genuine resolver bug, one level down.
             log.debug("bindings: %s resolver failed", name, exc_info=True)
-            out.append(BindingReport(name, BOUND_UNAVAILABLE, None, f"{type(e).__name__}: {e}"))
+            out.append(_fault(name, None, None, f"{type(e).__name__}: {e}"))
     return out

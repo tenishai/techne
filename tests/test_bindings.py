@@ -26,6 +26,7 @@ from techne.core.bindings import (
     BOUND_STORE,
     BOUND_UNAVAILABLE,
     DOMAINS,
+    STATE_READABLE,
     all_bindings,
     domain_binding,
 )
@@ -51,10 +52,18 @@ def test_every_domain_answers_the_same_question_in_the_same_shape(config):
 
     assert [r.domain for r in reports] == [name for name, _ in DOMAINS]
     for r in reports:
-        assert r.binding in (BOUND_ABSENT, BOUND_LOCAL, BOUND_STORE, BOUND_UNAVAILABLE), r
+        assert r.binding in (BOUND_ABSENT, BOUND_LOCAL, BOUND_STORE), r
+        assert r.state in (STATE_READABLE, BOUND_UNAVAILABLE), r
         assert isinstance(r.ok, bool)
         assert r.detail.strip(), f"{r.domain} reported no operator-facing detail"
-        assert set(r.as_dict()) == {"domain", "binding", "target", "ok", "detail"}
+        assert set(r.as_dict()) == {
+            "domain",
+            "binding",
+            "state",
+            "target",
+            "ok",
+            "detail",
+        }
 
 
 def test_the_vocabulary_is_the_ladders_not_a_second_one(config):
@@ -112,7 +121,11 @@ def test_a_named_store_that_is_missing_is_unavailable_not_absent(config, tmp_pat
     config.stores["architect"] = StoreSpec(adapter="sqlite", dsn=str(tmp_path / "nope.db"))
     r = domain_binding(config, "architect")
 
-    assert r.binding == BOUND_UNAVAILABLE
+    assert r.state == BOUND_UNAVAILABLE
+    assert r.binding == BOUND_STORE, (
+        "the fault ERASED what the operator bound the domain to — the axis fusion "
+        "Prudence flagged, where a --json consumer cannot learn it was store-bound"
+    )
     assert r.ok is False
     assert "nope.db" in r.detail
 
@@ -146,7 +159,8 @@ def test_a_named_archivist_store_that_is_missing_is_unavailable(config, tmp_path
     config.archivist_db_path = str(tmp_path / "never-created.db")
 
     r = domain_binding(config, "archivist")
-    assert r.binding == BOUND_UNAVAILABLE
+    assert r.state == BOUND_UNAVAILABLE
+    assert r.binding == BOUND_STORE
     assert "never-created.db" in r.detail
 
 
@@ -161,7 +175,11 @@ def test_the_346_misconfiguration_surfaces_here_with_its_own_message(config):
     config.archivist_db_path = str(config.db_path)
 
     row = next(r for r in all_bindings(config) if r.domain == "archivist")
-    assert row.binding == BOUND_UNAVAILABLE
+    assert row.state == BOUND_UNAVAILABLE
+    assert row.binding is None, (
+        "a resolver that died before determining the binding must say so with None, "
+        "not guess a value the operator would then act on"
+    )
     assert row.ok is False
     assert "techne#346" in row.detail, f"the guard's own text was swallowed: {row.detail}"
     assert "must not be the personal techne db" in row.detail
@@ -221,8 +239,45 @@ def test_a_connection_naming_a_missing_store_is_unavailable(config, tmp_path):
     }
 
     r = domain_binding(config, "archivist")
-    assert r.binding == BOUND_UNAVAILABLE
+    assert r.state == BOUND_UNAVAILABLE
+    assert r.binding == BOUND_STORE
     assert "gone.db" in r.detail
+
+
+def test_a_connection_with_no_db_path_is_a_fault_not_a_green_row(config):
+    """PRUDENCE, #717 r3 — THE SAME DIVERGENCE ONE BRANCH ALONG. `config.py` coerces a
+    missing `db_path` to `""`, and `_resolve_conn_db_path("")` resolves to
+    `techne_home()` — a DIRECTORY, which always exists. So `.exists()` reported
+    `store | ok=True | team store ... at <a directory>` while federation, handed the
+    same spec, died with `disk I/O error` and skipped past it.
+
+    Two surfaces disagreeing about one config is precisely the defect this PR exists to
+    remove; I reintroduced it in the branch that fixed the first instance."""
+    from techne.config import FederationConnectionSpec
+
+    config.connections = {
+        "archivist": FederationConnectionSpec(role="team", db_path="", label="acme team")
+    }
+
+    r = domain_binding(config, "archivist")
+
+    assert r.ok is False, f"a connection with no db_path reported healthy: {r.detail}"
+    assert r.state == BOUND_UNAVAILABLE
+    assert "db_path" in r.detail, "the detail did not name the operator's actual mistake"
+
+
+def test_a_directory_where_a_store_should_be_is_not_a_store(config, tmp_path):
+    """The general form of the bug above: `.exists()` is true for a directory. Fixed at
+    the shared `_present` helper rather than in the one branch that surfaced it, so the
+    named-store and default-store paths cannot drift back."""
+    from techne.config import StoreSpec
+
+    d = tmp_path / "architect.db"
+    d.mkdir()  # a directory sitting exactly where the db should be
+    config.stores["architect"] = StoreSpec(adapter="sqlite", dsn=str(d))
+
+    r = domain_binding(config, "architect")
+    assert r.ok is False, "a DIRECTORY was accepted as a store because .exists() is true"
 
 
 def test_a_codex_fault_is_unavailable_not_absent(config, monkeypatch):
@@ -237,7 +292,8 @@ def test_a_codex_fault_is_unavailable_not_absent(config, monkeypatch):
 
     r = domain_binding(config, "codex")
 
-    assert r.binding == BOUND_UNAVAILABLE, "a real fault was reported as a healthy absence"
+    assert r.state == BOUND_UNAVAILABLE, "a real fault was reported as a healthy absence"
+    assert r.binding is None, "the resolver never determined a binding; it must not invent one"
     assert r.ok is False
     assert "legacy migration failed" in r.detail, "the fault's message was discarded"
     assert "codex index" not in r.detail, (
@@ -278,10 +334,11 @@ def test_a_resolver_that_throws_still_yields_a_row(config, monkeypatch):
 
     assert len(reports) == 4, "a throwing resolver removed a row from the report"
     bad = next(r for r in reports if r.domain == "archivist")
-    assert bad.binding == BOUND_UNAVAILABLE, (
+    assert bad.state == BOUND_UNAVAILABLE, (
         "a failed resolver reported `absent`, indistinguishable from a domain that is "
         "deliberately unconfigured — a --json consumer could not tell them apart"
     )
+    assert bad.binding is None
     assert "RuntimeError" in bad.detail
     assert "resolver exploded" in bad.detail, "the exception MESSAGE was discarded"
     assert [r.domain for r in reports[1:]] == [n for n, _ in B.DOMAINS[1:]], (
