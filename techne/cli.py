@@ -44,7 +44,9 @@ def capabilities(ctx, as_json):
         f"{store['sessions']} sessions · {store['identity']} identity"
     )
     if store["codex_repos"]:
-        click.echo(f"  {store['codex_symbols']} symbols indexed across {store['codex_repos']} repo(s)")
+        click.echo(
+            f"  {store['codex_symbols']} symbols indexed across {store['codex_repos']} repo(s)"
+        )
     click.echo(f"  search: {store['vectors']}")
     click.echo("")
 
@@ -1282,9 +1284,7 @@ def custodian_status(ctx):
             marker = get_state(conn, f"{MARKER_PREFIX}:{name}:last_run") or {}
             click.echo(f"{name}")
             click.echo(f"  {rail.what}")
-            click.echo(
-                f"  bound: {f'yes — {model}' if bound else 'no (resident)'}"
-            )
+            click.echo(f"  bound: {f'yes — {model}' if bound else 'no (resident)'}")
             if marker:
                 click.echo(
                     f"  last run: {marker.get('ts', '?')} "
@@ -1396,8 +1396,7 @@ def custodian_run(ctx, rail_names, limit, dry_run, as_json):
         # Exit 0: unbound is the DEFAULT posture, not a failure. The rails are answered
         # by a resident agent and that has always been the working path.
         click.echo(
-            "No model bound — every rail stays resident. "
-            "Set custodian.model to run headless."
+            "No model bound — every rail stays resident. Set custodian.model to run headless."
         )
         return
 
@@ -1922,18 +1921,24 @@ def audit(ctx, since_days, as_json):
     )
     arch = ledger["architect"]
     lib = ledger["librarian"]
+    arch_iv = ledger["archivist"]
     arch_note = "" if arch["read"] else "   → never queried"
     click.echo("LEDGER READ/WRITE")
     click.echo(f"  memory:    store {m['write']} · recall+search {m['read']}   → {mem_ratio}")
     click.echo(f"  codex:     reads {cx['read']} · Edit {cx['edit']:,}   → {codex_ratio}")
     click.echo(f"  architect: pattern reads {arch['read']}{arch_note}")
-    if lib["mcp_read_tool"]:
-        lib_note = "" if lib["read"] else "   → never queried"
-        click.echo(f"  librarian: reads {lib['read']}{lib_note}")
-    else:
-        # No librarian MCP tool exists (CLI-only store), so the ledger can't see
-        # it — say that, don't imply an ignored tool. (techne#329 review)
-        click.echo("  librarian: CLI-only store — no MCP read tool, not visible to this ledger")
+    # THE `else` HERE WAS UNREACHABLE ONCE #724 SHIPPED `librarian_search` and #727
+    # made `mcp_read_tool` a real derivation — it printed "CLI-only store, no MCP read
+    # tool" for a tool the docs now tell operators to call. Kept as a branch rather than
+    # deleted, because the DISTINCTION is still live for any future domain that has no
+    # MCP surface: "0 because nobody called it" and "0 because there is nothing to call"
+    # must not print the same line. (Prudence, #725 r4.)
+    for name, row in (("librarian", lib), ("archivist", arch_iv)):
+        if row["mcp_read_tool"]:
+            note = "" if row["read"] else "   → never queried"
+            click.echo(f"  {name}: reads {row['read']}{note}")
+        else:
+            click.echo(f"  {name}: no MCP read tool — not visible to this ledger")
     click.echo("")
 
     # Edit-rail proximity-attribution (techne#374).
@@ -4590,7 +4595,9 @@ def cards_repair(ctx, do_apply):
             click.echo("\nDry run. Re-run with --apply to perform it.")
 
     if result["needs_human"]:
-        click.echo(f"\n{len(result['needs_human'])} card(s) need a human — pointer set but unresolvable:")
+        click.echo(
+            f"\n{len(result['needs_human'])} card(s) need a human — pointer set but unresolvable:"
+        )
         for d in result["needs_human"]:
             click.echo(f"  knowledge#{d['card_id']}  doc:{d.get('doc_id')}  ({d.get('reason')})")
         click.echo("  Restore librarian.db, or supersede the card. This command will not guess.")

@@ -252,6 +252,49 @@ def test_mcp_read_tool_is_derived_not_hardcoded(db):
     )
 
 
+def test_has_mcp_read_tool_actually_consults_the_registry(monkeypatch):
+    """PRUDENCE'S MUTATION, MADE PERMANENT — and the previous version of this file
+    failed it.
+
+    `_has_mcp_read_tool` was `domain in DOMAIN_NAMES`, called only with literals that
+    are in `DOMAIN_NAMES` forever: a constant wearing a derivation's clothes. She proved
+    it by REMOVING `librarian_search` from the registry — the tool was gone, the
+    function still said True, and the whole suite stayed green. The assertion above is
+    `x in S for x in S` against that body, which is why it could not notice.
+
+    So this asserts the only thing that makes it a derivation: take the tool away, and
+    the answer changes.
+    """
+    from techne import mcp_server
+    from techne.core.utilization import _has_mcp_read_tool
+
+    assert _has_mcp_read_tool("librarian") is True
+
+    without = {k: v for k, v in mcp_server.TOOL_HANDLERS.items() if k != "librarian_search"}
+    monkeypatch.setattr(mcp_server, "TOOL_HANDLERS", without)
+
+    assert _has_mcp_read_tool("librarian") is False, (
+        "the tool was removed from the registry and the ledger still claims it exists "
+        "— the function is not consulting anything"
+    )
+    assert _has_mcp_read_tool("architect") is True, "unrelated domains must be unaffected"
+
+
+def test_the_ledger_counts_archivist_reads(db):
+    """PRUDENCE, #725 r4. `archivist_search` was counted by no tuple — three of the four
+    domain-named tools landed in the ledger and the archivist's vanished.
+
+    The bite does not need an archivist row: when a read moves from `techne_recall` to
+    `archivist_search` — which the docs tell operators to do — `memory.read` falls and
+    the panel reports a read-path DECLINE that is actually a read-path MIGRATION.
+    """
+    _obs(db, "mcp__techne__archivist_search", 5)
+    _obs(db, "mcp__techne__techne_archivist_query", 2)
+    led = read_write_ledger(db)
+    assert led["archivist"]["read"] == 7, "archivist reads are invisible to the ledger"
+    assert led["archivist"]["mcp_read_tool"] is True
+
+
 def test_the_ledger_counts_the_domain_named_architect_tool(db):
     """`_ARCHITECT_READ` is an EXACT tuple, so a new tool must be added to it or
     successful adoption reads as `never queried` — the ledger reporting neglect at
@@ -982,3 +1025,26 @@ def test_recall_attribution_since_days_windows_injections(db):
     _kinject(db, "2026-01-01 12:00:00", [237])  # far in the past
     assert recall_attribution(db, since_days=7)["injections"] == 0
     assert recall_attribution(db)["injections"] == 1
+
+
+def test_techne_audit_renders_without_crashing(db, monkeypatch, tmp_path):
+    """A SMOKE TEST FOR THE COMMAND ITSELF, because nothing exercised its output.
+
+    While fixing the ledger I bound the archivist row from a variable that does not
+    exist in that scope — `techne audit` died with NameError partway through the
+    panel — and the FULL SUITE STAYED GREEN at 3367. Every ledger test asserts the
+    dict `read_write_ledger` returns; none of them renders it. The panel is the only
+    thing an operator actually sees.
+
+    Deliberately shallow: asserts it runs and names every domain, not the numbers.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    result = CliRunner().invoke(main, ["audit"])
+
+    assert result.exit_code == 0, f"techne audit crashed: {result.output[-600:]}"
+    for domain in ("memory", "codex", "architect", "librarian", "archivist"):
+        assert domain in result.output, f"{domain} is missing from the ledger panel"

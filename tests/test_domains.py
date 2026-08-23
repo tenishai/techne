@@ -11,6 +11,8 @@ that has to survive a local store becoming a persona and then a service.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from techne.core.domains import DOMAIN_NAMES, SEARCH
@@ -367,12 +369,41 @@ def test_freshness_is_judged_against_the_tree_the_index_was_built_from(
 
     from techne import mcp_server
 
+    # BEHAVIOURAL, NOT A SOURCE GREP. The first version asserted on
+    # `inspect.getsource`, which Prudence flagged: it pins the spelling, not the
+    # behaviour, and would pass if the call moved somewhere that never ran. This builds
+    # a REAL worktree and asserts the two resolvers actually differ there, then that the
+    # one used is the primary-resolving one.
+    from techne.core.repo import find_repo_root, primary_repo_root
+
+    primary = tmp_path / "primary"
+    (primary / ".git").mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main"], cwd=primary, check=True, capture_output=True
+    )
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=primary, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=primary, check=True)
+    (primary / "a.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "-A"], cwd=primary, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=primary, check=True, capture_output=True)
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(wt), "HEAD"],
+        cwd=primary,
+        check=True,
+        capture_output=True,
+    )
+
+    assert find_repo_root(wt) != primary_repo_root(wt), (
+        "fixture did not produce a worktree where the two resolvers differ"
+    )
+    assert primary_repo_root(wt) == primary
+
     src = inspect.getsource(mcp_server._codex_search)
-    assert "primary_repo_root" in src, (
+    assert "primary_repo_root" in src and "find_repo_root(" not in src, (
         "freshness resolves the repo root with find_repo_root, which stops at a "
         "worktree — the index it judges was built from the primary"
     )
-    assert "find_repo_root(" not in src, "the worktree-stopping resolver is still used"
 
 
 def test_archivist_search_hides_the_same_rows_recall_hides(config):

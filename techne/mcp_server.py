@@ -1762,8 +1762,10 @@ def _codex_search(args: dict, config: Config) -> dict:
 
     query = args.get("query", "")
     limit = args.get("limit", 20)
-    # ONE EXPRESSION FOR "WHICH TREE ARE WE ASKING ABOUT", used by all three consumers
-    # below (the db lookup, the binding, and the freshness root). It was spelled out
+    # ONE EXPRESSION FOR "WHICH TREE ARE WE ASKING ABOUT", used by the binding and the
+    # freshness root. `_codex_repo_db` still re-derives it internally, so this is two of
+    # three consumers, not three — the comment said three and Prudence checked. It was
+    # spelled out
     # three times — `args["repo"] or cwd` inside `_codex_repo_db`, again for the
     # envelope, again for `index_freshness` — and every defect in this function this
     # week has been two of those three disagreeing. They agree today; the point is that

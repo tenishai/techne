@@ -45,6 +45,17 @@ from techne.core.stores import plain_connect
 _MEMORY_WRITE = ("mcp__techne__techne_store",)
 _MEMORY_READ = ("mcp__techne__techne_recall", "mcp__techne__techne_search")
 _CODEX_READ = ("mcp__techne__codex_search", "mcp__techne__codex_blast_radius")
+# The archivist's own read tools. `techne_archivist_query` is the SQL surface;
+# `archivist_search` is the domain-named one added in #724. Counted by nothing at all
+# until #727 r4 — so three of the four domain tools landed in the ledger and the
+# archivist's vanished. THE BITE DOES NOT NEED AN ARCHIVIST ROW: when a read moves from
+# `techne_recall` to `archivist_search`, which the docs tell operators to do,
+# `memory.read` falls and the panel reports a read-path DECLINE that is actually a
+# read-path MIGRATION. (Prudence, #725 r4.)
+_ARCHIVIST_READ = (
+    "mcp__techne__archivist_search",
+    "mcp__techne__techne_archivist_query",
+)
 _ARCHITECT_READ = (
     "mcp__techne__pattern_search",
     "mcp__techne__pattern_related",
@@ -72,14 +83,25 @@ _LIBRARIAN_READ_PREFIX = "mcp__techne__librarian_"
 def _has_mcp_read_tool(domain: str) -> bool:
     """Does a domain have an MCP read tool at all?
 
-    ASKED, NOT ASSERTED. This distinguishes "0 because agents ignore an existing
-    tool" (a real behavioural signal) from "0 because there is nothing to call"
-    (ledger-invisible, not neglect) — and getting it wrong inverts the meaning of
-    every zero in the report.
-    """
-    from techne.core.domains import DOMAIN_NAMES
+    ASKS THE REGISTRY, which is where the fact lives. This distinguishes "0 because
+    agents ignore an existing tool" (a real behavioural signal) from "0 because there
+    is nothing to call" (ledger-invisible, not neglect) — and getting it wrong inverts
+    the meaning of every zero in the report.
 
-    return domain in DOMAIN_NAMES
+    A PREVIOUS VERSION WAS `domain in DOMAIN_NAMES`, WHICH IS A CONSTANT WEARING A
+    DERIVATION'S CLOTHES. Both call sites pass literals that are in `DOMAIN_NAMES`
+    forever, so it never consulted anything — I had replaced a hardcoded `False` with a
+    hardcoded `True`. Prudence proved it by removing `librarian_search` from the
+    registry: the tool was gone, the function still said True, and both tests stayed
+    green. (#727, caught in the #725 r4 review.)
+
+    Import is deliberately lazy: `mcp_server` imports from `core`, not the reverse, and
+    a module-level import here would invert that.
+    """
+    from techne.mcp_server import TOOL_HANDLERS
+
+    prefix = f"{domain}_"
+    return any(name.startswith(prefix) for name in TOOL_HANDLERS)
 
 
 # Code-write baseline for the codex "reads per edit" ratio. Edit only, to stay
@@ -201,6 +223,7 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
     codex_read = sum_tools(_CODEX_READ)
     code_edit = sum_tools(_CODE_EDIT)
     architect_read = sum_tools(_ARCHITECT_READ)
+    archivist_read = sum_tools(_ARCHIVIST_READ)
     librarian_read = sum_prefix(_LIBRARIAN_READ_PREFIX)
 
     return {
@@ -221,6 +244,7 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
         # see `_has_mcp_read_tool`.
         "architect": {"read": architect_read, "mcp_read_tool": _has_mcp_read_tool("architect")},
         "librarian": {"read": librarian_read, "mcp_read_tool": _has_mcp_read_tool("librarian")},
+        "archivist": {"read": archivist_read, "mcp_read_tool": _has_mcp_read_tool("archivist")},
     }
 
 
