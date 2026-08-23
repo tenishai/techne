@@ -52,17 +52,29 @@ def _backdate(db, tool, days):
 def test_injection_utilization_aggregates_per_source(db):
     # session_start: 2 events, one with 3 hits (real), one empty (fired, 0 hits).
     log_context_injection(
-        db, source="session_start", session_id="s1", trigger=None,
-        rows=[{"id": 1}, {"id": 2}, {"id": 3}], injected_text="x" * 40,
+        db,
+        source="session_start",
+        session_id="s1",
+        trigger=None,
+        rows=[{"id": 1}, {"id": 2}, {"id": 3}],
+        injected_text="x" * 40,
     )
     log_context_injection(
-        db, source="session_start", session_id="s1", trigger=None,
-        rows=[], injected_text="",
+        db,
+        source="session_start",
+        session_id="s1",
+        trigger=None,
+        rows=[],
+        injected_text="",
     )
     # codex_edit_rail: 1 event, 2 hits, a different session.
     log_context_injection(
-        db, source="codex_edit_rail", session_id="s2", trigger="sym",
-        rows=[{"id": "a"}, {"id": "b"}], injected_text="y" * 20,
+        db,
+        source="codex_edit_rail",
+        session_id="s2",
+        trigger="sym",
+        rows=[{"id": "a"}, {"id": "b"}],
+        injected_text="y" * 20,
     )
 
     rows = injection_utilization(db)
@@ -92,17 +104,31 @@ def test_injection_utilization_reports_avg_radius(db):
     """techne#343: avg_radius = mean pre-cap total_hits for a capping source;
     None for a source that never sets it."""
     log_context_injection(
-        db, source="codex_edit_rail", session_id="s1", trigger="sym",
-        rows=[{"id": 1}, {"id": 2}], injected_text="x" * 20, total_hits=14,
+        db,
+        source="codex_edit_rail",
+        session_id="s1",
+        trigger="sym",
+        rows=[{"id": 1}, {"id": 2}],
+        injected_text="x" * 20,
+        total_hits=14,
     )
     log_context_injection(
-        db, source="codex_edit_rail", session_id="s1", trigger="sym2",
-        rows=[{"id": 3}], injected_text="y" * 10, total_hits=6,
+        db,
+        source="codex_edit_rail",
+        session_id="s1",
+        trigger="sym2",
+        rows=[{"id": 3}],
+        injected_text="y" * 10,
+        total_hits=6,
     )
     # session_start never sets total_hits → avg_radius stays None.
     log_context_injection(
-        db, source="session_start", session_id="s1", trigger=None,
-        rows=[{"id": 9}], injected_text="z" * 8,
+        db,
+        source="session_start",
+        session_id="s1",
+        trigger=None,
+        rows=[{"id": 9}],
+        injected_text="z" * 8,
     )
     by = {r["source"]: r for r in injection_utilization(db)}
     assert by["codex_edit_rail"]["avg_radius"] == 10.0  # (14 + 6) / 2
@@ -132,8 +158,13 @@ def test_log_context_injection_self_migrates_total_hits(tmp_path):
     c.close()
 
     log_context_injection(
-        p, source="codex_edit_rail", session_id="s", trigger="x",
-        rows=[{"id": 1}], injected_text="x" * 8, total_hits=9,
+        p,
+        source="codex_edit_rail",
+        session_id="s",
+        trigger="x",
+        rows=[{"id": 1}],
+        injected_text="x" * 8,
+        total_hits=9,
     )
     c = sqlite3.connect(p)
     c.row_factory = sqlite3.Row
@@ -187,14 +218,49 @@ def test_read_write_ledger_never_queried_is_none_not_zerodiv(db):
     assert led["librarian"]["read"] == 0
 
 
-def test_librarian_flagged_not_mcp_exposed(db):
-    """techne exposes no librarian MCP tool, so the ledger can't measure it —
-    the row must be flagged mcp_read_tool=False (not reported as 'never queried',
-    which would imply an ignored tool). architect DOES have MCP tools → True.
-    (techne#329 review.)"""
+def test_mcp_read_tool_is_derived_not_hardcoded(db):
+    """`mcp_read_tool` separates "0 because agents ignore an existing tool" from
+    "0 because there is nothing to call". Getting it wrong inverts the meaning of
+    every zero in the report.
+
+    THIS TEST USED TO ASSERT `librarian: False` AND WAS RIGHT TO (techne#329): there
+    was no librarian MCP tool. #724 added `librarian_search`, the prefix matcher
+    auto-lit-up exactly as its comment promised — and the hardcoded boolean beside it
+    did not, so the ledger HAD the number and printed "no MCP read tool" anyway, for a
+    tool the tutorial tells operators to call. Prudence ranked that the one finding not
+    to let reach the release notes (#727).
+
+    The old assertion is why the suite stayed green through it: a test pinning a
+    constant cannot notice the constant going stale. So this asserts the DERIVATION —
+    every domain with a name in the vocabulary has a read tool, and a made-up one does
+    not — which stays true as the surface grows.
+    """
+    from techne.core.domains import DOMAIN_NAMES
+    from techne.core.utilization import _has_mcp_read_tool
+
     led = read_write_ledger(db)
-    assert led["librarian"]["mcp_read_tool"] is False
+    assert led["librarian"]["mcp_read_tool"] is True, (
+        "librarian_search exists and the prefix matcher counts it, but the ledger "
+        "still reports no MCP read tool"
+    )
     assert led["architect"]["mcp_read_tool"] is True
+
+    for domain in DOMAIN_NAMES:
+        assert _has_mcp_read_tool(domain) is True, domain
+    assert _has_mcp_read_tool("not-a-domain") is False, (
+        "the derivation answers True for anything — it is not deriving"
+    )
+
+
+def test_the_ledger_counts_the_domain_named_architect_tool(db):
+    """`_ARCHITECT_READ` is an EXACT tuple, so a new tool must be added to it or
+    successful adoption reads as `never queried` — the ledger reporting neglect at
+    precisely the moment the tool is being used. (Prudence, #727.)"""
+    _obs(db, "mcp__techne__architect_search", 4)
+    led = read_write_ledger(db)
+    assert led["architect"]["read"] == 4, (
+        "architect_search was not counted — the exact-match tuple is stale"
+    )
 
 
 def test_read_write_ledger_counts_librarian_by_prefix(db):
@@ -234,8 +300,12 @@ def _stamp(db, table, ts, where, params=()):
 def _inject(db, ts, *, trigger, deps, session="s1"):
     """Log a codex_edit_rail injection (deps = dependent symbol-id strings) at `ts`."""
     log_context_injection(
-        db, source="codex_edit_rail", session_id=session, trigger=trigger,
-        rows=[{"id": d} for d in deps], injected_text="x" * 20,
+        db,
+        source="codex_edit_rail",
+        session_id=session,
+        trigger=trigger,
+        rows=[{"id": d} for d in deps],
+        injected_text="x" * 20,
     )
     _stamp(db, "context_injections", ts, "trigger_snippet = ?", (trigger,))
 
@@ -263,7 +333,8 @@ def _multiedit(db, ts, path, *, body="", session="s1", file_path_first=True):
 
     edit = {"old_string": body, "new_string": body}
     tool_input = (
-        {"file_path": path, "edits": [edit]} if file_path_first
+        {"file_path": path, "edits": [edit]}
+        if file_path_first
         else {"edits": [edit], "file_path": path}
     )
     inp = _json.dumps(tool_input)[:500]  # summarize() truncation
@@ -280,8 +351,12 @@ def test_edit_rail_attribution_empty_db(db):
 
 
 def test_edit_rail_attribution_file_hit(db):
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")  # 30s later, same file
     a = edit_rail_attribution(db)
     assert a["injections"] == 1
@@ -292,16 +367,24 @@ def test_edit_rail_attribution_file_hit(db):
 def test_edit_rail_attribution_excludes_trigger_file(db):
     # The only dependent shares the trigger's OWN file — editing it is not
     # "used a dependent" (you were editing that symbol anyway).
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/foo.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/foo.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")
     a = edit_rail_attribution(db)
     assert a["file_attributed"] == 0
 
 
 def test_edit_rail_attribution_window(db):
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     _edit(db, "2026-01-01 12:10:00", "/repo/techne/foo.py")  # 10 min later
     tight = edit_rail_attribution(db, window_minutes=2.0)
     assert tight["no_edits_in_window"] == 1
@@ -311,8 +394,12 @@ def test_edit_rail_attribution_window(db):
 
 
 def test_edit_rail_attribution_next_edits_cap(db):
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     # Two unrelated edits first, then the dependent — beyond next_edits=2, so uncredited.
     _edit(db, "2026-01-01 12:00:10", "/repo/techne/a.py")
     _edit(db, "2026-01-01 12:00:20", "/repo/techne/b.py")
@@ -322,20 +409,28 @@ def test_edit_rail_attribution_next_edits_cap(db):
 
 
 def test_edit_rail_attribution_symbol_name(db):
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::compute_total::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::compute_total::function::10"],
+    )
     _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py", change="compute_total(x)")
     a = edit_rail_attribution(db)
     assert a["symbol_attributed"] == 1  # the edit text names the dependent
 
 
 def test_edit_rail_attribution_payload_composition(db):
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=[
-                "techne/foo.py::bar::function::10",     # real
-                "tests/test_foo.py::baz::function::3",  # test file
-                "techne/foo.py::<module>::module::0",   # synthetic module node
-            ])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=[
+            "techne/foo.py::bar::function::10",  # real
+            "tests/test_foo.py::baz::function::3",  # test file
+            "techne/foo.py::<module>::module::0",  # synthetic module node
+        ],
+    )
     pay = edit_rail_attribution(db)["payload"]
     assert pay["dependents"] == 3
     assert pay["real_pct"] == round(100 / 3, 1)
@@ -344,11 +439,15 @@ def test_edit_rail_attribution_payload_composition(db):
 
 
 def test_edit_rail_attribution_noise_only(db):
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=[
-                "techne/foo.py::<module>::module::0",   # module noise
-                "tests/test_x.py::a::function::1",      # test noise
-            ])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=[
+            "techne/foo.py::<module>::module::0",  # module noise
+            "tests/test_x.py::a::function::1",  # test noise
+        ],
+    )
     a = edit_rail_attribution(db)
     assert a["noise_only_injections"] == 1
     assert a["noise_only_pct"] == 100.0
@@ -362,8 +461,12 @@ def test_edit_rail_attribution_tz_aware_timestamp_no_crash(db):
     """Transcript-imported edits carry ISO '…Z' (tz-AWARE) timestamps while the
     injection's is naive — subtracting them used to raise TypeError and take down
     `techne audit` (review issue #1). Must not raise, and must still attribute."""
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     _edit(db, "2026-01-01T12:00:30.000Z", "/repo/techne/foo.py")  # tz-aware shape
     a = edit_rail_attribution(db)  # no TypeError
     assert a["file_attributed"] == 1
@@ -372,8 +475,12 @@ def test_edit_rail_attribution_tz_aware_timestamp_no_crash(db):
 def test_edit_rail_attribution_write_follow_up(db):
     """Write ('Wrote: <path>') follow-ups must be counted, not silently dropped
     (review issue #2)."""
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     _write(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")
     assert edit_rail_attribution(db)["file_attributed"] == 1
 
@@ -381,8 +488,12 @@ def test_edit_rail_attribution_write_follow_up(db):
 def test_edit_rail_attribution_multiedit_follow_up(db):
     """MultiEdit fires the rail, so a MultiEdit fix-up to a dependent must attribute
     at both file and symbol granularity (review issue #2)."""
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::compute_total::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::compute_total::function::10"],
+    )
     _multiedit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py", body="compute_total(x)")
     a = edit_rail_attribution(db)
     assert a["file_attributed"] == 1
@@ -392,27 +503,39 @@ def test_edit_rail_attribution_multiedit_follow_up(db):
 def test_edit_rail_attribution_symbol_not_credited_from_path(db):
     """A dependent whose name also appears in its own filename must NOT earn symbol
     credit when the change body doesn't touch it (review nit — match body, not path)."""
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::foo::function::10"])  # symbol 'foo' also in foo.py
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::foo::function::10"],
+    )  # symbol 'foo' also in foo.py
     _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py", change="unrelated_change()")
     a = edit_rail_attribution(db)
-    assert a["file_attributed"] == 1   # file still credited
+    assert a["file_attributed"] == 1  # file still credited
     assert a["symbol_attributed"] == 0  # symbol not — name only in the path
 
 
 def test_edit_rail_attribution_attributable_denominator(db):
     """Rate over 'injections that had a follow-up edit' is reported alongside the
     over-all rate (review suggestion)."""
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/t1.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/t1.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     _edit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py")  # hits the dep
-    _inject(db, "2026-01-01 13:00:00", trigger="techne/t2.py::t::function::5",
-            deps=["techne/baz.py::qux::function::7"])  # no follow-up edit
+    _inject(
+        db,
+        "2026-01-01 13:00:00",
+        trigger="techne/t2.py::t::function::5",
+        deps=["techne/baz.py::qux::function::7"],
+    )  # no follow-up edit
     a = edit_rail_attribution(db)
     assert a["injections"] == 2 and a["no_edits_in_window"] == 1
     assert a["attributable"] == 1
     assert a["file_attributed"] == 1
-    assert a["file_attributed_pct"] == 50.0             # over all injections
+    assert a["file_attributed_pct"] == 50.0  # over all injections
     assert a["file_attributed_pct_attributable"] == 100.0  # over those w/ a follow-up
 
 
@@ -420,11 +543,16 @@ def test_edit_rail_attribution_multiedit_truncation_boundary(db):
     """MultiEdit's Input JSON is truncated to 500 chars by summarize(). With
     file_path FIRST (schema order), it survives even a large edits payload →
     still attributed (re-review boundary case)."""
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
     # body >500 chars so the serialised Input is truncated; file_path is first.
-    _multiedit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py",
-               body="z" * 600, file_path_first=True)
+    _multiedit(
+        db, "2026-01-01 12:00:30", "/repo/techne/foo.py", body="z" * 600, file_path_first=True
+    )
     assert edit_rail_attribution(db)["file_attributed"] == 1
 
 
@@ -432,10 +560,15 @@ def test_edit_rail_attribution_multiedit_truncation_degrades_gracefully(db):
     """The pathological case — file_path serialised AFTER a large edits array is
     truncated away. Documents that this degrades to a silent DROP (undercount),
     never a crash (re-review boundary case)."""
-    _inject(db, "2026-01-01 12:00:00", trigger="techne/trig.py::t::function::5",
-            deps=["techne/foo.py::bar::function::10"])
-    _multiedit(db, "2026-01-01 12:00:30", "/repo/techne/foo.py",
-               body="z" * 600, file_path_first=False)
+    _inject(
+        db,
+        "2026-01-01 12:00:00",
+        trigger="techne/trig.py::t::function::5",
+        deps=["techne/foo.py::bar::function::10"],
+    )
+    _multiedit(
+        db, "2026-01-01 12:00:30", "/repo/techne/foo.py", body="z" * 600, file_path_first=False
+    )
     a = edit_rail_attribution(db)  # must not raise
     assert a["file_attributed"] == 0  # dropped, not crashed
 
@@ -658,8 +791,12 @@ def _stamp_last(db, table, ts):
 def _kinject(db, ts, ids, *, source="per_turn_recall", session="s1"):
     """Log a knowledge-rail injection of `ids` (knowledge row ids) at `ts`."""
     log_context_injection(
-        db, source=source, session_id=session, trigger="t",
-        rows=[{"id": i} for i in ids], injected_text="x" * 20,
+        db,
+        source=source,
+        session_id=session,
+        trigger="t",
+        rows=[{"id": i} for i in ids],
+        injected_text="x" * 20,
     )
     _stamp_last(db, "context_injections", ts)
 
@@ -707,8 +844,7 @@ def test_recall_attribution_echo_tool_cannot_credit(db):
     # techne_recall's captured Output contains the ids it RETURNED — crediting
     # that would be the store citing itself.
     _kinject(db, "2026-01-01 12:00:00", [237])
-    _act(db, "2026-01-01 12:00:30", "Output: techne#237",
-         tool="mcp__techne__techne_recall")
+    _act(db, "2026-01-01 12:00:30", "Output: techne#237", tool="mcp__techne__techne_recall")
     r = recall_attribution(db)
     assert r["cited_in_window"] == 0
     assert r["cited_in_session"] == 0
@@ -718,8 +854,7 @@ def test_recall_attribution_echo_tool_still_consumes_a_window_slot(db):
     # An echo tool is a real action: it can't earn credit, but it does push a
     # later genuine citation out of a 1-action window.
     _kinject(db, "2026-01-01 12:00:00", [237])
-    _act(db, "2026-01-01 12:00:10", "Output: techne#237",
-         tool="mcp__techne__techne_recall")
+    _act(db, "2026-01-01 12:00:10", "Output: techne#237", tool="mcp__techne__techne_recall")
     _act(db, "2026-01-01 12:00:20", "now I use techne#237")
     assert recall_attribution(db, next_actions=1)["cited_in_window"] == 0
     assert recall_attribution(db, next_actions=2)["cited_in_window"] == 1
@@ -798,8 +933,8 @@ def test_recall_attribution_per_item_table(db):
     by_id = {r["id"]: r for r in recall_attribution(db)["items"]}
     assert by_id[237]["encounters"] == 1
     assert by_id[237]["cited_in_session"] == 1
-    assert by_id[812]["encounters"] == 2          # shown twice…
-    assert by_id[812]["cited_in_session"] == 0    # …never named
+    assert by_id[812]["encounters"] == 2  # shown twice…
+    assert by_id[812]["cited_in_session"] == 0  # …never named
     assert by_id[812]["sessions"] == 1
     r = recall_attribution(db)
     assert r["items_injected"] == 2
@@ -819,8 +954,12 @@ def test_recall_attribution_ignores_codex_style_string_ids(db):
     # codex_edit_rail writes symbol-id STRINGS into the same column. If such a
     # source is passed explicitly it must degrade to "no citable ids", not raise.
     log_context_injection(
-        db, source="codex_edit_rail", session_id="s1", trigger="sym",
-        rows=[{"id": "techne/foo.py::bar::function::10"}], injected_text="x",
+        db,
+        source="codex_edit_rail",
+        session_id="s1",
+        trigger="sym",
+        rows=[{"id": "techne/foo.py::bar::function::10"}],
+        injected_text="x",
     )
     _stamp_last(db, "context_injections", "2026-01-01 12:00:00")
     _act(db, "2026-01-01 12:00:10", "techne#237")

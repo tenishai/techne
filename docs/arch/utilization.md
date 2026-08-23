@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-utilization
 updated: 2026-08-19
-anchor: techne/core/utilization.py sha=8e21ea4e654e4be10466004c4d67ae0147c002c1
+anchor: techne/core/utilization.py sha=27f4a3766e5d78a67ba6d4ce428718217b7c3c1e
 ---
 # utilization — is the read path earning its tokens? (techne#329)
 
@@ -25,6 +25,8 @@ Live figures as of 2026-08-16 (all-time): 1,601 injections analysed, 28 cited in
 - **TWO WINDOWS, AND BOTH ARE DELIBERATE.** `window` = within N following actions AND M minutes, so a citation plausibly follows FROM the injection. `session` = anywhere later, which OVER-credits (the agent may have reached the id via its own recall call, or been re-shown it) and exists only to bound how much the tight window could be missing. Report both or neither; a single number invites the wrong reading.
 - **THE DENOMINATOR IS `attributable`, NOT `injections`.** Sessions that took an injection and then produced NO observations cannot be scored either way, and there are a lot of them — `unobserved_sessions` was 309 of 357 sessions' worth at last count. Dividing by all injections reports a capture gap as agent indifference. #562 is the cost side of that same population.
 - **ECHO TOOLS CANNOT EARN CREDIT.** An observation that is the store quoting its own output back (a recall result containing the id it just returned) must not count as the agent citing it — it still consumes a window slot, but it scores nothing.
+- **`mcp_read_tool` IS DERIVED, NEVER HARDCODED.** It separates "0 because agents ignore an existing tool" (a real behavioural signal — this seam's founding finding was `pattern_search` never called at all) from "0 because there is nothing to call" (ledger-invisible, not neglect). Getting it wrong INVERTS THE MEANING OF EVERY ZERO in the report. It was a hardcoded `False` for librarian beside a PREFIX MATCHER that had already started counting once #724 added `librarian_search` — the ledger had the number and printed "no MCP read tool" anyway, for a tool the docs tell operators to call. A hardcoded boolean beside a derived count is two answers to one question and drifts the moment the surface grows (#727, found by Prudence).
+- **THE READ TUPLES ARE EXACT MATCHES, SO A NEW TOOL MUST BE ADDED TO THEM.** `_ARCHITECT_READ` missed `architect_search` for the same reason, and the failure is the nasty direction: successful adoption reads as `never queried`, i.e. the ledger reports neglect at precisely the moment the tool is being used. A test asserts the domain-named tool is counted; the older test that asserted the stale constant is why the suite stayed green through the regression, and it now asserts the DERIVATION instead — a test pinning a constant cannot notice the constant going stale.
 - **THE PER-ITEM TABLE IS WHERE THE ACTION IS.** `items` gives encounters vs citations per injected id. An item with many encounters and zero citations is EITHER load-bearing-and-silent OR pure token cost, and no automated signal can tell those apart — only an operator can.
 
 ## KNOWN GAPS

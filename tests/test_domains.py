@@ -373,3 +373,37 @@ def test_freshness_is_judged_against_the_tree_the_index_was_built_from(
         "worktree — the index it judges was built from the primary"
     )
     assert "find_repo_root(" not in src, "the worktree-stopping resolver is still used"
+
+
+def test_archivist_search_hides_the_same_rows_recall_hides(config):
+    """PRUDENCE, #727. `search()` defaults `include_archived=True` and both recall call
+    sites pass False (techne#216) — so addressing the archivist BY NAME surfaced
+    soft-archived rows that asking recall the same question suppresses.
+
+    Two surfaces answering one question differently is the defect the connection seam
+    exists to remove: one of them is lying about what the archivist holds. The point of
+    a stable vocabulary is that `archivist_search` and `techne_recall` disagree about
+    ranking, never about what exists.
+    """
+    import sqlite3
+
+    from techne.core.knowledge import store
+
+    kept = store(config.db_path, "the kestrel roosts at dusk", type="fact")
+    gone = store(config.db_path, "the kestrel roosts at dawn", type="fact")
+
+    # soft-archive is `status = 'archived'`, the column recall's own clause reads
+    # (`search.py:374`) — not a boolean `archived` column, which does not exist.
+    con = sqlite3.connect(config.db_path)
+    con.execute("UPDATE knowledge SET status = 'archived' WHERE id = ?", (gone,))
+    con.commit()
+    con.close()
+
+    r = SEARCH["archivist"](config, "kestrel")
+    ids = {row.get("id") for row in r["results"]}
+
+    assert kept in ids, "the live row was dropped"
+    assert gone not in ids, (
+        "archivist_search returned a soft-archived row that recall hides — the two "
+        "surfaces disagree about what the archivist holds"
+    )

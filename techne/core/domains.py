@@ -152,15 +152,23 @@ def archivist_search(config, query: str, limit: int = 20) -> dict:
     # documents it as "the same defect #552 removed six times", and I reproduced it one
     # module along while fixing the sixth. Resolving first makes the ordering guarantee
     # STRUCTURAL rather than conventional. (Prudence, #725.)
+    # `include_archived=False`, MATCHING RECALL. `search()` defaults it True, and both
+    # `_techne_recall` call sites pass False (techne#216) — so without it, addressing
+    # the archivist by name surfaced soft-archived rows that recall suppresses.
+    # Measured by Prudence: 1 row versus 0 on the same query. Two surfaces answering
+    # the same question differently is the defect the connection seam exists to remove;
+    # one of them would be lying about what the archivist holds. (#727.)
     report = _binding_of(config, "archivist")
     if report.binding == ARCHIVIST_ABSENT or not report.ok:
         return _envelope("archivist", config, [], report=report)
     if report.binding == ARCHIVIST_LOCAL:
-        rows = search(config.db_path, query, table="knowledge", limit=limit)
+        rows = search(config.db_path, query, table="knowledge", limit=limit, include_archived=False)
         return _envelope("archivist", config, rows, report=report)
     target = report.target
     rows = (
-        search(target, query, table="knowledge", limit=limit) if target and target.is_file() else []
+        search(target, query, table="knowledge", limit=limit, include_archived=False)
+        if target and target.is_file()
+        else []
     )
     return _envelope("archivist", config, rows, report=report)
 
