@@ -253,7 +253,9 @@ def _select_backend(config: "Config | None") -> tuple[str, str]:
 
     if backend_override in ("model2vec", "fastembed"):
         default_for_override = (
-            _DEFAULT_MODEL2VEC_MODEL if backend_override == "model2vec" else _DEFAULT_FASTEMBED_MODEL
+            _DEFAULT_MODEL2VEC_MODEL
+            if backend_override == "model2vec"
+            else _DEFAULT_FASTEMBED_MODEL
         )
         return backend_override, model_override or default_for_override
 
@@ -373,6 +375,31 @@ def _get_embedding_model(
         backend, model_name = _select_backend(config)
         _embedding_model = _build_backend(backend, model_name, allow_download=allow_download)
     return _embedding_model
+
+
+def model_cached(config: "Config | None" = None) -> bool:
+    """True iff the embedding model can be loaded WITHOUT a network fetch.
+
+    The missing third state. `backend_available()` is an IMPORT probe — it says
+    the package is installed, not that the model is present — so on a fresh
+    `pip install techne[vectors]` it reports True while every semantic search
+    silently degrades to FTS (techne#708). Nothing else distinguishes
+    "no vector search because the backend is absent" from "no vector search
+    because the weights were never downloaded", and only the second is one
+    command away from fixed.
+
+    Cheap by construction: `allow_download=False` makes an uncached model raise
+    immediately (~0.2s, fastembed via `local_files_only`, model2vec via
+    HF_HUB_OFFLINE) rather than blocking on the Hub. A cached model is the
+    process singleton, so repeat calls are free.
+    """
+    if not backend_available():
+        return False
+    try:
+        _get_embedding_model(config, allow_download=False)
+    except Exception:
+        return False
+    return True
 
 
 def _reset_embedding_model() -> None:

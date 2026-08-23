@@ -85,9 +85,15 @@ def _mmr_reorder(
         return candidates[:limit]
 
     try:
-        model = _get_embedding_model()
+        # allow_download=False for the same reason as search_vec (techne#708).
+        # This call site is UNREACHABLE today — the mmr_lambda == 0.0
+        # short-circuit above returns before it and no live caller raises
+        # lambda (the config knob was removed; see docs/arch/search-embeddings.md
+        # "MMR — CODE EXISTS, NO CONFIG SURFACE"). Guarded anyway so it cannot
+        # become a cold-cache hang the day someone re-plumbs the knob.
+        model = _get_embedding_model(allow_download=False)
     except Exception:
-        # No embedding backend installed/available — no-op.
+        # No embedding backend installed, or the model is not cached — no-op.
         return candidates[:limit]
 
     # Embed all candidates that don't already have a cached embedding.
@@ -630,7 +636,22 @@ def search_vec(
 
     import numpy as np
 
-    model = _get_embedding_model()
+    # allow_download=False IS LOAD-BEARING, not defensive (techne#708). This
+    # function is reachable from hooks/user_prompt_submit.py -> search()
+    # (use_vectors=True by default) -> here, i.e. from EVERY prompt submission.
+    # On a cold HF cache the default would block on a Hub fetch, and a blocking
+    # HTTP download is signal-deaf: bounded_hook's SIGALRM cannot preempt it, so
+    # the turn hangs rather than degrading. backend_available() above does NOT
+    # cover this — it is an IMPORT probe, so it passes with the package present
+    # and the model absent, which is exactly the fresh-install state.
+    try:
+        model = _get_embedding_model(allow_download=False)
+    except Exception:
+        # Uncached model. Degrade to FTS-only, the same contract as every other
+        # exit in this function. The singleton is deliberately left unset on a
+        # failed allow_download=False attempt, so `techne vectors backfill`
+        # (which may download) can still warm the cache in the same process.
+        return []
     q_emb = np.stack(list(model.embed([query])))[0]
     q_bytes = q_emb.astype("float32").tobytes()
 
