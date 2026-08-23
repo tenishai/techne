@@ -28,3 +28,81 @@ def find_repo_root(path: Path) -> Path | None:
         if (candidate / ".git").exists():
             return candidate
     return None
+
+
+def primary_repo_root(path: Path) -> Path | None:
+    """The PRIMARY checkout that owns *path* — a linked worktree maps to its parent.
+
+    WHY THIS EXISTS (tenishai/agents#53). Reviews and the worktree-per-session SOP
+    (techne#376/#740) run inside `git worktree` checkouts, and `find_repo_root` stops at
+    the worktree because a worktree has its own `.git`. The codex is db-per-repo and is
+    indexed against the PRIMARY checkout, so every query from inside a worktree resolved
+    to a path with no index and answered "no codex index for the active repo". Measured
+    across 340 posted reviews: the impact pass ran in 6% of them, because the reviewer's
+    persona correctly says to fall back to grep when codex returns nothing. The tool was
+    pointed at the wrong path; nobody was ignoring instructions.
+
+    Resolving to the primary is also the SEMANTICALLY RIGHT answer, not merely the one
+    with a db: the impact pass asks "what calls this TODAY, on the base branch, that the
+    PR must not break". The worktree is checked out at the PR head. The primary's graph
+    is the question being asked.
+
+    READ PATH ONLY — see `resolve_repo_db_for_query`. The write path deliberately does
+    NOT follow this, or `reindex_edited_file` would write a PR branch's symbols into the
+    base graph that other sessions are querying.
+
+    NO STRING HEURISTICS. Git's own layout answers it: a linked worktree's `.git` is a
+    FILE pointing at `<primary>/.git/worktrees/<name>`, and that directory holds a
+    `commondir` file naming `<primary>/.git`. `coord.py` warns from experience against
+    splitting on `/worktrees/` — a repo whose own path contains that segment defeats it.
+    Any malformed or missing piece falls back to *path*'s own root, which is today's
+    behaviour.
+
+    THAT FALLBACK DOES NOT MEAN THIS "CAN ONLY IMPROVE RESOLUTION, NEVER BREAK A WORKING
+    INSTALL" — an earlier draft said so and it was false in both directions (Prudence,
+    #719). The inference is the exact fallacy that shipped the bug: breakage never came
+    from a MALFORMED piece, it came from a WELL-FORMED `commondir` in a layout where
+    `parent` is not the repo root. Hence the name guard below. It is still not a
+    totalising guarantee — a bare repo literally named `.git` clears both guards and
+    resolves to a directory holding no checkout — which is benign, and stated rather
+    than papered over.
+    """
+    root = find_repo_root(path)
+    if root is None:
+        return None
+    dot_git = root / ".git"
+    if dot_git.is_dir():
+        return root  # the primary checkout
+    try:
+        # ".git" is a file: "gitdir: <abs-or-rel path to the worktree's git dir>"
+        pointer = dot_git.read_text(encoding="utf-8").strip()
+        if not pointer.startswith("gitdir:"):
+            return root
+        git_dir = Path(pointer.split(":", 1)[1].strip())
+        if not git_dir.is_absolute():
+            git_dir = (root / git_dir).resolve()
+        common = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+        common_dir = Path(common)
+        if not common_dir.is_absolute():
+            common_dir = (git_dir / common_dir).resolve()
+        # `commondir` names the common git dir, and `parent` is the repo root ONLY when
+        # that dir is literally `<root>/.git`. THE ORIGINAL CODE ASSUMED IT ALWAYS WAS,
+        # AND THAT WAS FALSE IN BOTH DIRECTIONS (Prudence, #719):
+        #
+        #   * `.bare + worktrees` (a common layout): common dir is `<x>/.bare`, so
+        #     `parent` is `<x>` — not a checkout at all. An indexed worktree that
+        #     resolved fine before started resolving to something with no index.
+        #   * A BARE REPO NESTED INSIDE ANOTHER REPO is the dangerous one: common dir
+        #     `<outer>/.bare` gives `parent == <outer>`, whose `.git` DOES exist, so the
+        #     inner repo's worktree resolved to the OUTER REPO'S INDEX — confident
+        #     answers about the wrong code, which `_codex` elsewhere calls worse than
+        #     saying no. Reproduced before fixing.
+        #
+        # So the name is checked, not just the existence of a sibling `.git`. Anything
+        # else falls back to the worktree's own root, which is the pre-fix behaviour.
+        if common_dir.name != ".git":
+            return root
+        primary = common_dir.parent
+        return primary if (primary / ".git").exists() else root
+    except (OSError, ValueError, IndexError):
+        return root
