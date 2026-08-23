@@ -12,6 +12,7 @@ that has to survive a local store becoming a persona and then a service.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -357,27 +358,27 @@ def test_the_no_repo_hint_reports_the_repo_the_caller_asked_about(config, tmp_pa
 def test_freshness_is_judged_against_the_tree_the_index_was_built_from(
     config, tmp_path, monkeypatch
 ):
-    """PRUDENCE, #725 r3 — pre-existing, and it fires in HER environment.
+    """PRUDENCE, #725 r3 and again at r5 — pre-existing, and it fires in HER environment.
 
     `db_path` is the PRIMARY checkout's index (#719 made the read resolve there) while
-    `find_repo_root` stopped at the worktree — so freshness compared the primary's index
-    against a different tree's files and called it stale. On every zero-result search
-    from inside a review worktree, the envelope names the primary's db and the notice
-    beside it calls that db stale on the strength of a tree it was never built from.
+    `find_repo_root` stops at the worktree, so freshness compared the primary's index
+    against a different tree's files. Every zero-result search from inside a review
+    worktree got a notice calling that db stale on the strength of a tree it was never
+    built from.
+
+    THE FIRST VERSION OF THIS TEST BUILT THIS EXACT FIXTURE AND THEN NEVER USED IT —
+    the deciding assertion was still `inspect.getsource`, and its docstring called
+    itself BEHAVIOURAL. She reintroduced the defect and got ruff clean, 3370 passed:
+    the same number I was reporting as green with the bug live. A grep that admits it
+    is a grep is a weak test; one labelled behavioural is a trap for the next reader.
+
+    So it spies on `index_freshness` and asserts the `repo_root` it is HANDED.
     """
-    import inspect
-
     from techne import mcp_server
-
-    # BEHAVIOURAL, NOT A SOURCE GREP. The first version asserted on
-    # `inspect.getsource`, which Prudence flagged: it pins the spelling, not the
-    # behaviour, and would pass if the call moved somewhere that never ran. This builds
-    # a REAL worktree and asserts the two resolvers actually differ there, then that the
-    # one used is the primary-resolving one.
     from techne.core.repo import find_repo_root, primary_repo_root
 
     primary = tmp_path / "primary"
-    (primary / ".git").mkdir(parents=True)
+    primary.mkdir()
     subprocess.run(
         ["git", "init", "-q", "-b", "main"], cwd=primary, check=True, capture_output=True
     )
@@ -394,15 +395,47 @@ def test_freshness_is_judged_against_the_tree_the_index_was_built_from(
         capture_output=True,
     )
 
+    primary_real = primary.resolve()
     assert find_repo_root(wt) != primary_repo_root(wt), (
         "fixture did not produce a worktree where the two resolvers differ"
     )
-    assert primary_repo_root(wt) == primary
 
-    src = inspect.getsource(mcp_server._codex_search)
-    assert "primary_repo_root" in src and "find_repo_root(" not in src, (
-        "freshness resolves the repo root with find_repo_root, which stops at a "
-        "worktree — the index it judges was built from the primary"
+    # An indexed repo so the search reaches the zero-result branch that computes
+    # freshness, rather than short-circuiting on the no-repo hint.
+    from techne.core.codegraph import add_symbol
+    from techne.core.codex import CODEX_SCHEMA, repo_db_path
+    from techne.core.stores import SqliteStore
+
+    db = repo_db_path(config, primary_real)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    SqliteStore("codex", db).migrate(CODEX_SCHEMA)
+    add_symbol(db, id="a.py::f::function::1", file="a.py", name="f", kind="function")
+
+    seen = {}
+
+    def spy(db_path, *, repo_root=None, **kw):
+        seen["repo_root"] = repo_root
+        # Shape matches the real return so `zero_result_notice` can render it:
+        # {"files": n, **counts, "unindexed": n, "coverage": str}
+        return {
+            "files": 1,
+            "fresh": 1,
+            "stale": 0,
+            "missing": 0,
+            "unknown": 0,
+            "unindexed": 0,
+            "coverage": "complete",
+        }
+
+    monkeypatch.setattr("techne.core.codegraph.index_freshness", spy)
+    monkeypatch.chdir(wt)
+
+    mcp_server.TOOL_HANDLERS["codex_search"]({"query": "no_such_symbol_xyz"}, config)
+
+    assert seen.get("repo_root") is not None, "index_freshness was never reached"
+    assert Path(seen["repo_root"]).resolve() == primary_real, (
+        f"freshness judged the index against {seen['repo_root']} — the worktree — "
+        f"when the index was built from {primary_real}"
     )
 
 

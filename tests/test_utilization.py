@@ -1048,3 +1048,47 @@ def test_techne_audit_renders_without_crashing(db, monkeypatch, tmp_path):
     assert result.exit_code == 0, f"techne audit crashed: {result.output[-600:]}"
     for domain in ("memory", "codex", "architect", "librarian", "archivist"):
         assert domain in result.output, f"{domain} is missing from the ledger panel"
+
+
+def test_the_flag_and_the_count_cannot_disagree(db, monkeypatch):
+    """PRUDENCE, #725 r5 — HER REPRODUCTION, MADE PERMANENT.
+
+    The predicate asked "is a tool named `<domain>_*` registered?" — a naming
+    convention — while the counters name tools that do not match their own domain
+    prefix: `techne_archivist_query`, `pattern_search`, `pattern_related`. Two facts
+    that agreed only by luck of which tools existed.
+
+    Her demonstration: seed reads through `techne_archivist_query`, drop
+    `archivist_search` from the registry, and the panel printed "no MCP read tool —
+    not visible to this ledger" while the dict held `read: 7`. The count discarded and
+    the operator told the opposite of the truth.
+    """
+    from techne import mcp_server
+    from techne.core.utilization import _has_mcp_read_tool
+
+    _obs(db, "mcp__techne__techne_archivist_query", 7)
+
+    without = {k: v for k, v in mcp_server.TOOL_HANDLERS.items() if k != "archivist_search"}
+    monkeypatch.setattr(mcp_server, "TOOL_HANDLERS", without)
+
+    led = read_write_ledger(db)
+    assert led["archivist"]["read"] == 7, "the counter stopped seeing the SQL surface"
+    assert _has_mcp_read_tool("archivist") is True, (
+        "the flag says no tool exists while the counter is counting 7 reads through "
+        "one — the panel would print 'not visible to this ledger' over a real number"
+    )
+    assert led["archivist"]["mcp_read_tool"] is True
+
+
+def test_a_domain_with_no_registered_read_tool_reports_false(db, monkeypatch):
+    """The other direction, so the flag is not simply always True: strip EVERY tool the
+    archivist's counter names and the answer must change."""
+    from techne import mcp_server
+    from techne.core.utilization import _ARCHIVIST_READ, _has_mcp_read_tool
+
+    bare = {n.removeprefix("mcp__techne__") for n in _ARCHIVIST_READ}
+    without = {k: v for k, v in mcp_server.TOOL_HANDLERS.items() if k not in bare}
+    monkeypatch.setattr(mcp_server, "TOOL_HANDLERS", without)
+
+    assert _has_mcp_read_tool("archivist") is False
+    assert _has_mcp_read_tool("librarian") is True, "unrelated domains must be unaffected"

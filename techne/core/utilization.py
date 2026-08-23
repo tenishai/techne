@@ -80,10 +80,32 @@ _ARCHITECT_READ = (
 _LIBRARIAN_READ_PREFIX = "mcp__techne__librarian_"
 
 
+#: Domain -> the read tools its counter actually sums. ONE FACT, TWO CONSUMERS: the
+#: ledger counts through this and `_has_mcp_read_tool` asks through it, so the count
+#: and the "does a tool exist" boolean CANNOT disagree.
+#:
+#: They were two facts. The predicate asked "is a tool named `<domain>_*` registered?"
+#: — a naming convention — while the counters name tools that do not match their own
+#: domain prefix at all: `techne_archivist_query`, `pattern_search`, `pattern_related`.
+#: They agreed on the boolean only by luck of which tools happened to exist. Prudence
+#: demonstrated the divergence: seed 7 `techne_archivist_query` reads, drop
+#: `archivist_search`, and the panel prints "no MCP read tool — not visible to this
+#: ledger" while the dict holds `read: 7`. The count discarded and the operator told
+#: the opposite of the truth — the same inversion #727 fixed, through a different door.
+#: (#728 review r5.)
+_DOMAIN_READ_TOOLS: dict[str, tuple[str, ...] | str] = {
+    "archivist": _ARCHIVIST_READ,
+    "architect": _ARCHITECT_READ,
+    "codex": _CODEX_READ,
+    "librarian": _LIBRARIAN_READ_PREFIX,  # a PREFIX, so a new librarian_* tool auto-counts
+}
+
+
 def _has_mcp_read_tool(domain: str) -> bool:
     """Does a domain have an MCP read tool at all?
 
-    ASKS THE REGISTRY, which is where the fact lives. This distinguishes "0 because
+    ASKS THE REGISTRY THROUGH THE SAME TUPLE THE COUNTER SUMS, so the boolean and the
+    count are one fact rather than two that agree by luck. This distinguishes "0 because
     agents ignore an existing tool" (a real behavioural signal) from "0 because there
     is nothing to call" (ledger-invisible, not neglect) — and getting it wrong inverts
     the meaning of every zero in the report.
@@ -100,8 +122,13 @@ def _has_mcp_read_tool(domain: str) -> bool:
     """
     from techne.mcp_server import TOOL_HANDLERS
 
-    prefix = f"{domain}_"
-    return any(name.startswith(prefix) for name in TOOL_HANDLERS)
+    spec = _DOMAIN_READ_TOOLS.get(domain)
+    if spec is None:
+        return False
+    registered = {f"mcp__techne__{name}" for name in TOOL_HANDLERS}
+    if isinstance(spec, str):  # a prefix
+        return any(name.startswith(spec) for name in registered)
+    return any(name in registered for name in spec)
 
 
 # Code-write baseline for the codex "reads per edit" ratio. Edit only, to stay
