@@ -138,3 +138,88 @@ def test_the_degrade_is_not_silent(monkeypatch, tmp_path, capsys):
     # ONCE PER PROCESS, not once per turn — this is a per-prompt hook path.
     search_mod.search_vec(tmp_path / "x.db", "q")
     assert capsys.readouterr().err == "", "the warning repeated on a later turn"
+
+
+def test_model_cached_is_a_filesystem_probe_not_a_backend_build(monkeypatch, tmp_path):
+    """THE #361 INVARIANT IS THE CONSTRAINT, and it is why this is a `Path.is_dir()`
+    question rather than a resolver call.
+
+    `test_collect_health_skips_backend_build_when_no_vectors` spies on
+    `_get_embedding_model` and asserts `collect_health` never calls it — the load plus
+    dim probe is 85-290 MB on the SessionStart path. An earlier attempt to answer
+    "are the weights here?" in that branch called the resolver and broke exactly that.
+
+    So: `model_cached` must answer without touching it.
+    """
+    from unittest.mock import MagicMock
+
+    from techne.core import embeddings
+
+    spy = MagicMock()
+    monkeypatch.setattr(embeddings, "_get_embedding_model", spy)
+    monkeypatch.setattr(embeddings, "_select_backend", lambda cfg: ("model2vec", "org/mdl"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+
+    assert embeddings.model_cached(None) is False  # nothing on disk
+    spy.assert_not_called()
+
+    snap = tmp_path / "hub" / "models--org--mdl" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").write_text("weights")
+    assert embeddings.model_cached(None) is True
+    spy.assert_not_called()
+
+
+def test_model_cached_says_None_when_it_cannot_tell(monkeypatch):
+    """NONE IS NOT FALSE. Reporting "not cached" for a state we did not measure is the
+    guess-dressed-as-a-fact this codebase keeps finding — and the caller (the doctor)
+    must be able to stay quiet rather than tell an operator to run a backfill that
+    would not help."""
+    from techne.core import embeddings
+
+    def no_backend(_cfg):
+        raise ImportError("neither model2vec nor fastembed")
+
+    monkeypatch.setattr(embeddings, "_select_backend", no_backend)
+    assert embeddings.model_cached(None) is None
+
+    monkeypatch.setattr(embeddings, "_select_backend", lambda cfg: ("unknown-backend", "m"))
+    assert embeddings.model_cached(None) is None
+
+
+def test_an_empty_snapshot_dir_is_not_cached(monkeypatch, tmp_path):
+    """An interrupted fetch leaves the snapshot directory present and EMPTY — which is
+    the state that produced techne#708's hang. Treating "directory exists" as cached
+    would report a broken install as healthy."""
+    from techne.core import embeddings
+
+    monkeypatch.setattr(embeddings, "_select_backend", lambda cfg: ("model2vec", "org/mdl"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    (tmp_path / "hub" / "models--org--mdl" / "snapshots" / "abc").mkdir(parents=True)
+
+    assert embeddings.model_cached(None) is False
+
+
+def test_the_doctor_names_the_uncached_state_with_a_remedy(monkeypatch, tmp_path):
+    """PRUDENCE, #728. `DORMANT` is documented as "off by configuration" and must name
+    the key that disabled it. On an install where vectors were deliberately turned ON
+    and the weights are simply absent, nothing disabled anything — the channel is
+    BROKEN, not dormant, and after #708 it degrades silently forever because
+    `backfill_vectors` is the only call left that may download.
+    """
+    from techne.config import Config
+    from techne.core import checks, embeddings
+    from techne.core.database import init_db
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    config = Config.load()
+    init_db(config.db_path)  # fresh db: no vec tables, so the DORMANT branch is taken
+
+    monkeypatch.setattr(embeddings, "backend_available", lambda: True)
+    monkeypatch.setattr(embeddings, "model_cached", lambda cfg=None: False)
+
+    res = checks.check_vector_coverage(config)
+
+    assert res.verdict == checks.Verdict.DORMANT, "the verdict itself should not change"
+    assert res.remedy == "techne vectors backfill", "no remedy — the operator is stuck"
+    assert "not cached" in res.detail

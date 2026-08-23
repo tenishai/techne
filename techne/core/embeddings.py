@@ -112,6 +112,7 @@ rather than riding along here.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
@@ -253,7 +254,9 @@ def _select_backend(config: "Config | None") -> tuple[str, str]:
 
     if backend_override in ("model2vec", "fastembed"):
         default_for_override = (
-            _DEFAULT_MODEL2VEC_MODEL if backend_override == "model2vec" else _DEFAULT_FASTEMBED_MODEL
+            _DEFAULT_MODEL2VEC_MODEL
+            if backend_override == "model2vec"
+            else _DEFAULT_FASTEMBED_MODEL
         )
         return backend_override, model_override or default_for_override
 
@@ -342,6 +345,60 @@ def _build_backend(
         return EmbeddingBackend("model2vec", model_name, impl, dim)
 
     raise ValueError(f"unknown embedding backend {backend!r}")  # unreachable via _select_backend
+
+
+def model_cached(config: "Config | None" = None) -> bool | None:
+    """Are the embedding WEIGHTS already on disk — WITHOUT building the backend?
+
+    THIS IS A FILESYSTEM CHECK, DELIBERATELY, AND THE DISTINCTION IS THE WHOLE POINT.
+    `techne#361` pins that `collect_health` must not build the backend on an install
+    with no vec tables (`test_collect_health_skips_backend_build_when_no_vectors` spies
+    on `_get_embedding_model` and asserts it is never called) — the load plus dim probe
+    is 85-290 MB of work on the SessionStart path. A previous attempt to answer this
+    question in that branch called the resolver and broke exactly that invariant.
+
+    So it answers by LOOKING, not by loading: the HF hub cache layout for model2vec,
+    fastembed's own cache dir. No import of the backend, no construction, no network.
+
+    Returns True / False, or **None when it cannot tell** — an unknown backend, or a
+    cache convention this does not know. None is not False: reporting "not cached" for
+    a state we did not measure is the guess-dressed-as-a-fact this codebase keeps
+    finding, and the caller must be able to stay quiet instead.
+    """
+    try:
+        backend, model_name = _select_backend(config)
+    except Exception:  # noqa: BLE001 — no backend installed is not "not cached"
+        return None
+
+    if backend == "fastembed":
+        cache = Path.home() / ".cache" / "fastembed"
+        if not cache.is_dir():
+            return False
+        # fastembed lays models out under a directory carrying the model name with
+        # separators flattened; match loosely rather than guess the exact scheme.
+        needle = model_name.replace("/", "").replace("-", "").lower()
+        return any(
+            needle in p.name.replace("-", "").replace("_", "").lower()
+            for p in cache.iterdir()
+            if p.is_dir()
+        )
+
+    if backend == "model2vec":
+        # Standard HF hub layout: <hub>/models--<org>--<name>/snapshots/<rev>/...
+        hub = Path(
+            os.environ.get("HF_HUB_CACHE")
+            or (Path(os.environ["HF_HOME"]) / "hub" if os.environ.get("HF_HOME") else "")
+            or (Path.home() / ".cache" / "huggingface" / "hub")
+        )
+        repo = hub / f"models--{model_name.replace('/', '--')}"
+        snapshots = repo / "snapshots"
+        if not snapshots.is_dir():
+            return False
+        # A snapshot dir that exists but holds nothing is an interrupted fetch, which
+        # is NOT cached — the state that produced techne#708's hang in the first place.
+        return any(any(rev.iterdir()) for rev in snapshots.iterdir() if rev.is_dir())
+
+    return None
 
 
 def _get_embedding_model(
