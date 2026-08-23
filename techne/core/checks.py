@@ -1768,7 +1768,12 @@ def check_outbox_targets(config) -> list[CheckResult]:
             )
         )
 
-    from techne.lifecycle import RETIRED_PRODUCER_TARGETS
+    from techne.core.archivist import archivist_binding
+    from techne.lifecycle import retired_producer_targets
+
+    # Resolved ONCE, outside the loop: both read config and are identical for every row.
+    retired_here = retired_producer_targets(config)
+    binding = archivist_binding(config)
 
     for target, total, last_synced, pending, last_enqueued in rows:
         pending = pending or 0
@@ -1780,7 +1785,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # Reporting it as "producer may be dead" is technically true and
         # permanently un-actionable, which is the nag that teaches an operator
         # to skip the whole report (#469 review 3).
-        # A LANE THIS RELEASE RETIRED IS ALSO A RETIRED LANE (techne#552 part 3,
+        # A LANE WITH NO PRODUCER UNDER THIS BINDING IS A RETIRED LANE (techne#552 part 3,
         # Prudence #714 r4). `sink:archivist` stopped having a producer when thread
         # summaries moved to the sync lane, but its delivered rows stay — deliberately,
         # so they remain drainable — so `GROUP BY target` keeps returning it forever
@@ -1802,7 +1807,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
         # draining, and short-circuiting before the backlog branch would hide it. The
         # frozen-MAX(created_at) problem this fixes only arises once the lane is fully
         # drained, which is exactly when `pending == 0`.
-        if target in RETIRED_PRODUCER_TARGETS and pending == 0:
+        if target in retired_here and pending == 0:
             results.append(
                 CheckResult(
                     name=f"outbox:{target}",
@@ -1810,7 +1815,7 @@ def check_outbox_targets(config) -> list[CheckResult]:
                     kind=Kind.TEMPORAL,
                     verdict=Verdict.DORMANT,
                     last_fired=last_synced,
-                    evidence=f"target={target!r} in lifecycle.RETIRED_PRODUCER_TARGETS",
+                    evidence=f"target={target!r} has no producer under binding={binding}",
                     detail=(
                         f"retired by techne#552 ({total} delivered rows kept readable) — "
                         "no producer by design, not a dead one"

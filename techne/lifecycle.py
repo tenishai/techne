@@ -20,17 +20,51 @@ ARCHIVIST_SINK_TARGET = "sink:archivist"
 # Back-compat alias (was the only, sync-only, target before #224).
 THREAD_SUMMARY_TARGET = THREAD_SUMMARY_SYNC_TARGET
 
-#: LANES THAT NO LONGER HAVE A PRODUCER, declared HERE because this is where the
-#: retirement happens (techne#552 part 3). Delivered rows stay — they must remain
-#: drainable and readable — so the lane keeps appearing in the outbox forever with a
-#: frozen MAX(created_at), and anything that judges liveness by "has this enqueued
-#: lately" will call a correctly-retired lane a dead producer.
-#:
-#: DECLARED NEXT TO THE RETIREMENT, AND IMPORTED BY THE CHECKER, rather than the checker
-#: re-spelling the literal: a copy of this fact would go stale the moment either side
-#: moved, which is the shape techne#518 found five times and the one this PR's own card
-#: entry ends on. (Prudence, #714 r4.)
-RETIRED_PRODUCER_TARGETS = frozenset({ARCHIVIST_SINK_TARGET})
+#: Lanes retired by the RELEASE — nothing can feed them under any configuration.
+#: `sink:archivist` stopped having a producer when techne#552 part 3 moved thread
+#: summaries to the sync lane. Delivered rows stay (they must remain drainable), so the
+#: lane keeps appearing in the outbox forever with a frozen MAX(created_at), and
+#: anything judging liveness by "has this enqueued lately" calls it a dead producer.
+_RELEASE_RETIRED_TARGETS = frozenset({ARCHIVIST_SINK_TARGET})
+
+
+def retired_producer_targets(config) -> frozenset[str]:
+    """Lanes with NO PRODUCER UNDER THE CURRENT BINDING (techne#715).
+
+    A PREDICATE, NOT A SET, AND THAT IS THE FIX. techne#714 introduced a static
+    `RETIRED_PRODUCER_TARGETS`, which is correct for `sink:archivist` — nothing can feed
+    it under any configuration. It is WRONG for `sink:archivist_knowledge`, which is fed
+    by `push_knowledge_to_archivist` only under a STORE binding: under `local` (the
+    default since techne#552) it has no producer at all, but it is not globally retired,
+    so a static set could not express it and the fix walked past it.
+
+    MEASURED on the author's box minutes after #714 merged: 2,208 delivered rows,
+    `pending=0`, `push_knowledge_to_archivist` returning 0, last enqueue frozen at the
+    upgrade — due to report STALE / ok=False / remedy=None seven days later. The same
+    permanent unclearable false red #714 r4 was raised to remove, one lane over, on the
+    same migration cohort.
+
+    THE SHARPER RULE, which is what this function encodes: RETIRING A PRODUCER IS A
+    PROPERTY OF A CONFIGURATION, NOT ONLY OF A RELEASE. Retirement-by-release is the
+    special case where the answer is the same for every config.
+
+    Declared here, beside the retirement, and imported by the checker rather than
+    re-spelled there — a copy of this fact goes stale the moment either side moves
+    (techne#518, five times).
+    """
+    from techne.core.archivist import (
+        ARCHIVIST_KNOWLEDGE_TARGET,
+        ARCHIVIST_STORE,
+        archivist_binding,
+    )
+
+    retired = set(_RELEASE_RETIRED_TARGETS)
+    if archivist_binding(config) != ARCHIVIST_STORE:
+        # Distilled knowledge egresses only to a SEPARATE store. Under `local` the team
+        # knowledge IS this instance's knowledge, so there is nothing to push and this
+        # lane has no producer — for this config, not for the product.
+        retired.add(ARCHIVIST_KNOWLEDGE_TARGET)
+    return frozenset(retired)
 
 
 def _thread_summary_target(config) -> str:
