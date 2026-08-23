@@ -1,0 +1,407 @@
+"""What each knowledge domain is bound to — one question, four domains (techne#552 part 4).
+
+Richard, scoping the connection seam:
+
+    I want to review techne and make sure connecting to the librarian, archivist,
+    architect, and codex in techne had the same feel as connecting to liminal with a
+    persona, and cabal with a local agent and with a remote agent.
+
+That is a question about CONNECTING, and this module answers it. `techne_recall` already
+fans out over memory / archivist / librarian and reports the ladder; what had no uniform
+answer was "what is domain X bound to, and can I reach it" — asked identically of all
+four.
+
+=== WHY BINDING AND NOT THE RECALL LADDER, WHICH IS WHAT #552 PART 4 LITERALLY SAYS ===
+
+#552 part 4 reads "bring patterns and codex through the same call", i.e. add them as
+rungs 5 and 6. TWO THINGS ARGUE AGAINST THAT, one from the siblings and one measured.
+
+THE SIBLINGS ANSWER "SAME FEEL" ON THE BINDING AXIS, NOT THE QUERY AXIS. Read rather
+than recalled, 2026-08-22:
+
+  * liminal `src/liminal/target/base.py` — a `Target` is "a named backend with a
+    transport". `name` is the namespace, `list_tools` returns tools UNPREFIXED and the
+    Multiplexer adds `{name}.`, and in-process vs HTTP vs stdio are KINDS OF TARGET.
+    The call shape never changes; the transport is a field.
+  * cabal `src/cabal/handlers/` already ships `patterns.py`, `code.py`, `documents.py`
+    and `archivist.py` SIDE BY SIDE — these exact domains, as peers, each exposing
+    `{domain}.{verb}`.
+
+Neither fuses its domains into one query. Both make the CONNECTION uniform and let the
+caller name the domain. Fusing all four into `recall` would be a third answer, not the
+same one.
+
+AND THE MEASURED HALF — retrieval quality today would make those rungs noise:
+
+  * PATTERNS. `search_patterns` is FTS over name+body with an OR fallback, and its own
+    docstring says the corpus is queried in problem language while patterns are titled
+    metaphorically. Measured: "archivist binding" -> "Late-binding task definitions";
+    "guarded read-only SQL over a shared store" -> "Dialect-agnostic filter-DSL
+    compiler". Plausible-looking, mostly irrelevant. techne#550 (a one-line `problem`
+    field) is the fix and is not landed.
+  * CODEX. The DURABLE finding is dilution: across six realistic topics, 45% of hits
+    were TEST symbols, because test names are long English sentences and FTS matches
+    them better than implementation identifiers. That is structural — it follows from
+    what FTS ranks, not from when the index last ran.
+
+    Staleness was also measured (2026-08-21: 166 files fresh / 83 stale, and
+    `retired_producer_targets`, merged the same day, returned zero hits) but is a
+    SNAPSHOT and was already out of date within a day; a reindex moves it. Cited here
+    as the state on that date, not as a standing property. (Prudence, #717.)
+
+A rung that returns noise on EVERY recall is worse than no rung, and the response shape
+is the thing open-sourcing freezes (knowledge#1085). So: bind uniformly now, and revisit
+the rungs when #550 and codex freshness make them answerable. Recorded as a decision
+rather than an omission.
+
+=== THE SHAPE, AND ITS PRECEDENT IN THIS FILE'S NEIGHBOUR ===
+
+`checks._VERSION_REGISTRY` already enumerates these same domains and already carries the
+lesson this module needs: A UNIFORM QUESTION MAY NOT HAVE A UNIFORM MECHANISM. Reading
+`PRAGMA user_version` off every store would report three false problems on a healthy
+machine, because core uses a `schema_version` TABLE while domain stores use the pragma
+and librarian has no stamp at all.
+
+Binding is the same: "what is this bound to" is one question, but the archivist answers
+it from `archivist_binding`, architect and librarian from the `stores` registry, and
+codex from a per-repo index that may simply not exist. So the registry below declares
+the MECHANISM per domain and the CALLER never has to know which one it got.
+
+THE VOCABULARY IS REUSED, NOT INVENTED. `absent` / `local` / `store` come from
+`core.tiers`, where they already describe the archivist rung and are already tested. A
+second vocabulary for the same three states is how two subsystems come to disagree about
+what "local" means.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from techne.core.tiers import (
+    ARCHIVIST_ABSENT,
+    ARCHIVIST_LOCAL,
+    ARCHIVIST_STORE,
+    STATE_UNAVAILABLE,
+)
+
+log = logging.getLogger(__name__)
+
+#: The three states, re-exported under domain-neutral names so callers outside the
+#: archivist do not import an `ARCHIVIST_*` constant to describe the codex.
+BOUND_ABSENT = ARCHIVIST_ABSENT
+BOUND_LOCAL = ARCHIVIST_LOCAL
+BOUND_STORE = ARCHIVIST_STORE
+#: FOUR states, not three-plus-a-bool. `reachable: bool` collapsed three different
+#: facts — "absent by design", "bound and readable", "bound and unreadable" — and the
+#: CLI then reported `3 domain(s) not reachable` on a HEALTHY fresh install, because
+#: `absent` is unreachable by definition and librarian/architect dbs are created lazily
+#: on first write. An operator would have chased four non-problems.
+#:
+#: The module claimed to reuse the ladder's vocabulary, borrowed three constants, then
+#: RE-INVENTED the fourth case the ladder already names — `tiers.STATE_UNAVAILABLE`,
+#: which exists there for precisely this and whose comment says flattening these states
+#: "is precisely the S5 failure". Borrowed now, so the claim is true rather than
+#: three-quarters true. (Prudence, #717.)
+BOUND_UNAVAILABLE = STATE_UNAVAILABLE
+
+#: THE SECOND AXIS, SPLIT BACK OUT (Prudence, #717 r3). Fusing the two into one field
+#: was right for the CLI and wrong for `--json`: `unavailable` OVERWROTE the binding, so
+#: a consumer could not learn that an unreachable domain was store-bound. Splitting is
+#: not additive LATER — `binding` would stop taking the value `unavailable`, and a
+#: consumer keyed on it would silently start reading `"store"` where it used to read
+#: `"unavailable"`. This module's own docstring argues the response shape is the thing
+#: open-sourcing freezes; no consumer exists yet, so today it costs one key.
+#:
+#: `unavailable` is BORROWED from the ladder. `readable` is MINTED, deliberately: the
+#: ladder's positive states are RETRIEVAL outcomes (`hit` = rows came back, `empty` =
+#: none did), and this axis is about REACHABILITY — a readable store with nothing in it
+#: is `readable` here and `empty` there. Borrowing `hit` would import a meaning that
+#: does not apply, which is the drift the borrow rule exists to prevent, not an
+#: instance of following it.
+STATE_READABLE = "readable"
+
+
+@dataclass(frozen=True, slots=True)
+class BindingReport:
+    """What one domain is bound to, in the caller's terms."""
+
+    domain: str
+    #: absent | local | store — WHAT IT IS BOUND TO, and never the fault state. `absent`
+    #: is HEALTHY and expected for codex (unindexed repo) and for `archivist: none`.
+    #: None only when a resolver died before it could determine even this.
+    binding: str | None
+    #: readable | unavailable — WHAT HAPPENED WHEN WE LOOKED. Orthogonal to `binding`:
+    #: a store-bound domain whose file is missing is `store` + `unavailable`, and both
+    #: halves survive into `--json`.
+    state: str
+    #: Where it resolves, when that is meaningful. None when absent or unresolvable.
+    target: Path | None
+    #: One operator-facing line. For `unavailable` it carries the REASON VERBATIM —
+    #: see `all_bindings`, where discarding it hid the techne#346 guard's message.
+    detail: str
+
+    @property
+    def ok(self) -> bool:
+        """True unless this domain is configured and unreadable.
+
+        `absent` counts as ok: an unindexed repo has no codex and `archivist: none` is
+        a deliberate choice, and flagging either trains an operator to ignore the
+        report — the same reasoning the liveness rail applies to DORMANT.
+        """
+        return self.state != BOUND_UNAVAILABLE
+
+    @property
+    def label(self) -> str:
+        """The one word a HUMAN reads. The CLI fuses the axes deliberately — an
+        operator scanning four rows wants "is anything wrong", and `store` next to a
+        `!` would make them hunt for the fault state. Presentation fuses; data does
+        not."""
+        if not self.ok:
+            return self.state
+        # No fallback. Every row is built by `_ok` or `_fault`, `_ok` types `binding`
+        # as `str`, and a `_fault` row never reaches this line — so the `or "unknown"`
+        # that used to sit here was unreachable, and replacing it with a different
+        # fallback would just rename the dead branch. (Prudence, #717 r4.)
+        return self.binding
+
+    def as_dict(self) -> dict:
+        return {
+            "domain": self.domain,
+            "binding": self.binding,
+            "state": self.state,
+            "target": str(self.target) if self.target else None,
+            "ok": self.ok,
+            "detail": self.detail,
+        }
+
+
+def _ok(domain: str, binding: str, target: Path | None, detail: str) -> BindingReport:
+    """A domain we looked at and could read (or that is healthily absent)."""
+    return BindingReport(domain, binding, STATE_READABLE, target, detail)
+
+
+def _fault(domain: str, binding: str | None, target: Path | None, detail: str) -> BindingReport:
+    """A domain that is configured and unreadable.
+
+    TAKES THE BINDING TOO, deliberately: the fault does not erase what the operator
+    bound the domain to, and fusing the two is what cost `--json` that fact. `None` is
+    for the one case where we genuinely never found out — a resolver that died first.
+    """
+    return BindingReport(domain, binding, BOUND_UNAVAILABLE, target, detail)
+
+
+def _present(path: Path) -> bool:
+    """IS THERE A STORE HERE — `is_file`, not `exists`.
+
+    `config.py` coerces a missing `db_path` to `""`, and `_resolve_conn_db_path("")`
+    resolves to `techne_home()` — a DIRECTORY that always exists. So `.exists()`
+    reported `store | ok` for a connection with no db_path at all, while federation
+    handed the same spec died with `disk I/O error` and skipped past it: the exact
+    divergence-between-surfaces this PR set out to remove, one branch along.
+    (Prudence, #717 r3.)
+
+    Deliberately NOT deeper than this. Whether the file is a valid techne db is a
+    different question, and answering it here would be a design expansion rather than
+    a fix — she flagged that boundary explicitly.
+    """
+    return path.is_file()
+
+
+def _archivist(config) -> BindingReport:
+    """Delegates to the archivist's own resolver — it is the one domain whose binding
+    is a config DECISION rather than a path lookup, and techne#552 spent a PR making
+    that single-sourced. Re-deriving it here would be the seventh private opinion."""
+    from techne.core.archivist import (
+        ARCHIVIST_CONNECTION_NAME,
+        _resolve_archivist_path,
+        archivist_binding,
+    )
+
+    binding = archivist_binding(config)
+    if binding == BOUND_ABSENT:
+        return _ok("archivist", binding, None, "no archivist (archivist: none)")
+    if binding == BOUND_LOCAL:
+        return _ok(
+            "archivist",
+            binding,
+            Path(config.db_path),
+            "resolves to this instance's own knowledge — no second store",
+        )
+    # TWO TOPOLOGIES ANSWER `store`, AND THEY RESOLVE DIFFERENTLY (Prudence, #717).
+    # `archivist_binding` returns STORE for `archivist_db_path` OR a `connections`
+    # entry, but `_resolve_archivist_path` only knows the former — so a
+    # connection-bound archivist fell through to the DEFAULT `<data_dir>/archivist.db`,
+    # which a team install has no reason to have, and this command reported
+    # `unavailable` for a store that was present and working. Recall never saw it:
+    # `mcp_server.py` does `conns.setdefault(ARCHIVIST_CONNECTION_NAME, ...)`, so the
+    # operator's own entry wins there and only this surface diverged. Delegating the
+    # binding while re-deriving the path is the same defect #552 removed six times.
+    conn = (config.connections or {}).get(ARCHIVIST_CONNECTION_NAME)
+    if conn is not None:
+        # THROUGH FEDERATION'S OWN RESOLVER, not `Path(...)`. techne#332 resolves a
+        # relative db_path against `techne_home()`; checking `exists()` on the raw
+        # string would invent a fresh false `unavailable` for exactly the portable
+        # committed-config case that rule exists to support.
+        from techne.core.federation import _resolve_conn_db_path
+
+        label = getattr(conn, "label", "") or ARCHIVIST_CONNECTION_NAME
+        raw = getattr(conn, "db_path", "") or ""
+        if not raw.strip():
+            # An empty db_path resolves to `techne_home()`, which always exists — see
+            # `_present`. Named separately from "not present" because the operator's
+            # mistake is different: the key is missing, not the file.
+            return _fault("archivist", binding, None, f"connection '{label}' has no db_path set")
+        # THE RAW VALUE, NOT A STRIPPED ONE (Prudence, #717 r4). Federation resolves
+        # whatever the config literally says, so stripping here would make the two
+        # surfaces disagree about a padded `"  /tmp/team.db  "`: this one would report a
+        # healthy store at /tmp/team.db while federation resolved a nonsense path under
+        # `techne_home()` and skipped it. Contrived to reach, and exactly the species of
+        # divergence this PR removed twice. The `.strip()` above is a config-SHAPE check
+        # — "is the key blank" — not a path transformation.
+        target = _resolve_conn_db_path(raw)
+        if not _present(target):
+            return _fault(
+                "archivist",
+                binding,
+                target,
+                f"connection '{label}' names a store that is not present at {target}",
+            )
+        return _ok("archivist", binding, target, f"team store via connection '{label}' at {target}")
+
+    # `_resolve_archivist_path` RAISES on the techne#346 misconfiguration
+    # (archivist_db_path pointing at the personal db). Left to propagate to
+    # `all_bindings`, which turns it into an `unavailable` row CARRYING THE MESSAGE —
+    # this is the one tool an operator would run to diagnose exactly that.
+    path = _resolve_archivist_path(config)
+    if not _present(path):
+        return _fault("archivist", binding, path, f"team store named but not present at {path}")
+    return _ok("archivist", binding, path, f"separate team store at {path}")
+
+
+def _registry_domain(domain: str, label: str) -> Callable[[object], BindingReport]:
+    """A domain whose binding is the `stores` registry: architect and librarian.
+
+    `store` when an operator named a dsn, `local` at the default
+    `<data_dir>/<domain>.db`. Routed through `store_path`, never path-derived —
+    techne#409 makes that a standing rule after path-derivation broke domain routing.
+    """
+
+    def resolve(config) -> BindingReport:
+        from techne.core.stores import store_path
+
+        spec = config.stores.get(domain)
+        path = store_path(config, domain)
+        named = bool(spec and spec.dsn)
+        if named and not _present(path):
+            # An operator NAMED a store and it is not there. That is the fault case —
+            # and it keeps BOUND_STORE, because the fault does not erase what they
+            # bound it to.
+            return _fault(domain, BOUND_STORE, path, f"{label} store named but missing: {path}")
+        if named:
+            return _ok(domain, BOUND_STORE, path, f"{label} at an operator-named store ({path})")
+        # A DEFAULT db that does not exist yet is NOT a fault: librarian and architect
+        # create theirs lazily on first write, so a fresh install has neither file and
+        # nothing is wrong. Reporting that as unreachable is what made the CLI say
+        # "3 domain(s) not reachable" on a healthy box. (Prudence, #717.)
+        lazily = "" if _present(path) else " (created on first write)"
+        return _ok(domain, BOUND_LOCAL, path, f"{label} at the default {path.name}{lazily}")
+
+    return resolve
+
+
+def _codex(config) -> BindingReport:
+    """Codex is db-per-repo (techne#209), so its binding is a property of WHERE YOU ARE.
+
+    `absent` is the common, healthy state here in a way it is not for the other three:
+    an unindexed repo has no codex, which is a fact about that repo rather than a fault.
+    Reported rather than resolved to a default, because a codex bound to some other
+    repo's index would answer confidently about the wrong code.
+    """
+    import os
+
+    from techne.core.codex import resolve_repo_db_for_query
+
+    try:
+        path = resolve_repo_db_for_query(config, os.getcwd())
+    except Exception as exc:  # noqa: BLE001 — a fault is a report, not a crash
+        # UNAVAILABLE, NOT ABSENT (Prudence, #717). `resolve_repo_db_for_query`
+        # RETURNS None for both healthy absences — no repo, and a repo with no index —
+        # so nothing reaching this `except` is healthy: it is a failing legacy
+        # migration or an unreadable db. Reporting `absent` + ok=True told the operator
+        # "no index for the active repo", sending them to `techne codex index` for a
+        # fault that command does not fix. Same principle as this module's sibling
+        # test asserts for `all_bindings`.
+        log.debug("codex: could not resolve a repo db for the cwd", exc_info=True)
+        return _fault("codex", None, None, f"{type(exc).__name__}: {exc}")
+
+    if path is None:
+        return _ok(
+            "codex",
+            BOUND_ABSENT,
+            None,
+            "no index for the active repo — `techne codex index <repo>`",
+        )
+    # ALWAYS `local` — there is no store binding for a per-repo index, and reporting one
+    # was a fabricated distinction. `config.stores["codex"].dsn` feeds only
+    # `store_path(config, "codex")`, the LEGACY GLOBAL db that `migrate_legacy_codex_db`
+    # moves away from; the live read path — `resolve_repo_db_for_query` -> `repo_db_path`
+    # — derives from `data_dir` plus a sha of the repo root and NEVER consults
+    # `config.stores`. So the old code reported `store` while pointing at a path the
+    # operator's dsn had no bearing on. (Prudence, #717.)
+    #
+    # `resolve_repo_db_for_query` returns a path only if it EXISTS, so there is no
+    # unavailable case here: either an index is there, or the branch above says absent.
+    return _ok("codex", BOUND_LOCAL, Path(path), f"index at {path}")
+
+
+#: The four knowledge domains, and how each answers the one question. Order matches the
+#: recall ladder's, so the two surfaces read the same way round.
+DOMAINS: tuple[tuple[str, Callable], ...] = (
+    ("archivist", _archivist),
+    ("librarian", _registry_domain("librarian", "documents")),
+    ("architect", _registry_domain("architect", "patterns")),
+    ("codex", _codex),
+)
+
+
+def domain_binding(config, domain: str) -> BindingReport:
+    """What ONE domain is bound to. Raises KeyError for an unknown domain."""
+    for name, resolver in DOMAINS:
+        if name == domain:
+            return resolver(config)
+    known = ", ".join(n for n, _ in DOMAINS)
+    raise KeyError(f"unknown domain: {domain!r} (known: {known})")
+
+
+def all_bindings(config) -> list[BindingReport]:
+    """Every domain, same shape, in ladder order — the "same feel" surface.
+
+    NEVER RAISES for one bad domain. A resolver that throws would otherwise take the
+    whole report down, and the report's value is that it is complete: an operator
+    comparing four domains needs four rows, one of which may say it could not be read.
+    """
+    out: list[BindingReport] = []
+    for name, resolver in DOMAINS:
+        try:
+            out.append(resolver(config))
+        except Exception as e:  # noqa: BLE001
+            # UNAVAILABLE, NOT ABSENT — a resolver that failed and a domain that is
+            # deliberately unconfigured are different facts, and reporting both as
+            # `absent` left a --json consumer unable to tell them apart at all.
+            #
+            # AND THE MESSAGE VERBATIM. Discarding `str(e)` for the exception TYPE meant
+            # the techne#346 guard's deliberately loud refusal — "archivist_db_path must
+            # not be the personal techne db" — arrived as "could not resolve: ValueError"
+            # in the one tool an operator would run to diagnose that misconfiguration.
+            # (Prudence, #717.)
+            # DEBUG, NOT WARNING-WITH-TRACEBACK. `techne bindings` is a diagnostic
+            # whose product IS the four rows; at warning level a config error printed a
+            # full stack trace to stderr directly above a row already carrying the same
+            # message verbatim, burying the readable answer under the raw one. The
+            # traceback still exists for a genuine resolver bug, one level down.
+            log.debug("bindings: %s resolver failed", name, exc_info=True)
+            out.append(_fault(name, None, None, f"{type(e).__name__}: {e}"))
+    return out
