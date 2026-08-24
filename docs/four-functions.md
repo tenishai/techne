@@ -46,6 +46,10 @@ techne bindings
 Four rows, always. This is the map: **what each name currently resolves to**. Come
 back to it whenever an answer surprises you.
 
+**Yours will differ, and that is expected** — the block above is a populated install. A
+fresh one shows the codex `absent` and the lazily-created dbs flagged; see
+[the welcome guide](welcome.md) for that output.
+
 ---
 
 ## 1. The archivist — what does the team know?
@@ -172,7 +176,24 @@ Then `codex_blast_radius("techne/core/search.py::search_vec::function::552")` an
 *"what breaks if I change this"*.
 
 CLI: `techne codex index <repo>` first — **the index is built by hand and can be
-stale.** The codex is the one domain that will confidently tell you about code you
+stale.**
+
+**And it resolves from your working directory, which is a silent argument.** `codex_search`
+takes the repo from `repo` *or your cwd*, walking up to the nearest repo root. So the identical
+call answers differently depending on where you are standing — and the dangerous case is not
+the miss, it is the **confident hit against the wrong repo**. Measured, two indexed repos both
+defining `shared_symbol_name`, one call:
+
+```
+cwd = tinyrepo  (indexed) : {"binding":"local","count":1,"target":".../tinyrepo-750d265f.db"}
+cwd = otherrepo (indexed) : {"binding":"local","count":1,"target":".../otherrepo-7e3d1fa9.db"}
+cwd = no repo             : {"binding":"absent","count":0,"target":null}
+```
+
+Rows 1 and 2 are the same `binding`, the same `count`, and a same-shaped `id`. **Only `target`
+differs.** `core/bindings.py` says it plainly: *a codex bound to some other repo's index would
+answer confidently about the wrong code.* The `absent` in row 3 is the honest failure; row 2 is
+the one that will mislead you. **Pass `repo` explicitly when it matters, and read `target`.** The codex is the one domain that will confidently tell you about code you
 deleted last week if you have not re-indexed. See [codex usage](codex-usage.md) for
 when to reach for it and when not to.
 
@@ -186,12 +207,18 @@ time:
 | field | what it tells you |
 |---|---|
 | `domain` | which of the four answered |
-| `binding` | `absent` · `local` · `store` — *what kind of thing* it resolved to. (Rarely `null`, when the resolver itself threw; `state` and `notice` still tell you what happened.) |
+| `binding` | `absent` · `local` · `store` — *what kind of thing* it resolved to |
 | `state` | `readable` · `unavailable` — whether it could actually be read |
 | `target` | the concrete path, so you can go look |
 
 Four shapes for four domains would put the burden of knowing which one you got back
 onto you. That is exactly the seam this vocabulary removes.
+
+> **A resolver that throws does not degrade — it raises.** `techne bindings` catches per
+> domain and can print `binding: null` for the codex, because that is the one resolver with
+> an internal `try`. The four *search* calls have no such catch: a misconfiguration (say
+> `archivist_db_path` pointing at your personal db) raises out of `archivist_search` rather
+> than returning an envelope. Do not write a `notice` handler and skip the try/except.
 
 ### An unreadable domain answers with a reason, not an empty list
 
@@ -236,10 +263,16 @@ The source says so in its own words (`core/bindings.py`): *`absent` is the commo
 healthy state here in a way it is not for the other three — an unindexed repo has no
 codex, which is a fact about that repo rather than a fault.*
 
-So the same value carries two readings, and they call for different actions. For the
-archivist, librarian and architect, `absent` means **you turned it off** and the answer
-is a shrug. For the codex it usually means **you have not indexed yet** — and the
-detail line hands you the command. Read the detail, not just the field.
+**Which domains can say `absent` is decided by the domain**, so you resolve it from the
+name alone rather than by checking your config:
+
+- **codex** — *not indexed yet.* The detail line hands you the command.
+- **archivist** — *you configured `archivist: none`.*
+- **librarian and architect** — **no `absent`.** They always resolve somewhere; the only
+  question they can raise is whether that somewhere is readable, which is `state`.
+
+Two readings of one field, and the domain name tells you which applies. Read the detail,
+not just the field.
 
 ---
 
@@ -260,16 +293,16 @@ Now bind it to a team store — `archivist_db_path` in `~/.techne/config.yaml`, 
 
 ```json
 { "domain": "archivist", "binding": "store",
-  "target": "/var/folders/.../archivist.db", "count": 1 }
-```
-
-```
-first result: the team decided surveyed_at carries two facts
+  "target": "/var/folders/.../archivist.db", "count": 1,
+  "results": [ { "content": "the team decided surveyed_at carries two facts", ... } ] }
 ```
 
 Nothing about the call changed. Not the name, not the arguments, not the shape of the
 answer. What changed is `binding` and `target` — and the answer *told you*, so you
 never have to guess which store you are reading.
+
+(One honest caveat, here rather than buried: for the **codex** the call is not quite
+invariant — your working directory is a silent argument to it. §4 has the measurement.)
 
 That is the escalation story, and it is the reason to learn the names rather than the
 file paths: **`librarian.db` is where documents happen to live today. The librarian is
@@ -294,27 +327,12 @@ persona currently means **external** documentation, with your own files assigned
 move between them. That is cabal's prompt to widen rather than techne's meaning to
 narrow, but until it does, the mapping is not one-to-one. Tracked in techne#724.
 
-**The codex is experimental and manually indexed.** It does not watch your
-filesystem. `techne codex index` is a thing you run, and between runs the graph is a
-snapshot with a date on it.
-
-**And the codex has a silent argument: your working directory.** This one cuts against
-the claim above, so it belongs here rather than buried. `codex_search` resolves the repo
-from `repo` *or your cwd*, so the identical call answers differently depending on where
-you are standing. Measured — one repo, indexed, same config, same query:
-
-```
-cwd = the indexed repo : {"binding": "local",  "target": ".../tinyrepo-5d29667b.db", "count": 1}
-cwd = anywhere else    : {"binding": "absent", "target": null,                       "count": 0}
-```
-
-A hit and a miss. The envelope reports it honestly — `target` names the db, or `null` —
-which is the seam working as designed. But if you have just been taught that the call is
-invariant, you will read that `absent` as *"the index is gone"* rather than *"I am in the
-wrong directory."* This is a different axis from staleness above: **identity**, not
-freshness, and it is the more surprising of the two. Pass `repo` explicitly when it
-matters.
-
+**The codex is experimental and manually indexed by default.** `techne codex index` is a
+thing you run, and between runs the graph is a snapshot with a date on it. Two switches opt
+out of that — `techne codex watch` re-indexes on file changes, and
+`hooks.codex_reindex_on_edit` re-indexes a touched file after every Write/Edit — both off
+by default. **The codex also resolves from your working directory**, which can answer
+confidently about the wrong repo; see §4.
 **`techne_recall` is still the default for "what do we know about X".** It escalates
 across all four rungs for you. The four domain calls are for when you already know
 which function you want — reaching for them by reflex means doing the routing by hand

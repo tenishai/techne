@@ -21,9 +21,11 @@ techne has four knowledge domains, and you address each one **by name**:
 | **archivist** | *What does the team know?* | `archivist_search` · `techne archivist query` |
 | **librarian** | *What is written down?* | `librarian_search` · `techne librarian search` |
 | **architect** | *What is worth stealing?* | `architect_search` · `techne architect search` |
-| **codex** | *What does the code look like?* | `codex_search` · `techne codex index` |
+| **codex** | *What does the code look like?* | `codex_search` · `techne codex search` |
 
-Every answer says **what it resolved to** — a `binding` (`absent` / `local` / `store`)
+The codex needs `techne codex index <repo>` run once before it can answer.
+
+Every answer says **what it resolved to** — a `binding` (`absent` / `local` / `store` — not every domain can reach every value)
 and the concrete `target` path — so the call stays the same while the infrastructure
 underneath it changes. `techne bindings` reports all four at once.
 

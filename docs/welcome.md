@@ -100,10 +100,12 @@ knowledge is what *"what does the team know"* means when the team is you. The sa
 team store appears — the answer's `binding` and `target` change, and it *tells you*
 they did, so you never have to guess which store you just read.
 
-`absent` means *"there is deliberately nothing here"* — and for the codex on day one
-that is not a fault, it is a fact about the repo you are standing in. You have not
-indexed anything yet, and the row tells you the command that changes it. The other
-three would only say `absent` if you had switched them off.
+`absent` means *"there is deliberately nothing here"*, and **which domains can say it
+is decided by the domain, not by you**. On the codex it means *you have not indexed this
+repo yet* — a fact about where you are standing rather than a fault, and the row hands you
+the command. On the archivist it means *you configured `archivist: none`*. **The librarian
+and architect have no `absent` at all** — they always resolve somewhere, so the only
+question they can raise is whether that somewhere is readable.
 
 That is the whole reason to learn four names instead of four file paths: `librarian.db`
 is where documents happen to live today; **the librarian is the function you are
