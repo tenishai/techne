@@ -112,6 +112,7 @@ rather than riding along here.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
@@ -253,7 +254,9 @@ def _select_backend(config: "Config | None") -> tuple[str, str]:
 
     if backend_override in ("model2vec", "fastembed"):
         default_for_override = (
-            _DEFAULT_MODEL2VEC_MODEL if backend_override == "model2vec" else _DEFAULT_FASTEMBED_MODEL
+            _DEFAULT_MODEL2VEC_MODEL
+            if backend_override == "model2vec"
+            else _DEFAULT_FASTEMBED_MODEL
         )
         return backend_override, model_override or default_for_override
 
@@ -342,6 +345,114 @@ def _build_backend(
         return EmbeddingBackend("model2vec", model_name, impl, dim)
 
     raise ValueError(f"unknown embedding backend {backend!r}")  # unreachable via _select_backend
+
+
+def _flatten(name: str) -> str:
+    """Lower-case *name* with every separator that differs between a model id and its
+    on-disk directory removed. BOTH SIDES OF A COMPARISON MUST USE THIS — they used to
+    strip different characters (`/` and `-` vs `-` and `_`), so a model name carrying
+    `_` missed on the asymmetry alone (Prudence, #728 r2 nit)."""
+    return name.replace("/", "").replace("-", "").replace("_", "").lower()
+
+
+def _hf_hub_cache() -> Path:
+    """The huggingface_hub cache directory, honouring its FULL resolution chain.
+
+    `huggingface_hub/constants.py` resolves HF_HUB_CACHE -> HUGGINGFACE_HUB_CACHE ->
+    $HF_HOME/hub -> $XDG_CACHE_HOME/huggingface/hub -> ~/.cache/huggingface/hub. We
+    honoured the first and third only, so with weights genuinely on disk under either
+    of the other two, `model_cached()` reported False — measured (Prudence, #728 r2):
+
+        XDG_CACHE_HOME                        -> False
+        HUGGINGFACE_HUB_CACHE (legacy alias)  -> False
+        HF_HUB_CACHE (the one we honoured)    -> True
+    """
+    for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        if os.environ.get(var):
+            return Path(os.environ[var])
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]) / "hub"
+    if os.environ.get("XDG_CACHE_HOME"):
+        return Path(os.environ["XDG_CACHE_HOME"]) / "huggingface" / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def model_cached(config: "Config | None" = None) -> bool | None:
+    """Are the embedding WEIGHTS already on disk — WITHOUT building the backend?
+
+    THIS IS A FILESYSTEM CHECK, DELIBERATELY, AND THE DISTINCTION IS THE WHOLE POINT.
+    `techne#361` pins that `collect_health` must not build the backend on an install
+    with no vec tables (`test_collect_health_skips_backend_build_when_no_vectors` spies
+    on `_get_embedding_model` and asserts it is never called) — the load plus dim probe
+    is 85-290 MB of work on the SessionStart path. A previous attempt to answer this
+    question in that branch called the resolver and broke exactly that invariant.
+
+    So it answers by LOOKING, not by loading: the HF hub cache layout for model2vec,
+    fastembed's own cache dir. No import of the backend, no construction, no network.
+
+    Returns True / False, or **None when it cannot tell** — an unknown backend, or a
+    cache convention this does not know. None is not False: reporting "not cached" for
+    a state we did not measure is the guess-dressed-as-a-fact this codebase keeps
+    finding, and the caller must be able to stay quiet instead.
+    """
+    try:
+        backend, model_name = _select_backend(config)
+    except Exception:  # noqa: BLE001 — no backend installed is not "not cached"
+        return None
+
+    if backend == "fastembed":
+        cache = Path.home() / ".cache" / "fastembed"
+        if not cache.is_dir():
+            return False
+        # FASTEMBED NAMES THE DIRECTORY AFTER THE SOURCE REPO, NOT THE LOGICAL MODEL,
+        # and matching the logical name reported a fully-cached model as NOT cached
+        # (Prudence, #728 r2). Measured on the author's own cache:
+        #     logical:  sentence-transformers/all-MiniLM-L6-v2
+        #     on disk:  models--qdrant--all-MiniLM-L6-v2-onnx
+        # `sentencetransformersallminilml6v2` cannot match `modelsqdrantallminilml6v2onnx`
+        # and could not for the rest of the Qdrant-hosted catalogue either. The LAST path
+        # segment is what the two spellings share: `allminilml6v2` IS a substring of the
+        # directory, while an uncached `BAAI/bge-small-en-v1.5` still finds nothing.
+        #
+        # BOTH SIDES NORMALISE IDENTICALLY via `_flatten`. They did not: the needle
+        # stripped `/` and `-` while the directory stripped `-` and `_`, so a model name
+        # carrying `_` missed on that asymmetry alone.
+        needle = _flatten(model_name.rsplit("/", 1)[-1])
+        for entry in cache.iterdir():
+            if not entry.is_dir() or needle not in _flatten(entry.name):
+                continue
+            # KEEP LOOKING AFTER A NAME MATCH THAT HAS NO WEIGHTS (Prudence, #728 r3
+            # nit 1). This used to `return any(...)` on the FIRST directory whose name
+            # matched, so an interrupted `models--baai--bge-small-en` sorting ahead of
+            # a complete `models--qdrant--bge-small-en-onnx` answered False with the
+            # weights on disk — the r2 false negative again, in a narrower form and
+            # DEPENDENT ON READDIR ORDER, which is worse than simply wrong because it
+            # will not reproduce. Measured with the order forced:
+            #     ['models--baai--bge-small-en', 'models--qdrant--bge-small-en-onnx']
+            #     weights in the second; probe -> False
+            # AN EMPTY REPO DIR IS AN INTERRUPTED FETCH, NOT A CACHE HIT. The model2vec
+            # branch below already knew this; fastembed had no equivalent, and
+            # `snapshot_download` creates `<repo>/refs/` BEFORE any weight lands, so a
+            # Ctrl-C'd fetch read as cached — the very state that hangs the turn.
+            # The artifact fastembed loads is an ONNX graph; looking for it directly is
+            # layout-agnostic (flat or `snapshots/<rev>/`) and is the honest expression
+            # of "the weights are here", which `refs/` alone is not.
+            if any(entry.rglob("*.onnx")):
+                return True
+        return False
+
+    if backend == "model2vec":
+        # Standard HF hub layout: <hub>/models--<org>--<name>/snapshots/<rev>/...
+        hub = _hf_hub_cache()
+        repo = hub / f"models--{model_name.replace('/', '--')}"
+        snapshots = repo / "snapshots"
+        if not snapshots.is_dir():
+            return False
+        # A snapshot dir that exists but holds nothing is an interrupted fetch, which
+        # is NOT cached — the state that produced techne#708's hang in the first place.
+        return any(any(rev.iterdir()) for rev in snapshots.iterdir() if rev.is_dir())
+
+    return None
 
 
 def _get_embedding_model(

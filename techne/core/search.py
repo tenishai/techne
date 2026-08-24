@@ -2,6 +2,7 @@
 
 import math
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -85,9 +86,15 @@ def _mmr_reorder(
         return candidates[:limit]
 
     try:
-        model = _get_embedding_model()
+        # allow_download=False for the same reason as search_vec (techne#708).
+        # This call site is UNREACHABLE today — the mmr_lambda == 0.0
+        # short-circuit above returns before it and no live caller raises
+        # lambda (the config knob was removed; see docs/arch/search-embeddings.md
+        # "MMR — CODE EXISTS, NO CONFIG SURFACE"). Guarded anyway so it cannot
+        # become a cold-cache hang the day someone re-plumbs the knob.
+        model = _get_embedding_model(allow_download=False)
     except Exception:
-        # No embedding backend installed/available — no-op.
+        # No embedding backend installed, or the model is not cached — no-op.
         return candidates[:limit]
 
     # Embed all candidates that don't already have a cached embedding.
@@ -602,6 +609,54 @@ def search_knowledge_conn(
 _VEC_SUPERSEDE_OVERFETCH = 3
 
 
+# The broad `except` below is correct — a hook must not raise — but before techne#708
+# those exceptions PROPAGATED to user_prompt_submit's handler, which printed to stderr
+# and made `_record` write outcome="failed". Returning [] silently would delete that
+# signal and make a rail whose every search fails report LIVE, which is the exact shape
+# _record's docstring exists to prevent. So keep the broad catch and narrow the SILENCE.
+#
+# TWO SIGNALS, BECAUSE ON THE PATH THAT MATTERS THE STDERR ONE REACHES NOBODY.
+# `user_prompt_submit` is a `UserPromptSubmit` hook and it exits 0. Claude Code's hook
+# documentation is explicit: "Stderr from a hook that exits 0 goes to the debug log
+# only, never the transcript, and Claude never sees it." Only exit 2 surfaces stderr,
+# and this hook must never exit 2 — that BLOCKS the prompt and erases it. So on the
+# hook path the warning below is invisible to the operator AND to Claude, and the
+# marker is the only signal that can exist. It is not the nice-to-have half.
+# (Prudence, #728 r3 nit 5 asked whether that stderr surfaces at all; it does not.)
+#
+# ONCE PER PROCESS, WHICH IS NOT ONCE PER TURN ON THE HOOK PATH EITHER. The hook runs
+# as a FRESH SUBPROCESS per prompt, so this flag starts False every turn and the line
+# would print every turn if anyone could see it. The dedupe earns its keep only in a
+# long-lived process — a CLI backfill loop, the MCP server.
+_EMBED_UNAVAILABLE_WARNED = False
+
+#: The last vector-channel failure, for the liveness marker. CONSUME-ONCE via
+#: `take_vec_channel_error()` (techne#728 r3 Important 1).
+#:
+#: WHY A MODULE GLOBAL RATHER THAN A RETURN VALUE. Threading a per-channel status out
+#: of `search()` is the right long-term shape and it is a signature change across every
+#: caller — that is techne#739 and it stays there. This is the same mechanism sitting
+#: four lines above, used for the same reason, and it closes the marker half here
+#: rather than one release later.
+#:
+#: CONSUME-ONCE IS LOAD-BEARING, not tidiness. In a long-lived process a failure left
+#: standing would mark a LATER, healthy turn as degraded — a stale-derived-fact defect,
+#: which is precisely the class this whole change is about. Reading it clears it.
+_VEC_CHANNEL_ERROR: str | None = None
+
+
+def take_vec_channel_error() -> str | None:
+    """Return the last vector-channel failure and CLEAR it. None when there was none.
+
+    The vector channel degrades to FTS rather than raising (techne#708), so a caller
+    that wants to record the degradation has nothing to catch. This is how it finds
+    out. See `_VEC_CHANNEL_ERROR` for why it clears.
+    """
+    global _VEC_CHANNEL_ERROR
+    err, _VEC_CHANNEL_ERROR = _VEC_CHANNEL_ERROR, None
+    return err
+
+
 def search_vec(
     db_path: Path,
     query: str,
@@ -630,7 +685,49 @@ def search_vec(
 
     import numpy as np
 
-    model = _get_embedding_model()
+    # allow_download=False IS LOAD-BEARING, not defensive (techne#708). This
+    # function is reachable from hooks/user_prompt_submit.py -> search()
+    # (use_vectors=True by default) -> here, i.e. from EVERY prompt submission.
+    # On a cold HF cache the default would block on a Hub fetch, and a blocking
+    # HTTP download is signal-deaf: bounded_hook's SIGALRM cannot preempt it, so
+    # the turn hangs rather than degrading. backend_available() above does NOT
+    # cover this — it is an IMPORT probe, so it passes with the package present
+    # and the model absent, which is exactly the fresh-install state.
+    try:
+        model = _get_embedding_model(allow_download=False)
+    except Exception as exc:
+        # Degrade to FTS-only, the same contract as every other exit here. The
+        # singleton is deliberately left unset on a failed allow_download=False
+        # attempt, so `techne vectors backfill` (which may download) can still
+        # warm the cache in the same process.
+        #
+        # LESS SILENT — AND ONLY HALF THE SIGNAL, WHICH THE PREVIOUS WORDING GOT
+        # WRONG (Prudence, #728 r2). This catch is broad on purpose (a hook must not
+        # raise) and therefore also swallows genuine construction failures: a typo'd
+        # `search.embedding_model` reaches _build_backend unvalidated, as do a corrupt
+        # cache and an incompatible weights file. Pre-#708 those propagated and
+        # `_record` wrote outcome="failed".
+        #
+        # BOTH HALVES, NOW. An earlier round of this PR restored only the stderr half
+        # and the rail still recorded outcome="ok" over a dead backend — MEASURED
+        # end-to-end through user_prompt_submit.main():
+        #     {"last_run": {"outcome": "ok", "detail": "1 rows"}, "last_error": null}
+        # `_record`'s docstring, eight lines above where that happens, names exactly
+        # that shape as the bug the module exists to surface. The guard was intact; the
+        # failure walked around it, because post-#708 `search_vec` no longer raises.
+        # `_VEC_CHANNEL_ERROR` is what user_prompt_submit reads to fill `degraded`.
+        # (Prudence, #728 r3 Important 1.)
+        global _EMBED_UNAVAILABLE_WARNED, _VEC_CHANNEL_ERROR
+
+        _VEC_CHANNEL_ERROR = f"vector recall unavailable: {exc}"
+        if not _EMBED_UNAVAILABLE_WARNED:
+            _EMBED_UNAVAILABLE_WARNED = True
+            print(
+                "techne: vector recall unavailable — embedding model not cached "
+                f"or not buildable ({exc}); run `techne vectors backfill`",
+                file=sys.stderr,
+            )
+        return []
     q_emb = np.stack(list(model.embed([query])))[0]
     q_bytes = q_emb.astype("float32").tobytes()
 
