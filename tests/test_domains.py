@@ -471,3 +471,75 @@ def test_archivist_search_hides_the_same_rows_recall_hides(config):
         "archivist_search returned a soft-archived row that recall hides — the two "
         "surfaces disagree about what the archivist holds"
     )
+
+
+# ---- techne#744: the four names are addressable on the CLI too --------------------
+
+
+class TestTheFourDomainsAreAddressableByName:
+    """Board #726's DONE MEANS, pinned as an invariant rather than left as prose:
+
+        An operator can address the archivist, librarian, architect and codex BY NAME.
+
+    It was false when the documentation phase went looking. The MCP surface had all
+    four (`archivist_search` / `librarian_search` / `architect_search` / `codex_search`)
+    and `techne bindings` reported all four, but the CLI spelled the librarian
+    `techne library` — the STORAGE word, naming the document store, which is the
+    layout framing this release demotes the four names out of. So the one place the
+    vocabulary broke was the domain #724 already records as diverging from cabal.
+    """
+
+    @staticmethod
+    def _invoke(args):
+        from click.testing import CliRunner
+
+        from techne.cli import main
+
+        return CliRunner().invoke(main, args)
+
+    @pytest.mark.parametrize("domain", ["archivist", "librarian", "architect", "codex"])
+    def test_each_domain_answers_to_its_own_name(self, domain):
+        """A missing command exits 2 with 'No such command', so this discriminates
+        between the command existing and the CLI merely not crashing."""
+        result = self._invoke([domain, "--help"])
+
+        assert result.exit_code == 0, (
+            f"`techne {domain}` must exist — it is one of the four domain names "
+            f"the release exists to teach. Got: {result.output}"
+        )
+        assert "No such command" not in result.output
+
+    def test_the_legacy_library_spelling_still_works(self):
+        """An alias, not a rename. Every existing script, `docs/librarian-guide.md` and
+        `tests/test_cli_transcript_commands.py` say `library`, and breaking them to
+        teach a word is a bad trade."""
+        result = self._invoke(["library", "--help"])
+
+        assert result.exit_code == 0, result.output
+
+    def test_the_alias_reports_the_canonical_name(self):
+        """`techne library` must not print usage for a command that does not appear in
+        `--help`. click echoes back what the operator typed unless `resolve_command`
+        says otherwise, and a usage line naming an unlisted command is worse than
+        either spelling on its own."""
+        result = self._invoke(["library", "--help"])
+
+        usage = result.output.splitlines()[0]
+        # Asserting on the COMMAND half, not the program name: CliRunner's prog_name is
+        # "main", while the real entry point prints "techne". Pinning the prog name
+        # would pass here and say nothing about what an operator sees.
+        assert " librarian [OPTIONS]" in usage, usage
+        assert " library [OPTIONS]" not in usage, usage
+
+    def test_help_offers_one_spelling_per_domain(self):
+        """TWO SPELLINGS IN `--help` TEACHES THE AMBIGUITY, which is the thing #744 is
+        about — so the alias is resolved rather than registered a second time. If this
+        fails, someone reached for `main.add_command(..., name=...)`, which works and
+        puts both words in the listing."""
+        result = self._invoke(["--help"])
+        commands = result.output[result.output.index("Commands:") :]
+
+        assert "\n  librarian " in commands, commands
+        assert "\n  library " not in commands, (
+            "the legacy spelling must keep working but must not be advertised"
+        )
