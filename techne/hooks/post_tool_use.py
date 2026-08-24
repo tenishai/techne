@@ -131,6 +131,139 @@ _ENV_VALUE_LETTERS = frozenset({"u", "C", "P"})
 _ENV_VALUE_LONG_OPTS = frozenset({"--unset", "--chdir"})
 
 
+#: TRANSPARENT PREFIXES THAT ARE NOT `env` (techne#545). Each runs the command that
+#: follows it, so a test run behind one is still a test run — but `_skip_env_prefix`
+#: cannot absorb them, because its option grammar is `env`'s getopt rule specifically
+#: and these do not share it (`nice -n 10` takes a value on a letter `env` does not
+#: know; `timeout 60 pytest` carries a MANDATORY POSITIONAL before the command).
+#:
+#: MEASURED on main before the fix — every one of these contributed NO test evidence:
+#:   timeout 60 pytest -q | nice -n 10 pytest -q | nohup pytest -q | stdbuf -o0 pytest -q
+#: A green suite behind any of them left the gate unable to see the run, and an
+#: unrecognised row is DISCARDED WHOLE — so its failures never reach `all_failed` and
+#: a smaller intact run elsewhere in the window certifies green. That is the #438
+#: starvation shape, i.e. a false green, not a harmless miss.
+#:
+#: Per prefix: (short letters taking a value, long options taking a separate value,
+#: count of mandatory positionals before the command).
+_TRANSPARENT_PREFIXES: dict[str, tuple[frozenset[str], frozenset[str], int]] = {
+    "nohup": (frozenset(), frozenset(), 0),
+    "setsid": (frozenset(), frozenset(), 0),
+    "nice": (frozenset({"n"}), frozenset({"--adjustment"}), 0),
+    "stdbuf": (
+        frozenset({"i", "o", "e"}),
+        frozenset({"--input", "--output", "--error"}),
+        0,
+    ),
+    # `timeout DURATION COMMAND` — the duration is positional and unflagged, so without
+    # the count it reads as the command head and the runner is never found. THE ONLY ROW
+    # WITH positionals > 0 — though since the cluster rule was corrected that is no
+    # longer the only way to walk past a real head: a value letter LAST in a cluster
+    # consumes the next token, so any row with value letters does the same when an
+    # option is written without its value (`nice -n pytest`). Every such spelling is
+    # malformed and inert, which is why the conclusion survives. The walk-past case:
+    # `timeout git commit -m pytest` (no duration) lands on `commit`, so the
+    # _DASH_M_IS_A_MESSAGE guard no longer applies and the -m pair rule fires. Left as
+    # is because every such spelling is a malformed `timeout` that exits at "invalid
+    # time interval" and emits no count-shaped output — inert in the same sense this
+    # file already accepts for `go build --tags test` (Prudence, #737 nit 3).
+    "timeout": (frozenset({"s", "k"}), frozenset({"--signal", "--kill-after"}), 1),
+    # `-P/--pgid` and `-u/--uid` also take values (util-linux). CORRECTION to an
+    # earlier note here (Prudence withdrew her own nit): these do not only under-skip.
+    # `-p`/`-P`/`-u` select the act-on-an-existing-process form, where util-linux does
+    # NOT exec a trailing command — so `ionice -u 1000 pytest` now resolves to `pytest`
+    # and reports a test run that never happens. Inert in the same sense as the
+    # `timeout` row above: the wrapped command does not run, so no count-shaped output
+    # reaches the ledger in either direction. Pre-existing in shape — `-p` behaved
+    # identically before these two letters were added.
+    "ionice": (
+        frozenset({"c", "n", "p", "P", "u"}),
+        frozenset({"--class", "--classdata", "--pid", "--pgid", "--uid"}),
+        0,
+    ),
+}
+
+
+def _skip_transparent_prefixes(tokens: list[str], i: int = 0) -> int:
+    """Index of the real command head, past `env` and the `_TRANSPARENT_PREFIXES`.
+
+    Loops so the forms compose — `env FOO=1 nice -n 10 timeout 60 pytest -q` is one
+    real invocation and resolves to `pytest`. Delegates `env` to `_skip_env_prefix`
+    rather than reimplementing it: that grammar is subtle enough that a second copy
+    would drift, which is the reason it was factored out in the first place.
+
+    A prefix with NOTHING after it is left where it is: `nohup` alone is not a test run
+    and the caller should see the head it actually has. (Bare `env` returns an index
+    PAST the end while bare `nohup` returns its own index — different indices, identical
+    outcome at both call sites, since neither matches a runner.)
+
+    ONLY THE EVIDENCE GATE USES THIS; THE CAPTURE FILTER DELIBERATELY DOES NOT, and the
+    reason is not oversight. None of these prefixes is in `_READONLY_BASH_HEADS`, so
+    `_bash_is_readonly_noise` already finds an unrecognised head and returns False —
+    meaning CAPTURE, which is the direction its own docstring commits to ("when in
+    doubt we CAPTURE"). Measured: `timeout 60 pytest -q`, `nohup pytest -q`,
+    `nohup git push` and `timeout 60 git commit -m x` all reach the ledger today. So
+    the gate's fix is not moot — the rows it needs are there — and the only cost of the
+    asymmetry is that `timeout 60 ls` is captured as noise rather than dropped.
+    """
+    while True:
+        moved = _skip_env_prefix(tokens, i)
+        if moved != i:
+            i = moved
+            continue
+        if i >= len(tokens):
+            return i
+        spec = _TRANSPARENT_PREFIXES.get(tokens[i].rsplit("/", 1)[-1])
+        if spec is None:
+            return i
+        value_letters, value_long_opts, positionals = spec
+        j = i + 1
+        while j < len(tokens):
+            t = tokens[j]
+            if t.startswith("--"):
+                # `--output=L` carries its value attached; `--output L` does not.
+                j += 2 if (t in value_long_opts and "=" not in t) else 1
+            elif t[:1] == "-" and len(t) > 1:
+                # SAME RULE AS `env`, from the SAME helper. This was a second, weaker
+                # copy — `t[1] in value_letters and len(t) == 2` — and it drifted
+                # inside the very PR whose docstring argues against reimplementing a
+                # grammar because "a second copy would drift" (Prudence, #737).
+                j += _getopt_cluster_advance(t, value_letters)
+            else:
+                break
+        j += positionals
+        if j >= len(tokens):
+            return i  # a bare prefix with no command — leave it for the caller
+        i = j
+
+
+def _getopt_cluster_advance(token: str, value_letters: frozenset[str]) -> int:
+    """How many tokens a short-option cluster consumes, by getopt's ACTUAL rule.
+
+    ONE DEFINITION, because this rule has now been got wrong three times in this repo
+    and every miss has the same consequence — the index lands on an argument, the head
+    is never found, the row is discarded whole, and a smaller intact run elsewhere in
+    the window certifies green. Starvation, i.e. a false green, not a harmless gap.
+
+    THE RULE, which is subtler than "check the first letter": a value binds to the
+    first VALUE LETTER in the cluster, and consumes the FOLLOWING TOKEN only when that
+    letter is LAST. Otherwise the remainder of the token is the value. Measured against
+    the real `env`: `-uCC bash` consumes one token (CC is the value), `-iu CC` consumes
+    two. Checking `token[1]` instead — the shape this helper replaced in
+    `_skip_transparent_prefixes` — reads `timeout -vs KILL 60 pytest` as landing on
+    `60` rather than `pytest`, and `ionice -tc 2 pytest` as landing on `2`.
+    """
+    cluster = token[1:]
+    first_value = next(
+        (k for k, ch in enumerate(cluster) if ch in value_letters), None
+    )
+    if first_value is None:
+        return 1  # flags only (`-i`, `-0`)
+    if first_value == len(cluster) - 1:
+        return 2  # `-u CC`, `-iu CC`, `-vs KILL` — value is the next token
+    return 1  # `-uCC`, `-oL`, `-tc2` — value attached in-token
+
+
 def _skip_env_prefix(tokens: list[str], i: int = 0) -> int:
     """Index of the real command head, past any transparent ``env`` prefix.
 
@@ -180,16 +313,7 @@ def _skip_env_prefix(tokens: list[str], i: int = 0) -> int:
                 # of the token is its value if any remains; only a value letter in
                 # LAST position consumes the following token. All six spellings
                 # below were run against the real env before this was written.
-                cluster = t[1:]
-                first_value = next(
-                    (k for k, ch in enumerate(cluster) if ch in _ENV_VALUE_LETTERS), None
-                )
-                if first_value is None:
-                    i += 1  # flags only (`-i`, `-0`)
-                elif first_value == len(cluster) - 1:
-                    i += 2  # `-u CC`, `-iu CC`, `-P /usr/bin` — value is next token
-                else:
-                    i += 1  # `-uCC`, `-uC`, `-iuCC` — value attached in-token
+                i += _getopt_cluster_advance(t, _ENV_VALUE_LETTERS)
             elif "=" in t and not t.startswith("-"):
                 i += 1
             else:
