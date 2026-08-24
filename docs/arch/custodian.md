@@ -1,12 +1,12 @@
 ---
 card: arch-card:techne-custodian
-updated: 2026-08-21
-anchor: techne/core/custodian.py sha=32a1c3d44a1ca59121bac7c5665996f3f4eb4deb
+updated: 2026-08-23
+anchor: techne/core/custodian.py sha=55b383e33daaf6331ea0b27d4fa3cd9158ff50eb
 ---
 # custodian — headless emit→ingest rails (techne#555)
 
 WHAT: binds a model to the emit→ingest rails so they can run with no live session. A CUSTODIAN THAT ONLY WORKS WHILE YOU ARE WATCHING IS NOT A CUSTODIAN — everything genuinely custodial (dedup, merge/supersede, faithfulness on rewrites, contradiction classification) sat on the resident path, which has no daemon.
-SEAM: `Rail(name, emit, ingest, what)` registry + `run_rail` / `run_custodian` / `resolve_generate_fn` / `record_rail_marker`. Five rails: consolidate, dream, faithfulness, conflict, memory_claims.
+SEAM: `Rail(name, emit, ingest, what)` registry + `run_rail` / `run_custodian` / `resolve_generate_fn` / `record_rail_marker` / `clear_rail_marker`. Five rails: consolidate, dream, faithfulness, conflict, memory_claims.
 THE RESIDENT PATH IS UNCHANGED. Unbound (the default) every rail behaves exactly as before; borrowed inference stays right for judgment work the operator is present for. This adds a second way to ANSWER the prompts, not a replacement.
 ADAPTERS, NOT RAIL EDITS: the five rails disagree on key names (`target_ids` / `group_ids` / `candidate_id` / `focus_id`+`comparison_ids` / `prompt_hash`). Each `_<rail>_ingest` re-states that mapping; NO RAIL IS MODIFIED, which is what keeps "resident path unchanged" provable. A wrong key is a TypeError at 3am in an unattended run — pinned per-rail by a parametrized arg-capture test.
 PROVIDER-AGNOSTIC: the binding is `str -> str`, resolved through the same `_make_generate_fn` as the operator-model path, so any LiteLLM id works (ollama/*, vertex_ai/claude-* via ADC, openai/*, a proxy api_base). THE CREDENTIAL QUESTION BELONGS IN CONFIG, NOT THIS CODE PATH — five viable transports were enumerated on #555 and the right one differs per operator and per pass.
@@ -17,6 +17,8 @@ WHY THE EXISTING CHECK COULD NOT SEE IT: it keys on `knowledge_candidates.origin
 
 INVARIANTS — the ones a diff will not show you:
 - **NO FALLBACK TO `Config.model`, EVER.** `resolve_generate_fn` resolves rail_models → custodian.model → NOTHING. Inheriting the session-wide model is precisely how reflect came to be bound to a credential plane the operator does not hold. AN ABSENT BINDING MUST READ AS ABSENT (dormant, runs nothing), never as bound-to-something-unreachable. Pinned by `test_does_not_fall_back_to_config_model`.
+- **AND REFLECT NOW OBEYS THE SAME RULE (2026-08-23).** This card stated the invariant for the five custodian rails while naming reflect as the cautionary tale — and left reflect itself still falling back, because it has its own runner and was never routed through `resolve_generate_fn`. #709's marker made that visible the moment it deployed: `rail:reflect:bound` went BROKEN with `RuntimeError: requires litellm` on the operator's own box. A RULE STATED IN THE DOCSTRING OF ONE CODE PATH IS NOT ENFORCED IN THE OTHER. `reflect_on_session` now requires an explicit `config.reflect.model` and skips the automatic pass when it is empty.
+- **UNBINDING RETRACTS THE MARKER — `clear_rail_marker`.** The marker's contract is "the LAST MODEL-BOUND RUN, and how it went". Once a rail has no binding there is no such run to describe, so leaving the payload in place reports a months-old failure as the current state: the same stale-derived-fact defect the marker exists to expose, pointed the other way. The retraction must be a DELETE, not a payload saying "unbound" — `check_model_bound_rails` reads DORMANT off a marker's ABSENCE, and every `noop:*` maps to LIVE, which an unbound rail is not. Only a path that positively establishes "there is no binding" retracts; `reflect.enabled=False` returns before the binding question is asked and leaves the last bound run readable.
 - **A BOUND RAIL THAT FAILS MUST LEAVE A TRACE.** Every run records `rail:<name>:last_run` in `extension_state` — success AND failure, with the reason — via the same mechanism the hooks use. An unattended custodian that fails silently is strictly WORSE than none: it reports success while doing nothing.
 - **FOUR OUTCOMES, and answered-zero is NOT ok**: `ok` / `partial` / `error` / `noop:nothing-to-do`. Emitting 20 and answering 0 must never summarise as "ran"; answered-some must be distinguishable from answered-all, or a rail degrading toward zero reads healthy until it arrives.
 - **THE MARKER CARRIES THE EXCEPTION TYPE, not just the message.** `AuthenticationError` tells an operator "this needs a credential it was never given" in one word — a different remedy from "this is broken".

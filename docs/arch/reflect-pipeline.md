@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-reflect-pipeline
-updated: 2026-08-18
-anchor: techne/core/reflect.py sha=5a4d077dcb95c9a324c4b6f57850bb5764e21ec2
+updated: 2026-08-23
+anchor: techne/core/reflect.py sha=dd706e35e63491322e2e4076152c256c1bef60f1
 anchor: techne/core/sleepdream.py sha=fa629d589f34d30f5edb51fb7682b897bc3ead04
 ---
 # reflect / consolidate / dream — self-maintenance
@@ -28,5 +28,9 @@ INVARIANTS:
 - _FAITHFULNESS_GATED_ACTIONS={'merge','supersede'}: promoting a merge/supersede candidate needs a prior faithfulness check (raises FaithfulnessGateError unless force=True); keep this gate in sync with faithfulness_emit's SQL filter.
 
 **THE AUTOMATIC PATH RECORDS A LIVENESS MARKER NOW (techne#555).** `reflect_on_session` catches every LLM failure, counts it in `result["errors"]`, and lets teardown proceed — correct, because teardown must not fail on reflection. But a counter nobody reads is not a signal: MEASURED 2026-08-21, this rail had produced ZERO candidates since 2026-06-20 (every one of the 444 in the store came from the RESIDENT emit→ingest route, `model_used='agent-assisted'`), because `config.model` is an Anthropic id and the operator holds no Console API key. `AuthenticationError` on every session, for two months, while `check_maintenance_rails` read the rail LIVE off the resident route's output. It now writes `rail:reflect:last_run` via `custodian.record_rail_marker` on EVERY outcome — ok / partial / error / noop — carrying the exception TYPE, because "AuthenticationError" says *needs a credential it was never given* where a generic failure says only *broken*. Never raises into teardown.
+
+**THE AUTOMATIC PASS IS UNBOUND BY DEFAULT, AND THAT IS THE FIX (2026-08-23).** The marker above did its job on first contact: `rail:reflect:bound` read BROKEN the day #709 deployed. THE CAUSE WAS THE FALLBACK ITSELF — `reflect_on_session` used `config.reflect.model or config.model`, so an operator who never chose a headless model still got an unattended call to whatever the session used. It now requires an explicit `reflect.model`; empty means the automatic pass does not run, and no LLM is called.
+TWO SWITCHES, NOT ONE, and confusing them is the trap. `reflect.enabled` turns the FEATURE on — including the SessionStart nudge and the reflection-debt queue, which drive the RESIDENT route. `reflect.model` binds only the automatic pass. So the obvious remedy for a noisy unbound rail — `reflect.enabled: false` — trades the working path for the dead one: it silences a rail that produces nothing by switching off the one that produces everything. Enabled-and-unbound is a normal, fully-working posture.
+UNBINDING RETRACTS THE MARKER (`custodian.clear_rail_marker` over `extension_state.clear_state`), because a marker describes the last BOUND run and there is no longer any such run to describe. Absence is what `check_model_bound_rails` reads as DORMANT, which is the truth for a rail answered by a resident agent.
 
 **CANDIDATE ROWS NOW NAME THEIR PRODUCER (techne#555).** `_insert_consolidation_candidate` / `_insert_dream_candidate` hardcoded `model_used='agent-assisted'` in their VALUES clause. That was correct while the RESIDENT agent was the only thing answering these prompts; the custodian makes a second producer real, and a headless row claiming a resident agent judged it destroys the one column that distinguishes them — the same blindness that hid the automatic reflect rail for two months. Now a bound parameter, REQUIRED on the private inserters (no default, so a missed forward is a TypeError rather than a silent lie) and defaulted to `RESIDENT_PRODUCER` on the public `*_ingest` entry points, which is what leaves the resident path byte-for-byte unchanged. `RESIDENT_PRODUCER` is defined here ONCE; conflict.py and federation.py import it rather than re-typing the literal (techne#518).
