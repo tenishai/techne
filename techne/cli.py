@@ -9,7 +9,41 @@ from techne import __version__
 from techne.config import CLAUDE_CODE, PLATFORMS, Config, PostureConfig, techne_home
 
 
-@click.group()
+class _AliasedGroup(click.Group):
+    """Resolve legacy command names WITHOUT listing them twice in `--help`.
+
+    techne#744. The 0.16.0 board's DONE MEANS is that an operator can address the
+    archivist, librarian, architect and codex BY NAME. Three of the four already
+    could; the librarian was `techne library` — and `library` is the STORAGE word,
+    naming the document store, which is exactly the layout framing this release
+    demotes the four names out of.
+
+    An alias rather than a rename because every existing script, `docs/librarian-guide.md`
+    and the transcript-command tests say `library`, and breaking them to teach a word
+    is a bad trade. Resolved in `get_command` rather than registered a second time with
+    `add_command`, because a second registration puts BOTH spellings in `--help` — and a
+    help listing that offers two words for one domain teaches the ambiguity this issue
+    exists to remove.
+    """
+
+    #: legacy spelling -> canonical domain name. Keep this SMALL; it is a compatibility
+    #: shim, not a synonym system. Every entry is a word an operator might already have
+    #: in a script, not a word we would choose today.
+    ALIASES = {"library": "librarian"}
+
+    def get_command(self, ctx, cmd_name):
+        return super().get_command(ctx, self.ALIASES.get(cmd_name, cmd_name))
+
+    def resolve_command(self, ctx, args):
+        # Report the CANONICAL name, not the alias the operator typed. click's default
+        # echoes back what was typed, so `techne library --badopt` would print usage for
+        # a command name that does not appear in `--help` — which is worse than either
+        # spelling alone.
+        _, cmd, rest = super().resolve_command(ctx, args)
+        return cmd.name, cmd, rest
+
+
+@click.group(cls=_AliasedGroup)
 @click.version_option(version=__version__)
 @click.pass_context
 def main(ctx):
@@ -3103,8 +3137,13 @@ def probe(ctx, runtime, mode, model, timeout, keep):
 
 @main.group(invoke_without_command=True)
 @click.pass_context
-def library(ctx):
-    """Librarian document store — index + recall full documents (techne#91)."""
+def librarian(ctx):
+    """Librarian document store — index + recall full documents (techne#91).
+
+    Addressable as `techne librarian`, one of the four domain names (techne#744).
+    `techne library` still works and is not listed, because two spellings in `--help`
+    teaches the ambiguity rather than the vocabulary.
+    """
     if ctx.invoked_subcommand is not None:
         return
     config = ctx.obj["config"]
@@ -3120,7 +3159,7 @@ def library(ctx):
         click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
 
 
-@library.command("index-transcripts")
+@librarian.command("index-transcripts")
 @click.option(
     "--platform",
     type=click.Choice(["claude-code"]),
@@ -3158,7 +3197,7 @@ def library_index_transcripts(ctx, platform, transcripts_dir, limit):
     click.echo("Search them: techne library search <query>")
 
 
-@library.command("index-markdown")
+@librarian.command("index-markdown")
 @click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
     "--source-type",
@@ -3181,7 +3220,7 @@ def library_index_markdown(ctx, root, source_type):
     click.echo("Search them: techne library search <query>")
 
 
-@library.command("search")
+@librarian.command("search")
 @click.argument("query")
 @click.option("--limit", default=20)
 @click.pass_context
@@ -3207,7 +3246,7 @@ def library_search(ctx, query, limit):
         click.echo()
 
 
-@library.command("migrate-store")
+@librarian.command("migrate-store")
 @click.pass_context
 def library_migrate_store(ctx):
     """One-time: move documents from techne.db into librarian.db (db-per-domain #99).
@@ -3222,7 +3261,7 @@ def library_migrate_store(ctx):
     click.echo(json.dumps(result, indent=2))
 
 
-@library.command("doctor")
+@librarian.command("doctor")
 @click.pass_context
 def library_doctor(ctx):
     """Cross-db health check: report document cards whose pointer doesn't resolve in
@@ -3247,7 +3286,7 @@ def library_doctor(ctx):
         ctx.exit(1)  # non-zero so CI / scripts can gate on a clean bill
 
 
-@library.command("show")
+@librarian.command("show")
 @click.argument("doc_id", type=int)
 @click.option("--chars", default=4000, help="Max content chars to print (0 = all).")
 @click.pass_context
@@ -3266,7 +3305,7 @@ def library_show(ctx, doc_id, chars):
     click.echo(body if chars == 0 else body[:chars])
 
 
-@library.command("card")
+@librarian.command("card")
 @click.argument("card_id", type=int)
 @click.option("--chars", default=2000, help="Max document chars to print (0 = all).")
 @click.pass_context
@@ -3299,7 +3338,7 @@ def library_card(ctx, card_id, chars):
         click.echo("\n(pointer did not resolve to a document)")
 
 
-@library.group("cards")
+@librarian.group("cards")
 def library_cards():
     """Document-card gist fill — the agent-assisted summarization pass (Option D)."""
 
