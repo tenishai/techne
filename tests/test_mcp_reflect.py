@@ -357,7 +357,12 @@ def test_emit_cursor_drains_large_session_across_passes(config, monkeypatch):
 
 def test_emit_cursor_marker_records_emitted_threads(config, monkeypatch):
     """The cursor marker carries the cumulative per-thread 'emitted' list + total, and
-    a re-emit skips already-delivered threads (techne#269/#236)."""
+    a re-emit skips already-delivered threads (techne#269/#236).
+
+    KEYED ON thread_id SINCE techne#733 — this test previously asserted prompt_hashes,
+    which is exactly the key that drifted. The BEHAVIOURAL assertion below (pass 2
+    delivers h2/h3, not h0/h1) is unchanged and is what actually guards the cursor.
+    """
     import techne.core.reflect as reflect_mod
 
     _seed(config, "cur", n=6)
@@ -377,7 +382,8 @@ def test_emit_cursor_marker_records_emitted_threads(config, monkeypatch):
         marker = get_state(conn, "reflect:emitted:cur")
     finally:
         conn.close()
-    assert sorted(marker["emitted"]) == ["h0", "h1", "h2", "h3"]
+    assert sorted(marker["emitted"]) == ["t0", "t1", "t2", "t3"]
+    assert marker["key"] == "thread_id", "a new marker must name its key (#733)"
     assert marker["total"] == 5 and marker["remaining"] == 1
 
 

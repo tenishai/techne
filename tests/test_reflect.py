@@ -1840,3 +1840,145 @@ def test_promote_refuses_to_mint_an_unbacked_document_card(tmp_path):
         "a document_card with no doc: pointer is not a card — it must not be minted "
         "as one, or fsck goes red forever (#633)"
     )
+
+
+# ---------------------------------------------------------------------------
+# techne#733 — the emit cursor was keyed on an UNSTABLE value
+# ---------------------------------------------------------------------------
+
+
+def _cursor(config, session_id):
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    conn = connect(config.db_path)
+    try:
+        return get_state(conn, f"reflect:emitted:{session_id}") or {}
+    finally:
+        conn.close()
+
+
+def test_prompt_hash_moves_when_live_knowledge_changes(tmp_path):
+    """THE ROOT CAUSE, pinned at its source. The old cursor's docstring called
+    prompt_hash "the stable, always-present per-thread id" and scoped the drift hazard
+    to write_to='live'. In fact _build_prompt embeds a freshly-retrieved existing-
+    knowledge block, so ANY write to live knowledge — from any session, at any time —
+    moves the hash of a thread whose own observations never changed."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_batch, load_session_for_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    # THE FIXTURE DEFAULT DISABLES THIS BLOCK ("skip FTS in tests"), and the block IS the
+    # defect — a suite that leaves it off cannot observe the drift at all. Production runs
+    # with include_existing_knowledge: true.
+    config.reflect.include_existing_knowledge = True
+    session_id = _mk_db_backed_session(config)
+    threads, observations = load_session_for_reflection(config, session_id)
+
+    render = lambda: [  # noqa: E731
+        b["prompt_hash"]
+        for b in emit_reflection_batch(config, session_id, threads, observations)
+    ]
+    before = render()
+    assert before, "precondition: the thread must render"
+    assert before == render(), (
+        "back-to-back renders must agree — the hash is not nondeterministic, it DRIFTS"
+    )
+
+    store(config.db_path, "Session work Filesystem observations tools filesystem", type="fact")
+    after = render()
+
+    assert after != before, (
+        "prompt_hash did NOT move after a live-knowledge write — if this ever passes, "
+        "the #733 premise is gone and the cursor could key on prompt_hash again"
+    )
+
+
+def test_a_drifting_hash_does_not_re_emit_or_inflate_the_cursor(tmp_path):
+    """THE SYMPTOM. Under the old key a drifted hash matched nothing, so the thread was
+    re-emitted AND a second entry appended — accumulating without bound. Measured on the
+    operator's store: 51 entries for 23 threads, remaining=-27."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    config.reflect.include_existing_knowledge = True  # the drift needs the block on
+    session_id = _mk_db_backed_session(config)
+
+    first = emit_reflection_pass(config, session_id)
+    assert first["count"] >= 1, "precondition: at least one thread emitted"
+
+    store(config.db_path, "Session work Filesystem observations tools filesystem", type="fact")
+
+    second = emit_reflection_pass(config, session_id)
+    assert second["count"] == 0, "a delivered thread must stay delivered across a knowledge write"
+
+    marker = _cursor(config, session_id)
+    assert len(marker["emitted"]) <= marker["total"], "cursor must never exceed the thread count"
+    assert marker.get("remaining", 0) >= 0, "remaining must never go negative"
+
+
+def test_a_corrupt_cursor_reads_as_pending_not_done(tmp_path):
+    """FAIL-CLOSED. An over-full cursor is not evidence of completion, and treating it as
+    completion is what dropped six sessions out of the SessionStart nudge — the reason
+    126 owed queue rows were reported to the operator as 50."""
+    from techne.core.reflect import _marker_has_unemitted_threads
+
+    assert _marker_has_unemitted_threads({"emitted": ["a"] * 51, "total": 24}) is True
+    assert _marker_has_unemitted_threads({"emitted": ["a", "b"], "total": 5}) is True
+    assert _marker_has_unemitted_threads({"emitted": ["a", "b"], "total": 2}) is False
+
+
+def test_a_legacy_cursor_is_rebuilt_from_the_drained_queue(tmp_path):
+    """A pre-#733 marker holds prompt_hashes that are unrecoverable, so the delivered set
+    comes from the ledger that was right all along — the queue rows already drained."""
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import _emitted_keys
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+
+    conn = connect(config.db_path)
+    tid = conn.execute("SELECT id FROM threads WHERE session_id = ?", (session_id,)).fetchone()[0]
+    conn.execute("DELETE FROM reflection_queue WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "INSERT INTO reflection_queue (session_id, thread_id, drained_at) VALUES (?,?,?)",
+        (session_id, tid, "2026-08-20 00:00:00"),
+    )
+    conn.commit()
+    set_state(conn, f"reflect:emitted:{session_id}", {"emitted": ["deadbeef"], "total": 1})
+    legacy = {"emitted": ["deadbeef"], "total": 1}
+    conn.close()
+
+    assert _emitted_keys(config, session_id, legacy) == {tid}, (
+        "a legacy marker's prompt_hashes must be discarded for the drained-queue record"
+    )
+
+
+def test_owed_threads_are_ordered_ahead_of_paid_ones(tmp_path):
+    """THE REPORTED SYMPTOM. The char budget is spent in order, so a session whose early
+    threads are already paid spent its whole budget re-rendering them and never reached
+    the owed rows — measured: 11 prompts emitted, ZERO of them owed."""
+    from techne.core.database import connect
+    from techne.core.reflect import _owed_first
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    conn = connect(config.db_path)
+    conn.execute("DELETE FROM reflection_queue WHERE session_id = ?", (session_id,))
+    for tid, drained in (("t-paid", "2026-08-20 00:00:00"), ("t-owed", None)):
+        conn.execute(
+            "INSERT OR IGNORE INTO threads (id, session_id, thread_num, label, summary) "
+            "VALUES (?,?,?,?,?)",
+            (tid, session_id, 1, tid, tid),
+        )
+        conn.execute(
+            "INSERT INTO reflection_queue (session_id, thread_id, drained_at) VALUES (?,?,?)",
+            (session_id, tid, drained),
+        )
+    conn.commit()
+    conn.close()
+
+    batch = [{"thread_id": "t-paid"}, {"thread_id": "t-owed"}]
+    assert [i["thread_id"] for i in _owed_first(config, session_id, batch)] == ["t-owed", "t-paid"]
