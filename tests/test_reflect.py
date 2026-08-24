@@ -2086,12 +2086,14 @@ def test_the_prompt_hash_fallback_cannot_grow_without_bound(tmp_path):
     )
 
 
-def test_the_richest_bucket_wins_a_thread_id_collision(tmp_path):
-    """IMPORTANT 3. Colliding Thread objects carry DIFFERENT observation buckets
-    (`obs_by_thread` is keyed on thread_num), so first-wins discards the loser's
-    observations entirely — Prudence measured a 3-observation thread beating an
-    11-observation one. Before the dedup both were emitted; first-wins would have made
-    the dedup a net LOSS of memory."""
+def test_a_thread_id_collision_is_resolved_losslessly(tmp_path):
+    """IMPORTANT 2, twice corrected. Colliding Thread objects carry DIFFERENT observation
+    buckets (`obs_by_thread` is keyed on thread_num), so PICKING a winner discards the
+    loser's observations permanently — measured across three trees: main emitted both
+    (3 and 11), first-wins dropped the 11, richest-wins dropped the 3. Against the merge
+    base either choice was a net LOSS of memory, and the duplicate drain it avoided was
+    already a no-op (`drain_reflection_queue` is guarded on `drained_at IS NULL`).
+    Unioning the index sets keeps one item per persisted id AND every observation."""
     import techne.core.thread_orchestrator as TO
     from techne.core.reflect import emit_reflection_batch
 
@@ -2107,8 +2109,47 @@ def test_the_richest_bucket_wins_a_thread_id_collision(tmp_path):
     finally:
         TO.persisted_thread_id = orig
 
-    assert len(batch) == 1, "the collision must still yield one item"
-    assert batch[0]["thread_num"] == 2, (
-        "the 11-observation thread must win — keeping the thin one silently drops "
-        "8 observations that were reflected before the dedup existed"
+    assert len(batch) == 1, "the collision must still yield one item per persisted id"
+    prompt = batch[0]["prompt"]
+    assert obs[0]["content"] in prompt, "thin's observations were discarded"
+    assert obs[13]["content"] in prompt, "fat's observations were discarded"
+
+
+def test_a_marker_reopens_when_the_session_grows(tmp_path):
+    """IMPORTANT 1 (#734 r2). Writing on a completed-but-empty pass fixed the uncleanable
+    cursor and introduced a new silence: a session with nothing renderable got
+    `total: 0`, and `_marker_has_unemitted_threads` reads `total` FROM THE MARKER and
+    never recomputes it, so `0 < 0` is false forever. Prudence measured origin/main
+    nudging such a session after a 12-observation backfill while the new marker returned
+    [] — with an explicit emit returning count: 1, so the work was really there. Both
+    consumers go quiet: the SessionStart nudge and the #643 startup drain.
+
+    TESTED AT THE PREDICATE, NOT END-TO-END, AND THE REASON IS WORTH RECORDING: the
+    session-level gate in `pending_reflection` and the per-thread gate in
+    `emit_reflection_batch` are THE SAME CONFIG VALUE, so a fixture session that is
+    nudge-eligible is also renderable. Reproducing the real shape needs a session whose
+    observations split across threads that are each individually sub-threshold, which
+    the heuristic detector does not let a test force. Pinning the predicate is honest;
+    claiming an end-to-end reproduction here would not be.
+    """
+    from techne.core.reflect import _marker_has_unemitted_threads, emit_reflection_pass
+
+    grown = {"key": "thread_id", "emitted": [], "total": 0, "observations": 3}
+    assert _marker_has_unemitted_threads(grown, observations=15) is True, (
+        "a session stamped empty and since grown must re-open — the marker is the only "
+        "signal the nudge reads, so a stale one suppresses it permanently"
+    )
+    assert _marker_has_unemitted_threads(grown, observations=3) is False, (
+        "an unchanged session must stay quiet — nudged at most once is the contract"
+    )
+    assert _marker_has_unemitted_threads({"emitted": [], "total": 0}, observations=99) is False, (
+        "a legacy marker carries no count; absent means CANNOT TELL, and re-surfacing "
+        "every historical session would be a worse regression than the one being fixed"
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    emit_reflection_pass(config, session_id)
+    assert _cursor(config, session_id)["observations"] == 14, (
+        "emit must record the observation count it judged the session at"
     )
