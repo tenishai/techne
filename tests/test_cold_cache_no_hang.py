@@ -498,10 +498,30 @@ class TestADeadVectorChannelIsNotRecordedAsHealthy:
     def test_a_healthy_turn_still_records_ok(self, monkeypatch, tmp_path):
         """THE OTHER HALF, and the one that makes the pair mean something. Asserting
         only `failed` would keep passing if the signal fired unconditionally — which is
-        a worse defect than the one being fixed, because it marks every healthy turn."""
+        a worse defect than the one being fixed, because it marks every healthy turn.
+
+        THE STUBS ARE NOT DECORATION (Prudence, #728 r4 nit 2). Without them this test
+        was green for a reason its own docstring did not describe: `sqlite_vec` is not
+        installed in this venv, so `search_vec` returned at the `import sqlite_vec`
+        ImportError — ONE EXIT EARLIER than the `backend_available()` gate the patch
+        below was meant to exercise, making that patch inert. Measured with a spy:
+        `backend_available() reached? False`. `_dead_backend` guards against exactly
+        this and names it; this test omitted the same two lines. It would also have
+        taken a different path on a box WITH sqlite-vec installed.
+
+        NOT COVERED HERE, deliberately: a LIVE vector channel recording `ok`. Both
+        halves of this pair are "the channel did not answer, quietly" — driving a
+        working channel needs the real sqlite-vec extension, which this venv does not
+        have. Recorded rather than faked, since a stubbed "live" channel would be the
+        same false premise one layer up.
+        """
+        import sys
+
         config = self._config(tmp_path)
         self._seed(config)
         monkeypatch.setattr(search_mod, "_VEC_CHANNEL_ERROR", None)
+        monkeypatch.setitem(sys.modules, "sqlite_vec", type("m", (), {})())
+        monkeypatch.setitem(sys.modules, "numpy", type("m", (), {})())
         monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
 
         self._run(config, monkeypatch)

@@ -2318,13 +2318,18 @@ def check_vector_coverage(config) -> CheckResult:
 
                 # THE REMEDY IS GATED ON `backend_available()`, AND `model_cached()`
                 # ONLY PICKS THE SENTENCE (Prudence, #728 r2 suggestion). Gating the
-                # remedy on `model_cached() is False` cost two things. An install with
-                # the extra present, the weights cached and no vec tables — a fresh
-                # TECHNE_HOME on a machine whose HF cache is already warm — is just as
-                # permanently FTS-only and got no remedy at all. And it made the probe
-                # load-bearing for whether the operator is told ANYTHING, so a probe
-                # that cannot tell (`None`) silenced the doctor entirely rather than
-                # degrading to a vaguer sentence.
+                # remedy on `model_cached() is False` cost ONE thing, and this comment
+                # claimed TWO until #728 r4. The real cost: an install with the extra
+                # present, the weights cached and no vec tables — a fresh TECHNE_HOME on
+                # a machine whose HF cache is already warm — is just as permanently
+                # FTS-only and got no remedy at all.
+                #
+                # THE SECOND "COST" COULD NOT OCCUR. "A probe that cannot tell (`None`)
+                # silenced the doctor entirely" describes an unreachable state:
+                # `model_cached` returns None only when `_select_backend` raises, which
+                # happens only when neither backend imports — and this branch has
+                # already gated on `backend_available()`. Both cards retracted it and
+                # this was the last copy, which is the shape the retraction is about.
                 #
                 # `backend_available()` is the honest expression of "the operator
                 # turned this on"; `model_cached()` is only the REASON it is idle.
