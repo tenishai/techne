@@ -531,6 +531,85 @@ class TestTheFourDomainsAreAddressableByName:
         assert " librarian [OPTIONS]" in usage, usage
         assert " library [OPTIONS]" not in usage, usage
 
+    def test_aliases_holds_only_the_documented_legacy_spelling(self):
+        """THE DOOR, CLOSED WITH A TEST RATHER THAN WITH SYNTAX (Prudence, #745 r1).
+
+        A frozenset stops mutation at runtime, which is not the failure being guarded
+        against: the failure is someone adding a second key in a future PR because the
+        dict makes it a one-line change. Every entry must be a word an operator already
+        has in a script, not a word we would choose today — growing this table turns a
+        compatibility shim into a synonym system. If you are adding one, say in the PR
+        why the word exists.
+        """
+        from techne.cli import _AliasedGroup
+
+        assert _AliasedGroup.ALIASES == {"library": "librarian"}
+
+    def test_shell_completion_survives_an_unknown_command(self):
+        """`resolve_command`'s override CRASHED here (#745 r1 Important 1). click ends
+        `return cmd_name if cmd else None, cmd, args[1:]`, and `cmd` is None whenever
+        `resilient_parsing` is set — the NoSuchCommand raise is guarded by
+        `and not ctx.resilient_parsing`. Dereferencing `cmd.name` unconditionally killed
+        shell completion over any unknown word, and `_resolve_context` could not help
+        because it checks `cmd is None` AFTER the call."""
+        import click
+
+        from techne.cli import main
+
+        ctx = click.Context(main, info_name="techne", resilient_parsing=True)
+
+        name, cmd, _ = main.resolve_command(ctx, ["definitely-not-a-command"])
+
+        assert cmd is None and name is None
+
+    def test_the_cli_never_prints_the_demoted_spelling(self):
+        """AN ASSERTION RATHER THAN A HABIT. The docs were updated and the CLI's own
+        output still said `techne library` in four places — three of them printed
+        immediately after the operator typed the canonical word, and one
+        (`techne recall`) reaches operators who never invoke the librarian at all. So
+        the release shipped its CLI teaching the word it exists to demote.
+
+        Found twice in one PR, which is what makes it worth a test: prose about the
+        vocabulary is checked, and the strings the operator actually SEES were not.
+        Scans string literals only — the comments and the group docstring legitimately
+        discuss `techne library`, because explaining the alias is not teaching it.
+        """
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parent.parent / "techne" / "cli.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+
+        # DOCSTRINGS ARE EXCLUDED DELIBERATELY, BY IDENTITY. An earlier version matched
+        # "techne library " WITH A TRAILING SPACE and passed only because the group
+        # docstring happens to write it as `techne library` with a backtick — i.e. it
+        # passed for a reason unrelated to what it asserts. Collecting the docstring
+        # nodes and skipping them by id says the true thing: explaining the alias is not
+        # teaching it, and the match itself is now unconditional.
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                body = getattr(node, "body", None)
+                if (
+                    body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    docstrings.add(id(body[0].value))
+
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in docstrings:
+                    continue
+                if "techne library" in node.value:
+                    offenders.append(f"{src.name}:{node.lineno}: {node.value.strip()[:70]}")
+
+        assert not offenders, "operator-facing text still says `techne library`:\n" + "\n".join(
+            offenders
+        )
+
     def test_help_offers_one_spelling_per_domain(self):
         """TWO SPELLINGS IN `--help` TEACHES THE AMBIGUITY, which is the thing #744 is
         about — so the alias is resolved rather than registered a second time. If this
