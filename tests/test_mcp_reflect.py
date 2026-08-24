@@ -400,3 +400,46 @@ def test_pending_reflection_ignores_old_shape_marker(config):
     finally:
         conn.close()
     assert pending_reflection(config) == []
+
+
+def test_the_mcp_cursor_survives_a_knowledge_write(config):
+    """techne#733/#734 — THE INTEGRATION-LEVEL GAP Prudence named.
+
+    Every cursor test in this file runs on the module fixture, which sets
+    `include_existing_knowledge = False` ("skip FTS in tests") — and that block IS the
+    #733 defect, so this file was structurally unable to observe the drift it is the
+    integration surface for. The same fixture default is what let a root-cause test pass
+    against broken code during the #734 work.
+
+    WHAT THIS LAYER CAN ACTUALLY OBSERVE, stated plainly because it is not obvious:
+    `_seed` records observations only, so no thread is persisted and
+    `persisted_thread_id` returns None for every one of them. Every item here therefore
+    takes the `prompt_hash` FALLBACK — this file exercises the unstable key exclusively.
+    That makes re-delivery expected (re-offering a thread with no stable identity is the
+    only safe answer) and makes the BOUND the property worth pinning: with the knowledge
+    block on, each pass moves every hash, and before the write-time reconciliation that
+    grew the cursor by one entry per thread per pass, without limit, forever.
+    """
+    from techne.core.knowledge import store
+
+    config.reflect.include_existing_knowledge = True
+    _seed(config, "kw", n=6)
+
+    sizes = []
+    for i in range(4):
+        out = _techne_reflect_emit({"session_id": "kw"}, config)
+        assert out["batch"] or i > 0, "precondition: the session emitted something"
+        store(config.db_path, f"an unrelated durable fact about session work {i}", type="fact")
+        conn = connect(config.db_path)
+        try:
+            marker = get_state(conn, "reflect:emitted:kw")
+        finally:
+            conn.close()
+        sizes.append(len(marker["emitted"]))
+        assert len(marker["emitted"]) <= marker["total"], (
+            f"pass {i}: cursor holds {len(marker['emitted'])} keys for "
+            f"{marker['total']} renderable threads — the unstable key is accumulating"
+        )
+        assert marker.get("remaining", 0) >= 0
+
+    assert max(sizes) <= marker["total"], f"cursor grew unbounded across passes: {sizes}"

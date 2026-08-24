@@ -1982,3 +1982,133 @@ def test_owed_threads_are_ordered_ahead_of_paid_ones(tmp_path):
 
     batch = [{"thread_id": "t-paid"}, {"thread_id": "t-owed"}]
     assert [i["thread_id"] for i in _owed_first(config, session_id, batch)] == ["t-owed", "t-paid"]
+
+
+# ---------------------------------------------------------------------------
+# techne#734 round 1 (Prudence) — the fail-closed branch needed a way back out
+# ---------------------------------------------------------------------------
+
+
+def test_an_over_full_cursor_repairs_itself(tmp_path):
+    """CRITICAL 1. Reading a corrupt cursor as PENDING is right; leaving it corrupt is
+    not. The marker write used to be gated on `bool(batch)`, so once a session was fully
+    emitted nothing could ever rewrite it — Prudence measured five consecutive passes
+    reporting pending=True with no operation able to clear it. #733's silent drop turned
+    into a banner that nags forever, which is the same defect wearing the opposite sign.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import _marker_has_unemitted_threads, emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    emit_reflection_pass(config, session_id)  # drain it legitimately
+
+    marker = _cursor(config, session_id)
+    conn = connect(config.db_path)
+    set_state(
+        conn,
+        f"reflect:emitted:{session_id}",
+        {**marker, "emitted": [*marker["emitted"], "t-stale-0", "t-stale-1"]},
+    )
+    conn.close()
+    assert _marker_has_unemitted_threads(_cursor(config, session_id)), "precondition: corrupt"
+
+    emit_reflection_pass(config, session_id)  # a completed-but-EMPTY pass must repair
+
+    repaired = _cursor(config, session_id)
+    assert len(repaired["emitted"]) <= repaired["total"], "the pass must reconcile, not append"
+    assert not _marker_has_unemitted_threads(repaired), (
+        "a corrupt cursor with no work left must be CLEARABLE — otherwise the operator "
+        "is trained to ignore a banner that can never go green"
+    )
+
+
+def test_a_legacy_cursor_on_a_finished_session_stops_nagging(tmp_path):
+    """CRITICAL 1(a), the operator's own six sessions. A pre-#733 over-full marker on a
+    session whose queue IS fully drained rebuilt correctly, filtered the batch to empty,
+    and then never replaced the legacy marker — `key` stayed None pass after pass."""
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import _marker_has_unemitted_threads, emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    emit_reflection_pass(config, session_id)
+    conn = connect(config.db_path)
+    conn.execute(
+        "UPDATE reflection_queue SET drained_at = ? WHERE session_id = ?",
+        ("2026-08-20 00:00:00", session_id),
+    )
+    conn.commit()
+    set_state(  # a legacy marker: prompt_hashes, no `key`, wildly over-full
+        conn, f"reflect:emitted:{session_id}", {"emitted": [f"h{i}" for i in range(51)], "total": 1}
+    )
+    conn.close()
+
+    for _ in range(3):
+        emit_reflection_pass(config, session_id)
+
+    final = _cursor(config, session_id)
+    assert final.get("key") == "thread_id", "a legacy marker must be replaced, not orbited"
+    assert not _marker_has_unemitted_threads(final)
+
+
+def test_the_prompt_hash_fallback_cannot_grow_without_bound(tmp_path):
+    """CRITICAL 2. `_cursor_key` falls back to prompt_hash when thread_id is None, and I
+    argued that "inherits the instability for that case alone — re-offering it is the
+    only safe answer". Re-offering IS safe; APPENDING is #733 verbatim. Prudence measured
+    the cursor growing 1,2,3,4,5,6 across six passes with one knowledge write each."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    config.reflect.include_existing_knowledge = True
+    session_id = _mk_db_backed_session(config)
+    # Force the fallback: no thread resolves to a persisted row.
+    import techne.core.thread_orchestrator as TO
+
+    orig = TO.persisted_thread_id
+    TO.persisted_thread_id = lambda *a, **k: None
+    try:
+        sizes = []
+        for _ in range(6):
+            emit_reflection_pass(config, session_id)
+            store(config.db_path, "Session work Filesystem observations tools", type="fact")
+            sizes.append(len(_cursor(config, session_id).get("emitted", [])))
+    finally:
+        TO.persisted_thread_id = orig
+
+    total = _cursor(config, session_id)["total"]
+    assert max(sizes) <= total, (
+        f"cursor grew to {max(sizes)} for {total} renderable threads — the fallback is "
+        f"still accumulating, which is #733 verbatim on the branch that closes it: {sizes}"
+    )
+
+
+def test_the_richest_bucket_wins_a_thread_id_collision(tmp_path):
+    """IMPORTANT 3. Colliding Thread objects carry DIFFERENT observation buckets
+    (`obs_by_thread` is keyed on thread_num), so first-wins discards the loser's
+    observations entirely — Prudence measured a 3-observation thread beating an
+    11-observation one. Before the dedup both were emitted; first-wins would have made
+    the dedup a net LOSS of memory."""
+    import techne.core.thread_orchestrator as TO
+    from techne.core.reflect import emit_reflection_batch
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 14)
+    thin = Thread(thread_num=1, label="thin", summary="thin", observation_indices=list(range(3)))
+    fat = Thread(thread_num=2, label="fat", summary="fat", observation_indices=list(range(3, 14)))
+
+    orig = TO.persisted_thread_id
+    TO.persisted_thread_id = lambda *a, **k: "t-collide"
+    try:
+        batch = emit_reflection_batch(config, session_id, [thin, fat], obs)
+    finally:
+        TO.persisted_thread_id = orig
+
+    assert len(batch) == 1, "the collision must still yield one item"
+    assert batch[0]["thread_num"] == 2, (
+        "the 11-observation thread must win — keeping the thin one silently drops "
+        "8 observations that were reflected before the dedup existed"
+    )

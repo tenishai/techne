@@ -646,23 +646,40 @@ def emit_reflection_batch(
     from techne.core.thread_orchestrator import persisted_thread_id
 
     obs_by_thread = _bucket_observations(threads, observations)
-    batch: list[dict] = []
-    #: Persisted ids already in this batch. Two Thread objects can resolve to ONE
-    #: threads.id (re-detection splits a thread whose rows still map back to the saved
-    #: row), and the duplicate is not harmless: the same prompt is rendered and answered
-    #: twice, the second ingest re-drains a queue row already stamped, and the emit
-    #: budget pays for the same work twice. MEASURED on session 0ae96e10 — 24 items,
-    #: 23 distinct ids (techne#733).
-    seen_ids: set[str] = set()
+
+    # ONE ITEM PER PERSISTED THREAD, AND THE TIE-BREAK IS NOT ARBITRARY (techne#733).
+    # Two Thread objects can resolve to ONE threads.id (re-detection splits a thread
+    # whose rows still map back to the saved row) — measured on session 0ae96e10: 24
+    # items, 23 distinct ids. The duplicate is not harmless: the same prompt is rendered
+    # and answered twice and the second ingest re-drains a row already stamped.
+    #
+    # THE COLLIDING THREADS DO NOT CARRY THE SAME OBSERVATIONS. `obs_by_thread` is keyed
+    # on `thread_num`, so each side of a collision has its own bucket and `_build_prompt`
+    # renders only the survivor's. Keeping the FIRST one therefore DISCARDS the other's
+    # observations outright — Prudence measured a 3-observation thread beating an
+    # 11-observation thread to the id, so those 11 were never reflected at all. Before
+    # the dedup both were emitted, so both sets were reflected at the cost of a duplicate;
+    # first-wins would have made this change a net LOSS of memory on exactly the rail
+    # whose stated stakes are "dropping one loses the session's memory silently".
+    # Richest bucket wins; ties fall to the earlier thread, which is stable.
+    eligible: list[tuple[str | None, Thread, list[dict]]] = []
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
         if len(t_obs) < config.reflect.min_observations_per_thread:
             continue
-        tid = persisted_thread_id(config.db_path, session_id, t)
-        if tid is not None and tid in seen_ids:
+        eligible.append((persisted_thread_id(config.db_path, session_id, t), t, t_obs))
+
+    best: dict[str, int] = {}
+    for idx, (tid, _t, t_obs) in enumerate(eligible):
+        if tid is None:
             continue
-        if tid is not None:
-            seen_ids.add(tid)
+        if tid not in best or len(t_obs) > len(eligible[best[tid]][2]):
+            best[tid] = idx
+
+    batch: list[dict] = []
+    for idx, (tid, t, t_obs) in enumerate(eligible):
+        if tid is not None and best[tid] != idx:
+            continue
         prompt = _build_prompt(t, t_obs, config.db_path, config)
         prompt_hash = _prompt_hash(prompt)
         batch.append(
@@ -863,6 +880,9 @@ def emit_reflection_pass(
     threads, observations = load_session_for_reflection(config, session_id)
     batch = emit_reflection_batch(config, session_id, threads, observations)
     total = len(batch)
+    #: Every key this session can render RIGHT NOW. The cursor is reconciled against
+    #: this before it is persisted — see the write below.
+    current_ids = {_cursor_key(item) for item in batch}
 
     # Per-thread emit cursor (techne#269/#236): a session with more reflectable threads
     # than the emit cap must drain losslessly across passes — the #268 marker collapsed
@@ -914,7 +934,20 @@ def emit_reflection_pass(
     # passes (total minus the cumulative emitted set), so a multi-pass drain reports its
     # true shortfall and reaches 0 only when the whole session is done (techne#269).
     newly = [_cursor_key(item) for item in batch]
-    emitted_ids = sorted(already | set(newly))
+    # RECONCILE, DO NOT JUST APPEND (Prudence, #734 r1). Before this the cursor was only
+    # ever read and appended to, and THAT is what made every remaining #733 symptom
+    # permanent rather than transient:
+    #   * A key that no longer renders — a drifted `prompt_hash` from the None-thread_id
+    #     fallback, or a queue row rebuilt for a thread that is no longer emittable —
+    #     stayed in the set forever, so the set grew without bound (measured: 1,2,3,4,5,6
+    #     across six passes) and `len(emitted) > total` became permanent.
+    #   * The rebuild path could itself WRITE an over-full marker in the new format, so
+    #     it never took the rebuild path again and recorded `remaining: 0` while reading
+    #     pending — internally incoherent.
+    # Intersecting with what is renderable now makes the set describe REALITY at write
+    # time. A dropped key is re-offered next pass, which costs a prompt; leaving it in
+    # cost a cursor nobody could clear.
+    emitted_ids = sorted((already | set(newly)) & current_ids)
     truncated = len(emitted_ids) < total
     # CLAMPED. A negative `remaining` is what an unstable cursor key produced for two
     # months, and it reaches the operator through the SessionStart banner (techne#733).
@@ -924,7 +957,16 @@ def emit_reflection_pass(
     # #268). Detect it, leave the cursor UNADVANCED so the auto-trigger keeps surfacing
     # it, and flag the payload loudly.
     oversized = len(batch) == 1 and len(json.dumps(batch)) > max_chars
-    delivered = bool(batch) and not oversized
+    # A COMPLETED-BUT-EMPTY PASS MUST STILL WRITE (Prudence, #734 r1). The old guard was
+    # `bool(batch) and not oversized`, so once everything was emitted the marker could
+    # never be rewritten — and a session carrying a legacy or over-full cursor then read
+    # as PENDING on every pass with NO OPERATION ABLE TO CLEAR IT. Measured: five
+    # consecutive passes, `pending=True` every time, `key` never leaving None. That turns
+    # #733's silent drop into a banner that nags forever, which is the same defect wearing
+    # the opposite sign — an uncleanable warning trains the operator to ignore the rail.
+    # `oversized` STILL withholds the advance: that is #268 footgun 3, and a lone thread
+    # too big to deliver must keep re-surfacing.
+    delivered = not oversized
 
     # Advance the cursor: record the cumulative set of emitted thread prompt_hashes plus
     # the session's total, so pending_reflection re-surfaces the session until every
@@ -932,6 +974,17 @@ def emit_reflection_pass(
     # ALSO the exactly-once reflected-marker (techne#236 Gap 2) — one unified marker, not
     # two. We do NOT advance when nothing deliverable was produced.
     if delivered:
+        # THE INVARIANT, ASSERTED AT THE WRITE POINT (Prudence, #734 r1). #733 survived
+        # two months because this was only ever checked by arithmetic that failed open —
+        # `len(emitted) < total` quietly answers "done" for the markers that are WORST.
+        # The reconciliation above makes this unreachable by construction, which is
+        # exactly why it belongs here: it cannot fire today, and it turns the next
+        # regression into a loud failure instead of another silent two months.
+        if len(emitted_ids) > total:
+            raise AssertionError(
+                f"reflect cursor invariant violated for {session_id}: "
+                f"{len(emitted_ids)} emitted keys > {total} renderable threads"
+            )
         conn = connect(config.db_path)
         try:
             set_state(
