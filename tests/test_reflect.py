@@ -1840,3 +1840,353 @@ def test_promote_refuses_to_mint_an_unbacked_document_card(tmp_path):
         "a document_card with no doc: pointer is not a card — it must not be minted "
         "as one, or fsck goes red forever (#633)"
     )
+
+
+# ---------------------------------------------------------------------------
+# techne#733 — the emit cursor was keyed on an UNSTABLE value
+# ---------------------------------------------------------------------------
+
+
+def _cursor(config, session_id):
+    from techne.core.database import connect
+    from techne.core.extension_state import get_state
+
+    conn = connect(config.db_path)
+    try:
+        return get_state(conn, f"reflect:emitted:{session_id}") or {}
+    finally:
+        conn.close()
+
+
+def test_prompt_hash_moves_when_live_knowledge_changes(tmp_path):
+    """THE ROOT CAUSE, pinned at its source. The old cursor's docstring called
+    prompt_hash "the stable, always-present per-thread id" and scoped the drift hazard
+    to write_to='live'. In fact _build_prompt embeds a freshly-retrieved existing-
+    knowledge block, so ANY write to live knowledge — from any session, at any time —
+    moves the hash of a thread whose own observations never changed."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_batch, load_session_for_reflection
+
+    config = _mk_config(tmp_path, enabled=True)
+    # THE FIXTURE DEFAULT DISABLES THIS BLOCK ("skip FTS in tests"), and the block IS the
+    # defect — a suite that leaves it off cannot observe the drift at all. Production runs
+    # with include_existing_knowledge: true.
+    config.reflect.include_existing_knowledge = True
+    session_id = _mk_db_backed_session(config)
+    threads, observations = load_session_for_reflection(config, session_id)
+
+    render = lambda: [  # noqa: E731
+        b["prompt_hash"]
+        for b in emit_reflection_batch(config, session_id, threads, observations)
+    ]
+    before = render()
+    assert before, "precondition: the thread must render"
+    assert before == render(), (
+        "back-to-back renders must agree — the hash is not nondeterministic, it DRIFTS"
+    )
+
+    store(config.db_path, "Session work Filesystem observations tools filesystem", type="fact")
+    after = render()
+
+    assert after != before, (
+        "prompt_hash did NOT move after a live-knowledge write — if this ever passes, "
+        "the #733 premise is gone and the cursor could key on prompt_hash again"
+    )
+
+
+def test_a_drifting_hash_does_not_re_emit_or_inflate_the_cursor(tmp_path):
+    """THE SYMPTOM. Under the old key a drifted hash matched nothing, so the thread was
+    re-emitted AND a second entry appended — accumulating without bound. Measured on the
+    operator's store: 51 entries for 23 threads, remaining=-27."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    config.reflect.include_existing_knowledge = True  # the drift needs the block on
+    session_id = _mk_db_backed_session(config)
+
+    first = emit_reflection_pass(config, session_id)
+    assert first["count"] >= 1, "precondition: at least one thread emitted"
+
+    store(config.db_path, "Session work Filesystem observations tools filesystem", type="fact")
+
+    second = emit_reflection_pass(config, session_id)
+    assert second["count"] == 0, "a delivered thread must stay delivered across a knowledge write"
+
+    marker = _cursor(config, session_id)
+    assert len(marker["emitted"]) <= marker["total"], "cursor must never exceed the thread count"
+    assert marker.get("remaining", 0) >= 0, "remaining must never go negative"
+
+
+def test_a_corrupt_cursor_reads_as_pending_not_done(tmp_path):
+    """FAIL-CLOSED. An over-full cursor is not evidence of completion, and treating it as
+    completion is what dropped six sessions out of the SessionStart nudge — the reason
+    126 owed queue rows were reported to the operator as 50."""
+    from techne.core.reflect import _marker_has_unemitted_threads
+
+    assert _marker_has_unemitted_threads({"emitted": ["a"] * 51, "total": 24}) is True
+    assert _marker_has_unemitted_threads({"emitted": ["a", "b"], "total": 5}) is True
+    assert _marker_has_unemitted_threads({"emitted": ["a", "b"], "total": 2}) is False
+
+
+def test_a_legacy_cursor_is_rebuilt_from_the_drained_queue(tmp_path):
+    """A pre-#733 marker holds prompt_hashes that are unrecoverable, so the delivered set
+    comes from the ledger that was right all along — the queue rows already drained."""
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import _emitted_keys
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+
+    conn = connect(config.db_path)
+    tid = conn.execute("SELECT id FROM threads WHERE session_id = ?", (session_id,)).fetchone()[0]
+    conn.execute("DELETE FROM reflection_queue WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "INSERT INTO reflection_queue (session_id, thread_id, drained_at) VALUES (?,?,?)",
+        (session_id, tid, "2026-08-20 00:00:00"),
+    )
+    conn.commit()
+    set_state(conn, f"reflect:emitted:{session_id}", {"emitted": ["deadbeef"], "total": 1})
+    legacy = {"emitted": ["deadbeef"], "total": 1}
+    conn.close()
+
+    assert _emitted_keys(config, session_id, legacy) == {tid}, (
+        "a legacy marker's prompt_hashes must be discarded for the drained-queue record"
+    )
+
+
+def test_owed_threads_are_ordered_ahead_of_paid_ones(tmp_path):
+    """THE REPORTED SYMPTOM. The char budget is spent in order, so a session whose early
+    threads are already paid spent its whole budget re-rendering them and never reached
+    the owed rows — measured: 11 prompts emitted, ZERO of them owed."""
+    from techne.core.database import connect
+    from techne.core.reflect import _owed_first
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    conn = connect(config.db_path)
+    conn.execute("DELETE FROM reflection_queue WHERE session_id = ?", (session_id,))
+    for tid, drained in (("t-paid", "2026-08-20 00:00:00"), ("t-owed", None)):
+        conn.execute(
+            "INSERT OR IGNORE INTO threads (id, session_id, thread_num, label, summary) "
+            "VALUES (?,?,?,?,?)",
+            (tid, session_id, 1, tid, tid),
+        )
+        conn.execute(
+            "INSERT INTO reflection_queue (session_id, thread_id, drained_at) VALUES (?,?,?)",
+            (session_id, tid, drained),
+        )
+    conn.commit()
+    conn.close()
+
+    batch = [{"thread_id": "t-paid"}, {"thread_id": "t-owed"}]
+    assert [i["thread_id"] for i in _owed_first(config, session_id, batch)] == ["t-owed", "t-paid"]
+
+
+# ---------------------------------------------------------------------------
+# techne#734 round 1 (Prudence) — the fail-closed branch needed a way back out
+# ---------------------------------------------------------------------------
+
+
+def test_an_over_full_cursor_repairs_itself(tmp_path):
+    """CRITICAL 1. Reading a corrupt cursor as PENDING is right; leaving it corrupt is
+    not. The marker write used to be gated on `bool(batch)`, so once a session was fully
+    emitted nothing could ever rewrite it — Prudence measured five consecutive passes
+    reporting pending=True with no operation able to clear it. #733's silent drop turned
+    into a banner that nags forever, which is the same defect wearing the opposite sign.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import _marker_has_unemitted_threads, emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    emit_reflection_pass(config, session_id)  # drain it legitimately
+
+    marker = _cursor(config, session_id)
+    conn = connect(config.db_path)
+    set_state(
+        conn,
+        f"reflect:emitted:{session_id}",
+        {**marker, "emitted": [*marker["emitted"], "t-stale-0", "t-stale-1"]},
+    )
+    conn.close()
+    assert _marker_has_unemitted_threads(_cursor(config, session_id)), "precondition: corrupt"
+
+    emit_reflection_pass(config, session_id)  # a completed-but-EMPTY pass must repair
+
+    repaired = _cursor(config, session_id)
+    assert len(repaired["emitted"]) <= repaired["total"], "the pass must reconcile, not append"
+    assert not _marker_has_unemitted_threads(repaired), (
+        "a corrupt cursor with no work left must be CLEARABLE — otherwise the operator "
+        "is trained to ignore a banner that can never go green"
+    )
+
+
+def test_a_legacy_cursor_on_a_finished_session_stops_nagging(tmp_path):
+    """CRITICAL 1(a), the operator's own six sessions. A pre-#733 over-full marker on a
+    session whose queue IS fully drained rebuilt correctly, filtered the batch to empty,
+    and then never replaced the legacy marker — `key` stayed None pass after pass."""
+    from techne.core.database import connect
+    from techne.core.extension_state import set_state
+    from techne.core.reflect import _marker_has_unemitted_threads, emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    emit_reflection_pass(config, session_id)
+    conn = connect(config.db_path)
+    conn.execute(
+        "UPDATE reflection_queue SET drained_at = ? WHERE session_id = ?",
+        ("2026-08-20 00:00:00", session_id),
+    )
+    conn.commit()
+    set_state(  # a legacy marker: prompt_hashes, no `key`, wildly over-full
+        conn, f"reflect:emitted:{session_id}", {"emitted": [f"h{i}" for i in range(51)], "total": 1}
+    )
+    conn.close()
+
+    for _ in range(3):
+        emit_reflection_pass(config, session_id)
+
+    final = _cursor(config, session_id)
+    assert final.get("key") == "thread_id", "a legacy marker must be replaced, not orbited"
+    assert not _marker_has_unemitted_threads(final)
+
+
+def test_the_prompt_hash_fallback_cannot_grow_without_bound(tmp_path):
+    """CRITICAL 2. `_cursor_key` falls back to prompt_hash when thread_id is None, and I
+    argued that "inherits the instability for that case alone — re-offering it is the
+    only safe answer". Re-offering IS safe; APPENDING is #733 verbatim. Prudence measured
+    the cursor growing 1,2,3,4,5,6 across six passes with one knowledge write each."""
+    from techne.core.knowledge import store
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    config.reflect.include_existing_knowledge = True
+    session_id = _mk_db_backed_session(config)
+    # Force the fallback: no thread resolves to a persisted row.
+    import techne.core.thread_orchestrator as TO
+
+    orig = TO.persisted_thread_id
+    TO.persisted_thread_id = lambda *a, **k: None
+    try:
+        sizes = []
+        for _ in range(6):
+            emit_reflection_pass(config, session_id)
+            store(config.db_path, "Session work Filesystem observations tools", type="fact")
+            sizes.append(len(_cursor(config, session_id).get("emitted", [])))
+    finally:
+        TO.persisted_thread_id = orig
+
+    total = _cursor(config, session_id)["total"]
+    assert max(sizes) <= total, (
+        f"cursor grew to {max(sizes)} for {total} renderable threads — the fallback is "
+        f"still accumulating, which is #733 verbatim on the branch that closes it: {sizes}"
+    )
+
+
+def test_a_thread_id_collision_is_resolved_losslessly(tmp_path):
+    """IMPORTANT 2, twice corrected. Colliding Thread objects carry DIFFERENT observation
+    buckets (`obs_by_thread` is keyed on thread_num), so PICKING a winner discards the
+    loser's observations permanently — measured across three trees: main emitted both
+    (3 and 11), first-wins dropped the 11, richest-wins dropped the 3. Against the merge
+    base either choice was a net LOSS of memory, and the duplicate drain it avoided was
+    already a no-op (`drain_reflection_queue` is guarded on `drained_at IS NULL`).
+    Unioning the index sets keeps one item per persisted id AND every observation."""
+    import techne.core.thread_orchestrator as TO
+    from techne.core.reflect import emit_reflection_batch
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id, obs = _mk_session_with_obs(config, 14)
+    thin = Thread(thread_num=1, label="thin", summary="thin", observation_indices=list(range(3)))
+    fat = Thread(thread_num=2, label="fat", summary="fat", observation_indices=list(range(3, 14)))
+
+    orig = TO.persisted_thread_id
+    TO.persisted_thread_id = lambda *a, **k: "t-collide"
+    try:
+        batch = emit_reflection_batch(config, session_id, [thin, fat], obs)
+    finally:
+        TO.persisted_thread_id = orig
+
+    assert len(batch) == 1, "the collision must still yield one item per persisted id"
+    prompt = batch[0]["prompt"]
+    assert obs[0]["content"] in prompt, "thin's observations were discarded"
+    assert obs[13]["content"] in prompt, "fat's observations were discarded"
+
+
+def test_a_marker_reopens_when_the_session_grows():
+    """IMPORTANT 1 (#734 r2). A session with nothing renderable was stamped `total: 0`,
+    and `_marker_has_unemitted_threads` reads `total` FROM THE MARKER and never
+    recomputes it, so `0 < 0` is false forever — permanently suppressing the
+    SessionStart nudge and the #643 startup drain for a session that later gained work.
+
+    KEEP BOTH TESTS; NEITHER SUBSUMES THE OTHER. The end-to-end test below guards the
+    WIRING (that `pending_reflection` passes the count at all). This one is the repo's
+    ONLY guard on the legacy branch (`observations` absent → CANNOT TELL) and on the
+    equality boundary. Measured by Prudence: mutating `marker.get("observations")` to
+    `marker.get("observations", 0)` and deselecting this test leaves 3388 passing —
+    a mutation that re-surfaces every historical session forever, which this file's own
+    docstring calls worse than the bug being fixed. The end-to-end test structurally
+    cannot see it, because a fixture session written by current code always has the key."""
+    from techne.core.reflect import _marker_has_unemitted_threads
+
+    grown = {"key": "thread_id", "emitted": [], "total": 0, "observations": 3}
+    assert _marker_has_unemitted_threads(grown, observations=15) is True
+    assert _marker_has_unemitted_threads(grown, observations=3) is False, (
+        "an unchanged session must stay quiet — nudged at most once is the contract"
+    )
+    assert _marker_has_unemitted_threads({"emitted": [], "total": 0}, observations=99) is False, (
+        "a legacy marker carries no count; absent means CANNOT TELL, and re-surfacing "
+        "every historical session would be a worse regression than the one being fixed"
+    )
+
+
+def test_a_thin_session_that_grows_is_nudged_again(tmp_path):
+    """THE SEAM THE PREDICATE TEST CANNOT SEE (Prudence, #734 r3).
+
+    The whole re-open fix is ONE keyword argument — `observations=r["n"]` where
+    `pending_reflection` calls the predicate. Prudence deleted it, restoring the exact
+    d2b77ea behaviour, and ran the suite: 3388 passed. Nothing caught the FIX BEING
+    REMOVED, because the predicate test calls `_marker_has_unemitted_threads` directly
+    and never exercises the caller.
+
+    I had claimed this shape was structurally untestable — the session-level gate in
+    `pending_reflection` and the per-thread gate in `emit_reflection_batch` are the same
+    config value, so a nudge-eligible session is also renderable. THAT WAS A FAILURE OF
+    IMAGINATION, and recording it matters more than the test: the gate only binds when
+    emit has to *find* the session. `emit_reflection_pass` consults `pending_reflection`
+    only when `session_id` is None, so passing an explicit id skips it entirely. Emit
+    the session while it is honestly thin, then grow it."""
+    from techne.core.reflect import emit_reflection_pass, pending_reflection
+    from techne.core.state import add_observation
+    from techne.lifecycle import redetect_threads
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = start_session(config.db_path, project_path="/tmp/p", agent_identity="a")
+    for i in range(2):  # thin: below min_observations_per_thread, so nothing renders
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+    redetect_threads(config, session_id)
+
+    assert emit_reflection_pass(config, session_id)["count"] == 0, "precondition: thin"
+    assert _cursor(config, session_id)["total"] == 0, "precondition: the total:0 marker"
+
+    for i in range(12):  # the session keeps going and gains real work
+        add_observation(config.db_path, session_id, "Edit", f"later {i}")
+    redetect_threads(config, session_id)
+
+    assert session_id in [p["session_id"] for p in pending_reflection(config)], (
+        "a session stamped total:0 while thin, then grown, must re-open — this is the "
+        "assertion that fails when the `observations=` wiring is severed"
+    )
+
+    # THE NUDGE MUST HAVE WORK BEHIND IT, not merely fire. Without this the test passes
+    # even with the second `redetect_threads` deleted, which proves nothing about the
+    # load-bearing half of the original measurement (an explicit emit returned count: 1).
+    second = emit_reflection_pass(config, session_id)
+    assert second["count"] == 1, "the re-open must surface REAL work, not merely fire"
+    assert _cursor(config, session_id)["observations"] == 14, (
+        "emit must record the EXACT count it judged the session at — the marker is the "
+        "only thing the nudge reads, and `len(observations) + 1` passes the whole suite "
+        "while making a session that grows by exactly one never re-open"
+    )
