@@ -560,20 +560,30 @@ def test_an_unbound_rail_still_shows_what_its_last_run_did(config):
     assert "reflect.enabled = false" in detail, "and it must say WHY it is not authoritative"
 
 
-def test_an_unbound_rail_with_a_garbled_marker_still_reads_a_sentence(config):
+@pytest.mark.parametrize("marker_detail", ["garbled", ""])
+def test_an_unbound_rail_with_a_garbled_marker_still_reads_a_sentence(config, marker_detail):
     """The fail-closed path accepts an empty or unrecognised outcome, so a GARBLED marker
     reaches the unbound branch too. The naive interpolation rendered "last bound run :
     garbled", and with both fields empty it trailed off at "last bound run ". Cosmetic,
-    and operator-facing — which is the combination this card's own invariant says rots.
-    (Prudence, #743 r1 nit 5.)"""
+    and operator-facing — which is the combination `liveness.md` says rots.
+
+    ASSERTS THE SENTINEL ALONE, NOT THE SENTENCE (Prudence, #743 r2 answer to C). An
+    earlier version also asserted the ABSENCE of `"run : "`, on the theory that absence
+    survives a reword. It does not survive the second shape: with `detail=""` the broken
+    render is `"last bound run "`, which contains no `"run : "` at all, so the absence
+    assertion PASSES while blind. It catches a strict subset of what the sentinel catches.
+    Coupling to the token deliberately chosen survives any rewrite of the prose around it.
+
+    PARAMETRIZED because the docstring names two failure shapes and the single-case
+    version only ever rendered one — she had to construct the other by hand to check it.
+    """
     _bind(config)
-    record_rail_marker(config, "reflect", outcome="", detail="garbled")
+    record_rail_marker(config, "reflect", outcome="", detail=marker_detail)
 
     config.reflect.enabled = False
 
     detail = _reflect(config).detail
-    assert "last bound run <no outcome recorded>: garbled" in detail, detail
-    assert "run : " not in detail, f"the empty outcome leaked a stray colon: {detail}"
+    assert "<no outcome recorded>" in detail, detail
 
 
 def test_an_unbound_rail_with_an_error_marker_reads_dormant_not_broken(config):
@@ -693,7 +703,9 @@ def test_unbinding_retracts_a_stale_error_marker(config, monkeypatch):
 
     R.reflect_on_session(config, "sess-2", [Thread(thread_num=1, label="t", summary="s")], [])
 
-    assert not _marker(config, "reflect"), "a retracted rail must not keep reporting BROKEN"
+    assert not _marker(config, "reflect"), (
+        "a retracted rail must not keep a payload describing a run that cannot happen"
+    )
 
 
 def test_clear_rail_marker_is_idempotent(config):

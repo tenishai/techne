@@ -351,12 +351,34 @@ def clear_rail_marker(config, rail: str) -> None:
     """Retract a rail's marker because the rail is no longer bound to a model.
 
     THE MARKER'S CONTRACT IS "the last model-bound run, and how it went". Once a rail
-    has no binding there is no such run to describe, and leaving the old payload in
-    place makes `check_model_bound_rails` report a months-old failure as the current
-    state — the same stale-derived-fact defect the marker exists to expose, pointed
-    the other way. Unbinding a rail must return it to DORMANT, which the check reads
-    off the ABSENCE of a marker, so the retraction has to be a delete rather than a
-    fresh payload saying "unbound".
+    has no binding there is no such run to describe, so the payload stops being a
+    statement about now.
+
+    THE ORIGINAL REASON GIVEN HERE HAS EXPIRED — READ THIS BEFORE DELETING THIS
+    FUNCTION (techne#735). It used to say that leaving the payload in place makes
+    `check_model_bound_rails` report a months-old failure as the CURRENT STATE, and
+    that unbinding must return the rail to DORMANT "which the check reads off the
+    ABSENCE of a marker". Both are now false: the check asks `_rail_binding` FIRST, so
+    an unbound rail reads DORMANT off the BINDING, marker or no marker. Measured:
+
+        unbound + outcome='error'  ->  dormant, ok=True
+
+    So this retraction is no longer what makes the doctor honest, and a maintainer
+    weighing "can it go?" must not weigh it on the sentence that used to be here.
+
+    THE CONCLUSION SURVIVES ON A DIFFERENT REASON, and it is worth writing down because
+    nobody had (Prudence, #743 r2). The retraction must be a DELETE rather than a fresh
+    payload saying "unbound" — not because of what happens while unbound, but because
+    of what happens when the operator RE-BINDS. `unbound` is not a recognised outcome,
+    so it trips the #709 fail-closed arm the moment the rail is bound again. Measured:
+
+        retracted-as-payload ('unbound'), then RE-BOUND  ->  unknown
+        retracted-as-DELETE,              then RE-BOUND  ->  dormant
+
+    The open question is whether the retraction should exist at all: the unbound path
+    DELETES the payload while the disabled path KEEPS it, so "what did the last bound
+    run do?" is answerable on one path and not the other. Deliberately not decided in
+    techne#735 — it changes just-merged #732 behaviour.
 
     Best-effort and never raises, for the same reason as `record_rail_marker`: this is
     bookkeeping, and bookkeeping must not fail the teardown it runs inside.
