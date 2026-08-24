@@ -358,8 +358,15 @@ def clear_rail_marker(config, rail: str) -> None:
     FUNCTION (techne#735). It used to say that leaving the payload in place makes
     `check_model_bound_rails` report a months-old failure as the CURRENT STATE, and
     that unbinding must return the rail to DORMANT "which the check reads off the
-    ABSENCE of a marker". Both are now false: the check asks `_rail_binding` FIRST, so
-    an unbound rail reads DORMANT off the BINDING, marker or no marker. Measured:
+    ABSENCE of a marker".
+
+    THE FIRST IS NOW FALSE; THE SECOND IS NO LONGER LOAD-BEARING, and the distinction
+    matters because this is the canonical copy four other sites defer to (Prudence,
+    #743 r4 nit 1). The check does still read DORMANT off a marker's absence — the
+    `if not marker:` arm returns before `_rail_binding` is reached — so on THIS
+    function's own path that sentence describes what happens. What changed is that the
+    absence is no longer NECESSARY: an unbound rail with a marker still present reads
+    DORMANT off the BINDING. Measured:
 
         unbound + outcome='error'  ->  dormant, ok=True
 

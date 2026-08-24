@@ -1579,7 +1579,8 @@ def check_model_bound_rails(config) -> list[CheckResult]:
     incremented a counter nobody reads, and let teardown proceed. Two months of a rail
     reporting healthy while doing nothing.
 
-    So this check reads the MARKER, not the output: `rail:<name>:last_run`, written by
+    So this check reads the MARKER — and, since techne#735, the CONFIG; see below —
+    rather than the output: `rail:<name>:last_run`, written by
     `custodian.record_rail_marker` on every automatic or headless run, success and
     failure alike, with the reason.
 

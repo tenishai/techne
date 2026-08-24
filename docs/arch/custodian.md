@@ -1,7 +1,7 @@
 ---
 card: arch-card:techne-custodian
 updated: 2026-08-23
-anchor: techne/core/custodian.py sha=59d2878b9606e94d57ecbb8c900fb2c2fa3b1110
+anchor: techne/core/custodian.py sha=25cad6fb522cf8404c52cb8fe0cc16ad4e6b3b94
 ---
 # custodian — headless emit→ingest rails (techne#555)
 
