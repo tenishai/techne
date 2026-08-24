@@ -210,7 +210,7 @@ def _present(path: Path) -> bool:
     return path.is_file()
 
 
-def _archivist(config) -> BindingReport:
+def _archivist(config, start_path: str | None = None) -> BindingReport:
     """Delegates to the archivist's own resolver — it is the one domain whose binding
     is a config DECISION rather than a path lookup, and techne#552 spent a PR making
     that single-sourced. Re-deriving it here would be the seventh private opinion."""
@@ -289,7 +289,7 @@ def _registry_domain(domain: str, label: str) -> Callable[[object], BindingRepor
     techne#409 makes that a standing rule after path-derivation broke domain routing.
     """
 
-    def resolve(config) -> BindingReport:
+    def resolve(config, start_path: str | None = None) -> BindingReport:
         from techne.core.stores import store_path
 
         spec = config.stores.get(domain)
@@ -312,7 +312,7 @@ def _registry_domain(domain: str, label: str) -> Callable[[object], BindingRepor
     return resolve
 
 
-def _codex(config) -> BindingReport:
+def _codex(config, start_path: str | None = None) -> BindingReport:
     """Codex is db-per-repo (techne#209), so its binding is a property of WHERE YOU ARE.
 
     `absent` is the common, healthy state here in a way it is not for the other three:
@@ -325,7 +325,14 @@ def _codex(config) -> BindingReport:
     from techne.core.codex import resolve_repo_db_for_query
 
     try:
-        path = resolve_repo_db_for_query(config, os.getcwd())
+        # THE CALLER'S START PATH, NOT ALWAYS cwd. An MCP `codex_search` accepts a
+        # `repo` argument and reads THAT repo's index, so reporting cwd's binding
+        # beside those rows made the envelope deny the index it had just read from —
+        # and `_NO_REPO_HINT` routes callers to `repo` explicitly, so following the
+        # hint produced results labelled `absent`. Two derivations of one fact
+        # disagreeing is the #552 defect; this is the eighth instance.
+        # (Prudence, #725 r2.)
+        path = resolve_repo_db_for_query(config, start_path or os.getcwd())
     except Exception as exc:  # noqa: BLE001 — a fault is a report, not a crash
         # UNAVAILABLE, NOT ABSENT (Prudence, #717). `resolve_repo_db_for_query`
         # RETURNS None for both healthy absences — no repo, and a repo with no index —
@@ -367,11 +374,20 @@ DOMAINS: tuple[tuple[str, Callable], ...] = (
 )
 
 
-def domain_binding(config, domain: str) -> BindingReport:
-    """What ONE domain is bound to. Raises KeyError for an unknown domain."""
+def domain_binding(config, domain: str, start_path: str | None = None) -> BindingReport:
+    """What ONE domain is bound to. Raises KeyError for an unknown domain.
+
+    `start_path` is threaded to resolvers that are position-dependent — today only
+    codex, which is db-per-repo. A caller that READS one repo's index must be able to
+    REPORT that repo's binding; deriving it from cwd instead is how the envelope came
+    to deny an index it had just read from. (Prudence, #725 r2.)
+    """
     for name, resolver in DOMAINS:
         if name == domain:
-            return resolver(config)
+            # EVERY resolver takes the same shape, so no `except TypeError` is needed
+            # to tell them apart — that dance would silently swallow a genuine
+            # TypeError raised INSIDE a resolver and retry with fewer arguments.
+            return resolver(config, start_path)
     known = ", ".join(n for n, _ in DOMAINS)
     raise KeyError(f"unknown domain: {domain!r} (known: {known})")
 
@@ -386,7 +402,7 @@ def all_bindings(config) -> list[BindingReport]:
     out: list[BindingReport] = []
     for name, resolver in DOMAINS:
         try:
-            out.append(resolver(config))
+            out.append(resolver(config, None))
         except Exception as e:  # noqa: BLE001
             # UNAVAILABLE, NOT ABSENT — a resolver that failed and a domain that is
             # deliberately unconfigured are different facts, and reporting both as

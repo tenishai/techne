@@ -1020,6 +1020,69 @@ TOOLS = [
         },
     },
     {
+        "name": "archivist_search",
+        "description": (
+            "What the TEAM knows. Resolves to this instance's own knowledge when "
+            "the archivist is bound `local`, or to the team store when bound to "
+            "one — the answer says which. "
+            "One of techne's four knowledge domains (archivist, librarian, architect, "
+            "codex), addressable by name. Every answer carries the `binding` it "
+            "resolved to, so the same call keeps working as the domain grows from a "
+            "local store into a persona or a service. For 'what do we know about X' "
+            "across all four, use techne_recall instead — it escalates."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text"},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "librarian_search",
+        "description": (
+            "What is WRITTEN DOWN — documents, transcripts and cards. Today that "
+            "is the operator's own corpus; the role is the question, not the "
+            "file set. "
+            "One of techne's four knowledge domains (archivist, librarian, architect, "
+            "codex), addressable by name. Every answer carries the `binding` it "
+            "resolved to, so the same call keeps working as the domain grows from a "
+            "local store into a persona or a service. For 'what do we know about X' "
+            "across all four, use techne_recall instead — it escalates."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text"},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "architect_search",
+        "description": (
+            "Architectural PATTERNS — the 'what is worth stealing' corpus. Same "
+            "corpus as pattern_search, addressed by the domain name rather than "
+            "the mechanism. "
+            "One of techne's four knowledge domains (archivist, librarian, architect, "
+            "codex), addressable by name. Every answer carries the `binding` it "
+            "resolved to, so the same call keeps working as the domain grows from a "
+            "local store into a persona or a service. For 'what do we know about X' "
+            "across all four, use techne_recall instead — it escalates."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search text"},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "pattern_search",
         "description": (
             "Search the Architect's architectural-pattern corpus (architect.db) — design "
@@ -1663,6 +1726,31 @@ _NO_REPO_HINT = (
 )
 
 
+def _with_binding(config, payload: dict, start_path: str | None = None) -> dict:
+    """Add the codex domain's binding to an existing payload, WITHOUT changing its keys.
+
+    `codex_search` predates `core.domains` and callers depend on its shape, so the
+    binding is added rather than the response replaced. It matters because
+    `docs/mcp-tools.md` states that all four domains report what they resolved to —
+    and codex was the one that did not, so the doc was making a claim for a tool that
+    could not back it. The domain tests asserted the envelope of `domains.codex_search`,
+    which no MCP caller reaches. (Prudence, #725.)
+    """
+    from techne.core.bindings import domain_binding
+
+    # THE SAME START PATH THE READ USED. `_codex_repo_db` resolves
+    # `args["repo"] or cwd`; deriving the binding from cwd alone made the two disagree
+    # the moment a caller passed `repo` — and the no-repo hint tells them to.
+    report = domain_binding(config, "codex", start_path)
+    return {
+        **payload,
+        "domain": "codex",
+        "binding": report.binding,
+        "state": report.state,
+        "target": str(report.target) if report.target else None,
+    }
+
+
 def _codex_search(args: dict, config: Config) -> dict:
     """FTS over Codex symbols, scoped to the active repo (db-per-repo, techne#209)."""
     from techne.core.codegraph import (
@@ -1674,9 +1762,20 @@ def _codex_search(args: dict, config: Config) -> dict:
 
     query = args.get("query", "")
     limit = args.get("limit", 20)
+    # ONE EXPRESSION FOR "WHICH TREE ARE WE ASKING ABOUT", used by the binding and the
+    # freshness root. `_codex_repo_db` still re-derives it internally, so this is two of
+    # three consumers, not three — the comment said three and Prudence checked. It was
+    # spelled out
+    # three times — `args["repo"] or cwd` inside `_codex_repo_db`, again for the
+    # envelope, again for `index_freshness` — and every defect in this function this
+    # week has been two of those three disagreeing. They agree today; the point is that
+    # they now CANNOT disagree.
+    import os as _os
+
+    _start = args.get("repo") or _os.getcwd()
     db_path = _codex_repo_db(args, config)
     if db_path is None:
-        return {"results": [], "count": 0, "notice": _NO_REPO_HINT}
+        return _with_binding(config, {"results": [], "count": 0, "notice": _NO_REPO_HINT}, _start)
     hits = annotate_freshness(db_path, search_symbols(db_path, query, limit=limit))
     # "unknown" included (techne#595 r1): a hit whose file could not be read or
     # resolved is not a trustworthy hit, and counting only stale/missing meant an
@@ -1708,20 +1807,25 @@ def _codex_search(args: dict, config: Config) -> dict:
         # before the meta key existed (or by a path that never set it) resolves
         # every RELATIVE file path to "unknown", and an all-unknown scan reported
         # as "current" would be this very bug wearing the fix's clothes.
-        import os as _os
         from pathlib import Path as _Path
 
-        from techne.core.repo import find_repo_root
+        # PRIMARY, NOT THE WORKTREE (Prudence, #725 r3). `db_path` is the PRIMARY
+        # checkout's index — #719 made the read resolve there — while `find_repo_root`
+        # stops at the worktree, so freshness compared the primary's index against a
+        # different tree's files and called it stale. It fires on EVERY zero-result
+        # search from inside a review worktree: the envelope names the primary's db and
+        # the notice beside it calls that db stale on the strength of a tree it was
+        # never built from. Both halves predate this PR; the fix is the resolver #719
+        # already added for exactly this.
+        from techne.core.repo import primary_repo_root
 
-        idx = index_freshness(
-            db_path, repo_root=find_repo_root(_Path(args.get("repo") or _os.getcwd()))
-        )
+        idx = index_freshness(db_path, repo_root=primary_repo_root(_Path(_start)))
         result["index"] = idx
         # Rendered by core.codegraph so this tool and the grep-assist HOOK say the
         # same thing about the same nothing (techne#602). A second copy would be a
         # second definition of "how much can this absence be trusted".
         result["notice"] = zero_result_notice(idx)
-    return result
+    return _with_binding(config, result, _start)
 
 
 def _techne_archivist_query(args: dict, config: Config) -> dict:
@@ -1917,6 +2021,33 @@ def _codex_blast_radius(args: dict, config: Config) -> dict:
     if notices:
         result["notice"] = " ".join(notices)
     return result
+
+
+def _domain_search(domain: str):
+    """Address one knowledge domain BY NAME (techne#552, the connection seam).
+
+    The four names — archivist, librarian, architect, codex — are the vocabulary an
+    operator learns in techne and keeps when the infrastructure grows into liminal and
+    cabal. A local librarian may become a cabal persona and later a deployed service;
+    the CALL does not change, only the `binding` in the answer.
+
+    RECALL IS STILL THE DEFAULT. `techne_recall` escalates across all four rungs and is
+    the right answer to "what do we know about X". These are for when you already know
+    which function you want.
+    """
+
+    def handler(args: dict, config: Config) -> dict:
+        from techne.core.domains import SEARCH
+
+        return SEARCH[domain](config, args.get("query", ""), limit=args.get("limit", 20))
+
+    handler.__name__ = f"_{domain}_search"
+    return handler
+
+
+_archivist_search = _domain_search("archivist")
+_librarian_search = _domain_search("librarian")
+_architect_search = _domain_search("architect")
 
 
 def _pattern_search(args: dict, config: Config) -> dict:
@@ -2275,6 +2406,9 @@ TOOL_HANDLERS = {
     "codex_blast_radius": _codex_blast_radius,
     "techne_archivist_query": _techne_archivist_query,
     "techne_capabilities": _techne_capabilities,
+    "archivist_search": _archivist_search,
+    "librarian_search": _librarian_search,
+    "architect_search": _architect_search,
     "pattern_search": _pattern_search,
     "pattern_related": _pattern_related,
     "techne_reflect_emit": _techne_reflect_emit,
