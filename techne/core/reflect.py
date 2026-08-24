@@ -394,7 +394,7 @@ def load_session_for_reflection(config: Config, session_id: str) -> tuple[list[T
     return threads, observations
 
 
-def _marker_has_unemitted_threads(marker: dict | None) -> bool:
+def _marker_has_unemitted_threads(marker: dict | None, *, observations: int | None = None) -> bool:
     """Is a session still pending reflection given its emit-cursor marker (techne#269)?
 
     The ``reflect:emitted:<id>`` marker is a per-thread emit cursor: ``emitted`` is the
@@ -414,7 +414,35 @@ def _marker_has_unemitted_threads(marker: dict | None) -> bool:
     emitted = marker.get("emitted")
     if emitted is None:
         return False  # #268-era marker (no per-thread cursor) → treat as fully emitted
-    return len(emitted) < marker.get("total", len(emitted))
+    total = marker.get("total", len(emitted))
+    # A SESSION THAT LATER GROWS MUST RE-OPEN (Prudence, #734 r2). Writing on a
+    # completed-but-empty pass fixed the uncleanable cursor, but it also stamped
+    # `total: 0` on a session that had nothing renderable YET — and this function reads
+    # `total` out of the marker and never recomputes it, so `0 < 0` is false forever.
+    # MEASURED against both trees: thin session, empty emit, 12 observations backfilled,
+    # threads re-detected — origin/main nudged the session, the new marker returned []
+    # while an explicit emit returned count: 1. Both consumers went quiet (the
+    # SessionStart nudge and the #643 startup drain).
+    #
+    # The marker now records the observation count it was written at, so a caller that
+    # knows the CURRENT count can say "this session has grown since we judged it".
+    # Legacy markers carry no count and are unaffected — absent means "cannot tell",
+    # which keeps the old behaviour rather than re-surfacing every historical session.
+    seen_obs = marker.get("observations")
+    if observations is not None and seen_obs is not None and observations > seen_obs:
+        return True
+    if len(emitted) > total:
+        # A CORRUPT CURSOR MUST NOT READ AS "DONE" (techne#733). Recording more emitted
+        # entries than the session has threads is impossible under a stable key, so this
+        # marker's contents are not evidence of anything — and the arithmetic below would
+        # quietly answer "fully emitted" for the sessions whose bookkeeping is WORST.
+        # MEASURED on the operator's store: six sessions carried over-full cursors (one at
+        # 51 entries for 24 threads) and every one of them had dropped out of the
+        # SessionStart nudge, which is how 126 owed queue rows were reported as 50.
+        # "We do not know" is a reason to re-surface, never to stay silent — the same
+        # fail-open defect #709 closed in check_model_bound_rails.
+        return True
+    return len(emitted) < total
 
 
 def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
@@ -454,7 +482,9 @@ def pending_reflection(config: Config, *, limit: int = 5) -> list[dict]:
         return [
             {"session_id": r["session_id"], "observations": r["n"]}
             for r in rows
-            if _marker_has_unemitted_threads(get_state(conn, f"reflect:emitted:{r['session_id']}"))
+            if _marker_has_unemitted_threads(
+                get_state(conn, f"reflect:emitted:{r['session_id']}"), observations=r["n"]
+            )
         ]
     finally:
         conn.close()
@@ -634,11 +664,73 @@ def emit_reflection_batch(
     from techne.core.thread_orchestrator import persisted_thread_id
 
     obs_by_thread = _bucket_observations(threads, observations)
-    batch: list[dict] = []
+
+    eligible: list[tuple[str | None, Thread, list[dict]]] = []
     for t in threads:
         t_obs = obs_by_thread.get(t.thread_num, [])
         if len(t_obs) < config.reflect.min_observations_per_thread:
             continue
+        eligible.append((persisted_thread_id(config.db_path, session_id, t), t, t_obs))
+
+    # ONE ITEM PER PERSISTED THREAD, AND THE COLLISION IS RESOLVED LOSSLESSLY
+    # (techne#733; corrected by Prudence at #734 r2). Two Thread objects can resolve to
+    # ONE threads.id — re-detection splits a thread whose rows still map back to the
+    # saved row. Measured on session 0ae96e10: 24 items, 23 distinct ids.
+    #
+    # THE COLLIDING ITEMS ARE NOT THE SAME PROMPT, which is what an earlier revision of
+    # this comment claimed. `_bucket_observations` keys on `thread_num`, so each side
+    # carries its OWN observations and `_build_prompt` renders only what it is handed.
+    # So PICKING a winner — by first-seen or by richest — silently discards the loser's
+    # observations, and they never come back: measured across three trees, main emitted
+    # both (3 and 11 observations), first-wins dropped the 11, richest-wins dropped the
+    # 3. Against the merge base either choice converts "both reflected, one wasted
+    # drain" into "one reflected, the rest discarded" — on the rail whose whole stake is
+    # that dropping a thread loses the session's memory silently.
+    #
+    # AND THE DUPLICATE IT WAS AVOIDING WAS ALREADY HARMLESS: `drain_reflection_queue`
+    # is guarded on `drained_at IS NULL`, so the second stamp is a no-op.
+    #
+    # UNIONING THE INDEX SETS IS THEREFORE BOTH SMALLER AND CORRECT, and the reason is
+    # DETECTOR-CONDITIONAL — worth stating precisely on a change whose whole thesis is
+    # that trusting a comment cost two months (Prudence, #734 r3).
+    #
+    # On `threads.detector: heuristic` (the default) the buckets really are disjoint BY
+    # CONSTRUCTION: `split_at_boundaries` appends each index exactly once in ascending
+    # order and `merge_pass` only concatenates adjacent segments, so the indices arrive
+    # already sorted and unique and `sorted(set(...))` is a strict no-op for any thread
+    # that did not collide. On `threads.detector: llm` — a supported, validated config
+    # value — `observation_indices` comes from `_parse_threads` reading an LLM's free-text
+    # `Observations: 0,1,2` line, and NOTHING validates that parse for ordering,
+    # duplicates or overlap. "Every observation belongs to exactly one thread" is a
+    # REQUEST IN A PROMPT there, not an invariant.
+    #
+    # The union is still right on that path — it reorders to chronological, drops a
+    # duplicate render, and a genuine cross-thread overlap still merges correctly — but
+    # it is right for a weaker reason, and `sorted(set(...))` applies to every persisted
+    # tid rather than only collided ones, so the claim has to hold universally.
+    merged: dict[str, list[int]] = {}
+    rep: dict[str, int] = {}
+    for idx, (tid, t, t_obs) in enumerate(eligible):
+        if tid is None:
+            continue
+        keep = [i for i in t.observation_indices if 0 <= i < len(observations)]
+        if tid not in merged:
+            merged[tid], rep[tid] = list(keep), idx
+        else:
+            merged[tid].extend(keep)
+            # The representative supplies label/summary only; richest bucket describes
+            # the merged thread best.
+            if len(keep) > len(eligible[rep[tid]][2]):
+                rep[tid] = idx
+    for tid in merged:
+        merged[tid] = sorted(set(merged[tid]))
+
+    batch: list[dict] = []
+    for idx, (tid, t, t_obs) in enumerate(eligible):
+        if tid is not None:
+            if rep[tid] != idx:
+                continue
+            t_obs = [observations[i] for i in merged[tid]]
         prompt = _build_prompt(t, t_obs, config.db_path, config)
         prompt_hash = _prompt_hash(prompt)
         batch.append(
@@ -646,7 +738,7 @@ def emit_reflection_batch(
                 # The real persisted FK id — resolved against the threads table, not
                 # recomputed (techne#106: a re-detected thread hashes differently than
                 # the saved row on legacy sessions). None → candidate gets a NULL FK.
-                "thread_id": persisted_thread_id(config.db_path, session_id, t),
+                "thread_id": tid,
                 "session_id": session_id,
                 "thread_num": t.thread_num,
                 "prompt_hash": prompt_hash,
@@ -721,6 +813,91 @@ def reflection_debt_stats(config: Config) -> dict:
     return stats
 
 
+def _cursor_key(item: dict) -> str:
+    """The emit cursor's key for one batch item: the persisted thread id.
+
+    Falls back to `prompt_hash` ONLY for a thread with no persisted row (`thread_id` is
+    None — an unsaved/legacy thread). That fallback keeps the pre-#733 behaviour for the
+    one case it was actually chosen for, and inherits its instability for that case
+    alone: an unpersisted thread has no stable identity to key on, so re-offering it is
+    the only safe answer.
+    """
+    return item.get("thread_id") or item["prompt_hash"]
+
+
+#: Marker field naming the key `emitted` holds. Absent = a pre-#733 marker whose
+#: entries are prompt_hashes and cannot be compared against anything stable.
+_CURSOR_KEY = "thread_id"
+
+
+def _emitted_keys(config: Config, session_id: str, marker: dict | None) -> set[str]:
+    """The set of already-delivered thread keys for this session's emit cursor.
+
+    WHY THE KEY CHANGED (techne#733). The cursor used to store `prompt_hash`, described
+    as "the stable, always-present per-thread id". IT IS NOT STABLE. `_prompt_hash`
+    hashes the RENDERED prompt, and `_build_prompt` embeds a freshly-retrieved "What the
+    agent already knows" block — so the hash of an unchanged thread changes whenever
+    LIVE KNOWLEDGE changes, which every reflect/promote/`techne_store` call does. The
+    docstring scoped that hazard to `write_to='live'`; the real trigger is any write to
+    the knowledge table from any session, which is continuous.
+
+    The consequence is not a missed exclusion, it is an ACCUMULATING one: a drifted hash
+    matches nothing, so the thread is re-emitted AND a second entry is appended.
+    MEASURED: session 0ae96e10 held 51 entries for 23 renderable threads, 48 of which
+    matched no current render; `remaining` had gone to -27; six sessions were affected.
+
+    `thread_id` is the persisted FK — it is what `reflection_queue` is keyed on and what
+    `drain_reflection_queue` stamps, so keying here on the same thing makes the cursor
+    and the ledger agree by construction instead of by coincidence. prompt_hash stays
+    exactly where it belongs: candidate dedup (#236), which WANTS to notice a re-render.
+
+    A pre-#733 marker is not migrated in place — its contents are unrecoverable — so the
+    delivered set is rebuilt from the authoritative record: queue rows already drained.
+    A session with no queue rows at all (pre-#514) rebuilds to empty, which re-offers its
+    threads once. That is the safe direction: re-reading a thread costs a prompt, while
+    dropping one loses the session's memory silently.
+    """
+    if marker and marker.get("key") == _CURSOR_KEY:
+        return set(marker.get("emitted", []))
+    conn = connect(config.db_path)
+    try:
+        return {
+            r["thread_id"]
+            for r in conn.execute(
+                "SELECT thread_id FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NOT NULL",
+                (session_id,),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
+def _owed_first(config: Config, session_id: str, batch: list[dict]) -> list[dict]:
+    """Stable-sort the batch so threads with an UNDRAINED queue row come first.
+
+    The char budget is spent in order, so ordering decides what a capped pass can even
+    reach. Without this the budget goes to whatever sits earliest in thread order —
+    which on a session with paid early threads means re-rendering work already done
+    while the owed rows stay unreachable pass after pass (techne#733).
+    """
+    conn = connect(config.db_path)
+    try:
+        owed = {
+            r["thread_id"]
+            for r in conn.execute(
+                "SELECT thread_id FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NULL",
+                (session_id,),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    if not owed:
+        return batch
+    return sorted(batch, key=lambda i: i.get("thread_id") not in owed)
+
+
 def emit_reflection_pass(
     config: Config,
     session_id: str | None = None,
@@ -754,30 +931,39 @@ def emit_reflection_pass(
     threads, observations = load_session_for_reflection(config, session_id)
     batch = emit_reflection_batch(config, session_id, threads, observations)
     total = len(batch)
+    #: Every key this session can render RIGHT NOW. The cursor is reconciled against
+    #: this before it is persisted — see the write below.
+    current_ids = {_cursor_key(item) for item in batch}
 
     # Per-thread emit cursor (techne#269/#236): a session with more reflectable threads
     # than the emit cap must drain losslessly across passes — the #268 marker collapsed
     # the whole session to "emitted" on the first partial emit, so threads past the cap
-    # were never reflected. Load the prompt_hashes already delivered and exclude them, so
-    # each pass takes the NEXT slice of unemitted threads: no overlap, no loss. The cursor
-    # is keyed on prompt_hash — the stable, always-present per-thread id (thread_id can be
-    # NULL for unpersisted threads) and the same key #236 dedups candidates on.
+    # were never reflected. Load the keys already delivered and exclude them, so each pass
+    # takes the NEXT slice of unemitted threads: no overlap, no loss.
+    #
+    # THE CURSOR IS KEYED ON THE PERSISTED thread_id (see `_cursor_key`). The sentence
+    # that stood here until #733 said it was keyed on prompt_hash, "the stable,
+    # always-present per-thread id" — and TRUSTING THAT CLAIM IS WHAT COST TWO MONTHS.
+    # It is false: `_prompt_hash` hashes the RENDERED prompt and `_build_prompt` embeds a
+    # freshly-retrieved knowledge block, so the hash moves whenever anyone writes
+    # knowledge. prompt_hash is still the right key for #236's candidate dedup, which
+    # WANTS to notice a re-render; it was never right for a cursor.
     conn = connect(config.db_path)
     try:
         marker = get_state(conn, f"reflect:emitted:{session_id}")
     finally:
         conn.close()
-    already = set(marker.get("emitted", [])) if marker else set()
-    # Stability invariant: prompt_hash is derived from the rendered prompt INCLUDING the
-    # per-thread existing-knowledge block (reflect._build_prompt), so it must not shift
-    # between cursor passes mid-drain — otherwise an already-emitted thread re-appears.
-    # This holds on the DEFAULT path (write_to='candidates'): that path never mutates live
-    # knowledge, and a completed session's observations are frozen, so the hash is stable.
-    # KNOWN LIVE-MODE LIMITATION (write_to='live'): promoting knowledge mid-drain can alter
-    # a drained thread's existing-knowledge block, changing its prompt_hash. The cursor
-    # would then re-emit it, and #236's (prompt_hash, content) dedup would be sidestepped
-    # (duplicate candidate / re-promotion).
-    batch = [item for item in batch if item["prompt_hash"] not in already]
+    already = _emitted_keys(config, session_id, marker)
+    # THE "STABILITY INVARIANT" THAT USED TO BE ASSERTED HERE WAS FALSE, and stating it
+    # is more useful than deleting it. It claimed prompt_hash "must not shift between
+    # cursor passes mid-drain" and that this "holds on the DEFAULT path
+    # (write_to='candidates'): that path never mutates live knowledge". The scoping was
+    # the error — the hash moves on ANY live-knowledge write from ANY session, which is
+    # continuous, and the cursor keyed on it accumulated for two months (techne#733).
+    # The cursor now keys on the persisted thread_id, so no stability claim about the
+    # rendered prompt is load-bearing here any more.
+    batch = [item for item in batch if _cursor_key(item) not in already]
+    batch = _owed_first(config, session_id, batch)
 
     # Bound the payload so a large session can't produce a batch that exceeds the MCP
     # transport's token cap — an oversized emit used to error out AND still mark the
@@ -803,29 +989,69 @@ def emit_reflection_pass(
     # Cursor-relative truncation: `remaining` counts threads NOT YET emitted across all
     # passes (total minus the cumulative emitted set), so a multi-pass drain reports its
     # true shortfall and reaches 0 only when the whole session is done (techne#269).
-    newly = [item["prompt_hash"] for item in batch]
-    emitted_ids = sorted(already | set(newly))
+    newly = [_cursor_key(item) for item in batch]
+    # RECONCILE, DO NOT JUST APPEND (Prudence, #734 r1). Before this the cursor was only
+    # ever read and appended to, and THAT is what made every remaining #733 symptom
+    # permanent rather than transient:
+    #   * A key that no longer renders — a drifted `prompt_hash` from the None-thread_id
+    #     fallback, or a queue row rebuilt for a thread that is no longer emittable —
+    #     stayed in the set forever, so the set grew without bound (measured: 1,2,3,4,5,6
+    #     across six passes) and `len(emitted) > total` became permanent.
+    #   * The rebuild path could itself WRITE an over-full marker in the new format, so
+    #     it never took the rebuild path again and recorded `remaining: 0` while reading
+    #     pending — internally incoherent.
+    # Intersecting with what is renderable now makes the set describe REALITY at write
+    # time. A dropped key is re-offered next pass, which costs a prompt; leaving it in
+    # cost a cursor nobody could clear.
+    emitted_ids = sorted((already | set(newly)) & current_ids)
     truncated = len(emitted_ids) < total
-    remaining = total - len(emitted_ids)
+    # CLAMPED. A negative `remaining` is what an unstable cursor key produced for two
+    # months, and it reaches the operator through the SessionStart banner (techne#733).
+    remaining = max(0, total - len(emitted_ids))
     # A lone thread that alone exceeds the budget can't be delivered whole. Marking
     # the session emitted here would silently skip it — footgun 3, unchanged (Prudence,
     # #268). Detect it, leave the cursor UNADVANCED so the auto-trigger keeps surfacing
     # it, and flag the payload loudly.
     oversized = len(batch) == 1 and len(json.dumps(batch)) > max_chars
-    delivered = bool(batch) and not oversized
+    # A COMPLETED-BUT-EMPTY PASS MUST STILL WRITE (Prudence, #734 r1). The old guard was
+    # `bool(batch) and not oversized`, so once everything was emitted the marker could
+    # never be rewritten — and a session carrying a legacy or over-full cursor then read
+    # as PENDING on every pass with NO OPERATION ABLE TO CLEAR IT. Measured: five
+    # consecutive passes, `pending=True` every time, `key` never leaving None. That turns
+    # #733's silent drop into a banner that nags forever, which is the same defect wearing
+    # the opposite sign — an uncleanable warning trains the operator to ignore the rail.
+    # `oversized` STILL withholds the advance: that is #268 footgun 3, and a lone thread
+    # too big to deliver must keep re-surfacing.
+    delivered = not oversized
 
-    # Advance the cursor: record the cumulative set of emitted thread prompt_hashes plus
+    # Advance the cursor: record the cumulative set of emitted thread ids plus
     # the session's total, so pending_reflection re-surfaces the session until every
     # thread is drained (techne#269) and re-emits skip already-delivered threads. This is
     # ALSO the exactly-once reflected-marker (techne#236 Gap 2) — one unified marker, not
     # two. We do NOT advance when nothing deliverable was produced.
     if delivered:
+        # THE INVARIANT, ASSERTED AT THE WRITE POINT (Prudence, #734 r1). #733 survived
+        # two months because this was only ever checked by arithmetic that failed open —
+        # `len(emitted) < total` quietly answers "done" for the markers that are WORST.
+        # The reconciliation above makes this unreachable by construction, which is
+        # exactly why it belongs here: it cannot fire today, and it turns the next
+        # regression into a loud failure instead of another silent two months.
+        if len(emitted_ids) > total:
+            raise AssertionError(
+                f"reflect cursor invariant violated for {session_id}: "
+                f"{len(emitted_ids)} emitted keys > {total} renderable threads"
+            )
         conn = connect(config.db_path)
         try:
             set_state(
                 conn,
                 f"reflect:emitted:{session_id}",
                 {
+                    "key": _CURSOR_KEY,
+                    #: The session's observation count AT WRITE TIME. `total` alone
+                    #: cannot re-open a session that was judged empty and later grew,
+                    #: because this marker is the only thing the nudge reads (#734 r2).
+                    "observations": len(observations),
                     "emitted": emitted_ids,
                     "total": total,
                     "remaining": remaining,
