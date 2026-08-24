@@ -123,9 +123,14 @@ _OUTCOME_STATES = {"filed", "shipped", "rejected"}
 #: THE TRADE THIS MAKES, STATED BECAUSE IT IS NOT FREE (Prudence, #738). The ordinary
 #: `techne architect ingest` IS the declined path — `ingest_patterns_md` passes
 #: `overwrite_verdict=stated` where `stated = verdict is not None`, and the CLI's
-#: `--verdict` defaults to None. So for any row whose verdict is not `skip%`, this
-#: predicate is false and `surveyed_at` is now FIXED AT FIRST INGEST and never advances.
+#: `--verdict` defaults to None. So for the ordinary pattern-ingest path this
+#: predicate is false and `surveyed_at` FREEZES AT THE LAST ACCEPTED WRITE — usually
+#: first ingest, but on the `clears_skip` path the date moves once and freezes there.
 #: Before, it always advanced.
+#:
+#: AND `skip%` ROWS ARE NOT AN EXCEPTION, though it reads like they might be: the
+#: no-lift call site passes overwrite_verdict=False and does NOT pass clears_skip, so a
+#: skip row re-ingested through it freezes too — even with `--verdict` stated.
 #:
 #: BOTH BEHAVIOURS ARE WRONG, and this one is the less wrong. The column is carrying two
 #: facts in one slot — WHEN THE KEPT VERDICT WAS REACHED and WHEN WE LAST LOOKED — and
@@ -220,6 +225,11 @@ def upsert_investigation(
     a URL first seen as a no-lift bullet and later carrying patterns: the row kept
     `skip-with-flag` while owning a pattern, so `stats()` reported it under both
     `patterns` and `skips` at once.
+
+    BOTH FLAGS NOW GATE `surveyed_at` AS WELL AS THE VERDICT (techne#429). The names
+    say verdict and the behaviour is wider: declining the verdict also declines the
+    date, because the two are one fact — "this is the survey we are keeping". Noted
+    here because this docstring is what a call site and `help()` show.
     """
     if verdict not in VERDICTS:
         raise ValueError(
@@ -303,12 +313,16 @@ def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -
 
     Scoped by `before` (a surveyed_at date) rather than sweeping the whole table,
     so a genuine operator-supplied full-eval recorded after the fix is never
-    clobbered. Caveat, INVERTED BY techne#429: re-ingest no longer overwrites
-surveyed_at when it declines the verdict, and the ordinary ingest path IS the
-declined path. So a legacy row that has since been re-investigated now keeps its
-ORIGINAL date and falls INSIDE the sweep rather than outside it. Rows already
-re-ingested before that fix still carry the newer date and still need
-`set_verdict`; there is no way to tell the two populations apart.
+    clobbered.
+
+    Caveat, INVERTED BY techne#429: re-ingest no longer overwrites surveyed_at
+    when it declines the verdict, and the ordinary ingest path IS the declined
+    path. So a legacy row that has since been re-investigated now keeps its
+    ORIGINAL date and falls INSIDE the sweep rather than outside it. Rows already
+    re-ingested BEFORE that fix still carry the newer date and still need
+    `set_verdict` — and a genuine post-fix full-eval is BYTE-IDENTICAL to a
+    pre-fix clobbered legacy row in both columns, so there is no way to tell the
+    two populations apart. Do not widen `before` to catch the stragglers.
 
     dry_run=True by default: this rewrites the operator's corpus, so the caller
     has to ask for it twice.
