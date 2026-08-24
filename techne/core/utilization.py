@@ -45,15 +45,92 @@ from techne.core.stores import plain_connect
 _MEMORY_WRITE = ("mcp__techne__techne_store",)
 _MEMORY_READ = ("mcp__techne__techne_recall", "mcp__techne__techne_search")
 _CODEX_READ = ("mcp__techne__codex_search", "mcp__techne__codex_blast_radius")
-_ARCHITECT_READ = ("mcp__techne__pattern_search", "mcp__techne__pattern_related")
-# NOTE (techne#329 review): techne exposes NO librarian/library MCP read tool
-# (verified 2026-07-14 — the library store is reachable only via the `techne
-# library` CLI, which is not a tool-use observation). So a ledger of MCP
-# tool-uses structurally CANNOT measure librarian utilization — the prefix count
-# stays 0 by construction and must NOT be reported as "never queried" (that
-# implies a tool agents ignore, not a store the ledger can't see). The prefix
-# match is kept to auto-light-up if a librarian_* MCP tool is ever added.
+# The archivist's own read tools. `techne_archivist_query` is the SQL surface;
+# `archivist_search` is the domain-named one added in #724. Counted by nothing at all
+# until #727 r4 — so three of the four domain tools landed in the ledger and the
+# archivist's vanished. THE BITE DOES NOT NEED AN ARCHIVIST ROW: when a read moves from
+# `techne_recall` to `archivist_search`, which the docs tell operators to do,
+# `memory.read` falls and the panel reports a read-path DECLINE that is actually a
+# read-path MIGRATION. (Prudence, #725 r4.)
+_ARCHIVIST_READ = (
+    "mcp__techne__archivist_search",
+    "mcp__techne__techne_archivist_query",
+)
+_ARCHITECT_READ = (
+    "mcp__techne__pattern_search",
+    "mcp__techne__pattern_related",
+    "mcp__techne__architect_search",
+)
+# NOTE (techne#329 review): techne exposed NO librarian MCP read tool — the store
+# was reachable only via the `techne library` CLI, which is not a tool-use
+# observation — so this ledger structurally COULD NOT measure librarian
+# utilization, and 0 had to be reported as "invisible", never as "never queried"
+# (which implies a tool agents ignore rather than a store the ledger cannot see).
+#
+# THAT CHANGED IN #724: `librarian_search` exists, and it matches this prefix, so
+# the counting auto-lit-up exactly as the comment promised. `mcp_read_tool` did
+# NOT, because it was a HARDCODED False beside a prefix matcher that had already
+# started counting — the ledger had the number and declined to print it, telling
+# an operator "no MCP read tool" for a tool the tutorial tells them to call.
+# Prudence ranked that the one finding not to let reach the release notes (#727).
+#
+# So it is DERIVED now. A hardcoded boolean beside a derived count is two answers
+# to one question, and they drift the moment the surface grows — which is the
+# whole defect the domain vocabulary exists to remove.
 _LIBRARIAN_READ_PREFIX = "mcp__techne__librarian_"
+
+
+#: Domain -> the read tools its counter actually sums. ONE FACT, TWO CONSUMERS: the
+#: ledger counts through this and `_has_mcp_read_tool` asks through it, so the count
+#: and the "does a tool exist" boolean CANNOT disagree.
+#:
+#: They were two facts. The predicate asked "is a tool named `<domain>_*` registered?"
+#: — a naming convention — while the counters name tools that do not match their own
+#: domain prefix at all: `techne_archivist_query`, `pattern_search`, `pattern_related`.
+#: They agreed on the boolean only by luck of which tools happened to exist. Prudence
+#: demonstrated the divergence: seed 7 `techne_archivist_query` reads, drop
+#: `archivist_search`, and the panel prints "no MCP read tool — not visible to this
+#: ledger" while the dict holds `read: 7`. The count discarded and the operator told
+#: the opposite of the truth — the same inversion #727 fixed, through a different door.
+#: (#728 review r5.)
+_DOMAIN_READ_TOOLS: dict[str, tuple[str, ...] | str] = {
+    "archivist": _ARCHIVIST_READ,
+    "architect": _ARCHITECT_READ,
+    "codex": _CODEX_READ,
+    "librarian": _LIBRARIAN_READ_PREFIX,  # a PREFIX, so a new librarian_* tool auto-counts
+}
+
+
+def _has_mcp_read_tool(domain: str) -> bool:
+    """Does a domain have an MCP read tool at all?
+
+    ASKS THE REGISTRY THROUGH THE SAME TUPLE THE COUNTER SUMS, so the boolean and the
+    count are one fact rather than two that agree by luck. This distinguishes "0 because
+    agents ignore an existing tool" (a real behavioural signal) from "0 because there
+    is nothing to call" (ledger-invisible, not neglect) — and getting it wrong inverts
+    the meaning of every zero in the report.
+
+    A PREVIOUS VERSION WAS `domain in DOMAIN_NAMES`, WHICH IS A CONSTANT WEARING A
+    DERIVATION'S CLOTHES. Both call sites pass literals that are in `DOMAIN_NAMES`
+    forever, so it never consulted anything — I had replaced a hardcoded `False` with a
+    hardcoded `True`. Prudence proved it by removing `librarian_search` from the
+    registry: the tool was gone, the function still said True, and both tests stayed
+    green. (#727, caught in the #725 r4 review.)
+
+    Import is deliberately lazy: `mcp_server` imports from `core`, not the reverse, and
+    a module-level import here would invert that.
+    """
+    from techne.mcp_server import TOOL_HANDLERS
+
+    spec = _DOMAIN_READ_TOOLS.get(domain)
+    if spec is None:
+        return False
+    registered = {f"mcp__techne__{name}" for name in TOOL_HANDLERS}
+    if isinstance(spec, str):  # a prefix
+        return any(name.startswith(spec) for name in registered)
+    return any(name in registered for name in spec)
+
+
 # Code-write baseline for the codex "reads per edit" ratio. Edit only, to stay
 # directly comparable to #329's original finding (Edit dominates by ~100x).
 _CODE_EDIT = ("Edit",)
@@ -156,9 +233,7 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
             f"SELECT tool_name, COUNT(*) AS n FROM observations {where} GROUP BY tool_name",
             params,
         ).fetchall()
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM observations {where}", params
-        ).fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM observations {where}", params).fetchone()[0]
     finally:
         conn.close()
 
@@ -175,6 +250,7 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
     codex_read = sum_tools(_CODEX_READ)
     code_edit = sum_tools(_CODE_EDIT)
     architect_read = sum_tools(_ARCHITECT_READ)
+    archivist_read = sum_tools(_ARCHIVIST_READ)
     librarian_read = sum_prefix(_LIBRARIAN_READ_PREFIX)
 
     return {
@@ -190,10 +266,12 @@ def read_write_ledger(db_path: Path, *, since_days: int | None = None) -> dict:
             "edits_per_read": round(code_edit / codex_read, 1) if codex_read else None,
         },
         # mcp_read_tool distinguishes "0 because agents don't call an existing
-        # MCP tool" (architect — a real behavioural signal) from "0 because there
-        # is no MCP tool to call" (librarian — ledger-invisible, not neglect).
-        "architect": {"read": architect_read, "mcp_read_tool": True},
-        "librarian": {"read": librarian_read, "mcp_read_tool": False},
+        # MCP tool" (a real behavioural signal) from "0 because there is no MCP
+        # tool to call" (ledger-invisible, not neglect). DERIVED, not hardcoded —
+        # see `_has_mcp_read_tool`.
+        "architect": {"read": architect_read, "mcp_read_tool": _has_mcp_read_tool("architect")},
+        "librarian": {"read": librarian_read, "mcp_read_tool": _has_mcp_read_tool("librarian")},
+        "archivist": {"read": archivist_read, "mcp_read_tool": _has_mcp_read_tool("archivist")},
     }
 
 
@@ -366,8 +444,7 @@ def edit_rail_attribution(
         # Credited targets: dependents minus anything in the trigger's own file.
         credited_files = {_sym_file(s) for s in ids if _sym_file(s) != trigger_file}
         credited_names = {
-            n for s in ids
-            if _sym_file(s) != trigger_file and (n := _sym_name(s)) is not None
+            n for s in ids if _sym_file(s) != trigger_file and (n := _sym_name(s)) is not None
         }
 
         # The next `next_edits` edits within `window_minutes` after the injection.
@@ -670,8 +747,13 @@ def recall_attribution(
         for i in idset:
             it = items.setdefault(
                 i,
-                {"id": i, "encounters": 0, "sessions": set(),
-                 "cited_in_window": 0, "cited_in_session": 0},
+                {
+                    "id": i,
+                    "encounters": 0,
+                    "sessions": set(),
+                    "cited_in_window": 0,
+                    "cited_in_session": 0,
+                },
             )
             it["encounters"] += 1
             if inj["session_id"]:

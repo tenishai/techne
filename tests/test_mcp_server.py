@@ -78,6 +78,9 @@ class TestHandleRequest:
         tools = response["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == {
+            "archivist_search",
+            "librarian_search",
+            "architect_search",
             "techne_search",
             "techne_store",
             "techne_observe",
