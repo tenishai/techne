@@ -690,10 +690,24 @@ def emit_reflection_batch(
     # AND THE DUPLICATE IT WAS AVOIDING WAS ALREADY HARMLESS: `drain_reflection_queue`
     # is guarded on `drained_at IS NULL`, so the second stamp is a no-op.
     #
-    # UNIONING THE INDEX SETS IS THEREFORE BOTH SMALLER AND CORRECT. The buckets are
-    # disjoint by construction (an observation index belongs to one thread_num), and
-    # rebuilding from sorted indices keeps the merged bucket in chronological order
-    # rather than in whatever order the collision happened to arrive.
+    # UNIONING THE INDEX SETS IS THEREFORE BOTH SMALLER AND CORRECT, and the reason is
+    # DETECTOR-CONDITIONAL — worth stating precisely on a change whose whole thesis is
+    # that trusting a comment cost two months (Prudence, #734 r3).
+    #
+    # On `threads.detector: heuristic` (the default) the buckets really are disjoint BY
+    # CONSTRUCTION: `split_at_boundaries` appends each index exactly once in ascending
+    # order and `merge_pass` only concatenates adjacent segments, so the indices arrive
+    # already sorted and unique and `sorted(set(...))` is a strict no-op for any thread
+    # that did not collide. On `threads.detector: llm` — a supported, validated config
+    # value — `observation_indices` comes from `_parse_threads` reading an LLM's free-text
+    # `Observations: 0,1,2` line, and NOTHING validates that parse for ordering,
+    # duplicates or overlap. "Every observation belongs to exactly one thread" is a
+    # REQUEST IN A PROMPT there, not an invariant.
+    #
+    # The union is still right on that path — it reorders to chronological, drops a
+    # duplicate render, and a genuine cross-thread overlap still merges correctly — but
+    # it is right for a weaker reason, and `sorted(set(...))` applies to every persisted
+    # tid rather than only collided ones, so the claim has to hold universally.
     merged: dict[str, list[int]] = {}
     rep: dict[str, int] = {}
     for idx, (tid, t, t_obs) in enumerate(eligible):

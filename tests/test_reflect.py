@@ -2116,29 +2116,17 @@ def test_a_thread_id_collision_is_resolved_losslessly(tmp_path):
 
 
 def test_a_marker_reopens_when_the_session_grows(tmp_path):
-    """IMPORTANT 1 (#734 r2). Writing on a completed-but-empty pass fixed the uncleanable
-    cursor and introduced a new silence: a session with nothing renderable got
-    `total: 0`, and `_marker_has_unemitted_threads` reads `total` FROM THE MARKER and
-    never recomputes it, so `0 < 0` is false forever. Prudence measured origin/main
-    nudging such a session after a 12-observation backfill while the new marker returned
-    [] — with an explicit emit returning count: 1, so the work was really there. Both
-    consumers go quiet: the SessionStart nudge and the #643 startup drain.
+    """IMPORTANT 1 (#734 r2). A session with nothing renderable was stamped `total: 0`,
+    and `_marker_has_unemitted_threads` reads `total` FROM THE MARKER and never
+    recomputes it, so `0 < 0` is false forever — permanently suppressing the
+    SessionStart nudge and the #643 startup drain for a session that later gained work.
 
-    TESTED AT THE PREDICATE, NOT END-TO-END, AND THE REASON IS WORTH RECORDING: the
-    session-level gate in `pending_reflection` and the per-thread gate in
-    `emit_reflection_batch` are THE SAME CONFIG VALUE, so a fixture session that is
-    nudge-eligible is also renderable. Reproducing the real shape needs a session whose
-    observations split across threads that are each individually sub-threshold, which
-    the heuristic detector does not let a test force. Pinning the predicate is honest;
-    claiming an end-to-end reproduction here would not be.
-    """
-    from techne.core.reflect import _marker_has_unemitted_threads, emit_reflection_pass
+    Pins the predicate. The END-TO-END coverage — which is what actually guards the
+    wiring — is the test below; see its docstring for why this one is not enough."""
+    from techne.core.reflect import _marker_has_unemitted_threads
 
     grown = {"key": "thread_id", "emitted": [], "total": 0, "observations": 3}
-    assert _marker_has_unemitted_threads(grown, observations=15) is True, (
-        "a session stamped empty and since grown must re-open — the marker is the only "
-        "signal the nudge reads, so a stale one suppresses it permanently"
-    )
+    assert _marker_has_unemitted_threads(grown, observations=15) is True
     assert _marker_has_unemitted_threads(grown, observations=3) is False, (
         "an unchanged session must stay quiet — nudged at most once is the contract"
     )
@@ -2147,9 +2135,41 @@ def test_a_marker_reopens_when_the_session_grows(tmp_path):
         "every historical session would be a worse regression than the one being fixed"
     )
 
+
+def test_a_thin_session_that_grows_is_nudged_again(tmp_path):
+    """THE SEAM THE PREDICATE TEST CANNOT SEE (Prudence, #734 r3).
+
+    The whole re-open fix is ONE keyword argument — `observations=r["n"]` where
+    `pending_reflection` calls the predicate. Prudence deleted it, restoring the exact
+    d2b77ea behaviour, and ran the suite: 3388 passed. Nothing caught the FIX BEING
+    REMOVED, because the predicate test calls `_marker_has_unemitted_threads` directly
+    and never exercises the caller.
+
+    I had claimed this shape was structurally untestable — the session-level gate in
+    `pending_reflection` and the per-thread gate in `emit_reflection_batch` are the same
+    config value, so a nudge-eligible session is also renderable. THAT WAS A FAILURE OF
+    IMAGINATION, and recording it matters more than the test: the gate only binds when
+    emit has to *find* the session. `emit_reflection_pass` consults `pending_reflection`
+    only when `session_id` is None, so passing an explicit id skips it entirely. Emit
+    the session while it is honestly thin, then grow it."""
+    from techne.core.reflect import emit_reflection_pass, pending_reflection
+    from techne.core.state import add_observation
+    from techne.lifecycle import redetect_threads
+
     config = _mk_config(tmp_path, enabled=True)
-    session_id = _mk_db_backed_session(config)
-    emit_reflection_pass(config, session_id)
-    assert _cursor(config, session_id)["observations"] == 14, (
-        "emit must record the observation count it judged the session at"
+    session_id = start_session(config.db_path, project_path="/tmp/p", agent_identity="a")
+    for i in range(2):  # thin: below min_observations_per_thread, so nothing renders
+        add_observation(config.db_path, session_id, "Edit", f"edit {i}")
+    redetect_threads(config, session_id)
+
+    assert emit_reflection_pass(config, session_id)["count"] == 0, "precondition: thin"
+    assert _cursor(config, session_id)["total"] == 0, "precondition: the total:0 marker"
+
+    for i in range(12):  # the session keeps going and gains real work
+        add_observation(config.db_path, session_id, "Edit", f"later {i}")
+    redetect_threads(config, session_id)
+
+    assert session_id in [p["session_id"] for p in pending_reflection(config)], (
+        "a session stamped total:0 while thin, then grown, must re-open — this is the "
+        "assertion that fails when the `observations=` wiring is severed"
     )
