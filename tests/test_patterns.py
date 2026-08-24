@@ -897,3 +897,111 @@ def test_the_v3_to_v4_step_collapses_the_pre_rename_target(tmp_path):
         assert targets == {"liminal"}, "the pre-rename spelling must be collapsed, not kept"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# techne#429 — the ordinary ingest IS the declined path
+# ---------------------------------------------------------------------------
+
+
+def _one_pattern_md(surveyed: str) -> str:
+    return f"""---
+name: architectural-patterns
+---
+
+## Capability probing
+
+- **Source**: https://github.com/x/repo — `src/a.ts`
+- **Surveyed**: {surveyed}
+
+Probe for libsqlite3 and sqlite-vec; branch on availability.
+"""
+
+
+def _surveyed_at(db, url="https://github.com/x/repo"):
+    # Direct SQL: `investigations_for_url` projects (surveyed_by, lens, verdict,
+    # summary) and deliberately does not expose the date this test is about.
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT surveyed_at FROM investigations WHERE url = ?", (url,)
+        ).fetchone()
+        return row[0][:10] if row else None
+    finally:
+        conn.close()
+
+
+def test_the_ordinary_ingest_path_does_not_advance_the_survey_date(db):
+    """THE BINDING BETWEEN "THE CLI DEFAULT" AND "THE DECLINED PATH" (Prudence, #738 r2).
+
+    The comment block at patterns.py and the whole of techne#741 rest on one fact: the
+    ordinary `techne architect ingest` declines the verdict, so `surveyed_at` no longer
+    advances. Nothing held that in place. Prudence mutated `cli.py`'s `--verdict`
+    default from None to "patterns-only" — which falsifies the recorded mechanism and
+    inverts the sweep_legacy_verdicts caveat straight back — and the full suite stayed
+    green at 3393 passed. No test invokes the architect CLI group at all, and every
+    existing test calls upsert_investigation or ingest_patterns_md with an explicit
+    verdict, so the default was invisible to all of them.
+
+    This pins the `stated` half in the file that changes most. A failing assertion here
+    points straight at the comment that would otherwise have gone stale."""
+    ingest_patterns_md(db, _one_pattern_md("2026-01-01"))
+    assert _surveyed_at(db) == "2026-01-01"
+
+    ingest_patterns_md(db, _one_pattern_md("2026-08-24"))
+    assert _surveyed_at(db) == "2026-01-01", (
+        "the ordinary ingest declines the verdict, so the date must not advance — if "
+        "this fails, the trade recorded in patterns.py is no longer the trade being made"
+    )
+
+
+def test_an_ingest_that_states_a_verdict_does_advance_the_date(db):
+    """The other half, so the pair discriminates: when the verdict IS accepted the date
+    follows it. Without this, freezing the date unconditionally would also pass."""
+    ingest_patterns_md(db, _one_pattern_md("2026-01-01"))
+    ingest_patterns_md(db, _one_pattern_md("2026-08-24"), verdict="full-eval")
+    assert _surveyed_at(db) == "2026-08-24"
+
+
+def test_the_cli_verdict_default_is_what_makes_ingest_the_declined_path(db, tmp_path, monkeypatch):
+    """THE OTHER HALF OF THE BINDING — through the real CLI (Prudence, #738 r2).
+
+    The test above pins `stated = verdict is not None`, but it calls
+    `ingest_patterns_md` directly, so `cli.py`'s `--verdict` default stays invisible to
+    it. Prudence measured that NOTHING in the repo covers the architect CLI group, and
+    that changing that default from None to "patterns-only" falsifies the recorded
+    mechanism, inverts the sweep_legacy_verdicts caveat back to its old form, and
+    undermines techne#741 — while leaving 3393 tests green.
+
+    So this drives `techne architect ingest` itself with no --verdict. It is the first
+    CliRunner case against this group; the door is worth opening for a one-line default
+    that three artefacts depend on."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    class _Cfg:
+        architect_db_path = db
+        stores = {}
+
+    monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: _Cfg())
+    monkeypatch.setattr("techne.core.architect.architect_db", lambda *a, **k: db)
+
+    corpus = tmp_path / "corpus.md"
+    runner = CliRunner()
+
+    corpus.write_text(_one_pattern_md("2026-01-01"))
+    first = runner.invoke(main, ["architect", "ingest", str(corpus)])
+    assert first.exit_code == 0, first.output
+    assert _surveyed_at(db) == "2026-01-01", first.output
+
+    corpus.write_text(_one_pattern_md("2026-08-24"))
+    second = runner.invoke(main, ["architect", "ingest", str(corpus)])
+    assert second.exit_code == 0, second.output
+    assert _surveyed_at(db) == "2026-01-01", (
+        "`techne architect ingest` with no --verdict must DECLINE the verdict and "
+        "therefore leave the date alone. If this fails, cli.py's --verdict default "
+        "changed and the mechanism recorded in patterns.py is no longer true."
+    )

@@ -106,6 +106,51 @@ _TARGET_ALIASES = {"limenal": "liminal"}
 _OUTCOME_STATES = {"filed", "shipped", "rejected"}
 
 
+#: WHEN A RE-INGEST REPLACES THE STORED SURVEY, as ONE definition (techne#429/#711).
+#:
+#: `surveyed_at` used to be updated UNCONDITIONALLY while `verdict` was guarded, so a
+#: re-ingest that declined to replace the verdict still stamped the new date — pairing
+#: a date from one investigation with a verdict from another. The row then asserts,
+#: with no way to tell from the outside, that the OLD judgement was reached on the NEW
+#: date. That is the kind of claim `investigations` exists to make trustworthy: the
+#: liveness sweep in #431 and the drift mechanism in #505 both key on this date.
+#:
+#: The date and the verdict are ONE FACT — "this is the survey we are keeping" — so
+#: they must move together or not at all. Written once and interpolated into both
+#: assignments rather than repeated, because two spellings of one predicate is exactly
+#: how they drifted apart in the first place.
+#:
+#: THE TRADE THIS MAKES, STATED BECAUSE IT IS NOT FREE (Prudence, #738). The ordinary
+#: `techne architect ingest` IS the declined path — `ingest_patterns_md` passes
+#: `overwrite_verdict=stated` where `stated = verdict is not None`, and the CLI's
+#: `--verdict` defaults to None. So for the ordinary pattern-ingest path this
+#: predicate is false and `surveyed_at` FREEZES AT THE LAST ACCEPTED WRITE — usually
+#: first ingest, but on the `clears_skip` path the date moves once and freezes there.
+#: Before, it always advanced.
+#:
+#: AND `skip%` ROWS ARE NOT AN EXCEPTION, though it reads like they might be: the
+#: no-lift call site passes overwrite_verdict=False and does NOT pass clears_skip, so a
+#: skip row re-ingested through it freezes too — even with `--verdict` stated.
+#:
+#: BOTH BEHAVIOURS ARE WRONG, and this one is the less wrong. The column is carrying two
+#: facts in one slot — WHEN THE KEPT VERDICT WAS REACHED and WHEN WE LAST LOOKED — and
+#: declining to restate a judgement is not the same as declining to have looked. The old
+#: bug made the date too NEW (a fresh date on a stale verdict, undetectable from
+#: outside); this makes it too OLD (a frozen date on a URL we did re-survey). A frozen
+#: date is at least honest about the verdict it accompanies, which is what #431's
+#: liveness sweep and #505's drift mechanism actually key on. Splitting the two facts
+#: needs a `last_seen_at` column — tracked as techne#741, deliberately not a schema
+#: migration inside a release-gated fix.
+#:
+#: THE BOUNDARY IS DELIBERATE: `summary`, `skip_reason` and `maturity` below are still
+#: COALESCEd from the declined investigation, so a kept row can adopt a newer summary.
+#: They only ever fill a NULL, and unlike the date they make no claim about WHEN — so
+#: the "these are one fact" argument does not extend to them.
+_TAKES_NEW_SURVEY = (
+    "(:overwrite OR (:clears_skip AND investigations.verdict LIKE 'skip%'))"
+)
+
+
 def _wikilink_targets(body: str) -> list[str]:
     """Extract the referenced pattern names from `[[...]]` links in *body*.
 
@@ -180,6 +225,11 @@ def upsert_investigation(
     a URL first seen as a no-lift bullet and later carrying patterns: the row kept
     `skip-with-flag` while owning a pattern, so `stats()` reported it under both
     `patterns` and `skips` at once.
+
+    BOTH FLAGS NOW GATE `surveyed_at` AS WELL AS THE VERDICT (techne#429). The names
+    say verdict and the behaviour is wider: declining the verdict also declines the
+    date, because the two are one fact — "this is the survey we are keeping". Noted
+    here because this docstring is what a call site and `help()` show.
     """
     if verdict not in VERDICTS:
         raise ValueError(
@@ -198,11 +248,11 @@ def upsert_investigation(
                VALUES (:id, :url, :surveyed_by, :lens, :surveyed_at, :verdict,
                        :summary, :skip_reason, :maturity)
                ON CONFLICT(url, surveyed_by, lens) DO UPDATE SET
-                 surveyed_at = excluded.surveyed_at,
-                 verdict = CASE
-                             WHEN :overwrite THEN excluded.verdict
-                             WHEN :clears_skip AND investigations.verdict LIKE 'skip%'
-                                  THEN excluded.verdict
+                 surveyed_at = CASE WHEN """ + _TAKES_NEW_SURVEY + """
+                                 THEN excluded.surveyed_at
+                                 ELSE investigations.surveyed_at END,
+                 verdict = CASE WHEN """ + _TAKES_NEW_SURVEY + """
+                             THEN excluded.verdict
                              ELSE investigations.verdict END,
                  summary = COALESCE(excluded.summary, investigations.summary),
                  skip_reason = COALESCE(excluded.skip_reason, investigations.skip_reason),
@@ -263,9 +313,16 @@ def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -
 
     Scoped by `before` (a surveyed_at date) rather than sweeping the whole table,
     so a genuine operator-supplied full-eval recorded after the fix is never
-    clobbered. Caveat: because re-ingest currently overwrites surveyed_at
-    (techne#429), a legacy row that has since been re-investigated carries the
-    newer date and will fall outside the sweep — it will need `set_verdict`.
+    clobbered.
+
+    Caveat, INVERTED BY techne#429: re-ingest no longer overwrites surveyed_at
+    when it declines the verdict, and the ordinary ingest path IS the declined
+    path. So a legacy row that has since been re-investigated now keeps its
+    ORIGINAL date and falls INSIDE the sweep rather than outside it. Rows already
+    re-ingested BEFORE that fix still carry the newer date and still need
+    `set_verdict` — and a genuine post-fix full-eval is BYTE-IDENTICAL to a
+    pre-fix clobbered legacy row in both columns, so there is no way to tell the
+    two populations apart. Do not widen `before` to catch the stragglers.
 
     dry_run=True by default: this rewrites the operator's corpus, so the caller
     has to ask for it twice.
