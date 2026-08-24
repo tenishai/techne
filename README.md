@@ -18,10 +18,10 @@ techne has four knowledge domains, and you address each one **by name**:
 
 | | The question it answers | Ask it |
 |---|---|---|
-| **archivist** | *What does the team know?* | `archivist_search` · `techne archivist` |
-| **librarian** | *What is written down?* | `librarian_search` · `techne librarian` |
-| **architect** | *What is worth stealing?* | `architect_search` · `techne architect` |
-| **codex** | *What does the code look like?* | `codex_search` · `techne codex` |
+| **archivist** | *What does the team know?* | `archivist_search` · `techne archivist query` |
+| **librarian** | *What is written down?* | `librarian_search` · `techne librarian search` |
+| **architect** | *What is worth stealing?* | `architect_search` · `techne architect search` |
+| **codex** | *What does the code look like?* | `codex_search` · `techne codex index` |
 
 Every answer says **what it resolved to** — a `binding` (`absent` / `local` / `store`)
 and the concrete `target` path — so the call stays the same while the infrastructure
@@ -424,16 +424,16 @@ techne probe [--runtime claude-code|opencode] [--mode off-test|pull|differential
 
 # Domain stores — db-per-domain (each in its own db file beside techne.db)
 # Librarian (librarian.db) — documents: transcripts + markdown; recall the gist, fetch full on demand
-techne librarian                             # document + card counts
+techne librarian                           # document + card counts
 techne librarian index-transcripts [--platform claude-code] [--dir DIR]
 techne librarian index-markdown DIR [--source-type docs]
-techne librarian search QUERY                # full-text over document content
-techne librarian show DOC_ID                 # full document (the fetch-on-demand half)
-techne librarian card CARD_ID                # gist + resolve the document cross-db
+techne librarian search QUERY              # full-text over document content
+techne librarian show DOC_ID               # full document (the fetch-on-demand half)
+techne librarian card CARD_ID              # gist + resolve the document cross-db
 techne librarian cards emit|ingest|list|gist-transcripts
                                            # agent-assisted gist fill (no API key)
-techne librarian doctor                      # cross-db health check: dangling or stale cards
-techne librarian migrate-store               # one-time: move documents techne.db → librarian.db
+techne librarian doctor                    # cross-db health check: dangling or stale cards
+techne librarian migrate-store             # one-time: move documents techne.db → librarian.db
 
 # Architect (architect.db) — the architectural-patterns corpus
 techne architect                           # pattern / investigation counts

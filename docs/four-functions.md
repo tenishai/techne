@@ -13,6 +13,11 @@ That is the whole vocabulary. This page walks you through asking each one, readi
 what comes back, and — the part that matters most — watching the **same call** answer
 from a different place when the infrastructure underneath it changes.
 
+**Who types what.** `archivist_search(...)` and its three siblings are calls your *agent*
+makes over MCP — you will normally ask in English and it will pick one. Anything shown as
+a shell command (`techne bindings`, `techne librarian search`) is something *you* type.
+Each section below gives both.
+
 > **Why learn four names instead of one search box?** Because the names outlive this
 > tool. An operator learns *archivist, librarian, architect, codex* in techne and keeps
 > them when the work grows into liminal and cabal, where a local librarian may become a
@@ -181,7 +186,7 @@ time:
 | field | what it tells you |
 |---|---|
 | `domain` | which of the four answered |
-| `binding` | `absent` · `local` · `store` — *what kind of thing* it resolved to |
+| `binding` | `absent` · `local` · `store` — *what kind of thing* it resolved to. (Rarely `null`, when the resolver itself threw; `state` and `notice` still tell you what happened.) |
 | `state` | `readable` · `unavailable` — whether it could actually be read |
 | `target` | the concrete path, so you can go look |
 
@@ -209,7 +214,7 @@ looked and there was nothing" and "I could not look" are not the same answer, an
 memory system that collapses them will confidently tell you the team has never
 discussed something it discussed for a month.
 
-### A domain you have switched off says so
+### `absent` means "there is deliberately nothing here"
 
 ```json
 { "domain": "archivist", "binding": "absent", "state": "readable", "target": null, "count": 0 }
@@ -218,6 +223,23 @@ discussed something it discussed for a month.
 `binding: absent` with `state: readable` reads oddly until you see what it means:
 *nothing went wrong, there is deliberately nothing here.* `archivist: none` is a
 legitimate configuration, not a fault.
+
+**Your first `absent` will almost certainly be the codex, and it will not mean you
+switched anything off.** An unindexed repo has no codex, so on a fresh install
+`techne bindings` reads:
+
+```
+  codex      absent       no index for the active repo — `techne codex index <repo>`
+```
+
+The source says so in its own words (`core/bindings.py`): *`absent` is the common,
+healthy state here in a way it is not for the other three — an unindexed repo has no
+codex, which is a fact about that repo rather than a fault.*
+
+So the same value carries two readings, and they call for different actions. For the
+archivist, librarian and architect, `absent` means **you turned it off** and the answer
+is a shrug. For the codex it usually means **you have not indexed yet** — and the
+detail line hands you the command. Read the detail, not just the field.
 
 ---
 
@@ -275,6 +297,23 @@ narrow, but until it does, the mapping is not one-to-one. Tracked in techne#724.
 **The codex is experimental and manually indexed.** It does not watch your
 filesystem. `techne codex index` is a thing you run, and between runs the graph is a
 snapshot with a date on it.
+
+**And the codex has a silent argument: your working directory.** This one cuts against
+the claim above, so it belongs here rather than buried. `codex_search` resolves the repo
+from `repo` *or your cwd*, so the identical call answers differently depending on where
+you are standing. Measured — one repo, indexed, same config, same query:
+
+```
+cwd = the indexed repo : {"binding": "local",  "target": ".../tinyrepo-5d29667b.db", "count": 1}
+cwd = anywhere else    : {"binding": "absent", "target": null,                       "count": 0}
+```
+
+A hit and a miss. The envelope reports it honestly — `target` names the db, or `null` —
+which is the seam working as designed. But if you have just been taught that the call is
+invariant, you will read that `absent` as *"the index is gone"* rather than *"I am in the
+wrong directory."* This is a different axis from staleness above: **identity**, not
+freshness, and it is the more surprising of the two. Pass `repo` explicitly when it
+matters.
 
 **`techne_recall` is still the default for "what do we know about X".** It escalates
 across all four rungs for you. The four domain calls are for when you already know

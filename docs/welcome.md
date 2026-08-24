@@ -87,16 +87,23 @@ techne bindings
 
 ```
   archivist  local        resolves to this instance's own knowledge — no second store
-  librarian  local        documents at the default librarian.db
-  architect  local        patterns at the default architect.db
-  codex      local        index at ~/.techne/codex/techne-5e47adfd.db
+  librarian  local        documents at the default librarian.db (created on first write)
+  architect  local        patterns at the default architect.db (created on first write)
+  codex      absent       no index for the active repo — `techne codex index <repo>`
 ```
 
-**On a fresh solo install all four say `local`, and that is the correct answer rather
-than a degraded one.** The archivist resolving to your own knowledge is what *"what
-does the team know"* means when the team is you. The same call keeps working when a
+That is a genuinely fresh install, and **three of the four say `local` while the codex
+says `absent` — both are correct answers rather than degraded ones.**
+
+`local` means *"this resolves to something here"*. The archivist resolving to your own
+knowledge is what *"what does the team know"* means when the team is you. The same call keeps working when a
 team store appears — the answer's `binding` and `target` change, and it *tells you*
 they did, so you never have to guess which store you just read.
+
+`absent` means *"there is deliberately nothing here"* — and for the codex on day one
+that is not a fault, it is a fact about the repo you are standing in. You have not
+indexed anything yet, and the row tells you the command that changes it. The other
+three would only say `absent` if you had switched them off.
 
 That is the whole reason to learn four names instead of four file paths: `librarian.db`
 is where documents happen to live today; **the librarian is the function you are
