@@ -23,9 +23,39 @@ from techne.config import Config
 from techne.core import migrator
 from techne.core.stores import StoreAdapter, migrated_store, plain_connect
 
-ARCHITECT_VERSION = 5  # PRAGMA user_version on architect.db
+ARCHITECT_VERSION = 6  # PRAGMA user_version on architect.db
 
-ARCHITECT_SCHEMA = """
+_PATTERNS_FTS_DDL = """
+-- `source_url` IS INDEXED; its absence was a silent false negative (techne#430).
+-- The dedup step of investigate-url / survey-field asks `architect search "<url>"`
+-- before spending a subagent on a repo. With only (name, body) indexed that query
+-- STRUCTURALLY could not match a pattern by its source, and returned a confident
+-- "No patterns matched" — so an already-surveyed URL got re-investigated, and the
+-- caller was told the corpus had nothing. `unicode61` splits on `/`, `:` and `-`,
+-- so a full URL and a bare `owner/repo` slug both tokenise into matchable terms.
+CREATE VIRTUAL TABLE IF NOT EXISTS patterns_fts USING fts5(
+    name, body, source_url, content=patterns, content_rowid=rowid,
+    tokenize='porter unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS patterns_ai AFTER INSERT ON patterns BEGIN
+    INSERT INTO patterns_fts(rowid, name, body, source_url)
+    VALUES (NEW.rowid, NEW.name, NEW.body, NEW.source_url);
+END;
+CREATE TRIGGER IF NOT EXISTS patterns_ad AFTER DELETE ON patterns BEGIN
+    INSERT INTO patterns_fts(patterns_fts, rowid, name, body, source_url)
+    VALUES ('delete', OLD.rowid, OLD.name, OLD.body, OLD.source_url);
+END;
+CREATE TRIGGER IF NOT EXISTS patterns_au AFTER UPDATE ON patterns BEGIN
+    INSERT INTO patterns_fts(patterns_fts, rowid, name, body, source_url)
+    VALUES ('delete', OLD.rowid, OLD.name, OLD.body, OLD.source_url);
+    INSERT INTO patterns_fts(rowid, name, body, source_url)
+    VALUES (NEW.rowid, NEW.name, NEW.body, NEW.source_url);
+END;"""
+
+#: The FTS block is defined ONCE, above, and interpolated here — the v5→v6 step
+#: recreates it from the same constant, so the live schema and the migration cannot
+#: drift into two derivations of one DDL (techne#430).
+ARCHITECT_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS investigations (
     id           TEXT PRIMARY KEY,            -- hash(url, surveyed_by, lens)
     url          TEXT NOT NULL,
@@ -96,22 +126,7 @@ CREATE TABLE IF NOT EXISTS pattern_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_pattern_outcomes_state ON pattern_outcomes(state);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS patterns_fts USING fts5(
-    name, body, content=patterns, content_rowid=rowid,
-    tokenize='porter unicode61'
-);
-CREATE TRIGGER IF NOT EXISTS patterns_ai AFTER INSERT ON patterns BEGIN
-    INSERT INTO patterns_fts(rowid, name, body) VALUES (NEW.rowid, NEW.name, NEW.body);
-END;
-CREATE TRIGGER IF NOT EXISTS patterns_ad AFTER DELETE ON patterns BEGIN
-    INSERT INTO patterns_fts(patterns_fts, rowid, name, body)
-    VALUES ('delete', OLD.rowid, OLD.name, OLD.body);
-END;
-CREATE TRIGGER IF NOT EXISTS patterns_au AFTER UPDATE ON patterns BEGIN
-    INSERT INTO patterns_fts(patterns_fts, rowid, name, body)
-    VALUES ('delete', OLD.rowid, OLD.name, OLD.body);
-    INSERT INTO patterns_fts(rowid, name, body) VALUES (NEW.rowid, NEW.name, NEW.body);
-END;
+{_PATTERNS_FTS_DDL}
 """
 
 # Process-global memoization keyed on db_path: prevents re-running the migration
@@ -247,6 +262,58 @@ def _step_v4_to_v5_pattern_outcomes(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pattern_outcomes_state ON pattern_outcomes(state)")
 
 
+def _step_v5_to_v6_index_source_url(conn) -> None:
+    """Add `source_url` to patterns_fts and rebuild (techne#430).
+
+    AN fts5 EXTERNAL-CONTENT TABLE CANNOT GAIN A COLUMN IN PLACE — there is no
+    ALTER for a virtual table, and the triggers that feed it name their columns
+    positionally. So the table and all three triggers are dropped and recreated
+    from SCHEMA_SQL, then `rebuild` repopulates the index from `patterns`.
+
+    REBUILD IS THE POINT, not a tidy-up: recreating the table alone leaves it EMPTY
+    on an existing store, which would turn a silent false negative into a total one.
+    Structurally idempotent — dropping what may not exist and recreating from the
+    canonical DDL is safe on a retrofit-versioned db that re-runs the ladder.
+    """
+    # THE LADDER RUNS FROM WHEREVER THE STORE IS, INCLUDING v0, so `patterns` may not
+    # carry `source_url` yet when this step is reached — an external-content fts5 table
+    # resolves its columns against the content table at REBUILD time, and a missing one
+    # fails with `no such column: T.source_url`. Column-presence guard, matching the
+    # style the rest of the ladder uses: if the content column is not there, the store
+    # predates it and there is nothing to index.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(patterns)")}
+    if "source_url" not in cols:
+        return
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='patterns_fts'"
+    ).fetchone()
+    if row and "source_url" in (row[0] or ""):
+        return  # already the v6 shape
+    # ATOMIC (one BEGIN/COMMIT, matching _step_v0_to_v1_reshape_relations above and
+    # codex's edges rebuild) — and here the reason is sharper than "never leave the
+    # table dropped". `plain_connect` runs DDL in autocommit, so without this the DROPs
+    # and CREATE are durable the instant they execute while the `rebuild` INSERT waits
+    # on the runner's commit. An interruption in that window leaves the NEW-SHAPED
+    # table durable and EMPTY — and the shape guard above then short-circuits every
+    # retry, so `user_version` reaches 6 over an index holding nothing.
+    #
+    # MEASURED by Prudence across both crash windows: `search url: 0` AND
+    # `search name: 0` — not a partial degradation, the whole pattern index gone,
+    # permanently, with the store claiming it is migrated. The guard cannot repair it
+    # because it keys on the table's SHAPE while the invariant that matters is that the
+    # index is POPULATED, and those two come apart exactly when the step is interrupted.
+    conn.executescript(
+        "BEGIN;\n"
+        "DROP TRIGGER IF EXISTS patterns_ai;\n"
+        "DROP TRIGGER IF EXISTS patterns_ad;\n"
+        "DROP TRIGGER IF EXISTS patterns_au;\n"
+        "DROP TABLE IF EXISTS patterns_fts;\n"
+        + _PATTERNS_FTS_DDL
+        + "\nINSERT INTO patterns_fts(patterns_fts) VALUES ('rebuild');\n"
+        "COMMIT;\n"
+    )
+
+
 def _architect_run_steps(conn, current: int, target: int) -> None:
     """Apply architect.db migration steps from *current* up to *target*.
 
@@ -265,6 +332,8 @@ def _architect_run_steps(conn, current: int, target: int) -> None:
         _step_v3_to_v4_canonicalise_liminal(conn)
     if current < 5:
         _step_v4_to_v5_pattern_outcomes(conn)
+    if current < 6:
+        _step_v5_to_v6_index_source_url(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
