@@ -500,14 +500,21 @@ class TestADeadVectorChannelIsNotRecordedAsHealthy:
         only `failed` would keep passing if the signal fired unconditionally — which is
         a worse defect than the one being fixed, because it marks every healthy turn.
 
-        THE STUBS ARE NOT DECORATION (Prudence, #728 r4 nit 2). Without them this test
-        was green for a reason its own docstring did not describe: `sqlite_vec` is not
-        installed in this venv, so `search_vec` returned at the `import sqlite_vec`
-        ImportError — ONE EXIT EARLIER than the `backend_available()` gate the patch
-        below was meant to exercise, making that patch inert. Measured with a spy:
-        `backend_available() reached? False`. `_dead_backend` guards against exactly
-        this and names it; this test omitted the same two lines. It would also have
-        taken a different path on a box WITH sqlite-vec installed.
+        THE `sqlite_vec` STUB IS WHAT MAKES THE GATE REACHABLE (Prudence, #728 r4 nit 2).
+        Without it this test was green for a reason its own docstring did not describe:
+        `sqlite_vec` is not installed in this venv, so `search_vec` returned at the
+        `import sqlite_vec` ImportError — ONE EXIT EARLIER than the `backend_available()`
+        gate the patch below was meant to exercise, making that patch inert. Measured
+        with a spy: `backend_available() reached? False`. It would also have taken a
+        different path on a box WITH sqlite-vec installed.
+
+        `numpy` MIRRORS `_dead_backend`, WHERE IT IS ACTUALLY REACHED — here it is not.
+        numpy is imported AFTER the `backend_available()` gate, so patching the gate to
+        False returns before it, and a spy confirms the stub is never touched on this
+        path (#728 r5 nit 1). Kept for the symmetry with `_dead_backend` and because it
+        survives a future reordering; named as inert rather than claimed as load-bearing,
+        since an earlier version of this docstring asserted of BOTH stubs what is true of
+        one — which is the shape this whole round closed.
 
         NOT COVERED HERE, deliberately: a LIVE vector channel recording `ok`. Both
         halves of this pair are "the channel did not answer, quietly" — driving a
