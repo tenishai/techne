@@ -1539,7 +1539,10 @@ def _rail_binding(config, rail: str) -> tuple[bool, str]:
     derived from a marker without first asking whether the rail is currently bound.
 
     DELIBERATE BOUNDARY: `custodian.rails` is NOT consulted. It selects what the
-    SCHEDULED runner drives (`custodian.py:422`), and an excluded rail can still be run
+    SCHEDULED runner drives (`custodian.effective_rails` — NAMED rather than cited by
+    line, because a line number is the one citation form that goes stale silently, in
+    a change whose whole subject is prose that stopped being true; techne#747 is open
+    on that class), and an excluded rail can still be run
     explicitly with `--rail`, so exclusion is a scheduling choice rather than an absent
     binding. Widening this to scheduling would need its own decision.
     """
@@ -1585,6 +1588,20 @@ def check_model_bound_rails(config) -> list[CheckResult]:
     at every install that has not opted in is how a check gets trained into noise. The
     finding is a marker that EXISTS and says the run failed: that is a rail someone
     switched on which is not working.
+
+    AND SINCE techne#735 IT READS THE MARKER *AND THE CONFIG*, which the paragraph
+    above no longer tells you on its own. `_rail_binding` is asked FIRST: a marker
+    records a run under a configuration that may no longer exist, so an UNBOUND rail
+    reads DORMANT for every outcome — the payload is kept and shown, but it stops
+    driving the verdict. "The finding is a marker that says the run failed" therefore
+    holds only while the rail is STILL BOUND; an install that opted OUT now reads the
+    same as one that never opted in, which is the consistent reading rather than a new
+    exception.
+
+    THIS IS THE CHECK `liveness.md` MEANS when it justifies a verdict depending on
+    `config` against the `config:trust` precedent. A maintainer auditing which checks
+    read config lands HERE, so the contract has to say so — otherwise the card raises
+    the question and this docstring answers it wrongly. (Prudence, #743 r3.)
     """
     from techne.core.custodian import MARKER_PREFIX, RAILS
     from techne.core.database import connect

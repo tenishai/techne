@@ -656,9 +656,17 @@ def test_reflect_unbound_never_calls_a_model(config, monkeypatch):
 
 
 def test_reflect_unbound_reads_as_dormant_not_broken(config, monkeypatch):
-    """Unbound must leave NO marker. `check_model_bound_rails` reads DORMANT off the
-    marker's ABSENCE, and dormant is the truth for a rail answered by a resident
-    agent — a `noop:` payload would green it as LIVE, which it is not."""
+    """Unbound must leave NO marker, and dormant is the truth for a rail answered by a
+    resident agent.
+
+    THE STATED MECHANISM EXPIRED IN techne#735 and this docstring is corrected rather
+    than deleted, because what it PINS is still right. It used to say the check "reads
+    DORMANT off the marker's ABSENCE" and that "a `noop:` payload would green it as
+    LIVE": both are now false for an unbound rail, which reads DORMANT off the BINDING
+    regardless of what the marker holds. The retraction's live justification is in
+    `custodian.clear_rail_marker`'s docstring — it is about RE-BINDING, not about the
+    unbound state.
+    """
     from techne.core import reflect as R
     from techne.core.thread_orchestrator import Thread
 
