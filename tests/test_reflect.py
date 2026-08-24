@@ -2115,14 +2115,20 @@ def test_a_thread_id_collision_is_resolved_losslessly(tmp_path):
     assert obs[13]["content"] in prompt, "fat's observations were discarded"
 
 
-def test_a_marker_reopens_when_the_session_grows(tmp_path):
+def test_a_marker_reopens_when_the_session_grows():
     """IMPORTANT 1 (#734 r2). A session with nothing renderable was stamped `total: 0`,
     and `_marker_has_unemitted_threads` reads `total` FROM THE MARKER and never
     recomputes it, so `0 < 0` is false forever — permanently suppressing the
     SessionStart nudge and the #643 startup drain for a session that later gained work.
 
-    Pins the predicate. The END-TO-END coverage — which is what actually guards the
-    wiring — is the test below; see its docstring for why this one is not enough."""
+    KEEP BOTH TESTS; NEITHER SUBSUMES THE OTHER. The end-to-end test below guards the
+    WIRING (that `pending_reflection` passes the count at all). This one is the repo's
+    ONLY guard on the legacy branch (`observations` absent → CANNOT TELL) and on the
+    equality boundary. Measured by Prudence: mutating `marker.get("observations")` to
+    `marker.get("observations", 0)` and deselecting this test leaves 3388 passing —
+    a mutation that re-surfaces every historical session forever, which this file's own
+    docstring calls worse than the bug being fixed. The end-to-end test structurally
+    cannot see it, because a fixture session written by current code always has the key."""
     from techne.core.reflect import _marker_has_unemitted_threads
 
     grown = {"key": "thread_id", "emitted": [], "total": 0, "observations": 3}
@@ -2172,4 +2178,15 @@ def test_a_thin_session_that_grows_is_nudged_again(tmp_path):
     assert session_id in [p["session_id"] for p in pending_reflection(config)], (
         "a session stamped total:0 while thin, then grown, must re-open — this is the "
         "assertion that fails when the `observations=` wiring is severed"
+    )
+
+    # THE NUDGE MUST HAVE WORK BEHIND IT, not merely fire. Without this the test passes
+    # even with the second `redetect_threads` deleted, which proves nothing about the
+    # load-bearing half of the original measurement (an explicit emit returned count: 1).
+    second = emit_reflection_pass(config, session_id)
+    assert second["count"] == 1, "the re-open must surface REAL work, not merely fire"
+    assert _cursor(config, session_id)["observations"] == 14, (
+        "emit must record the EXACT count it judged the session at — the marker is the "
+        "only thing the nudge reads, and `len(observations) + 1` passes the whole suite "
+        "while making a session that grows by exactly one never re-open"
     )
