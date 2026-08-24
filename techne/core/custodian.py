@@ -347,6 +347,33 @@ def record_rail_marker(config, rail: str, *, outcome: str, detail: str = "") -> 
         log.warning("custodian: could not record marker for rail %s", rail, exc_info=True)
 
 
+def clear_rail_marker(config, rail: str) -> None:
+    """Retract a rail's marker because the rail is no longer bound to a model.
+
+    THE MARKER'S CONTRACT IS "the last model-bound run, and how it went". Once a rail
+    has no binding there is no such run to describe, and leaving the old payload in
+    place makes `check_model_bound_rails` report a months-old failure as the current
+    state — the same stale-derived-fact defect the marker exists to expose, pointed
+    the other way. Unbinding a rail must return it to DORMANT, which the check reads
+    off the ABSENCE of a marker, so the retraction has to be a delete rather than a
+    fresh payload saying "unbound".
+
+    Best-effort and never raises, for the same reason as `record_rail_marker`: this is
+    bookkeeping, and bookkeeping must not fail the teardown it runs inside.
+    """
+    from techne.core.database import connect
+    from techne.core.extension_state import clear_state
+
+    try:
+        conn = connect(config.db_path)
+        try:
+            clear_state(conn, f"{MARKER_PREFIX}:{rail}:last_run")
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        log.warning("custodian: could not clear marker for rail %s", rail, exc_info=True)
+
+
 def _empty_outcome(rail, config) -> str:
     """The `noop:` reason for an empty batch — rail-specific when it can say, generic
     otherwise. Never raises; a diagnostic must not fail the run it describes.

@@ -309,16 +309,33 @@ class InjectionConfig:
 
 @dataclass
 class ReflectConfig:
-    # End-of-session reflection: an LLM scans each detected thread and proposes
-    # durable knowledge / identity entries worth keeping. Off by default; opt
-    # in per host. While `write_to="candidates"` the live knowledge / identity
-    # tables are never touched — proposals land in `knowledge_candidates` for
-    # human review via `techne reflect review`.
+    """End-of-session reflection: each detected thread is distilled into durable
+    knowledge / identity entries worth keeping. While `write_to="candidates"` the live
+    knowledge / identity tables are never touched — proposals land in
+    `knowledge_candidates` for human review via `techne reflect review`.
+
+    TWO SWITCHES, AND THEY ARE NOT THE SAME SWITCH.
+
+    `enabled` turns the FEATURE on: the SessionStart nudge and the reflection-debt
+    queue, which drive the resident emit→ingest route where a live agent answers the
+    prompts with its own model. That route needs no binding and no key, and on most
+    instances it is the only one that ever runs.
+
+    `model` binds the AUTOMATIC pass — the unattended run at session teardown. Empty
+    means unbound, which means that pass does not run at all. Enabled-with-no-model is
+    a normal, fully-working posture, not a half-configured one.
+    """
+
     enabled: bool = False
     min_observations_per_thread: int = 8
     min_confidence: str = "medium"
     max_candidates_per_thread: int = 5
-    model: str = ""  # falls back to Config.model when empty
+    #: Any LiteLLM identifier. Empty means the automatic pass is UNBOUND and skipped.
+    #: THERE IS DELIBERATELY NO FALLBACK TO `Config.model` — inheriting the
+    #: session-wide model is what bound this rail to a credential plane the operator
+    #: did not hold and left it failing silently for two months (techne#555). Same
+    #: rule, and the same reason, as `CustodianConfig.model` below.
+    model: str = ""
     include_existing_knowledge: bool = True
     existing_knowledge_k: int = 10
     write_to: ReflectWriteTo = "candidates"
