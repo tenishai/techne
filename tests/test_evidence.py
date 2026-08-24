@@ -1718,3 +1718,149 @@ class TestProbeLengthTestPressure:
         _insert_obs(db_path, "s", "Edit", "Edited: a.py\nChange: x → y")
         _insert_obs(db_path, "s", "Bash", "Ran: pytest -q")  # no Output section
         assert probe_length_test_pressure(db_path)["bash_rows"] == 0
+
+
+# ---------------------------------------------------------------------------
+# techne#545 — a test run behind a transparent prefix contributed no evidence
+# ---------------------------------------------------------------------------
+
+
+class TestTransparentPrefixes:
+    """The gate saw `pytest -q` and `env bash -c 'pytest -q'` but not `timeout 60
+    pytest -q`. Measured on main before the fix, every wrapped form was False.
+
+    THE MISS IS NOT HARMLESS. An unrecognised row is discarded WHOLE, so its failures
+    never reach `all_failed` and a smaller intact run elsewhere in the window certifies
+    green — the #438 starvation shape, i.e. a false green rather than a missing signal.
+    """
+
+    def test_the_wrapped_forms_from_the_issue_are_recognised(self):
+        from techne.core.evidence import _command_runs_tests
+
+        for cmd in (
+            "pytest -q",
+            "env bash -c 'pytest -q'",
+            "timeout 60 pytest -q",
+            "nice -n 10 pytest -q",
+            "nohup pytest -q",
+            "stdbuf -o0 pytest -q",
+        ):
+            assert _command_runs_tests(cmd), f"{cmd!r} runs tests and must be seen"
+
+    def test_prefixes_compose_and_carry_their_option_grammars(self):
+        """Each prefix has a DIFFERENT grammar, which is why `_skip_env_prefix` could
+        not simply absorb them: `nice -n` takes a value on a letter `env` does not
+        know, and `timeout` carries a mandatory POSITIONAL duration before the
+        command — without which the duration reads as the command head."""
+        from techne.core.evidence import _command_runs_tests
+
+        for cmd in (
+            "env FOO=1 nice -n 10 timeout 60 pytest -q",
+            "timeout --signal=KILL 5m pytest",
+            "stdbuf -o 0 pytest -q",
+            "timeout 60 make test",  # the subcommand path, not just a runner head
+        ):
+            assert _command_runs_tests(cmd), f"{cmd!r} must resolve to the real head"
+
+    def test_a_bare_prefix_is_not_a_test_run(self):
+        """`nohup` alone runs nothing. Left where it is, matching `_skip_env_prefix`'s
+        rule for bare `env` — otherwise the skipper walks off the end and the caller
+        loses the head it actually has."""
+        from techne.core.evidence import _command_runs_tests
+
+        # NOTE the UNQUOTED `pytest`. With quotes the token is the six-character
+        # string `'pytest'` — `_command_runs_tests` splits on whitespace, not shlex —
+        # so the assertion held for a second, accidental reason and would have kept
+        # passing if the _DASH_M_IS_A_MESSAGE guard were deleted (Prudence, #737 nit 2).
+        for cmd in ("nohup", "timeout 60", "nice", "timeout 60 git commit -m pytest"):
+            assert not _command_runs_tests(cmd), f"{cmd!r} does not run tests"
+
+
+class TestOneGetoptRule:
+    """#737 Important. The transparent-prefix skipper carried a SECOND, weaker copy of
+    getopt's cluster rule — `t[1] in value_letters and len(t) == 2` — 25 lines above
+    the correct one, and it drifted inside the very PR whose docstring argues against
+    reimplementing a grammar because "a second copy would drift".
+
+    getopt binds a value to the first VALUE LETTER in a cluster, and consumes the
+    following token only when that letter is LAST. Both spellings below are uncommon,
+    but a miss here is a false green, not a harmless gap — this file's own standard."""
+
+    def test_a_clustered_flag_before_a_value_letter_is_read_correctly(self):
+        from techne.core.evidence import _command_runs_tests
+
+        # `-vs KILL` — `v` is a flag, `s` is the value letter and is LAST, so KILL is
+        # consumed. Under the drifted rule the index landed on `60`, not `pytest`.
+        assert _command_runs_tests("timeout -vs KILL 60 pytest")
+        assert _command_runs_tests("ionice -tc 2 pytest")
+
+    def test_an_attached_value_consumes_only_its_own_token(self):
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("stdbuf -oL pytest")
+        assert _command_runs_tests("stdbuf -o L pytest")
+
+    def test_env_still_uses_the_same_rule(self):
+        """The helper is shared, so `env`'s own measured cases must not regress:
+        `-uCC bash` consumes one token (CC is attached), `-iu CC` consumes two."""
+        from techne.hooks.post_tool_use import _skip_transparent_prefixes
+
+        for cmd in ("env -uCC bash -c pytest", "env -iu CC bash -c pytest"):
+            tokens = cmd.split()
+            assert tokens[_skip_transparent_prefixes(tokens)] == "bash", cmd
+
+    def test_the_helper_matches_stdlib_getopt_over_every_cluster(self):
+        """THE RULE, EXECUTED AGAINST AN INDEPENDENT IMPLEMENTATION (Prudence, #737 r2).
+
+        This grammar has been got wrong three times in this repo and every miss is a
+        false green. Documentation is what we had; `getopt` is the same C grammar the
+        real utilities use, it ships with Python, and it needs no coreutils — so the
+        part most likely to go wrong is now the part most verified. She ran 11,368
+        clusters across the transparent rows and `env`'s letters with 0 disagreements;
+        this pins it permanently."""
+        import getopt as _getopt
+        import itertools
+
+        from techne.hooks.post_tool_use import (
+            _ENV_VALUE_LETTERS,
+            _TRANSPARENT_PREFIXES,
+            _getopt_cluster_advance,
+        )
+
+        letter_sets = [_ENV_VALUE_LETTERS] + [spec[0] for spec in _TRANSPARENT_PREFIXES.values()]
+        alphabet = "ucsknoiePt0"
+        checked = 0
+        for value_letters in letter_sets:
+            if not value_letters:
+                continue
+            spec = "".join(c + (":" if c in value_letters else "") for c in alphabet)
+            for size in (1, 2, 3):
+                for combo in itertools.product(alphabet, repeat=size):
+                    token = "-" + "".join(combo)
+                    # getopt consumes the next token iff it parses `token VALUE` but
+                    # not `token` alone — the operational definition of "takes a value".
+                    try:
+                        _getopt.getopt([token], spec)
+                        consumes = 1
+                    except _getopt.GetoptError:
+                        try:
+                            _getopt.getopt([token, "VALUE"], spec)
+                            consumes = 2
+                        except _getopt.GetoptError:
+                            continue  # not a legal cluster at all
+                    assert _getopt_cluster_advance(token, value_letters) == consumes, (
+                        f"{token!r} with {sorted(value_letters)}: helper says "
+                        f"{_getopt_cluster_advance(token, value_letters)}, getopt says {consumes}"
+                    )
+                    checked += 1
+        assert checked > 1000, f"the corpus must be substantial, got {checked}"
+
+    def test_the_helper_contract_directly(self):
+        """nit 3 — the docstring's own examples as assertions, so a failure names the
+        RULE rather than naming a command."""
+        from techne.hooks.post_tool_use import _getopt_cluster_advance as adv
+
+        assert adv("-vs", frozenset({"s", "k"})) == 2, "value letter LAST consumes next"
+        assert adv("-uCC", frozenset({"u"})) == 1, "value attached in-token"
+        assert adv("-tc", frozenset({"c"})) == 2, "flag then value letter, last"
+        assert adv("-i", frozenset({"u"})) == 1, "no value letter present"
