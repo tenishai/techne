@@ -721,3 +721,102 @@ def test_widening_the_target_set_did_not_weaken_the_pr130_guard():
     assert _apply_targets("This was **built in techne** last year.") == []
     assert _apply_targets("**Where to apply in widgets**: still unknown.") == []
     assert _apply_targets("**Where to apply in techne**: similar to liminal's gate.") == ["techne"]
+
+
+# ---------------------------------------------------------------------------
+# techne#430 — source_url was absent from the FTS index
+# ---------------------------------------------------------------------------
+
+
+def _seed_pattern(db, *, pid, name, body, source_url):
+    from techne.core.architect import ARCHITECT_SCHEMA
+
+    conn = plain_connect(db)
+    try:
+        conn.executescript(ARCHITECT_SCHEMA)
+        conn.execute(
+            "INSERT INTO patterns (id, name, body, source_url, status, created_at) "
+            "VALUES (?,?,?,?,'active',datetime('now'))",
+            (pid, name, body, source_url),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_pattern_is_findable_by_its_source_url(tmp_path):
+    """techne#430. `patterns_fts` indexed only (name, body), so `architect search
+    "<url>"` — the dedup step investigate-url runs BEFORE spending a subagent — could
+    not structurally match a pattern by its source and returned a confident "No
+    patterns matched". An already-surveyed repo got re-investigated, and the caller was
+    told the corpus had nothing."""
+    from techne.core.patterns import search_patterns
+
+    db = tmp_path / "architect.db"
+    _seed_pattern(
+        db,
+        pid="p-430",
+        name="Wholly unrelated title",
+        body="Body text that shares no term with the URL.",
+        source_url="https://github.com/DemoDevelops/lens",
+    )
+
+    assert search_patterns(db, "https://github.com/DemoDevelops/lens"), (
+        "a full URL must find the pattern it sourced"
+    )
+    assert search_patterns(db, "DemoDevelops/lens"), "the owner/repo slug must too"
+    assert not search_patterns(db, "github.com/NotTheOwner/other"), (
+        "and an unsurveyed URL must still find nothing — otherwise the dedup check "
+        "trades a false negative for a false positive"
+    )
+
+
+def test_the_migration_backfills_the_index_rather_than_emptying_it(tmp_path):
+    """The v5->v6 step DROPs and recreates an external-content fts5 table, which cannot
+    gain a column in place. Recreating alone leaves it EMPTY on an existing store —
+    turning a silent false negative into a total one — so `rebuild` is load-bearing."""
+    from techne.core import architect
+
+    db = tmp_path / "architect.db"
+    _seed_pattern(
+        db, pid="p-mig", name="n", body="b", source_url="https://example.invalid/a/b"
+    )
+    conn = plain_connect(db)
+    try:  # force the store back to the pre-#430 version so the step re-runs
+        conn.execute("PRAGMA user_version = 5")
+        conn.commit()
+    finally:
+        conn.close()
+
+    architect._reconcile_relations(db)
+
+    conn = plain_connect(db)
+    try:
+        assert conn.execute("SELECT count(*) FROM patterns_fts").fetchone()[0] == 1, (
+            "the rebuild must repopulate the index, not leave it empty"
+        )
+        assert "source_url" in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='patterns_fts'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_the_step_skips_a_store_whose_patterns_table_predates_source_url(tmp_path):
+    """The ladder runs from wherever the store is, including v0. An external-content
+    fts5 table resolves its columns against the content table at REBUILD time, so a
+    missing `source_url` fails with `no such column: T.source_url` — the step guards on
+    column presence rather than assuming the ladder already added it."""
+    from techne.core import architect
+
+    db = tmp_path / "architect.db"
+    conn = plain_connect(db)
+    conn.executescript(
+        "CREATE TABLE patterns (id TEXT PRIMARY KEY, name TEXT, body TEXT, status TEXT);"
+        "CREATE TABLE pattern_relations (src_pattern_id TEXT, dst_pattern_id TEXT,"
+        " kind TEXT NOT NULL, PRIMARY KEY (src_pattern_id, dst_pattern_id, kind));"
+    )
+    conn.commit()
+    conn.close()
+
+    architect._reconcile_relations(db)  # must not raise
