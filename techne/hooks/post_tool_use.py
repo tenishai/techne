@@ -131,6 +131,82 @@ _ENV_VALUE_LETTERS = frozenset({"u", "C", "P"})
 _ENV_VALUE_LONG_OPTS = frozenset({"--unset", "--chdir"})
 
 
+#: TRANSPARENT PREFIXES THAT ARE NOT `env` (techne#545). Each runs the command that
+#: follows it, so a test run behind one is still a test run — but `_skip_env_prefix`
+#: cannot absorb them, because its option grammar is `env`'s getopt rule specifically
+#: and these do not share it (`nice -n 10` takes a value on a letter `env` does not
+#: know; `timeout 60 pytest` carries a MANDATORY POSITIONAL before the command).
+#:
+#: MEASURED on main before the fix — every one of these contributed NO test evidence:
+#:   timeout 60 pytest -q | nice -n 10 pytest -q | nohup pytest -q | stdbuf -o0 pytest -q
+#: A green suite behind any of them left the gate unable to see the run, and an
+#: unrecognised row is DISCARDED WHOLE — so its failures never reach `all_failed` and
+#: a smaller intact run elsewhere in the window certifies green. That is the #438
+#: starvation shape, i.e. a false green, not a harmless miss.
+#:
+#: Per prefix: (short letters taking a value, long options taking a separate value,
+#: count of mandatory positionals before the command).
+_TRANSPARENT_PREFIXES: dict[str, tuple[frozenset[str], frozenset[str], int]] = {
+    "nohup": (frozenset(), frozenset(), 0),
+    "setsid": (frozenset(), frozenset(), 0),
+    "nice": (frozenset({"n"}), frozenset({"--adjustment"}), 0),
+    "stdbuf": (
+        frozenset({"i", "o", "e"}),
+        frozenset({"--input", "--output", "--error"}),
+        0,
+    ),
+    # `timeout DURATION COMMAND` — the duration is positional and unflagged, so
+    # without the count it reads as the command head and the runner is never found.
+    "timeout": (frozenset({"s", "k"}), frozenset({"--signal", "--kill-after"}), 1),
+    "ionice": (
+        frozenset({"c", "n", "p"}),
+        frozenset({"--class", "--classdata", "--pid"}),
+        0,
+    ),
+}
+
+
+def _skip_transparent_prefixes(tokens: list[str], i: int = 0) -> int:
+    """Index of the real command head, past `env` and the `_TRANSPARENT_PREFIXES`.
+
+    Loops so the forms compose — `env FOO=1 nice -n 10 timeout 60 pytest -q` is one
+    real invocation and resolves to `pytest`. Delegates `env` to `_skip_env_prefix`
+    rather than reimplementing it: that grammar is subtle enough that a second copy
+    would drift, which is the reason it was factored out in the first place.
+
+    A prefix with NOTHING after it is left where it is, matching `_skip_env_prefix`'s
+    rule for bare `env`: `nohup` alone is not a test run and the caller should see the
+    head it actually has.
+    """
+    while True:
+        moved = _skip_env_prefix(tokens, i)
+        if moved != i:
+            i = moved
+            continue
+        if i >= len(tokens):
+            return i
+        spec = _TRANSPARENT_PREFIXES.get(tokens[i].rsplit("/", 1)[-1])
+        if spec is None:
+            return i
+        value_letters, value_long_opts, positionals = spec
+        j = i + 1
+        while j < len(tokens):
+            t = tokens[j]
+            if t.startswith("--"):
+                # `--output=L` carries its value attached; `--output L` does not.
+                j += 2 if (t in value_long_opts and "=" not in t) else 1
+            elif t[:1] == "-" and len(t) > 1:
+                # `-o L` takes the next token; `-oL` carries it attached. Checked on
+                # the FIRST letter, because that is the one a value binds to.
+                j += 2 if (t[1] in value_letters and len(t) == 2) else 1
+            else:
+                break
+        j += positionals
+        if j >= len(tokens):
+            return i  # a bare prefix with no command — leave it for the caller
+        i = j
+
+
 def _skip_env_prefix(tokens: list[str], i: int = 0) -> int:
     """Index of the real command head, past any transparent ``env`` prefix.
 

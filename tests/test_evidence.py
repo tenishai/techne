@@ -1718,3 +1718,55 @@ class TestProbeLengthTestPressure:
         _insert_obs(db_path, "s", "Edit", "Edited: a.py\nChange: x → y")
         _insert_obs(db_path, "s", "Bash", "Ran: pytest -q")  # no Output section
         assert probe_length_test_pressure(db_path)["bash_rows"] == 0
+
+
+# ---------------------------------------------------------------------------
+# techne#545 — a test run behind a transparent prefix contributed no evidence
+# ---------------------------------------------------------------------------
+
+
+class TestTransparentPrefixes:
+    """The gate saw `pytest -q` and `env bash -c 'pytest -q'` but not `timeout 60
+    pytest -q`. Measured on main before the fix, every wrapped form was False.
+
+    THE MISS IS NOT HARMLESS. An unrecognised row is discarded WHOLE, so its failures
+    never reach `all_failed` and a smaller intact run elsewhere in the window certifies
+    green — the #438 starvation shape, i.e. a false green rather than a missing signal.
+    """
+
+    def test_the_wrapped_forms_from_the_issue_are_recognised(self):
+        from techne.core.evidence import _command_runs_tests
+
+        for cmd in (
+            "pytest -q",
+            "env bash -c 'pytest -q'",
+            "timeout 60 pytest -q",
+            "nice -n 10 pytest -q",
+            "nohup pytest -q",
+            "stdbuf -o0 pytest -q",
+        ):
+            assert _command_runs_tests(cmd), f"{cmd!r} runs tests and must be seen"
+
+    def test_prefixes_compose_and_carry_their_option_grammars(self):
+        """Each prefix has a DIFFERENT grammar, which is why `_skip_env_prefix` could
+        not simply absorb them: `nice -n` takes a value on a letter `env` does not
+        know, and `timeout` carries a mandatory POSITIONAL duration before the
+        command — without which the duration reads as the command head."""
+        from techne.core.evidence import _command_runs_tests
+
+        for cmd in (
+            "env FOO=1 nice -n 10 timeout 60 pytest -q",
+            "timeout --signal=KILL 5m pytest",
+            "stdbuf -o 0 pytest -q",
+            "timeout 60 make test",  # the subcommand path, not just a runner head
+        ):
+            assert _command_runs_tests(cmd), f"{cmd!r} must resolve to the real head"
+
+    def test_a_bare_prefix_is_not_a_test_run(self):
+        """`nohup` alone runs nothing. Left where it is, matching `_skip_env_prefix`'s
+        rule for bare `env` — otherwise the skipper walks off the end and the caller
+        loses the head it actually has."""
+        from techne.core.evidence import _command_runs_tests
+
+        for cmd in ("nohup", "timeout 60", "nice", "timeout 60 git commit -m 'pytest'"):
+            assert not _command_runs_tests(cmd), f"{cmd!r} does not run tests"

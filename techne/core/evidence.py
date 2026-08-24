@@ -27,7 +27,11 @@ from pathlib import Path
 # The gate reads bounded projections of tool output, so it needs the writer's
 # budget and marker to tell a complete record from a cut one (techne#438).
 from techne.core.redaction import REDACTION_MARKER
-from techne.hooks.post_tool_use import _PREVIEW_MAX_CHARS, _skip_env_prefix, was_elided
+from techne.hooks.post_tool_use import (
+    _PREVIEW_MAX_CHARS,
+    _skip_transparent_prefixes,
+    was_elided,
+)
 
 # Tool names that are NOT agent deeds — meta-records or user-side events.
 #
@@ -480,7 +484,7 @@ def _shell_c_script(segment: str) -> str | None:
     i = 0
     while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
         i += 1
-    i = _skip_env_prefix(tokens, i)
+    i = _skip_transparent_prefixes(tokens, i)
     if i >= len(tokens) or tokens[i].rsplit("/", 1)[-1] not in _SHELL_C_WRAPPERS:
         return None
     # `-c`, including clustered SHORT flags containing c (`-lc`, `-ec`, `-cx`).
@@ -565,7 +569,7 @@ def _command_runs_tests(command: str) -> bool:
         # suite_green=True and BACKED the tests_green claim — the 2620-test run
         # discarded, the 5-test run certifying green. That is the starvation-
         # shaped false green this file names at 596-599 and techne#438.
-        i = _skip_env_prefix(tokens, i)
+        i = _skip_transparent_prefixes(tokens, i)
         if i >= len(tokens):
             continue
         head = tokens[i].rsplit("/", 1)[-1]  # basename of e.g. .venv/bin/pytest
