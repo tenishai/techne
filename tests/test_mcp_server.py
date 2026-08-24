@@ -529,14 +529,27 @@ def test_the_four_domains_section_names_all_four():
     text = doc.read_text(encoding="utf-8")
 
     start = text.index("## The four domains")
-    end = text.index("\n## ", start)
-    section = text[start:end]
+    # `find`, not `index`: if this section ever becomes the last H2 — and
+    # `## Patterns (architect)` is a plausible fold-in target, since the doc's own prose
+    # says `pattern_search` is the same corpus addressed by the mechanism — `index`
+    # raises a bare ValueError that tells the next reader nothing about what they broke.
+    # (Prudence, #745 r1 nit 3.)
+    end = text.find("\n## ", start)
+    section = text[start:] if end == -1 else text[start:end]
 
     for domain in ("archivist", "librarian", "architect", "codex"):
         assert f"### `{domain}_search`" in section, (
             f"`{domain}_search` must be documented INSIDE the four-domains section — "
             "a vocabulary section that lists three of four teaches the gap"
         )
+
+    # The prose in that section claims the codex has TWO calls and that they live here.
+    # Without this, moving `codex_blast_radius` back out would leave the loop green,
+    # because the loop only ever looks for `codex_search` (#745 r1 nit 4).
+    assert "### `codex_blast_radius`" in section, (
+        "the section says the codex has two calls and that they live here — "
+        "assert it, or the claim is prose the test does not cover"
+    )
 
 
 def _codex_db_with_fan_in(tmp_path, n: int, proven: int | None = None):

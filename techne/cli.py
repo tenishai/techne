@@ -39,8 +39,26 @@ class _AliasedGroup(click.Group):
         # echoes back what was typed, so `techne library --badopt` would print usage for
         # a command name that does not appear in `--help` — which is worse than either
         # spelling alone.
-        _, cmd, rest = super().resolve_command(ctx, args)
-        return cmd.name, cmd, rest
+        #
+        # NARROW ON PURPOSE, BOTH WAYS (Prudence, #745 r1 Important 1). An earlier form
+        # returned `cmd.name` unconditionally and CRASHED: click's `resolve_command`
+        # ends `return cmd_name if cmd else None, cmd, args[1:]`, and `cmd` is None
+        # whenever `ctx.resilient_parsing` is set — the NoSuchCommand raise is guarded
+        # by `and not ctx.resilient_parsing`. So shell completion over an unknown word
+        # died on `None.name`, and `_resolve_context`'s own `if cmd is None` handling
+        # never ran because it checks AFTER the call. Reproduced against click 8.4.2:
+        #     main.resolve_command(Context(main, resilient_parsing=True), ["bogus"])
+        #     -> AttributeError: 'NoneType' object has no attribute 'name'
+        # techne neither documents nor installs completion, which is why nothing caught
+        # it — but the standard click one-liner reaches it, and this override turned a
+        # working path into a crashing one.
+        #
+        # Gating on `name in ALIASES` also keeps the rewrite off every OTHER command,
+        # which is a blast radius the feature never needed.
+        name, cmd, rest = super().resolve_command(ctx, args)
+        if cmd is not None and name in self.ALIASES:
+            name = cmd.name
+        return name, cmd, rest
 
 
 @click.group(cls=_AliasedGroup)
@@ -838,7 +856,7 @@ def search(ctx, query, table, limit):
             click.echo(f"    #{r.get('id')} {r.get('title', '') or r.get('source_url', '')}")
             snippet = (r.get("content", "") or "").replace("\n", " ").strip()
             click.echo(f"    {snippet[:200]}")
-            click.echo(f"    ↳ full: techne library show {r.get('id')}")
+            click.echo(f"    ↳ full: techne librarian show {r.get('id')}")
         click.echo()
 
 
@@ -3194,7 +3212,7 @@ def library_index_transcripts(ctx, platform, transcripts_dir, limit):
 
     counts = index_transcripts(config, source, limit=limit)
     click.echo(json.dumps(counts, indent=2))
-    click.echo("Search them: techne library search <query>")
+    click.echo("Search them: techne librarian search <query>")
 
 
 @librarian.command("index-markdown")
@@ -3217,7 +3235,7 @@ def library_index_markdown(ctx, root, source_type):
 
     counts = index_markdown_dir(config, root, source_type=source_type)
     click.echo(json.dumps(counts, indent=2))
-    click.echo("Search them: techne library search <query>")
+    click.echo("Search them: techne librarian search <query>")
 
 
 @librarian.command("search")
@@ -3242,7 +3260,7 @@ def library_search(ctx, query, limit):
         click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
         snippet = (d.get("content", "") or "").replace("\n", " ").strip()
         click.echo(f"    {snippet[:200]}")
-        click.echo(f"    ↳ full: techne library show {d['id']}")
+        click.echo(f"    ↳ full: techne librarian show {d['id']}")
         click.echo()
 
 
