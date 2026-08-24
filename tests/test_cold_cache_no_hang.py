@@ -9,6 +9,8 @@ the turn hangs instead of degrading.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from techne.core import embeddings as embeddings_mod
@@ -223,3 +225,131 @@ def test_the_doctor_names_the_uncached_state_with_a_remedy(monkeypatch, tmp_path
     assert res.verdict == checks.Verdict.DORMANT, "the verdict itself should not change"
     assert res.remedy == "techne vectors backfill", "no remedy — the operator is stuck"
     assert "not cached" in res.detail
+
+
+# ---------------------------------------------------------------------------
+# #728 r2 Important 1 — every "cannot tell" was returning False
+# ---------------------------------------------------------------------------
+
+
+class TestModelCachedReadsTheDiskCorrectly:
+    """The probe reported a fully-cached fastembed model as NOT cached, so
+    `check_vector_coverage` printed "model weights not cached" with the weights on
+    disk. A measurement claim, and it was wrong."""
+
+    def _fastembed(self, monkeypatch, tmp_path, model):
+        from techne.core import embeddings as E
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(E, "_select_backend", lambda cfg: ("fastembed", model))
+
+    def test_a_cached_fastembed_model_reads_as_cached(self, monkeypatch, tmp_path):
+        """fastembed names the directory after the SOURCE REPO, not the logical model:
+        `sentence-transformers/all-MiniLM-L6-v2` lands in `models--qdrant--
+        all-MiniLM-L6-v2-onnx`. Matching the logical name could never match, and could
+        not for the rest of the Qdrant-hosted catalogue either."""
+        from techne.core.embeddings import model_cached
+
+        repo = tmp_path / ".cache" / "fastembed" / "models--qdrant--all-MiniLM-L6-v2-onnx"
+        (repo / "snapshots" / "abc").mkdir(parents=True)
+        (repo / "snapshots" / "abc" / "model.onnx").write_bytes(b"weights")
+        self._fastembed(monkeypatch, tmp_path, "sentence-transformers/all-MiniLM-L6-v2")
+
+        assert model_cached() is True
+
+    def test_an_uncached_fastembed_model_still_reads_as_uncached(self, monkeypatch, tmp_path):
+        """The looser match must not trade a false negative for a false positive."""
+        from techne.core.embeddings import model_cached
+
+        repo = tmp_path / ".cache" / "fastembed" / "models--qdrant--all-MiniLM-L6-v2-onnx"
+        (repo / "snapshots" / "abc").mkdir(parents=True)
+        (repo / "snapshots" / "abc" / "model.onnx").write_bytes(b"weights")
+        self._fastembed(monkeypatch, tmp_path, "BAAI/bge-small-en-v1.5")
+
+        assert model_cached() is False
+
+    def test_an_interrupted_fastembed_fetch_is_not_cached(self, monkeypatch, tmp_path):
+        """`snapshot_download` creates `<repo>/refs/` BEFORE any weight lands, so a
+        Ctrl-C'd fetch read as cached — which is the state that hangs the turn. The
+        model2vec branch already knew this; fastembed had no equivalent."""
+        from techne.core.embeddings import model_cached
+
+        repo = tmp_path / ".cache" / "fastembed" / "models--qdrant--all-MiniLM-L6-v2-onnx"
+        (repo / "refs").mkdir(parents=True)
+        (repo / "refs" / "main").write_text("deadbeef")
+        self._fastembed(monkeypatch, tmp_path, "sentence-transformers/all-MiniLM-L6-v2")
+
+        assert model_cached() is False
+
+    @pytest.mark.parametrize("var", ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "XDG_CACHE_HOME"])
+    def test_the_hf_cache_chain_is_honoured_end_to_end(self, monkeypatch, tmp_path, var):
+        """huggingface_hub resolves HF_HUB_CACHE -> HUGGINGFACE_HUB_CACHE -> $HF_HOME/hub
+        -> $XDG_CACHE_HOME/huggingface/hub -> ~/.cache/... We honoured the first and
+        third only, so weights genuinely on disk under either of the others read False."""
+        from techne.core import embeddings as E
+        from techne.core.embeddings import model_cached
+
+        for v in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+            monkeypatch.delenv(v, raising=False)
+        # ISOLATE THE FALLBACK. Without this the chain's last link resolves to the REAL
+        # ~/.cache/huggingface/hub, which on a developer machine genuinely holds this
+        # model — so the test passed even with the env var removed from the chain, i.e.
+        # it asserted nothing. Found by mutating the chain and watching it stay green.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "nowhere"))
+        hub = tmp_path / ("huggingface/hub" if var == "XDG_CACHE_HOME" else "hub")
+        monkeypatch.setenv(var, str(tmp_path if var == "XDG_CACHE_HOME" else hub))
+        snap = hub / "models--minishlab--potion-base-8M" / "snapshots" / "r1"
+        snap.mkdir(parents=True)
+        (snap / "model.safetensors").write_bytes(b"weights")
+        monkeypatch.setattr(E, "_select_backend", lambda cfg: ("model2vec", "minishlab/potion-base-8M"))
+
+        assert model_cached() is True, f"{var} is in the documented chain and must be read"
+
+
+class TestTheRemedyIsGatedOnTheBackendNotTheProbe:
+    """#728 r2 suggestion. Gating the remedy on `model_cached() is False` made the
+    probe load-bearing for whether the operator is told anything at all — so a warm
+    cache with no vec tables, and a probe that could not tell, both got silence."""
+
+    def _dormant_check(self, monkeypatch, tmp_path, *, available, cached):
+        from techne.config import Config
+        from techne.core import embeddings as E
+        from techne.core.checks import check_vector_coverage
+        from techne.core.database import init_db
+
+        cfg = Config()
+        cfg.db_path = tmp_path / "t.db"
+        init_db(cfg.db_path)
+        conn = __import__("sqlite3").connect(cfg.db_path)
+        conn.execute("DROP TABLE IF EXISTS knowledge_vec_rowids")
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(E, "backend_available", lambda: available)
+        monkeypatch.setattr(E, "model_cached", lambda c=None: cached)
+        results = check_vector_coverage(cfg)
+        return results if isinstance(results, list) else [results]
+
+    @pytest.mark.parametrize("cached", [True, None])
+    def test_a_warm_or_unmeasurable_cache_still_gets_a_remedy(
+        self, monkeypatch, tmp_path, cached
+    ):
+        """Both are permanently FTS-only until a backfill runs, and neither licenses
+        claiming the weights are missing."""
+        (res,) = self._dormant_check(monkeypatch, tmp_path, available=True, cached=cached)
+        assert res.remedy == "techne vectors backfill", (
+            "the backend is on and there are no vectors — that is actionable regardless "
+            "of what the cache probe could determine"
+        )
+        assert "not cached" not in (res.detail or ""), (
+            "with cached=True/None the doctor must not assert the weights are missing"
+        )
+
+    def test_an_uncached_backend_keeps_its_specific_sentence(self, monkeypatch, tmp_path):
+        (res,) = self._dormant_check(monkeypatch, tmp_path, available=True, cached=False)
+        assert "not cached" in (res.detail or "")
+        assert res.remedy == "techne vectors backfill"
+
+    def test_no_backend_means_no_remedy(self, monkeypatch, tmp_path):
+        """The operator never turned this on; there is nothing to tell them to do."""
+        (res,) = self._dormant_check(monkeypatch, tmp_path, available=False, cached=None)
+        assert res.remedy is None

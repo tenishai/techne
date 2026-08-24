@@ -662,12 +662,24 @@ def search_vec(
         # attempt, so `techne vectors backfill` (which may download) can still
         # warm the cache in the same process.
         #
-        # NOT SILENT. This catch is broad on purpose (a hook must not raise) and
-        # therefore also swallows genuine construction failures — a typo'd
-        # `search.embedding_model` reaches _build_backend unvalidated, as do a
-        # corrupt cache and an incompatible weights file. Pre-#708 those
-        # propagated and were recorded as outcome="failed"; one stderr line per
-        # process restores that signal without per-turn noise.
+        # LESS SILENT — AND ONLY HALF THE SIGNAL, WHICH THE PREVIOUS WORDING GOT
+        # WRONG (Prudence, #728 r2). This catch is broad on purpose (a hook must not
+        # raise) and therefore also swallows genuine construction failures: a typo'd
+        # `search.embedding_model` reaches _build_backend unvalidated, as do a corrupt
+        # cache and an incompatible weights file. Pre-#708 those propagated and
+        # `_record` wrote outcome="failed".
+        #
+        # THIS LINE RESTORES THE STDERR HALF, NOT THE MARKER, and the marker is the
+        # half the liveness subsystem reads. `_record`'s `degraded` argument is set
+        # only inside user_prompt_submit's `except Exception` around the recall block;
+        # post-#708 `search_vec` returns [] instead of raising, so nothing raises,
+        # `degraded` stays None, and the rail records outcome="ok" over a dead backend.
+        # MEASURED end-to-end through user_prompt_submit.main() with a dead backend:
+        #     {"last_run": {"outcome": "ok", "detail": "1 rows"}, "last_error": null}
+        #
+        # Threading a "vector channel unavailable" signal back out of `search()` is a
+        # larger change than #708, so it is FILED (techne#739) rather than done here —
+        # but this comment does not get to claim a signal it does not restore.
         global _EMBED_UNAVAILABLE_WARNED
         if not _EMBED_UNAVAILABLE_WARNED:
             _EMBED_UNAVAILABLE_WARNED = True

@@ -2316,11 +2316,34 @@ def check_vector_coverage(config) -> CheckResult:
             try:
                 from techne.core import embeddings as _emb
 
-                if _emb.backend_available() and _emb.model_cached(config) is False:
-                    detail = (
-                        "embedding backend installed, model weights not cached; "
-                        "recall is FTS-only until they are fetched"
-                    )
+                # THE REMEDY IS GATED ON `backend_available()`, AND `model_cached()`
+                # ONLY PICKS THE SENTENCE (Prudence, #728 r2 suggestion). Gating the
+                # remedy on `model_cached() is False` cost two things. An install with
+                # the extra present, the weights cached and no vec tables — a fresh
+                # TECHNE_HOME on a machine whose HF cache is already warm — is just as
+                # permanently FTS-only and got no remedy at all. And it made the probe
+                # load-bearing for whether the operator is told ANYTHING, so a probe
+                # that cannot tell (`None`) silenced the doctor entirely rather than
+                # degrading to a vaguer sentence.
+                #
+                # `backend_available()` is the honest expression of "the operator
+                # turned this on"; `model_cached()` is only the REASON it is idle.
+                if _emb.backend_available():
+                    cached = _emb.model_cached(config)
+                    if cached is False:
+                        detail = (
+                            "embedding backend installed, model weights not cached; "
+                            "recall is FTS-only until they are fetched"
+                        )
+                    else:
+                        # `True` (warm cache, no vec tables yet) and `None` (could not
+                        # tell) share a sentence, because neither licenses claiming the
+                        # weights are missing — the distinction the None-not-False rule
+                        # exists to protect.
+                        detail = (
+                            "embedding backend installed but no vectors written yet; "
+                            "recall is FTS-only until a backfill runs"
+                        )
                     remedy = "techne vectors backfill"
             except Exception:  # noqa: BLE001 — a probe must never fail a health check
                 pass
