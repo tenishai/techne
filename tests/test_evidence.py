@@ -1768,5 +1768,43 @@ class TestTransparentPrefixes:
         loses the head it actually has."""
         from techne.core.evidence import _command_runs_tests
 
-        for cmd in ("nohup", "timeout 60", "nice", "timeout 60 git commit -m 'pytest'"):
+        # NOTE the UNQUOTED `pytest`. With quotes the token is the six-character
+        # string `'pytest'` — `_command_runs_tests` splits on whitespace, not shlex —
+        # so the assertion held for a second, accidental reason and would have kept
+        # passing if the _DASH_M_IS_A_MESSAGE guard were deleted (Prudence, #737 nit 2).
+        for cmd in ("nohup", "timeout 60", "nice", "timeout 60 git commit -m pytest"):
             assert not _command_runs_tests(cmd), f"{cmd!r} does not run tests"
+
+
+class TestOneGetoptRule:
+    """#737 Important. The transparent-prefix skipper carried a SECOND, weaker copy of
+    getopt's cluster rule — `t[1] in value_letters and len(t) == 2` — 25 lines above
+    the correct one, and it drifted inside the very PR whose docstring argues against
+    reimplementing a grammar because "a second copy would drift".
+
+    getopt binds a value to the first VALUE LETTER in a cluster, and consumes the
+    following token only when that letter is LAST. Both spellings below are uncommon,
+    but a miss here is a false green, not a harmless gap — this file's own standard."""
+
+    def test_a_clustered_flag_before_a_value_letter_is_read_correctly(self):
+        from techne.core.evidence import _command_runs_tests
+
+        # `-vs KILL` — `v` is a flag, `s` is the value letter and is LAST, so KILL is
+        # consumed. Under the drifted rule the index landed on `60`, not `pytest`.
+        assert _command_runs_tests("timeout -vs KILL 60 pytest")
+        assert _command_runs_tests("ionice -tc 2 pytest")
+
+    def test_an_attached_value_consumes_only_its_own_token(self):
+        from techne.core.evidence import _command_runs_tests
+
+        assert _command_runs_tests("stdbuf -oL pytest")
+        assert _command_runs_tests("stdbuf -o L pytest")
+
+    def test_env_still_uses_the_same_rule(self):
+        """The helper is shared, so `env`'s own measured cases must not regress:
+        `-uCC bash` consumes one token (CC is attached), `-iu CC` consumes two."""
+        from techne.hooks.post_tool_use import _skip_transparent_prefixes
+
+        for cmd in ("env -uCC bash -c pytest", "env -iu CC bash -c pytest"):
+            tokens = cmd.split()
+            assert tokens[_skip_transparent_prefixes(tokens)] == "bash", cmd
