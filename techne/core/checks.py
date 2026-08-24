@@ -1512,6 +1512,54 @@ def _rail_consumption(conn, rail: str) -> tuple[int, str | None]:
     return pending or 0, (last_decision or None)
 
 
+def _rail_binding(config, rail: str) -> tuple[bool, str]:
+    """Is *rail* bound to a model RIGHT NOW? Returns (bound, why_not).
+
+    THE QUESTION A MARKER CANNOT ANSWER (techne#735). A marker is a record of a run
+    that happened under a configuration that may no longer exist. #732 fixed half of
+    this at WRITE time — the unbound path retracts its marker — but a write-time
+    retraction only fires when a session actually ends, and it cannot fire at all on
+    the paths that never reach the retracting code:
+
+      * `reflect.enabled = false` — `lifecycle.py` gates the call site, so
+        `reflect_on_session` is never invoked and nothing can ever clear the marker.
+      * the five custodian rails — `clear_rail_marker` exists but reflect is its only
+        caller, so an unbound custodian rail keeps its last marker permanently.
+      * even the fixed unbound-reflect path lies in the window between an operator
+        editing the config and the next session end.
+
+    Measured before the fix, one marker `outcome="ok"` and three configurations:
+
+        reflect, enabled + bound   -> LIVE      (correct)
+        reflect, enabled = false   -> LIVE      (the rail is OFF)
+        reflect, enabled, no model -> LIVE      (the rail cannot run)
+        dream,   custodian unbound -> LIVE      (the rail cannot run)
+
+    So the rule is Prudence's generalisation rather than three patches: no verdict is
+    derived from a marker without first asking whether the rail is currently bound.
+
+    DELIBERATE BOUNDARY: `custodian.rails` is NOT consulted. It selects what the
+    SCHEDULED runner drives (`custodian.effective_rails` — NAMED rather than cited by
+    line, because a line number is the one citation form that goes stale silently, in
+    a change whose whole subject is prose that stopped being true; techne#747 is open
+    on that class), and an excluded rail can still be run
+    explicitly with `--rail`, so exclusion is a scheduling choice rather than an absent
+    binding. Widening this to scheduling would need its own decision.
+    """
+    if rail == "reflect":
+        if not config.reflect.enabled:
+            return False, "reflect.enabled = false"
+        if not config.reflect.model:
+            return False, "reflect.model unset"
+        return True, ""
+
+    from techne.core.custodian import effective_model
+
+    if not effective_model(config, rail=rail):
+        return False, "custodian.model unset"
+    return True, ""
+
+
 @register_check
 def check_model_bound_rails(config) -> list[CheckResult]:
     """Did a MODEL-BOUND rail actually produce, or did it fail where nobody was looking?
@@ -1531,7 +1579,8 @@ def check_model_bound_rails(config) -> list[CheckResult]:
     incremented a counter nobody reads, and let teardown proceed. Two months of a rail
     reporting healthy while doing nothing.
 
-    So this check reads the MARKER, not the output: `rail:<name>:last_run`, written by
+    So this check reads the MARKER — and, since techne#735, the CONFIG; see below —
+    rather than the output: `rail:<name>:last_run`, written by
     `custodian.record_rail_marker` on every automatic or headless run, success and
     failure alike, with the reason.
 
@@ -1540,6 +1589,20 @@ def check_model_bound_rails(config) -> list[CheckResult]:
     at every install that has not opted in is how a check gets trained into noise. The
     finding is a marker that EXISTS and says the run failed: that is a rail someone
     switched on which is not working.
+
+    AND SINCE techne#735 IT READS THE MARKER *AND THE CONFIG*, which the paragraph
+    above no longer tells you on its own. `_rail_binding` is asked FIRST: a marker
+    records a run under a configuration that may no longer exist, so an UNBOUND rail
+    reads DORMANT for every outcome — the payload is kept and shown, but it stops
+    driving the verdict. "The finding is a marker that says the run failed" therefore
+    holds only while the rail is STILL BOUND; an install that opted OUT now reads the
+    same as one that never opted in, which is the consistent reading rather than a new
+    exception.
+
+    THIS IS THE CHECK `liveness.md` MEANS when it justifies a verdict depending on
+    `config` against the `config:trust` precedent. A maintainer auditing which checks
+    read config lands HERE, so the contract has to say so — otherwise the card raises
+    the question and this docstring answers it wrongly. (Prudence, #743 r3.)
     """
     from techne.core.custodian import MARKER_PREFIX, RAILS
     from techne.core.database import connect
@@ -1567,6 +1630,49 @@ def check_model_bound_rails(config) -> list[CheckResult]:
                         verdict=Verdict.DORMANT,
                         detail="no model-bound run recorded — answered by a resident agent",
                         evidence=f"extension_state has no {MARKER_PREFIX}:{rail}:last_run",
+                    )
+                )
+                continue
+
+            bound, why_unbound = _rail_binding(config, rail)
+            if not bound:
+                # A MARKER FROM A BINDING THAT NO LONGER EXISTS IS NOT CURRENT STATE
+                # (techne#735). The payload is KEPT AND SHOWN — that is what #732 was
+                # protecting, and an operator switching a rail off for an afternoon
+                # should still be able to read what the last bound run did — but it
+                # stops driving the verdict, because the rail cannot run today.
+                #
+                # THIS DOWNGRADES `error`/`partial` TO DORMANT TOO, NOT ONLY `ok`, and
+                # that is deliberate rather than an oversight. Reading BROKEN off a
+                # stale payload is wrong in the same way as reading LIVE — both derive
+                # a claim about now from a configuration that is gone. It is wrong in
+                # the SAFE direction, which is exactly the argument that would let it
+                # survive unexamined. Nothing is hidden by the downgrade: the outcome
+                # and its detail ride in `detail` below, so an operator reading the
+                # doctor still sees "last bound run error: AuthenticationError".
+                results.append(
+                    CheckResult(
+                        name=f"rail:{rail}:bound",
+                        subsystem="custodian",
+                        kind=Kind.FAIL_OPEN,
+                        verdict=Verdict.DORMANT,
+                        last_fired=ts,
+                        # `outcome or "<no outcome recorded>"` because a GARBLED marker
+                        # reaches here too: the fail-closed path accepts an empty or
+                        # unrecognised outcome, and the naive form rendered "last bound
+                        # run : garbled" or trailed off at "last bound run ". Cosmetic,
+                        # but this string is operator-facing, and this card's own
+                        # invariant is that a detail string is documentation that rots.
+                        # (Prudence, #743 r1 nit 5.)
+                        detail=(
+                            f"not bound ({why_unbound}) — the rail cannot run; "
+                            f"last bound run {outcome or '<no outcome recorded>'}"
+                            + (f": {detail}" if detail else "")
+                        ),
+                        evidence=(
+                            f"{MARKER_PREFIX}:{rail}:last_run outcome={outcome!r} "
+                            "retained but not authoritative — see _rail_binding"
+                        ),
                     )
                 )
                 continue

@@ -1330,10 +1330,16 @@ def reflect_on_session(
     # An injected `generate_fn` IS a binding — the caller supplied the callable, so
     # there is nothing left to resolve.
     if generate_fn is None and not config.reflect.model:
-        # Retract any marker from when this rail WAS bound. Absent-marker is what
-        # `check_model_bound_rails` reads as DORMANT ("answered by a resident agent"),
-        # which is exactly the truth here; a stale `error` payload would otherwise
-        # report a run that can no longer happen as the rail's current state.
+        # Retract any marker from when this rail WAS bound.
+        #
+        # THE REASON LIVES IN `custodian.clear_rail_marker`'s DOCSTRING, NOT HERE
+        # (techne#735). This comment used to say a stale `error` payload "would
+        # otherwise report a run that can no longer happen as the rail's current
+        # state" — which stopped being true when `check_model_bound_rails` started
+        # asking `_rail_binding` first: unbound reads DORMANT off the BINDING, marker
+        # or no marker. The retraction is still correct, on a different reason (what
+        # happens on RE-BIND), and that reason is written down in exactly one place so
+        # it cannot drift. Read it there before concluding this call can go.
         _clear_reflect_marker(config)
         return result
 
