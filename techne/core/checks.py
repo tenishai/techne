@@ -2297,13 +2297,69 @@ def check_vector_coverage(config) -> CheckResult:
                 " WHERE rowid NOT IN (SELECT id FROM knowledge)"
             ).fetchone()[0]
         except Exception:  # noqa: BLE001 — vec tables absent = channel not enabled
+            # DORMANT MEANS "OFF BY CONFIGURATION", AND IT MUST NAME THE KEY THAT
+            # DISABLED IT (checks.py's own Verdict docs). On an install where vectors
+            # were deliberately turned ON — the extra installed, 85-290 MB paid for —
+            # and the weights simply are not on disk, nothing disabled anything: the
+            # channel is broken, not dormant, and the operator is told neither.
+            #
+            # After techne#708 `search_vec` degrades silently to FTS instead of hanging,
+            # and `backfill_vectors` is the ONLY call left in the package that may
+            # download. So without this, a fresh install is permanently FTS-only and the
+            # doctor reports a deliberately-off channel. (Prudence, #728 review.)
+            #
+            # A FILESYSTEM PROBE, NEVER A BACKEND BUILD. techne#361 pins that this path
+            # must not construct the model; `model_cached` answers by looking at the
+            # cache, and returns None when it cannot tell rather than guessing False.
+            detail = "vector channel not initialised (FTS-only search)"
+            remedy = None
+            try:
+                from techne.core import embeddings as _emb
+
+                # THE REMEDY IS GATED ON `backend_available()`, AND `model_cached()`
+                # ONLY PICKS THE SENTENCE (Prudence, #728 r2 suggestion). Gating the
+                # remedy on `model_cached() is False` cost ONE thing, and this comment
+                # claimed TWO until #728 r4. The real cost: an install with the extra
+                # present, the weights cached and no vec tables — a fresh TECHNE_HOME on
+                # a machine whose HF cache is already warm — is just as permanently
+                # FTS-only and got no remedy at all.
+                #
+                # THE SECOND "COST" COULD NOT OCCUR. "A probe that cannot tell (`None`)
+                # silenced the doctor entirely" describes an unreachable state:
+                # `model_cached` returns None only when `_select_backend` raises, which
+                # happens only when neither backend imports — and this branch has
+                # already gated on `backend_available()`. Both cards retracted it and
+                # this was the last copy, which is the shape the retraction is about.
+                #
+                # `backend_available()` is the honest expression of "the operator
+                # turned this on"; `model_cached()` is only the REASON it is idle.
+                if _emb.backend_available():
+                    cached = _emb.model_cached(config)
+                    if cached is False:
+                        detail = (
+                            "embedding backend installed, model weights not cached; "
+                            "recall is FTS-only until they are fetched"
+                        )
+                    else:
+                        # `True` (warm cache, no vec tables yet) and `None` (could not
+                        # tell) share a sentence, because neither licenses claiming the
+                        # weights are missing — the distinction the None-not-False rule
+                        # exists to protect.
+                        detail = (
+                            "embedding backend installed but no vectors written yet; "
+                            "recall is FTS-only until a backfill runs"
+                        )
+                    remedy = "techne vectors backfill"
+            except Exception:  # noqa: BLE001 — a probe must never fail a health check
+                pass
             return CheckResult(
                 name="vectors:coverage",
                 subsystem="search",
                 kind=Kind.COVERAGE,
                 verdict=Verdict.DORMANT,
                 evidence="knowledge_vec_rowids absent",
-                detail="vector channel not initialised (FTS-only search)",
+                detail=detail,
+                remedy=remedy,
             )
     finally:
         conn.close()
