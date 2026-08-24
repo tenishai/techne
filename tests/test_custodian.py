@@ -38,7 +38,7 @@ def config(tmp_path, monkeypatch):
     return cfg
 
 
-def _bind(config, rail="*"):
+def _bind(config):
     """Give the rail a model, because techne#735 made the verdict depend on it.
 
     These tests all say "a rail someone switched on" and none of them switched one on:
@@ -560,6 +560,22 @@ def test_an_unbound_rail_still_shows_what_its_last_run_did(config):
     assert "reflect.enabled = false" in detail, "and it must say WHY it is not authoritative"
 
 
+def test_an_unbound_rail_with_a_garbled_marker_still_reads_a_sentence(config):
+    """The fail-closed path accepts an empty or unrecognised outcome, so a GARBLED marker
+    reaches the unbound branch too. The naive interpolation rendered "last bound run :
+    garbled", and with both fields empty it trailed off at "last bound run ". Cosmetic,
+    and operator-facing — which is the combination this card's own invariant says rots.
+    (Prudence, #743 r1 nit 5.)"""
+    _bind(config)
+    record_rail_marker(config, "reflect", outcome="", detail="garbled")
+
+    config.reflect.enabled = False
+
+    detail = _reflect(config).detail
+    assert "last bound run <no outcome recorded>: garbled" in detail, detail
+    assert "run : " not in detail, f"the empty outcome leaked a stray colon: {detail}"
+
+
 def test_an_unbound_rail_with_an_error_marker_reads_dormant_not_broken(config):
     """THE DOWNGRADE IS DELIBERATE — do not "fix" this back. Reading BROKEN off a stale
     payload is wrong in the same way as reading LIVE: both derive a claim about now
@@ -647,8 +663,24 @@ def test_reflect_unbound_reads_as_dormant_not_broken(config, monkeypatch):
 
 def test_unbinding_retracts_a_stale_error_marker(config, monkeypatch):
     """THE OPERATOR'S ACTUAL STATE, pinned. The marker was written by a bound-and-broken
-    run; once the rail is unbound that payload describes a run that can no longer
-    happen, and `doctor` would report it as BROKEN forever. Unbinding retracts it."""
+    run; once the rail is unbound that payload describes a run that can no longer happen.
+    Unbinding retracts it.
+
+    THE ORIGINAL REASON FOR THIS TEST HAS EXPIRED — READ THIS BEFORE DECIDING THE
+    RETRACTION CAN GO (techne#735). It used to end "and `doctor` would report it as
+    BROKEN forever", which was true and is now false: `check_model_bound_rails` asks
+    `_rail_binding` before trusting any marker, so an unbound rail reads DORMANT
+    regardless of outcome — pinned by
+    `test_an_unbound_rail_with_an_error_marker_reads_dormant_not_broken` twenty lines
+    below. The doctor no longer needs this retraction to tell the truth.
+
+    So this test now pins TIDINESS, not honesty, and there is a live question about
+    whether it should exist at all: the unbound path DELETES the payload while the
+    disabled path KEEPS it, so "what did the last bound run do?" is answerable on one
+    path and not the other. That decision is deliberately NOT made here — it changes
+    just-merged #732 behaviour — but whoever makes it must not make it on the expired
+    premise this docstring used to state. (Prudence, #743 r1 Important 2.)
+    """
     from techne.core import reflect as R
     from techne.core.thread_orchestrator import Thread
 

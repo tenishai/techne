@@ -1639,9 +1639,17 @@ def check_model_bound_rails(config) -> list[CheckResult]:
                         kind=Kind.FAIL_OPEN,
                         verdict=Verdict.DORMANT,
                         last_fired=ts,
+                        # `outcome or "<no outcome recorded>"` because a GARBLED marker
+                        # reaches here too: the fail-closed path accepts an empty or
+                        # unrecognised outcome, and the naive form rendered "last bound
+                        # run : garbled" or trailed off at "last bound run ". Cosmetic,
+                        # but this string is operator-facing, and this card's own
+                        # invariant is that a detail string is documentation that rots.
+                        # (Prudence, #743 r1 nit 5.)
                         detail=(
                             f"not bound ({why_unbound}) — the rail cannot run; "
-                            f"last bound run {outcome}" + (f": {detail}" if detail else "")
+                            f"last bound run {outcome or '<no outcome recorded>'}"
+                            + (f": {detail}" if detail else "")
                         ),
                         evidence=(
                             f"{MARKER_PREFIX}:{rail}:last_run outcome={outcome!r} "
