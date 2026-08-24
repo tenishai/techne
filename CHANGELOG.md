@@ -124,6 +124,64 @@ All notable changes to techne are documented here. Format loosely follows
   #550 and codex freshness make them answerable — `test_the_recall_ladder_is_unchanged`
   is the guard, and says so.
 
+- **`techne archivist query` and the `techne_archivist_query` MCP tool** (#554) — a
+  guarded read-only SQL surface over team memory. The Archivist could hand you things
+  but you could not interrogate it: `archivist.db` was reachable only through
+  federation fan-out inside recall, which pushes results at you for a topic string.
+  "Which decisions touch cabal?", "what was written last week that superseded
+  something?", "who wrote what?" are plain reads, and every one was impossible without
+  opening the sqlite file by hand. Pairs with #553 — a query surface without writer
+  provenance answers *what do we know* but never *who says so*.
+
+  **Distilled only**: `knowledge`, `knowledge_deps`, `knowledge_fts`. The raw
+  observation tier is not readable here, deliberately and separately from whatever the
+  distilled-only egress decision concludes. Enforced by SQLite itself, not by
+  convention — a `?mode=ro` connection, a `set_authorizer` callback checked during
+  prepare (which denies `ATTACH`, because a read-only connection can otherwise attach
+  and read the *personal* store out through the team surface), a work budget that
+  stops a runaway query, and one statement per call. No write verbs on this path ever,
+  for any caller.
+
+  Three outcomes are distinguishable on purpose: `rows`, `no-rows` (the query ran and
+  matched nothing — an answer), and `store-absent` (no team store is bound — *not*
+  "the team knows nothing"). Collapsing the third is how a standalone install comes to
+  report that the team knows nothing; it is the same failure the recall ladder's
+  `loose-match-only` exists to prevent.
+- **`techne custodian run|status` — the emit→ingest rails can run headless** (#555). The
+  passes that are actually custodial — dedup, merge/supersede, the faithfulness check on
+  rewrites, contradiction classification — all sat on the resident path, which requires an
+  agent sitting there to answer emitted prompts. A custodian that only works while you are
+  watching is not a custodian. Rails now take an optional model binding and run unattended;
+  unbound (the default) every rail behaves exactly as before.
+
+  Provider-agnostic by construction: the binding is a `str -> str` callable resolved through
+  the same `_make_generate_fn` as the operator-model path, so any LiteLLM identifier works —
+  local Ollama, Vertex via ADC, a proxy. The credential question lives in config, not in the
+  code path.
+
+
+- **`pattern_outcomes` gets a write path** (#551, #426) — `techne architect realized` /
+  `outcomes` / `unrealized`, plus `record_outcome()` and `unrealized_patterns()`. The
+  code had been written since 2026-07-28 and blocked on a version number: #426 shipped
+  `ARCHITECT_VERSION = 4` while main had since taken v4 for #674's liminal
+  canonicalisation. **Both steps are kept at their own rungs and `architect.db` is now
+  v5.** Verified on a copy of the live store rather than on fixtures — 520 patterns
+  preserved, and `pattern_outcomes` compared column by column against the 11 rows
+  already there, since `IF NOT EXISTS` would otherwise mask a divergent shape.
+
+- **A running MCP server notices when the code moved underneath it** (#696 part B). A
+  `stat` of `<runtime>/.git/logs/HEAD` behind a 30s TTL, then a walk of the `techne.*`
+  entries already in `sys.modules`. The observation it rests on: *the process that needs
+  to report is the one that already knows* — answering "am I running the code on disk"
+  from outside costs `ps` plus git; from inside it costs one `stat`.
+
+- **SessionStart learns what a live server already knows** (#696 part A). A server
+  publishes its finding as one small JSON file per pid under `runtime-state/`, written
+  whole then renamed, and **only when there is a real finding** — so the presence of a
+  file means something is wrong rather than merely that a server ran. `check_runtime_torn`
+  reads them with a directory listing and `os.kill(pid, 0)` to drop the dead, which keeps
+  it an *ordinary* check and lets it reach the banner through the path that already
+  existed.
 
 ### Changed
 
@@ -231,46 +289,6 @@ All notable changes to techne are documented here. Format loosely follows
   config* reported `dormant/ok` with zero rows and `stale/ok=False` with three drained
   ones. Both branches now answer from one predicate.
 
-
-### Added
-
-- **`techne archivist query` and the `techne_archivist_query` MCP tool** (#554) — a
-  guarded read-only SQL surface over team memory. The Archivist could hand you things
-  but you could not interrogate it: `archivist.db` was reachable only through
-  federation fan-out inside recall, which pushes results at you for a topic string.
-  "Which decisions touch cabal?", "what was written last week that superseded
-  something?", "who wrote what?" are plain reads, and every one was impossible without
-  opening the sqlite file by hand. Pairs with #553 — a query surface without writer
-  provenance answers *what do we know* but never *who says so*.
-
-  **Distilled only**: `knowledge`, `knowledge_deps`, `knowledge_fts`. The raw
-  observation tier is not readable here, deliberately and separately from whatever the
-  distilled-only egress decision concludes. Enforced by SQLite itself, not by
-  convention — a `?mode=ro` connection, a `set_authorizer` callback checked during
-  prepare (which denies `ATTACH`, because a read-only connection can otherwise attach
-  and read the *personal* store out through the team surface), a work budget that
-  stops a runaway query, and one statement per call. No write verbs on this path ever,
-  for any caller.
-
-  Three outcomes are distinguishable on purpose: `rows`, `no-rows` (the query ran and
-  matched nothing — an answer), and `store-absent` (no team store is bound — *not*
-  "the team knows nothing"). Collapsing the third is how a standalone install comes to
-  report that the team knows nothing; it is the same failure the recall ladder's
-  `loose-match-only` exists to prevent.
-- **`techne custodian run|status` — the emit→ingest rails can run headless** (#555). The
-  passes that are actually custodial — dedup, merge/supersede, the faithfulness check on
-  rewrites, contradiction classification — all sat on the resident path, which requires an
-  agent sitting there to answer emitted prompts. A custodian that only works while you are
-  watching is not a custodian. Rails now take an optional model binding and run unattended;
-  unbound (the default) every rail behaves exactly as before.
-
-  Provider-agnostic by construction: the binding is a `str -> str` callable resolved through
-  the same `_make_generate_fn` as the operator-model path, so any LiteLLM identifier works —
-  local Ollama, Vertex via ADC, a proxy. The credential question lives in config, not in the
-  code path.
-
-### Fixed
-
 - **The automatic session-end reflect rail had never produced a single candidate** (#555).
   Not since a regression — *ever*, since 2026-06-20. Measured on the author's store: all 444
   candidates carry `model_used='agent-assisted'` (the resident route); zero came from the
@@ -305,6 +323,52 @@ All notable changes to techne are documented here. Format loosely follows
   latency; a CPU-bound dev box merely made it visible (a real conflict prompt had not returned
   after 240s there, against 11.6s for the same prompt on the inference host).
 
+
+- **A declined re-ingest no longer overwrites the survey date** (#429, #711) —
+  `surveyed_at` moved unconditionally while `verdict` sat behind a guard, so a re-ingest
+  that *kept* the stored verdict still stamped the new date. The row then asserted that
+  the old judgement was reached on the new date, with nothing on the outside able to
+  detect it. The date and the verdict are one fact and now move together. **This fixes
+  new writes and cannot repair old ones from the table alone** — though the snapshots and
+  transcripts can, and did: 7 rows carry the signature, 0 are corrupt (#741).
+
+- **A pattern is findable by its source URL** (#430) — `patterns_fts` indexed only
+  `(name, body)`, so the dedup step that runs *before* spending a subagent could not
+  structurally match a pattern by its source and returned a confident "no patterns
+  matched". An already-surveyed repo got re-investigated and the caller was told the
+  corpus had nothing.
+
+- **The reflect emit cursor was keyed on a hash that drifts** (#733) — so the pass
+  re-emitted work it had already done, or skipped work it had not, depending on which way
+  the hash moved. Keyed on `thread_id` now.
+
+- **The automatic reflect pass requires an explicit binding** (#731) — it inherited
+  `config.model`, which is how the rail came to be bound to a credential plane the
+  operator does not hold. An absent binding must read as absent, never as bound to
+  something unreachable.
+
+- **A test run behind a transparent prefix now contributes evidence** (#545) — a suite
+  invoked through `nice`, `nohup`, `timeout` or `stdbuf` was invisible to the evidence
+  gate, so `techne_check_evidence` could not confirm a test claim that had actually been
+  run.
+
+- **The capability report's enable snippet could be read as current state** (#638) —
+  every capability was handed a bare `hooks:` block with the flag set true, including the
+  ones that were OFF. That string is valid YAML describing a config, so a reader took it
+  as status rather than as a change to make. Not hypothetical: an agent narrating the
+  report quoted the snippet for an off flag and the operator concluded it was on. The
+  frame now travels inside the payload, and a capability that is already on returns no
+  snippet at all.
+
+### Docs
+
+- **Scoped the "nothing auto-runs `backfill_vectors`" claim to this repo** (#704) — it
+  was true of the source and false of any deployment that schedules it, which is a claim
+  about the world made from a grep of one tree.
+- **Re-measured the disk cost against v0.15.0, one row only** (#691) — the fastembed row
+  is a fresh measurement; the model2vec row is deliberately still the v0.14.0 figure,
+  because a py3.13 venv is a *different construction*, and two numbers measured
+  differently do not belong in one column.
 
 ## [0.15.0] — 2026-08-19
 
@@ -679,6 +743,12 @@ that has run any of them will not re-run it.
 - **Banner honesty** (#488, #452/#457) — deferred (expensive) checks are named rather than
   silently omitted, and hook-registration drift is surfaced at session start.
 
+- **Operator-owned config layer for egress-selecting keys** (#393) — the keys that choose where memory can GO (`sync`, `connections`, `llm_api_base`, `llm_api_key`, `model`, `reflect.model`, `conflict.model`, `archivist_db_path`, `standalone`, `stores`) can now be pinned in a `config.operator.yaml` that techne honors only while the file is provably not writable by the process reading it. Resolved from `/etc/techne/config.operator.yaml` → `$TECHNE_OPERATOR_CONFIG` → `<techne_home>/config.operator.yaml`, gated once in `Config.load()`. A layer that exists but is writable by us FAILS CLOSED to the built-in default destinations rather than deferring to `config.yaml` — and `config.yaml` keeps its own values on disk either way, so an enforcing layer never destroys the file it overrules. Only `/etc/techne/config.operator.yaml` is a real lock; the other two tiers are conveniences an agent can bypass from its own environment — `$TECHNE_OPERATOR_CONFIG` with `env -u`, and the `<techne_home>` tier via `TECHNE_HOME` — and the check names the tier in force together with the lever that actually applies to it. **Operators pinning a layer must declare the WHOLE set** — an omitted key reverts to its built-in value rather than falling back to `config.yaml`. Watch `stores` in particular: an omitted store DSN does not error, it opens a new empty database at `<data_dir>/<domain>.db`, so domain memory looks intact and is not. **Installs with no operator layer are unaffected** — `config.yaml` keeps full authority, and the new `config:trust` check reports that state rather than implying a boundary nobody deployed.
+
+- **`techne architect ingest --verdict`** (#428) — record the operator's actual judgment (`skip` / `skip-with-flag` / `patterns-only` / `full-eval`) for the URLs an ingest covers.
+- **`techne architect reverdict URL --verdict X`** (#428) — correct one investigation's verdict without re-ingesting its pattern block. Leaves `surveyed_at` alone: correcting a judgment is not a re-survey.
+- **`techne architect sweep-legacy-verdicts --before DATE [--apply]`** (#428) — retire pre-#428 auto-assigned verdicts to `unknown`. Dry-run by default and date-scoped, so a genuine post-fix verdict is never clobbered.
+
 ### Fixed
 
 - **Outbox retention that preserves the dedup ledger** (#518, #484) — 130,266 synced rows
@@ -749,6 +819,14 @@ that has run any of them will not re-run it.
   discarded reflection no longer reports as a successful empty one (#465); `techne doctor`
   asks for `--posture auto` on a machine that was never initialised (#480).
 
+- **`techne watch` no longer crash-loops forever on a missing `[watch]` extra** (#498) — `deploy/techne-watch.service` shipped `Restart=on-failure` + `RestartSec=5s` with no `RestartPreventExitStatus`, while `watch()` raised a plain `RuntimeError` for the missing `watchdog` import. An operator who installed techne without the extra got a respawn every 5 seconds forever, and a journal full of tracebacks that read like a runtime fault when the fix was one `pip install`. A configuration error was being retried as though it were transient, and it never becomes non-transient. `techne watch` now exits `78` (`sysexits.h` `EX_CONFIG`) on a startup precondition that restarting cannot satisfy, and the shipped unit sets `RestartPreventExitStatus=78`, so systemd stops on the FIRST failure — no retry counter, no backoff ladder, no coordination between app and supervisor beyond one agreed constant. **Both halves are required**: either line alone still crash-loops, which is why the test derives the unit's value from `techne/exit_codes.py` rather than retyping `78`. The new `StartupConfigError` subclasses `RuntimeError` deliberately, so existing `except RuntimeError` callers are unaffected and the exit contract is opt-in at the seam that can act on it.
+
+- **`runtime:loaded` — a long-running process holding pre-deploy modules is no longer reported as healthy** (#491) — `runtime:revision` reads git HEAD from disk, so it rendered a torn MCP server as LIVE while `techne_reflect_emit` died on an `ImportError` for a symbol that was present in both the repo and the runtime. The new check compares each long-lived techne process's start time against the deployed HEAD's committer time and reports STALE with a restart remedy. Deliberately a **conservative staleness warning, not a tear detector**: a runtime pull under a live server was measured NOT tearing it, so the check reports the ordering it observed and explicitly disclaims the inference.
+
+- **The investigation verdict is no longer hardcoded** (#428) — `ingest_patterns_md` wrote `full-eval` for any URL group carrying patterns and `skip-with-flag` for a no-lift bullet, and the CLI could not set one, so the column recorded *whether the markdown had patterns* rather than a judgment and `patterns-only` was unreachable by any code path. The live corpus had 202 `full-eval` / 70 `skip-with-flag` / 0 `patterns-only` against 19 eval docs on disk. Verdicts are now validated against a vocabulary, and an ingest that does not state one records `patterns-only` (the documented modal outcome) instead of `full-eval`.
+
+</details>
+
 ### Performance
 
 - **Hook fast path — 100ms → 50ms per hook** (#470) — stdlib-only config read.
@@ -773,6 +851,8 @@ that has run any of them will not re-run it.
 - **Cold-storage tier proposal** (#405) — graduate aged knowledge to Librarian documents.
 - The arch-card freshness gate is wired into CI (#383).
 
+- **Three suites are now documented as deliberately local-only, and the claim is testable** (#453, #456, #537) — `probe` (3 tests, #94 memory-attribution), `eval_llm` (1 test, #118) and the two `RUN_LSP_INTEGRATION`-gated LSP tests each need a toolchain CI does not carry (the `claude`/`opencode` CLI, a reachable model, `pyright-langserver` i.e. Node for two tests), and each would SKIP rather than fail if wired up naively — so covering them buys a green result that means less than it looks. ARCHITECTURE.md now states this as a decision rather than a "gotcha", and `tests/test_local_only_suites.py` fails if the repo and the policy drift apart in either direction. Also records WHY `hooks.capture_read` is off (`config.py`): volume, not maturity — `Read` is far more frequent than `Bash`, so capturing it inflates the ledger without a matching gain. It is shipped and symmetric with `capture_bash`; the only defect was that the reason lived in someone's head.
+
 ### Removed
 
 - **`search.mmr_lambda` config knob** (#420) — it defaulted to 0.3, round-tripped through
@@ -785,31 +865,7 @@ that has run any of them will not re-run it.
 <details>
 <summary>Earlier detail from this cycle, kept verbatim</summary>
 
-### Added
-
-- **Operator-owned config layer for egress-selecting keys** (#393) — the keys that choose where memory can GO (`sync`, `connections`, `llm_api_base`, `llm_api_key`, `model`, `reflect.model`, `conflict.model`, `archivist_db_path`, `standalone`, `stores`) can now be pinned in a `config.operator.yaml` that techne honors only while the file is provably not writable by the process reading it. Resolved from `/etc/techne/config.operator.yaml` → `$TECHNE_OPERATOR_CONFIG` → `<techne_home>/config.operator.yaml`, gated once in `Config.load()`. A layer that exists but is writable by us FAILS CLOSED to the built-in default destinations rather than deferring to `config.yaml` — and `config.yaml` keeps its own values on disk either way, so an enforcing layer never destroys the file it overrules. Only `/etc/techne/config.operator.yaml` is a real lock; the other two tiers are conveniences an agent can bypass from its own environment — `$TECHNE_OPERATOR_CONFIG` with `env -u`, and the `<techne_home>` tier via `TECHNE_HOME` — and the check names the tier in force together with the lever that actually applies to it. **Operators pinning a layer must declare the WHOLE set** — an omitted key reverts to its built-in value rather than falling back to `config.yaml`. Watch `stores` in particular: an omitted store DSN does not error, it opens a new empty database at `<data_dir>/<domain>.db`, so domain memory looks intact and is not. **Installs with no operator layer are unaffected** — `config.yaml` keeps full authority, and the new `config:trust` check reports that state rather than implying a boundary nobody deployed.
-
-- **`techne architect ingest --verdict`** (#428) — record the operator's actual judgment (`skip` / `skip-with-flag` / `patterns-only` / `full-eval`) for the URLs an ingest covers.
-- **`techne architect reverdict URL --verdict X`** (#428) — correct one investigation's verdict without re-ingesting its pattern block. Leaves `surveyed_at` alone: correcting a judgment is not a re-survey.
-- **`techne architect sweep-legacy-verdicts --before DATE [--apply]`** (#428) — retire pre-#428 auto-assigned verdicts to `unknown`. Dry-run by default and date-scoped, so a genuine post-fix verdict is never clobbered.
-
-### Removed
-
 - **`search.mmr_lambda` config knob** (#420) — it defaulted to 0.3, round-tripped through `config.yaml`, and was never passed to any search function, so every live path ran at `search_fts`'s own 0.0 (MMR off). Setting it was a silent no-op. Removed rather than plumbed because turning it on would have been an unmeasured retrieval change: every live caller passes λ=0, so `_mmr_reorder` returns at its λ=0 guard and never reaches the scoring loop. The deterministic `eval`/`eval_gate` legs install `.[dev,codex]` and lack numpy, so they cannot observe MMR at any λ — but the `eval-vec` leg CAN (it installs `[vectors]` on 3.14 with `potion-base-8M` pre-cached, and its `search(use_vectors=True)` path runs through `_mmr_reorder`), which is where a re-plumbing measurement belongs. Plumbing it would therefore have been an unmeasured retrieval change, on installs whose 0.3 was a serialized default nobody chose. Existing configs carrying the key still load; it is ignored, as it was in effect before. The `mmr_lambda=` parameter on `search_fts`/`_mmr_reorder` is unchanged and still tested.
-
-### Documentation
-
-- **Three suites are now documented as deliberately local-only, and the claim is testable** (#453, #456, #537) — `probe` (3 tests, #94 memory-attribution), `eval_llm` (1 test, #118) and the two `RUN_LSP_INTEGRATION`-gated LSP tests each need a toolchain CI does not carry (the `claude`/`opencode` CLI, a reachable model, `pyright-langserver` i.e. Node for two tests), and each would SKIP rather than fail if wired up naively — so covering them buys a green result that means less than it looks. ARCHITECTURE.md now states this as a decision rather than a "gotcha", and `tests/test_local_only_suites.py` fails if the repo and the policy drift apart in either direction. Also records WHY `hooks.capture_read` is off (`config.py`): volume, not maturity — `Read` is far more frequent than `Bash`, so capturing it inflates the ledger without a matching gain. It is shipped and symmetric with `capture_bash`; the only defect was that the reason lived in someone's head.
-
-### Fixed
-
-- **`techne watch` no longer crash-loops forever on a missing `[watch]` extra** (#498) — `deploy/techne-watch.service` shipped `Restart=on-failure` + `RestartSec=5s` with no `RestartPreventExitStatus`, while `watch()` raised a plain `RuntimeError` for the missing `watchdog` import. An operator who installed techne without the extra got a respawn every 5 seconds forever, and a journal full of tracebacks that read like a runtime fault when the fix was one `pip install`. A configuration error was being retried as though it were transient, and it never becomes non-transient. `techne watch` now exits `78` (`sysexits.h` `EX_CONFIG`) on a startup precondition that restarting cannot satisfy, and the shipped unit sets `RestartPreventExitStatus=78`, so systemd stops on the FIRST failure — no retry counter, no backoff ladder, no coordination between app and supervisor beyond one agreed constant. **Both halves are required**: either line alone still crash-loops, which is why the test derives the unit's value from `techne/exit_codes.py` rather than retyping `78`. The new `StartupConfigError` subclasses `RuntimeError` deliberately, so existing `except RuntimeError` callers are unaffected and the exit contract is opt-in at the seam that can act on it.
-
-- **`runtime:loaded` — a long-running process holding pre-deploy modules is no longer reported as healthy** (#491) — `runtime:revision` reads git HEAD from disk, so it rendered a torn MCP server as LIVE while `techne_reflect_emit` died on an `ImportError` for a symbol that was present in both the repo and the runtime. The new check compares each long-lived techne process's start time against the deployed HEAD's committer time and reports STALE with a restart remedy. Deliberately a **conservative staleness warning, not a tear detector**: a runtime pull under a live server was measured NOT tearing it, so the check reports the ordering it observed and explicitly disclaims the inference.
-
-- **The investigation verdict is no longer hardcoded** (#428) — `ingest_patterns_md` wrote `full-eval` for any URL group carrying patterns and `skip-with-flag` for a no-lift bullet, and the CLI could not set one, so the column recorded *whether the markdown had patterns* rather than a judgment and `patterns-only` was unreachable by any code path. The live corpus had 202 `full-eval` / 70 `skip-with-flag` / 0 `patterns-only` against 19 eval docs on disk. Verdicts are now validated against a vocabulary, and an ingest that does not state one records `patterns-only` (the documented modal outcome) instead of `full-eval`.
-
-</details>
 
 ## [0.12.0] — 2026-07-24
 
