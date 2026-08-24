@@ -941,6 +941,10 @@ def test_reflect_on_session_logs_on_make_generate_fn_failure(tmp_path, caplog):
     """#246: when _make_generate_fn raises, log.exception fires AND errors counter
     increments (generate_fn=None path so the real _make_generate_fn is called)."""
     config = _mk_config(tmp_path, enabled=True)
+    # A BOUND model is what puts us on the _make_generate_fn path at all (techne#555):
+    # unbound skips the automatic pass entirely, so without this the test would assert
+    # the error counter on a pass that never tried.
+    config.reflect.model = "ollama/llama3"
     session_id, obs = _mk_session_with_obs(config, 5)
     thread = Thread(thread_num=1, label="x", summary="x", observation_indices=list(range(5)))
     _save_thread_row(config, session_id, thread)

@@ -41,3 +41,19 @@ def set_state(conn: sqlite3.Connection, name: str, payload: dict, *, commit: boo
     )
     if commit:
         conn.commit()
+
+
+def clear_state(conn: sqlite3.Connection, name: str, *, commit: bool = True) -> bool:
+    """Delete the payload for *name*. Returns True if a row was actually removed.
+
+    The counterpart to `set_state`, for the case where a stored fact stops being
+    true rather than changing value. A payload that describes a configuration
+    that no longer exists is worse than no payload: `get_state` cannot tell a
+    current claim from a retracted one, so a reader keeps reporting the old
+    state indefinitely. Deleting is how a writer says "there is nothing to say
+    here any more".
+    """
+    cur = conn.execute("DELETE FROM extension_state WHERE name = ?", (name,))
+    if commit:
+        conn.commit()
+    return cur.rowcount > 0
