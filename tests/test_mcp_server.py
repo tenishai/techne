@@ -513,6 +513,45 @@ def test_mcp_tools_doc_is_complete():
     assert not missing, f"tools registered but undocumented in docs/mcp-tools.md: {missing}"
 
 
+def test_the_four_domains_section_names_all_four():
+    """techne#744. `test_mcp_tools_doc_is_complete` above measures a PROXY: it asks
+    whether a `### \u0060name\u0060` heading exists ANYWHERE in the file. That is
+    satisfiable without the property that matters — `codex_search` was documented in a
+    "Code graph" section of its own, so the section whose whole job is teaching the
+    four-name vocabulary listed THREE of them and the suite was green.
+
+    Same shape `docs/arch/liveness.md` names: the signal was measured on a proxy that
+    could be satisfied without the thing being true. So this asserts on the SECTION.
+    """
+    from pathlib import Path
+
+    doc = Path(__file__).resolve().parent.parent / "docs" / "mcp-tools.md"
+    text = doc.read_text(encoding="utf-8")
+
+    start = text.index("## The four domains")
+    # `find`, not `index`: if this section ever becomes the last H2 — and
+    # `## Patterns (architect)` is a plausible fold-in target, since the doc's own prose
+    # says `pattern_search` is the same corpus addressed by the mechanism — `index`
+    # raises a bare ValueError that tells the next reader nothing about what they broke.
+    # (Prudence, #745 r1 nit 3.)
+    end = text.find("\n## ", start)
+    section = text[start:] if end == -1 else text[start:end]
+
+    for domain in ("archivist", "librarian", "architect", "codex"):
+        assert f"### `{domain}_search`" in section, (
+            f"`{domain}_search` must be documented INSIDE the four-domains section — "
+            "a vocabulary section that lists three of four teaches the gap"
+        )
+
+    # The prose in that section claims the codex has TWO calls and that they live here.
+    # Without this, moving `codex_blast_radius` back out would leave the loop green,
+    # because the loop only ever looks for `codex_search` (#745 r1 nit 4).
+    assert "### `codex_blast_radius`" in section, (
+        "the section says the codex has two calls and that they live here — "
+        "assert it, or the claim is prose the test does not cover"
+    )
+
+
 def _codex_db_with_fan_in(tmp_path, n: int, proven: int | None = None):
     """A hub symbol with *n* direct dependents — the shape that blew the token ceiling."""
     from techne.core.codegraph import add_edge, add_symbol
