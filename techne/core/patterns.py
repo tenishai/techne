@@ -106,6 +106,24 @@ _TARGET_ALIASES = {"limenal": "liminal"}
 _OUTCOME_STATES = {"filed", "shipped", "rejected"}
 
 
+#: WHEN A RE-INGEST REPLACES THE STORED SURVEY, as ONE definition (techne#429/#711).
+#:
+#: `surveyed_at` used to be updated UNCONDITIONALLY while `verdict` was guarded, so a
+#: re-ingest that declined to replace the verdict still stamped the new date — pairing
+#: a date from one investigation with a verdict from another. The row then asserts,
+#: with no way to tell from the outside, that the OLD judgement was reached on the NEW
+#: date. That is the kind of claim `investigations` exists to make trustworthy: the
+#: liveness sweep in #431 and the drift mechanism in #505 both key on this date.
+#:
+#: The date and the verdict are ONE FACT — "this is the survey we are keeping" — so
+#: they must move together or not at all. Written once and interpolated into both
+#: assignments rather than repeated, because two spellings of one predicate is exactly
+#: how they drifted apart in the first place.
+_TAKES_NEW_SURVEY = (
+    "(:overwrite OR (:clears_skip AND investigations.verdict LIKE 'skip%'))"
+)
+
+
 def _wikilink_targets(body: str) -> list[str]:
     """Extract the referenced pattern names from `[[...]]` links in *body*.
 
@@ -198,11 +216,11 @@ def upsert_investigation(
                VALUES (:id, :url, :surveyed_by, :lens, :surveyed_at, :verdict,
                        :summary, :skip_reason, :maturity)
                ON CONFLICT(url, surveyed_by, lens) DO UPDATE SET
-                 surveyed_at = excluded.surveyed_at,
-                 verdict = CASE
-                             WHEN :overwrite THEN excluded.verdict
-                             WHEN :clears_skip AND investigations.verdict LIKE 'skip%'
-                                  THEN excluded.verdict
+                 surveyed_at = CASE WHEN """ + _TAKES_NEW_SURVEY + """
+                                 THEN excluded.surveyed_at
+                                 ELSE investigations.surveyed_at END,
+                 verdict = CASE WHEN """ + _TAKES_NEW_SURVEY + """
+                             THEN excluded.verdict
                              ELSE investigations.verdict END,
                  summary = COALESCE(excluded.summary, investigations.summary),
                  skip_reason = COALESCE(excluded.skip_reason, investigations.skip_reason),

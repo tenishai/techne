@@ -965,3 +965,80 @@ def test_an_interrupted_v6_step_rolls_back_to_the_old_shape(tmp_path, monkeypatc
         ).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# techne#429 / #711 — surveyed_at was clobbered while verdict was guarded
+# ---------------------------------------------------------------------------
+
+
+def _investigation(db, **kw):
+    from techne.core.patterns import upsert_investigation
+
+    base = dict(
+        url="https://github.com/o/r",
+        surveyed_by="poe",
+        lens="architecture",
+        surveyed_at="2026-01-01T00:00:00",
+        verdict="skip-with-flag",
+        summary=None,
+        skip_reason=None,
+        maturity=None,
+    )
+    base.update(kw)
+    return upsert_investigation(db, **base)
+
+
+def _row(db):
+    conn = plain_connect(db)
+    try:
+        conn.row_factory = sqlite3.Row
+        return dict(
+            conn.execute("SELECT surveyed_at, verdict FROM investigations").fetchone()
+        )
+    finally:
+        conn.close()
+
+
+def test_a_declined_re_ingest_keeps_the_original_survey_date(tmp_path):
+    """techne#429. `surveyed_at` was updated unconditionally while `verdict` was
+    guarded, so a re-ingest that KEPT the stored verdict still stamped the new date —
+    producing a row that claims the old judgement was reached on the new date. The
+    liveness sweep (#431) and the drift mechanism (#505) both key on that date."""
+    db = tmp_path / "architect.db"
+    conn = plain_connect(db)
+    conn.executescript(ARCHITECT_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    _investigation(db, surveyed_at="2026-01-01T00:00:00", verdict="full-eval")
+    _investigation(
+        db,
+        surveyed_at="2026-08-24T00:00:00",
+        verdict="patterns-only",
+        overwrite_verdict=False,
+    )
+
+    row = _row(db)
+    assert row["verdict"] == "full-eval", "precondition: the verdict was NOT replaced"
+    assert row["surveyed_at"] == "2026-01-01T00:00:00", (
+        "the date must not move when the verdict does not — they are one fact, and a "
+        "new date on an old verdict is a claim nothing can detect from the outside"
+    )
+
+
+def test_an_accepted_re_ingest_moves_the_date_with_the_verdict(tmp_path):
+    """The other half: when the verdict IS replaced the date must follow, or the row
+    reports a fresh judgement carrying a stale date."""
+    db = tmp_path / "architect.db"
+    conn = plain_connect(db)
+    conn.executescript(ARCHITECT_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    _investigation(db, surveyed_at="2026-01-01T00:00:00", verdict="full-eval")
+    _investigation(db, surveyed_at="2026-08-24T00:00:00", verdict="patterns-only")
+
+    row = _row(db)
+    assert row["verdict"] == "patterns-only"
+    assert row["surveyed_at"] == "2026-08-24T00:00:00"
