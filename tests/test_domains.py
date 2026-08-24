@@ -571,8 +571,17 @@ class TestTheFourDomainsAreAddressableByName:
 
         Found twice in one PR, which is what makes it worth a test: prose about the
         vocabulary is checked, and the strings the operator actually SEES were not.
-        Scans string literals only — the comments and the group docstring legitimately
-        discuss `techne library`, because explaining the alias is not teaching it.
+        Scans every string literal INCLUDING DOCSTRINGS, because click renders command
+        docstrings verbatim as `--help` — the surface an operator is most likely to
+        read. Exactly two are exempt, by owner name: `_AliasedGroup` and the `librarian`
+        group, which explain the alias rather than teach it. Comments are not scanned
+        and do not need to be; they never reach an operator.
+
+        f-strings ARE covered: `ast.walk` descends into `JoinedStr` and yields its
+        literal segments as ordinary `Constant` nodes — which matters, because two of
+        the four sites this test was written for are f-strings. The narrow edge is a
+        SPLIT f-string (`f"techne {noun} search"`), where a placeholder abuts the word;
+        surveyed at the time and there were none.
         """
         import ast
         from pathlib import Path
@@ -580,15 +589,30 @@ class TestTheFourDomainsAreAddressableByName:
         src = Path(__file__).resolve().parent.parent / "techne" / "cli.py"
         tree = ast.parse(src.read_text(encoding="utf-8"))
 
-        # DOCSTRINGS ARE EXCLUDED DELIBERATELY, BY IDENTITY. An earlier version matched
-        # "techne library " WITH A TRAILING SPACE and passed only because the group
-        # docstring happens to write it as `techne library` with a backtick — i.e. it
-        # passed for a reason unrelated to what it asserts. Collecting the docstring
-        # nodes and skipping them by id says the true thing: explaining the alias is not
-        # teaching it, and the match itself is now unconditional.
-        docstrings = set()
+        # DOCSTRINGS ARE SCANNED TOO, AND ONLY TWO ARE EXEMPT — BY OWNER, NOT BY
+        # CATEGORY (Prudence, #745 r2 Important 1). An earlier version exempted every
+        # docstring, which exempted exactly the surface this test claims to guard:
+        # CLICK RENDERS COMMAND DOCSTRINGS VERBATIM AS `--help`. Demonstrated by adding
+        # one line to `librarian search`'s docstring — the suite stayed green while
+        # `techne librarian search --help` printed "run techne library show <id>" to
+        # the operator. And it is not exotic: the `librarian` group docstring one screen
+        # up MODELS writing `techne library`, so the next person adding a subcommand has
+        # a template for the offence.
+        #
+        # (An earlier cut also matched "techne library " with a TRAILING SPACE and
+        # passed only because that docstring writes it with a backtick — it passed for a
+        # reason unrelated to what it asserts. The match is unconditional now.)
+        #
+        # EXEMPT BY OWNER NAME, NOT BY LINE NUMBER: a line citation is the one form that
+        # goes stale silently (techne#747), and these two move whenever the file above
+        # them does.
+        EXPLAINS_THE_ALIAS = {"_AliasedGroup", "librarian"}
+
+        exempt = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                if node.name not in EXPLAINS_THE_ALIAS:
+                    continue
                 body = getattr(node, "body", None)
                 if (
                     body
@@ -596,12 +620,12 @@ class TestTheFourDomainsAreAddressableByName:
                     and isinstance(body[0].value, ast.Constant)
                     and isinstance(body[0].value.value, str)
                 ):
-                    docstrings.add(id(body[0].value))
+                    exempt.add(id(body[0].value))
 
         offenders = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if id(node) in docstrings:
+                if id(node) in exempt:
                     continue
                 if "techne library" in node.value:
                     offenders.append(f"{src.name}:{node.lineno}: {node.value.strip()[:70]}")
