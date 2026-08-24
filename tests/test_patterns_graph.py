@@ -3,6 +3,8 @@ queries, the pattern_relations shape migration, and legacy-row retirement (techn
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from techne.core import architect
@@ -721,3 +723,245 @@ def test_widening_the_target_set_did_not_weaken_the_pr130_guard():
     assert _apply_targets("This was **built in techne** last year.") == []
     assert _apply_targets("**Where to apply in widgets**: still unknown.") == []
     assert _apply_targets("**Where to apply in techne**: similar to liminal's gate.") == ["techne"]
+
+
+# ---------------------------------------------------------------------------
+# techne#430 — source_url was absent from the FTS index
+# ---------------------------------------------------------------------------
+
+
+def _seed_pattern(db, *, pid, name, body, source_url):
+    from techne.core.architect import ARCHITECT_SCHEMA
+
+    conn = plain_connect(db)
+    try:
+        conn.executescript(ARCHITECT_SCHEMA)
+        conn.execute(
+            "INSERT INTO patterns (id, name, body, source_url, status, created_at) "
+            "VALUES (?,?,?,?,'active',datetime('now'))",
+            (pid, name, body, source_url),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_pattern_is_findable_by_its_source_url(tmp_path):
+    """techne#430. `patterns_fts` indexed only (name, body), so `architect search
+    "<url>"` — the dedup step investigate-url runs BEFORE spending a subagent — could
+    not structurally match a pattern by its source and returned a confident "No
+    patterns matched". An already-surveyed repo got re-investigated, and the caller was
+    told the corpus had nothing."""
+    from techne.core.patterns import search_patterns
+
+    db = tmp_path / "architect.db"
+    _seed_pattern(
+        db,
+        pid="p-430",
+        name="Wholly unrelated title",
+        body="Body text that shares no term with the URL.",
+        source_url="https://github.com/DemoDevelops/lens",
+    )
+
+    assert search_patterns(db, "https://github.com/DemoDevelops/lens"), (
+        "a full URL must find the pattern it sourced"
+    )
+    assert search_patterns(db, "DemoDevelops/lens"), "the owner/repo slug must too"
+    assert not search_patterns(db, "github.com/NotTheOwner/other"), (
+        "and an unsurveyed URL must still find nothing — otherwise the dedup check "
+        "trades a false negative for a false positive"
+    )
+
+
+def _make_genuine_v5(db):
+    """An architect.db at the REAL pre-#430 shape: `patterns_fts(name, body)` with its
+    insert trigger, one pattern, `user_version = 5`.
+
+    Extracted because building it from ARCHITECT_SCHEMA and merely stamping the version
+    does NOT produce a v5 store — the schema is already v6-shaped, so the step's shape
+    guard short-circuits and the test exercises nothing while passing. That was live in
+    this file before #736 r1.
+    """
+    conn = plain_connect(db)
+    conn.executescript(ARCHITECT_SCHEMA)
+    conn.executescript(
+        "DROP TRIGGER IF EXISTS patterns_ai;"
+        "DROP TRIGGER IF EXISTS patterns_ad;"
+        "DROP TRIGGER IF EXISTS patterns_au;"
+        "DROP TABLE IF EXISTS patterns_fts;"
+        "CREATE VIRTUAL TABLE patterns_fts USING fts5("
+        "  name, body, content=patterns, content_rowid=rowid,"
+        "  tokenize='porter unicode61');"
+        "CREATE TRIGGER patterns_ai AFTER INSERT ON patterns BEGIN"
+        "  INSERT INTO patterns_fts(rowid, name, body)"
+        "  VALUES (NEW.rowid, NEW.name, NEW.body); END;"
+    )
+    conn.execute(
+        "INSERT INTO patterns (id, name, body, source_url, status, created_at) "
+        "VALUES ('p-mig','n','b','https://example.invalid/a/b','active',datetime('now'))"
+    )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
+
+
+def test_the_migration_backfills_the_index_rather_than_emptying_it(tmp_path):
+    """The v5->v6 step DROPs and recreates an external-content fts5 table, which cannot
+    gain a column in place. Recreating alone leaves it EMPTY — turning a silent false
+    negative into a total one — so `rebuild` is load-bearing.
+
+    THE STORE MUST START AT THE GENUINE v5 SHAPE. An earlier version of this test built
+    it from ARCHITECT_SCHEMA (already v6) and merely stamped `user_version = 5`; the
+    step's shape guard then short-circuited and the test exercised NOTHING while
+    passing. Prudence found the same weakness reachable from the v1 fixture.
+
+    AND THE ASSERTION READS THE INDEX, NOT count(*). On an external-content table a
+    bare `count(*)` enumerates the CONTENT table, so it returns 1 whether or not the
+    rebuild ran — measured: deleting the rebuild left the whole suite green.
+    """
+    from techne.core import architect
+
+    db = tmp_path / "architect.db"
+    _make_genuine_v5(db)
+
+    architect._reconcile_relations(db)
+
+    conn = plain_connect(db)
+    try:
+        assert "source_url" in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='patterns_fts'"
+        ).fetchone()[0], "the step must reshape the table"
+        matched = conn.execute(
+            "SELECT count(*) FROM patterns_fts WHERE patterns_fts MATCH ?",
+            ('"example.invalid/a/b"',),
+        ).fetchone()[0]
+        assert matched == 1, (
+            "the rebuild must repopulate the INDEX — recreating the table alone leaves "
+            "it empty, turning a silent false negative into a total one"
+        )
+    finally:
+        conn.close()
+
+
+def test_the_step_skips_a_store_whose_patterns_table_predates_source_url(tmp_path):
+    """The ladder runs from wherever the store is, including v0. An external-content
+    fts5 table resolves its columns against the content table at REBUILD time, so a
+    missing `source_url` fails with `no such column: T.source_url` — the step guards on
+    column presence rather than assuming the ladder already added it."""
+    from techne.core import architect
+
+    db = tmp_path / "architect.db"
+    conn = plain_connect(db)
+    conn.executescript(
+        "CREATE TABLE patterns (id TEXT PRIMARY KEY, name TEXT, body TEXT, status TEXT);"
+        "CREATE TABLE pattern_relations (src_pattern_id TEXT, dst_pattern_id TEXT,"
+        " kind TEXT NOT NULL, PRIMARY KEY (src_pattern_id, dst_pattern_id, kind));"
+    )
+    conn.commit()
+    conn.close()
+
+    architect._reconcile_relations(db)  # must not raise
+
+
+def test_the_rebuild_is_committed_with_the_ddl_not_left_pending(tmp_path):
+    """techne#430, Prudence r1 Important 1 — approached from the side this test can
+    actually see, and NAMED for it (r2 nit).
+
+    `plain_connect` runs DDL in autocommit, so before the step was atomic the DROPs and
+    CREATE were durable the instant they ran while the `rebuild` INSERT waited on the
+    RUNNER's commit. What this test holds down is precisely that: the rebuild is now
+    committed together with the DDL rather than left pending on someone else's commit.
+
+    IT DOES NOT EXERCISE THE ROLLBACK, despite an earlier name and docstring that said
+    it did. Prudence instrumented it: at the moment `die()` raises, `in_transaction` is
+    False and the shape is already v6 — the script has committed, nothing rolls back,
+    and the retry short-circuits on shape because there is nothing left to repair. The
+    rollback is covered by the test below, which fails INSIDE the script.
+
+    Kept because it is the only test in the repository that fails against the
+    non-atomic form: there, both windows leave `url_hits=0` AND `name_hits=0` and the
+    retry cannot repair it."""
+    from techne.core import architect
+
+    db = tmp_path / "architect.db"
+    _make_genuine_v5(db)
+
+    real = architect._step_v5_to_v6_index_source_url
+
+    def die(conn):
+        real(conn)
+        raise KeyboardInterrupt("interrupted after the step's script")
+
+    architect._step_v5_to_v6_index_source_url = die
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            architect._reconcile_relations(db)
+    finally:
+        architect._step_v5_to_v6_index_source_url = real
+
+    # The retry must be able to repair whatever the interrupted run left behind.
+    architect._reconcile_relations(db)
+
+    conn = plain_connect(db)
+    try:
+        matched = conn.execute(
+            "SELECT count(*) FROM patterns_fts WHERE patterns_fts MATCH ?",
+            ('"example.invalid/a/b"',),
+        ).fetchone()[0]
+        assert matched == 1, (
+            "after an interrupted migration the retry must leave a POPULATED index — "
+            "a reshaped-but-empty table is what the shape guard cannot repair"
+        )
+    finally:
+        conn.close()
+
+
+def test_an_interrupted_v6_step_rolls_back_to_the_old_shape(tmp_path, monkeypatch):
+    """THE ROLLBACK ITSELF, which the test above cannot reach (Prudence, #736 r2).
+
+    Failure is injected INSIDE the script, after the three DROPs and the CREATEs have
+    executed. With one BEGIN/COMMIT the v5 table, its trigger and its working
+    name-index all survive untouched — SQLite's DDL is transactional and the fts5
+    shadow tables roll back with it — and `user_version` stays at 5 so the retry still
+    runs. Measured by Prudence on this tree:
+
+        before                 shape=v5 uv=5 triggers=1 url_hits=0 name_hits=1
+        after mid-script death shape=v5 uv=5 triggers=1 url_hits=0 name_hits=1
+        after retry            shape=v6 uv=6 triggers=3 url_hits=1 name_hits=1
+    """
+    from techne.core import architect
+
+    db = tmp_path / "architect.db"
+    _make_genuine_v5(db)
+
+    monkeypatch.setattr(
+        architect,
+        "_PATTERNS_FTS_DDL",
+        architect._PATTERNS_FTS_DDL + "\nSELECT boom_not_a_function();\n",
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        architect._reconcile_relations(db)
+    monkeypatch.undo()
+
+    conn = plain_connect(db)
+    try:
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='patterns_fts'"
+        ).fetchone()[0]
+        assert "source_url" not in sql, "a mid-script death must roll back to the v5 shape"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5, (
+            "and must not stamp the version — otherwise the retry never runs"
+        )
+    finally:
+        conn.close()
+
+    architect._reconcile_relations(db)  # the retry must still repair it
+
+    conn = plain_connect(db)
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM patterns_fts WHERE patterns_fts MATCH ?",
+            ('"example.invalid/a/b"',),
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
