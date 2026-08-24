@@ -421,6 +421,15 @@ def model_cached(config: "Config | None" = None) -> bool | None:
         for entry in cache.iterdir():
             if not entry.is_dir() or needle not in _flatten(entry.name):
                 continue
+            # KEEP LOOKING AFTER A NAME MATCH THAT HAS NO WEIGHTS (Prudence, #728 r3
+            # nit 1). This used to `return any(...)` on the FIRST directory whose name
+            # matched, so an interrupted `models--baai--bge-small-en` sorting ahead of
+            # a complete `models--qdrant--bge-small-en-onnx` answered False with the
+            # weights on disk — the r2 false negative again, in a narrower form and
+            # DEPENDENT ON READDIR ORDER, which is worse than simply wrong because it
+            # will not reproduce. Measured with the order forced:
+            #     ['models--baai--bge-small-en', 'models--qdrant--bge-small-en-onnx']
+            #     weights in the second; probe -> False
             # AN EMPTY REPO DIR IS AN INTERRUPTED FETCH, NOT A CACHE HIT. The model2vec
             # branch below already knew this; fastembed had no equivalent, and
             # `snapshot_download` creates `<repo>/refs/` BEFORE any weight lands, so a
@@ -428,7 +437,8 @@ def model_cached(config: "Config | None" = None) -> bool | None:
             # The artifact fastembed loads is an ONNX graph; looking for it directly is
             # layout-agnostic (flat or `snapshots/<rev>/`) and is the honest expression
             # of "the weights are here", which `refs/` alone is not.
-            return any(entry.rglob("*.onnx"))
+            if any(entry.rglob("*.onnx")):
+                return True
         return False
 
     if backend == "model2vec":

@@ -676,6 +676,29 @@ def main() -> None:
             print(f"techne: per-turn recall degraded: {e}", file=sys.stderr)
             degraded = str(e)[:200]
 
+        # A DEAD VECTOR CHANNEL DOES NOT RAISE, SO THERE IS NOTHING TO CATCH ABOVE
+        # (techne#728 r3 Important 1). Since techne#708 `search_vec` degrades to FTS
+        # and returns [] rather than propagating, so `search()` succeeds, this handler
+        # never fires, `degraded` stays None, and `_record` writes outcome="ok" over a
+        # backend that answered nothing — the shape `_record`'s own docstring names as
+        # the bug this module exists to surface. `take_vec_channel_error()` is how a
+        # caller learns about a degradation that did not raise.
+        #
+        # AND IT IS THE ONLY SIGNAL THAT CAN EXIST HERE. `search_vec` also prints to
+        # stderr, but this is a `UserPromptSubmit` hook that exits 0, and Claude Code
+        # discards a zero-exit hook's stderr — "goes to the debug log only, never the
+        # transcript, and Claude never sees it". Exit 2 would surface it and BLOCK the
+        # prompt, which is not on the table. So the marker is not the second half of
+        # the signal; on this path it is the whole of it.
+        #
+        # An existing `degraded` WINS: recall failing outright is the more specific
+        # fact, and the vector channel is one input to it.
+        from techne.core.search import take_vec_channel_error
+
+        vec_error = take_vec_channel_error()
+        if vec_error and degraded is None:
+            degraded = vec_error[:200]
+
     # ------------------------------------------------------------------
     # Seed block (techne#277) — static nudge to store a durable if one emerged.
     # No DB query; the model self-gates and the session-end batch reconciles.

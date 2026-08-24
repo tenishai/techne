@@ -609,13 +609,52 @@ def search_knowledge_conn(
 _VEC_SUPERSEDE_OVERFETCH = 3
 
 
-# Once per process, not once per turn. The broad `except` below is correct — a
-# hook must not raise — but before techne#708 those exceptions PROPAGATED to
-# user_prompt_submit's handler, which printed to stderr and made `_record` write
-# outcome="failed". Returning [] silently would delete that signal and make a
-# rail whose every search fails report LIVE, which is the exact shape _record's
-# docstring exists to prevent. So keep the broad catch and narrow the SILENCE.
+# The broad `except` below is correct — a hook must not raise — but before techne#708
+# those exceptions PROPAGATED to user_prompt_submit's handler, which printed to stderr
+# and made `_record` write outcome="failed". Returning [] silently would delete that
+# signal and make a rail whose every search fails report LIVE, which is the exact shape
+# _record's docstring exists to prevent. So keep the broad catch and narrow the SILENCE.
+#
+# TWO SIGNALS, BECAUSE ON THE PATH THAT MATTERS THE STDERR ONE REACHES NOBODY.
+# `user_prompt_submit` is a `UserPromptSubmit` hook and it exits 0. Claude Code's hook
+# documentation is explicit: "Stderr from a hook that exits 0 goes to the debug log
+# only, never the transcript, and Claude never sees it." Only exit 2 surfaces stderr,
+# and this hook must never exit 2 — that BLOCKS the prompt and erases it. So on the
+# hook path the warning below is invisible to the operator AND to Claude, and the
+# marker is the only signal that can exist. It is not the nice-to-have half.
+# (Prudence, #728 r3 nit 5 asked whether that stderr surfaces at all; it does not.)
+#
+# ONCE PER PROCESS, WHICH IS NOT ONCE PER TURN ON THE HOOK PATH EITHER. The hook runs
+# as a FRESH SUBPROCESS per prompt, so this flag starts False every turn and the line
+# would print every turn if anyone could see it. The dedupe earns its keep only in a
+# long-lived process — a CLI backfill loop, the MCP server.
 _EMBED_UNAVAILABLE_WARNED = False
+
+#: The last vector-channel failure, for the liveness marker. CONSUME-ONCE via
+#: `take_vec_channel_error()` (techne#728 r3 Important 1).
+#:
+#: WHY A MODULE GLOBAL RATHER THAN A RETURN VALUE. Threading a per-channel status out
+#: of `search()` is the right long-term shape and it is a signature change across every
+#: caller — that is techne#739 and it stays there. This is the same mechanism sitting
+#: four lines above, used for the same reason, and it closes the marker half here
+#: rather than one release later.
+#:
+#: CONSUME-ONCE IS LOAD-BEARING, not tidiness. In a long-lived process a failure left
+#: standing would mark a LATER, healthy turn as degraded — a stale-derived-fact defect,
+#: which is precisely the class this whole change is about. Reading it clears it.
+_VEC_CHANNEL_ERROR: str | None = None
+
+
+def take_vec_channel_error() -> str | None:
+    """Return the last vector-channel failure and CLEAR it. None when there was none.
+
+    The vector channel degrades to FTS rather than raising (techne#708), so a caller
+    that wants to record the degradation has nothing to catch. This is how it finds
+    out. See `_VEC_CHANNEL_ERROR` for why it clears.
+    """
+    global _VEC_CHANNEL_ERROR
+    err, _VEC_CHANNEL_ERROR = _VEC_CHANNEL_ERROR, None
+    return err
 
 
 def search_vec(
@@ -669,18 +708,18 @@ def search_vec(
         # cache and an incompatible weights file. Pre-#708 those propagated and
         # `_record` wrote outcome="failed".
         #
-        # THIS LINE RESTORES THE STDERR HALF, NOT THE MARKER, and the marker is the
-        # half the liveness subsystem reads. `_record`'s `degraded` argument is set
-        # only inside user_prompt_submit's `except Exception` around the recall block;
-        # post-#708 `search_vec` returns [] instead of raising, so nothing raises,
-        # `degraded` stays None, and the rail records outcome="ok" over a dead backend.
-        # MEASURED end-to-end through user_prompt_submit.main() with a dead backend:
+        # BOTH HALVES, NOW. An earlier round of this PR restored only the stderr half
+        # and the rail still recorded outcome="ok" over a dead backend — MEASURED
+        # end-to-end through user_prompt_submit.main():
         #     {"last_run": {"outcome": "ok", "detail": "1 rows"}, "last_error": null}
-        #
-        # Threading a "vector channel unavailable" signal back out of `search()` is a
-        # larger change than #708, so it is FILED (techne#739) rather than done here —
-        # but this comment does not get to claim a signal it does not restore.
-        global _EMBED_UNAVAILABLE_WARNED
+        # `_record`'s docstring, eight lines above where that happens, names exactly
+        # that shape as the bug the module exists to surface. The guard was intact; the
+        # failure walked around it, because post-#708 `search_vec` no longer raises.
+        # `_VEC_CHANNEL_ERROR` is what user_prompt_submit reads to fill `degraded`.
+        # (Prudence, #728 r3 Important 1.)
+        global _EMBED_UNAVAILABLE_WARNED, _VEC_CHANNEL_ERROR
+
+        _VEC_CHANNEL_ERROR = f"vector recall unavailable: {exc}"
         if not _EMBED_UNAVAILABLE_WARNED:
             _EMBED_UNAVAILABLE_WARNED = True
             print(

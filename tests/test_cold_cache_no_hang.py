@@ -137,9 +137,14 @@ def test_the_degrade_is_not_silent(monkeypatch, tmp_path, capsys):
     assert "vector recall unavailable" in first
     assert "techne vectors backfill" in first, "the warning must name the remedy"
 
-    # ONCE PER PROCESS, not once per turn — this is a per-prompt hook path.
+    # ONCE PER PROCESS. NOT once per turn on the hook path, which is what the comment
+    # here used to imply (Prudence, #728 r3 nit 5): user_prompt_submit runs as a FRESH
+    # SUBPROCESS per prompt, so the flag starts False every turn. The dedupe earns its
+    # keep in a long-lived process — a CLI backfill loop, the MCP server — and this
+    # asserts it there. The hook's signal is the MARKER, not this line; see
+    # `test_a_dead_vector_channel_records_a_failed_marker`.
     search_mod.search_vec(tmp_path / "x.db", "q")
-    assert capsys.readouterr().err == "", "the warning repeated on a later turn"
+    assert capsys.readouterr().err == "", "the warning repeated within one process"
 
 
 def test_model_cached_is_a_filesystem_probe_not_a_backend_build(monkeypatch, tmp_path):
@@ -281,6 +286,50 @@ class TestModelCachedReadsTheDiskCorrectly:
 
         assert model_cached() is False
 
+    def test_a_name_match_without_weights_does_not_stop_the_search(self, monkeypatch, tmp_path):
+        """ORDER-DEPENDENT, WHICH IS WORSE THAN WRONG (Prudence, #728 r3 nit 1). The loop
+        used to `return` on the FIRST directory whose flattened name matched, so an
+        interrupted repo sorting ahead of a complete one answered False with the weights
+        on disk — the r2 false negative again, and it would not reproduce.
+
+        Both directories here match the needle `bgesmallen`; only the second has weights.
+        """
+        from techne.core.embeddings import model_cached
+
+        cache = tmp_path / ".cache" / "fastembed"
+        (cache / "models--baai--bge-small-en" / "refs").mkdir(parents=True)
+        complete = cache / "models--qdrant--bge-small-en-onnx" / "snapshots" / "abc"
+        complete.mkdir(parents=True)
+        (complete / "model.onnx").write_bytes(b"weights")
+        self._fastembed(monkeypatch, tmp_path, "BAAI/bge-small-en")
+
+        # THE ORDER MUST BE FORCED, or this test asserts nothing. `iterdir()` yields in
+        # filesystem order, so the complete repo may come first by luck and the reverted
+        # code passes — measured: with a bare `sorted(...)` precondition instead of this
+        # patch, reverting the fix left all 22 green. A test of order-dependence that
+        # does not control the order is the defect it is testing for.
+        _iterdir = Path.iterdir
+        monkeypatch.setattr(Path, "iterdir", lambda self: iter(sorted(_iterdir(self))))
+        assert next(iter(cache.iterdir())).name == "models--baai--bge-small-en", (
+            "precondition: the WEIGHTLESS repo must be visited first"
+        )
+
+        assert model_cached() is True
+
+    def test_an_underscore_in_the_model_name_still_matches(self, monkeypatch, tmp_path):
+        """`_flatten` normalises BOTH sides (Prudence, #728 r2 nit). They used to strip
+        different characters — the needle `/` and `-`, the directory `-` and `_` — so a
+        model id carrying `_` missed on that asymmetry alone. Nothing in the suite carried
+        one, so reverting the fix left every test green (#728 r3 nit 3)."""
+        from techne.core.embeddings import model_cached
+
+        repo = tmp_path / ".cache" / "fastembed" / "models--acme--my-embed-v1-onnx"
+        (repo / "snapshots" / "abc").mkdir(parents=True)
+        (repo / "snapshots" / "abc" / "model.onnx").write_bytes(b"weights")
+        self._fastembed(monkeypatch, tmp_path, "acme/my_embed_v1")
+
+        assert model_cached() is True
+
     @pytest.mark.parametrize("var", ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "XDG_CACHE_HOME"])
     def test_the_hf_cache_chain_is_honoured_end_to_end(self, monkeypatch, tmp_path, var):
         """huggingface_hub resolves HF_HUB_CACHE -> HUGGINGFACE_HUB_CACHE -> $HF_HOME/hub
@@ -301,7 +350,9 @@ class TestModelCachedReadsTheDiskCorrectly:
         snap = hub / "models--minishlab--potion-base-8M" / "snapshots" / "r1"
         snap.mkdir(parents=True)
         (snap / "model.safetensors").write_bytes(b"weights")
-        monkeypatch.setattr(E, "_select_backend", lambda cfg: ("model2vec", "minishlab/potion-base-8M"))
+        monkeypatch.setattr(
+            E, "_select_backend", lambda cfg: ("model2vec", "minishlab/potion-base-8M")
+        )
 
         assert model_cached() is True, f"{var} is in the documented chain and must be read"
 
@@ -330,9 +381,7 @@ class TestTheRemedyIsGatedOnTheBackendNotTheProbe:
         return results if isinstance(results, list) else [results]
 
     @pytest.mark.parametrize("cached", [True, None])
-    def test_a_warm_or_unmeasurable_cache_still_gets_a_remedy(
-        self, monkeypatch, tmp_path, cached
-    ):
+    def test_a_warm_or_unmeasurable_cache_still_gets_a_remedy(self, monkeypatch, tmp_path, cached):
         """Both are permanently FTS-only until a backfill runs, and neither licenses
         claiming the weights are missing."""
         (res,) = self._dormant_check(monkeypatch, tmp_path, available=True, cached=cached)
@@ -353,3 +402,120 @@ class TestTheRemedyIsGatedOnTheBackendNotTheProbe:
         """The operator never turned this on; there is nothing to tell them to do."""
         (res,) = self._dormant_check(monkeypatch, tmp_path, available=False, cached=None)
         assert res.remedy is None
+
+
+class TestADeadVectorChannelIsNotRecordedAsHealthy:
+    """techne#728 r3 Important 1. `allow_download=False` is what fixes the hang;
+    swallowing the exception into `outcome="ok"` was a SEPARATE choice made in the same
+    `except`, and only the first was necessary. Post-#708 `search_vec` returns [] instead
+    of raising, so `search()` succeeds, user_prompt_submit's handler never fires,
+    `degraded` stays None, and `_record` writes `ok` over a backend that answered
+    nothing — the exact shape `_record`'s own docstring names as the bug it exists to
+    surface. The guard was intact; the failure walked around it."""
+
+    @staticmethod
+    def _config(tmp_path):
+        from techne.config import Config
+        from techne.core.database import init_db
+
+        cfg = Config()
+        cfg.db_path = tmp_path / "test.db"
+        init_db(cfg.db_path).close()
+        cfg.hooks.per_turn_recall = True
+        cfg.hooks.user_prompt_submit = True
+        return cfg
+
+    @staticmethod
+    def _marker(config):
+        from techne.core.database import connect
+        from techne.core.extension_state import get_state
+
+        conn = connect(config.db_path)
+        try:
+            return get_state(conn, "hook:user_prompt_submit:last_run") or {}
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _dead_backend(monkeypatch):
+        import sys
+
+        monkeypatch.setattr(search_mod, "_EMBED_UNAVAILABLE_WARNED", False)
+        monkeypatch.setattr(search_mod, "_VEC_CHANNEL_ERROR", None)
+        monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
+        monkeypatch.setattr(
+            search_mod,
+            "_get_embedding_model",
+            lambda *a, **k: (_ for _ in ()).throw(_Uncached("weights corrupt")),
+        )
+        # sqlite_vec and numpy are reached BEFORE the resolver. A real install with
+        # backend_available() True always has both; without the stubs this venv fails
+        # earlier, for the wrong reason, and the test passes on a false premise.
+        monkeypatch.setitem(sys.modules, "sqlite_vec", type("m", (), {})())
+        monkeypatch.setitem(sys.modules, "numpy", type("m", (), {})())
+
+    @staticmethod
+    def _run(config, monkeypatch, prompt="what did we decide about markers"):
+        import io
+        import json
+
+        from techne.config import Config
+        from techne.hooks import user_prompt_submit
+
+        monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+        monkeypatch.setattr(
+            "sys.stdin", io.StringIO(json.dumps({"session_id": "s1", "prompt": prompt}))
+        )
+        try:
+            user_prompt_submit.main()
+        except SystemExit as exc:
+            assert exc.code in (0, None), f"a hook must never exit non-zero: {exc.code}"
+
+    @staticmethod
+    def _seed(config):
+        """FTS must return a row, or the hook takes the noop branch and the test would
+        be measuring the wrong exit."""
+        from techne.core.knowledge import store
+
+        store(
+            config.db_path,
+            "we decided markers are read at binding time",
+            type="decision",
+        )
+
+    def test_a_dead_vector_channel_records_a_failed_marker(self, monkeypatch, tmp_path):
+        config = self._config(tmp_path)
+        self._seed(config)
+        self._dead_backend(monkeypatch)
+
+        self._run(config, monkeypatch)
+
+        marker = self._marker(config)
+        assert marker.get("outcome") == "failed", (
+            f"a rail whose vector channel is dead must not report ok: {marker}"
+        )
+
+    def test_a_healthy_turn_still_records_ok(self, monkeypatch, tmp_path):
+        """THE OTHER HALF, and the one that makes the pair mean something. Asserting
+        only `failed` would keep passing if the signal fired unconditionally — which is
+        a worse defect than the one being fixed, because it marks every healthy turn."""
+        config = self._config(tmp_path)
+        self._seed(config)
+        monkeypatch.setattr(search_mod, "_VEC_CHANNEL_ERROR", None)
+        monkeypatch.setattr(embeddings_mod, "backend_available", lambda: False)
+
+        self._run(config, monkeypatch)
+
+        marker = self._marker(config)
+        assert marker.get("outcome") == "ok", marker
+
+    def test_the_channel_error_is_consumed_not_left_standing(self, monkeypatch, tmp_path):
+        """CONSUME-ONCE (see `_VEC_CHANNEL_ERROR`). In a long-lived process a failure
+        left standing would mark a LATER, healthy turn as degraded — a stale-derived-fact
+        defect, which is the class this whole change is about."""
+        self._dead_backend(monkeypatch)
+
+        search_mod.search_vec(tmp_path / "x.db", "q")
+
+        assert search_mod.take_vec_channel_error() is not None, "the failure must be recorded"
+        assert search_mod.take_vec_channel_error() is None, "and must not outlive one read"
