@@ -38,6 +38,20 @@ def config(tmp_path, monkeypatch):
     return cfg
 
 
+def _bind(config, rail="*"):
+    """Give the rail a model, because techne#735 made the verdict depend on it.
+
+    These tests all say "a rail someone switched on" and none of them switched one on:
+    the `config` fixture is UNBOUND, so before #735 they asserted the outcome->verdict
+    mapping against a config under which the rail could not have run at all. The
+    mapping is what they exist to pin and it is unchanged; this makes the fixture
+    express the state each docstring already claims.
+    """
+    config.custodian.model = "ollama/test-model"
+    config.reflect.enabled = True
+    config.reflect.model = "ollama/test-model"
+
+
 def _marker(config, rail):
     from techne.core.database import connect
     from techne.core.extension_state import get_state
@@ -428,6 +442,7 @@ def test_an_error_marker_reads_broken(config):
     """A rail someone switched on that is not working. This is the finding."""
     from techne.core.checks import Verdict, check_model_bound_rails
 
+    _bind(config)
     record_rail_marker(config, "reflect", outcome="error", detail="AuthenticationError: no key")
 
     results = {r.name: r for r in check_model_bound_rails(config)}
@@ -441,6 +456,7 @@ def test_a_partial_marker_also_reads_broken(config):
     before it gets there."""
     from techne.core.checks import Verdict, check_model_bound_rails
 
+    _bind(config)
     record_rail_marker(config, "consolidate", outcome="partial", detail="answered 1/9")
 
     results = {r.name: r for r in check_model_bound_rails(config)}
@@ -450,6 +466,7 @@ def test_a_partial_marker_also_reads_broken(config):
 def test_an_ok_marker_reads_live(config):
     from techne.core.checks import Verdict, check_model_bound_rails
 
+    _bind(config)
     record_rail_marker(config, "dream", outcome="ok", detail="answered 3/3")
 
     results = {r.name: r for r in check_model_bound_rails(config)}
@@ -463,6 +480,103 @@ def test_the_check_covers_reflect_which_is_not_a_custodian_rail(config):
 
     names = {r.name for r in check_model_bound_rails(config)}
     assert "rail:reflect:bound" in names
+
+
+# ---- techne#735: a marker is not authoritative once the rail is unbound --------
+
+
+def _reflect(config):
+    from techne.core.checks import check_model_bound_rails
+
+    return next(r for r in check_model_bound_rails(config) if r.name == "rail:reflect:bound")
+
+
+def test_a_disabled_reflect_rail_does_not_read_live(config):
+    """THE FILED DEFECT (techne#735). #732 made the UNBOUND path retract its marker;
+    the DISABLED path was left alone, and it is the path an operator is more likely to
+    take. `lifecycle.py` gates the call site on `reflect.enabled`, so when the feature
+    is off `reflect_on_session` is never invoked and NO code path can clear the marker
+    — it is permanent, not "readable for an afternoon".
+
+    The direction is why this is Important rather than a nit: unbound + stale `error`
+    read BROKEN, which is noisy, wrong and self-announcing, so someone fixes it.
+    Disabled + stale `ok` read LIVE — silent, wrong and comfortable.
+    """
+    from techne.core.checks import Verdict
+
+    _bind(config)
+    record_rail_marker(config, "reflect", outcome="ok", detail="3 thread(s) reflected")
+    assert _reflect(config).verdict is Verdict.LIVE, "precondition: bound and healthy"
+
+    config.reflect.enabled = False
+
+    assert _reflect(config).verdict is Verdict.DORMANT
+
+
+def test_an_unbound_reflect_rail_does_not_read_live(config):
+    """#732's retraction happens at WRITE time, inside `reflect_on_session`. Reading
+    the check with a config that has just been unbound — before any session has ended
+    — still saw the stale marker. A write-time retraction cannot cover a read that
+    happens first."""
+    from techne.core.checks import Verdict
+
+    _bind(config)
+    record_rail_marker(config, "reflect", outcome="ok", detail="3 thread(s) reflected")
+
+    config.reflect.model = ""
+
+    assert _reflect(config).verdict is Verdict.DORMANT
+
+
+def test_an_unbound_custodian_rail_does_not_read_live(config):
+    """THE HOLE techne#735 DOES NOT MENTION, and it is four rails wider than the issue.
+    `clear_rail_marker` exists but reflect is its only caller, so an unbound custodian
+    rail keeps its last marker permanently — the same shape, with no retraction
+    anywhere at all."""
+    from techne.core.checks import Verdict, check_model_bound_rails
+
+    _bind(config)
+    record_rail_marker(config, "dream", outcome="ok", detail="answered 3/3")
+    live = {r.name: r for r in check_model_bound_rails(config)}
+    assert live["rail:dream:bound"].verdict is Verdict.LIVE, "precondition"
+
+    config.custodian.model = ""
+
+    results = {r.name: r for r in check_model_bound_rails(config)}
+    assert results["rail:dream:bound"].verdict is Verdict.DORMANT
+
+
+def test_an_unbound_rail_still_shows_what_its_last_run_did(config):
+    """WHAT #732 WAS PROTECTING SURVIVES. The marker is kept and its payload is shown;
+    it just stops driving the verdict. If this fails, the fix has bought honesty by
+    destroying the evidence, which is the trade #732 explicitly refused."""
+    _bind(config)
+    record_rail_marker(config, "reflect", outcome="ok", detail="3 thread(s) reflected")
+
+    config.reflect.enabled = False
+
+    detail = _reflect(config).detail
+    assert "3 thread(s) reflected" in detail, "the last bound run must stay readable"
+    assert "reflect.enabled = false" in detail, "and it must say WHY it is not authoritative"
+
+
+def test_an_unbound_rail_with_an_error_marker_reads_dormant_not_broken(config):
+    """THE DOWNGRADE IS DELIBERATE — do not "fix" this back. Reading BROKEN off a stale
+    payload is wrong in the same way as reading LIVE: both derive a claim about now
+    from a configuration that is gone. BROKEN is merely wrong in the SAFE direction,
+    which is exactly what would let it survive unexamined. Nothing is hidden — the
+    outcome still rides in the detail, asserted below."""
+    from techne.core.checks import Verdict
+
+    _bind(config)
+    record_rail_marker(config, "reflect", outcome="error", detail="AuthenticationError: no key")
+    assert _reflect(config).verdict is Verdict.BROKEN, "precondition: bound and broken"
+
+    config.reflect.enabled = False
+
+    result = _reflect(config)
+    assert result.verdict is Verdict.DORMANT
+    assert "AuthenticationError" in result.detail
 
 
 # ---- reflect's own marker -----------------------------------------------------
@@ -566,7 +680,15 @@ def test_disabled_reflect_leaves_the_marker_alone(config):
     """RETRACTION IS THE UNBOUND PATH'S JOB, NOT THE DISABLED PATH'S. `enabled=False`
     returns before any binding question is asked, and an operator who switches the
     feature off for an afternoon should still be able to read what the last bound run
-    did. Only a pass that positively establishes "this rail has no binding" retracts."""
+    did. Only a pass that positively establishes "this rail has no binding" retracts.
+
+    WHERE THE SAFETY COMES FROM CHANGED IN techne#735, and this test no longer carries
+    it. It used `outcome="error"` — the one residual that happened to be safe, because
+    a stale `error` reads BROKEN. Substitute `outcome="ok"` and the same test used to
+    document a rail reporting LIVE while switched off. The marker is still kept, which
+    is what this test pins; what makes keeping it safe is now
+    `check_model_bound_rails` asking whether the rail is bound BEFORE trusting the
+    payload. See `test_a_disabled_reflect_rail_does_not_read_live`."""
     from techne.core import reflect as R
     from techne.core.thread_orchestrator import Thread
 
@@ -1049,6 +1171,7 @@ def test_an_unrecognised_marker_outcome_fails_closed(config):
     """
     from techne.core.checks import Verdict, check_model_bound_rails
 
+    _bind(config)
     record_rail_marker(config, "dream", outcome="", detail="garbled")
     record_rail_marker(config, "conflict", outcome="something-new-from-the-future")
 
@@ -1062,6 +1185,7 @@ def test_a_noop_is_still_healthy(config):
     fail-closed branch above must not sweep the legitimate steady state with it."""
     from techne.core.checks import Verdict, check_model_bound_rails
 
+    _bind(config)
     record_rail_marker(config, "consolidate", outcome="noop:nothing-to-do")
 
     results = {r.name: r for r in check_model_bound_rails(config)}

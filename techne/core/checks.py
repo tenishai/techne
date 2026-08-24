@@ -1512,6 +1512,51 @@ def _rail_consumption(conn, rail: str) -> tuple[int, str | None]:
     return pending or 0, (last_decision or None)
 
 
+def _rail_binding(config, rail: str) -> tuple[bool, str]:
+    """Is *rail* bound to a model RIGHT NOW? Returns (bound, why_not).
+
+    THE QUESTION A MARKER CANNOT ANSWER (techne#735). A marker is a record of a run
+    that happened under a configuration that may no longer exist. #732 fixed half of
+    this at WRITE time — the unbound path retracts its marker — but a write-time
+    retraction only fires when a session actually ends, and it cannot fire at all on
+    the paths that never reach the retracting code:
+
+      * `reflect.enabled = false` — `lifecycle.py` gates the call site, so
+        `reflect_on_session` is never invoked and nothing can ever clear the marker.
+      * the five custodian rails — `clear_rail_marker` exists but reflect is its only
+        caller, so an unbound custodian rail keeps its last marker permanently.
+      * even the fixed unbound-reflect path lies in the window between an operator
+        editing the config and the next session end.
+
+    Measured before the fix, one marker `outcome="ok"` and three configurations:
+
+        reflect, enabled + bound   -> LIVE      (correct)
+        reflect, enabled = false   -> LIVE      (the rail is OFF)
+        reflect, enabled, no model -> LIVE      (the rail cannot run)
+        dream,   custodian unbound -> LIVE      (the rail cannot run)
+
+    So the rule is Prudence's generalisation rather than three patches: no verdict is
+    derived from a marker without first asking whether the rail is currently bound.
+
+    DELIBERATE BOUNDARY: `custodian.rails` is NOT consulted. It selects what the
+    SCHEDULED runner drives (`custodian.py:422`), and an excluded rail can still be run
+    explicitly with `--rail`, so exclusion is a scheduling choice rather than an absent
+    binding. Widening this to scheduling would need its own decision.
+    """
+    if rail == "reflect":
+        if not config.reflect.enabled:
+            return False, "reflect.enabled = false"
+        if not config.reflect.model:
+            return False, "reflect.model unset"
+        return True, ""
+
+    from techne.core.custodian import effective_model
+
+    if not effective_model(config, rail=rail):
+        return False, "custodian.model unset"
+    return True, ""
+
+
 @register_check
 def check_model_bound_rails(config) -> list[CheckResult]:
     """Did a MODEL-BOUND rail actually produce, or did it fail where nobody was looking?
@@ -1567,6 +1612,41 @@ def check_model_bound_rails(config) -> list[CheckResult]:
                         verdict=Verdict.DORMANT,
                         detail="no model-bound run recorded — answered by a resident agent",
                         evidence=f"extension_state has no {MARKER_PREFIX}:{rail}:last_run",
+                    )
+                )
+                continue
+
+            bound, why_unbound = _rail_binding(config, rail)
+            if not bound:
+                # A MARKER FROM A BINDING THAT NO LONGER EXISTS IS NOT CURRENT STATE
+                # (techne#735). The payload is KEPT AND SHOWN — that is what #732 was
+                # protecting, and an operator switching a rail off for an afternoon
+                # should still be able to read what the last bound run did — but it
+                # stops driving the verdict, because the rail cannot run today.
+                #
+                # THIS DOWNGRADES `error`/`partial` TO DORMANT TOO, NOT ONLY `ok`, and
+                # that is deliberate rather than an oversight. Reading BROKEN off a
+                # stale payload is wrong in the same way as reading LIVE — both derive
+                # a claim about now from a configuration that is gone. It is wrong in
+                # the SAFE direction, which is exactly the argument that would let it
+                # survive unexamined. Nothing is hidden by the downgrade: the outcome
+                # and its detail ride in `detail` below, so an operator reading the
+                # doctor still sees "last bound run error: AuthenticationError".
+                results.append(
+                    CheckResult(
+                        name=f"rail:{rail}:bound",
+                        subsystem="custodian",
+                        kind=Kind.FAIL_OPEN,
+                        verdict=Verdict.DORMANT,
+                        last_fired=ts,
+                        detail=(
+                            f"not bound ({why_unbound}) — the rail cannot run; "
+                            f"last bound run {outcome}" + (f": {detail}" if detail else "")
+                        ),
+                        evidence=(
+                            f"{MARKER_PREFIX}:{rail}:last_run outcome={outcome!r} "
+                            "retained but not authoritative — see _rail_binding"
+                        ),
                     )
                 )
                 continue
