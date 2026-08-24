@@ -773,31 +773,60 @@ def test_a_pattern_is_findable_by_its_source_url(tmp_path):
 
 def test_the_migration_backfills_the_index_rather_than_emptying_it(tmp_path):
     """The v5->v6 step DROPs and recreates an external-content fts5 table, which cannot
-    gain a column in place. Recreating alone leaves it EMPTY on an existing store —
-    turning a silent false negative into a total one — so `rebuild` is load-bearing."""
+    gain a column in place. Recreating alone leaves it EMPTY — turning a silent false
+    negative into a total one — so `rebuild` is load-bearing.
+
+    THE STORE MUST START AT THE GENUINE v5 SHAPE. An earlier version of this test built
+    it from ARCHITECT_SCHEMA (already v6) and merely stamped `user_version = 5`; the
+    step's shape guard then short-circuited and the test exercised NOTHING while
+    passing. Prudence found the same weakness reachable from the v1 fixture.
+
+    AND THE ASSERTION READS THE INDEX, NOT count(*). On an external-content table a
+    bare `count(*)` enumerates the CONTENT table, so it returns 1 whether or not the
+    rebuild ran — measured: deleting the rebuild left the whole suite green.
+    """
     from techne.core import architect
 
     db = tmp_path / "architect.db"
-    _seed_pattern(
-        db, pid="p-mig", name="n", body="b", source_url="https://example.invalid/a/b"
-    )
     conn = plain_connect(db)
-    try:  # force the store back to the pre-#430 version so the step re-runs
-        conn.execute("PRAGMA user_version = 5")
-        conn.commit()
-    finally:
-        conn.close()
+    conn.executescript(ARCHITECT_SCHEMA)
+    # Reshape the FTS back to the pre-#430 (name, body) form, triggers included, so the
+    # migration has something real to migrate.
+    conn.executescript(
+        "DROP TRIGGER IF EXISTS patterns_ai;"
+        "DROP TRIGGER IF EXISTS patterns_ad;"
+        "DROP TRIGGER IF EXISTS patterns_au;"
+        "DROP TABLE IF EXISTS patterns_fts;"
+        "CREATE VIRTUAL TABLE patterns_fts USING fts5("
+        "  name, body, content=patterns, content_rowid=rowid,"
+        "  tokenize='porter unicode61');"
+        "CREATE TRIGGER patterns_ai AFTER INSERT ON patterns BEGIN"
+        "  INSERT INTO patterns_fts(rowid, name, body)"
+        "  VALUES (NEW.rowid, NEW.name, NEW.body); END;"
+    )
+    conn.execute(
+        "INSERT INTO patterns (id, name, body, source_url, status, created_at) "
+        "VALUES ('p-mig','n','b','https://example.invalid/a/b','active',datetime('now'))"
+    )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
 
     architect._reconcile_relations(db)
 
     conn = plain_connect(db)
     try:
-        assert conn.execute("SELECT count(*) FROM patterns_fts").fetchone()[0] == 1, (
-            "the rebuild must repopulate the index, not leave it empty"
-        )
         assert "source_url" in conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='patterns_fts'"
+        ).fetchone()[0], "the step must reshape the table"
+        matched = conn.execute(
+            "SELECT count(*) FROM patterns_fts WHERE patterns_fts MATCH ?",
+            ('"example.invalid/a/b"',),
         ).fetchone()[0]
+        assert matched == 1, (
+            "the rebuild must repopulate the INDEX — recreating the table alone leaves "
+            "it empty, turning a silent false negative into a total one"
+        )
     finally:
         conn.close()
 
@@ -820,3 +849,64 @@ def test_the_step_skips_a_store_whose_patterns_table_predates_source_url(tmp_pat
     conn.close()
 
     architect._reconcile_relations(db)  # must not raise
+
+
+def test_an_interrupted_v6_step_leaves_nothing_for_the_guard_to_short_circuit(tmp_path):
+    """techne#430, Prudence r1 Important 1. `plain_connect` runs DDL in autocommit, so
+    before the step was atomic the DROPs and CREATE were durable the instant they ran
+    while the `rebuild` INSERT waited on the runner's commit. An interruption in that
+    window left the NEW-SHAPED table durable and EMPTY — and the shape guard then
+    short-circuited every retry, so `user_version` reached 6 over an index holding
+    nothing. Measured across both crash windows: `search url: 0` AND `search name: 0`.
+
+    Simulated by failing inside the step after the DDL would have landed: with one
+    BEGIN/COMMIT the whole thing rolls back, so the store is left at the OLD shape and
+    the retry can still repair it."""
+    from techne.core import architect
+
+    db = tmp_path / "architect.db"
+    conn = plain_connect(db)
+    conn.executescript(ARCHITECT_SCHEMA)
+    conn.executescript(
+        "DROP TRIGGER IF EXISTS patterns_ai;"
+        "DROP TABLE IF EXISTS patterns_fts;"
+        "CREATE VIRTUAL TABLE patterns_fts USING fts5("
+        "  name, body, content=patterns, content_rowid=rowid,"
+        "  tokenize='porter unicode61');"
+    )
+    conn.execute(
+        "INSERT INTO patterns (id, name, body, source_url, status, created_at) "
+        "VALUES ('p-x','n','b','https://example.invalid/a/b','active',datetime('now'))"
+    )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
+
+    real = architect._step_v5_to_v6_index_source_url
+
+    def die(conn):
+        real(conn)
+        raise KeyboardInterrupt("interrupted after the step's script")
+
+    architect._step_v5_to_v6_index_source_url = die
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            architect._reconcile_relations(db)
+    finally:
+        architect._step_v5_to_v6_index_source_url = real
+
+    # The retry must be able to repair whatever the interrupted run left behind.
+    architect._reconcile_relations(db)
+
+    conn = plain_connect(db)
+    try:
+        matched = conn.execute(
+            "SELECT count(*) FROM patterns_fts WHERE patterns_fts MATCH ?",
+            ('"example.invalid/a/b"',),
+        ).fetchone()[0]
+        assert matched == 1, (
+            "after an interrupted migration the retry must leave a POPULATED index — "
+            "a reshaped-but-empty table is what the shape guard cannot repair"
+        )
+    finally:
+        conn.close()

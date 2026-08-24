@@ -289,11 +289,29 @@ def _step_v5_to_v6_index_source_url(conn) -> None:
     ).fetchone()
     if row and "source_url" in (row[0] or ""):
         return  # already the v6 shape
-    for trig in ("patterns_ai", "patterns_ad", "patterns_au"):
-        conn.execute(f"DROP TRIGGER IF EXISTS {trig}")
-    conn.execute("DROP TABLE IF EXISTS patterns_fts")
-    conn.executescript(_PATTERNS_FTS_DDL)
-    conn.execute("INSERT INTO patterns_fts(patterns_fts) VALUES ('rebuild')")
+    # ATOMIC (one BEGIN/COMMIT, matching _step_v0_to_v1_reshape_relations above and
+    # codex's edges rebuild) — and here the reason is sharper than "never leave the
+    # table dropped". `plain_connect` runs DDL in autocommit, so without this the DROPs
+    # and CREATE are durable the instant they execute while the `rebuild` INSERT waits
+    # on the runner's commit. An interruption in that window leaves the NEW-SHAPED
+    # table durable and EMPTY — and the shape guard above then short-circuits every
+    # retry, so `user_version` reaches 6 over an index holding nothing.
+    #
+    # MEASURED by Prudence across both crash windows: `search url: 0` AND
+    # `search name: 0` — not a partial degradation, the whole pattern index gone,
+    # permanently, with the store claiming it is migrated. The guard cannot repair it
+    # because it keys on the table's SHAPE while the invariant that matters is that the
+    # index is POPULATED, and those two come apart exactly when the step is interrupted.
+    conn.executescript(
+        "BEGIN;\n"
+        "DROP TRIGGER IF EXISTS patterns_ai;\n"
+        "DROP TRIGGER IF EXISTS patterns_ad;\n"
+        "DROP TRIGGER IF EXISTS patterns_au;\n"
+        "DROP TABLE IF EXISTS patterns_fts;\n"
+        + _PATTERNS_FTS_DDL
+        + "\nINSERT INTO patterns_fts(patterns_fts) VALUES ('rebuild');\n"
+        "COMMIT;\n"
+    )
 
 
 def _architect_run_steps(conn, current: int, target: int) -> None:
