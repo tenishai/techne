@@ -157,16 +157,25 @@ _TRANSPARENT_PREFIXES: dict[str, tuple[frozenset[str], frozenset[str], int]] = {
     ),
     # `timeout DURATION COMMAND` — the duration is positional and unflagged, so without
     # the count it reads as the command head and the runner is never found. THE ONLY ROW
-    # WITH positionals > 0, and therefore the only one that can walk PAST a real head:
+    # WITH positionals > 0 — though since the cluster rule was corrected that is no
+    # longer the only way to walk past a real head: a value letter LAST in a cluster
+    # consumes the next token, so any row with value letters does the same when an
+    # option is written without its value (`nice -n pytest`). Every such spelling is
+    # malformed and inert, which is why the conclusion survives. The walk-past case:
     # `timeout git commit -m pytest` (no duration) lands on `commit`, so the
     # _DASH_M_IS_A_MESSAGE guard no longer applies and the -m pair rule fires. Left as
     # is because every such spelling is a malformed `timeout` that exits at "invalid
     # time interval" and emits no count-shaped output — inert in the same sense this
     # file already accepts for `go build --tags test` (Prudence, #737 nit 3).
     "timeout": (frozenset({"s", "k"}), frozenset({"--signal", "--kill-after"}), 1),
-    # `-P/--pgid` and `-u/--uid` also take values (util-linux). They belong to the
-    # act-on-an-existing-process form, which carries no command at all, so omitting
-    # them under-skipped rather than over-skipped — listed for completeness.
+    # `-P/--pgid` and `-u/--uid` also take values (util-linux). CORRECTION to an
+    # earlier note here (Prudence withdrew her own nit): these do not only under-skip.
+    # `-p`/`-P`/`-u` select the act-on-an-existing-process form, where util-linux does
+    # NOT exec a trailing command — so `ionice -u 1000 pytest` now resolves to `pytest`
+    # and reports a test run that never happens. Inert in the same sense as the
+    # `timeout` row above: the wrapped command does not run, so no count-shaped output
+    # reaches the ledger in either direction. Pre-existing in shape — `-p` behaved
+    # identically before these two letters were added.
     "ionice": (
         frozenset({"c", "n", "p", "P", "u"}),
         frozenset({"--class", "--classdata", "--pid", "--pgid", "--uid"}),
