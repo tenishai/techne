@@ -1076,16 +1076,43 @@ def reflect_on_session(
     Never raises — failures are counted in `errors`. The caller (run_session_end)
     must still treat session teardown as successful.
 
-    `generate_fn` is an injectable LLM callable for tests; in prod it's built
-    from config.reflect.model (falling back to config.model).
+    `generate_fn` is an injectable LLM callable for tests; in prod it is built from
+    `config.reflect.model`, and an empty `reflect.model` means THIS PASS DOES NOT RUN.
     """
     result = {"threads_considered": len(threads), "threads_reflected": 0, **new_ingest_counts()}
     if not config.reflect.enabled:
         return result
 
-    # One LLM client for the whole pass, with optional override of the
-    # session-wide model (so reflection can run on a cheaper model than
-    # whatever the thread-summarizer uses).
+    # THE AUTOMATIC PASS REQUIRES AN EXPLICIT BINDING, AND DOES NOT INHERIT
+    # `config.model` (techne#555). This used to fall back to the session-wide model,
+    # which is how the rail came to be bound to a credential plane the operator does
+    # not hold: `config.model` was an Anthropic id, the operator held no Console API
+    # key, every session-end pass raised, `reflect_on_session` counted the error and
+    # returned, and the rail produced zero candidates from 2026-06-20 onward while
+    # `check_maintenance_rails` read LIVE off the 450 the RESIDENT route had written.
+    # `resolve_generate_fn` already refuses this fallback for the five custodian rails
+    # and names this rail as the reason; reflect has its own runner and was left
+    # inheriting. It no longer does.
+    #
+    # UNBOUND IS A CORRECT AND COMMON POSTURE, NOT A FAULT. `reflect.enabled` also
+    # gates the SessionStart nudge and the reflection-debt queue, which drive the
+    # resident emit→ingest route — the route that actually produces candidates on an
+    # instance with no headless binding. So enabled-and-unbound must leave that route
+    # working and simply not attempt an LLM call here, rather than failing loudly or
+    # forcing the operator to disable reflection wholesale to silence it.
+    #
+    # An injected `generate_fn` IS a binding — the caller supplied the callable, so
+    # there is nothing left to resolve.
+    if generate_fn is None and not config.reflect.model:
+        # Retract any marker from when this rail WAS bound. Absent-marker is what
+        # `check_model_bound_rails` reads as DORMANT ("answered by a resident agent"),
+        # which is exactly the truth here; a stale `error` payload would otherwise
+        # report a run that can no longer happen as the rail's current state.
+        _clear_reflect_marker(config)
+        return result
+
+    # One LLM client for the whole pass. `reflect.model` is a full override of the
+    # session-wide model rather than a tweak of it — see above.
     reflect_config = config
     if config.reflect.model:
         # Shallow override of config.model for the generate fn only
@@ -1188,6 +1215,16 @@ def _why(e: Exception) -> str:
     """
     msg = str(e).strip().splitlines()[0] if str(e).strip() else ""
     return f"{type(e).__name__}: {msg}"[:300]
+
+
+def _clear_reflect_marker(config) -> None:
+    """Drop this rail's marker when the automatic pass is unbound. Never raises."""
+    try:
+        from techne.core.custodian import clear_rail_marker
+
+        clear_rail_marker(config, "reflect")
+    except Exception:  # noqa: BLE001
+        log.warning("reflect: could not clear liveness marker", exc_info=True)
 
 
 def _record_reflect_marker(config, *, outcome: str, detail: str = "") -> None:

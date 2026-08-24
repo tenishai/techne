@@ -16,6 +16,7 @@ from techne.core.custodian import (
     MARKER_PREFIX,
     RAILS,
     Rail,
+    clear_rail_marker,
     effective_limit,
     effective_model,
     effective_rails,
@@ -474,6 +475,7 @@ def test_reflect_records_a_marker_when_its_model_is_unreachable(config, monkeypa
     from techne.core.thread_orchestrator import Thread
 
     config.reflect.enabled = True
+    config.reflect.model = "ollama/llama3"  # bound — the unbound path never calls out
 
     def boom(cfg):
         raise RuntimeError("AuthenticationError: Missing Anthropic API Key")
@@ -487,6 +489,93 @@ def test_reflect_records_a_marker_when_its_model_is_unreachable(config, monkeypa
     assert marker, "reflect failed to build its model and recorded NOTHING — the #555 bug"
     assert marker["outcome"] == "error"
     assert "Missing Anthropic API Key" in marker["detail"]
+
+
+def test_reflect_unbound_never_calls_a_model(config, monkeypatch):
+    """THE OTHER HALF OF #555. The rail was bound to `config.model` by fallback, so an
+    operator who never chose a headless model still got an unattended call to whatever
+    the session used — and on this operator's box that call could not authenticate.
+    Enabled with no `reflect.model` must run nothing at all."""
+    from techne.core import reflect as R
+    from techne.core.thread_orchestrator import Thread
+
+    config.reflect.enabled = True
+    config.reflect.model = ""
+    config.model = "claude-haiku-4-5-20251001"  # the id the old fallback would inherit
+
+    def boom(cfg):
+        raise AssertionError("unbound reflect must not build a model callable")
+
+    monkeypatch.setattr(R, "_make_generate_fn", boom)
+
+    threads = [Thread(thread_num=1, label="t", summary="s")]
+    result = R.reflect_on_session(config, "sess-unbound", threads, [{"content": "x"}])
+
+    assert result["errors"] == 0, "skipping an unbound pass is not an error"
+    assert result["threads_reflected"] == 0
+
+
+def test_reflect_unbound_reads_as_dormant_not_broken(config, monkeypatch):
+    """Unbound must leave NO marker. `check_model_bound_rails` reads DORMANT off the
+    marker's ABSENCE, and dormant is the truth for a rail answered by a resident
+    agent — a `noop:` payload would green it as LIVE, which it is not."""
+    from techne.core import reflect as R
+    from techne.core.thread_orchestrator import Thread
+
+    config.reflect.enabled = True
+    config.reflect.model = ""
+    monkeypatch.setattr(R, "_make_generate_fn", lambda cfg: (lambda p: "{}"))
+
+    R.reflect_on_session(config, "sess-unbound", [Thread(thread_num=1, label="t", summary="s")], [])
+
+    assert not _marker(config, "reflect"), "unbound must not write a liveness marker"
+
+
+def test_unbinding_retracts_a_stale_error_marker(config, monkeypatch):
+    """THE OPERATOR'S ACTUAL STATE, pinned. The marker was written by a bound-and-broken
+    run; once the rail is unbound that payload describes a run that can no longer
+    happen, and `doctor` would report it as BROKEN forever. Unbinding retracts it."""
+    from techne.core import reflect as R
+    from techne.core.thread_orchestrator import Thread
+
+    record_rail_marker(config, "reflect", outcome="error", detail="RuntimeError: needs litellm")
+    assert _marker(config, "reflect")["outcome"] == "error", "precondition"
+
+    config.reflect.enabled = True
+    config.reflect.model = ""
+    monkeypatch.setattr(R, "_make_generate_fn", lambda cfg: (lambda p: "{}"))
+
+    R.reflect_on_session(config, "sess-2", [Thread(thread_num=1, label="t", summary="s")], [])
+
+    assert not _marker(config, "reflect"), "a retracted rail must not keep reporting BROKEN"
+
+
+def test_clear_rail_marker_is_idempotent(config):
+    """Clearing a rail that has no marker is a no-op, not an error — the unbound path
+    runs on every teardown and must not care whether it is the first one."""
+    clear_rail_marker(config, "dream")
+    assert not _marker(config, "dream")
+
+    record_rail_marker(config, "dream", outcome="ok", detail="answered 3/3")
+    clear_rail_marker(config, "dream")
+    clear_rail_marker(config, "dream")
+    assert not _marker(config, "dream")
+
+
+def test_disabled_reflect_leaves_the_marker_alone(config):
+    """RETRACTION IS THE UNBOUND PATH'S JOB, NOT THE DISABLED PATH'S. `enabled=False`
+    returns before any binding question is asked, and an operator who switches the
+    feature off for an afternoon should still be able to read what the last bound run
+    did. Only a pass that positively establishes "this rail has no binding" retracts."""
+    from techne.core import reflect as R
+    from techne.core.thread_orchestrator import Thread
+
+    record_rail_marker(config, "reflect", outcome="error", detail="RuntimeError: needs litellm")
+    config.reflect.enabled = False
+
+    R.reflect_on_session(config, "sess-3", [Thread(thread_num=1, label="t", summary="s")], [])
+
+    assert _marker(config, "reflect")["outcome"] == "error"
 
 
 # ---- the CLI ------------------------------------------------------------------
