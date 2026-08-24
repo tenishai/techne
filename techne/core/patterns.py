@@ -119,6 +119,28 @@ _OUTCOME_STATES = {"filed", "shipped", "rejected"}
 #: they must move together or not at all. Written once and interpolated into both
 #: assignments rather than repeated, because two spellings of one predicate is exactly
 #: how they drifted apart in the first place.
+#:
+#: THE TRADE THIS MAKES, STATED BECAUSE IT IS NOT FREE (Prudence, #738). The ordinary
+#: `techne architect ingest` IS the declined path — `ingest_patterns_md` passes
+#: `overwrite_verdict=stated` where `stated = verdict is not None`, and the CLI's
+#: `--verdict` defaults to None. So for any row whose verdict is not `skip%`, this
+#: predicate is false and `surveyed_at` is now FIXED AT FIRST INGEST and never advances.
+#: Before, it always advanced.
+#:
+#: BOTH BEHAVIOURS ARE WRONG, and this one is the less wrong. The column is carrying two
+#: facts in one slot — WHEN THE KEPT VERDICT WAS REACHED and WHEN WE LAST LOOKED — and
+#: declining to restate a judgement is not the same as declining to have looked. The old
+#: bug made the date too NEW (a fresh date on a stale verdict, undetectable from
+#: outside); this makes it too OLD (a frozen date on a URL we did re-survey). A frozen
+#: date is at least honest about the verdict it accompanies, which is what #431's
+#: liveness sweep and #505's drift mechanism actually key on. Splitting the two facts
+#: needs a `last_seen_at` column — tracked as techne#741, deliberately not a schema
+#: migration inside a release-gated fix.
+#:
+#: THE BOUNDARY IS DELIBERATE: `summary`, `skip_reason` and `maturity` below are still
+#: COALESCEd from the declined investigation, so a kept row can adopt a newer summary.
+#: They only ever fill a NULL, and unlike the date they make no claim about WHEN — so
+#: the "these are one fact" argument does not extend to them.
 _TAKES_NEW_SURVEY = (
     "(:overwrite OR (:clears_skip AND investigations.verdict LIKE 'skip%'))"
 )
@@ -281,9 +303,12 @@ def sweep_legacy_verdicts(db_path: Path, *, before: str, dry_run: bool = True) -
 
     Scoped by `before` (a surveyed_at date) rather than sweeping the whole table,
     so a genuine operator-supplied full-eval recorded after the fix is never
-    clobbered. Caveat: because re-ingest currently overwrites surveyed_at
-    (techne#429), a legacy row that has since been re-investigated carries the
-    newer date and will fall outside the sweep — it will need `set_verdict`.
+    clobbered. Caveat, INVERTED BY techne#429: re-ingest no longer overwrites
+surveyed_at when it declines the verdict, and the ordinary ingest path IS the
+declined path. So a legacy row that has since been re-investigated now keeps its
+ORIGINAL date and falls INSIDE the sweep rather than outside it. Rows already
+re-ingested before that fix still carry the newer date and still need
+`set_verdict`; there is no way to tell the two populations apart.
 
     dry_run=True by default: this rewrites the operator's corpus, so the caller
     has to ask for it twice.
