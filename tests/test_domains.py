@@ -608,8 +608,13 @@ class TestTheFourDomainsAreAddressableByName:
         # them does.
         EXPLAINS_THE_ALIAS = {"_AliasedGroup", "librarian"}
 
+        # `tree.body`, NOT `ast.walk` — MODULE SCOPE ONLY (Prudence, #745 r3 nit 1).
+        # Matching the name anywhere in the tree meant a NESTED `def librarian` could
+        # carry an offending docstring and be exempted; she planted one inside
+        # `library_search` and the guard stayed green at 25 passed. Both legitimate
+        # owners are module-level, so restricting the scan costs one word and closes it.
         exempt = set()
-        for node in ast.walk(tree):
+        for node in tree.body:
             if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
                 if node.name not in EXPLAINS_THE_ALIAS:
                     continue
@@ -627,8 +632,15 @@ class TestTheFourDomainsAreAddressableByName:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if id(node) in exempt:
                     continue
-                if "techne library" in node.value:
-                    offenders.append(f"{src.name}:{node.lineno}: {node.value.strip()[:70]}")
+                idx = node.value.find("techne library")
+                if idx != -1:
+                    # A WINDOW AROUND THE MATCH, not the first 70 chars (#745 r3 nit 2).
+                    # Slicing from the start of a long `--help` docstring printed a
+                    # first line that does not contain the offence at all, with `lineno`
+                    # pointing at the opening quote — a cold trail on the exact failure
+                    # this guard exists to report.
+                    window = node.value[max(0, idx - 30) : idx + 45].replace("\n", " ")
+                    offenders.append(f"{src.name}:{node.lineno}: …{window.strip()}…")
 
         assert not offenders, "operator-facing text still says `techne library`:\n" + "\n".join(
             offenders
