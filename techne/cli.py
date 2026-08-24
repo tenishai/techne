@@ -9,7 +9,59 @@ from techne import __version__
 from techne.config import CLAUDE_CODE, PLATFORMS, Config, PostureConfig, techne_home
 
 
-@click.group()
+class _AliasedGroup(click.Group):
+    """Resolve legacy command names WITHOUT listing them twice in `--help`.
+
+    techne#744. The 0.16.0 board's DONE MEANS is that an operator can address the
+    archivist, librarian, architect and codex BY NAME. Three of the four already
+    could; the librarian was `techne library` — and `library` is the STORAGE word,
+    naming the document store, which is exactly the layout framing this release
+    demotes the four names out of.
+
+    An alias rather than a rename because every existing script, `docs/librarian-guide.md`
+    and the transcript-command tests say `library`, and breaking them to teach a word
+    is a bad trade. Resolved in `get_command` rather than registered a second time with
+    `add_command`, because a second registration puts BOTH spellings in `--help` — and a
+    help listing that offers two words for one domain teaches the ambiguity this issue
+    exists to remove.
+    """
+
+    #: legacy spelling -> canonical domain name. Keep this SMALL; it is a compatibility
+    #: shim, not a synonym system. Every entry is a word an operator might already have
+    #: in a script, not a word we would choose today.
+    ALIASES = {"library": "librarian"}
+
+    def get_command(self, ctx, cmd_name):
+        return super().get_command(ctx, self.ALIASES.get(cmd_name, cmd_name))
+
+    def resolve_command(self, ctx, args):
+        # Report the CANONICAL name, not the alias the operator typed. click's default
+        # echoes back what was typed, so `techne library --badopt` would print usage for
+        # a command name that does not appear in `--help` — which is worse than either
+        # spelling alone.
+        #
+        # NARROW ON PURPOSE, BOTH WAYS (Prudence, #745 r1 Important 1). An earlier form
+        # returned `cmd.name` unconditionally and CRASHED: click's `resolve_command`
+        # ends `return cmd_name if cmd else None, cmd, args[1:]`, and `cmd` is None
+        # whenever `ctx.resilient_parsing` is set — the NoSuchCommand raise is guarded
+        # by `and not ctx.resilient_parsing`. So shell completion over an unknown word
+        # died on `None.name`, and `_resolve_context`'s own `if cmd is None` handling
+        # never ran because it checks AFTER the call. Reproduced against click 8.4.2:
+        #     main.resolve_command(Context(main, resilient_parsing=True), ["bogus"])
+        #     -> AttributeError: 'NoneType' object has no attribute 'name'
+        # techne neither documents nor installs completion, which is why nothing caught
+        # it — but the standard click one-liner reaches it, and this override turned a
+        # working path into a crashing one.
+        #
+        # Gating on `name in ALIASES` also keeps the rewrite off every OTHER command,
+        # which is a blast radius the feature never needed.
+        name, cmd, rest = super().resolve_command(ctx, args)
+        if cmd is not None and name in self.ALIASES:
+            name = cmd.name
+        return name, cmd, rest
+
+
+@click.group(cls=_AliasedGroup)
 @click.version_option(version=__version__)
 @click.pass_context
 def main(ctx):
@@ -804,7 +856,7 @@ def search(ctx, query, table, limit):
             click.echo(f"    #{r.get('id')} {r.get('title', '') or r.get('source_url', '')}")
             snippet = (r.get("content", "") or "").replace("\n", " ").strip()
             click.echo(f"    {snippet[:200]}")
-            click.echo(f"    ↳ full: techne library show {r.get('id')}")
+            click.echo(f"    ↳ full: techne librarian show {r.get('id')}")
         click.echo()
 
 
@@ -3103,8 +3155,13 @@ def probe(ctx, runtime, mode, model, timeout, keep):
 
 @main.group(invoke_without_command=True)
 @click.pass_context
-def library(ctx):
-    """Librarian document store — index + recall full documents (techne#91)."""
+def librarian(ctx):
+    """Librarian document store — index + recall full documents (techne#91).
+
+    Addressable as `techne librarian`, one of the four domain names (techne#744).
+    `techne library` still works and is not listed, because two spellings in `--help`
+    teaches the ambiguity rather than the vocabulary.
+    """
     if ctx.invoked_subcommand is not None:
         return
     config = ctx.obj["config"]
@@ -3120,7 +3177,7 @@ def library(ctx):
         click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
 
 
-@library.command("index-transcripts")
+@librarian.command("index-transcripts")
 @click.option(
     "--platform",
     type=click.Choice(["claude-code"]),
@@ -3155,10 +3212,10 @@ def library_index_transcripts(ctx, platform, transcripts_dir, limit):
 
     counts = index_transcripts(config, source, limit=limit)
     click.echo(json.dumps(counts, indent=2))
-    click.echo("Search them: techne library search <query>")
+    click.echo("Search them: techne librarian search <query>")
 
 
-@library.command("index-markdown")
+@librarian.command("index-markdown")
 @click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
     "--source-type",
@@ -3178,10 +3235,10 @@ def library_index_markdown(ctx, root, source_type):
 
     counts = index_markdown_dir(config, root, source_type=source_type)
     click.echo(json.dumps(counts, indent=2))
-    click.echo("Search them: techne library search <query>")
+    click.echo("Search them: techne librarian search <query>")
 
 
-@library.command("search")
+@librarian.command("search")
 @click.argument("query")
 @click.option("--limit", default=20)
 @click.pass_context
@@ -3203,11 +3260,11 @@ def library_search(ctx, query, limit):
         click.echo(f"  #{d['id']}  [{d['source_type']}]  {d.get('title') or d['source_url']}")
         snippet = (d.get("content", "") or "").replace("\n", " ").strip()
         click.echo(f"    {snippet[:200]}")
-        click.echo(f"    ↳ full: techne library show {d['id']}")
+        click.echo(f"    ↳ full: techne librarian show {d['id']}")
         click.echo()
 
 
-@library.command("migrate-store")
+@librarian.command("migrate-store")
 @click.pass_context
 def library_migrate_store(ctx):
     """One-time: move documents from techne.db into librarian.db (db-per-domain #99).
@@ -3222,7 +3279,7 @@ def library_migrate_store(ctx):
     click.echo(json.dumps(result, indent=2))
 
 
-@library.command("doctor")
+@librarian.command("doctor")
 @click.pass_context
 def library_doctor(ctx):
     """Cross-db health check: report document cards whose pointer doesn't resolve in
@@ -3247,7 +3304,7 @@ def library_doctor(ctx):
         ctx.exit(1)  # non-zero so CI / scripts can gate on a clean bill
 
 
-@library.command("show")
+@librarian.command("show")
 @click.argument("doc_id", type=int)
 @click.option("--chars", default=4000, help="Max content chars to print (0 = all).")
 @click.pass_context
@@ -3266,7 +3323,7 @@ def library_show(ctx, doc_id, chars):
     click.echo(body if chars == 0 else body[:chars])
 
 
-@library.command("card")
+@librarian.command("card")
 @click.argument("card_id", type=int)
 @click.option("--chars", default=2000, help="Max document chars to print (0 = all).")
 @click.pass_context
@@ -3299,7 +3356,7 @@ def library_card(ctx, card_id, chars):
         click.echo("\n(pointer did not resolve to a document)")
 
 
-@library.group("cards")
+@librarian.group("cards")
 def library_cards():
     """Document-card gist fill — the agent-assisted summarization pass (Option D)."""
 

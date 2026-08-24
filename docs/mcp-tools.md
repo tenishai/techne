@@ -148,16 +148,6 @@ List all ACTIVE reminders (including future ones) for in-session management. Ret
 
 Dismiss a reminder by id so it no longer surfaces. The row is kept as status='done' for audit; it will not appear in future hook injections. (techne#207)
 
-## Code graph (codex)
-
-### `codex_search`
-
-Search Codex symbols (functions, classes, methods) by name or signature. Requires `techne codex index <repo>` to have been run first. Scoped to one repo (db-per-repo, techne#209): pass `repo` to pick it, else the server's working directory's repo is used. Experimental: the index is built manually and may be stale — re-run `techne codex index` after code changes.
-
-### `codex_blast_radius`
-
-Compute the transitive reachability (blast radius) of a Codex symbol. direction defaults to `in`=what reaches this symbol (dependents) — the "what breaks if I change this" impact set; `out`=what this symbol reaches (dependencies). Uses recursive CTE BFS over the call/import graph. tests/fixtures/** nodes are excluded by default (name-collision noise in the v1 name-based edge model; set…
-
 ## The four domains
 
 ### `archivist_search`
@@ -176,6 +166,20 @@ grow without the call changing.
 
 Architectural PATTERNS — the "what is worth stealing" corpus. Same corpus as
 `pattern_search`, addressed by the domain name rather than the mechanism.
+
+The codex is the fourth domain and it has TWO calls rather than one, because the graph
+answers two different questions: `codex_search` finds a symbol, `codex_blast_radius`
+answers *"what breaks if I change this"*. They live here rather than in a section of
+their own — this section is what teaches the four names, and a vocabulary section that
+listed three of them taught the gap (techne#744).
+
+### `codex_search`
+
+Search Codex symbols (functions, classes, methods) by name or signature. Requires `techne codex index <repo>` to have been run first. Scoped to one repo (db-per-repo, techne#209): pass `repo` to pick it, else the server's working directory's repo is used. Experimental: the index is built manually and may be stale — re-run `techne codex index` after code changes.
+
+### `codex_blast_radius`
+
+Compute the transitive reachability (blast radius) of a Codex symbol. direction defaults to `in`=what reaches this symbol (dependents) — the "what breaks if I change this" impact set; `out`=what this symbol reaches (dependencies). Uses recursive CTE BFS over the call/import graph. tests/fixtures/** nodes are excluded by default (name-collision noise in the v1 name-based edge model; set…
 
 `archivist`, `librarian`, `architect` and `codex` are techne's four knowledge
 domains, and the vocabulary is deliberate: an operator learns these four names in

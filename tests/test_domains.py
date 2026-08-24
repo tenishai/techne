@@ -471,3 +471,190 @@ def test_archivist_search_hides_the_same_rows_recall_hides(config):
         "archivist_search returned a soft-archived row that recall hides — the two "
         "surfaces disagree about what the archivist holds"
     )
+
+
+# ---- techne#744: the four names are addressable on the CLI too --------------------
+
+
+class TestTheFourDomainsAreAddressableByName:
+    """Board #726's DONE MEANS, pinned as an invariant rather than left as prose:
+
+        An operator can address the archivist, librarian, architect and codex BY NAME.
+
+    It was false when the documentation phase went looking. The MCP surface had all
+    four (`archivist_search` / `librarian_search` / `architect_search` / `codex_search`)
+    and `techne bindings` reported all four, but the CLI spelled the librarian
+    `techne library` — the STORAGE word, naming the document store, which is the
+    layout framing this release demotes the four names out of. So the one place the
+    vocabulary broke was the domain #724 already records as diverging from cabal.
+    """
+
+    @staticmethod
+    def _invoke(args):
+        from click.testing import CliRunner
+
+        from techne.cli import main
+
+        return CliRunner().invoke(main, args)
+
+    @pytest.mark.parametrize("domain", ["archivist", "librarian", "architect", "codex"])
+    def test_each_domain_answers_to_its_own_name(self, domain):
+        """A missing command exits 2 with 'No such command', so this discriminates
+        between the command existing and the CLI merely not crashing."""
+        result = self._invoke([domain, "--help"])
+
+        assert result.exit_code == 0, (
+            f"`techne {domain}` must exist — it is one of the four domain names "
+            f"the release exists to teach. Got: {result.output}"
+        )
+        assert "No such command" not in result.output
+
+    def test_the_legacy_library_spelling_still_works(self):
+        """An alias, not a rename. Every existing script, `docs/librarian-guide.md` and
+        `tests/test_cli_transcript_commands.py` say `library`, and breaking them to
+        teach a word is a bad trade."""
+        result = self._invoke(["library", "--help"])
+
+        assert result.exit_code == 0, result.output
+
+    def test_the_alias_reports_the_canonical_name(self):
+        """`techne library` must not print usage for a command that does not appear in
+        `--help`. click echoes back what the operator typed unless `resolve_command`
+        says otherwise, and a usage line naming an unlisted command is worse than
+        either spelling on its own."""
+        result = self._invoke(["library", "--help"])
+
+        usage = result.output.splitlines()[0]
+        # Asserting on the COMMAND half, not the program name: CliRunner's prog_name is
+        # "main", while the real entry point prints "techne". Pinning the prog name
+        # would pass here and say nothing about what an operator sees.
+        assert " librarian [OPTIONS]" in usage, usage
+        assert " library [OPTIONS]" not in usage, usage
+
+    def test_aliases_holds_only_the_documented_legacy_spelling(self):
+        """THE DOOR, CLOSED WITH A TEST RATHER THAN WITH SYNTAX (Prudence, #745 r1).
+
+        A frozenset stops mutation at runtime, which is not the failure being guarded
+        against: the failure is someone adding a second key in a future PR because the
+        dict makes it a one-line change. Every entry must be a word an operator already
+        has in a script, not a word we would choose today — growing this table turns a
+        compatibility shim into a synonym system. If you are adding one, say in the PR
+        why the word exists.
+        """
+        from techne.cli import _AliasedGroup
+
+        assert _AliasedGroup.ALIASES == {"library": "librarian"}
+
+    def test_shell_completion_survives_an_unknown_command(self):
+        """`resolve_command`'s override CRASHED here (#745 r1 Important 1). click ends
+        `return cmd_name if cmd else None, cmd, args[1:]`, and `cmd` is None whenever
+        `resilient_parsing` is set — the NoSuchCommand raise is guarded by
+        `and not ctx.resilient_parsing`. Dereferencing `cmd.name` unconditionally killed
+        shell completion over any unknown word, and `_resolve_context` could not help
+        because it checks `cmd is None` AFTER the call."""
+        import click
+
+        from techne.cli import main
+
+        ctx = click.Context(main, info_name="techne", resilient_parsing=True)
+
+        name, cmd, _ = main.resolve_command(ctx, ["definitely-not-a-command"])
+
+        assert cmd is None and name is None
+
+    def test_the_cli_never_prints_the_demoted_spelling(self):
+        """AN ASSERTION RATHER THAN A HABIT. The docs were updated and the CLI's own
+        output still said `techne library` in four places — three of them printed
+        immediately after the operator typed the canonical word, and one
+        (`techne recall`) reaches operators who never invoke the librarian at all. So
+        the release shipped its CLI teaching the word it exists to demote.
+
+        Found twice in one PR, which is what makes it worth a test: prose about the
+        vocabulary is checked, and the strings the operator actually SEES were not.
+        Scans every string literal INCLUDING DOCSTRINGS, because click renders command
+        docstrings verbatim as `--help` — the surface an operator is most likely to
+        read. Exactly two are exempt, by owner name: `_AliasedGroup` and the `librarian`
+        group, which explain the alias rather than teach it. Comments are not scanned
+        and do not need to be; they never reach an operator.
+
+        f-strings ARE covered: `ast.walk` descends into `JoinedStr` and yields its
+        literal segments as ordinary `Constant` nodes — which matters, because two of
+        the four sites this test was written for are f-strings. The narrow edge is a
+        SPLIT f-string (`f"techne {noun} search"`), where a placeholder abuts the word;
+        surveyed at the time and there were none.
+        """
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parent.parent / "techne" / "cli.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+
+        # DOCSTRINGS ARE SCANNED TOO, AND ONLY TWO ARE EXEMPT — BY OWNER, NOT BY
+        # CATEGORY (Prudence, #745 r2 Important 1). An earlier version exempted every
+        # docstring, which exempted exactly the surface this test claims to guard:
+        # CLICK RENDERS COMMAND DOCSTRINGS VERBATIM AS `--help`. Demonstrated by adding
+        # one line to `librarian search`'s docstring — the suite stayed green while
+        # `techne librarian search --help` printed "run techne library show <id>" to
+        # the operator. And it is not exotic: the `librarian` group docstring one screen
+        # up MODELS writing `techne library`, so the next person adding a subcommand has
+        # a template for the offence.
+        #
+        # (An earlier cut also matched "techne library " with a TRAILING SPACE and
+        # passed only because that docstring writes it with a backtick — it passed for a
+        # reason unrelated to what it asserts. The match is unconditional now.)
+        #
+        # EXEMPT BY OWNER NAME, NOT BY LINE NUMBER: a line citation is the one form that
+        # goes stale silently (techne#747), and these two move whenever the file above
+        # them does.
+        EXPLAINS_THE_ALIAS = {"_AliasedGroup", "librarian"}
+
+        # `tree.body`, NOT `ast.walk` — MODULE SCOPE ONLY (Prudence, #745 r3 nit 1).
+        # Matching the name anywhere in the tree meant a NESTED `def librarian` could
+        # carry an offending docstring and be exempted; she planted one inside
+        # `library_search` and the guard stayed green at 25 passed. Both legitimate
+        # owners are module-level, so restricting the scan costs one word and closes it.
+        exempt = set()
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                if node.name not in EXPLAINS_THE_ALIAS:
+                    continue
+                body = getattr(node, "body", None)
+                if (
+                    body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    exempt.add(id(body[0].value))
+
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in exempt:
+                    continue
+                idx = node.value.find("techne library")
+                if idx != -1:
+                    # A WINDOW AROUND THE MATCH, not the first 70 chars (#745 r3 nit 2).
+                    # Slicing from the start of a long `--help` docstring printed a
+                    # first line that does not contain the offence at all, with `lineno`
+                    # pointing at the opening quote — a cold trail on the exact failure
+                    # this guard exists to report.
+                    window = node.value[max(0, idx - 30) : idx + 45].replace("\n", " ")
+                    offenders.append(f"{src.name}:{node.lineno}: …{window.strip()}…")
+
+        assert not offenders, "operator-facing text still says `techne library`:\n" + "\n".join(
+            offenders
+        )
+
+    def test_help_offers_one_spelling_per_domain(self):
+        """TWO SPELLINGS IN `--help` TEACHES THE AMBIGUITY, which is the thing #744 is
+        about — so the alias is resolved rather than registered a second time. If this
+        fails, someone reached for `main.add_command(..., name=...)`, which works and
+        puts both words in the listing."""
+        result = self._invoke(["--help"])
+        commands = result.output[result.output.index("Commands:") :]
+
+        assert "\n  librarian " in commands, commands
+        assert "\n  library " not in commands, (
+            "the legacy spelling must keep working but must not be advertised"
+        )
