@@ -133,6 +133,7 @@ corrupted anything. What you are looking at is a set retention will never remove
 | `created_at ... is not YYYY-MM-DDTHH:MM:SSZ` | the stamp is not in the one format that sorts chronologically as text, so the set cannot be ordered | see below |
 | `created_at ... is in the future` | the set cannot be ordered against real time — usually a clock that was ahead when it was written | see below |
 | `is a symlink` | something under `backups/` is a symlink to a set | remove the symlink; techne will not follow it or delete its target |
+| `has no manifest` | a backup techne started and never finished — the manifest is written last, so this is what a `^C`, a `SIGKILL` or a power cut leaves | check it is not a run still in progress, then delete the directory. It is an incomplete copy, **not** a restorable set |
 
 The first row is deliberately not a list of specific errnos. Retention reports whatever the
 OS returned, and naming one of them here would send an operator to check permissions on a

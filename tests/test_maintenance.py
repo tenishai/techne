@@ -470,15 +470,39 @@ def test_prune_rejects_a_negative_keep(tmp_path):
         prune_backup_sets(tmp_path, keep=-1)
 
 
-def test_prune_is_deterministic_when_stamps_tie(tmp_path):
+@pytest.mark.parametrize("order", [False, True], ids=["iterdir-ascending", "iterdir-descending"])
+def test_prune_is_deterministic_when_stamps_tie(tmp_path, monkeypatch, order):
     """`_now_iso()` has ONE-SECOND resolution, so ties are reachable under a scripted or
     retried `--keep` run. Without a secondary key, a stable sort leaves the survivor to
     `Path.iterdir()` — i.e. to the filesystem (pre-pass on #755: three sets, one stamp,
-    keep=1, survivor was whichever iterdir listed first)."""
+    keep=1, survivor was whichever iterdir listed first).
+
+    RUN UNDER BOTH DIRECTORY ORDERS, which is the whole point and was the defect in the
+    version of this test that shipped in round 2 (Prudence, #755 round 5, question D).
+    That version ran in whatever order APFS gave — ascending — where the tie-break's answer
+    and the filesystem's answer AGREE. It therefore passed on a machine whose filesystem
+    happened to be doing the work, and it would have gone silently green on one that
+    listed descending. A test for "the result does not depend on directory order" cannot
+    itself run in only one directory order.
+
+    Note the two orders are NOT symmetric: a stable `sort(reverse=True)` preserves input
+    order among equal keys, so DESCENDING yields `backup-C` even unguarded. Ascending is
+    the order that catches it. Keeping both is deliberate — the claim is about every order,
+    and pinning only the discriminating one re-encodes today's implementation.
+    """
     b = tmp_path / "backups"
     same = "2026-03-01T00:00:00Z"
     for name in ("backup-A", "backup-B", "backup-C"):
         _set(b, name, same)
+
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(
+        Path,
+        "iterdir",
+        lambda self: iter(sorted(real_iterdir(self), key=lambda q: q.name, reverse=order))
+        if self == b
+        else real_iterdir(self),
+    )
 
     kept = {p.name for p in b.iterdir()} - {p.name for p in prune_backup_sets(b, keep=1)[0]}
 
@@ -643,12 +667,18 @@ def test_backup_exits_0_when_retention_completes(config, monkeypatch):
     from techne.config import Config
 
     monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
-    _set(Path(config.data_dir) / "backups", "backup-20260101-000000", "2026-01-01T00:00:00Z")
+    old = _set(Path(config.data_dir) / "backups", "backup-20260101-000000", "2026-01-01T00:00:00Z")
 
     result = CliRunner().invoke(main, ["backup", "--keep", "1"])
 
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
     assert "retention INCOMPLETE" not in result.output
+    # PROVE RETENTION RAN, not merely that nothing complained (Prudence, #755 round 5,
+    # question D). Both of this file's exit-0 assertions survived `if keep is not None:` ->
+    # `if False:` — they passed with retention DISABLED ENTIRELY, which is the state they
+    # exist to distinguish from working.
+    assert not old.exists(), "exit 0 with the old set still present — retention did nothing"
+    assert "pruned 1 older set(s)" in result.output
 
 
 def test_a_symlinked_set_never_enters_the_keep_window(tmp_path):
@@ -711,7 +741,12 @@ def test_prune_leaves_a_set_restore_cannot_read_alone(tmp_path, dbs):
         json.dumps({"created_at": "2026-02-01T00:00:00Z", "databases": dbs})
     )
 
-    with pytest.raises((RestoreError, AttributeError)):
+    # ONE DOOR, NOT TWO (Prudence, #755 round 5, question D). `raises((RestoreError,
+    # AttributeError))` passes whichever happens, so it cannot notice the behaviour
+    # changing. Today it is AttributeError — which is the defect #759 exists to fix, so
+    # pinning it precisely means #759 must come back and update this line. That is the
+    # point: a test that has to be revisited when the behaviour changes is doing its job.
+    with pytest.raises(AttributeError):
         read_manifest(unreadable)
 
     removed, _ = prune_backup_sets(b, keep=0)
@@ -760,12 +795,17 @@ def test_an_absent_manifest_stays_silent(config, monkeypatch):
     backups = Path(config.data_dir) / "backups"
     backups.mkdir(parents=True, exist_ok=True)
     (backups / "someone-elses-folder").mkdir()
+    # A REAL SET THAT MUST BE PRUNED, so this cannot pass with retention disabled — the
+    # weak-oracle problem Prudence ranked in round 5. Without it, "exit 0 and no complaint"
+    # is equally true of a run that did nothing at all.
+    prunable = _set(backups, "backup-20260101-000000", "2026-01-01T00:00:00Z")
 
     result = CliRunner().invoke(main, ["backup", "--keep", "1"])
 
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
     assert "retention INCOMPLETE" not in result.output
-    assert (backups / "someone-elses-folder").exists()
+    assert (backups / "someone-elses-folder").exists(), "reported or removed a foreign folder"
+    assert not prunable.exists(), "retention did not run, so the silence proves nothing"
 
 
 def test_every_retention_refusal_has_a_row_in_the_docs():
@@ -801,3 +841,54 @@ def test_every_refusal_phrase_is_actually_used():
     ]
 
     assert not unused, f"documented but never emitted: {unused}"
+
+
+def test_an_interrupted_backup_leaves_nothing_behind(config, monkeypatch):
+    """THE MANIFEST IS WRITTEN LAST, so an interrupted run left a directory holding a full
+    copy of a live domain db and no manifest — which the pruner read as "not ours" and
+    ignored forever (Prudence, #755 round 5 Important 1). Measured before the fix: at
+    `keep=0` the pruner removed the REAL set and left the orphan, `failed=[]`. KeyboardInterrupt
+    specifically, because that is how a person stops a backup and it is not an `Exception`."""
+    import techne.core.maintenance as maint
+
+    calls = {"n": 0}
+    real_copy = maint._online_copy
+
+    def _interrupted(src, dst):
+        calls["n"] += 1
+        real_copy(src, dst)
+        if calls["n"] == 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(maint, "_online_copy", _interrupted)
+    backups = Path(config.data_dir) / "backups"
+
+    with pytest.raises(KeyboardInterrupt):
+        backup_all_dbs(config)
+
+    leftovers = [d.name for d in backups.iterdir()] if backups.exists() else []
+    assert leftovers == [], f"an interrupted backup left {leftovers} behind"
+
+
+def test_an_orphaned_set_we_named_is_reported(config, monkeypatch):
+    """The half in-process cleanup cannot reach: a SIGKILL or a power cut runs no handler.
+    The directory is still one TECHNE NAMED, so it is an interrupted backup rather than a
+    foreign folder — conclusive that it is ours, conclusive that it is incomplete, and
+    therefore reported rather than silently left to hold a copy of a live db forever."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+    backups = Path(config.data_dir) / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    orphan = backups / "backup-20260101-120000"
+    orphan.mkdir()
+    (orphan / "techne.db").write_bytes(b"a partial copy of a live database")
+
+    result = CliRunner().invoke(main, ["backup", "--keep", "1"])
+
+    assert result.exit_code == 3, f"exit {result.exit_code}\n{result.output}"
+    assert "has no manifest" in result.output
+    assert orphan.exists(), "an incomplete set must be reported, never deleted automatically"

@@ -230,24 +230,39 @@ def backup_all_dbs(
     backed_up: list[str] = []
     skipped: list[str] = []
     manifest_dbs: dict[str, dict] = {}
-    for domain, src in paths.items():
-        if not src.exists():
-            skipped.append(domain)
-            continue
-        out = dest_dir / f"{domain}.db"
-        _online_copy(src, out)
-        backed_up.append(domain)
-        manifest_dbs[domain] = {"file": out.name, "size_bytes": out.stat().st_size}
+    # A FAILED BACKUP USED TO LEAVE A SET NOTHING WOULD EVER RECLAIM (Prudence, #755 round 5
+    # Important 1). The manifest is written LAST — correctly, since a set is not a set until
+    # it is complete — so a `^C` partway through left `backups/<label>-<stamp>/` holding a
+    # full copy of a live domain db and no manifest. `_classify_backup_set` then read it as
+    # "no manifest, not ours" and stayed silent, forever. Measured: at `keep=0` the pruner
+    # removed the REAL set and left the orphan, `failed=[]`. techne wrote it, techne named
+    # it, and techne would neither reclaim nor mention it.
+    #
+    # `BaseException`, not `Exception`: KeyboardInterrupt and SystemExit are the likely ways
+    # this is interrupted and neither is an Exception. The partial set is removed and the
+    # original raised — housekeeping must not swallow the reason the backup stopped.
+    try:
+        for domain, src in paths.items():
+            if not src.exists():
+                skipped.append(domain)
+                continue
+            out = dest_dir / f"{domain}.db"
+            _online_copy(src, out)
+            backed_up.append(domain)
+            manifest_dbs[domain] = {"file": out.name, "size_bytes": out.stat().st_size}
 
-    from techne import __version__
+        from techne import __version__
 
-    manifest = {
-        "techne_version": __version__,
-        "created_at": _now_iso(),
-        "databases": manifest_dbs,
-        "skipped_absent": skipped,
-    }
-    (dest_dir / _MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
+        manifest = {
+            "techne_version": __version__,
+            "created_at": _now_iso(),
+            "databases": manifest_dbs,
+            "skipped_absent": skipped,
+        }
+        (dest_dir / _MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
+    except BaseException:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise
     return BackupResult(dest=dest_dir, backed_up=backed_up, skipped_absent=skipped)
 
 
@@ -267,11 +282,16 @@ _CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 #:
 #: Failures from the delete itself are NOT here: those carry the OS's own `strerror`, which
 #: is why the table's first row deliberately describes the class instead of naming an errno.
+#: The shape `_unique_dir(root / f"{label}-{_now_stamp()}")` produces. Used ONLY to decide
+#: whether a manifest-less directory is one WE left behind — never to decide what to delete.
+_OUR_SET_NAME = re.compile(r".+-\d{8}-\d{6}(-\d+)?$")
+
 RETENTION_REFUSAL_PHRASES = (
     "is a symlink",
     "manifest is unreadable",
     "is not YYYY-MM-DDTHH:MM:SSZ",
     "is in the future",
+    "has no manifest",
 )
 
 
@@ -308,7 +328,27 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     try:
         manifest = json.loads((child / _MANIFEST_NAME).read_text())
     except FileNotFoundError:
-        return None, None  # no manifest at all: not ours, and not our business
+        # THE RULE THIS FUNCTION ACTUALLY FOLLOWS, stated once because the previous comment
+        # justified silence with "delete nothing you cannot read" — the right answer by a
+        # route that gives the WRONG one a screen further down, where round 3 already ruled
+        # that reasoning insufficient (Prudence, #755 round 5, question A):
+        #
+        #   A CONCLUSIVE "NOT OURS" IS SILENT. AN INCONCLUSIVE TEST IS REPORTED.
+        #
+        # Every silent branch below is the identity test COMPLETING and answering no. Every
+        # reported one is that test failing to run, or running and answering yes.
+        #
+        # A missing manifest is conclusive — unless we NAMED the directory. Then it is one
+        # of ours that never finished: the manifest is written last, so an interrupted
+        # backup leaves exactly this. In-process failures are cleaned up by
+        # `backup_all_dbs`, but a SIGKILL or a power cut runs no handler, and the orphan
+        # holds a full copy of a live db that nothing would otherwise reclaim or mention.
+        if _OUR_SET_NAME.fullmatch(child.name):
+            return None, (
+                f"{RETENTION_REFUSAL_PHRASES[4]} — techne named this directory, so it is an "
+                "interrupted backup rather than a foreign one; it is never pruned"
+            )
+        return None, None  # not named by us and carrying no manifest: conclusively not ours
     except ValueError:
         return None, None  # present but not JSON: nothing here claims to be a backup set
     except OSError as exc:
@@ -345,10 +385,20 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         # raises AttributeError rather than RestoreError. So round 2's asymmetry survived
         # in this narrow shape: the pruner called it ours and would rmtree it, restore
         # tracebacked on it. Narrow (it needs a manifest, a non-empty `databases`, AND a
-        # canonical `...Z` stamp, all inside `backups/`) but the fix is one line, and
-        # "delete nothing you cannot read" is the rule this predicate exists to enforce.
-        # `read_manifest`'s AttributeError is pre-existing and reachable from `techne
-        # restore <any dir>` — filed separately rather than grown into this PR.
+        # canonical `...Z` stamp, all inside `backups/`) but the fix is one line.
+        #
+        # SILENT RATHER THAN REPORTED, and by the rule at the top of this function rather
+        # than by "delete nothing you cannot read" — which is what this comment used to say
+        # (Prudence, #755 round 5, question A). That phrasing reaches the right answer HERE
+        # and the wrong one one screen up, where round 3 ruled it insufficient for an
+        # unreadable manifest. The rule that covers both: this branch is the identity test
+        # COMPLETING and answering no — a manifest whose `databases` values are not objects
+        # never described a techne backup set, whatever else it is. Checked rather than
+        # assumed: no techne version has written non-dict values (`27ac22f:202`, HEAD
+        # `:240`), so this is conclusively someone else's file and not ours to report.
+        #
+        # `read_manifest`'s AttributeError on the same input is pre-existing and reachable
+        # from `techne restore <any dir>` — filed as #759 rather than grown into this PR.
         return None, None
     stamp = str(manifest.get("created_at", ""))
     # THE SORT IS LEXICOGRAPHIC, SO THE FORMAT IS PART OF THE CONTRACT. `_now_iso()` is the
