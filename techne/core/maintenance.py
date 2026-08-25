@@ -278,6 +278,10 @@ def backup_all_dbs(
 #: text. See the format note inside `prune_backup_sets`.
 _CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
+#: The shape `_unique_dir(root / f"{label}-{_now_stamp()}")` produces. Used ONLY to decide
+#: whether a manifest-less directory is one WE left behind — never to decide what to delete.
+_OUR_SET_NAME = re.compile(r".+-\d{8}-\d{6}(-\d+)?$")
+
 #: THE DISTINGUISHING PHRASE OF EVERY REASON RETENTION REFUSES A SET, and the single source
 #: for both the messages below and the exit-3 table in `docs/deployment.md`.
 #:
@@ -290,6 +294,18 @@ _CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 #:
 #: Failures from the delete itself are NOT here: those carry the OS's own `strerror`, which
 #: is why the table's first row deliberately describes the class instead of naming an errno.
+RETENTION_REFUSAL_PHRASES = (
+    "is a symlink",
+    "manifest is unreadable",
+    "is not YYYY-MM-DDTHH:MM:SSZ",
+    "is in the future",
+    "has no manifest",
+    "manifest does not parse",
+    "lists databases in a shape techne cannot read",
+    "lists a database file that is not there",
+)
+
+
 @dataclass(frozen=True)
 class SetClass:
     """What one directory under `backups/` is, in the three terms retention needs.
@@ -317,23 +333,10 @@ class SetClass:
     holds_data: bool = False
 
 
-#: The shape `_unique_dir(root / f"{label}-{_now_stamp()}")` produces. Used ONLY to decide
-#: whether a manifest-less directory is one WE left behind — never to decide what to delete.
-_OUR_SET_NAME = re.compile(r".+-\d{8}-\d{6}(-\d+)?$")
-
-RETENTION_REFUSAL_PHRASES = (
-    "is a symlink",
-    "manifest is unreadable",
-    "is not YYYY-MM-DDTHH:MM:SSZ",
-    "is in the future",
-    "has no manifest",
-    "manifest does not parse",
-    "lists databases in a shape techne cannot read",
-)
 
 
 def _classify_backup_set(child: Path) -> SetClass:
-    """Classify one directory under `backups/`. Returns `(stamp, refusal)`.
+    """Classify one directory under `backups/` — returns a three-field `SetClass`.
 
     THREE OUTCOMES, AND COLLAPSING TWO OF THEM IS WHAT WENT WRONG (Prudence, #755 round 3
     Important 1). The previous version returned a bare `None` for both "not ours, say
@@ -518,8 +521,39 @@ def _classify_backup_set(child: Path) -> SetClass:
             f"manifest created_at {stamp} {RETENTION_REFUSAL_PHRASES[3]} — it cannot be "
             "ordered against real time, so it is never pruned and holds a retention slot"
         ))
-    # `holds_data` is the whole point of the type: an empty set is OURS (so we can
-    # reclaim it) and is NOT A BACKUP (so it must never occupy a retention slot).
+    # DELETION-SAFETY AND SLOT-ELIGIBILITY ARE STILL TWO QUESTIONS (Prudence, #755 round 8).
+    # `holds_data` answers the first correctly — an empty set holds no database, so removing
+    # it loses nothing. It is one value short of the second: `bool(dbs)` trusts the
+    # manifest's LIST, while `read_manifest` also requires every listed file to EXIST. A set
+    # whose `.db` has since gone therefore looked like a backup, took a keep slot, and —
+    # being newer — evicted a genuine one. Demonstrated: `keep=1` removed the restorable set
+    # and kept the one `restore` raises `RestoreError: backup set is incomplete` on.
+    #
+    # The two coincide for every set techne has ever written, which is why 3497 tests could
+    # not see it; it needs an external cause (a partial copy, a half-finished sync, someone
+    # reclaiming space by hand). Not a Critical for that reason — but it deletes a good
+    # backup, which is why it is fixed here rather than filed.
+    #
+    # No fourth field is needed. An unrestorable set gets NO STAMP, so it can never occupy a
+    # slot, and a REFUSAL, so it is reported rather than accumulating in silence —
+    # `holds_data=True` keeps it out of the unconditional empty-set reclamation, because it
+    # still contains real database files someone may want to salvage.
+    missing = sorted(
+        domain
+        for domain, meta in dbs.items()
+        if not (child / meta.get("file", f"{domain}.db")).exists()
+    )
+    if missing:
+        return SetClass(
+            None,
+            (
+                f"{RETENTION_REFUSAL_PHRASES[7]} ({', '.join(missing)}) — `restore` refuses "
+                "it, so it is not counted as a backup and is never pruned"
+            ),
+            holds_data=True,
+        )
+    # An empty set is OURS (so we can reclaim it) and is NOT A BACKUP (so it must never
+    # occupy a retention slot).
     return SetClass(stamp, None, holds_data=bool(dbs))
 
 

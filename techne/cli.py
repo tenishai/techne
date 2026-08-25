@@ -4728,7 +4728,17 @@ def backup_cmd(ctx, out, keep):
             res.dest.parent, keep, protect=res.dest, apply_keep=bool(res.backed_up)
         )
         if removed:
-            click.echo(f"pruned {len(removed)} older set(s), keeping {keep}")
+            # DO NOT CLAIM A CEILING THAT WAS NOT APPLIED (Prudence, #755 round 8, Nit 2).
+            # With `apply_keep=False` only empty sets are reclaimed, so `removed` is
+            # non-empty while real sets sit above `keep` untouched — printing "keeping 1"
+            # over three surviving sets is an assertion the run did not make.
+            if res.backed_up:
+                click.echo(f"pruned {len(removed)} older set(s), keeping {keep}")
+            else:
+                click.echo(
+                    f"reclaimed {len(removed)} empty set(s) — keep window NOT applied, "
+                    "this run captured nothing"
+                )
         # SAY SO WHEN RETENTION DID NOT HAPPEN (Prudence, #755 Important 2). On a nightly
         # timer a silently-failing prune fills the disk exactly as no `--keep` would.
         for path, err in failed:

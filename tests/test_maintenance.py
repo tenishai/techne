@@ -395,6 +395,12 @@ def _set(backups: Path, name: str, created_at: str) -> Path:
     (d / "manifest.json").write_text(
         json.dumps({"created_at": created_at, "databases": {"techne": {"file": "techne.db"}}})
     )
+    # AND THE FILE IT LISTS, because a set that names a database it does not contain is one
+    # `restore` refuses (Prudence, #755 round 8). Leaving it out made every fixture here
+    # assert a shape techne would decline — the same defect as the `"databases": {}` fixture
+    # in round 2, which is where the precedent was set: fix the fixture, do not weaken the
+    # check to accommodate it.
+    (d / "techne.db").write_bytes(b"")
     return d
 
 
@@ -833,6 +839,7 @@ _REFUSAL_BUILDERS = {
     "has no manifest": "no_manifest",
     "manifest does not parse": "bad_json",
     "lists databases in a shape techne cannot read": "bad_databases",
+    "lists a database file that is not there": "missing_db_file",
 }
 
 
@@ -869,6 +876,9 @@ def test_every_refusal_phrase_is_actually_emitted(tmp_path, phrase):
     elif build == "bad_json":
         d.mkdir()
         (d / "manifest.json").write_text("")  # what a truncating write leaves behind
+    elif build == "missing_db_file":
+        _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+        (d / "techne.db").unlink()  # the manifest still lists it
     elif build == "bad_databases":
         d.mkdir()
         (d / "manifest.json").write_text(
@@ -1177,3 +1187,70 @@ def test_exit_4_takes_precedence_over_exit_3(config, monkeypatch, tmp_path):
     assert "NO DATABASES WERE BACKED UP" in result.output, "the 4-condition does not hold"
     assert result.exit_code == 4, f"3 won over 4 — exit {result.exit_code}\n{result.output}"
     assert stranded.exists()
+
+
+def test_protect_covers_the_empty_set_path_too(tmp_path):
+    """THE SIXTH WEAK-TEST MECHANISM (Prudence, #755 round 8, found by mutation not opinion):
+    A GUARD TESTED ONLY ON THE PATHS THAT EXISTED WHEN THE TEST WAS WRITTEN. She made
+    `protect` ignore empty sets and all 65 tests passed — because the existing test uses a
+    POPULATED fixture, so it covers `protect` for the keep-window path only, and round 7
+    added a second deletion path (unconditional empty-set reclamation) that nothing checked.
+
+    This is load-bearing beyond tidiness: `protect` on the empty path is the ONLY thing
+    preserving the misconfiguration record. On a wrongly-pointed timer every run writes an
+    empty set and reclaims the previous ones; without `protect` the current run's set goes
+    too, and the operator loses the `skipped_absent` list naming which domains were absent."""
+    b = tmp_path / "backups"
+    b.mkdir(parents=True)
+    fresh = b / "backup-20260103-000000"
+    fresh.mkdir()
+    fresh_manifest = {
+        "techne_version": "0.15.0",
+        "created_at": "2026-01-03T00:00:00Z",
+        "databases": {},
+        "skipped_absent": ["techne", "librarian", "codex", "architect"],
+    }
+    (fresh / "manifest.json").write_text(json.dumps(fresh_manifest))
+    older_empty = b / "backup-20260102-000000"
+    older_empty.mkdir()
+    (older_empty / "manifest.json").write_text(
+        json.dumps(
+            {"techne_version": "0.15.0", "created_at": "2026-01-02T00:00:00Z", "databases": {}}
+        )
+    )
+
+    removed, failed = prune_backup_sets(b, keep=0, protect=fresh)
+
+    assert failed == []
+    assert fresh.exists(), "protect does not cover the empty-set reclamation path"
+    assert removed == [older_empty]
+    assert json.loads((fresh / "manifest.json").read_text())["skipped_absent"], (
+        "the surviving set no longer records which domains were absent"
+    )
+
+
+def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
+    """`holds_data = bool(dbs)` TRUSTED THE MANIFEST'S LIST (Prudence, #755 round 8,
+    Important). `read_manifest` additionally requires every listed file to EXIST, so a set
+    whose `.db` had gone still looked like a backup, took a keep slot, and — being newer —
+    evicted a genuine one. Her measurement: `keep=1` removed the restorable set and kept the
+    one `restore` raises `RestoreError: backup set is incomplete` on.
+
+    The two predicates coincide for every set techne has ever written, which is why the
+    whole suite could not see it; reaching this state needs an external cause — a partial
+    copy, a half-finished sync, someone reclaiming space by hand."""
+    b = tmp_path / "backups"
+    good = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+    broken = _set(b, "backup-20260102-000000", "2026-01-02T00:00:00Z")  # newer
+    (broken / "techne.db").unlink()  # something outside techne took it
+
+    with pytest.raises(RestoreError):
+        read_manifest(broken)
+
+    removed, failed = prune_backup_sets(b, keep=1)
+
+    assert good.exists(), "an unrestorable set evicted the restorable one"
+    assert removed == [], f"pruned against a set restore refuses: {removed}"
+    assert [p.name for p, _ in failed] == [broken.name]
+    assert "not there" in failed[0][1]
+    assert broken.exists(), "deleted a set that still holds real database files"
