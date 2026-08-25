@@ -231,11 +231,37 @@ def test_cli_fsck_inconsistent_exit_one(config, monkeypatch):
     assert "inconsistencies found" in res.output
 
 
+def _the_set_in(root: Path) -> Path:
+    """`--out` names the backups ROOT; the set is the timestamped dir inside it.
+
+    THIS CHANGED IN techne#742 AND THE CHANGE IS THE POINT. `--out` used to name the SET,
+    which is what made `--keep` prune the root's PARENT — a directory the operator never
+    named. The help text always described a root; the code disagreed, and the disagreement
+    turned into an `rmtree`. Scripts doing `backup --out X` then `restore X` need
+    `restore X/backup-<stamp>` now.
+    """
+    sets = [c for c in root.iterdir() if c.is_dir() and (c / "manifest.json").is_file()]
+    assert len(sets) == 1, f"expected exactly one set under {root}, found {sets}"
+    return sets[0]
+
+
+def test_cli_backup_writes_a_timestamped_set_inside_out(config, monkeypatch, tmp_path):
+    """`--out` is the ROOT, not the set (techne#742). Pinning it because the previous
+    behaviour disagreed with the flag's own help text, and `--keep` turned that
+    disagreement into a deletion one directory up."""
+    out = tmp_path / "root"
+    _run_cli(config, monkeypatch, ["backup", "--out", str(out)])
+
+    assert not (out / "manifest.json").exists(), "`--out` must not itself be the set"
+    assert _the_set_in(out).name.startswith("backup-")
+
+
 def test_cli_backup_then_restore_round_trip(config, monkeypatch, tmp_path):
     _add_knowledge(config.db_path, "CLI-MARKER")
-    out = tmp_path / "myset"
-    res = _run_cli(config, monkeypatch, ["backup", "--out", str(out)])
+    root = tmp_path / "myroot"
+    res = _run_cli(config, monkeypatch, ["backup", "--out", str(root)])
     assert res.exit_code == 0 and "techne" in res.output
+    out = _the_set_in(root)
     assert (out / "manifest.json").exists()
 
     conn = connect(config.db_path)
@@ -251,8 +277,9 @@ def test_cli_backup_then_restore_round_trip(config, monkeypatch, tmp_path):
 
 def test_cli_restore_cancelled_leaves_live_untouched(config, monkeypatch, tmp_path):
     _add_knowledge(config.db_path, "KEEP-ME")
-    out = tmp_path / "set"
-    _run_cli(config, monkeypatch, ["backup", "--out", str(out)])
+    root = tmp_path / "root"
+    _run_cli(config, monkeypatch, ["backup", "--out", str(root)])
+    out = _the_set_in(root)
     conn = connect(config.db_path)
     conn.execute("INSERT INTO knowledge (type, content, confidence) VALUES ('fact','NEWER','high')")
     conn.commit()

@@ -184,9 +184,24 @@ def backup_all_dbs(config: Config, dest_dir: Path | None = None) -> BackupResult
     and a manifest records the set so a restore can validate it. Absent domains are skipped
     (recorded in the manifest), not created. Returns the destination + which domains landed.
     """
-    if dest_dir is None:
-        dest_dir = _unique_dir(Path(config.data_dir) / "backups" / f"backup-{_now_stamp()}")
-    dest_dir = Path(dest_dir)
+    # `dest_dir` IS THE BACKUPS ROOT, NOT THE SET — which is what `--out`'s help text has
+    # always said ("Destination dir (default: <data_dir>/backups/)") and what this code did
+    # not do (Prudence, #755 Critical 1). Treating a supplied path AS the set made
+    # `res.dest.parent` — the directory `--keep` prunes — one the operator never named.
+    # Reproduced before the fix: `--out ~/techne-backup --keep 1` rmtree'd a sibling
+    # project directory that happened to contain a `manifest.json`. That is not a
+    # techne-private filename and `rmtree` is not recoverable.
+    #
+    # It also made `--keep` USELESS where it was pointed: every `--out` run wrote into the
+    # same directory, so there was only ever one set there to prune.
+    #
+    # BREAKING, DELIBERATELY, ON RICHARD'S CALL. A script doing `backup --out X` then
+    # `restore X` now needs `restore X/backup-<stamp>`. The alternative was to keep a
+    # flag whose documented meaning and behaviour disagree, which is what turned into a
+    # deletion. `restore` accepts the set path it always did; `--out` now yields a root
+    # containing timestamped sets, which is what makes `--out` usable on a timer at all.
+    root = Path(dest_dir) if dest_dir is not None else Path(config.data_dir) / "backups"
+    dest_dir = _unique_dir(root / f"backup-{_now_stamp()}")
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     paths = domain_db_paths(config)

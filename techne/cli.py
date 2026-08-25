@@ -4681,7 +4681,11 @@ def reconcile_cmd(ctx):
 
 
 @main.command("backup")
-@click.option("--out", default=None, help="Destination dir (default: <data_dir>/backups/)")
+@click.option(
+    "--out",
+    default=None,
+    help="Backups ROOT to write a timestamped set into (default: <data_dir>/backups/).",
+)
 @click.option(
     "--keep",
     # IntRange, not int: `--keep -1` used to run the whole backup and THEN traceback out of
@@ -4710,28 +4714,6 @@ def backup_cmd(ctx, out, keep):
     # keep=1 schedule, delete the only good backup and then discover the disk is full — the
     # window where the operator has nothing is exactly the window a backup exists to remove.
     # `protect` is belt-and-braces on top of that ordering.
-    if keep is not None and out is not None:
-        # `--keep` REFUSES TO GUESS A ROOT (Prudence, #755 Critical 1). `backup_all_dbs`
-        # appends the timestamped set name ONLY on the default path; with `--out` the
-        # supplied path IS the set, so `res.dest.parent` is a directory the operator never
-        # named. Reproduced before fixing: `--out ~/techne-backup --keep 1` rmtree'd a
-        # sibling project directory that happened to contain a `manifest.json` — not a
-        # techne-private filename, and rmtree is not recoverable.
-        #
-        # It was also USELESS where it was pointed: every `--out` run writes into the same
-        # directory, so there is only ever one set there to prune.
-        #
-        # THE ROOT CAUSE IS THAT `--out`'s HELP TEXT AND ITS BEHAVIOUR DISAGREE — the text
-        # calls it "Destination dir (default: <data_dir>/backups/)", i.e. the ROOT, and the
-        # code treats it as the SET. Making `--out` mean the root is the better fix and it
-        # breaks `restore <out>` for anyone scripting it today, so it is filed rather than
-        # done at a release boundary. This refuses the dangerous combination instead.
-        raise click.UsageError(
-            "--keep cannot be combined with --out: --out names the backup SET, so there is "
-            "no backups root to prune and the parent is a directory you did not name. "
-            "Use --keep on the default destination, or prune the --out location yourself."
-        )
-
     if keep is not None:
         from techne.core.maintenance import prune_backup_sets
 
