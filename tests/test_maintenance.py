@@ -432,3 +432,33 @@ def test_prune_rejects_a_negative_keep(tmp_path):
     quietly does nothing is the shape this whole issue is about."""
     with pytest.raises(ValueError, match="keep must be >= 0"):
         prune_backup_sets(tmp_path, keep=-1)
+
+
+def test_prune_is_deterministic_when_stamps_tie(tmp_path):
+    """`_now_iso()` has ONE-SECOND resolution, so ties are reachable under a scripted or
+    retried `--keep` run. Without a secondary key, a stable sort leaves the survivor to
+    `Path.iterdir()` — i.e. to the filesystem (pre-pass on #755: three sets, one stamp,
+    keep=1, survivor was whichever iterdir listed first)."""
+    b = tmp_path / "backups"
+    same = "2026-03-01T00:00:00Z"
+    for name in ("backup-A", "backup-B", "backup-C"):
+        _set(b, name, same)
+
+    kept = {p.name for p in b.iterdir()} - {p.name for p in prune_backup_sets(b, keep=1)}
+
+    assert kept == {"backup-C"}, "the survivor must not depend on directory order"
+
+
+def test_prune_skips_a_stamp_it_cannot_order_safely(tmp_path):
+    """THE SORT IS LEXICOGRAPHIC, so the format is part of the contract. Demonstrated in
+    the pre-pass: `2025-06-01T23:00:00+02:00` (21:00Z) sorts ABOVE `2025-06-01T22:00:00Z`
+    as text while being an hour OLDER — so the newer set gets pruned. The failure mode is
+    a DELETED BACKUP, so a set we cannot order is skipped rather than guessed at."""
+    b = tmp_path / "backups"
+    offset = _set(b, "backup-offset", "2025-06-01T23:00:00+02:00")
+    canonical = _set(b, "backup-canonical", "2025-06-01T22:00:00Z")
+
+    removed = prune_backup_sets(b, keep=0)
+
+    assert offset.exists(), "pruned a set whose stamp cannot be ordered as text"
+    assert removed == [canonical]

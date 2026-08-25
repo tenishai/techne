@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 from dataclasses import dataclass, field
@@ -213,6 +214,11 @@ def backup_all_dbs(config: Config, dest_dir: Path | None = None) -> BackupResult
     return BackupResult(dest=dest_dir, backed_up=backed_up, skipped_absent=skipped)
 
 
+#: The one shape `_now_iso()` emits, and the only one that sorts chronologically as
+#: text. See the format note inside `prune_backup_sets`.
+_CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
 def prune_backup_sets(backups_dir: Path, keep: int, *, protect: Path | None = None) -> list[Path]:
     """Delete all but the newest *keep* backup sets. Returns what was removed.
 
@@ -263,9 +269,26 @@ def prune_backup_sets(backups_dir: Path, keep: int, *, protect: Path | None = No
             continue  # unreadable or malformed: cannot date it, so cannot judge it
         if not stamp:
             continue
+        # THE SORT IS LEXICOGRAPHIC, SO THE FORMAT IS PART OF THE CONTRACT. `_now_iso()`
+        # is the only writer and always emits `%Y-%m-%dT%H:%M:%SZ`, which sorts
+        # chronologically as text. A stamp in another shape does not — demonstrated in
+        # the pre-pass: "2025-06-01T23:00:00+02:00" (21:00Z) sorts ABOVE
+        # "2025-06-01T22:00:00Z" as a string while being an hour OLDER, so the newer set
+        # gets pruned. Latent rather than live today, and the failure is a DELETED
+        # BACKUP, so a set we cannot order safely is skipped rather than guessed at.
+        if not _CANONICAL_STAMP.fullmatch(stamp):
+            continue
         sets.append((stamp, child))
 
-    sets.sort(key=lambda pair: pair[0], reverse=True)
+    # TIE-BREAK ON NAME, BECAUSE TIES ARE REACHABLE (pre-pass on #755). `_now_iso()` has
+    # ONE-SECOND resolution, so two sets written in the same second carry identical
+    # stamps — reachable under a scripted or retried `--keep` run. With a stable sort and
+    # no secondary key, which one survives is decided by `Path.iterdir()`, i.e. by the
+    # filesystem. Demonstrated: three sets sharing a stamp at keep=1 kept whichever
+    # iterdir happened to list first. The directory name carries the same stamp plus a
+    # uniquifying suffix, so it is a deterministic tie-break rather than a meaningful one
+    # — the point is that the answer stops depending on the filesystem.
+    sets.sort(key=lambda pair: (pair[0], pair[1].name), reverse=True)
     removed: list[Path] = []
     for _, path in sets[keep:]:
         if protect and path.resolve() == protect:
