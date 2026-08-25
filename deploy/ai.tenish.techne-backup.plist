@@ -5,11 +5,12 @@
   Installation:
     1. Copy to ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
     2. Edit the techne path below to your virtualenv's binary, and the log paths.
-    3. launchctl load ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
+       (`launchctl load` still works but is deprecated)
     4. Verify:  launchctl list | grep techne-backup
 
-  --keep IS NOT OPTIONAL. `techne backup` writes a full set every run and nothing
-  prunes by default, so a nightly job without it fills the disk.
+  The keep flag is NOT optional. `techne backup` writes a full set every run and
+  nothing prunes by default, so a nightly job without it fills the disk.
 
   RunAtLoad is false deliberately: loading the agent should not fire a backup at a
   moment nobody chose. StartCalendarInterval fires it at 03:15; if the machine is
@@ -37,6 +38,16 @@
 
     <key>RunAtLoad</key>
     <false/>
+
+    <!-- Uncomment only if techne state is not in ~/.techne, for parity with the
+         systemd unit's Environment= line. -->
+    <!--
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TECHNE_HOME</key>
+        <string>/Users/YOUR_USER/.techne</string>
+    </dict>
+    -->
 
     <key>StandardOutPath</key>
     <string>/Users/YOUR_USER/.techne/backup.log</string>

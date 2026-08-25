@@ -7,7 +7,13 @@
 #      and set TECHNE_HOME if your state is not in ~/.techne.
 #   3. systemctl --user daemon-reload
 #      systemctl --user enable --now techne-backup.timer
-#   4. Verify:  systemctl --user list-timers techne-backup
+#   4. loginctl enable-linger $USER
+#      REQUIRED, and step 5 will not tell you it is missing. Without lingering the
+#      `systemd --user` manager stops at last logout, so on a headless box — or any
+#      machine you do not stay logged into — the timer simply never fires. Step 5 shows
+#      it perfectly healthy while you are still logged in, which is a verification that
+#      confirms a thing that stops being true the moment you disconnect.
+#   5. Verify:  systemctl --user list-timers techne-backup
 #
 # --keep IS NOT OPTIONAL ON A TIMER. `techne backup` writes a full set every run and
 # nothing prunes by default, so a nightly job without it fills the disk. 14 is the

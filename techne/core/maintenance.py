@@ -219,8 +219,10 @@ def backup_all_dbs(config: Config, dest_dir: Path | None = None) -> BackupResult
 _CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
-def prune_backup_sets(backups_dir: Path, keep: int, *, protect: Path | None = None) -> list[Path]:
-    """Delete all but the newest *keep* backup sets. Returns what was removed.
+def prune_backup_sets(
+    backups_dir: Path, keep: int, *, protect: Path | None = None
+) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """Delete all but the newest *keep* backup sets. Returns (removed, failed).
 
     RETENTION IS WHY THIS EXISTS, AND WHY IT LANDS WITH THE SCHEDULING DOCS RATHER THAN
     AFTER (techne#742). `backup_all_dbs` had none, so `techne backup` was safe to run by
@@ -245,7 +247,7 @@ def prune_backup_sets(backups_dir: Path, keep: int, *, protect: Path | None = No
     if keep < 0:
         raise ValueError(f"keep must be >= 0; got {keep}")
     if not backups_dir.is_dir():
-        return []
+        return [], []
 
     protect = protect.resolve() if protect else None
     sets: list[tuple[str, Path]] = []
@@ -290,15 +292,22 @@ def prune_backup_sets(backups_dir: Path, keep: int, *, protect: Path | None = No
     # — the point is that the answer stops depending on the filesystem.
     sets.sort(key=lambda pair: (pair[0], pair[1].name), reverse=True)
     removed: list[Path] = []
+    failed: list[tuple[Path, str]] = []
     for _, path in sets[keep:]:
         if protect and path.resolve() == protect:
             continue
         try:
             shutil.rmtree(path)
-        except OSError:
-            continue  # housekeeping must not fail the backup it follows
+        except OSError as exc:
+            # NOT FAILING IS NOT THE SAME AS NOT TELLING (Prudence, #755 Important 2).
+            # Housekeeping must not fail the backup it follows — but swallowing this
+            # silently means a nightly `--keep 14` fills the disk exactly as it would with
+            # no retention at all, and nothing anywhere says so. Returned to the caller to
+            # report; this module does not print.
+            failed.append((path, str(exc)))
+            continue
         removed.append(path)
-    return removed
+    return removed, failed
 
 
 # ---------------------------------------------------------------------------

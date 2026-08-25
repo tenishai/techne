@@ -370,7 +370,7 @@ def test_prune_keeps_the_newest_n_sets(tmp_path):
     mid = _set(b, "backup-20260201-000000", "2026-02-01T00:00:00Z")
     new = _set(b, "backup-20260301-000000", "2026-03-01T00:00:00Z")
 
-    removed = prune_backup_sets(b, keep=2)
+    removed, _ = prune_backup_sets(b, keep=2)
 
     assert removed == [old]
     assert not old.exists()
@@ -389,7 +389,7 @@ def test_prune_orders_by_the_manifest_not_by_mtime(tmp_path):
     # Make the OLDER set look freshest on disk, which is what a read would do.
     os.utime(older, (9_000_000_000, 9_000_000_000))
 
-    removed = prune_backup_sets(b, keep=1)
+    removed, _ = prune_backup_sets(b, keep=1)
 
     assert removed == [older], "ordered by mtime, not by the manifest's created_at"
     assert newer.exists()
@@ -408,7 +408,7 @@ def test_prune_never_touches_what_is_not_a_backup_set(tmp_path):
     (stray_dir / "techne.db").write_text("no manifest here")
     _set(b, "backup-20260301-000000", "2026-03-01T00:00:00Z")
 
-    removed = prune_backup_sets(b, keep=0)
+    removed, _ = prune_backup_sets(b, keep=0)
 
     assert stray_file.exists(), "pruned a migration backup it cannot identify"
     assert stray_dir.exists(), "pruned a directory with no manifest"
@@ -421,7 +421,7 @@ def test_prune_protects_the_set_the_caller_just_wrote(tmp_path):
     b = tmp_path / "backups"
     fresh = _set(b, "backup-20260301-000000", "2026-03-01T00:00:00Z")
 
-    removed = prune_backup_sets(b, keep=0, protect=fresh)
+    removed, _ = prune_backup_sets(b, keep=0, protect=fresh)
 
     assert removed == []
     assert fresh.exists()
@@ -444,7 +444,7 @@ def test_prune_is_deterministic_when_stamps_tie(tmp_path):
     for name in ("backup-A", "backup-B", "backup-C"):
         _set(b, name, same)
 
-    kept = {p.name for p in b.iterdir()} - {p.name for p in prune_backup_sets(b, keep=1)}
+    kept = {p.name for p in b.iterdir()} - {p.name for p in prune_backup_sets(b, keep=1)[0]}
 
     assert kept == {"backup-C"}, "the survivor must not depend on directory order"
 
@@ -458,7 +458,7 @@ def test_prune_skips_a_stamp_it_cannot_order_safely(tmp_path):
     offset = _set(b, "backup-offset", "2025-06-01T23:00:00+02:00")
     canonical = _set(b, "backup-canonical", "2025-06-01T22:00:00Z")
 
-    removed = prune_backup_sets(b, keep=0)
+    removed, _ = prune_backup_sets(b, keep=0)
 
     assert offset.exists(), "pruned a set whose stamp cannot be ordered as text"
     assert removed == [canonical]

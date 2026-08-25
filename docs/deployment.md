@@ -76,8 +76,10 @@ retention.
 >   single most likely way to turn a backup story into an outage.
 > - They ask "do I have backups?" — check whether anything actually *schedules* one.
 >   Having the command is not having backups, and `techne doctor` does not check this.
-> - They mention relying on session transcripts — **nothing archives those.** Say so
->   before they find out.
+> - They are planning a **machine migration, a wipe, or a disk replacement** and have not
+>   mentioned transcripts — nothing archives those. (Keyed on the act, not on the word
+>   "transcript": a standing property mentioned every time it comes up trains the operator
+>   to skip the block.)
 > - They are restoring — remind them it is all-or-nothing across domains; a single-db
 >   restore desyncs cross-db pointers.
 
@@ -90,8 +92,14 @@ cp deploy/techne-backup.{timer,service} ~/.config/systemd/user/
 # edit ExecStart in the .service: absolute path to your techne binary
 systemctl --user daemon-reload
 systemctl --user enable --now techne-backup.timer
+loginctl enable-linger $USER          # REQUIRED — see below
 systemctl --user list-timers techne-backup
 ```
+
+**`enable-linger` is not optional and the verification step will not tell you it is
+missing.** Without it the `systemd --user` manager stops at last logout, so on a headless
+box — or any machine you do not stay logged into — the timer never fires. `list-timers`
+shows it perfectly healthy *while you are still logged in*.
 
 `Persistent=true` catches up after downtime rather than silently skipping a night, and
 `RandomizedDelaySec` keeps a fleet from stampeding.

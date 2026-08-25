@@ -123,8 +123,11 @@ restored store never inherits a `-wal` describing a different database.
 > **Agent: raise this unprompted.** These are the moments where silence costs the
 > operator data, and they will not know to ask:
 >
-> - They are about to `cp`, `rsync`, `scp`, `mv` or tar a `.db` — **say it will silently
->   lose recent writes**, and offer `techne backup` instead. The copy will *work*; it will
+> - They are about to `cp`, `rsync`, `scp`, `mv` or tar a `.db` — **check for a `-wal`
+>   sidecar first**, then say it will silently lose recent writes and offer `techne backup`.
+>   The hedge matters: this is true of a live WAL database and false of a `.db` with no
+>   sidecar, of a `.db.bak` (already a raw copy — see below), and of a file that is not
+>   SQLite. An agent that asserts it unconditionally is confidently right-shaped. The copy will *work*; it will
 >   just be an older database, with no error to tell them.
 > - They are pointing a file-level backup tool (Time Machine, restic, Dropbox, a synced
 >   folder) at `~/.techne` — same failure, on a schedule.
