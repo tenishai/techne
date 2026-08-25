@@ -31,11 +31,17 @@ block with no row here fails, and a row pointing at a section that does not exis
 Same rule as architecture cards below, for the same reason: an unindexed trigger is one
 that never fires.
 
-**Staleness is checked where it can be, and marked where it cannot.** Trigger bullets make
-claims about techne — that a command exists, that some capability *does not*. Those are
-tested. Bullets resting on SQLite's own semantics (what a `-wal` file is) are not tested and
-are not expected to rot, because they are not claims about this codebase. The test says
-which is which rather than letting the set look uniformly verified.
+**Staleness is checked, not marked.** Every bullet in both current blocks is a claim about
+techne and all of them are tested — including the `-wal` ones, which look like statements
+about SQLite and are not: they are true *because* techne opens its databases in WAL mode,
+one line in `core/database.py`. Flip it to `DELETE` and all four become confidently wrong
+advice. Absences ("`techne doctor` does not check this", "nothing archives transcripts")
+cannot be proved by grep, so the relevant SURFACE is pinned instead — the registered check
+names, the command tree — and any change trips the test and forces a re-read.
+
+The bullet count per document is pinned too, so a new trigger cannot land without someone
+deciding whether it is checkable. If one genuinely is not, record it as unchecked rather
+than leaving the set looking uniformly verified.
 
 ## Architecture cards
 

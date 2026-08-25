@@ -72,6 +72,30 @@ def _index_rows() -> list[tuple[str, str]]:
     return re.findall(r"\]\((docs/[^)#]+)#([^)]+)\)", section)
 
 
+def _trigger_blocks(path: Path) -> list[list[str]]:
+    """Every trigger block in a document, as lists of bullet lines.
+
+    `split(marker)[1]` read only the FIRST (Prudence, #764). A second block in the same
+    document was invisible: its bullets were unaccounted, and because the index compares
+    at document granularity, the doc still counted as indexed. Two silent holes from one
+    assumption that a document carries at most one block.
+    """
+    blocks, current, in_block = [], [], False
+    for line in path.read_text().splitlines():
+        if TRIGGER_MARKER in line:
+            in_block, current = True, []
+            continue
+        if in_block:
+            if line.startswith("> - "):
+                current.append(line)
+            elif not line.startswith(">"):
+                blocks.append(current)
+                in_block = False
+    if in_block:
+        blocks.append(current)
+    return blocks
+
+
 def _docs_with_trigger_blocks() -> set[str]:
     return {
         str(p.relative_to(REPO))
@@ -138,40 +162,85 @@ def test_the_command_triggers_tell_agents_to_offer_still_exists():
     assert "--keep" in result.output, "the scheduling trigger's `--keep` advice is stale"
 
 
+#: The check names `techne doctor` runs today. Pinned, not keyword-matched.
+#:
+#: The keyword version asked whether any check NAME contained "backup"/"schedul" — and
+#: Prudence walked straight through it with `check_timer_liveness`, which is exactly what
+#: someone would call this feature (#764). AN ABSENCE CANNOT BE PROVED BY GREP: you can
+#: only ask whether the surface changed. So the surface is pinned, and any new check trips
+#: this and forces a human to re-read the trigger that claims doctor does not do this.
+#: Re-bless by adding the name here, the same way an arch card is re-blessed.
+DOCTOR_CHECKS_AT_LAST_REVIEW = {
+    "check_config_trust",
+    "check_hooks",
+    "check_instance_identity",
+    "check_maintenance_rails",
+    "check_mcp_registration",
+    "check_model_bound_rails",
+    "check_outbox_targets",
+    "check_runtime_loaded",
+    "check_runtime_revision",
+    "check_runtime_torn",
+    "check_schema_versions",
+    "check_vector_coverage",
+}
+
+
 def test_the_absence_the_backup_trigger_asserts_is_still_absent():
-    """"`techne doctor` does not check this" is the sharpest kind of claim to let rot: if
-    doctor GAINS the check, the trigger keeps telling operators it has not got it, and the
-    agent talks them out of trusting a signal that now works."""
+    """"`techne doctor` does not check this" is the sharpest claim to let rot: if doctor
+    GAINS a scheduling check, the trigger keeps telling operators it has not got one, and
+    the agent talks them out of trusting a signal that now works."""
     from techne.core.checks import _REGISTRY
 
-    # THE REGISTRY, NOT `--help` TEXT. The first version of this grepped `doctor --help` for
-    # "schedul" and failed on the phrase "a scheduled audit" — a word matching for a reason
-    # unrelated to the claim. That is the same defect #755 spent nine rounds on, so it is
-    # worth naming here: a substring in prose is not evidence about behaviour. `_REGISTRY`
-    # is what `run_checks` actually iterates, so it is the thing the claim is about.
-    concerned = [
-        fn.__name__
-        for fn in _REGISTRY
-        if any(word in fn.__name__ for word in ("backup", "schedul", "retention"))
-    ]
+    now = {fn.__name__ for fn in _REGISTRY}
+    added = now - DOCTOR_CHECKS_AT_LAST_REVIEW
 
-    assert not concerned, (
-        f"`techne doctor` may now check scheduling ({concerned}) — the trigger in "
-        "deployment.md tells operators it does not. Re-read it."
+    assert not added, (
+        f"`techne doctor` gained checks since this was last reviewed: {sorted(added)}. "
+        "Read deployment.md's backup trigger — it tells operators doctor does NOT check "
+        "whether anything schedules a backup. If one of these does, the trigger is wrong. "
+        "If none does, add them here."
     )
 
 
-def test_the_absence_the_migration_trigger_asserts_is_still_absent():
-    """"nothing archives transcripts" — an absence, which no amount of reading the code
-    reminds you to re-check."""
-    from click.testing import CliRunner
+#: Every command and subcommand the CLI exposes, pinned for the same reason.
+#:
+#: The keyword version grepped top-level `--help` for "archive" — and missed
+#: `knowledge archive-scan` and `knowledge unarchive`, which already ship (#764). A
+#: subcommand is invisible to top-level help, so the test was asking a question the output
+#: could not answer.
+def _command_tree() -> set[str]:
+    import click
 
     from techne.cli import main
 
-    result = CliRunner().invoke(main, ["--help"])
+    names = set()
+    for name, cmd in main.commands.items():
+        names.add(name)
+        if isinstance(cmd, click.Group):
+            names.update(f"{name} {sub}" for sub in cmd.commands)
+    return names
 
-    assert "archive" not in result.output.lower(), (
-        "a transcript-archive command may now exist — re-read the trigger in deployment.md"
+
+def test_the_absence_the_migration_trigger_asserts_is_still_absent():
+    """"nothing archives transcripts" — an absence, which nothing about reading the code
+    reminds you to re-check. Pinned at the command-tree level so a SUBCOMMAND cannot slip
+    past, which is how `knowledge archive-scan` was invisible to the first version."""
+    # `archivist*` is the DOMAIN name, not an archiving verb — matched by the same
+    # substring and pinned here rather than filtered, because a filter that drops names
+    # by prefix is another exemption by category.
+    archive_like = {n for n in _command_tree() if "archiv" in n}
+
+    assert archive_like == {
+        "archivist",
+        "archivist query",
+        "archivist schema",
+        "knowledge archive-scan",
+        "knowledge unarchive",
+    }, (
+        f"the CLI's archive-shaped commands changed: {sorted(archive_like)}. Read "
+        "deployment.md's migration trigger — it tells operators nothing archives session "
+        "transcripts. If one of these now does, the trigger is wrong."
     )
 
 
@@ -191,20 +260,81 @@ def test_the_restore_trigger_is_still_all_or_nothing():
 
 # ------------------------------------------------- #757: what is NOT checked, said aloud
 
-JUDGEMENT_BULLETS = 4  # the four WAL bullets in docs/db-per-domain.md
+#: Bullets in each document that NO test here can check, declared per document.
+#:
+#: Hardcoding one path and one count meant the index tests would extend to #753/#754 for
+#: free and the staleness tests not at all — the half that gets expensive once three files
+#: carry the convention (Prudence, #764). Keyed by document now, and a document carrying a
+#: block with no entry is a failure, so a new one cannot land without this decision being
+#: made.
+#:
+#: THE WAL BULLETS ARE NOT IN HERE ANY MORE, AND THAT IS THE POINT. I had exempted four of
+#: them as "SQLite's own semantics, not claims about this codebase". They all rest on
+#: `PRAGMA journal_mode=WAL` — ONE LINE of techne's own code (`core/database.py:773`).
+#: Prudence flipped it to `DELETE` and 15 tests passed. Exempting by category is the same
+#: mistake she caught on #755 round 2, and the category I chose was wrong on inspection.
+#: {document: (total bullets, of which nothing here can check)}
+TRIGGER_BULLETS = {
+    "docs/db-per-domain.md": (4, 0),
+    "docs/deployment.md": (4, 0),
+}
 
 
-def test_the_unchecked_bullets_are_accounted_for():
-    """WHAT IS NOT VERIFIED MUST NOT READ AS VERIFIED (#757). Four bullets rest on SQLite's
-    own semantics — what a `-wal` file is, that copying a live db loses recent writes. They
-    are not claims about this codebase, so nothing here can check them and they are not
-    expected to rot. Stating the count keeps the set honest: adding a fifth unverifiable
-    bullet has to be a deliberate act, not a silent one."""
-    block = (REPO / "docs" / "db-per-domain.md").read_text()
-    trigger_block = block.split(TRIGGER_MARKER)[1].split("\n\n")[0]
-    bullets = [ln for ln in trigger_block.splitlines() if ln.startswith("> - ")]
+def test_the_wal_premise_every_wal_trigger_rests_on():
+    """FOUR BULLETS I HAD EXEMPTED AS "NOT ABOUT THIS CODEBASE" (Prudence, #764). "copying
+    the `.db` loses recent writes", "`-wal` is committed data", "copy all three" — every one
+    of them is true BECAUSE techne opens its databases in WAL mode, which is one line of our
+    code. In `DELETE` mode there is no `-wal` beside a live database and all four bullets
+    become confidently wrong advice. The premise is ours, so it is testable, so it is
+    tested."""
+    from techne.core.database import connect, init_db
 
-    assert len(bullets) == JUDGEMENT_BULLETS, (
-        f"{len(bullets)} WAL bullets, {JUDGEMENT_BULLETS} accounted for as judgement — "
-        "if you added one, decide whether it is checkable and update this count"
+    db = Path(__file__).parent / "_wal_probe.db"
+    try:
+        init_db(db).close()
+        conn = connect(db)
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db) + suffix).unlink(missing_ok=True)
+
+    assert mode.lower() == "wal", (
+        f"journal_mode is {mode!r} — every `-wal` trigger in docs/db-per-domain.md is now "
+        "wrong, including the advice to copy all three files"
     )
+
+
+@pytest.mark.parametrize("doc", sorted(_docs_with_trigger_blocks()))
+def test_every_document_with_triggers_declares_its_bullets(doc):
+    """WHAT IS NOT VERIFIED MUST NOT READ AS VERIFIED. A document carrying trigger blocks
+    with no entry fails, so #753 and #754 cannot land a block without someone deciding,
+    per bullet, whether it is checkable."""
+    assert doc in TRIGGER_BULLETS, (
+        f"{doc} carries trigger blocks but declares no bullet accounting — decide which "
+        "of its bullets this file can check, and record the remainder"
+    )
+
+
+@pytest.mark.parametrize("doc,counts", sorted(TRIGGER_BULLETS.items()))
+def test_the_bullet_accounting_still_matches(doc, counts):
+    """PIN THE TOTAL, NOT JUST THE UNCHECKED COUNT. My first version asserted
+    `bullets >= declared` with `declared = 0` — trivially true, so it proved nothing and a
+    whole second block of unaccounted bullets sailed past it. That is the same
+    vacuous-assertion shape as the source-grep test #755 threw out, reproduced while fixing
+    the finding that a second block is invisible at all (Prudence, #764).
+
+    Counts EVERY block in the document. Adding a bullet or a block now fails, which forces
+    the per-bullet decision rather than letting it default to unmade."""
+    total, unchecked = counts
+    blocks = _trigger_blocks(REPO / doc)
+    found = sum(len(b) for b in blocks)
+
+    assert found == total, (
+        f"{doc}: {found} trigger bullets across {len(blocks)} block(s), {total} accounted "
+        "for. Decide for each new bullet whether this file can check it, then update "
+        "TRIGGER_BULLETS."
+    )
+    assert unchecked <= total
