@@ -4682,8 +4682,14 @@ def reconcile_cmd(ctx):
 
 @main.command("backup")
 @click.option("--out", default=None, help="Destination dir (default: <data_dir>/backups/)")
+@click.option(
+    "--keep",
+    type=int,
+    default=None,
+    help="Delete all but the newest N backup sets in the destination, after this one succeeds.",
+)
 @click.pass_context
-def backup_cmd(ctx, out):
+def backup_cmd(ctx, out, keep):
     """Snapshot ALL present domain DBs together into one timestamped set.
 
     Cross-DB invariants span files, so a single-DB backup desyncs pointers — always back up
@@ -4697,6 +4703,17 @@ def backup_cmd(ctx, out):
     config = ctx.obj["config"]
     res = backup_all_dbs(config, _Path(out) if out else None)
     click.echo(f"backed up [{', '.join(res.backed_up) or '(none)'}] → {res.dest}")
+
+    # PRUNE AFTER THE NEW SET LANDS, NEVER BEFORE (techne#742). Pruning first would, on a
+    # keep=1 schedule, delete the only good backup and then discover the disk is full — the
+    # window where the operator has nothing is exactly the window a backup exists to remove.
+    # `protect` is belt-and-braces on top of that ordering.
+    if keep is not None:
+        from techne.core.maintenance import prune_backup_sets
+
+        removed = prune_backup_sets(res.dest.parent, keep, protect=res.dest)
+        if removed:
+            click.echo(f"pruned {len(removed)} older set(s), keeping {keep}")
     if res.skipped_absent:
         click.echo(f"skipped (absent): {', '.join(res.skipped_absent)}")
 

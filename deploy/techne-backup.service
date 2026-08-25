@@ -1,0 +1,15 @@
+# techne-backup.service — oneshot unit driven by techne-backup.timer (techne#742)
+#
+# See techne-backup.timer for installation. This unit does nothing on its own;
+# it is Type=oneshot and exits after one backup.
+
+[Unit]
+Description=techne consistent backup of all domain dbs
+Documentation=https://github.com/tenishai/techne/blob/main/docs/deployment.md
+
+[Service]
+Type=oneshot
+# EDIT THIS: absolute path to your virtualenv's techne binary.
+ExecStart=/home/YOUR_USER/.venv/bin/techne backup --keep 14
+# EDIT IF NEEDED: only when techne state is not in ~/.techne.
+# Environment=TECHNE_HOME=/home/YOUR_USER/.techne

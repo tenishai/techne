@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from techne.core.maintenance import (
     RestoreError,
     backup_all_dbs,
     domain_db_paths,
+    prune_backup_sets,
     read_manifest,
     restore_all_dbs,
     run_fsck,
@@ -344,3 +346,89 @@ def test_restore_staging_failure_leaves_live_untouched(config, monkeypatch):
     # Live DB never overwritten; no orphan temp left behind.
     assert "LIVE-OK" in _knowledge_contents(config.db_path)
     assert not config.db_path.with_name(config.db_path.name + ".restore-tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# retention — techne#742
+# ---------------------------------------------------------------------------
+
+
+def _set(backups: Path, name: str, created_at: str) -> Path:
+    """A backup set is a directory carrying a manifest. Anything else is not ours."""
+    d = backups / name
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps({"created_at": created_at, "databases": {}}))
+    return d
+
+
+def test_prune_keeps_the_newest_n_sets(tmp_path):
+    """RETENTION IS WHY THIS EXISTS (techne#742). `techne backup` had none, so it was safe
+    by hand and unsafe on a timer — a nightly job with no ceiling is a disk-filling cron job
+    dressed as a backup story."""
+    b = tmp_path / "backups"
+    old = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+    mid = _set(b, "backup-20260201-000000", "2026-02-01T00:00:00Z")
+    new = _set(b, "backup-20260301-000000", "2026-03-01T00:00:00Z")
+
+    removed = prune_backup_sets(b, keep=2)
+
+    assert removed == [old]
+    assert not old.exists()
+    assert mid.exists() and new.exists()
+
+
+def test_prune_orders_by_the_manifest_not_by_mtime(tmp_path):
+    """A restore, a copy, or a backup tool reading the directory rewrites mtimes. Ordering on
+    them would evict a genuine recent backup BECAUSE SOMETHING READ IT. The stamp inside the
+    set is the fact; the filesystem's opinion about it is not."""
+    import os
+
+    b = tmp_path / "backups"
+    older = _set(b, "backup-A", "2026-01-01T00:00:00Z")
+    newer = _set(b, "backup-B", "2026-03-01T00:00:00Z")
+    # Make the OLDER set look freshest on disk, which is what a read would do.
+    os.utime(older, (9_000_000_000, 9_000_000_000))
+
+    removed = prune_backup_sets(b, keep=1)
+
+    assert removed == [older], "ordered by mtime, not by the manifest's created_at"
+    assert newer.exists()
+
+
+def test_prune_never_touches_what_is_not_a_backup_set(tmp_path):
+    """Migration `.db.bak` files live under `backups/` too and are pruned by their own scheme
+    in `migrator._prune_backups`. A pruner that cannot tell what it is deleting deletes
+    nothing — the same rule that one states."""
+    b = tmp_path / "backups"
+    b.mkdir(parents=True)
+    stray_file = b / "techne-v18-to-v19-20260101-000000.db.bak"
+    stray_file.write_text("not a set")
+    stray_dir = b / "backups-pre-runtime-pull-20260813"
+    stray_dir.mkdir()
+    (stray_dir / "techne.db").write_text("no manifest here")
+    _set(b, "backup-20260301-000000", "2026-03-01T00:00:00Z")
+
+    removed = prune_backup_sets(b, keep=0)
+
+    assert stray_file.exists(), "pruned a migration backup it cannot identify"
+    assert stray_dir.exists(), "pruned a directory with no manifest"
+    assert len(removed) == 1
+
+
+def test_prune_protects_the_set_the_caller_just_wrote(tmp_path):
+    """Even at keep=0. Deleting the set the caller is about to rely on is the failure this
+    mechanism exists to prevent (`migrator._prune_backups` states the same rule)."""
+    b = tmp_path / "backups"
+    fresh = _set(b, "backup-20260301-000000", "2026-03-01T00:00:00Z")
+
+    removed = prune_backup_sets(b, keep=0, protect=fresh)
+
+    assert removed == []
+    assert fresh.exists()
+
+
+def test_prune_rejects_a_negative_keep(tmp_path):
+    """`keep=-1` would silently keep everything via slice semantics — a retention flag that
+    quietly does nothing is the shape this whole issue is about."""
+    with pytest.raises(ValueError, match="keep must be >= 0"):
+        prune_backup_sets(tmp_path, keep=-1)

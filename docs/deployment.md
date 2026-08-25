@@ -48,6 +48,80 @@ automatically.
 
 ---
 
+## Scheduled backups (techne#742)
+
+`techne backup` copies **every present domain db together** into one timestamped set, via
+SQLite's online backup API — consistent even while something is writing — with a manifest
+that `techne restore` validates before applying. Cross-db invariants span files, so always
+back up and restore the **whole set**; a single-db backup desyncs pointers.
+
+**`--keep` is not optional on a timer.** Every run writes a full set and nothing prunes by
+default, so a nightly job without it fills the disk. That is why the units below all pass
+it, and why the flag landed with this documentation rather than after it.
+
+```bash
+techne backup --keep 14      # one set per run, newest 14 retained
+```
+
+Retention is ordered by each set's **own manifest timestamp**, not by mtime — reading or
+copying a backup directory rewrites mtimes, and ordering on them would evict a genuine
+recent backup because something touched it. Anything under `backups/` without a manifest
+is left alone, including the migration `.db.bak` files that live there under their own
+retention.
+
+> **Agent: raise this unprompted.**
+>
+> - They are writing a cron job, timer, launchd plist or CI step that calls
+>   `techne backup` **without `--keep`** — say it will grow without bound. This is the
+>   single most likely way to turn a backup story into an outage.
+> - They ask "do I have backups?" — check whether anything actually *schedules* one.
+>   Having the command is not having backups, and `techne doctor` does not check this.
+> - They mention relying on session transcripts — **nothing archives those.** Say so
+>   before they find out.
+> - They are restoring — remind them it is all-or-nothing across domains; a single-db
+>   restore desyncs cross-db pointers.
+
+### Linux — systemd user timer
+
+Ship both `deploy/techne-backup.timer` and `deploy/techne-backup.service`:
+
+```bash
+cp deploy/techne-backup.{timer,service} ~/.config/systemd/user/
+# edit ExecStart in the .service: absolute path to your techne binary
+systemctl --user daemon-reload
+systemctl --user enable --now techne-backup.timer
+systemctl --user list-timers techne-backup
+```
+
+`Persistent=true` catches up after downtime rather than silently skipping a night, and
+`RandomizedDelaySec` keeps a fleet from stampeding.
+
+### macOS — launchd agent
+
+```bash
+cp deploy/ai.tenish.techne-backup.plist ~/Library/LaunchAgents/
+# edit the techne path and the log paths
+launchctl load ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
+launchctl list | grep techne-backup
+```
+
+`RunAtLoad` is deliberately false — loading an agent should not fire a backup at a moment
+nobody chose. If the machine is asleep at the scheduled time, launchd runs it once on wake.
+
+### What is NOT automated, stated plainly
+
+- **Transcript archiving.** There is no techne primitive for it. Session transcripts are
+  the durable history behind several recovery paths — `techne import` backfills
+  observations from them, and they have settled questions no table could — but archiving
+  them is a manual `tar` today. If you rely on them, put that on your own schedule and
+  know that techne is not doing it for you.
+- **The author's fleet sweep.** `~/.techne/db_snapshot.py` discovers sqlite dbs across
+  arbitrary roots and prunes per identity. It is host-local and **does not ship**
+  (techne#742). `techne backup` covers the four domain dbs, which is what a single-machine
+  operator needs; the sweep exists for a multi-repo fleet and is not part of the package.
+
+---
+
 ## inotify watch-limit on Linux
 
 ### Symptom

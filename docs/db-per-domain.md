@@ -86,6 +86,58 @@ Sequenced; the Librarian goes first because it's already built and working — t
 3. **Patterns → `architect.db`** (#87): build on the proven registry/adapter; collapse `architectural-patterns.md` into the store.
 4. **Codex → `codex.db`** (#89): graph domain on the same pattern.
 
+## The `-wal` and `-shm` files next to every db
+
+You will see these and they are not junk, not a crash artifact, and not yours to delete:
+
+```
+techne.db          the database
+techne.db-wal      the write-ahead log — committed data that is not folded in yet
+techne.db-shm      shared-memory index into the -wal, so readers can find their way
+```
+
+techne opens **every** store with `PRAGMA journal_mode=WAL` (`core/database.py`,
+`core/stores.py`). WAL is why a long recall does not block a write, and why a hook can
+read while a session writes.
+
+**The consequence that matters: `techne.db` alone is not your database.** A committed
+write can live in `-wal` for a while before it is checkpointed into the main file. Copy
+the `.db` by itself and you get a database missing its most recent writes — with no error,
+because what you copied is a perfectly valid older database.
+
+| you want to | do this | not this |
+|---|---|---|
+| back up | `techne backup` | `cp techne.db somewhere` |
+| move a store | copy **all three**, or `techne backup` then `techne restore` | copy the `.db` |
+| inspect it | `sqlite3 techne.db` — it reads the `-wal` for you | anything that reads bytes |
+| free the space | it is already bounded; a checkpoint folds it back on clean close | delete `-wal` |
+
+**Never delete a `-wal` beside a live database.** It is not a cache — it is committed data
+that has not been folded in yet, and deleting it discards those transactions.
+
+`techne backup` uses SQLite's **online backup API**, which is consistent even while
+something is writing — that is what the API is for, and it is why the command exists
+rather than a documented `cp`. `techne restore` clears stale sidecars on the way in, so a
+restored store never inherits a `-wal` describing a different database.
+
+> **Agent: raise this unprompted.** These are the moments where silence costs the
+> operator data, and they will not know to ask:
+>
+> - They are about to `cp`, `rsync`, `scp`, `mv` or tar a `.db` — **say it will silently
+>   lose recent writes**, and offer `techne backup` instead. The copy will *work*; it will
+>   just be an older database, with no error to tell them.
+> - They are pointing a file-level backup tool (Time Machine, restic, Dropbox, a synced
+>   folder) at `~/.techne` — same failure, on a schedule.
+> - They ask what a `-wal`/`-shm` file is, or propose deleting one — **`-wal` is committed
+>   data, not a cache.** Deleting it beside a live db discards those transactions.
+> - They are moving techne between machines and mention only the `.db`.
+
+**Sidecars beside a `.bak` mean it was copied, not backed up.** `~/.techne/` accumulates
+`*.db.bak-*` files with their own `-wal`/`-shm` — those came from raw file copies during
+migrations. They are readable, but they are the shape this section is warning about.
+
+---
+
 ## Operational contract: backup/restore + fsck (techne#139)
 
 db-per-domain has one unavoidable consequence: **two SQLite files cannot share a

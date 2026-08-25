@@ -213,6 +213,71 @@ def backup_all_dbs(config: Config, dest_dir: Path | None = None) -> BackupResult
     return BackupResult(dest=dest_dir, backed_up=backed_up, skipped_absent=skipped)
 
 
+def prune_backup_sets(backups_dir: Path, keep: int, *, protect: Path | None = None) -> list[Path]:
+    """Delete all but the newest *keep* backup sets. Returns what was removed.
+
+    RETENTION IS WHY THIS EXISTS, AND WHY IT LANDS WITH THE SCHEDULING DOCS RATHER THAN
+    AFTER (techne#742). `backup_all_dbs` had none, so `techne backup` was safe to run by
+    hand and unsafe to put on a timer: a nightly job with no ceiling is a disk-filling
+    cron job dressed as a backup story. Documenting the schedule without shipping the
+    ceiling would be advice that breaks the machine it is given to.
+
+    A SET IS ONLY A SET IF IT CARRIES A MANIFEST. Anything else under `backups/` is left
+    alone — migration `.db.bak` files live there too, pruned by their own scheme in
+    `migrator._prune_backups`, and a pruner that cannot tell what it is deleting should
+    delete nothing. Same rule that pruner states: a file not matching the shape is never
+    removed, deliberately.
+
+    ORDERED BY THE MANIFEST'S `created_at`, NOT BY MTIME. A restore, a copy, or a backup
+    tool touching the directory rewrites mtimes and would reorder the sets — evicting a
+    genuine recent backup because something read it. The stamp inside the set is the fact;
+    the filesystem's opinion about it is not.
+
+    `protect` is never removed, even at keep=0 — deleting the set the caller is about to
+    rely on is the failure this exists to prevent (the idiom is `migrator._prune_backups`').
+    """
+    if keep < 0:
+        raise ValueError(f"keep must be >= 0; got {keep}")
+    if not backups_dir.is_dir():
+        return []
+
+    protect = protect.resolve() if protect else None
+    sets: list[tuple[str, Path]] = []
+    for child in backups_dir.iterdir():
+        if not child.is_dir():
+            continue
+        manifest = child / _MANIFEST_NAME
+        if not manifest.is_file():
+            # AN EQUIVALENT MUTANT, AND SAID SO RATHER THAN LEFT LOOKING LOAD-BEARING.
+            # Deleting this line changes nothing observable: the read below then raises
+            # OSError and the `except` reaches the same `continue`. Measured — the
+            # mutation survives the whole prune suite. Kept because it states the
+            # SEMANTIC test ("is this set ours?") where the except states a different
+            # one ("is it corrupt?"), and a reader should not have to derive the first
+            # from the second. But no test pins it, and pretending otherwise is the
+            # habit this file's own retention exists to break.
+            continue
+        try:
+            stamp = str(json.loads(manifest.read_text()).get("created_at", ""))
+        except (OSError, ValueError):
+            continue  # unreadable or malformed: cannot date it, so cannot judge it
+        if not stamp:
+            continue
+        sets.append((stamp, child))
+
+    sets.sort(key=lambda pair: pair[0], reverse=True)
+    removed: list[Path] = []
+    for _, path in sets[keep:]:
+        if protect and path.resolve() == protect:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            continue  # housekeeping must not fail the backup it follows
+        removed.append(path)
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # Restore — write a backup set back over the live DBs, as a unit
 # ---------------------------------------------------------------------------
