@@ -62,3 +62,39 @@ def test_audit_edit_rail_panel_populated(cli_db):
     assert "module-noise 33.3%" in result.output
     # Proximity caveat is always printed.
     assert "PROXIMITY" in result.output
+
+
+def test_an_injected_config_is_honoured(tmp_path, monkeypatch):
+    """AN INJECTED CONFIG USED TO BE SILENTLY DISCARDED (techne#766). `main` called
+    `ctx.ensure_object(dict)` — which reads as "honour what the caller passed" — and then
+    unconditionally overwrote `ctx.obj["config"]` with `Config.load()`. A caller passing
+    `obj={"config": cfg}` got the ambient store, with no error and exit 0.
+
+    Untested until now for the reason those gaps usually are: everything in the suite that
+    needs a scoped config patches `Config.load` instead, which works precisely BECAUSE it
+    patches the call that was doing the overwriting. The `obj=` path had no witness.
+
+    Asserted through a command that REPORTS which store it used, so this fails if the
+    injection stops being honoured rather than merely if the attribute is set."""
+    from click.testing import CliRunner
+
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    injected = Config()
+    injected.db_path = tmp_path / "injected.db"
+    injected.data_dir = tmp_path
+    init_db(injected.db_path).close()
+
+    ambient = Config()
+    ambient.db_path = tmp_path / "ambient.db"
+    ambient.data_dir = tmp_path / "ambient-home"
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: ambient))
+
+    result = CliRunner().invoke(main, ["backup"], obj={"config": injected})
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "backups").is_dir(), (
+        f"the injected config was discarded — backup went to {ambient.data_dir}\n{result.output}"
+    )
+    assert not (ambient.data_dir / "backups").exists(), "wrote to the ambient store"
