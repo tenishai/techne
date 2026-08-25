@@ -3543,7 +3543,12 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
 
     config = ctx.obj["config"]
     from techne.core.architect import architect_db
-    from techne.core.patterns import DEFAULT_INGEST_VERDICT, add_pattern, upsert_investigation
+    from techne.core.patterns import (
+        DEFAULT_INGEST_VERDICT,
+        add_pattern,
+        backfill_graph,
+        upsert_investigation,
+    )
 
     sources = [s for s in (body, body_file) if s is not None]
     if len(sources) > 1:
@@ -3559,15 +3564,37 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     if not body.strip():
         raise click.UsageError("the body is empty — a pattern with no body is not a pattern")
 
-    # VALIDATED WITH THE PARSER'S OWN REGEXES, so `add` and `ingest` cannot disagree about
-    # what a URL or a date is. A second opinion here would be a second spelling.
-    from techne.import_md import _DATE_RE, _URL_RE
+    # NORMALIZE THE WAY THE PARSER DOES, NOT MERELY ACCEPT WHAT IT ACCEPTS (Prudence, #758
+    # Critical). `_URL_RE` and `_DATE_RE` are UNANCHORED EXTRACTORS — `_DATE_RE` carries a
+    # capture group precisely so callers take `group(1)`, and `_parse_pattern_body` does.
+    # This used them as booleans and then stored the RAW argument, so sharing the regex
+    # bought acceptance parity while normalization — where the disagreement actually lives
+    # — was never shared at all. Measured at the database:
+    #
+    #   `--source "https://github.com/x/y — src/foo.ts"`, which is the shape
+    #   `export_patterns_md` itself teaches, stored whole. `investigations` is
+    #   UNIQUE(url, surveyed_by, lens), so add and ingest MINT DIFFERENT ROWS FOR ONE URL:
+    #   add → export → re-ingest turned one investigation into two, against the invariant
+    #   `test_export_roundtrips_with_ingest` already names.
+    #
+    #   `--surveyed "surveyed 2026-01-01 roughly"` accepted and stored raw. patterns.py:50
+    #   records that `surveyed_at` is a zero-padded ISO date BECAUSE import_md enforces it
+    #   at parse time, and calls that scoping "the sweep's only safety property" — so the
+    #   sweep's own predicate returns [] for such a row, since 's' > '2'.
+    #
+    # The date is checked against `_ISO_DATE_RE`, which is ANCHORED and already lives in
+    # the module this command writes into — the right regex was one import away.
+    from techne.core.patterns import _ISO_DATE_RE
+    from techne.import_md import _URL_RE
 
     surveyed = surveyed or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if not _DATE_RE.search(surveyed):
-        raise click.UsageError(f"--surveyed must be YYYY-MM-DD; got {surveyed!r}")
-    if not _URL_RE.search(source):
+    if not _ISO_DATE_RE.match(surveyed):
+        raise click.UsageError(f"--surveyed must be exactly YYYY-MM-DD; got {surveyed!r}")
+    url_match = _URL_RE.search(source)
+    if url_match is None:
         raise click.UsageError(f"--source must be an http(s) URL; got {source!r}")
+    # `.group(0).rstrip("),.;")` — character-for-character what import_md.py:250 stores.
+    source = url_match.group(0).rstrip("),.;")
 
     db = architect_db(config)
     inv_id = upsert_investigation(
@@ -3586,6 +3613,14 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     pid, stored = add_pattern(
         db, investigation_id=inv_id, name=name, source_url=source, body=body.strip()
     )
+    # AND THE GRAPH, WHICH `ingest` BUILDS AND THIS DID NOT (Prudence, #758 Important B).
+    # `ingest_patterns_md` writes FOUR things: the investigation, the pattern, typed
+    # relations declared in the body, and then `backfill_graph` to materialise wikilink
+    # edges and re-resolve anything earlier ingests left dangling. This wrote two — so
+    # `pattern_relations` stayed EMPTY for every pattern fed through `add`, and the
+    # operator this command exists for got a silently graphless store while
+    # `architect related` and `architect graph` returned nothing.
+    backfill_graph(db)
     if stored:
         click.echo(f"added {pid}  {name}")
     else:

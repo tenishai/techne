@@ -227,10 +227,31 @@ def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | str:
             n for n, v in (("`- **Source**:`", source_line), ("`- **Surveyed**:`", date_line))
             if v is None
         ]
-        reason = (
-            f"no {' or '.join(absent)} line{'s' if len(absent) > 1 else ''} "
-            "(the ** bold markers are required)"
-        )
+        # DIAGNOSE THE RIGHT THING (Prudence, #758 Important C). The metadata bullets must
+        # come FIRST: the first non-metadata, non-blank line ends the preamble and
+        # everything after it is body. So a section that opens with framing prose — an
+        # ordinary way to write — has its perfectly correct `- **Source**:` line eaten as
+        # body, and the old message then told the operator "the ** bold markers are
+        # required" about a file whose markers were right. Being told to fix something
+        # that is not broken is worse than a vague error.
+        misplaced = [
+            n
+            for n, marker in (
+                ("`- **Source**:`", "- **Source**:"),
+                ("`- **Surveyed**:`", "- **Surveyed**:"),
+            )
+            if n in absent and any(ln.strip().startswith(marker) for ln in body.splitlines())
+        ]
+        if misplaced:
+            reason = (
+                f"{' and '.join(misplaced)} appears AFTER the body starts — the metadata "
+                "bullets must come first, before any prose, or they are read as body text"
+            )
+        else:
+            reason = (
+                f"no {' or '.join(absent)} line{'s' if len(absent) > 1 else ''} "
+                "(the ** bold markers are required)"
+            )
         logger.warning("skip_section", extra={"heading": heading, "reason": reason})
         return reason
 

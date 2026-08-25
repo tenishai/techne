@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from techne.cli import main
+from techne.core.architect import architect_db
 from techne.core.database import init_db
 from techne.import_md import parse
 
@@ -83,6 +84,16 @@ def test_ingest_says_what_it_dropped(cli_config, tmp_path):
 # --------------------------------------------------------------------------- add
 
 
+def _query(db, sql):
+    import sqlite3
+
+    conn = sqlite3.connect(str(db))
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
 def _add(*args):
     return CliRunner().invoke(main, ["architect", "add", *args])
 
@@ -145,3 +156,144 @@ def test_add_accepts_every_url_shape_ingest_accepts(cli_config, url):
     result = _add("--name", "P", "--source", url, "--body", "b")
 
     assert result.exit_code == 0, f"ingest accepts {url!r} and add rejects it:\n{result.output}"
+
+
+@pytest.mark.parametrize(
+    "raw,stored",
+    [
+        ("https://github.com/x/y", "https://github.com/x/y"),
+        # the shape `export_patterns_md` itself teaches — a URL followed by a path
+        ("https://github.com/x/y — src/foo.ts", "https://github.com/x/y"),
+        ("see https://github.com/x/y for details", "https://github.com/x/y"),
+        ("https://github.com/x/y).", "https://github.com/x/y"),
+        ("(https://github.com/x/y;", "https://github.com/x/y"),
+    ],
+)
+def test_add_stores_what_ingest_would_store(cli_config, raw, stored):
+    """PARITY OF WHAT LANDS IN THE DATABASE, not of what is accepted (Prudence, #758
+    Critical). `_URL_RE` and `_DATE_RE` are unanchored EXTRACTORS — `_DATE_RE` carries a
+    capture group so callers take `group(1)`, and `_parse_pattern_body` does. `add` used
+    them as booleans and stored the raw argument, so sharing the regex bought ACCEPTANCE
+    parity while normalization, where the disagreement actually lives, was never shared.
+
+    It matters because `investigations` is `UNIQUE(url, surveyed_by, lens)`: the two paths
+    minted DIFFERENT ROWS FOR ONE URL, and add → export → re-ingest turned one
+    investigation into two, against an invariant `test_export_roundtrips_with_ingest`
+    already names.
+
+    The oracle my previous test could not be: its three fixtures were the subset where raw
+    equals normalized, so it was unfalsifiable by construction — and no mutant could have
+    exposed it, because AN ABSENT TRANSFORMATION HAS NO MUTANT to kill."""
+    result = _add("--name", "P", "--source", raw, "--surveyed", "2026-01-01", "--body", "b")
+
+    assert result.exit_code == 0, result.output
+
+    db = architect_db(cli_config)
+    urls = [r[0] for r in _query(db, "SELECT url FROM investigations")]
+    assert urls == [stored], f"add stored {urls}, ingest would store [{stored!r}]"
+
+
+def test_add_and_ingest_agree_on_one_investigation_per_url(cli_config, tmp_path):
+    """THE INVARIANT THE NORMALIZATION GAP BROKE. Same URL through both paths must be one
+    investigation row, not two."""
+    _add(
+        "--name", "P", "--source", "https://github.com/x/y — src/foo.ts",
+        "--surveyed", "2026-01-01", "--body", "b",
+    )
+    md = tmp_path / "corpus.md"
+    md.write_text(
+        "## P2\n\n- **Source**: https://github.com/x/y — src/foo.ts\n"
+        "- **Surveyed**: 2026-01-01\n\nanother body\n"
+    )
+    CliRunner().invoke(main, ["architect", "ingest", str(md)])
+
+    rows = _query(architect_db(cli_config), "SELECT url FROM investigations")
+
+    assert len(rows) == 1, f"one URL became {len(rows)} investigations: {rows}"
+
+
+def test_add_rejects_a_date_that_is_not_exactly_iso(cli_config):
+    """`patterns.py:50` records that `surveyed_at` is a zero-padded ISO date BECAUSE
+    import_md enforces it at parse time, and calls that scoping "the sweep's only safety
+    property". `add` bypassed parse time: `"surveyed 2026-01-01 roughly"` was accepted and
+    stored raw, and the sweep's own predicate then returns [] for it — `'s' > '2'`, so no
+    `< date` comparison reaches it. `_ISO_DATE_RE` is anchored and already lived in the
+    module `add` writes into."""
+    result = _add(
+        "--name", "P", "--source", "https://x.com/a",
+        "--surveyed", "surveyed 2026-01-01 roughly", "--body", "b",
+    )
+
+    assert result.exit_code != 0
+    assert "exactly YYYY-MM-DD" in result.output
+
+
+def test_add_builds_the_relation_graph_like_ingest_does(cli_config):
+    """`ingest` writes four things; `add` wrote two — no relations, no backfill — so
+    `pattern_relations` stayed EMPTY for add-fed patterns and `architect related` returned
+    nothing for exactly the operator this command exists for (Prudence, #758 Important B)."""
+    _add("--name", "Alpha", "--source", "https://x.com/a", "--body", "mentions [[Beta]]")
+    _add("--name", "Beta", "--source", "https://x.com/b", "--body", "the other one")
+
+    rows = _query(architect_db(cli_config), "SELECT COUNT(*) FROM pattern_relations")
+
+    assert rows[0][0] > 0, "add fed the store but built no graph"
+
+
+def test_prose_before_the_metadata_is_diagnosed_as_misplaced_not_missing():
+    """BEING TOLD TO FIX SOMETHING THAT IS NOT BROKEN IS WORSE THAN A VAGUE ERROR
+    (Prudence, #758 Important C). The metadata bullets must come first: the first
+    non-metadata, non-blank line ends the preamble, so a section opening with framing prose
+    — an ordinary way to write — has its perfectly correct `- **Source**:` line eaten as
+    body. The message then told the operator the bold markers were required, about a file
+    whose markers were right."""
+    result = parse(
+        "## P\n\nFraming prose first.\n\n- **Source**: https://x.com/a\n"
+        "- **Surveyed**: 2026-01-01\n\nBody.\n"
+    )
+
+    assert len(result.skipped) == 1
+    reason = result.skipped[0].reason
+    assert "AFTER the body starts" in reason, reason
+    assert "bold markers are required" not in reason, (
+        "still blaming the markers on a file whose markers are correct"
+    )
+
+
+def test_add_reads_stdin_only_when_it_is_piped(tmp_path):
+    """The one guard with no test (Prudence, #758 D — she ran both halves by hand). On a
+    tty, reading stdin would HANG looking like the command is working, which is the exact
+    failure this feeder exists to stop making.
+
+    A REAL PTY, NOT A MONKEYPATCH. `CliRunner` swaps `sys.stdin` at invoke time, so
+    patching `sys.stdin.isatty` before the call is undone by the runner and the guard can
+    never be reached — my first version asserted the tty message and got the piped one,
+    testing the opposite branch from the one it named. The only way to put a tty on stdin
+    is to give the process a tty."""
+    import os
+    import pty
+    import subprocess
+    import sys
+
+    env = {**os.environ, "TECHNE_HOME": str(tmp_path)}
+    cmd = [sys.executable, "-m", "techne.cli", "architect", "add",
+           "--name", "P", "--source", "https://x.com/a"]
+
+    controller, follower = pty.openpty()
+    try:
+        with_tty = subprocess.run(
+            cmd, stdin=follower, capture_output=True, text=True, timeout=60, env=env
+        )
+    finally:
+        os.close(controller)
+        os.close(follower)
+    piped = subprocess.run(
+        cmd, input="", capture_output=True, text=True, timeout=60, env=env
+    )
+
+    assert "pipe it on stdin" in with_tty.stdout + with_tty.stderr, (
+        "on a tty the command must refuse rather than block on stdin"
+    )
+    assert "pipe it on stdin" not in piped.stdout + piped.stderr, (
+        "a piped run must READ stdin, not refuse — the two branches are not distinguished"
+    )
