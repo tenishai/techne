@@ -67,7 +67,17 @@ class _AliasedGroup(click.Group):
 def main(ctx):
     """techne — agentic memory and knowledge system."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = Config.load()
+    # `setdefault`, NOT assignment (techne#766). `ensure_object` creates the dict when the
+    # caller did not supply one, which reads as "honour what was passed in" — and the next
+    # line then threw it away, so a Config injected via `CliRunner(..., obj={"config": cfg})`
+    # was SILENTLY DISCARDED and the command ran against the ambient store instead.
+    #
+    # Found the hard way: a reviewer believed they were scoped to a temp store, and four
+    # `techne backup` runs went against a live one under a mutation setting `--keep 1`.
+    # Nothing was lost that time. The failure is this repo's recurring shape — two states
+    # ("scoped" and "not") sharing one observable, since the command runs and exits 0
+    # either way — and it points at `backup` and `restore`, which write and delete.
+    ctx.obj.setdefault("config", Config.load())
 
 
 @main.command()
