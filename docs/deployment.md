@@ -114,12 +114,47 @@ folded into either success or failure:
 | code | meaning |
 |---|---|
 | `0` | backup written, retention completed |
-| `3` | **backup written, retention did NOT complete** — old sets are accumulating |
+| `3` | **backup written, one or more sets were not reclaimed** — see below |
 | `1` | the backup itself failed |
 | `2` | usage error (e.g. `--keep -1`), before any work happens |
 
-`3` is not a failed backup and should not page anyone as one — but left unwatched it is the
-disk filling up on a schedule, which is the outcome `--keep` exists to prevent.
+`3` is not a failed backup and should not page anyone as one.
+
+#### What `3` actually means, because there are four causes and they want different fixes
+
+The run names every set it could not reclaim and why. **A stranded set is still a valid,
+fully restorable backup** — `restore` does not inspect `created_at`, so nothing here has
+corrupted anything. What you are looking at is a set retention will never remove on its own.
+
+| the message says | what happened | what to do |
+|---|---|---|
+| `[Errno 13] Permission denied` | the set's directory or its contents cannot be removed | fix the permissions under `backups/` |
+| `manifest is unreadable (...)` | techne cannot read the set's own manifest, so it will not judge it | fix the permissions on that `manifest.json` |
+| `created_at ... is not YYYY-MM-DDTHH:MM:SSZ` / `... is in the future` | the set cannot be ordered against the others, so it is never chosen for deletion | see below |
+| `is a symlink` | something under `backups/` is a symlink to a set | remove the symlink; techne will not follow it |
+
+**The two stamp cases are the ones with no in-tool remedy, deliberately.** Retention only
+ever deletes what it can *order*, because the failure mode of guessing is a deleted backup.
+There is no `--prune-unorderable` flag and there should not be: it could only ever delete a
+restorable backup, which `mv` does better and reversibly. Move the set out of `backups/` if
+you want the alarm to stop, or restore from it and then move it.
+
+A future stamp usually means the clock was ahead when that set was written and has since
+been corrected — `Persistent=true` fires a catch-up run right after boot, which is exactly
+the window before NTP has synced.
+
+Once a set is stranded, **every subsequent run exits `3` until you move it.** That is
+intended: the condition is permanent until someone acts, and it names its set and its
+remedy each time rather than repeating an unactionable warning.
+
+**A failed run does not stop the timer.** `systemctl --user list-timers` still shows the
+next run, and the next run still writes a backup. An operator who sees `failed (Result:
+exit-code, status=3)` and concludes backups have stopped is reaching for the wrong fix at
+the worst possible moment: the backups are fine, the housekeeping is not.
+
+Leave the units alone on this. Neither sets `Restart=` or `KeepAlive`, so exit 3 cannot
+cause a respawn — and `SuccessExitStatus=3` would be actively wrong, because it records the
+run as successful and destroys the signal.
 
 ### macOS — launchd agent
 

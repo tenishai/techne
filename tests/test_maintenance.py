@@ -693,3 +693,76 @@ def test_unorderable_sets_are_reported_so_they_cannot_pile_up_silently(config, m
     assert result.exit_code == 3, f"exit {result.exit_code}\n{result.output}"
     assert "retention INCOMPLETE: 7 set(s)" in result.output
     assert all((backups / f"backup-bad-{i}").exists() for i in range(7))
+
+
+@pytest.mark.parametrize("dbs", [{"techne": "techne.db"}, {"techne": None}, {"techne": ["x"]}])
+def test_prune_leaves_a_set_restore_cannot_read_alone(tmp_path, dbs):
+    """THE ONE SHAPE THAT STILL GOT THROUGH (Prudence, #755 round 3 Nit 3). A `databases`
+    dict whose VALUES are not dicts satisfied "non-empty dict" while `read_manifest` cannot
+    read it at all — it raises AttributeError from `meta.get(...)`, not RestoreError. So
+    round 2's asymmetry survived here: the pruner called it ours and would rmtree it while
+    restore tracebacked on it. Asserted against `read_manifest` in the same body, so the
+    pair is pinned rather than the symptom."""
+    b = tmp_path / "backups"
+    ours = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+    unreadable = b / "backup-20260201-000000"
+    unreadable.mkdir(parents=True)
+    (unreadable / "manifest.json").write_text(
+        json.dumps({"created_at": "2026-02-01T00:00:00Z", "databases": dbs})
+    )
+
+    with pytest.raises((RestoreError, AttributeError)):
+        read_manifest(unreadable)
+
+    removed, _ = prune_backup_sets(b, keep=0)
+
+    assert unreadable.exists(), "pruned a set techne cannot read as a backup"
+    assert removed == [ours]
+
+
+def test_an_unreadable_manifest_is_reported_not_silently_skipped(config, monkeypatch):
+    """AN UNREADABLE MANIFEST IS NOT AN ABSENT ONE (Prudence, #755 round 4 Important 1).
+    Folding every OSError into silence meant a set techne itself wrote — canonical stamp,
+    real db files — went permanently quiet and permanently unpruned the moment its manifest
+    became unreadable. Round 3 shut the stamp door and left this one open, and reachability
+    is symmetric: `_now_iso()` is the sole writer of `created_at` and always emits
+    canonical, so a bad stamp is no more techne-producible than a chmod'd manifest. Driven
+    through the real CLI with a REAL permission denial."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+    backups = Path(config.data_dir) / "backups"
+    stranded = _set(backups, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+    (stranded / "manifest.json").chmod(0o000)
+    try:
+        result = CliRunner().invoke(main, ["backup", "--keep", "1"])
+
+        assert result.exit_code == 3, f"exit {result.exit_code}\n{result.output}"
+        assert "manifest is unreadable" in result.output
+        assert stranded.exists()
+    finally:
+        (stranded / "manifest.json").chmod(0o644)
+
+
+def test_an_absent_manifest_stays_silent(config, monkeypatch):
+    """The other side of the same boundary: a directory under a root the operator pointed us
+    at, carrying no manifest, is not ours to report OR delete. If this went to `failed` the
+    exit code would go red for someone else's folder and the signal would be worthless."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+    backups = Path(config.data_dir) / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / "someone-elses-folder").mkdir()
+
+    result = CliRunner().invoke(main, ["backup", "--keep", "1"])
+
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+    assert "retention INCOMPLETE" not in result.output
+    assert (backups / "someone-elses-folder").exists()

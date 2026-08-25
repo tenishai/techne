@@ -19,7 +19,16 @@ All notable changes to techne are documented here. Format loosely follows
   **Retention failure exits 3**, distinct from a failed backup (`1`) and from success
   (`0`). A timer surfaces exit status and nothing else, so at `0` a permanently broken
   prune reads green while the disk fills — the failure `--keep` exists to prevent, one
-  level up.
+  level up. A set that cannot be *ordered* — a non-canonical or future `created_at`, or a
+  symlink — is never pruned and is reported the same way, because a set retention will
+  never reclaim is the same problem to the operator whether the cause was a failed delete
+  or a refused one.
+
+  **This also puts `restore`'s safety net on a clock.** `techne restore` snapshots the
+  current state first and prints `prior state snapshotted at: <path>`, which reads as
+  durable. It is an ordinary set under `backups/` — deliberately, so retention can reclaim
+  it — so `--keep N` counts it as one of the N and it ages out like any other. If you want
+  one kept, move it out of `backups/`.
 
 - **Scheduling that ships** (#742). `deploy/techne-backup.{timer,service}` and
   `deploy/ai.tenish.techne-backup.plist`, both passing `--keep 14`, with install steps in
@@ -71,8 +80,11 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
-- **BREAKING: `techne backup --out DIR` now names the backups *root*, not the set**
-  (#742). `--out`'s help text has always called it the root; the code treated the path
+- **BREAKING (0.16.0): `techne backup --out DIR` now names the backups *root*, not the
+  set** (#742). The version is stated here rather than left to the heading because
+  `README.md` and `docs/db-per-domain.md` both say "changed in 0.16.0", and until this
+  section is dated at release an operator who greps the CHANGELOG for `0.16.0` would
+  otherwise find nothing (Prudence, #755 round 3 Nit 6). `--out`'s help text has always called it the root; the code treated the path
   you passed *as* the timestamped set. The two disagreed for as long as the flag has
   existed, and it stayed harmless only because nothing else read that path — until
   `--keep` did.

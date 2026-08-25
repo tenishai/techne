@@ -288,16 +288,48 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         return None, "is a symlink — refusing to remove it or its target"
     try:
         manifest = json.loads((child / _MANIFEST_NAME).read_text())
-    except (OSError, ValueError):
-        return None, None  # absent, unreadable, or not JSON: not ours, or not judgeable
+    except FileNotFoundError:
+        return None, None  # no manifest at all: not ours, and not our business
+    except ValueError:
+        return None, None  # present but not JSON: nothing here claims to be a backup set
+    except OSError as exc:
+        # AN UNREADABLE MANIFEST IS NOT THE SAME AS AN ABSENT ONE (Prudence, #755 round 4
+        # Important 1). Folding every OSError into silence meant a set TECHNE ITSELF WROTE
+        # — canonical stamp, real db files — went permanently quiet and permanently
+        # unpruned the moment its manifest became unreadable. Measured through the real
+        # CLI: seven such sets at `--keep 1` gave exit 0, no `retention INCOMPLETE`, and
+        # eight sets on disk — character-for-character the failure round 3 closed for
+        # stamps. The stamp door was shut and this one left open.
+        #
+        # Her decisive argument, which is why this is not a judgement call: REACHABILITY IS
+        # SYMMETRIC. `_now_iso()` is the sole writer of `created_at` and always emits
+        # canonical, so a bad stamp is no more techne-producible than a chmod'd manifest.
+        # Treating one as a leak worth reporting and the other as none of our business had
+        # no basis. A permission bit is also the more likely of the two in practice.
+        return None, (
+            f"manifest is unreadable ({exc.strerror or exc}) — it cannot be judged, so "
+            "the set is never pruned"
+        )
     if not isinstance(manifest, dict):
         return None, None
     dbs = manifest.get("databases")
     if not isinstance(dbs, dict) or not dbs:
-        # `read_manifest`'s own identity test, verbatim. techne refusing to RESTORE from a
-        # directory while being willing to DELETE it is not a defensible pair, and
-        # `manifest.json` + `created_at` are among the least techne-private things there
-        # are — a foreign `{"name": "my-extension", ...}` used to pass (round 2).
+        # `read_manifest`'s own identity test. techne refusing to RESTORE from a directory
+        # while being willing to DELETE it is not a defensible pair, and `manifest.json` +
+        # `created_at` are among the least techne-private things there are — a foreign
+        # `{"name": "my-extension", ...}` used to pass (round 2).
+        return None, None
+    if not all(isinstance(meta, dict) for meta in dbs.values()):
+        # THE ONE SHAPE THAT STILL GOT THROUGH (Prudence, #755 round 3 Nit 3). A
+        # `databases` dict whose VALUES are strings/None/lists satisfied "non-empty dict"
+        # here while `read_manifest` cannot read it at all — its `meta.get("file", ...)`
+        # raises AttributeError rather than RestoreError. So round 2's asymmetry survived
+        # in this narrow shape: the pruner called it ours and would rmtree it, restore
+        # tracebacked on it. Narrow (it needs a manifest, a non-empty `databases`, AND a
+        # canonical `...Z` stamp, all inside `backups/`) but the fix is one line, and
+        # "delete nothing you cannot read" is the rule this predicate exists to enforce.
+        # `read_manifest`'s AttributeError is pre-existing and reachable from `techne
+        # restore <any dir>` — filed separately rather than grown into this PR.
         return None, None
     stamp = str(manifest.get("created_at", ""))
     # THE SORT IS LEXICOGRAPHIC, SO THE FORMAT IS PART OF THE CONTRACT. `_now_iso()` is the
