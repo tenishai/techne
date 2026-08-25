@@ -104,14 +104,34 @@ shows it perfectly healthy *while you are still logged in*.
 `Persistent=true` catches up after downtime rather than silently skipping a night, and
 `RandomizedDelaySec` keeps a fleet from stampeding.
 
+### Exit codes, because a timer only ever sees this one
+
+`systemctl --user status` and `launchctl list` surface **exit status and nothing else** —
+whatever the run said on stderr went to the journal or `backup.log`, which nobody reads
+until something is already wrong. So retention failure has its own code rather than being
+folded into either success or failure:
+
+| code | meaning |
+|---|---|
+| `0` | backup written, retention completed |
+| `3` | **backup written, retention did NOT complete** — old sets are accumulating |
+| `1` | the backup itself failed |
+| `2` | usage error (e.g. `--keep -1`), before any work happens |
+
+`3` is not a failed backup and should not page anyone as one — but left unwatched it is the
+disk filling up on a schedule, which is the outcome `--keep` exists to prevent.
+
 ### macOS — launchd agent
 
 ```bash
 cp deploy/ai.tenish.techne-backup.plist ~/Library/LaunchAgents/
 # edit the techne path and the log paths
-launchctl load ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
 launchctl list | grep techne-backup
 ```
+
+`launchctl load` still works and is what older guides show, but it is deprecated; the
+plist header says `bootstrap` and these two should not disagree.
 
 `RunAtLoad` is deliberately false — loading an agent should not fire a backup at a moment
 nobody chose. If the machine is asleep at the scheduled time, launchd runs it once on wake.
@@ -123,6 +143,11 @@ nobody chose. If the machine is asleep at the scheduled time, launchd runs it on
   observations from them, and they have settled questions no table could — but archiving
   them is a manual `tar` today. If you rely on them, put that on your own schedule and
   know that techne is not doing it for you.
+- **The pre-restore snapshot is not a keepsake.** `techne restore` snapshots the current
+  state first and prints `prior state snapshotted at: <path>`, which reads as durable. It
+  is an ordinary set under `backups/` — deliberately, so retention can reclaim it — so the
+  next `--keep N` run counts it as one of the N and it ages out like any other. If you
+  want it kept, move it out of `backups/` yourself.
 - **The author's fleet sweep.** `~/.techne/db_snapshot.py` discovers sqlite dbs across
   arbitrary roots and prunes per identity. It is host-local and **does not ship**
   (techne#742). `techne backup` covers the four domain dbs, which is what a single-machine

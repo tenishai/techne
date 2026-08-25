@@ -21,6 +21,7 @@ operational consequences this module makes first-class:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,8 @@ from pathlib import Path
 
 from techne.config import Config
 from techne.core.stores import store_path
+
+logger = logging.getLogger(__name__)
 
 # The domains and how their db path is resolved from config WITHOUT instantiating the store
 # (store creation would migrate/CREATE an absent DB — fsck/backup must not do that).
@@ -211,6 +214,14 @@ def backup_all_dbs(
     # left the nested one. Labelling here restores the pre-break on-disk layout
     # (`backups/pre-restore-<stamp>/`, manifest at the top) under the new root semantics.
     # Internal only: not reachable from the CLI, so it is not a path-injection surface.
+    # AN INVARIANT, NOT A COMMENT (Prudence, #755 Nit 8). `root / f"{label}-..."` is safe
+    # today because of a property of the two CALLERS, not of this function — and a comment
+    # asserting that sits where the next caller's author reads it as a description rather
+    # than a constraint they must uphold. A `label` carrying a separator or a leading dot
+    # escapes the root, and the failure would be SILENT because it still creates a
+    # plausible directory. Cheap to make impossible instead.
+    if not label or label.startswith(".") or set(label) & {"/", "\\"} or ".." in label:
+        raise ValueError(f"label must be a bare directory-name fragment; got {label!r}")
     root = Path(dest_dir) if dest_dir is not None else Path(config.data_dir) / "backups"
     dest_dir = _unique_dir(root / f"{label}-{_now_stamp()}")
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -243,6 +254,69 @@ def backup_all_dbs(
 #: The one shape `_now_iso()` emits, and the only one that sorts chronologically as
 #: text. See the format note inside `prune_backup_sets`.
 _CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def _our_backup_set_stamp(child: Path) -> str | None:
+    """`child`'s `created_at` if it is one of OUR backup sets, else None.
+
+    THE PRUNER'S GUARD USED TO BE WEAKER THAN THE SENTENCE DESCRIBING IT (Prudence,
+    #755 Important 1). The docstring below promised "a pruner that cannot tell what it
+    is deleting should delete nothing"; the implementation asked only for a file named
+    `manifest.json` that parses as JSON and carries an ISO-Z `created_at`. Neither is
+    techne-private — `manifest.json` is one of the most common filenames in the
+    ecosystem and `created_at` one of its most common fields — so a foreign directory
+    like `{"name": "my-extension", "version": "2.1.0", "created_at": "..."}` passed.
+    Demonstrated: `read_manifest` REFUSED that directory ("manifest lists no
+    databases") while the pruner `rmtree`'d it. techne declining to restore from a
+    thing and being willing to delete it is not a defensible pair, and `rmtree` is not
+    recoverable.
+
+    IDENTITY, NOT INTEGRITY — which is where this deliberately stops short of full
+    `read_manifest` parity. `read_manifest` also requires every listed db FILE to be
+    present, because it is about to restore from them. Requiring that here would make
+    an incomplete set of ours UNPRUNABLE, so a set that lost a file would live forever
+    and retention would silently run one slot short. The question a pruner asks is "is
+    this ours?", not "could I restore it?".
+
+    Folded into one named predicate on Prudence's suggestion: the `manifest.is_file()`
+    line it replaces was documented in-tree as an equivalent mutant with no test able
+    to reach it. A named function is reachable, and `test_prune_leaves_a_foreign_
+    directory_alone` now pins it.
+    """
+    try:
+        manifest = json.loads((child / _MANIFEST_NAME).read_text())
+    except (OSError, ValueError):
+        return None  # absent, unreadable, or not JSON: not ours, or not judgeable
+    if not isinstance(manifest, dict):
+        return None
+    dbs = manifest.get("databases")
+    if not isinstance(dbs, dict) or not dbs:
+        return None  # `read_manifest`'s own identity test, verbatim
+    stamp = str(manifest.get("created_at", ""))
+    # THE SORT IS LEXICOGRAPHIC, SO THE FORMAT IS PART OF THE CONTRACT. `_now_iso()`
+    # is the only writer and always emits `%Y-%m-%dT%H:%M:%SZ`, which sorts
+    # chronologically as text. A stamp in another shape does not — demonstrated in
+    # the pre-pass: "2025-06-01T23:00:00+02:00" (21:00Z) sorts ABOVE
+    # "2025-06-01T22:00:00Z" as a string while being an hour OLDER, so the newer set
+    # gets pruned. The failure is a DELETED BACKUP, so a set we cannot order safely is
+    # skipped rather than guessed at.
+    if not _CANONICAL_STAMP.fullmatch(stamp):
+        return None
+    # A STAMP IN THE FUTURE IS THE SAME CATEGORY (Prudence, #755 Nit 4). With no upper
+    # bound on the sort, a set stamped 2099 — ordinary clock skew, and `Persistent=true`
+    # fires a catch-up run right after boot, before NTP may have synced — sorts newest
+    # forever, holds a keep slot permanently, and quietly makes retention `keep - 1`.
+    # `migrator.py` already carries a three-way branch for this hazard on mtimes, so
+    # this pruner's sibling has been bitten by it. Bounded harm (`protect` always saves
+    # tonight's set, so what is lost is the OLDEST, one run early) — but it is a stamp
+    # we cannot order against real time, and this function's rule for those is to skip.
+    if stamp > _now_iso():
+        logger.warning(
+            "backup_set_stamped_in_the_future",
+            extra={"set": child.name, "created_at": stamp},
+        )
+        return None
+    return stamp
 
 
 def prune_backup_sets(
@@ -280,31 +354,8 @@ def prune_backup_sets(
     for child in backups_dir.iterdir():
         if not child.is_dir():
             continue
-        manifest = child / _MANIFEST_NAME
-        if not manifest.is_file():
-            # AN EQUIVALENT MUTANT, AND SAID SO RATHER THAN LEFT LOOKING LOAD-BEARING.
-            # Deleting this line changes nothing observable: the read below then raises
-            # OSError and the `except` reaches the same `continue`. Measured — the
-            # mutation survives the whole prune suite. Kept because it states the
-            # SEMANTIC test ("is this set ours?") where the except states a different
-            # one ("is it corrupt?"), and a reader should not have to derive the first
-            # from the second. But no test pins it, and pretending otherwise is the
-            # habit this file's own retention exists to break.
-            continue
-        try:
-            stamp = str(json.loads(manifest.read_text()).get("created_at", ""))
-        except (OSError, ValueError):
-            continue  # unreadable or malformed: cannot date it, so cannot judge it
-        if not stamp:
-            continue
-        # THE SORT IS LEXICOGRAPHIC, SO THE FORMAT IS PART OF THE CONTRACT. `_now_iso()`
-        # is the only writer and always emits `%Y-%m-%dT%H:%M:%SZ`, which sorts
-        # chronologically as text. A stamp in another shape does not — demonstrated in
-        # the pre-pass: "2025-06-01T23:00:00+02:00" (21:00Z) sorts ABOVE
-        # "2025-06-01T22:00:00Z" as a string while being an hour OLDER, so the newer set
-        # gets pruned. Latent rather than live today, and the failure is a DELETED
-        # BACKUP, so a set we cannot order safely is skipped rather than guessed at.
-        if not _CANONICAL_STAMP.fullmatch(stamp):
+        stamp = _our_backup_set_stamp(child)
+        if stamp is None:
             continue
         sets.append((stamp, child))
 
@@ -321,6 +372,18 @@ def prune_backup_sets(
     failed: list[tuple[Path, str]] = []
     for _, path in sets[keep:]:
         if protect and path.resolve() == protect:
+            continue
+        if path.is_symlink():
+            # `shutil.rmtree` REFUSES A SYMLINK, and that refusal is what keeps the
+            # TARGET safe — but it raises `[Errno None] None`, a string containing
+            # neither the word "symlink" nor anything else actionable, and it raises it
+            # on every run forever (Prudence, #755 Nit 5). That is the alarm-fatigue
+            # channel for the `retention INCOMPLETE` signal directly above. Detected
+            # here so the message says what it is; the set is still not removed, and
+            # the target is still not touched. Not hypothetical under `backups/`:
+            # `migrator.py` records a dangling symlink there once stopping the store
+            # from opening at all.
+            failed.append((path, "is a symlink — refusing to remove it or its target"))
             continue
         try:
             shutil.rmtree(path)

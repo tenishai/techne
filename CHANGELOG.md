@@ -7,6 +7,27 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **`techne backup --keep N` — retention** (#742). `backup` wrote a full set every run
+  and pruned nothing, which made it safe to run by hand and unsafe to put on a timer: a
+  nightly job with no ceiling is a disk-filling cron job dressed as a backup story.
+  `--keep N` deletes all but the newest N sets in the destination, **after** the new one
+  lands, ordered by each set's manifest `created_at` rather than by mtime — reading a
+  backup directory rewrites mtimes and would evict a recent set because something *read*
+  it. A directory is only a set if it carries a manifest listing databases, the same
+  identity test `restore` applies; anything else under `backups/` is left alone.
+
+  **Retention failure exits 3**, distinct from a failed backup (`1`) and from success
+  (`0`). A timer surfaces exit status and nothing else, so at `0` a permanently broken
+  prune reads green while the disk fills — the failure `--keep` exists to prevent, one
+  level up.
+
+- **Scheduling that ships** (#742). `deploy/techne-backup.{timer,service}` and
+  `deploy/ai.tenish.techne-backup.plist`, both passing `--keep 14`, with install steps in
+  `docs/deployment.md`. The systemd path documents `loginctl enable-linger` as required
+  and says plainly that the verification step will not tell you it is missing — without
+  lingering the user manager stops at logout and the timer never fires, while
+  `list-timers` shows it healthy for as long as you stay logged in.
+
 - **The four knowledge domains are addressable by name** (#724). `archivist_search`,
   `librarian_search`, `architect_search` and `codex_search` — the archivist, librarian,
   architect and codex answer to their own names, in one envelope carrying the `binding`
@@ -49,6 +70,26 @@ All notable changes to techne are documented here. Format loosely follows
 
 
 ### Changed
+
+- **BREAKING: `techne backup --out DIR` now names the backups *root*, not the set**
+  (#742). `--out`'s help text has always called it the root; the code treated the path
+  you passed *as* the timestamped set. The two disagreed for as long as the flag has
+  existed, and it stayed harmless only because nothing else read that path — until
+  `--keep` did.
+
+  **If you script `backup --out X` followed by `restore X`, that now needs
+  `restore X/backup-<stamp>`.** `--out` yields a directory containing timestamped sets;
+  `restore` takes one set, as it always has.
+
+  The mismatch is what turned `--keep` into a deletion: `--keep` prunes
+  `res.dest.parent`, which under the old reading was the directory *above* the one you
+  named. `backup --out ~/techne-backup --keep 1` was reproduced deleting an unrelated
+  sibling project directory that happened to contain a `manifest.json`. The same
+  mismatch also made `--keep` useless where it was aimed — every `--out` run wrote to
+  the same directory, so there was never more than one set there to prune. Fixing the
+  behaviour to match the documentation was the choice over bolting a guard onto
+  `--keep`, because a flag whose documented meaning and behaviour disagree is what
+  produced the deletion.
 
 - **The archivist is a call, not a deployment mode** (#552). `standalone` was a *lane
   selector*: it forked both halves of the loop — write at

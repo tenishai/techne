@@ -108,7 +108,7 @@ because what you copied is a perfectly valid older database.
 | you want to | do this | not this |
 |---|---|---|
 | back up | `techne backup` | `cp techne.db somewhere` |
-| move a store | copy **all three**, or `techne backup` then `techne restore` | copy the `.db` |
+| move a store | copy **all three**, or `techne backup` then `techne restore <root>/backup-<stamp>` | copy the `.db` |
 | inspect it | `sqlite3 techne.db` — it reads the `-wal` for you | anything that reads bytes |
 | free the space | it is already bounded; a checkpoint folds it back on clean close | delete `-wal` |
 
@@ -155,7 +155,9 @@ transaction.** Cross-db invariants — a `document_card`'s `doc:<id>` resolving 
   whole set:
   - `techne backup [--out DIR]` snapshots **every present** domain db together (consistent
     online copy per file) into one timestamped directory with a `manifest.json`. Absent
-    domains are skipped, not created.
+    domains are skipped, not created. **`DIR` is the backups *root*, not the set** — the
+    timestamped set is created inside it. Before 0.16.0 `--out` named the set itself, so a
+    script doing `backup --out X` then `restore X` now needs `restore X/backup-<stamp>`.
   - `techne restore <dir>` writes a set back over the live dbs **as a unit** — the set is
     validated before any live file is touched, the current state is snapshotted first
     (reversible restore), and stale `-wal`/`-shm` sidecars are cleared. Never hand-restore a

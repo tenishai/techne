@@ -381,10 +381,19 @@ def test_restore_staging_failure_leaves_live_untouched(config, monkeypatch):
 
 
 def _set(backups: Path, name: str, created_at: str) -> Path:
-    """A backup set is a directory carrying a manifest. Anything else is not ours."""
+    """A backup set is a directory carrying a manifest THAT LISTS DATABASES.
+
+    `databases` used to be `{}` here, which the pruner accepted and `read_manifest`
+    rejects — so the fixture was asserting a set shape techne itself would refuse to
+    restore from (Prudence, #755 Important 1 flagged this before the check was
+    tightened). No db FILES are written: the pruner asks whether a directory is ours,
+    not whether it could be restored, and those are deliberately different questions.
+    """
     d = backups / name
     d.mkdir(parents=True)
-    (d / "manifest.json").write_text(json.dumps({"created_at": created_at, "databases": {}}))
+    (d / "manifest.json").write_text(
+        json.dumps({"created_at": created_at, "databases": {"techne": {"file": "techne.db"}}})
+    )
     return d
 
 
@@ -513,3 +522,122 @@ def test_the_pre_restore_snapshot_stays_visible_to_retention(config):
     assert failed == []
     assert pre[0] in removed, "retention cannot see the pre-restore set"
     assert not pre[0].exists()
+
+
+def test_prune_leaves_a_foreign_directory_alone(tmp_path):
+    """TECHNE REFUSING TO RESTORE FROM A DIRECTORY AND BEING WILLING TO DELETE IT IS NOT A
+    DEFENSIBLE PAIR (Prudence, #755 Important 1). `manifest.json` is not a techne-private
+    filename and `created_at` is not a techne-private field, so a foreign project directory
+    satisfied the old check — which asked only for parseable JSON and an ISO-Z stamp — while
+    `read_manifest` rejected it outright. `rmtree` is not recoverable."""
+    b = tmp_path / "backups"
+    ours = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+    foreign = b / "some_project"
+    foreign.mkdir(parents=True)
+    (foreign / "manifest.json").write_text(
+        json.dumps(
+            {"name": "my-extension", "version": "2.1.0", "created_at": "2024-03-01T09:00:00Z"}
+        )
+    )
+
+    with pytest.raises(RestoreError):
+        read_manifest(foreign)  # the asymmetry this test exists to close
+
+    removed, failed = prune_backup_sets(b, keep=0)
+
+    assert foreign.exists(), "pruned a directory techne refuses to read as a backup set"
+    assert removed == [ours]
+    assert failed == []
+
+
+def test_prune_skips_a_set_stamped_in_the_future(tmp_path):
+    """With no upper bound on a lexicographic sort, a set stamped 2099 sorts newest FOREVER,
+    holds a keep slot permanently, and quietly makes retention `keep - 1` (Prudence, #755
+    Nit 4). Reachable by ordinary clock skew — and `Persistent=true` fires a catch-up run
+    right after boot, before NTP may have synced. Same category as the `+02:00` stamp: one
+    we cannot order against real time, so it is skipped rather than trusted."""
+    b = tmp_path / "backups"
+    future = _set(b, "backup-future", "2099-01-01T00:00:00Z")
+    real = _set(b, "backup-real", "2026-03-01T00:00:00Z")
+
+    removed, _ = prune_backup_sets(b, keep=1)
+
+    assert future.exists(), "a future stamp must not occupy a retention slot"
+    assert real.exists(), "the newest REAL set was pruned in favour of a future-stamped one"
+    assert removed == []
+
+
+def test_prune_names_a_symlinked_set_as_a_symlink(tmp_path):
+    """`shutil.rmtree` REFUSES a symlink, which is what keeps the target safe — but it
+    raises `[Errno None] None`, a string containing neither the word "symlink" nor anything
+    actionable, on every run forever (Prudence, #755 Nit 5). That is the alarm-fatigue
+    channel for `retention INCOMPLETE`. Pins the target-safety too, which was accidental
+    rather than designed and had nothing holding it."""
+    b = tmp_path / "backups"
+    fresh = _set(b, "backup-fresh", "2026-03-01T00:00:00Z")
+    target = _set(tmp_path / "elsewhere", "backup-target", "2026-01-01T00:00:00Z")
+    (b / "backup-link").symlink_to(target, target_is_directory=True)
+
+    removed, failed = prune_backup_sets(b, keep=1, protect=fresh)
+
+    assert removed == []
+    assert [p.name for p, _ in failed] == ["backup-link"]
+    # EXACT, NOT `"symlink" in ...` — pytest derives `tmp_path` from the TEST NAME, so the
+    # raw `[Errno None] None: PosixPath('.../test_prune_names_a_symlinked_s0/...')` message
+    # CONTAINS the substring "symlink". A containment assertion here passes when the branch
+    # under test is deleted, satisfied by the fixture's own directory name. Caught by
+    # mutation-testing this guard; the test proved nothing until this line.
+    assert failed[0][1] == "is a symlink — refusing to remove it or its target"
+    assert target.exists(), "followed a symlink out of backups/ and deleted its target"
+    assert (b / "backup-link").is_symlink()
+
+
+@pytest.mark.parametrize("label", ["../escape", "a/b", "", ".hidden", "a\\b"])
+def test_backup_rejects_a_label_that_could_escape_the_root(config, label):
+    """AN INVARIANT, NOT A COMMENT (Prudence, #755 Nit 8). `root / f"{label}-<stamp>"` is
+    safe today because of a property of the two CALLERS, not of the function — and the
+    failure would be silent, because an escaped path still creates a plausible directory."""
+    with pytest.raises(ValueError, match="bare directory-name fragment"):
+        backup_all_dbs(config, label=label)
+
+
+def test_backup_exits_3_when_retention_could_not_complete(config, monkeypatch):
+    """EXIT STATUS IS THE ONLY CHANNEL A TIMER SURFACES (Prudence, #755 Important 2). Both
+    units this PR ships route stderr to a place nobody reads until something is already
+    wrong, so at exit 0 `systemctl status` reads green forever while retention is
+    permanently broken. 3 rather than 1: the backup SUCCEEDED, and a monitor has to be able
+    to tell those apart. Driven through the real CLI with a real prune failure — a
+    symlinked set, which `rmtree` genuinely refuses — not a patched pruner."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+    backups = Path(config.data_dir) / "backups"
+    target = _set(Path(config.data_dir) / "elsewhere", "backup-target", "2026-01-01T00:00:00Z")
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / "backup-link").symlink_to(target, target_is_directory=True)
+
+    result = CliRunner().invoke(main, ["backup", "--keep", "1"])
+
+    assert result.exit_code == 3, f"exit {result.exit_code}\n{result.output}"
+    assert "retention INCOMPLETE" in result.output
+    assert target.exists()
+
+
+def test_backup_exits_0_when_retention_completes(config, monkeypatch):
+    """The other half of the contract: a clean run must NOT go red, or the exit code stops
+    meaning anything and the operator silences it."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+    _set(Path(config.data_dir) / "backups", "backup-20260101-000000", "2026-01-01T00:00:00Z")
+
+    result = CliRunner().invoke(main, ["backup", "--keep", "1"])
+
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+    assert "retention INCOMPLETE" not in result.output

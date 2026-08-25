@@ -4714,6 +4714,7 @@ def backup_cmd(ctx, out, keep):
     # keep=1 schedule, delete the only good backup and then discover the disk is full — the
     # window where the operator has nothing is exactly the window a backup exists to remove.
     # `protect` is belt-and-braces on top of that ordering.
+    retention_incomplete = False
     if keep is not None:
         from techne.core.maintenance import prune_backup_sets
 
@@ -4728,8 +4729,25 @@ def backup_cmd(ctx, out, keep):
             click.echo(
                 f"retention INCOMPLETE: {len(failed)} set(s) could not be removed", err=True
             )
+            retention_incomplete = True
     if res.skipped_absent:
         click.echo(f"skipped (absent): {', '.join(res.skipped_absent)}")
+    if retention_incomplete:
+        # EXIT 3, NOT 0 (Prudence, #755 Important 2, second half). Saying it on stderr was
+        # not enough: both units this PR ships route stderr somewhere nobody reads until
+        # something is already wrong (the plist to `backup.log`, the systemd unit to the
+        # journal), and the ONLY thing `systemctl --user status` or `launchctl list`
+        # surfaces is EXIT STATUS. At 0 that reads green forever while retention is
+        # permanently broken — the disk-fills-silently outcome this PR exists to prevent,
+        # one level up.
+        #
+        # 3 RATHER THAN 1, because the backup itself SUCCEEDED and a monitor must be able
+        # to tell those apart; a scheduled job that cannot distinguish "no backup tonight"
+        # from "backup fine, housekeeping broken" gets one of the two wrong. The three
+        # codes are documented in deployment.md, which is also where an operator is told
+        # `--keep` is not optional. Exiting LAST so a run that did back up still prints its
+        # full report first.
+        ctx.exit(3)
 
 
 @main.command("restore")
