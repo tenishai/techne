@@ -44,7 +44,7 @@ TRIGGER_MARKER = "Agent: raise this unprompted"
 #: and a nested (indented) one both landed unaccounted (Prudence, #764 round 2). The
 #: failure mode that has bitten this file twice is a pattern narrower than the thing it
 #: claims to match, not one that is too broad.
-_BULLET_RE = re.compile(r"^>\s+[-*+]\s")
+_BULLET_RE = re.compile(r"^>\s*[-*+]\s")
 
 
 def _headings(path: Path) -> list[str]:
@@ -395,7 +395,7 @@ def test_the_absence_the_migration_trigger_asserts_is_still_absent():
 #: flag and missed a `domains=` kwarg added to the function, which another caller could
 #: reach without any CLI change. Asked myself whether the surface I pinned actually carries
 #: the claim, and the first answer was no.
-RESTORE_OPTIONS_AT_LAST_REVIEW = {"no_pre_backup", "yes"}
+RESTORE_OPTIONS_AT_LAST_REVIEW = {"backup_dir", "no_pre_backup", "yes"}
 RESTORE_ALL_DBS_PARAMS_AT_LAST_REVIEW = {"config", "src_dir", "pre_restore_backup"}
 
 
@@ -413,8 +413,12 @@ def test_the_restore_trigger_is_still_all_or_nothing():
     from techne.cli import main
 
     assert "restore" in main.commands, "restore no longer exists — the trigger is stale"
+    # `click.Parameter`, NOT `click.Option` — filtering to Options made a positional
+    # `domains` ARGUMENT invisible to the pin (Prudence, #764 round 3). A narrower filter
+    # inside the fix for a narrow filter, which is now the seventh instance of that in
+    # this PR. `backup_dir` is the existing positional and is pinned with the rest.
     options = {
-        p.name for p in main.commands["restore"].params if isinstance(p, click.Option)
+        p.name for p in main.commands["restore"].params if isinstance(p, click.Parameter)
     }
 
     assert options == RESTORE_OPTIONS_AT_LAST_REVIEW, (
@@ -517,6 +521,43 @@ def test_the_bullet_accounting_still_matches(doc, counts):
         "TRIGGER_BULLETS."
     )
     assert unchecked <= total
+
+
+def test_the_cli_really_does_not_prune_without_keep(config_free_tmp_home, monkeypatch):
+    """THE GATE, WHICH NEITHER OF MY OTHER TWO TESTS PINNED (Prudence, #764 round 3). I
+    pinned the declared default (`keep.default is None`) and I pinned that `backup_all_dbs`
+    does not prune. Neither touches `if keep is not None:` in `backup_cmd` — the gate that
+    JOINS them. Adding `if keep is None: keep = 14` there left 160 tests green while
+    `techne backup` on a timer became bounded and deployment.md became wrong advice.
+
+    Two correct halves and no test on the seam between them. Driven through the real CLI,
+    which is the only place the gate exists."""
+    from click.testing import CliRunner
+
+    import techne.core.maintenance as maint
+    from techne.cli import main
+    from techne.config import Config
+
+    cfg = config_free_tmp_home
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+    called: list[int] = []
+    real_prune = maint.prune_backup_sets
+    monkeypatch.setattr(
+        maint, "prune_backup_sets", lambda d, k, **kw: called.append(k) or real_prune(d, k, **kw)
+    )
+
+    result = CliRunner().invoke(main, ["backup"])
+
+    assert result.exit_code == 0, result.output
+    # ASSERT THE GATE, NOT ITS EFFECT. My first version ran backup three times and counted
+    # sets — which survives her mutation, because a default ceiling of 14 prunes nothing at
+    # three sets. Testing the downstream effect made the test's sensitivity depend on the
+    # very number the mutation chooses. Whether the pruner is CALLED is the claim.
+    assert called == [], (
+        f"`techne backup` with no `--keep` invoked retention with keep={called} — "
+        "deployment.md and both shipped units tell operators a job without `--keep` grows "
+        "without bound. It no longer does."
+    )
 
 
 def test_backup_without_keep_really_does_grow_without_bound(config_free_tmp_home):
