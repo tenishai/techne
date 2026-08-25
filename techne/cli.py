@@ -4741,13 +4741,15 @@ def backup_cmd(ctx, out, keep):
         # permanently broken — the disk-fills-silently outcome this PR exists to prevent,
         # one level up.
         #
-        # 3 RATHER THAN 1, because the backup itself SUCCEEDED and a monitor must be able
-        # to tell those apart; a scheduled job that cannot distinguish "no backup tonight"
-        # from "backup fine, housekeeping broken" gets one of the two wrong. The three
-        # codes are documented in deployment.md, which is also where an operator is told
-        # `--keep` is not optional. Exiting LAST so a run that did back up still prints its
-        # full report first.
-        ctx.exit(3)
+        # THE CODE IS NAMED IN `techne/exit_codes.py`, not spelled here. That module's
+        # stated rule is that a private convention scattered across call sites is not a
+        # contract, and a bare `3` at this line would have been exactly that — for a
+        # supervised entrypoint, which is the class the module exists for. Its docstring
+        # carries why the backup succeeding rules out every sysexits failure code.
+        # Exiting LAST so a run that did back up still prints its full report first.
+        from techne.exit_codes import EX_RETENTION_INCOMPLETE
+
+        ctx.exit(EX_RETENTION_INCOMPLETE)
 
 
 @main.command("restore")

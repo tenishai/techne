@@ -621,6 +621,9 @@ def test_backup_exits_3_when_retention_could_not_complete(config, monkeypatch):
 
     result = CliRunner().invoke(main, ["backup", "--keep", "1"])
 
+    # The LITERAL 3, not `EX_RETENTION_INCOMPLETE`, on purpose: this pins the value that
+    # crosses the process boundary into a monitor. Asserting against the constant would
+    # follow it if someone changed it, which is the one change that must break a test.
     assert result.exit_code == 3, f"exit {result.exit_code}\n{result.output}"
     assert "retention INCOMPLETE" in result.output
     assert target.exists()
