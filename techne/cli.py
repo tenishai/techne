@@ -4681,9 +4681,21 @@ def reconcile_cmd(ctx):
 
 
 @main.command("backup")
-@click.option("--out", default=None, help="Destination dir (default: <data_dir>/backups/)")
+@click.option(
+    "--out",
+    default=None,
+    help="Backups ROOT to write a timestamped set into (default: <data_dir>/backups/).",
+)
+@click.option(
+    "--keep",
+    # IntRange, not int: `--keep -1` used to run the whole backup and THEN traceback out of
+    # prune_backup_sets' guard. A usage error belongs before any work happens.
+    type=click.IntRange(min=0),
+    default=None,
+    help="Delete all but the newest N backup sets in the destination, after this one succeeds.",
+)
 @click.pass_context
-def backup_cmd(ctx, out):
+def backup_cmd(ctx, out, keep):
     """Snapshot ALL present domain DBs together into one timestamped set.
 
     Cross-DB invariants span files, so a single-DB backup desyncs pointers — always back up
@@ -4697,8 +4709,79 @@ def backup_cmd(ctx, out):
     config = ctx.obj["config"]
     res = backup_all_dbs(config, _Path(out) if out else None)
     click.echo(f"backed up [{', '.join(res.backed_up) or '(none)'}] → {res.dest}")
+
+    # PRUNE AFTER THE NEW SET LANDS, NEVER BEFORE (techne#742). Pruning first would, on a
+    # keep=1 schedule, delete the only good backup and then discover the disk is full — the
+    # window where the operator has nothing is exactly the window a backup exists to remove.
+    # `protect` is belt-and-braces on top of that ordering.
+    retention_incomplete = False
+    if keep is not None:
+        from techne.core.maintenance import prune_backup_sets
+
+        # `apply_keep=False` WHEN THE RUN CAPTURED NOTHING (Prudence, #755 round 7). The
+        # keep window means "keep the newest N backups", and a run that backed up nothing
+        # did not produce one — so weighing real archives against it deletes them on the
+        # strength of a failure. Empty sets are still reclaimed, since they hold no
+        # database and there is nothing in them to lose. The exit-4 check below used to
+        # come AFTER this call: the alarm sounded after the irreversible step.
+        removed, failed = prune_backup_sets(
+            res.dest.parent, keep, protect=res.dest, apply_keep=bool(res.backed_up)
+        )
+        if removed:
+            # DO NOT CLAIM A CEILING THAT WAS NOT APPLIED (Prudence, #755 round 8, Nit 2).
+            # With `apply_keep=False` only empty sets are reclaimed, so `removed` is
+            # non-empty while real sets sit above `keep` untouched — printing "keeping 1"
+            # over three surviving sets is an assertion the run did not make.
+            if res.backed_up:
+                click.echo(f"pruned {len(removed)} older set(s), keeping {keep}")
+            else:
+                click.echo(
+                    f"reclaimed {len(removed)} empty set(s) — keep window NOT applied, "
+                    "this run captured nothing"
+                )
+        # SAY SO WHEN RETENTION DID NOT HAPPEN (Prudence, #755 Important 2). On a nightly
+        # timer a silently-failing prune fills the disk exactly as no `--keep` would.
+        for path, err in failed:
+            click.echo(f"could not prune {path.name}: {err}", err=True)
+        if failed:
+            click.echo(
+                f"retention INCOMPLETE: {len(failed)} set(s) could not be removed", err=True
+            )
+            retention_incomplete = True
     if res.skipped_absent:
         click.echo(f"skipped (absent): {', '.join(res.skipped_absent)}")
+    if not res.backed_up:
+        # A BACKUP OF ZERO DATABASES IS NOT A BACKUP (techne#742). Said loudly AND in the
+        # exit status, because on a timer the status is the only half anyone sees — and a
+        # green nightly job that captures nothing is worse than a red one, being a false
+        # belief that you are covered until the day you need to restore. Takes precedence
+        # over `retention_incomplete`: both can be true, and this is the more serious.
+        from techne.exit_codes import EX_NOTHING_BACKED_UP
+
+        click.echo(
+            "NO DATABASES WERE BACKED UP — the set is empty. Check that this is the right "
+            f"store: {config.data_dir}",
+            err=True,
+        )
+        ctx.exit(EX_NOTHING_BACKED_UP)
+    if retention_incomplete:
+        # EXIT 3, NOT 0 (Prudence, #755 Important 2, second half). Saying it on stderr was
+        # not enough: both units this PR ships route stderr somewhere nobody reads until
+        # something is already wrong (the plist to `backup.log`, the systemd unit to the
+        # journal), and the ONLY thing `systemctl --user status` or `launchctl list`
+        # surfaces is EXIT STATUS. At 0 that reads green forever while retention is
+        # permanently broken — the disk-fills-silently outcome this PR exists to prevent,
+        # one level up.
+        #
+        # THE CODE IS NAMED IN `techne/exit_codes.py`, not spelled here. That module's
+        # stated rule is that a private convention scattered across call sites is not a
+        # contract, and a bare `3` at this line would have been exactly that — for a
+        # supervised entrypoint, which is the class the module exists for. Its docstring
+        # carries why the backup succeeding rules out every sysexits failure code.
+        # Exiting LAST so a run that did back up still prints its full report first.
+        from techne.exit_codes import EX_RETENTION_INCOMPLETE
+
+        ctx.exit(EX_RETENTION_INCOMPLETE)
 
 
 @main.command("restore")

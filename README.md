@@ -400,11 +400,16 @@ techne cards repair [--apply]              # retype document_cards that never ha
 techne reconcile                           # force the schema drift-reconcile passes on techne.db;
                                            # use when you suspect schema drift or after an
                                            # additive SCHEMA_SQL change at unchanged SCHEMA_VERSION
-techne backup [--out DIR]                  # snapshot ALL present domain DBs together into one
+techne backup [--out DIR] [--keep N]       # snapshot ALL present domain DBs together into one
                                            # timestamped set (cross-DB invariants require
-                                           # backup/restore of all DBs as a unit)
+                                           # backup/restore of all DBs as a unit). DIR is the
+                                           # backups ROOT, and a set is created INSIDE it —
+                                           # it is NOT the set, so it is not what you pass to
+                                           # `restore` (changed in 0.16.0). --keep N prunes to
+                                           # the newest N sets; exit 3 = backup OK, prune failed
 techne restore BACKUP_DIR [--yes] [--no-pre-backup]
-                                           # restore all domain DBs from a backup set; validates
+                                           # restore all domain DBs from ONE backup set —
+                                           # `<DIR>/backup-<stamp>`, not `<DIR>`; validates
                                            # the full set before touching any live file
 
 # Diagnostics

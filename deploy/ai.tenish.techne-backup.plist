@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ai.tenish.techne-backup.plist — nightly techne backup on macOS (techne#742)
+
+  Installation:
+    1. Copy to ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
+    2. Edit the techne path below to your virtualenv's binary, and the log paths.
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.tenish.techne-backup.plist
+       (`launchctl load` still works but is deprecated)
+    4. Verify:  launchctl list | grep techne-backup
+
+  The keep flag is NOT optional. `techne backup` writes a full set every run and
+  nothing prunes by default, so a nightly job without it fills the disk.
+
+  RunAtLoad is false deliberately: loading the agent should not fire a backup at a
+  moment nobody chose. StartCalendarInterval fires it at 03:15; if the machine is
+  asleep then, launchd runs it once on wake rather than skipping the night.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.tenish.techne-backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- EDIT THIS: absolute path to your virtualenv's techne binary. -->
+        <string>/Users/YOUR_USER/.venv/bin/techne</string>
+        <string>backup</string>
+        <string>--keep</string>
+        <string>14</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>3</integer>
+        <key>Minute</key><integer>15</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Uncomment only if techne state is not in ~/.techne, for parity with the
+         systemd unit's Environment= line. -->
+    <!--
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TECHNE_HOME</key>
+        <string>/Users/YOUR_USER/.techne</string>
+    </dict>
+    -->
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USER/.techne/backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USER/.techne/backup.log</string>
+</dict>
+</plist>

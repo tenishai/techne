@@ -121,6 +121,12 @@ Rook's procedure has no step for this; here it is the single biggest reclaim. Th
 ls ~/.techne/backups/ | sed -E 's/-[0-9]{8}-[0-9]{6}\.db\.bak$//' | sort | uniq -c | sort -rn | head
 ```
 
+**(b) and (c) apply ONLY IF YOU RUN THE AUTHOR'S SNAPSHOT TOOLING, WHICH DOES NOT SHIP WITH
+techne.** `~/.techne/db_snapshot.py` and `db_snapshot.json` are a host-local fleet sweep
+(techne#742). If `ls ~/.techne/snapshots` is empty or absent, **skip to (d)** — you have not
+misconfigured anything, you simply do not have that tool. The shipped equivalent is
+`techne backup`, whose retention is `--keep`.
+
 **(b) Orphaned snapshot identities.** `db_snapshot.py` prunes to `keep_per_db` (14) *per identity* — so an identity that stops receiving new snapshots keeps its last 14 forever. Path renames and deleted worktrees strand whole identity families. Find them by newest-snapshot date:
 
 ```
