@@ -824,23 +824,56 @@ def test_every_retention_refusal_has_a_row_in_the_docs():
     assert not missing, f"exit-3 causes with no row in deployment.md: {missing}"
 
 
-def test_every_refusal_phrase_is_actually_used():
-    """The other direction, for the same reason the arch-card gate is enforced both ways:
-    a phrase nobody emits documents a failure that cannot happen, and sends an operator
-    looking for a cause that is not theirs."""
-    from techne.core import maintenance
-    from techne.core.maintenance import RETENTION_REFUSAL_PHRASES
+@pytest.mark.parametrize(
+    "phrase,build",
+    [
+        ("is a symlink", "symlink"),
+        ("manifest is unreadable", "unreadable"),
+        ("is not YYYY-MM-DDTHH:MM:SSZ", "bad_stamp"),
+        ("is in the future", "future"),
+        ("has no manifest", "no_manifest"),
+        ("manifest does not parse", "bad_json"),
+    ],
+)
+def test_every_refusal_phrase_is_actually_emitted(tmp_path, phrase, build):
+    """VACUOUS BEFORE (Prudence, #755 round 6, question D). The previous version read
+    `maintenance.py`'s SOURCE TEXT and asserted each phrase appeared in it — so it passed
+    the exact mutation its own docstring described, because the constant and its use are
+    both source text. A test that greps the file it is testing is not a test.
 
-    src = Path(maintenance.__file__).read_text()
-    body = src[src.index("def _classify_backup_set") :]
+    Now each condition is BUILT and the message it produces is asserted, which also proves
+    the other direction of the doc gate: a phrase that is documented but that nothing can
+    actually emit sends an operator hunting a cause that is not theirs."""
+    b = tmp_path / "backups"
+    b.mkdir(parents=True)
+    if build == "symlink":
+        target = _set(tmp_path / "elsewhere", "backup-t", "2026-01-01T00:00:00Z")
+        (b / "backup-20260101-000000").symlink_to(target, target_is_directory=True)
+    elif build == "unreadable":
+        d = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+        (d / "manifest.json").chmod(0o000)
+    elif build == "bad_stamp":
+        _set(b, "backup-20260101-000000", "2025-06-01T23:00:00+02:00")
+    elif build == "future":
+        _set(b, "backup-20260101-000000", "2099-01-01T00:00:00Z")
+    elif build == "no_manifest":
+        (b / "backup-20260101-000000").mkdir()
+    elif build == "bad_json":
+        d = b / "backup-20260101-000000"
+        d.mkdir()
+        (d / "manifest.json").write_text("")  # what a truncating write leaves behind
 
-    unused = [
-        phrase
-        for i, phrase in enumerate(RETENTION_REFUSAL_PHRASES)
-        if f"RETENTION_REFUSAL_PHRASES[{i}]" not in body
-    ]
+    try:
+        _removed, failed = prune_backup_sets(b, keep=0)
 
-    assert not unused, f"documented but never emitted: {unused}"
+        assert len(failed) == 1, f"expected one refusal, got {failed}"
+        assert phrase in failed[0][1], f"{phrase!r} not in {failed[0][1]!r}"
+    finally:
+        leftover = b / "backup-20260101-000000"
+        if leftover.is_dir() and not leftover.is_symlink():
+            (leftover / "manifest.json").chmod(0o644) if (
+                leftover / "manifest.json"
+            ).exists() else None
 
 
 def test_an_interrupted_backup_leaves_nothing_behind(config, monkeypatch):
@@ -866,7 +899,12 @@ def test_an_interrupted_backup_leaves_nothing_behind(config, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         backup_all_dbs(config)
 
-    leftovers = [d.name for d in backups.iterdir()] if backups.exists() else []
+    # `if backups.exists() else []` made "the whole backups ROOT was deleted" indistinguishable
+    # from "the partial set was cleaned up" — mutating `rmtree(dest_dir)` to
+    # `rmtree(dest_dir.parent)` passed all 50 tests (Prudence, #755 round 6 Important 3).
+    # Cleanup that takes the root with it is a far worse bug than the one being fixed.
+    assert backups.is_dir(), "cleanup removed the backups root, not just the partial set"
+    leftovers = [d.name for d in backups.iterdir()]
     assert leftovers == [], f"an interrupted backup left {leftovers} behind"
 
 
@@ -961,3 +999,34 @@ def test_backup_exits_0_when_it_captured_something(config, monkeypatch):
 
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
     assert "NO DATABASES WERE BACKED UP" not in result.output
+
+
+def test_the_manifest_never_exists_half_written(config, monkeypatch):
+    """`Path.write_text` opens mode `'w'`, which TRUNCATES BEFORE IT WRITES — so a kill in
+    that window left a zero-byte `manifest.json`: a file that is neither absent nor valid
+    (Prudence, #755 round 6 Important 1). The fix writes a temp name and `os.replace`s it,
+    so the truncated state stops existing rather than being detected downstream.
+
+    Pins the PROPERTY, not the implementation: interrupt the run at the moment of the
+    swap and assert what is on disk. `manifest.json` must be wholly absent — never
+    present-and-empty. Cleanup is disabled here on purpose; it would otherwise remove the
+    evidence, and what is under test is the state a SIGKILL leaves, which no cleanup runs
+    for."""
+    import techne.core.maintenance as maint
+
+    def _die(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(maint.os, "replace", _die)
+    monkeypatch.setattr(maint.shutil, "rmtree", lambda *a, **k: None)  # keep the evidence
+
+    with pytest.raises(KeyboardInterrupt):
+        backup_all_dbs(config)
+
+    sets = list((Path(config.data_dir) / "backups").iterdir())
+    assert len(sets) == 1, sets
+    manifest = sets[0] / "manifest.json"
+    assert not manifest.exists(), (
+        f"a half-written manifest.json survived ({manifest.stat().st_size} bytes) — "
+        "the state the atomic write exists to make impossible"
+    )

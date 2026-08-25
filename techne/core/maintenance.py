@@ -259,7 +259,15 @@ def backup_all_dbs(
             "databases": manifest_dbs,
             "skipped_absent": skipped,
         }
-        (dest_dir / _MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
+        # ATOMIC, BECAUSE `write_text` TRUNCATES BEFORE IT WRITES (Prudence, #755 round 6
+        # Important 1). Mode `'w'` empties the file first, so a kill inside that window left
+        # a ZERO-BYTE manifest.json — which parses as neither absent nor valid, and fell
+        # into a branch that answered "not ours". Writing to a temp name in the same
+        # directory and `os.replace`-ing it means the manifest is either wholly absent or
+        # wholly there: the truncated state stops existing rather than being detected.
+        tmp_manifest = dest_dir / f"{_MANIFEST_NAME}.tmp"
+        tmp_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+        os.replace(tmp_manifest, dest_dir / _MANIFEST_NAME)
     except BaseException:
         shutil.rmtree(dest_dir, ignore_errors=True)
         raise
@@ -292,6 +300,7 @@ RETENTION_REFUSAL_PHRASES = (
     "is not YYYY-MM-DDTHH:MM:SSZ",
     "is in the future",
     "has no manifest",
+    "manifest does not parse",
 )
 
 
@@ -344,13 +353,32 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         # `backup_all_dbs`, but a SIGKILL or a power cut runs no handler, and the orphan
         # holds a full copy of a live db that nothing would otherwise reclaim or mention.
         if _OUR_SET_NAME.fullmatch(child.name):
+            # SAY WHAT WAS OBSERVED, NOT WHAT IT MEANS (Prudence, #755 round 6 Important 2).
+            # This message used to read "techne named this directory, so it is an interrupted
+            # backup" — an identity claim a NAME REGEX CANNOT MAKE. It cannot separate three
+            # cases: a backup in flight right now, one that died, and a foreign directory
+            # that happens to end in a timestamp (`photos-20240101-000000` matches, measured).
+            # The code deletes none of them, which is right — but the message was licensing a
+            # human to, and the operator deleting a directory techne never created is
+            # round 1's Critical committed by hand instead of by `rmtree`.
             return None, (
-                f"{RETENTION_REFUSAL_PHRASES[4]} — techne named this directory, so it is an "
-                "interrupted backup rather than a foreign one; it is never pruned"
+                f"{RETENTION_REFUSAL_PHRASES[4]} — a backup in progress, an interrupted one, "
+                "and a foreign directory are indistinguishable here; it is never pruned"
             )
         return None, None  # not named by us and carrying no manifest: conclusively not ours
     except ValueError:
-        return None, None  # present but not JSON: nothing here claims to be a backup set
+        # THE RULE ABOVE DECIDES THIS ONE TOO, and this branch was still carrying the old
+        # reasoning a line after the new rule was written (Prudence, #755 round 6 Important
+        # 1). A manifest that will not parse, inside a directory whose name matches the
+        # shape we create, is the identity test FAILING TO COMPLETE — the reported side.
+        # The truncation window that made this reachable from our own writes is closed
+        # above; what remains is corruption, which is exactly the inconclusive case.
+        if _OUR_SET_NAME.fullmatch(child.name):
+            return None, (
+                f"{RETENTION_REFUSAL_PHRASES[5]} — so whether this is a usable backup "
+                "cannot be determined here; it is never pruned"
+            )
+        return None, None  # unparseable, and nothing about it claims to be ours
     except OSError as exc:
         # AN UNREADABLE MANIFEST IS NOT THE SAME AS AN ABSENT ONE (Prudence, #755 round 4
         # Important 1). Folding every OSError into silence meant a set TECHNE ITSELF WROTE

@@ -143,11 +143,27 @@ corrupted anything. What you are looking at is a set retention will never remove
 | `created_at ... is not YYYY-MM-DDTHH:MM:SSZ` | the stamp is not in the one format that sorts chronologically as text, so the set cannot be ordered | see below |
 | `created_at ... is in the future` | the set cannot be ordered against real time — usually a clock that was ahead when it was written | see below |
 | `is a symlink` | something under `backups/` is a symlink to a set | remove the symlink; techne will not follow it or delete its target |
-| `has no manifest` | a backup techne started and never finished — the manifest is written last, so this is what a `^C`, a `SIGKILL` or a power cut leaves | check it is not a run still in progress, then delete the directory. It is an incomplete copy, **not** a restorable set |
+| `has no manifest` | a directory named like a backup set, carrying no manifest | **identify it before touching it** — see below |
+| `manifest does not parse` | a set whose `manifest.json` is corrupt | same — treat it as unidentified, not as a set |
 
 The first row is deliberately not a list of specific errnos. Retention reports whatever the
 OS returned, and naming one of them here would send an operator to check permissions on a
 full disk.
+
+**On the two "cannot identify it" rows.** techne reports these and will never delete them,
+because it cannot tell three situations apart from a directory name:
+
+- a backup **running right now** — this clears itself when the run finishes;
+- a backup that **died** (`SIGKILL`, OOM, power cut — an in-process `^C` cleans up after
+  itself, so it never gets this far);
+- a **foreign directory** that happens to end in a timestamp. `photos-20240101-000000` and
+  `export-20260101-120000` both match the shape techne writes.
+
+So do not delete on the strength of this message. To tell them apart: check whether a backup
+is in progress; check the directory's age against your schedule; and look inside — one of
+ours holds `*.db` files and nothing else. If it is genuinely an abandoned set of ours, it is
+an **incomplete copy and not a restorable backup**, and removing it is safe. If you cannot
+establish that, move it out of `backups/` rather than deleting it.
 
 **The two stamp cases are the ones with no in-tool remedy, deliberately.** Retention only
 ever deletes what it can *order*, because the failure mode of guessing is a deleted backup.
