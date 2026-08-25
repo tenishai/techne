@@ -167,6 +167,18 @@ All notable changes to techne are documented here. Format loosely follows
   author it does not have. Takes core schema to **v25**. Pairs with #554, which is the
   query surface over the same store.
 
+  **Existing rows are deliberately NOT backfilled, and the two entries read together
+  promise more than that.** #554 ships in this same release and answers *"who says so"* —
+  but for every row written before the upgrade the answer is `NULL`, permanently. The
+  local `source` was discarded at write time and was never stored, so filling it with the
+  only instance we have ever run would encode a guess as a fact, in the one table whose
+  job is to record who said what. New writes are attributed; old ones cannot be.
+
+  **And it needs `instance_name` set to do anything.** Unset — which is the default —
+  every federated row lands unattributed. `techne doctor` reports that as STALE with a
+  remedy rather than leaving it silent; the qualified `<agent>@<cabal>` form is in the
+  config reference.
+
 - **`pattern_outcomes` gets a write path** (#551, #426) — `techne architect realized` /
   `outcomes` / `unrealized`, plus `record_outcome()` and `unrealized_patterns()`. The
   code had been written since 2026-07-28 and blocked on a version number: #426 shipped
@@ -361,9 +373,18 @@ All notable changes to techne are documented here. Format loosely follows
   corpus had nothing. **Takes `architect.db` v5 → v6** — the second renumber this
   cycle, rebuilding the FTS table with `source_url` in it.
 
-- **The reflect emit cursor was keyed on a hash that drifts** (#733) — so the pass
-  re-emitted work it had already done, or skipped work it had not, depending on which way
-  the hash moved. Keyed on `thread_id` now.
+- **The reflect emit cursor was keyed on a hash that drifts** (#733) — keyed on
+  `thread_id` now.
+
+  **The effect was silence, not noise**, which is why it went unnoticed:
+  `_marker_has_unemitted_threads` answered `len(emitted) < total`, so an over-full cursor
+  read as *fully emitted* and every corrupted session dropped out of the SessionStart
+  nudge. Measured: **126 owed queue rows were reported to the operator as 50.** If you
+  have acted on those counts, they were understated.
+
+  **Your cursor state is rebuilt on upgrade.** A pre-#733 marker is unrecoverable, so the
+  delivered set is re-derived from the authoritative record — drained queue rows — rather
+  than trusted or discarded.
 
 - **The automatic reflect pass requires an explicit binding** (#731) — it inherited
   `config.model`, which is how the rail came to be bound to a credential plane the
