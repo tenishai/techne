@@ -183,6 +183,14 @@ All notable changes to techne are documented here. Format loosely follows
   it an *ordinary* check and lets it reach the banner through the path that already
   existed.
 
+
+- **The librarian answers to its own name** (#744) — `techne librarian`. Three of the four
+  domains were addressable by name and the librarian was `techne library`, which is the
+  *storage* word: it names the document store, and that is the layout framing this release
+  demotes the four names out of. An **alias, not a rename** — every existing script keeps
+  working — and resolved in `get_command` rather than registered twice, because a `--help`
+  listing offering two words for one domain teaches the ambiguity the fix exists to remove.
+
 ### Changed
 
 - **BREAKING (0.16.0): `techne backup --out DIR` now names the backups *root*, not the
@@ -360,6 +368,33 @@ All notable changes to techne are documented here. Format loosely follows
   frame now travels inside the payload, and a capability that is already on returns no
   snippet at all.
 
+
+- **A cold model cache degrades to FTS instead of hanging the turn** (#708) — `search_vec`
+  ran on **every prompt submission** and called the resolver with `allow_download=True`. On a
+  cold HF cache that is a Hub fetch, and a blocking HTTP download is **signal-deaf**, so
+  `bounded_hook`'s SIGALRM could not preempt it: the turn *hung* rather than degrading.
+  `backend_available()` could not catch this — it is an import probe, so it passes with the
+  package installed and the weights absent, which is exactly what `pip install techne[vectors]`
+  leaves behind. `backfill_vectors` deliberately keeps the permissive default; guarding it too
+  would leave nothing able to fetch the weights.
+
+  **And a dead vector channel no longer records `outcome="ok"`.** Fixing the hang converted a
+  reported failure into a clean marker, in the subsystem whose stated job is to make that
+  impossible. That matters more than it sounds: `user_prompt_submit` is a `UserPromptSubmit`
+  hook and exits 0, and Claude Code discards a zero-exit hook's stderr — so the marker is not
+  the second half of the signal, it is the whole of it.
+
+- **A rail switched off no longer reports LIVE forever** (#735) — `check_model_bound_rails`
+  derived its verdict from a marker's outcome alone, and a marker records a run under a
+  configuration that may no longer exist. Measured across four configurations, one `ok`
+  marker: reflect **disabled** read LIVE, reflect **unbound** read LIVE, and **all five
+  custodian rails** read LIVE — none of which had any retraction path at all.
+
+  Now **no verdict is derived from a marker without first asking whether the rail is currently
+  bound**. An unbound rail reads DORMANT and its payload is kept and shown. The direction is
+  the point: unbound + stale `error` read BROKEN — noisy, wrong, self-announcing, so someone
+  fixes it; disabled + stale `ok` read LIVE — silent, wrong, and comfortable.
+
 ### Docs
 
 - **Scoped the "nothing auto-runs `backfill_vectors`" claim to this repo** (#704) — it
@@ -369,6 +404,23 @@ All notable changes to techne are documented here. Format loosely follows
   is a fresh measurement; the model2vec row is deliberately still the v0.14.0 figure,
   because a py3.13 venv is a *different construction*, and two numbers measured
   differently do not belong in one column.
+
+
+- **A tutorial for the four functions** (#726) — [`docs/four-functions.md`](docs/four-functions.md).
+  Ask each domain by name, read the `binding` it resolved to, and watch the **same call**
+  answer from a different store. The escalation is *demonstrated* rather than asserted, and
+  every transcript in it was captured by running the code. Carries an honest limitations
+  section: the vocabulary is techne-only, cabal's Librarian currently means something
+  narrower (#724), the codex is manually indexed **and resolves from your working directory**,
+  and `techne_recall` is still the right default.
+- **The README promotes the four names** from a storage-layout row to the mental model, and
+  **`docs/welcome.md` gains the archivist**, which was previously absent from it entirely.
+- **The release notes described half the release** (#726) — audited `[Unreleased]` against
+  `git log v0.15.0..main` before the version bump: ten of twenty-one merged commits had no
+  entry, including a schema renumber. `[Unreleased]` also carried two `### Added` and two
+  `### Fixed` blocks, so content was present and invisible to anyone scanning; `[0.13.0]`
+  shipped with four duplicated headings. `tests/test_changelog.py` now pins the structural
+  half.
 
 ## [0.15.0] — 2026-08-19
 
