@@ -37,6 +37,8 @@ def config_free_tmp_home(tmp_path):
     cfg.data_dir = tmp_path
     init_db(cfg.db_path).close()
     return cfg
+
+
 AGENTS = REPO / "AGENTS.md"
 TRIGGER_MARKER = "Agent: raise this unprompted"
 
@@ -456,11 +458,56 @@ def test_the_restore_trigger_is_still_all_or_nothing():
 #: `PRAGMA journal_mode=WAL` — ONE LINE of techne's own code (`core/database.py:773`).
 #: Prudence flipped it to `DELETE` and 15 tests passed. Exempting by category is the same
 #: mistake she caught on #755 round 2, and the category I chose was wrong on inspection.
-#: {document: (total bullets, of which nothing here can check)}
-TRIGGER_BULLETS = {
-    "docs/db-per-domain.md": (4, 0),
-    "docs/deployment.md": (4, 0),
+#: WHICH TEST IS THE WITNESS FOR EACH BULLET, keyed by a distinctive phrase from the bullet.
+#:
+#: THE COUNT WAS DECORATIVE (Prudence, #764 round 4). The previous shape was
+#: `{document: (total, unchecked)}` and the only assertion touching the second element was
+#: `unchecked <= total` — `0 <= 4`, true of anything. She proved it twice: declaring EVERY
+#: bullet unchecked (the opposite of what AGENTS.md claims) passed 22, and deleting
+#: `test_the_wal_premise_…`, the sole witness behind all four `db-per-domain.md` bullets,
+#: passed 21 while the accounting still declared full coverage.
+#:
+#: That is the absent-transformation shape from #758, not the narrow-check shape this file
+#: kept producing: THE BULLET→TEST LINK EXISTED NOWHERE, so there was nothing to mutate and
+#: no mutant could have exposed it. Naming the witness is what makes the link checkable.
+TRIGGER_WITNESSES = {
+    "`cp`, `rsync`, `scp`, `mv` or tar": "test_the_wal_premise_every_wal_trigger_rests_on",
+    "file-level backup tool": "test_the_wal_premise_every_wal_trigger_rests_on",
+    "propose deleting one": "test_the_wal_premise_every_wal_trigger_rests_on",
+    "moving techne between machines": "test_the_wal_premise_every_wal_trigger_rests_on",
+    "cron job, timer, launchd plist": "test_the_cli_really_does_not_prune_without_keep",
+    "do I have backups?": "test_the_absence_the_backup_trigger_asserts_is_still_absent",
+    "machine migration, a wipe": "test_the_absence_the_migration_trigger_asserts_is_still_absent",
+    "They are restoring": "test_the_restore_trigger_is_still_all_or_nothing",
 }
+
+
+def test_every_bullet_names_a_witness():
+    """A bullet with no named test is an unverified claim wearing the same clothes as a
+    verified one, which is what this accounting exists to prevent."""
+    unwitnessed = [
+        line.strip()[:70]
+        for doc in sorted(_docs_with_trigger_blocks())
+        for block in _trigger_blocks(REPO / doc)
+        for line in block
+        if not any(key in line for key in TRIGGER_WITNESSES)
+    ]
+
+    assert not unwitnessed, (
+        f"trigger bullets with no witness: {unwitnessed}. Name the test that checks each, "
+        "or record it as unchecked — do not leave it looking covered."
+    )
+
+
+def test_every_named_witness_exists():
+    """The other direction: a witness named here and absent from the module is a link that
+    reads as real and is not. Deleting the WAL test used to leave the accounting intact."""
+    import sys
+
+    module = sys.modules[__name__]
+    missing = sorted({t for t in TRIGGER_WITNESSES.values() if not hasattr(module, t)})
+
+    assert not missing, f"named as witnesses but not defined in this module: {missing}"
 
 
 def test_the_wal_premise_every_wal_trigger_rests_on(tmp_path):
@@ -488,39 +535,6 @@ def test_the_wal_premise_every_wal_trigger_rests_on(tmp_path):
         f"journal_mode is {mode!r} — every `-wal` trigger in docs/db-per-domain.md is now "
         "wrong, including the advice to copy all three files"
     )
-
-
-@pytest.mark.parametrize("doc", sorted(_docs_with_trigger_blocks()))
-def test_every_document_with_triggers_declares_its_bullets(doc):
-    """WHAT IS NOT VERIFIED MUST NOT READ AS VERIFIED. A document carrying trigger blocks
-    with no entry fails, so #753 and #754 cannot land a block without someone deciding,
-    per bullet, whether it is checkable."""
-    assert doc in TRIGGER_BULLETS, (
-        f"{doc} carries trigger blocks but declares no bullet accounting — decide which "
-        "of its bullets this file can check, and record the remainder"
-    )
-
-
-@pytest.mark.parametrize("doc,counts", sorted(TRIGGER_BULLETS.items()))
-def test_the_bullet_accounting_still_matches(doc, counts):
-    """PIN THE TOTAL, NOT JUST THE UNCHECKED COUNT. My first version asserted
-    `bullets >= declared` with `declared = 0` — trivially true, so it proved nothing and a
-    whole second block of unaccounted bullets sailed past it. That is the same
-    vacuous-assertion shape as the source-grep test #755 threw out, reproduced while fixing
-    the finding that a second block is invisible at all (Prudence, #764).
-
-    Counts EVERY block in the document. Adding a bullet or a block now fails, which forces
-    the per-bullet decision rather than letting it default to unmade."""
-    total, unchecked = counts
-    blocks = _trigger_blocks(REPO / doc)
-    found = sum(len(b) for b in blocks)
-
-    assert found == total, (
-        f"{doc}: {found} trigger bullets across {len(blocks)} block(s), {total} accounted "
-        "for. Decide for each new bullet whether this file can check it, then update "
-        "TRIGGER_BULLETS."
-    )
-    assert unchecked <= total
 
 
 def test_the_cli_really_does_not_prune_without_keep(config_free_tmp_home, monkeypatch):

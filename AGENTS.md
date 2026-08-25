@@ -39,9 +39,11 @@ advice. Absences ("`techne doctor` does not check this", "nothing archives trans
 cannot be proved by grep, so the relevant SURFACE is pinned instead — the registered check
 names, the command tree — and any change trips the test and forces a re-read.
 
-The bullet count per document is pinned too, so a new trigger cannot land without someone
-deciding whether it is checkable. If one genuinely is not, record it as unchecked rather
-than leaving the set looking uniformly verified.
+Each bullet **names the test that witnesses it**, and both directions are enforced: a
+bullet with no named witness fails, and a witness named but not defined fails. Counting
+bullets was not enough — a count says a number is right, not that any particular claim is
+still checked, so deleting the one test behind four bullets left the accounting looking
+complete.
 
 ## Architecture cards
 
