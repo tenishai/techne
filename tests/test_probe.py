@@ -403,6 +403,88 @@ def test_opencode_fresh_session_pull_allowed_no_gating(monkeypatch):
     assert "--agent" not in captured["argv"]  # no read-only agent when pull is allowed
 
 
+# ---------------------------------------------------------------------------
+# PiAdapter (no real pi session spawned)
+# ---------------------------------------------------------------------------
+
+
+def test_pi_no_native_seed():
+    from techne.probe import PiAdapter
+
+    a = PiAdapter()
+    assert a.supports_native_seed() is False
+    with pytest.raises(NotImplementedError):
+        a.seed_native_canary("cw", "lbl")
+
+
+def test_pi_injected_context_includes_canary(config):
+    from techne.probe import PiAdapter
+
+    codeword, label = new_codeword()
+    seed_canary(config, codeword, label)
+    block = PiAdapter().injected_context(config)
+    assert "<techne-memory>" in block
+    assert codeword in block  # fresh high-confidence canary lands in `techne context`
+
+
+def test_pi_fresh_session_gates_tools(monkeypatch):
+    from techne.probe import runtimes
+
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = "techne=ANSWER"
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(runtimes.subprocess, "run", fake_run)
+    out = runtimes.PiAdapter().fresh_session("q", disable_native=True, allow_techne_tools=False)
+    assert out == "techne=ANSWER"
+    assert captured["argv"][0] == "pi"
+    assert "--print" in captured["argv"]
+    assert "--exclude-tools" in captured["argv"]
+    excluded = captured["argv"][captured["argv"].index("--exclude-tools") + 1]
+    for tool in ("bash", "read", "mcp", "mcpScript", "mcp__techne__techne_search"):
+        assert tool in excluded.split(",")
+
+
+def test_pi_fresh_session_pull_allowed_no_gating(monkeypatch):
+    from techne.probe import runtimes
+
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(runtimes.subprocess, "run", fake_run)
+    runtimes.PiAdapter(model="provider/model").fresh_session("q", disable_native=False, allow_techne_tools=True)
+    assert "--exclude-tools" not in captured["argv"]  # no gating when pull is allowed
+    assert "--model" in captured["argv"] and "provider/model" in captured["argv"]
+
+
+@pytest.mark.probe
+@pytest.mark.skipif(shutil.which("pi") is None, reason="pi CLI not on PATH")
+def test_real_offtest_probe_pi():
+    """End-to-end on pi: fresh `pi --print` with techne MCP tools gated off → the
+    extension's push injection must carry the codeword. Runs against the real db."""
+    from techne.probe import PiAdapter, run_probe
+
+    cfg = Config.load()
+    verdict = run_probe(cfg, PiAdapter(timeout=300), mode="off-test", cleanup=True)
+    assert verdict.passed, verdict.render()
+    assert verdict.provenance == "techne"
+
+
 class _NoInjectFake:
     name = "no-inject"
 
