@@ -658,3 +658,62 @@ class TestTheFourDomainsAreAddressableByName:
         assert "\n  library " not in commands, (
             "the legacy spelling must keep working but must not be advertised"
         )
+
+
+# ---- techne#726: the `absent` rule the docs state twice, pinned once -----------------
+
+
+class TestWhichDomainsCanReportAbsent:
+    """`docs/four-functions.md` and `docs/welcome.md` both teach a three-way rule:
+
+        codex     -> `absent` means "not indexed yet"
+        archivist -> `absent` means "you configured `archivist: none`"
+        librarian, architect -> no `absent` AT ALL
+
+    It was stated in two places and pinned in none (Prudence, #752 r3). Two prose copies
+    are consistent-today rather than checkable; this makes the load-bearing half — that
+    two of the four can never reach the value — a test, so a future change to
+    `_registry_domain` fails here rather than silently making both pages wrong.
+    """
+
+    @staticmethod
+    def _binding(config, domain):
+        from techne.core.bindings import domain_binding
+
+        return domain_binding(config, domain).binding
+
+    @pytest.mark.parametrize("domain", ["librarian", "architect"])
+    def test_a_registry_domain_can_never_report_absent(self, domain, tmp_path, monkeypatch):
+        """`_registry_domain` has exactly two exits — STORE when a dsn is named, LOCAL
+        otherwise — and `store_path` always returns a path, so the LOCAL branch is
+        unconditional. There is no `librarian: none` config key to reach `absent` with."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        from techne.config import Config
+
+        config = Config.load()
+
+        assert self._binding(config, domain) != "absent", (
+            f"{domain} reported `absent`, which two documentation pages say is impossible "
+            "for it — update the docs and this test together, or the pages are now wrong"
+        )
+
+    @pytest.mark.parametrize("domain", ["librarian", "architect"])
+    def test_not_even_with_a_named_store_that_is_missing(self, domain, tmp_path, monkeypatch):
+        """The near-miss: a named-but-absent store is `store`/`unavailable`, NOT `absent`.
+        `absent` claims nothing is configured; this is configured and unreachable, and
+        collapsing them is what the `unconfigured`/`empty` split exists to prevent."""
+        monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+        from techne.config import Config, StoreSpec
+        from techne.core.bindings import domain_binding
+
+        config = Config.load()
+        config.stores = dict(config.stores)
+        # A `StoreSpec`, not a bare string — `store_path` reads `spec.dsn`. My first cut
+        # passed a str and died with AttributeError, which is a test asserting nothing
+        # about the thing it names.
+        config.stores[domain] = StoreSpec(dsn=f"sqlite:///{tmp_path / 'nope' / f'{domain}.db'}")
+
+        report = domain_binding(config, domain)
+
+        assert report.binding != "absent", report
+        assert report.state == "unavailable", report

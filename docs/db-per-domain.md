@@ -63,7 +63,7 @@ This is the elegant part: **the card model makes federation a keyed `get`, not a
 
 > **Why not SQLite `ATTACH`?** ATTACH would couple recall to a single connection spanning every domain db — and to the physical layout (one machine, all files co-located). Separate connections behind `StoreAdapter` keep the domains independently movable/syncable and each db's schema self-contained. The card-in-recall model removes the only reason we'd have wanted ATTACH (no cross-db ranking at query time).
 
-**Domain-local search** (e.g. full-text over *all* of `librarian.db`'s content, not just the gists) is the domain's own search function (e.g. `documents.search_documents`) running its native SQL against `store.connect()` — a deliberate, domain-scoped operation (`techne library search`), separate from personal recall.
+**Domain-local search** (e.g. full-text over *all* of `librarian.db`'s content, not just the gists) is the domain's own search function (e.g. `documents.search_documents`) running its native SQL against `store.connect()` — a deliberate, domain-scoped operation (`techne librarian search`), separate from personal recall.
 
 ### Per-db breakdown
 
@@ -82,7 +82,7 @@ Sequenced; the Librarian goes first because it's already built and working — t
    - `documents.py` (`store_document`/`get_document`/search) operate on the librarian store, not `config.db_path`.
    - Cards stay in `techne.db`; extend the pointer with `store:librarian`; `resolve_card` fetches via the librarian store.
    - **Backfill**: copy the 57 existing `documents` rows from `techne.db` → `librarian.db`; drop the tables from `techne.db`.
-   - Remove the 6 `documents` references from `search.py`; route `techne search --table documents` (or a new `techne library search`) to the librarian store.
+   - Remove the 6 `documents` references from `search.py`; route `techne search --table documents` (or a new `techne librarian search`) to the librarian store.
 3. **Patterns → `architect.db`** (#87): build on the proven registry/adapter; collapse `architectural-patterns.md` into the store.
 4. **Codex → `codex.db`** (#89): graph domain on the same pattern.
 
@@ -113,7 +113,7 @@ transaction.** Cross-db invariants — a `document_card`'s `doc:<id>` resolving 
 
 ## Resolved (as implemented)
 
-- **`techne search --table documents`** → **domain-scoped.** Documents moved out of `techne.db` to `librarian.db`; full-content search is `techne library search` against the Librarian store, while personal recall ranks the gist cards in `techne.db`.
+- **`techne search --table documents`** → **domain-scoped.** Documents moved out of `techne.db` to `librarian.db`; full-content search is `techne librarian search` against the Librarian store, while personal recall ranks the gist cards in `techne.db`.
 - **Vector search across domains** → **per-domain, no cross-db vec.** Each domain owns its own vec index in its store; personal recall vec-searches only `techne.db`. No cross-db vector ranking is performed — the card model removes the need.
 - **Config defaults** → **lazy auto-create.** Domain dbs default to `<data_dir>/<domain>.db` and are created+migrated on first *use* (`librarian_store`/`architect_store`/`codex_store`), not at init — a memory-only install never materialises them and stays effectively one file.
 - ~~**Backend portability proof**: validate the SQLite→Postgres `StoreAdapter` swap~~ — **retired (techne#135).** techne is SQLite-only; the seam was unused and removed. Design a server backend against a real driver only if a concrete deploy/multi-writer need ever appears.
