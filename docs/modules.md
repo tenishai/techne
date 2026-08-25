@@ -43,6 +43,8 @@ Within a session, techne detects distinct topics with a **structural heuristic**
 
 **Why it's different:** the default detector is deterministic and free. You *can* opt into an LLM detector/summarizer, but you never have to.
 
+**How the split is actually made** — the signals, the merge rules, how a thread outlives its session, and how to inspect a boundary you disagree with: [`docs/threads.md`](threads.md).
+
 ---
 
 ## Memory hygiene — reflect · consolidate · dream · evidence · claims  ·  *uses the agent's own model*

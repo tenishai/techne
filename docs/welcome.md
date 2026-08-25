@@ -311,6 +311,8 @@ was the whole point.
   included.
 - **[`docs/modules.md`](./modules.md)** — a short sales-pitch for each module (what it
   does, why it's different, how to enable it).
+- **[`docs/threads.md`](./threads.md)** — sessions vs threads: why the split exists, the
+  signals that make it, and how a line of work survives a `/clear`.
 - **[`docs/four-functions.md`](./four-functions.md)** — the four domains, addressed by
   name: what each answers, how to read the `binding` it resolved to, and the same call
   against a different store.
