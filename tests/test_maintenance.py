@@ -489,3 +489,27 @@ def test_prune_skips_a_stamp_it_cannot_order_safely(tmp_path):
 
     assert offset.exists(), "pruned a set whose stamp cannot be ordered as text"
     assert removed == [canonical]
+
+
+def test_the_pre_restore_snapshot_stays_visible_to_retention(config):
+    """THE SET RETENTION CANNOT SEE IS THE ONE THAT GROWS FOREVER. Making `--out` the
+    backups ROOT (#755's Critical) silently re-nested the one internal caller that named
+    its own set: `restore_all_dbs`' pre-restore snapshot landed at
+    `backups/pre-restore-<stamp>/backup-<stamp>/`, and `prune_backup_sets` scans only
+    DIRECT children for a manifest — so `--keep` stopped seeing it and every restore
+    leaked a full copy of every domain db. Pins the layout, not the call: a set under
+    `backups/` must be prunable no matter which code path wrote it."""
+    _add_knowledge(config.db_path, "PRE-RESTORE-MARK")
+    res = backup_all_dbs(config)
+    restore_all_dbs(config, res.dest, pre_restore_backup=True)
+
+    backups = Path(config.data_dir) / "backups"
+    pre = [d for d in backups.iterdir() if d.is_dir() and d.name.startswith("pre-restore-")]
+    assert len(pre) == 1, f"expected one pre-restore set directly under backups/, got {pre}"
+    assert (pre[0] / "manifest.json").is_file(), "pre-restore set carries no manifest at its top"
+
+    removed, failed = prune_backup_sets(backups, keep=0)
+
+    assert failed == []
+    assert pre[0] in removed, "retention cannot see the pre-restore set"
+    assert not pre[0].exists()

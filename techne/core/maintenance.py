@@ -177,7 +177,9 @@ def _online_copy(src: Path, dst: Path) -> None:
         src_conn.close()
 
 
-def backup_all_dbs(config: Config, dest_dir: Path | None = None) -> BackupResult:
+def backup_all_dbs(
+    config: Config, dest_dir: Path | None = None, *, label: str = "backup"
+) -> BackupResult:
     """Snapshot every PRESENT domain DB together into one timestamped directory.
 
     Each db is copied via the online backup API (consistent even if written concurrently),
@@ -200,8 +202,17 @@ def backup_all_dbs(config: Config, dest_dir: Path | None = None) -> BackupResult
     # flag whose documented meaning and behaviour disagree, which is what turned into a
     # deletion. `restore` accepts the set path it always did; `--out` now yields a root
     # containing timestamped sets, which is what makes `--out` usable on a timer at all.
+    # `label` NAMES THE SET, AND IS WHAT KEEPS RETENTION ABLE TO SEE IT. Making `dest_dir`
+    # the ROOT (above) broke the one internal caller that had been naming its own set:
+    # `restore_all_dbs`' pre-restore snapshot became `backups/pre-restore-<stamp>/backup-
+    # <stamp>/`, and `prune_backup_sets` only scans DIRECT children for a manifest — so the
+    # set went invisible to `--keep` and every restore leaked a full copy of every domain db
+    # that retention could never reclaim. Demonstrated: `keep=0` removed the ordinary set and
+    # left the nested one. Labelling here restores the pre-break on-disk layout
+    # (`backups/pre-restore-<stamp>/`, manifest at the top) under the new root semantics.
+    # Internal only: not reachable from the CLI, so it is not a path-injection surface.
     root = Path(dest_dir) if dest_dir is not None else Path(config.data_dir) / "backups"
-    dest_dir = _unique_dir(root / f"backup-{_now_stamp()}")
+    dest_dir = _unique_dir(root / f"{label}-{_now_stamp()}")
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     paths = domain_db_paths(config)
@@ -390,9 +401,9 @@ def restore_all_dbs(
 
     pre: Path | None = None
     if pre_restore_backup:
-        pre = backup_all_dbs(
-            config, _unique_dir(Path(config.data_dir) / "backups" / f"pre-restore-{_now_stamp()}")
-        ).dest
+        # Label, do not name the directory: `dest_dir` is the backups ROOT now, so passing
+        # a set path here would nest the set inside it and hide it from retention.
+        pre = backup_all_dbs(config, label="pre-restore").dest
 
     live = domain_db_paths(config)
     plan: list[tuple[str, Path, Path, Path]] = []  # (domain, src_file, target, temp)
