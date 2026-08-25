@@ -349,7 +349,20 @@ class TestEgressUncertainPenaltyFixed:
         }
         egress_score = _eff_conf(row, half_life_days=30.0)
         search_score = _knowledge_decay_score(row, half_life_days=30.0)
-        assert egress_score == pytest.approx(search_score, rel=1e-9), (
+        # TOLERANCE SET BY CLOCK JITTER, NOT BY AMBITION. Both functions read the clock
+        # THEMSELVES, so this compares two independently-timed decays and the gap between
+        # the two statements above is real elapsed time. Measured: ~7e-12 back to back,
+        # 3e-10 at a 1ms gap, 2.8e-09 at 10ms. `rel=1e-9` therefore required the two calls
+        # to land within ~4ms, which a loaded CI runner under `-n 4` does not guarantee —
+        # it failed on 3.13 at 4e-09 while 3.12 passed, on a PR that touched only AGENTS.md
+        # and one new test file.
+        #
+        # 1e-6 is not a lowered bar: the defect this guards is egress OMITTING the
+        # ×0.5 uncertain penalty, which shows up as a 100% relative difference. The guard
+        # needs to separate 1e0 from clock noise, and 1e-6 sits three orders above the
+        # noise and six below the signal. The old value sat BELOW the noise floor, which is
+        # why it reported timing as a correctness failure.
+        assert egress_score == pytest.approx(search_score, rel=1e-6), (
             f"Egress score ({egress_score}) must match search score ({search_score}) "
             "for uncertain rows — drift between sites was the bug fixed in techne#249"
         )
