@@ -409,10 +409,22 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     #
     # `techne_version` is the honest identity key. `read_manifest` keys on `databases`
     # because it is about to RESTORE from them, which is a different question — and the
-    # round-2 fix imported its test wholesale without noticing that difference. Safe for
-    # every set ever written: `techne_version` has been in the manifest since backup/restore
-    # landed (`da6a228`, #139) and has never changed shape, so keying on it cannot strand a
-    # set an older techne wrote.
+    # round-2 fix imported its test wholesale without noticing that difference.
+    #
+    # SAFE FOR EVERY SET EVER WRITTEN, and checked by enumerating tags rather than by one
+    # `git log -S` — which counts occurrence changes and so cannot see a rename-and-readd.
+    # Every release from v0.8.0 (the first carrying `maintenance.py`) through v0.15.0 writes
+    # `techne_version`; every tag before that has no backup command at all, so no manifest
+    # of theirs exists to strand.
+    #
+    # THE STANDING HAZARD IS THE OTHER DIRECTION: rename this field and the sets it is the
+    # ONLY identity evidence for — the empty ones — silently become "not ours", never pruned
+    # and never mentioned. Populated sets survive such a rename via the `databases` test
+    # below, so the blast radius is the empty ones specifically, not every set on disk.
+    # (Measured by renaming the field and watching exactly the empty half of
+    # `test_what_backup_writes_is_recognised_as_ours` fail — the claim that it strands
+    # everything was wrong, and narrower is worth saying accurately: it is the case nobody
+    # would think to test.)
     if "techne_version" not in manifest and (not isinstance(dbs, dict) or not dbs):
         # `read_manifest`'s identity test, for manifests that do NOT claim to be ours.
         # techne refusing to RESTORE from a directory

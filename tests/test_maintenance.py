@@ -1030,3 +1030,36 @@ def test_the_manifest_never_exists_half_written(config, monkeypatch):
         f"a half-written manifest.json survived ({manifest.stat().st_size} bytes) — "
         "the state the atomic write exists to make impossible"
     )
+
+
+@pytest.mark.parametrize("populated", [True, False], ids=["with-databases", "empty"])
+def test_what_backup_writes_is_recognised_as_ours(config, tmp_path, populated):
+    """THE ROUND TRIP, WHICH IS THE INVARIANT THAT ACTUALLY MATTERS: whatever
+    `backup_all_dbs` writes, `_classify_backup_set` must recognise as ours. It has been
+    broken twice in this PR from opposite ends — round 2 taught the classifier
+    `read_manifest`'s test (which rejected our empty sets), and identity now keys on
+    `techne_version` (which a future rename would silently break for the sets it is the only
+    evidence for — the empty ones — leaving them never pruned and never mentioned: this PR's
+    own failure shape arriving via a refactor rather than a bug). Measured: renaming the
+    field fails exactly the empty half of this test and not the populated one.
+
+    Both cases, because the empty one is exactly what round 2 got wrong and a test that
+    only covers the populated one would have passed throughout."""
+    from techne.config import Config
+    from techne.core.maintenance import _classify_backup_set
+
+    if populated:
+        cfg = config
+    else:
+        empty = tmp_path / "no-dbs"
+        empty.mkdir()
+        cfg = Config()
+        cfg.db_path = empty / "techne.db"  # deliberately never created
+        cfg.data_dir = empty
+
+    res = backup_all_dbs(cfg)
+
+    stamp, refusal = _classify_backup_set(res.dest)
+
+    assert refusal is None, f"techne refuses to recognise a set it just wrote: {refusal}"
+    assert stamp is not None, "a set we wrote is invisible to retention"
