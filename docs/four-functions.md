@@ -193,9 +193,13 @@ cwd = no repo             : {"binding":"absent","count":0,"target":null}
 Rows 1 and 2 are the same `binding`, the same `count`, and a same-shaped `id`. **Only `target`
 differs.** `core/bindings.py` says it plainly: *a codex bound to some other repo's index would
 answer confidently about the wrong code.* The `absent` in row 3 is the honest failure; row 2 is
-the one that will mislead you. **Pass `repo` explicitly when it matters, and read `target`.** The codex is the one domain that will confidently tell you about code you
-deleted last week if you have not re-indexed. See [codex usage](codex-usage.md) for
-when to reach for it and when not to.
+the one that will mislead you. **Pass `repo` explicitly when it matters, and read
+`target`.**
+
+**And separately from *which* repo — how *old* it is.** The codex is the one domain that
+will confidently tell you about code you deleted last week if you have not re-indexed.
+Two different axes: the wrong repo above, a stale snapshot here. See
+[codex usage](codex-usage.md) for when to reach for it and when not to.
 
 ---
 
@@ -215,10 +219,14 @@ Four shapes for four domains would put the burden of knowing which one you got b
 onto you. That is exactly the seam this vocabulary removes.
 
 > **A resolver that throws does not degrade — it raises.** `techne bindings` catches per
-> domain and can print `binding: null` for the codex, because that is the one resolver with
-> an internal `try`. The four *search* calls have no such catch: a misconfiguration (say
-> `archivist_db_path` pointing at your personal db) raises out of `archivist_search` rather
-> than returning an envelope. Do not write a `notice` handler and skip the try/except.
+> domain, so a failed resolver becomes a row with `binding: null` and the reason verbatim —
+> whichever domain it was. The *search* calls do not catch: `archivist_search`,
+> `librarian_search` and `architect_search` let a resolver failure out at you. The one you can
+> actually trigger today is the archivist's — point `archivist_db_path` at your personal db and
+> `archivist_search` raises. The librarian and architect have no known misconfiguration that
+> reaches it; they simply would not catch one. **`codex_search` is the exception** — its
+> resolver catches internally, so it returns `binding: null` with a `notice`. Handle both: a
+> try/except *and* a `notice` handler.
 
 ### An unreadable domain answers with a reason, not an empty list
 
@@ -333,6 +341,7 @@ out of that — `techne codex watch` re-indexes on file changes, and
 `hooks.codex_reindex_on_edit` re-indexes a touched file after every Write/Edit — both off
 by default. **The codex also resolves from your working directory**, which can answer
 confidently about the wrong repo; see §4.
+
 **`techne_recall` is still the default for "what do we know about X".** It escalates
 across all four rungs for you. The four domain calls are for when you already know
 which function you want — reaching for them by reflex means doing the routing by hand

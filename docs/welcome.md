@@ -105,7 +105,8 @@ is decided by the domain, not by you**. On the codex it means *you have not inde
 repo yet* — a fact about where you are standing rather than a fault, and the row hands you
 the command. On the archivist it means *you configured `archivist: none`*. **The librarian
 and architect have no `absent` at all** — they always resolve somewhere, so the only
-question they can raise is whether that somewhere is readable.
+question they can raise is whether that somewhere is readable. (Full statement:
+[reading the answer](four-functions.md#reading-the-answer).)
 
 That is the whole reason to learn four names instead of four file paths: `librarian.db`
 is where documents happen to live today; **the librarian is the function you are
