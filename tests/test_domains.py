@@ -703,10 +703,8 @@ class TestWhichDomainsCanReportAbsent:
         `absent` claims nothing is configured; this is configured and unreachable, and
         collapsing them is what the `unconfigured`/`empty` split exists to prevent."""
         monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
-        from techne.config import Config
+        from techne.config import Config, StoreSpec
         from techne.core.bindings import domain_binding
-
-        from techne.config import StoreSpec
 
         config = Config.load()
         config.stores = dict(config.stores)

@@ -179,7 +179,8 @@ CLI: `techne codex index <repo>` first — **the index is built by hand and can 
 stale.**
 
 **And it resolves from your working directory, which is a silent argument.** `codex_search`
-takes the repo from `repo` *or your cwd*, walking up to the nearest repo root. So the identical
+takes the repo from `repo` *or your cwd*, walking up to the repo root — and a linked
+worktree resolves to its **primary**, which is one more way cwd is a silent argument. So the identical
 call answers differently depending on where you are standing — and the dangerous case is not
 the miss, it is the **confident hit against the wrong repo**. Measured, two indexed repos both
 defining `shared_symbol_name`, one call:
@@ -219,8 +220,9 @@ Four shapes for four domains would put the burden of knowing which one you got b
 onto you. That is exactly the seam this vocabulary removes.
 
 > **A resolver that throws does not degrade — it raises.** `techne bindings` catches per
-> domain, so a failed resolver becomes a row with `binding: null` and the reason verbatim —
-> whichever domain it was. The *search* calls do not catch: `archivist_search`,
+> domain, so a failed resolver becomes a row carrying the reason verbatim — whichever domain
+> it was. Plain `techne bindings` renders that row as `unavailable`; the literal
+> `binding: null` is what you see under `--json`. The *search* calls do not catch: `archivist_search`,
 > `librarian_search` and `architect_search` let a resolver failure out at you. The one you can
 > actually trigger today is the archivist's — point `archivist_db_path` at your personal db and
 > `archivist_search` raises. The librarian and architect have no known misconfiguration that
