@@ -494,10 +494,12 @@ def test_prune_skips_a_stamp_it_cannot_order_safely(tmp_path):
     offset = _set(b, "backup-offset", "2025-06-01T23:00:00+02:00")
     canonical = _set(b, "backup-canonical", "2025-06-01T22:00:00Z")
 
-    removed, _ = prune_backup_sets(b, keep=0)
+    removed, failed = prune_backup_sets(b, keep=0)
 
     assert offset.exists(), "pruned a set whose stamp cannot be ordered as text"
     assert removed == [canonical]
+    assert [p.name for p, _ in failed] == ["backup-offset"]
+    assert "cannot be ordered safely" in failed[0][1]
 
 
 def test_the_pre_restore_snapshot_stays_visible_to_retention(config):
@@ -560,11 +562,14 @@ def test_prune_skips_a_set_stamped_in_the_future(tmp_path):
     future = _set(b, "backup-future", "2099-01-01T00:00:00Z")
     real = _set(b, "backup-real", "2026-03-01T00:00:00Z")
 
-    removed, _ = prune_backup_sets(b, keep=1)
+    removed, failed = prune_backup_sets(b, keep=1)
 
     assert future.exists(), "a future stamp must not occupy a retention slot"
     assert real.exists(), "the newest REAL set was pruned in favour of a future-stamped one"
     assert removed == []
+    # NEVER DELETED AND NEVER MENTIONED IS A LEAK (Prudence, #755 round 3 Important 1).
+    assert [p.name for p, _ in failed] == ["backup-future"]
+    assert "in the future" in failed[0][1]
 
 
 def test_prune_names_a_symlinked_set_as_a_symlink(tmp_path):
@@ -644,3 +649,47 @@ def test_backup_exits_0_when_retention_completes(config, monkeypatch):
 
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
     assert "retention INCOMPLETE" not in result.output
+
+
+def test_a_symlinked_set_never_enters_the_keep_window(tmp_path):
+    """THE SCAN LOOP ADMITTED SYMLINKS AND ORDERED THEM BY THE TARGET'S STAMP (Prudence,
+    #755 round 3 Important 2). The `is_symlink` guard lived in the DELETE loop only, so a
+    symlink pointing at a set NEWER than a real one took a slot inside the keep window and
+    pushed the real backup out of it — measured `removed: ['backup-a']`, `failed: []`: a
+    genuine backup deleted, nothing reported. The round-2 test covered only the mirror case
+    (target older, so the symlink sorted last and merely failed to delete), which is
+    exactly why this half hid behind it."""
+    b = tmp_path / "backups"
+    real = _set(b, "backup-a", "2026-01-01T00:00:00Z")
+    newer_target = _set(tmp_path / "elsewhere", "backup-newer", "2026-06-01T00:00:00Z")
+    (b / "backup-link").symlink_to(newer_target, target_is_directory=True)
+
+    removed, failed = prune_backup_sets(b, keep=1)
+
+    assert real.exists(), "a real backup was deleted to make room for a symlink"
+    assert removed == []
+    assert [p.name for p, _ in failed] == ["backup-link"]
+    assert newer_target.exists()
+
+
+def test_unorderable_sets_are_reported_so_they_cannot_pile_up_silently(config, monkeypatch):
+    """SKIPPING A SET IS NOT FREE ONCE IT IS UNBOUNDED. Before Nit 4's fix, an unorderable
+    set was self-limiting — it got pruned once more than `keep` existed. Now it is never
+    pruned, so silence means the disk fills on a schedule while the timer reads green:
+    Important 2's shape, one level up, introduced by the fix for Nit 4. Driven through the
+    real CLI, because the exit code is the half that matters."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+    backups = Path(config.data_dir) / "backups"
+    for i in range(7):
+        _set(backups, f"backup-bad-{i}", f"2026-06-0{i + 1}T00:00:00+02:00")
+
+    result = CliRunner().invoke(main, ["backup", "--keep", "1"])
+
+    assert result.exit_code == 3, f"exit {result.exit_code}\n{result.output}"
+    assert "retention INCOMPLETE: 7 set(s)" in result.output
+    assert all((backups / f"backup-bad-{i}").exists() for i in range(7))
