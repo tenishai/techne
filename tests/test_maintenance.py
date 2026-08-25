@@ -1151,7 +1151,17 @@ def test_an_empty_set_never_evicts_a_real_backup(config, monkeypatch, tmp_path):
     ]
 
     for _ in range(5):  # five nights on a misconfigured timer
-        CliRunner().invoke(main, ["backup", "--keep", "2"])
+        result = CliRunner().invoke(main, ["backup", "--keep", "2"])
+
+    # PIN THE else-BRANCH WORDING TOO (Prudence, #755 round 9). Restoring the old
+    # "pruned N older set(s), keeping K" line left the whole suite green — only the `if`
+    # branch was covered, so the fix for a message that CLAIMED A CEILING IT DID NOT APPLY
+    # had nothing asserting it. By the last run an earlier empty set is being reclaimed, so
+    # this is the arrangement where that branch actually prints.
+    assert "keep window NOT applied" in result.output, (
+        f"the run claims a ceiling it did not apply:\n{result.output}"
+    )
+    assert "keeping 2" not in result.output
 
     survivors = [r.name for r in real if r.exists()]
     assert survivors == [r.name for r in real], (

@@ -333,8 +333,6 @@ class SetClass:
     holds_data: bool = False
 
 
-
-
 def _classify_backup_set(child: Path) -> SetClass:
     """Classify one directory under `backups/` — returns a three-field `SetClass`.
 
@@ -535,9 +533,15 @@ def _classify_backup_set(child: Path) -> SetClass:
     # backup, which is why it is fixed here rather than filed.
     #
     # No fourth field is needed. An unrestorable set gets NO STAMP, so it can never occupy a
-    # slot, and a REFUSAL, so it is reported rather than accumulating in silence —
-    # `holds_data=True` keeps it out of the unconditional empty-set reclamation, because it
-    # still contains real database files someone may want to salvage.
+    # slot, and a REFUSAL, so it is reported rather than accumulating in silence.
+    #
+    # `holds_data=True` here is INERT TODAY and said so rather than left looking load-bearing
+    # (Prudence, #755 round 9). The caller returns at `if cls.stamp is None: continue` before
+    # it is read, so setting it False changes nothing observable — measured. It is written
+    # because it is TRUE (the set does hold databases) and because the field's meaning is
+    # "safe to delete unconditionally?", to which the honest answer here is no. A later
+    # caller that reads `holds_data` without first checking `stamp` would otherwise get a
+    # lie. What actually keeps this set out of the empty-set reclamation is the `None` stamp.
     missing = sorted(
         domain
         for domain, meta in dbs.items()
