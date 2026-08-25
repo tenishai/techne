@@ -24,6 +24,19 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def config_free_tmp_home(tmp_path):
+    """A Config on a throwaway store, for the two tests that actually run techne."""
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "techne.db"
+    cfg.data_dir = tmp_path
+    init_db(cfg.db_path).close()
+    return cfg
 AGENTS = REPO / "AGENTS.md"
 TRIGGER_MARKER = "Agent: raise this unprompted"
 
@@ -280,7 +293,7 @@ TRIGGER_BULLETS = {
 }
 
 
-def test_the_wal_premise_every_wal_trigger_rests_on():
+def test_the_wal_premise_every_wal_trigger_rests_on(tmp_path):
     """FOUR BULLETS I HAD EXEMPTED AS "NOT ABOUT THIS CODEBASE" (Prudence, #764). "copying
     the `.db` loses recent writes", "`-wal` is committed data", "copy all three" — every one
     of them is true BECAUSE techne opens its databases in WAL mode, which is one line of our
@@ -289,17 +302,17 @@ def test_the_wal_premise_every_wal_trigger_rests_on():
     tested."""
     from techne.core.database import connect, init_db
 
-    db = Path(__file__).parent / "_wal_probe.db"
+    # `tmp_path`, NOT a fixed name in the tests directory. The first version wrote
+    # `tests/_wal_probe.db` — a shared path under `-n 4`, and a write into the source tree
+    # that outlives the run if the test dies between `init_db` and the cleanup. pytest
+    # gives every test its own directory precisely so neither can happen.
+    db = tmp_path / "wal_probe.db"
+    init_db(db).close()
+    conn = connect(db)
     try:
-        init_db(db).close()
-        conn = connect(db)
-        try:
-            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-        finally:
-            conn.close()
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     finally:
-        for suffix in ("", "-wal", "-shm"):
-            Path(str(db) + suffix).unlink(missing_ok=True)
+        conn.close()
 
     assert mode.lower() == "wal", (
         f"journal_mode is {mode!r} — every `-wal` trigger in docs/db-per-domain.md is now "
@@ -338,3 +351,24 @@ def test_the_bullet_accounting_still_matches(doc, counts):
         "TRIGGER_BULLETS."
     )
     assert unchecked <= total
+
+
+def test_backup_without_keep_really_does_grow_without_bound(config_free_tmp_home):
+    """THE SECOND HALF OF THE `--keep` TRIGGER, which nothing was checking. That bullet
+    makes two claims: `--keep` is the remedy (covered by the CLI test above) and WITHOUT IT
+    GROWTH IS UNBOUNDED. I counted the bullet as checked on the strength of the first half
+    only — which is the completeness claim I got wrong twice on #755, so it is asserted here
+    rather than assumed. If `backup` ever gains a default ceiling, this trigger becomes
+    advice about a problem that no longer exists and the bullet has to be rewritten."""
+    from techne.core.maintenance import backup_all_dbs
+
+    cfg = config_free_tmp_home
+    for _ in range(3):
+        backup_all_dbs(cfg)
+
+    sets = list((Path(cfg.data_dir) / "backups").iterdir())
+
+    assert len(sets) == 3, (
+        f"{len(sets)} sets after 3 unbounded runs — `backup` may now prune by default, "
+        "which would make deployment.md's `--keep` trigger wrong"
+    )
