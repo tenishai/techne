@@ -766,3 +766,38 @@ def test_an_absent_manifest_stays_silent(config, monkeypatch):
     assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
     assert "retention INCOMPLETE" not in result.output
     assert (backups / "someone-elses-folder").exists()
+
+
+def test_every_retention_refusal_has_a_row_in_the_docs():
+    """THE MESSAGES AND THE TABLE HAVE THE SAME AUTHOR, so left unchecked they agree with
+    each other rather than with reality (Prudence, #755 round 5 attack B). An operator
+    reading `docs/deployment.md` at 3am because their timer went red has to be able to
+    match what they see on stderr to a row. Derived rather than retyped, which is the rule
+    #498 set for this repo's other cross-process contract."""
+    from techne.core.maintenance import RETENTION_REFUSAL_PHRASES
+
+    doc = (Path(__file__).parent.parent / "docs" / "deployment.md").read_text()
+    table = doc[doc.index("What `3` actually means") :]
+
+    missing = [phrase for phrase in RETENTION_REFUSAL_PHRASES if phrase not in table]
+
+    assert not missing, f"exit-3 causes with no row in deployment.md: {missing}"
+
+
+def test_every_refusal_phrase_is_actually_used():
+    """The other direction, for the same reason the arch-card gate is enforced both ways:
+    a phrase nobody emits documents a failure that cannot happen, and sends an operator
+    looking for a cause that is not theirs."""
+    from techne.core import maintenance
+    from techne.core.maintenance import RETENTION_REFUSAL_PHRASES
+
+    src = Path(maintenance.__file__).read_text()
+    body = src[src.index("def _classify_backup_set") :]
+
+    unused = [
+        phrase
+        for i, phrase in enumerate(RETENTION_REFUSAL_PHRASES)
+        if f"RETENTION_REFUSAL_PHRASES[{i}]" not in body
+    ]
+
+    assert not unused, f"documented but never emitted: {unused}"

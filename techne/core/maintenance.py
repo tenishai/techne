@@ -255,6 +255,25 @@ def backup_all_dbs(
 #: text. See the format note inside `prune_backup_sets`.
 _CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
+#: THE DISTINGUISHING PHRASE OF EVERY REASON RETENTION REFUSES A SET, and the single source
+#: for both the messages below and the exit-3 table in `docs/deployment.md`.
+#:
+#: Derived rather than retyped, which is the rule #498 set for the other cross-process
+#: contract in this repo (its test reads the value from `exit_codes.py` "rather than
+#: retyping 78"). The hazard here is the one Prudence named on #755: the same person writes
+#: the message and the doc row, so the two agree with each other and neither is checked
+#: against reality. `test_every_retention_refusal_has_a_row_in_the_docs` closes that — add a
+#: refusal without a row and it fails.
+#:
+#: Failures from the delete itself are NOT here: those carry the OS's own `strerror`, which
+#: is why the table's first row deliberately describes the class instead of naming an errno.
+RETENTION_REFUSAL_PHRASES = (
+    "is a symlink",
+    "manifest is unreadable",
+    "is not YYYY-MM-DDTHH:MM:SSZ",
+    "is in the future",
+)
+
 
 def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     """Classify one directory under `backups/`. Returns `(stamp, refusal)`.
@@ -285,7 +304,7 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     # deleted, nothing reported. The old test covered only the mirror case (target older,
     # so the symlink sorted last and merely failed to delete), which is why this half hid.
     if child.is_symlink():
-        return None, "is a symlink — refusing to remove it or its target"
+        return None, f"{RETENTION_REFUSAL_PHRASES[0]} — refusing to remove it or its target"
     try:
         manifest = json.loads((child / _MANIFEST_NAME).read_text())
     except FileNotFoundError:
@@ -307,8 +326,8 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         # Treating one as a leak worth reporting and the other as none of our business had
         # no basis. A permission bit is also the more likely of the two in practice.
         return None, (
-            f"manifest is unreadable ({exc.strerror or exc}) — it cannot be judged, so "
-            "the set is never pruned"
+            f"{RETENTION_REFUSAL_PHRASES[1]} ({exc.strerror or exc}) — it cannot be "
+            "judged, so the set is never pruned"
         )
     if not isinstance(manifest, dict):
         return None, None
@@ -340,8 +359,8 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     # it IS reported, because "never deleted" and "never mentioned" together is a leak.
     if not _CANONICAL_STAMP.fullmatch(stamp):
         return None, (
-            f"manifest created_at {stamp!r} is not YYYY-MM-DDTHH:MM:SSZ — it cannot be "
-            "ordered safely, so it is never pruned and will accumulate"
+            f"manifest created_at {stamp!r} {RETENTION_REFUSAL_PHRASES[2]} — it cannot "
+            "be ordered safely, so it is never pruned and will accumulate"
         )
     # A STAMP IN THE FUTURE IS THE SAME CATEGORY (round 2, Nit 4). With no upper bound on
     # the sort it sorts newest forever, holds a keep slot permanently and quietly makes
@@ -349,8 +368,8 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     # catch-up run right after boot, before NTP may have synced.
     if stamp > _now_iso():
         return None, (
-            f"manifest created_at {stamp} is in the future — it cannot be ordered against "
-            "real time, so it is never pruned and holds a retention slot"
+            f"manifest created_at {stamp} {RETENTION_REFUSAL_PHRASES[3]} — it cannot be "
+            "ordered against real time, so it is never pruned and holds a retention slot"
         )
     return stamp, None
 
@@ -421,7 +440,9 @@ def prune_backup_sets(
             # nor anything actionable, and this is the last place that can say what it is.
             # Not hypothetical under `backups/`: `migrator.py` records a dangling symlink
             # there once stopping the store from opening at all.
-            failed.append((path, "is a symlink — refusing to remove it or its target"))
+            failed.append(
+                (path, f"{RETENTION_REFUSAL_PHRASES[0]} — refusing to remove it or its target")
+            )
             continue
         try:
             shutil.rmtree(path)

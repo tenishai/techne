@@ -120,7 +120,7 @@ folded into either success or failure:
 
 `3` is not a failed backup and should not page anyone as one.
 
-#### What `3` actually means, because there are four causes and they want different fixes
+#### What `3` actually means, because the causes differ and they want different fixes
 
 The run names every set it could not reclaim and why. **A stranded set is still a valid,
 fully restorable backup** — `restore` does not inspect `created_at`, so nothing here has
@@ -128,10 +128,15 @@ corrupted anything. What you are looking at is a set retention will never remove
 
 | the message says | what happened | what to do |
 |---|---|---|
-| `[Errno 13] Permission denied` | the set's directory or its contents cannot be removed | fix the permissions under `backups/` |
+| `[Errno N] <anything else>` | the delete itself failed, and the OS said why | act on **that** errno — it is reported verbatim. Permissions (`EACCES`) is the common one, but a read-only filesystem (`EROFS`), a file still open (`EBUSY`), or a full disk are all reachable and want different fixes |
 | `manifest is unreadable (...)` | techne cannot read the set's own manifest, so it will not judge it | fix the permissions on that `manifest.json` |
-| `created_at ... is not YYYY-MM-DDTHH:MM:SSZ` / `... is in the future` | the set cannot be ordered against the others, so it is never chosen for deletion | see below |
-| `is a symlink` | something under `backups/` is a symlink to a set | remove the symlink; techne will not follow it |
+| `created_at ... is not YYYY-MM-DDTHH:MM:SSZ` | the stamp is not in the one format that sorts chronologically as text, so the set cannot be ordered | see below |
+| `created_at ... is in the future` | the set cannot be ordered against real time — usually a clock that was ahead when it was written | see below |
+| `is a symlink` | something under `backups/` is a symlink to a set | remove the symlink; techne will not follow it or delete its target |
+
+The first row is deliberately not a list of specific errnos. Retention reports whatever the
+OS returned, and naming one of them here would send an operator to check permissions on a
+full disk.
 
 **The two stamp cases are the ones with no in-tool remedy, deliberately.** Retention only
 ever deletes what it can *order*, because the failure mode of guessing is a deleted backup.
