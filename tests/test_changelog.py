@@ -38,6 +38,15 @@ import pytest
 CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
 
+#: NOT WIDENED TO THE ATTRIBUTE FORM, and this is a deliberate non-fix (#748 r2 nit 3).
+#: `<details open>` does not match, so it would read as a stray closer and blame the wrong
+#: tag. I tried `</?details\\b[^>]*>` and it made the parse test and the balance test fail
+#: on a file whose structure is sound, in a way I could not explain from the code in the
+#: time available. Shipping a guard I cannot explain is worse than the nit it closes:
+#: nothing in this file uses the attribute form, the current failure is loud rather than
+#: silent, and a wrong diagnostic beats a guard with unexplained behaviour. Reopen with a
+#: reproduction if the attribute form ever appears.
+#:
 #: A `<details>` tag that OPENS A LINE is markup. One inside prose — `<details>` in a
 #: sentence, in backticks, in a fenced block — is the file TALKING ABOUT the convention,
 #: which this file now documents, so that edit is likely rather than hypothetical.
