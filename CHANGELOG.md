@@ -160,14 +160,28 @@ All notable changes to techne are documented here. Format loosely follows
   code path.
 
 
+- **Writer provenance on federated knowledge** (#553) — a shared Archivist could tell you
+  *what the team knows* and never *who says so*. Knowledge rows now carry `written_by`,
+  `origin_source` and `origin_session`, stamped **in the same INSERT** as the row rather
+  than by a follow-up UPDATE, so a crash between the two cannot leave a row that claims an
+  author it does not have. Takes core schema to **v25**. Pairs with #554, which is the
+  query surface over the same store.
+
 - **`pattern_outcomes` gets a write path** (#551, #426) — `techne architect realized` /
   `outcomes` / `unrealized`, plus `record_outcome()` and `unrealized_patterns()`. The
   code had been written since 2026-07-28 and blocked on a version number: #426 shipped
   `ARCHITECT_VERSION = 4` while main had since taken v4 for #674's liminal
-  canonicalisation. **Both steps are kept at their own rungs and `architect.db` is now
-  v5.** Verified on a copy of the live store rather than on fixtures — 520 patterns
+  canonicalisation. **Both steps are kept at their own rungs, taking `architect.db`
+  to v5.** Verified on a copy of the live store rather than on fixtures — 520 patterns
   preserved, and `pattern_outcomes` compared column by column against the 11 rows
   already there, since `IF NOT EXISTS` would otherwise mask a divergent shape.
+
+- **The recall ladder states itself** (#552, #695) — `techne_recall` now reports **every
+  rung** on every call, named and in order, and each row carries the rung it came from. A
+  rung that is **unconfigured** stays distinct from one that is **empty**: "I have no
+  librarian" and "the librarian had nothing" are different answers, and collapsing them is
+  how an absent result becomes indistinguishable from a working one. New `core/tiers.py`;
+  a response-shape change to the most-used entry point.
 
 - **A running MCP server notices when the code moved underneath it** (#696 part B). A
   `stat` of `<runtime>/.git/logs/HEAD` behind a 30s TTL, then a walk of the `techne.*`
@@ -344,7 +358,8 @@ All notable changes to techne are documented here. Format loosely follows
   `(name, body)`, so the dedup step that runs *before* spending a subagent could not
   structurally match a pattern by its source and returned a confident "no patterns
   matched". An already-surveyed repo got re-investigated and the caller was told the
-  corpus had nothing.
+  corpus had nothing. **Takes `architect.db` v5 → v6** — the second renumber this
+  cycle, rebuilding the FTS table with `source_url` in it.
 
 - **The reflect emit cursor was keyed on a hash that drifts** (#733) — so the pass
   re-emitted work it had already done, or skipped work it had not, depending on which way
@@ -419,7 +434,8 @@ All notable changes to techne are documented here. Format loosely follows
   `git log v0.15.0..main` before the version bump: ten of twenty-one merged commits had no
   entry, including a schema renumber. `[Unreleased]` also carried two `### Added` and two
   `### Fixed` blocks, so content was present and invisible to anyone scanning; `[0.13.0]`
-  shipped with four duplicated headings. `tests/test_changelog.py` now pins the structural
+  repeats four headings inside a `<details>` archive — checked, and
+  deliberate rather than a second instance, so it is exempted rather than merged. `tests/test_changelog.py` now pins the structural
   half.
 
 ## [0.15.0] — 2026-08-19

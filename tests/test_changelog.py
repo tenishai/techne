@@ -38,10 +38,36 @@ import pytest
 CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
 
+#: A `<details>` tag that OPENS A LINE is markup. One inside prose — `<details>` in a
+#: sentence, in backticks, in a fenced block — is the file TALKING ABOUT the convention,
+#: which this file now documents, so that edit is likely rather than hypothetical.
+#:
+#: MEASURED (Prudence, #748 r1 Important 4): matching the bare token anywhere let one
+#: prose mention unbalance the counter AND extend a strip region to the next real closer,
+#: silently dropping `[0.15.0]`, `[0.14.0]` and `[0.13.0]` from the duplicate-heading
+#: check — collection went 11 tests to 8. A guard that loses coverage when it misfires is
+#: worse than one that only misfires.
+_DETAILS = re.compile(r"^\s*(?P<tag></?details>)", re.M)
+
+
 def _strip_collapsed(text: str) -> str:
     """Drop `<details>…</details>` regions — a collapsed verbatim archive may repeat a
-    heading on purpose, and reading that as a duplicate is what broke this file once."""
-    return re.sub(r"<details>.*?</details>", "", text, flags=re.S)
+    heading on purpose, and reading that as a duplicate is what broke this file once.
+
+    Only line-leading tags count; see `_DETAILS`.
+    """
+    out, depth, cut = [], 0, 0
+    for m in _DETAILS.finditer(text):
+        if m.group("tag") == "<details>":
+            if depth == 0:
+                out.append(text[cut : m.start()])
+            depth += 1
+        else:
+            depth = max(0, depth - 1)
+            if depth == 0:
+                cut = m.end()
+    out.append(text[cut:])
+    return "".join(out)
 
 
 def _sections() -> list[tuple[str, list[str]]]:
@@ -87,12 +113,14 @@ def test_every_details_block_is_closed():
 
     Checks NESTING, not just counts: a stray closer before its opener balances numerically
     and is still broken, which is exactly the state that shipped past a bullet-count claim.
+    Line-leading tags only — a `<details>` mentioned in prose is the file describing its own
+    convention, not markup, and treating it as markup broke this guard once.
     """
     text = CHANGELOG.read_text(encoding="utf-8")
 
     depth = 0
-    for m in re.finditer(r"</?details>", text):
-        depth += 1 if m.group() == "<details>" else -1
+    for m in _DETAILS.finditer(text):
+        depth += 1 if m.group("tag") == "<details>" else -1
         assert depth >= 0, (
             f"`</details>` at offset {m.start()} closes a block that was never opened — "
             "counts can still balance while the nesting is inverted"
