@@ -53,9 +53,29 @@ class NoLiftEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class SkippedSection:
+    """A `## ` section that looked like a pattern and could not be parsed.
+
+    RETURNED, NOT ONLY LOGGED (techne#754). A section missing its `- **Source**:`
+    line was dropped with a `logger.warning` and nothing else, so `techne architect
+    ingest` printed `patterns: 0` and exited 0 on a file the operator had just
+    written by hand. The bold markers are load-bearing — `- Source:` parses as body
+    text — which makes a plausible first attempt fail in the one way this project
+    keeps failing: silently, looking like success. The caller cannot report what the
+    parser does not hand back.
+    """
+
+    heading: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class ParseResult:
     patterns: list[ParsedPattern]
     no_lifts: list[NoLiftEntry]
+    #: Sections that looked like patterns and were not parsed. Defaulted so the two
+    #: existing constructions (and any caller predating techne#754) keep working.
+    skipped: tuple[SkippedSection, ...] = ()
 
 
 # Skip these heading titles (case-insensitive prefix match) when scanning
@@ -100,11 +120,14 @@ def _relation_targets(rest: str) -> list[str]:
 def parse(text: str) -> ParseResult:
     """Parse a markdown document into ParsedPattern + NoLiftEntry lists.
 
-    Tolerant by design: unrecognized sections are skipped silently;
-    malformed pattern bodies (missing source/date) are skipped with a log.
+    Tolerant by design: unrecognized sections are skipped silently. Malformed
+    pattern bodies (missing source/date) are skipped too, but are RETURNED in
+    `skipped` as well as logged, so a caller can tell the operator which section it
+    dropped and why (techne#754) rather than reporting a successful zero.
     """
     patterns: list[ParsedPattern] = []
     no_lifts: list[NoLiftEntry] = []
+    skipped: list[SkippedSection] = []
 
     sections = _split_into_sections(text)
     for heading, body in sections:
@@ -116,10 +139,12 @@ def parse(text: str) -> ParseResult:
             continue
         # Anything else is a pattern candidate
         parsed = _parse_pattern_body(heading, body)
-        if parsed is not None:
+        if isinstance(parsed, ParsedPattern):
             patterns.append(parsed)
+        else:
+            skipped.append(SkippedSection(heading=heading, reason=parsed))
 
-    return ParseResult(patterns=patterns, no_lifts=no_lifts)
+    return ParseResult(patterns=patterns, no_lifts=no_lifts, skipped=tuple(skipped))
 
 
 def _split_into_sections(text: str) -> list[tuple[str, str]]:
@@ -158,11 +183,13 @@ def _split_into_sections(text: str) -> list[tuple[str, str]]:
     return sections
 
 
-def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | None:
+def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | str:
     """Extract URL + date + remaining body for a pattern section.
 
-    Returns None and logs a warning if the section lacks a Source or
-    Surveyed line.
+    Returns the parsed pattern, or a REASON STRING if the section could not be
+    parsed. It used to return None and log — which left the caller unable to tell
+    the operator anything (techne#754). The string is the message a human sees, so
+    it names the missing marker rather than the field.
     """
     source_line: str | None = None
     date_line: str | None = None
@@ -193,20 +220,30 @@ def _parse_pattern_body(heading: str, body: str) -> ParsedPattern | None:
             body_lines.append(line)
 
     if source_line is None or date_line is None:
-        logger.warning(
-            "skip_section",
-            extra={"heading": heading, "reason": "missing Source or Surveyed line"},
+        # Name the MISSING one, and say the markers are required. "missing Source or
+        # Surveyed line" does not tell an operator staring at a file that plainly has
+        # both which of `- Source:` / `- **Source**:` the parser wanted.
+        absent = [
+            n for n, v in (("`- **Source**:`", source_line), ("`- **Surveyed**:`", date_line))
+            if v is None
+        ]
+        reason = (
+            f"no {' or '.join(absent)} line{'s' if len(absent) > 1 else ''} "
+            "(the ** bold markers are required)"
         )
-        return None
+        logger.warning("skip_section", extra={"heading": heading, "reason": reason})
+        return reason
 
     url_match = _URL_RE.search(source_line)
     date_match = _DATE_RE.search(date_line)
     if url_match is None or date_match is None:
-        logger.warning(
-            "skip_section",
-            extra={"heading": heading, "reason": "could not extract URL or date"},
+        reason = (
+            "no http(s) URL in the Source line"
+            if url_match is None
+            else "no YYYY-MM-DD date in the Surveyed line"
         )
-        return None
+        logger.warning("skip_section", extra={"heading": heading, "reason": reason})
+        return reason
 
     return ParsedPattern(
         name=heading,

@@ -3480,7 +3480,117 @@ def architect_ingest(ctx, markdown_file, verdict):
     counts = ingest_patterns_md(
         architect_db(config), markdown_file.read_text(encoding="utf-8"), verdict=verdict
     )
+    # SAY WHAT WAS DROPPED, BEFORE the JSON (techne#754). A section missing its
+    # `- **Source**:` line was skipped with a log line nobody sees, so this printed
+    # `"patterns": 0` and exited 0 on a hand-written file — and the bold markers are
+    # load-bearing, which is not guessable. stderr, so `| jq` over the JSON still works.
+    for sk in counts["skipped"]:
+        click.echo(f'skipped section "{sk["heading"]}": {sk["reason"]}', err=True)
+    if counts["skipped"] and not counts["patterns_added"]:
+        click.echo(
+            "nothing was ingested. `techne architect add` takes the fields directly "
+            "if you would rather not hand-write the markdown.",
+            err=True,
+        )
     click.echo(json.dumps(counts, indent=2))
+
+
+@architect.command("add")
+@click.option("--name", required=True, help="What the pattern is called. Becomes its heading.")
+@click.option("--source", required=True, help="URL the pattern was lifted from.")
+@click.option(
+    "--surveyed",
+    default=None,
+    help="Date you looked at it, YYYY-MM-DD. Defaults to today.",
+)
+@click.option("--body", default=None, help="The pattern itself. Or --body-file, or stdin.")
+@click.option(
+    "--body-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Read the body from a file instead of --body.",
+)
+@click.option(
+    "--verdict",
+    type=click.Choice(["skip", "skip-with-flag", "patterns-only", "full-eval"]),
+    default=None,
+    help="Your judgment for this URL. Omit to record 'patterns-only' (the modal outcome).",
+)
+@click.option("--surveyed-by", default="raven", show_default=True)
+@click.option("--lens", default="infra", show_default=True)
+@click.pass_context
+def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens):
+    """Add ONE pattern to architect.db from its fields — the feeder that ships.
+
+    THE ARCHITECT HAD NO WAY IN THAT CAME WITH techne (techne#754). `ingest` takes a
+    markdown corpus, and `investigate-url` / `survey-field` — the skills that actually
+    fill the store — live in tenishai/skills, a separate install we never mention. So an
+    operator installs techne, reads the tutorial, learns to ask the architect, and the
+    thing that fills it ships from somewhere else.
+
+    A COMMAND RATHER THAN A BUNDLED SKILL, because `techne init --platform` advertises
+    five platforms and `techne/platforms/` holds one renderer. A skill installs into
+    Claude Code's `commands/` and nowhere else; a CLI command works on all five.
+
+    AND NOT A MARKDOWN GENERATOR. `ingest`'s format is not guessable — `- Source:` and
+    `- **Source**:` differ by two asterisks and the first is silently parsed as body
+    text — so a feeder that rendered markdown and re-parsed it would still fail in that
+    way, one layer down. This writes through the same store API `ingest` writes through
+    after parsing, so there is no format to get wrong.
+    """
+    import sys
+    from datetime import datetime, timezone
+
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import DEFAULT_INGEST_VERDICT, add_pattern, upsert_investigation
+
+    sources = [s for s in (body, body_file) if s is not None]
+    if len(sources) > 1:
+        raise click.UsageError("pass --body or --body-file, not both")
+    if body_file is not None:
+        body = body_file.read_text(encoding="utf-8")
+    elif body is None:
+        # stdin only when it is a PIPE. On a tty this would hang looking like the command
+        # is working, which is the failure this command exists to stop making.
+        if sys.stdin.isatty():
+            raise click.UsageError("no body: pass --body, --body-file, or pipe it on stdin")
+        body = sys.stdin.read()
+    if not body.strip():
+        raise click.UsageError("the body is empty — a pattern with no body is not a pattern")
+
+    # VALIDATED WITH THE PARSER'S OWN REGEXES, so `add` and `ingest` cannot disagree about
+    # what a URL or a date is. A second opinion here would be a second spelling.
+    from techne.import_md import _DATE_RE, _URL_RE
+
+    surveyed = surveyed or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not _DATE_RE.search(surveyed):
+        raise click.UsageError(f"--surveyed must be YYYY-MM-DD; got {surveyed!r}")
+    if not _URL_RE.search(source):
+        raise click.UsageError(f"--source must be an http(s) URL; got {source!r}")
+
+    db = architect_db(config)
+    inv_id = upsert_investigation(
+        db,
+        url=source,
+        surveyed_at=surveyed,
+        verdict=DEFAULT_INGEST_VERDICT if verdict is None else verdict,
+        surveyed_by=surveyed_by,
+        lens=lens,
+        # Same rules `ingest` applies: a stated verdict overwrites, the fallback is
+        # insert-only so a `reverdict` judgment survives, and storing a pattern proves the
+        # URL yielded one, so a stale skip must not outlive it.
+        overwrite_verdict=verdict is not None,
+        clears_skip=True,
+    )
+    pid, stored = add_pattern(
+        db, investigation_id=inv_id, name=name, source_url=source, body=body.strip()
+    )
+    if stored:
+        click.echo(f"added {pid}  {name}")
+    else:
+        # Ids are content hashes, so this is the same pattern, not a name collision.
+        click.echo(f"already present {pid}  {name}")
 
 
 @architect.command("reverdict")
