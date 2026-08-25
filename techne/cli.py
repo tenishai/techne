@@ -4732,6 +4732,20 @@ def backup_cmd(ctx, out, keep):
             retention_incomplete = True
     if res.skipped_absent:
         click.echo(f"skipped (absent): {', '.join(res.skipped_absent)}")
+    if not res.backed_up:
+        # A BACKUP OF ZERO DATABASES IS NOT A BACKUP (techne#742). Said loudly AND in the
+        # exit status, because on a timer the status is the only half anyone sees — and a
+        # green nightly job that captures nothing is worse than a red one, being a false
+        # belief that you are covered until the day you need to restore. Takes precedence
+        # over `retention_incomplete`: both can be true, and this is the more serious.
+        from techne.exit_codes import EX_NOTHING_BACKED_UP
+
+        click.echo(
+            "NO DATABASES WERE BACKED UP — the set is empty. Check that this is the right "
+            f"store: {config.data_dir}",
+            err=True,
+        )
+        ctx.exit(EX_NOTHING_BACKED_UP)
     if retention_incomplete:
         # EXIT 3, NOT 0 (Prudence, #755 Important 2, second half). Saying it on stderr was
         # not enough: both units this PR ships route stderr somewhere nobody reads until

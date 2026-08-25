@@ -372,13 +372,29 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     if not isinstance(manifest, dict):
         return None, None
     dbs = manifest.get("databases")
-    if not isinstance(dbs, dict) or not dbs:
-        # `read_manifest`'s own identity test. techne refusing to RESTORE from a directory
+    # AN EMPTY SET IS STILL OURS — the sixth case, and it arrives through the SUCCESS path
+    # rather than any interruption (found answering my own round-6 question B, which is the
+    # completeness-claim shape I got wrong in round 5). When every domain db is absent,
+    # `backup_all_dbs` writes a COMPLETE set with `"databases": {}`, and the identity test
+    # below then answered "not ours" about a set techne had just written. Measured: five
+    # nightly runs, five sets on disk, `removed=[]`, `failed=[]`, exit 0.
+    #
+    # `techne_version` is the honest identity key. `read_manifest` keys on `databases`
+    # because it is about to RESTORE from them, which is a different question — and the
+    # round-2 fix imported its test wholesale without noticing that difference. Safe for
+    # every set ever written: `techne_version` has been in the manifest since backup/restore
+    # landed (`da6a228`, #139) and has never changed shape, so keying on it cannot strand a
+    # set an older techne wrote.
+    if "techne_version" not in manifest and (not isinstance(dbs, dict) or not dbs):
+        # `read_manifest`'s identity test, for manifests that do NOT claim to be ours.
+        # techne refusing to RESTORE from a directory
         # while being willing to DELETE it is not a defensible pair, and `manifest.json` +
         # `created_at` are among the least techne-private things there are — a foreign
         # `{"name": "my-extension", ...}` used to pass (round 2).
         return None, None
-    if not all(isinstance(meta, dict) for meta in dbs.values()):
+    if not isinstance(dbs, dict) or not all(
+        isinstance(meta, dict) for meta in dbs.values()
+    ):
         # THE ONE SHAPE THAT STILL GOT THROUGH (Prudence, #755 round 3 Nit 3). A
         # `databases` dict whose VALUES are strings/None/lists satisfied "non-empty dict"
         # here while `read_manifest` cannot read it at all — its `meta.get("file", ...)`

@@ -892,3 +892,72 @@ def test_an_orphaned_set_we_named_is_reported(config, monkeypatch):
     assert result.exit_code == 3, f"exit {result.exit_code}\n{result.output}"
     assert "has no manifest" in result.output
     assert orphan.exists(), "an incomplete set must be reported, never deleted automatically"
+
+
+def test_a_set_with_no_databases_is_still_ours(config, monkeypatch):
+    """THE SIXTH CASE, AND IT ARRIVES THROUGH THE SUCCESS PATH. When every domain db is
+    absent, `backup_all_dbs` writes a COMPLETE set with `"databases": {}` — and the
+    identity test, imported wholesale from `read_manifest` in round 2, then answered "not
+    ours" about a set techne had just written. Measured before the fix: five nightly runs,
+    five sets on disk, `removed=[]`, `failed=[]`, exit 0. Silent unbounded growth with no
+    interruption involved. `read_manifest` keys on `databases` because it is about to
+    RESTORE from them; identity is a different question and `techne_version` answers it."""
+    empty_home = Path(config.data_dir) / "empty"
+    empty_home.mkdir()
+    from techne.config import Config
+
+    cfg = Config()
+    cfg.db_path = empty_home / "techne.db"  # deliberately never created
+    cfg.data_dir = empty_home
+
+    first = backup_all_dbs(cfg)
+    assert first.backed_up == [], "fixture is wrong — something was actually backed up"
+    for _ in range(3):
+        backup_all_dbs(cfg)
+
+    removed, failed = prune_backup_sets(empty_home / "backups", keep=1)
+
+    assert len(removed) == 3, f"retention cannot see sets techne itself wrote: {removed}"
+    assert failed == []
+    assert len(list((empty_home / "backups").iterdir())) == 1
+
+
+def test_backup_exits_4_when_it_captured_nothing(config, monkeypatch, tmp_path):
+    """A BACKUP OF ZERO DATABASES IS NOT A BACKUP, and at exit 0 it was indistinguishable
+    from a working one on the only channel a timer has. The realistic cause is a job pointed
+    at the wrong store — a typo'd TECHNE_HOME, a unit installed before `techne init` — which
+    means a green nightly light and no backups at all until the day someone needs to
+    restore. Separate from 1: nothing failed, there was simply nothing there."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    empty = tmp_path / "wrong-store"
+    empty.mkdir()
+    cfg = Config()
+    cfg.db_path = empty / "techne.db"  # deliberately never created
+    cfg.data_dir = empty
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
+
+    result = CliRunner().invoke(main, ["backup", "--keep", "14"])
+
+    assert result.exit_code == 4, f"exit {result.exit_code}\n{result.output}"
+    assert "NO DATABASES WERE BACKED UP" in result.output
+    assert str(empty) in result.output, "does not name the store it actually looked in"
+
+
+def test_backup_exits_0_when_it_captured_something(config, monkeypatch):
+    """The other side, so exit 4 cannot fire on a working backup — the failure that would
+    train an operator to ignore it."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: config))
+
+    result = CliRunner().invoke(main, ["backup"])
+
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+    assert "NO DATABASES WERE BACKED UP" not in result.output

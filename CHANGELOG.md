@@ -16,6 +16,13 @@ All notable changes to techne are documented here. Format loosely follows
   it. A directory is only a set if it carries a manifest listing databases, the same
   identity test `restore` applies; anything else under `backups/` is left alone.
 
+  **A run that captured nothing exits 4.** With no domain database present — a typo in
+  `TECHNE_HOME`, a timer installed before `techne init`, a service running as the wrong
+  user — `backup` used to write an empty set, print `backed up [(none)]` and exit `0`,
+  nightly, forever. A green light and no backups, discovered on the day someone needs to
+  restore. Separate from `1` because nothing failed: every step did what it was asked and
+  there was nothing to capture.
+
   **Retention failure exits 3**, distinct from a failed backup (`1`) and from success
   (`0`). A timer surfaces exit status and nothing else, so at `0` a permanently broken
   prune reads green while the disk fills — the failure `--keep` exists to prevent, one

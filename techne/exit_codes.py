@@ -49,6 +49,25 @@ EX_CONFIG = 78
 #: `SuccessExitStatus=3` to the shipped units, which would restore the silence.
 EX_RETENTION_INCOMPLETE = 3
 
+#: `techne backup`: THE RUN COMPLETED AND CAPTURED NOTHING.
+#:
+#: A backup of zero databases is not a backup, and until techne#742 it was indistinguishable
+#: from a working one on the only channel a timer has. Reproduced: with no domain db present
+#: — a typo'd ``TECHNE_HOME``, or the unit installed before ``techne init`` — ``backup``
+#: wrote an empty set, printed ``backed up [(none)]`` and exited 0, nightly, forever. The
+#: operator has a green timer and no backups, which is worse than a red one: it is a false
+#: belief that they are covered, and they find out when they need to restore.
+#:
+#: SEPARATE FROM ``1`` because the run did not fail — every step did what it was asked and
+#: there was nothing to capture, so a monitor that cannot tell those apart sends someone to
+#: debug a crash that did not happen. Separate from ``3`` because retention is fine here;
+#: these can occur together and ``4`` wins, being the more serious of the two.
+#:
+#: A fresh install with the timer already armed will go red until ``techne init`` runs. That
+#: is the intended reading — a backup job pointed at a store that does not exist is a
+#: misconfiguration whether or not it is a new one.
+EX_NOTHING_BACKED_UP = 4
+
 
 class StartupConfigError(RuntimeError):
     """A startup precondition that restarting cannot possibly satisfy.

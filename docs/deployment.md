@@ -115,8 +115,18 @@ folded into either success or failure:
 |---|---|
 | `0` | backup written, retention completed |
 | `3` | **backup written, one or more sets were not reclaimed** — see below |
+| `4` | **the run captured NOTHING** — no domain database was present to back up |
 | `1` | the backup itself failed |
 | `2` | usage error (e.g. `--keep -1`), before any work happens |
+
+`4` takes precedence over `3`: both can be true, and an empty backup is the more serious.
+
+**`4` almost always means the job is pointed at the wrong store.** A typo in `TECHNE_HOME`,
+a unit installed before `techne init` ran, or a service running as a user whose `~/.techne`
+is not the one you meant. The message names the directory it looked in — check that first.
+A backup of zero databases is not a backup, and at exit `0` it was indistinguishable from a
+working one on the only channel a timer has, which is a green light and no backups until
+the day you need to restore.
 
 `3` is not a failed backup and should not page anyone as one.
 
