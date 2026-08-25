@@ -387,8 +387,16 @@ def test_the_absence_the_migration_trigger_asserts_is_still_absent():
     )
 
 
-#: Every option `techne restore` exposes. Pinned, not grepped for one flag name.
+#: Every option `techne restore` exposes, and every parameter `restore_all_dbs` takes.
+#:
+#: TWO SURFACES, BECAUSE THE CLAIM LIVES IN THE SECOND ONE. "all-or-nothing across domains"
+#: is a property of `restore_all_dbs`, whose signature has no domain parameter at all — the
+#: CLI options are downstream of it. Pinning only the options would have caught a `--only`
+#: flag and missed a `domains=` kwarg added to the function, which another caller could
+#: reach without any CLI change. Asked myself whether the surface I pinned actually carries
+#: the claim, and the first answer was no.
 RESTORE_OPTIONS_AT_LAST_REVIEW = {"no_pre_backup", "yes"}
+RESTORE_ALL_DBS_PARAMS_AT_LAST_REVIEW = {"config", "src_dir", "pre_restore_backup"}
 
 
 def test_the_restore_trigger_is_still_all_or_nothing():
@@ -413,6 +421,19 @@ def test_the_restore_trigger_is_still_all_or_nothing():
         f"`restore`'s options changed: {sorted(options)}. Read db-per-domain.md's restore "
         "trigger — it tells operators restore is all-or-nothing across domains. If one of "
         "these selects a subset, the trigger is wrong. If none does, re-bless this pin."
+    )
+
+    # THE SURFACE THE CLAIM ACTUALLY LIVES ON. A domain-selecting parameter added here
+    # would make the trigger wrong without touching a single CLI option.
+    import inspect
+
+    from techne.core.maintenance import restore_all_dbs
+
+    params = set(inspect.signature(restore_all_dbs).parameters)
+
+    assert params == RESTORE_ALL_DBS_PARAMS_AT_LAST_REVIEW, (
+        f"`restore_all_dbs`'s signature changed: {sorted(params)}. If one of these selects "
+        "a subset of domains, restore is no longer all-or-nothing and the trigger is wrong."
     )
 
 
