@@ -446,10 +446,9 @@ def test_pi_fresh_session_gates_tools(monkeypatch):
     assert out == "techne=ANSWER"
     assert captured["argv"][0] == "pi"
     assert "--print" in captured["argv"]
-    assert "--exclude-tools" in captured["argv"]
-    excluded = captured["argv"][captured["argv"].index("--exclude-tools") + 1]
-    for tool in ("bash", "read", "mcp", "mcpScript", "mcp__techne__techne_search"):
-        assert tool in excluded.split(",")
+    # off-test gates ALL tools (not an enumerated denylist) so the extension's
+    # push injection is the only channel that can carry the canary.
+    assert "--no-tools" in captured["argv"]
 
 
 def test_pi_fresh_session_pull_allowed_no_gating(monkeypatch):
@@ -468,7 +467,7 @@ def test_pi_fresh_session_pull_allowed_no_gating(monkeypatch):
 
     monkeypatch.setattr(runtimes.subprocess, "run", fake_run)
     runtimes.PiAdapter(model="provider/model").fresh_session("q", disable_native=False, allow_techne_tools=True)
-    assert "--exclude-tools" not in captured["argv"]  # no gating when pull is allowed
+    assert "--no-tools" not in captured["argv"]  # no gating when pull is allowed
     assert "--model" in captured["argv"] and "provider/model" in captured["argv"]
 
 

@@ -233,10 +233,11 @@ class PiAdapter:
 
     techne's push on pi is the capture extension's `before_agent_start` hook,
     which appends a techne-memory block built by `techne context`. To test that
-    push in isolation (pull off) we run with `--exclude-tools` denying the
-    techne MCP tools plus the local pull tools (bash/read) and the pi-mcp-
-    adapter's gateway tools (`mcp`, `mcpScript`) — the only remaining channel
-    is the extension's injection.
+    push in isolation (pull off) we run with `--no-tools` — the model needs
+    zero tools to answer the probe prompt, and this closes the whole class of
+    pull channels (built-ins, extension tools, the pi-mcp-adapter gateway) at
+    once instead of enumerating a denylist against a moving target. Extensions
+    still load, so the capture extension's injection still fires.
 
     Runs in a throwaway temp workspace so the probe never touches a real repo;
     techne's durable knowledge is not project-scoped, so the canary still
@@ -244,25 +245,6 @@ class PiAdapter:
     """
 
     name = "pi"
-
-    # Local tools that could pull from techne out-of-band (shell `techne
-    # search`, reading the db / memory files) + the pi-mcp-adapter gateway
-    # tools that reach every MCP server. The `mcp__techne__*` names cover
-    # deployments where individual MCP tools are registered directly instead of
-    # behind the gateway.
-    PULL_TOOL_DENYLIST = [
-        "bash",
-        "read",
-        "mcp",
-        "mcpScript",
-        "mcp__techne__techne_observe",
-        "mcp__techne__techne_recall",
-        "mcp__techne__techne_resume",
-        "mcp__techne__techne_search",
-        "mcp__techne__techne_status",
-        "mcp__techne__techne_store",
-        "mcp__techne__techne_threads",
-    ]
 
     def __init__(
         self,
@@ -310,7 +292,9 @@ class PiAdapter:
             if self.model:
                 argv += ["--model", self.model]
             if not allow_techne_tools:
-                argv += ["--exclude-tools", ",".join(self.PULL_TOOL_DENYLIST)]
+                # No tools at all — the model answers from context only, so the
+                # extension's push injection is the sole channel (see class doc).
+                argv += ["--no-tools"]
             argv.append(prompt)
 
             logger.debug(

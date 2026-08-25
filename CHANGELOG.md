@@ -346,9 +346,10 @@ open and is not reversible — back up first.
   and it needed no new surface — one `techne observe` path, three clients.
 
   The probe follows: `techne probe --runtime pi` (a `PiAdapter` on
-  `pi --print` in a throwaway workspace, `--exclude-tools` gating the techne
-  MCP tools + bash/read + the pi-mcp-adapter's `mcp`/`mcpScript` gateway so the
-  extension's push injection is the only channel). pi has no native memory, so
+  `pi --print` in a throwaway workspace with `--no-tools`, so the extension's
+  push injection is the only channel — closing the whole class of pull paths
+  at once instead of a denylist against a moving target). pi has no native
+  memory, so
   `off-test` isolates the only techne path, as on opencode. Wired into the
   probe CLI, exported from `techne.probe`, and covered by the same unit tests
   the other adapters have plus a `@pytest.mark.probe` end-to-end.

@@ -40,40 +40,81 @@ const TECHNE_BIN = process.env.TECHNE_BIN ?? "techne"
 // techne's own transcript-ingest truncation (and the opencode plugin's cap).
 const MAX_CONTENT = 4000
 
-// Tools this extension itself runs (the techne CLI) — capturing them would just
-// record the plumbing, not the work.
-const SELF_TOOLS = new Set(["techne", "mcp"])
+// A hung techne CLI must not hold a turn — kill after this. The default
+// detector is heuristic (no LLM), so healthy runs finish in well under this.
+const RUN_TIMEOUT_MS = 10_000
 
-// Warn once per process if the techne binary is missing, so a misconfigured
-// TECHNE_BIN is visible instead of silently dropping every observation.
-let warnedMissing = false
+// True when the tool call is techne's own plumbing (this extension's CLI
+// shell-outs or techne MCP tools) — capturing it would record the plumbing,
+// not the work. Non-techne MCP servers are real work and get captured.
+function isTechnePlumbing(toolName: string, args: any): boolean {
+  if (toolName === "techne") return true
+  if (toolName === "mcp" || toolName === "mcpScript") {
+    const target = `${args?.server ?? ""} ${args?.tool ?? ""} ${toolName === "mcpScript" ? args?.code ?? "" : ""}`
+    return target.includes("techne")
+  }
+  // Directly-registered MCP tools carry the server in the name
+  // (e.g. mcp__techne__techne_search).
+  return toolName.includes("techne")
+}
+
+// Warn once per process, so a broken TECHNE_BIN is visible instead of
+// silently dropping every observation — without spamming per tool run.
+let warned = false
+function warn(msg: string): void {
+  if (warned) return
+  warned = true
+  console.warn(`[techne] ${msg}`)
+}
 
 /** Run a command, resolve with stdout. Never throws — capture is best-effort. */
 function run(args: string[], stdin?: string): Promise<string> {
   return new Promise((resolve) => {
+    let child
     try {
-      const child = spawn(TECHNE_BIN, args, { stdio: ["pipe", "pipe", "ignore"] })
-      let out = ""
-      child.stdout?.on("data", (d: Buffer) => (out += d.toString()))
-      child.on("error", (err) => {
-        if (!warnedMissing) {
-          warnedMissing = true
-          console.warn(
-            `[techne] capture disabled: cannot run ${TECHNE_BIN} (${err.message}) — ` +
-              `set TECHNE_BIN to a techne with the observe command, e.g. ` +
-              `export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"`,
-          )
-        }
-        resolve("")
-      })
-      child.on("close", () => resolve(out))
-      if (stdin !== undefined) {
-        child.stdin?.write(stdin)
-      }
-      child.stdin?.end()
+      child = spawn(TECHNE_BIN, args, { stdio: ["pipe", "pipe", "ignore"] })
     } catch {
       resolve("")
+      return
     }
+    let out = ""
+    let done = false
+    const finish = (value: string) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL")
+      finish("")
+    }, RUN_TIMEOUT_MS)
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()))
+    // A fast-exiting child (e.g. a stale pipx techne printing a usage error)
+    // never drains stdin → the queued write EPIPEs. Without this listener the
+    // error is uncaught and takes down the host pi process.
+    child.stdin?.on("error", () => {})
+    child.on("error", (err) => {
+      warn(
+        `capture disabled: cannot run ${TECHNE_BIN} (${err.message}) — ` +
+          `set TECHNE_BIN to a techne with the observe command, e.g. ` +
+          `export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"`,
+      )
+      finish("")
+    })
+    child.on("close", (code) => {
+      if (code !== 0) {
+        warn(
+          `capture degraded: ${TECHNE_BIN} ${args[0]} exited ${code} — ` +
+            `stale install? try: pipx install --force --editable <techne repo>`,
+        )
+      }
+      finish(out)
+    })
+    if (stdin !== undefined) {
+      child.stdin?.write(stdin)
+    }
+    child.stdin?.end()
   })
 }
 
@@ -137,9 +178,19 @@ export default function (pi: {
   // "prior context for this work", so a per-session snapshot is the right grain.
   const contextCache = new Map<string, string>()
 
+  // tool_execution_end doesn't carry args, so remember them at start — needed
+  // to tell techne's own MCP plumbing apart from other servers' real work.
+  const toolArgs = new Map<string, any>()
+
+  pi.on("tool_execution_start", (event) => {
+    toolArgs.set(event.toolCallId, event.args)
+  })
+
   // Each tool execution → one observation (the PostToolUse analogue).
   pi.on("tool_execution_end", async (event, ctx) => {
-    if (SELF_TOOLS.has(event.toolName)) return
+    const args = toolArgs.get(event.toolCallId)
+    toolArgs.delete(event.toolCallId)
+    if (isTechnePlumbing(event.toolName, args)) return
     await observe(techneSessionId(ctx), ctx.cwd, event.toolName, resultText(event.result))
   })
 

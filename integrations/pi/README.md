@@ -122,10 +122,13 @@ techne probe --runtime pi --mode off-test
 ```
 
 This seeds a unique codeword into techne only, spawns a fresh
-`pi --print` session in a throwaway workspace with the techne MCP tools and
-the local pull tools (bash/read) excluded (`--exclude-tools`) so the only path
-left is the extension's `before_agent_start` injection, then asks for the
-codeword. Surfacing it proves the **push** path carries memory into pi.
+`pi --print` session in a throwaway workspace with **all tools disabled**
+(`--no-tools`) so the only path left is the extension's `before_agent_start`
+injection, then asks for the codeword. Surfacing it proves the **push** path
+carries memory into pi. `--no-tools` closes the whole class of pull channels
+(built-ins, extension tools, the pi-mcp-adapter gateway) at once instead of
+enumerating a denylist against a moving target; extensions still load, so the
+injection still fires.
 Defaults to the model pi is configured with (override with `--model`); exit 0
 = pass. The canary is deleted afterward.
 
