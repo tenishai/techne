@@ -11,6 +11,16 @@ scanning for "Fixed" finds the first one and stops, so the second was invisible 
 though its content was present. That is not a content judgement — it is a duplicate
 heading, and a duplicate heading is checkable.
 
+COLLAPSED ARCHIVES ARE NOT DUPLICATES, and getting that wrong is what this file's own
+history is about. `[0.13.0]` wraps a verbatim archive in `<details><summary>Earlier detail
+from this cycle, kept verbatim</summary>`, which legitimately repeats `### Added` and
+`### Fixed` INSIDE the collapsed block. The first version of this test read those as the
+same defect as `[Unreleased]`'s and "fixed" them by interleaving the archive into the main
+flow — which split the `<details>` pair across sections, orphaned the closer, and left an
+unclosed opener swallowing five past releases into a collapsed spoiler on GitHub. The
+defect this test exists to catch, reintroduced by the test's own premise. So `<details>`
+regions are stripped before counting, and their balance is pinned separately below.
+
 DELIBERATELY NOT CHECKED HERE: whether every merged commit has an entry. That needs git
 history at test time, it cannot distinguish a docs-only commit from a missed feature,
 and a check that fires on legitimate omissions gets trained into noise. The audit is a
@@ -28,9 +38,15 @@ import pytest
 CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
 
+def _strip_collapsed(text: str) -> str:
+    """Drop `<details>…</details>` regions — a collapsed verbatim archive may repeat a
+    heading on purpose, and reading that as a duplicate is what broke this file once."""
+    return re.sub(r"<details>.*?</details>", "", text, flags=re.S)
+
+
 def _sections() -> list[tuple[str, list[str]]]:
     """(release heading, its `###` subsection headings) for every release block."""
-    text = CHANGELOG.read_text(encoding="utf-8")
+    text = _strip_collapsed(CHANGELOG.read_text(encoding="utf-8"))
     blocks = re.split(r"^(## \[.+?\].*)$", text, flags=re.M)
     out = []
     for i in range(1, len(blocks), 2):
@@ -60,3 +76,26 @@ def test_no_release_block_repeats_a_section_heading(release, subsections):
         f"{release} repeats {duplicates}. Merge them — a second block with the same "
         "heading is invisible to anyone scanning the notes."
     )
+
+
+def test_every_details_block_is_closed():
+    """THE DEFECT THE HEADING CHECK CANNOT SEE, because it reads markdown as text rather
+    than as structure. An unclosed `<details>` renders everything after it as a collapsed
+    spoiler on GitHub — content present and invisible, which is this file's whole subject.
+    It happened here: merging `[0.13.0]`'s headings split the pair across sections, leaving
+    an orphaned `</details>` and an opener that swallowed five past releases.
+
+    Checks NESTING, not just counts: a stray closer before its opener balances numerically
+    and is still broken, which is exactly the state that shipped past a bullet-count claim.
+    """
+    text = CHANGELOG.read_text(encoding="utf-8")
+
+    depth = 0
+    for m in re.finditer(r"</?details>", text):
+        depth += 1 if m.group() == "<details>" else -1
+        assert depth >= 0, (
+            f"`</details>` at offset {m.start()} closes a block that was never opened — "
+            "counts can still balance while the nesting is inverted"
+        )
+
+    assert depth == 0, f"{depth} `<details>` block(s) never closed"
