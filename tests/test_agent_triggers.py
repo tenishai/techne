@@ -40,6 +40,12 @@ def config_free_tmp_home(tmp_path):
 AGENTS = REPO / "AGENTS.md"
 TRIGGER_MARKER = "Agent: raise this unprompted"
 
+#: A bullet inside a blockquoted trigger block. `> - ` ONLY was too narrow: a `*` bullet
+#: and a nested (indented) one both landed unaccounted (Prudence, #764 round 2). The
+#: failure mode that has bitten this file twice is a pattern narrower than the thing it
+#: claims to match, not one that is too broad.
+_BULLET_RE = re.compile(r"^>\s+[-*+]\s")
+
 
 def _headings(path: Path) -> list[str]:
     """Real `#` headings — NOT lines that merely start with `#`.
@@ -99,7 +105,7 @@ def _trigger_blocks(path: Path) -> list[list[str]]:
             in_block, current = True, []
             continue
         if in_block:
-            if line.startswith("> - "):
+            if _BULLET_RE.match(line):
                 current.append(line)
             elif not line.startswith(">"):
                 blocks.append(current)
@@ -173,6 +179,23 @@ def test_the_command_triggers_tell_agents_to_offer_still_exists():
 
     assert result.exit_code == 0, "the triggers offer a command that no longer exists"
     assert "--keep" in result.output, "the scheduling trigger's `--keep` advice is stale"
+    # THE CLAIM RESTS ON THE DEFAULT, NOT ON THE FLAG EXISTING (Prudence, #764 round 2).
+    # Both doc claims — "`--keep` is not optional on a timer" and "a nightly job without it
+    # fills the disk" — are only true while the default is "no ceiling". Set `default=14`
+    # and both become wrong advice while `--keep` is still present and this test still
+    # green. Asserting the flag's presence tested the wrong half of the sentence.
+    import click
+
+    keep = next(
+        p
+        for p in main.commands["backup"].params
+        if isinstance(p, click.Option) and p.name == "keep"
+    )
+
+    assert keep.default is None, (
+        f"`--keep` now defaults to {keep.default!r} — deployment.md and the shipped units "
+        "both tell operators a job without `--keep` grows without bound. It no longer does."
+    )
 
 
 #: The check names `techne doctor` runs today. Pinned, not keyword-matched.
@@ -216,12 +239,128 @@ def test_the_absence_the_backup_trigger_asserts_is_still_absent():
     )
 
 
-#: Every command and subcommand the CLI exposes, pinned for the same reason.
+#: THE WHOLE COMMAND TREE. Not filtered by "archiv", which is how the second version still
+#: missed things: `knowledge rotate-transcripts` archives transcripts and contains neither
+#: string (Prudence, #764 round 2). WHICH COMMANDS COULD ARCHIVE TRANSCRIPTS CANNOT BE
+#: DETERMINED FROM THEIR NAMES, so the only sound mechanical question is whether the
+#: surface changed at all.
 #:
-#: The keyword version grepped top-level `--help` for "archive" — and missed
-#: `knowledge archive-scan` and `knowledge unarchive`, which already ship (#764). A
-#: subcommand is invisible to top-level help, so the test was asking a question the output
-#: could not answer.
+#: Yes, this trips on every CLI addition. That is the cost, and it is the right side to err
+#: on: the failure mode that has bitten this file three times is a check NARROWER than the
+#: claim it is filed under, never one that was too noisy. Re-bless by adding the entry,
+#: the same way an arch card is re-blessed when its seam moves.
+COMMAND_TREE_AT_LAST_REVIEW = {
+    "architect",
+    "architect applies",
+    "architect backfill",
+    "architect export",
+    "architect graph",
+    "architect ingest",
+    "architect outcomes",
+    "architect realized",
+    "architect related",
+    "architect retire-legacy",
+    "architect reverdict",
+    "architect search",
+    "architect show",
+    "architect sweep-legacy-verdicts",
+    "architect tag",
+    "architect topic",
+    "architect unrealized",
+    "archivist",
+    "archivist query",
+    "archivist schema",
+    "audit",
+    "backup",
+    "bindings",
+    "capabilities",
+    "cards",
+    "cards repair",
+    "codex",
+    "codex blast-radius",
+    "codex callers",
+    "codex index",
+    "codex index-all",
+    "codex search",
+    "codex stats",
+    "codex watch",
+    "compact",
+    "context",
+    "custodian",
+    "custodian run",
+    "custodian status",
+    "deposit",
+    "doctor",
+    "evidence",
+    "fsck",
+    "history",
+    "identity",
+    "identity show",
+    "import",
+    "init",
+    "knowledge",
+    "knowledge add",
+    "knowledge archive-scan",
+    "knowledge export",
+    "knowledge list",
+    "knowledge unarchive",
+    "librarian",
+    "librarian card",
+    "librarian cards",
+    "librarian doctor",
+    "librarian index-markdown",
+    "librarian index-transcripts",
+    "librarian migrate-store",
+    "librarian search",
+    "librarian show",
+    "memory",
+    "memory doctor",
+    "memory sync",
+    "migrate-summaries",
+    "observe",
+    "outbox",
+    "outbox dead",
+    "outbox flush",
+    "outbox flush-sinks",
+    "outbox prune-orphans",
+    "outbox purge",
+    "outbox status",
+    "outbox sweep",
+    "probe",
+    "profile",
+    "prompts",
+    "prompts export",
+    "prompts path",
+    "reconcile",
+    "reflect",
+    "reflect discard",
+    "reflect emit",
+    "reflect ingest",
+    "reflect promote",
+    "reflect review",
+    "reflect stats",
+    "restore",
+    "search",
+    "serve",
+    "session-end",
+    "sinks",
+    "sinks describe",
+    "sinks list",
+    "skills",
+    "skills install",
+    "skills remove",
+    "skills status",
+    "status",
+    "threads",
+    "threads redetect",
+    "threads show",
+    "vectors",
+    "vectors backfill",
+    "vectors status",
+    "watch",
+}
+
+
 def _command_tree() -> set[str]:
     import click
 
@@ -237,37 +376,43 @@ def _command_tree() -> set[str]:
 
 def test_the_absence_the_migration_trigger_asserts_is_still_absent():
     """"nothing archives transcripts" — an absence, which nothing about reading the code
-    reminds you to re-check. Pinned at the command-tree level so a SUBCOMMAND cannot slip
-    past, which is how `knowledge archive-scan` was invisible to the first version."""
-    # `archivist*` is the DOMAIN name, not an archiving verb — matched by the same
-    # substring and pinned here rather than filtered, because a filter that drops names
-    # by prefix is another exemption by category.
-    archive_like = {n for n in _command_tree() if "archiv" in n}
+    reminds you to re-check, and which cannot be established by matching command names."""
+    now = _command_tree()
+    added = now - COMMAND_TREE_AT_LAST_REVIEW
 
-    assert archive_like == {
-        "archivist",
-        "archivist query",
-        "archivist schema",
-        "knowledge archive-scan",
-        "knowledge unarchive",
-    }, (
-        f"the CLI's archive-shaped commands changed: {sorted(archive_like)}. Read "
+    assert not added, (
+        f"the CLI gained commands since this was last reviewed: {sorted(added)}. Read "
         "deployment.md's migration trigger — it tells operators nothing archives session "
-        "transcripts. If one of these now does, the trigger is wrong."
+        "transcripts. If one of these does, the trigger is wrong. If none does, add them."
     )
+
+
+#: Every option `techne restore` exposes. Pinned, not grepped for one flag name.
+RESTORE_OPTIONS_AT_LAST_REVIEW = {"no_pre_backup", "yes"}
 
 
 def test_the_restore_trigger_is_still_all_or_nothing():
     """"a single-db restore desyncs cross-db pointers" — the trigger's advice depends on
-    `restore` having no per-domain escape hatch."""
-    from click.testing import CliRunner
+    `restore` having no per-domain escape hatch.
+
+    TWO REPAIRS, both from Prudence attacking this directly (#764 round 2). It had no
+    `exit_code` guard, so renaming the command away entirely gave exit 2 and "No such
+    command" and the test stayed GREEN — a test that passes when the thing it tests does
+    not exist. And it grepped for the single string `--domain` while its siblings pin a
+    surface, so a real per-domain hatch named `--only` sailed through. Same narrowness."""
+    import click
 
     from techne.cli import main
 
-    result = CliRunner().invoke(main, ["restore", "--help"])
+    assert "restore" in main.commands, "restore no longer exists — the trigger is stale"
+    options = {
+        p.name for p in main.commands["restore"].params if isinstance(p, click.Option)
+    }
 
-    assert "--domain" not in result.output, (
-        "restore may now take a single domain — the all-or-nothing trigger is stale"
+    assert options == RESTORE_OPTIONS_AT_LAST_REVIEW, (
+        f"`restore`'s options changed: {sorted(options)}. Read db-per-domain.md's restore "
+        "trigger — it tells operators restore is all-or-nothing across domains. If one of "
+        "these selects a subset, the trigger is wrong. If none does, re-bless this pin."
     )
 
 
