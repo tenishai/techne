@@ -10,6 +10,7 @@ import pytest
 from techne.config import Config
 from techne.core.database import connect, init_db
 from techne.core.maintenance import (
+    RETENTION_REFUSAL_PHRASES,
     RestoreError,
     backup_all_dbs,
     domain_db_paths,
@@ -824,44 +825,61 @@ def test_every_retention_refusal_has_a_row_in_the_docs():
     assert not missing, f"exit-3 causes with no row in deployment.md: {missing}"
 
 
-@pytest.mark.parametrize(
-    "phrase,build",
-    [
-        ("is a symlink", "symlink"),
-        ("manifest is unreadable", "unreadable"),
-        ("is not YYYY-MM-DDTHH:MM:SSZ", "bad_stamp"),
-        ("is in the future", "future"),
-        ("has no manifest", "no_manifest"),
-        ("manifest does not parse", "bad_json"),
-    ],
-)
-def test_every_refusal_phrase_is_actually_emitted(tmp_path, phrase, build):
-    """VACUOUS BEFORE (Prudence, #755 round 6, question D). The previous version read
-    `maintenance.py`'s SOURCE TEXT and asserted each phrase appeared in it — so it passed
-    the exact mutation its own docstring described, because the constant and its use are
-    both source text. A test that greps the file it is testing is not a test.
+_REFUSAL_BUILDERS = {
+    "is a symlink": "symlink",
+    "manifest is unreadable": "unreadable",
+    "is not YYYY-MM-DDTHH:MM:SSZ": "bad_stamp",
+    "is in the future": "future",
+    "has no manifest": "no_manifest",
+    "manifest does not parse": "bad_json",
+    "lists databases in a shape techne cannot read": "bad_databases",
+}
 
-    Now each condition is BUILT and the message it produces is asserted, which also proves
-    the other direction of the doc gate: a phrase that is documented but that nothing can
-    actually emit sends an operator hunting a cause that is not theirs."""
+
+@pytest.mark.parametrize("phrase", RETENTION_REFUSAL_PHRASES)
+def test_every_refusal_phrase_is_actually_emitted(tmp_path, phrase):
+    """VACUOUS BEFORE, AND THEN OUT OF SYNC (Prudence, #755 rounds 6-7). The first version
+    read `maintenance.py`'s SOURCE TEXT, so it passed the exact mutation its own docstring
+    described — a test that greps the file it is testing is not a test. The second version
+    built each condition but iterated a HAND-WRITTEN list, so the phrase added in round 7
+    simply was not covered and its guard's mutation survived.
+
+    Parametrised over `RETENTION_REFUSAL_PHRASES` itself now, which is the same
+    derive-don't-retype rule the doc gate follows: add a phrase without a builder and this
+    fails, rather than silently testing one fewer thing than it claims to."""
+    build = _REFUSAL_BUILDERS.get(phrase)
+    assert build is not None, (
+        f"no builder for refusal {phrase!r} — add one rather than narrowing this test"
+    )
     b = tmp_path / "backups"
     b.mkdir(parents=True)
+    d = b / "backup-20260101-000000"
     if build == "symlink":
         target = _set(tmp_path / "elsewhere", "backup-t", "2026-01-01T00:00:00Z")
-        (b / "backup-20260101-000000").symlink_to(target, target_is_directory=True)
+        d.symlink_to(target, target_is_directory=True)
     elif build == "unreadable":
-        d = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+        _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
         (d / "manifest.json").chmod(0o000)
     elif build == "bad_stamp":
         _set(b, "backup-20260101-000000", "2025-06-01T23:00:00+02:00")
     elif build == "future":
         _set(b, "backup-20260101-000000", "2099-01-01T00:00:00Z")
     elif build == "no_manifest":
-        (b / "backup-20260101-000000").mkdir()
+        d.mkdir()
     elif build == "bad_json":
-        d = b / "backup-20260101-000000"
         d.mkdir()
         (d / "manifest.json").write_text("")  # what a truncating write leaves behind
+    elif build == "bad_databases":
+        d.mkdir()
+        (d / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "techne_version": "0.15.0",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "databases": {"techne": "techne.db"},  # a string, not an object
+                }
+            )
+        )
 
     try:
         _removed, failed = prune_backup_sets(b, keep=0)
@@ -869,11 +887,33 @@ def test_every_refusal_phrase_is_actually_emitted(tmp_path, phrase, build):
         assert len(failed) == 1, f"expected one refusal, got {failed}"
         assert phrase in failed[0][1], f"{phrase!r} not in {failed[0][1]!r}"
     finally:
-        leftover = b / "backup-20260101-000000"
-        if leftover.is_dir() and not leftover.is_symlink():
-            (leftover / "manifest.json").chmod(0o644) if (
-                leftover / "manifest.json"
-            ).exists() else None
+        m = d / "manifest.json"
+        if d.is_dir() and not d.is_symlink() and m.exists():
+            m.chmod(0o644)
+
+
+def test_an_empty_set_does_not_take_a_slot_from_a_real_one(tmp_path):
+    """ISOLATES THE `holds_data` GUARD. The CLI-level regression test for round 7's Critical
+    is saved by the ordering fix alone (`apply_keep=False` on a capture-nothing run), so it
+    never exercises this half — mutating `holds_data` back left it green. Here the window IS
+    applied and the empty set is the NEWEST, which is precisely the arrangement that
+    destroyed archives: sorted by stamp it would take a slot and evict a real backup."""
+    b = tmp_path / "backups"
+    older = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
+    newer = _set(b, "backup-20260102-000000", "2026-01-02T00:00:00Z")
+    empty = b / "backup-20260103-000000"
+    empty.mkdir()
+    (empty / "manifest.json").write_text(
+        json.dumps(
+            {"techne_version": "0.15.0", "created_at": "2026-01-03T00:00:00Z", "databases": {}}
+        )
+    )
+
+    removed, failed = prune_backup_sets(b, keep=2)
+
+    assert failed == []
+    assert older.exists() and newer.exists(), "an empty set evicted a real backup"
+    assert removed == [empty], f"the empty set was not reclaimed: {removed}"
 
 
 def test_an_interrupted_backup_leaves_nothing_behind(config, monkeypatch):
@@ -952,12 +992,18 @@ def test_a_set_with_no_databases_is_still_ours(config, monkeypatch):
     assert first.backed_up == [], "fixture is wrong — something was actually backed up"
     for _ in range(3):
         backup_all_dbs(cfg)
+    # A REAL SET IN THE ARRANGEMENT, which is what this test was missing (Prudence, #755
+    # round 7, question D). All-empty could not distinguish "reclaimed an empty set" from
+    # "evicted a real one" — and evicting a real one is exactly what the fix it was written
+    # for went on to do. One non-empty set here would have caught the Critical.
+    real = _set(empty_home / "backups", "backup-20200101-000000", "2020-01-01T00:00:00Z")
 
     removed, failed = prune_backup_sets(empty_home / "backups", keep=1)
 
-    assert len(removed) == 3, f"retention cannot see sets techne itself wrote: {removed}"
     assert failed == []
-    assert len(list((empty_home / "backups").iterdir())) == 1
+    assert real.exists(), "an empty set evicted a real backup from the keep window"
+    assert len(removed) == 4, f"empty sets are not being reclaimed: {removed}"
+    assert not any(p.name.startswith("backup-2026") for p in (empty_home / "backups").iterdir())
 
 
 def test_backup_exits_4_when_it_captured_nothing(config, monkeypatch, tmp_path):
@@ -1059,7 +1105,75 @@ def test_what_backup_writes_is_recognised_as_ours(config, tmp_path, populated):
 
     res = backup_all_dbs(cfg)
 
-    stamp, refusal = _classify_backup_set(res.dest)
+    cls = _classify_backup_set(res.dest)
 
-    assert refusal is None, f"techne refuses to recognise a set it just wrote: {refusal}"
-    assert stamp is not None, "a set we wrote is invisible to retention"
+    assert cls.refusal is None, f"techne refuses to recognise a set it just wrote: {cls.refusal}"
+    assert cls.stamp is not None, "a set we wrote is invisible to retention"
+    # AND THE THIRD ANSWER, which is what round 7's Critical turned on: being ours must not
+    # imply being a backup. A populated set holds data and may occupy a retention slot; an
+    # empty one is ours, is reclaimable, and must never take a slot from a real archive.
+    assert cls.holds_data is populated
+
+
+def test_an_empty_set_never_evicts_a_real_backup(config, monkeypatch, tmp_path):
+    """THE ROUND-7 CRITICAL, WHICH I CAUSED FIXING A LEAK (Prudence, #755). Round 6 made an
+    empty set "ours" so retention could reclaim it — and "ours" was also what made a set
+    COUNT TOWARD THE KEEP WINDOW. The empty set carries the newest stamp, so it took a slot
+    and evicted a genuine backup every night. Her measurement: three real sets, `--keep 2`,
+    empty source store, five nights, every real backup gone.
+
+    The leak that fix was chasing was a directory and a small JSON file. The regression was
+    the archive. Trading a leak for a deletion is the wrong direction and this pins it."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    wrong_store = tmp_path / "wrong-store"
+    wrong_store.mkdir()
+    cfg = Config()
+    cfg.db_path = wrong_store / "techne.db"  # never created — captures nothing
+    cfg.data_dir = wrong_store
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
+    backups = wrong_store / "backups"
+    real = [
+        _set(backups, f"backup-2026010{i}-030000", f"2026-01-0{i}T03:00:00Z") for i in (1, 2, 3)
+    ]
+
+    for _ in range(5):  # five nights on a misconfigured timer
+        CliRunner().invoke(main, ["backup", "--keep", "2"])
+
+    survivors = [r.name for r in real if r.exists()]
+    assert survivors == [r.name for r in real], (
+        f"a run that captured NOTHING destroyed real backups — {survivors} left of 3"
+    )
+
+
+def test_exit_4_takes_precedence_over_exit_3(config, monkeypatch, tmp_path):
+    """A CONTRACT WITH NO ORACLE (Prudence, #755 round 7, question D — the fifth distinct
+    weak-test mechanism in this PR). Inverting the 3-vs-4 precedence in `cli.py` left all
+    3491 tests green: the rule was documented in a changelog, a docstring and a doc table,
+    and asserted nowhere. Both conditions hold here at once — nothing was captured AND a
+    set cannot be reclaimed — and 4 must win, because an empty backup is the more serious
+    of the two."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    wrong_store = tmp_path / "wrong-store"
+    wrong_store.mkdir()
+    cfg = Config()
+    cfg.db_path = wrong_store / "techne.db"  # never created — captures nothing
+    cfg.data_dir = wrong_store
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls: cfg))
+    backups = wrong_store / "backups"
+    backups.mkdir(parents=True)
+    stranded = _set(backups, "backup-unorderable", "2025-06-01T23:00:00+02:00")
+
+    result = CliRunner().invoke(main, ["backup", "--keep", "1"])
+
+    assert "retention INCOMPLETE" in result.output, "the 3-condition does not hold — bad fixture"
+    assert "NO DATABASES WERE BACKED UP" in result.output, "the 4-condition does not hold"
+    assert result.exit_code == 4, f"3 won over 4 — exit {result.exit_code}\n{result.output}"
+    assert stranded.exists()

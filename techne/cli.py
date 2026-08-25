@@ -4718,7 +4718,15 @@ def backup_cmd(ctx, out, keep):
     if keep is not None:
         from techne.core.maintenance import prune_backup_sets
 
-        removed, failed = prune_backup_sets(res.dest.parent, keep, protect=res.dest)
+        # `apply_keep=False` WHEN THE RUN CAPTURED NOTHING (Prudence, #755 round 7). The
+        # keep window means "keep the newest N backups", and a run that backed up nothing
+        # did not produce one — so weighing real archives against it deletes them on the
+        # strength of a failure. Empty sets are still reclaimed, since they hold no
+        # database and there is nothing in them to lose. The exit-4 check below used to
+        # come AFTER this call: the alarm sounded after the irreversible step.
+        removed, failed = prune_backup_sets(
+            res.dest.parent, keep, protect=res.dest, apply_keep=bool(res.backed_up)
+        )
         if removed:
             click.echo(f"pruned {len(removed)} older set(s), keeping {keep}")
         # SAY SO WHEN RETENTION DID NOT HAPPEN (Prudence, #755 Important 2). On a nightly

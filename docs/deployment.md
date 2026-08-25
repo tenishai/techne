@@ -145,6 +145,7 @@ corrupted anything. What you are looking at is a set retention will never remove
 | `is a symlink` | something under `backups/` is a symlink to a set | remove the symlink; techne will not follow it or delete its target |
 | `has no manifest` | a directory named like a backup set, carrying no manifest | **identify it before touching it** — see below |
 | `manifest does not parse` | a set whose `manifest.json` is corrupt | same — treat it as unidentified, not as a set |
+| `lists databases in a shape techne cannot read` | the manifest says it is a techne backup, but its `databases` entries are malformed | `restore` cannot read it either, so do not count it as a backup. Keep it if you may want to salvage the `.db` files inside by hand; move it out of `backups/` to stop the alarm |
 
 The first row is deliberately not a list of specific errnos. Retention reports whatever the
 OS returned, and naming one of them here would send an operator to check permissions on a

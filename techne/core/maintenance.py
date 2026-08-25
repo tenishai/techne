@@ -290,6 +290,33 @@ _CANONICAL_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 #:
 #: Failures from the delete itself are NOT here: those carry the OS's own `strerror`, which
 #: is why the table's first row deliberately describes the class instead of naming an errno.
+@dataclass(frozen=True)
+class SetClass:
+    """What one directory under `backups/` is, in the three terms retention needs.
+
+    THE COLLAPSE THIS TYPE EXISTS TO PREVENT (Prudence, #755 round 7, Critical). Round 6
+    made an empty set "ours" so retention could reclaim it — and "ours" was ALSO what made
+    a set count toward the keep window. The empty set carries the newest stamp, so it took
+    a slot and evicted a real backup, every run, on the schedule. Measured through the real
+    CLI: three genuine sets, `--keep 2`, empty source store, five nights — every real
+    backup destroyed. A leak traded for a deletion, which is the worse direction, and the
+    leak was tiny: an empty set is a directory and a small JSON file.
+
+      `stamp`       when it was written, if we can order it safely.
+      `refusal`     why retention will not act on it, if so — surfaced to the operator.
+      `holds_data`  whether it contains any database. AN EMPTY SET IS OURS AND IS NOT A
+                    BACKUP: reclaimable because it holds nothing, and never eligible to
+                    occupy a retention slot for the same reason.
+
+    "Is this ours?" and "is this a backup?" are different questions. Answering them with
+    one value is what caused the Critical.
+    """
+
+    stamp: str | None
+    refusal: str | None
+    holds_data: bool = False
+
+
 #: The shape `_unique_dir(root / f"{label}-{_now_stamp()}")` produces. Used ONLY to decide
 #: whether a manifest-less directory is one WE left behind — never to decide what to delete.
 _OUR_SET_NAME = re.compile(r".+-\d{8}-\d{6}(-\d+)?$")
@@ -301,10 +328,11 @@ RETENTION_REFUSAL_PHRASES = (
     "is in the future",
     "has no manifest",
     "manifest does not parse",
+    "lists databases in a shape techne cannot read",
 )
 
 
-def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
+def _classify_backup_set(child: Path) -> SetClass:
     """Classify one directory under `backups/`. Returns `(stamp, refusal)`.
 
     THREE OUTCOMES, AND COLLAPSING TWO OF THEM IS WHAT WENT WRONG (Prudence, #755 round 3
@@ -333,7 +361,9 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     # deleted, nothing reported. The old test covered only the mirror case (target older,
     # so the symlink sorted last and merely failed to delete), which is why this half hid.
     if child.is_symlink():
-        return None, f"{RETENTION_REFUSAL_PHRASES[0]} — refusing to remove it or its target"
+        return SetClass(
+            None, f"{RETENTION_REFUSAL_PHRASES[0]} — refusing to remove it or its target"
+        )
     try:
         manifest = json.loads((child / _MANIFEST_NAME).read_text())
     except FileNotFoundError:
@@ -361,11 +391,11 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
             # The code deletes none of them, which is right — but the message was licensing a
             # human to, and the operator deleting a directory techne never created is
             # round 1's Critical committed by hand instead of by `rmtree`.
-            return None, (
+            return SetClass(None, (
                 f"{RETENTION_REFUSAL_PHRASES[4]} — a backup in progress, an interrupted one, "
                 "and a foreign directory are indistinguishable here; it is never pruned"
-            )
-        return None, None  # not named by us and carrying no manifest: conclusively not ours
+            ))
+        return SetClass(None, None)  # not named by us, no manifest: conclusively not ours
     except ValueError:
         # THE RULE ABOVE DECIDES THIS ONE TOO, and this branch was still carrying the old
         # reasoning a line after the new rule was written (Prudence, #755 round 6 Important
@@ -374,11 +404,11 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         # The truncation window that made this reachable from our own writes is closed
         # above; what remains is corruption, which is exactly the inconclusive case.
         if _OUR_SET_NAME.fullmatch(child.name):
-            return None, (
+            return SetClass(None, (
                 f"{RETENTION_REFUSAL_PHRASES[5]} — so whether this is a usable backup "
                 "cannot be determined here; it is never pruned"
-            )
-        return None, None  # unparseable, and nothing about it claims to be ours
+            ))
+        return SetClass(None, None)  # unparseable, nothing about it claims to be ours
     except OSError as exc:
         # AN UNREADABLE MANIFEST IS NOT THE SAME AS AN ABSENT ONE (Prudence, #755 round 4
         # Important 1). Folding every OSError into silence meant a set TECHNE ITSELF WROTE
@@ -393,12 +423,12 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         # canonical, so a bad stamp is no more techne-producible than a chmod'd manifest.
         # Treating one as a leak worth reporting and the other as none of our business had
         # no basis. A permission bit is also the more likely of the two in practice.
-        return None, (
+        return SetClass(None, (
             f"{RETENTION_REFUSAL_PHRASES[1]} ({exc.strerror or exc}) — it cannot be "
             "judged, so the set is never pruned"
-        )
+        ))
     if not isinstance(manifest, dict):
-        return None, None
+        return SetClass(None, None)
     dbs = manifest.get("databases")
     # AN EMPTY SET IS STILL OURS — the sixth case, and it arrives through the SUCCESS path
     # rather than any interruption (found answering my own round-6 question B, which is the
@@ -431,7 +461,7 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         # while being willing to DELETE it is not a defensible pair, and `manifest.json` +
         # `created_at` are among the least techne-private things there are — a foreign
         # `{"name": "my-extension", ...}` used to pass (round 2).
-        return None, None
+        return SetClass(None, None)
     if not isinstance(dbs, dict) or not all(
         isinstance(meta, dict) for meta in dbs.values()
     ):
@@ -455,7 +485,18 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
         #
         # `read_manifest`'s AttributeError on the same input is pre-existing and reachable
         # from `techne restore <any dir>` — filed as #759 rather than grown into this PR.
-        return None, None
+        #
+        # BUT NOT SILENT WHEN IT CLAIMS TO BE OURS (Prudence, #755 round 7). A manifest
+        # carrying `techne_version` with unreadable `databases` is the identity test saying
+        # YES and the readability test failing — the inconclusive case, which this
+        # function's own reachability-is-symmetric rule puts on the reported side. Silence
+        # there contradicted the rule three screens above it.
+        if "techne_version" in manifest:
+            return SetClass(None, (
+                f"{RETENTION_REFUSAL_PHRASES[6]} — it claims to be a techne backup and "
+                "cannot be read as one; it is never pruned"
+            ))
+        return SetClass(None, None)
     stamp = str(manifest.get("created_at", ""))
     # THE SORT IS LEXICOGRAPHIC, SO THE FORMAT IS PART OF THE CONTRACT. `_now_iso()` is the
     # only writer and always emits `%Y-%m-%dT%H:%M:%SZ`, which sorts chronologically as
@@ -464,24 +505,26 @@ def _classify_backup_set(child: Path) -> tuple[str | None, str | None]:
     # The failure is a DELETED BACKUP, so a set we cannot order is never guessed at — but
     # it IS reported, because "never deleted" and "never mentioned" together is a leak.
     if not _CANONICAL_STAMP.fullmatch(stamp):
-        return None, (
+        return SetClass(None, (
             f"manifest created_at {stamp!r} {RETENTION_REFUSAL_PHRASES[2]} — it cannot "
             "be ordered safely, so it is never pruned and will accumulate"
-        )
+        ))
     # A STAMP IN THE FUTURE IS THE SAME CATEGORY (round 2, Nit 4). With no upper bound on
     # the sort it sorts newest forever, holds a keep slot permanently and quietly makes
     # retention `keep - 1`. Reachable by ordinary clock skew, and `Persistent=true` fires a
     # catch-up run right after boot, before NTP may have synced.
     if stamp > _now_iso():
-        return None, (
+        return SetClass(None, (
             f"manifest created_at {stamp} {RETENTION_REFUSAL_PHRASES[3]} — it cannot be "
             "ordered against real time, so it is never pruned and holds a retention slot"
-        )
-    return stamp, None
+        ))
+    # `holds_data` is the whole point of the type: an empty set is OURS (so we can
+    # reclaim it) and is NOT A BACKUP (so it must never occupy a retention slot).
+    return SetClass(stamp, None, holds_data=bool(dbs))
 
 
 def prune_backup_sets(
-    backups_dir: Path, keep: int, *, protect: Path | None = None
+    backups_dir: Path, keep: int, *, protect: Path | None = None, apply_keep: bool = True
 ) -> tuple[list[Path], list[tuple[Path, str]]]:
     """Delete all but the newest *keep* backup sets. Returns (removed, failed).
 
@@ -512,18 +555,29 @@ def prune_backup_sets(
 
     protect = protect.resolve() if protect else None
     sets: list[tuple[str, Path]] = []
+    empties: list[Path] = []
     failed: list[tuple[Path, str]] = []
     for child in backups_dir.iterdir():
         if not child.is_dir():
             continue
-        stamp, refusal = _classify_backup_set(child)
-        if refusal is not None:
+        cls = _classify_backup_set(child)
+        if cls.refusal is not None:
             # OURS AND UNRECLAIMABLE. Surfaced through the same channel as a failed
             # `rmtree`, because the operator-visible consequence is identical: a set under
             # `backups/` that retention will never remove.
-            failed.append((child, refusal))
-        if stamp is not None:
-            sets.append((stamp, child))
+            failed.append((child, cls.refusal))
+        if cls.stamp is None:
+            continue
+        if cls.holds_data:
+            sets.append((cls.stamp, child))
+        else:
+            # AN EMPTY SET IS OURS AND IS NOT A BACKUP (Prudence, #755 round 7, Critical).
+            # It never enters `sets`, so it can never occupy a slot in the keep window —
+            # which is exactly how round 6's fix destroyed real archives: the empty set
+            # carried the newest stamp, took a slot, and evicted a genuine backup every
+            # night. And it is reclaimed unconditionally rather than by the window, because
+            # it holds no database: there is nothing in it to lose.
+            empties.append(child)
 
     # TIE-BREAK ON NAME, BECAUSE TIES ARE REACHABLE (pre-pass on #755). `_now_iso()` has
     # ONE-SECOND resolution, so two sets written in the same second carry identical
@@ -535,7 +589,14 @@ def prune_backup_sets(
     # — the point is that the answer stops depending on the filesystem.
     sets.sort(key=lambda pair: (pair[0], pair[1].name), reverse=True)
     removed: list[Path] = []
-    for _, path in sets[keep:]:
+    # THE KEEP WINDOW APPLIES TO BACKUPS. Empty sets are reclaimed either way; real sets are
+    # only weighed against `keep` when the caller says the window is meaningful. It is NOT
+    # when the run that just finished captured nothing (`apply_keep=False`): deleting
+    # archives on the strength of a run that backed up nothing is the same mistake as
+    # letting an empty set hold a slot, one level up. The alarm must not follow the
+    # irreversible step.
+    doomed = list(empties) + ([path for _, path in sets[keep:]] if apply_keep else [])
+    for path in doomed:
         if protect and path.resolve() == protect:
             continue
         if path.is_symlink():
