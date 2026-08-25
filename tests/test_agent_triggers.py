@@ -28,8 +28,39 @@ AGENTS = REPO / "AGENTS.md"
 TRIGGER_MARKER = "Agent: raise this unprompted"
 
 
+def _headings(path: Path) -> list[str]:
+    """Real `#` headings — NOT lines that merely start with `#`.
+
+    A shell comment inside a fenced block starts with `#` too, and `docs/deployment.md`
+    has nine of them (`# edit ExecStart ...`). Counting those let an index anchor
+    "resolve" to a code comment and pass, which is a hole in the gate rather than a
+    cosmetic one. Found by rendering the headings through GitHub's own markdown API and
+    getting 34 anchors for 35 candidate lines. `import_md._split_into_sections` already
+    tracks fences for the same reason.
+    """
+    out, in_fence = [], False
+    for line in path.read_text().splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if line.startswith("#") and not in_fence:
+            out.append(line)
+    return out
+
+
 def _slug(heading: str) -> str:
-    """GitHub's heading-to-anchor slug, which is what the index links against."""
+    """GitHub's heading-to-anchor slug, which is what the index links against.
+
+    THIS FUNCTION IS BOTH SIDES OF THE TEST BELOW, so that test cannot tell you the links
+    RENDER — only that they are self-consistent with this implementation. If `_slug`
+    disagreed with GitHub, every link in `AGENTS.md` would be broken and the suite would
+    stay green. Saying so rather than letting the check read as stronger than it is.
+
+    Cross-validated once, out of band, against GitHub's own renderer (`POST /markdown`,
+    reading the `class="anchor" href="#…"` it emits) on 2026-08-25: 26 headings, 26
+    anchors, zero disagreements, and all four anchors used by the index resolve. Redo it
+    that way if you change this function — a local test cannot check it by construction.
+    """
     text = heading.strip().lstrip("#").strip().lower()
     text = re.sub(r"[^\w\s-]", "", text)  # drop backticks, punctuation
     return re.sub(r"\s", "-", text)
@@ -52,6 +83,20 @@ def _docs_with_trigger_blocks() -> set[str]:
 # --------------------------------------------------------------- #756: the index
 
 
+def test_headings_exclude_fenced_code_comments():
+    """A shell comment inside a fenced block starts with `#` too — `docs/deployment.md` has
+    nine (`# edit ExecStart ...`). Counting them as headings let an index anchor "resolve"
+    to a code comment, which is a hole in the gate rather than a cosmetic one. Found by
+    rendering through GitHub's markdown API and getting 34 anchors for 35 candidate lines."""
+    deployment = REPO / "docs" / "deployment.md"
+    naive = [ln for ln in deployment.read_text().splitlines() if ln.startswith("#")]
+
+    real = _headings(deployment)
+
+    assert len(naive) > len(real), "fixture no longer contains fenced `#` comments"
+    assert not any("edit ExecStart" in h for h in real), "a code comment is being read as a heading"
+
+
 def test_the_index_is_not_empty():
     """A guard that silently matches nothing is worse than no guard — every assertion below
     would pass vacuously if the table parse broke."""
@@ -64,7 +109,7 @@ def test_every_indexed_trigger_points_at_a_real_section(doc, anchor):
     from having no row at all — except that it looks covered."""
     path = REPO / doc
     assert path.is_file(), f"{doc} does not exist"
-    slugs = {_slug(line) for line in path.read_text().splitlines() if line.startswith("#")}
+    slugs = {_slug(line) for line in _headings(path)}
     assert anchor in slugs, f"{doc}#{anchor} resolves to no heading"
 
 
