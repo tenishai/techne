@@ -30,9 +30,9 @@ So your context never gets flooded with full transcripts — you recall the gist
 - **One card per document.** Cards are *pull-only*: they ride recall but are never auto-dumped
   into your session at startup.
 - Recall the gist: `techne search "<topic>" --table knowledge` (cards live in knowledge).
-- Fetch the full thing: `techne library card <CARD_ID>` (resolves the pointer to the document)
-  or `techne library show <DOC_ID>`.
-- Search full document *content* directly: `techne library search "<text>"`.
+- Fetch the full thing: `techne librarian card <CARD_ID>` (resolves the pointer to the document)
+  or `techne librarian show <DOC_ID>`.
+- Search full document *content* directly: `techne librarian search "<text>"`.
 
 ---
 
@@ -49,8 +49,8 @@ not just the tool calls) and stores each session as a document with a gist card.
 
 ```sh
 # from any techne-initialized checkout:
-techne library index-transcripts                 # indexes the CURRENT project's transcripts
-techne library index-transcripts --dir ~/.claude/projects/<slug>   # a specific project
+techne librarian index-transcripts                 # indexes the CURRENT project's transcripts
+techne librarian index-transcripts --dir ~/.claude/projects/<slug>   # a specific project
 ```
 
 - **Idempotent** — re-run anytime; only new/changed sessions are rewritten.
@@ -64,14 +64,14 @@ techne library index-transcripts --dir ~/.claude/projects/<slug>   # a specific 
 Any directory of `.md` files can be indexed — design docs, runbooks, notes, a repo's `docs/`.
 
 ```sh
-techne library index-markdown ./docs --source-type docs
-techne library index-markdown ~/notes --source-type notes
+techne librarian index-markdown ./docs --source-type docs
+techne librarian index-markdown ~/notes --source-type notes
 ```
 
 - Title comes from the first `#` heading (else the filename).
 - Single-topic docs start with a *pending* card (gist = title). Fill real gists agent-side:
-  `techne library cards emit -o /tmp/b.json` → your Claude writes a 1–2 sentence gist into
-  each `summary` → `techne library cards ingest /tmp/b.json`. (No API key — see below.)
+  `techne librarian cards emit -o /tmp/b.json` → your Claude writes a 1–2 sentence gist into
+  each `summary` → `techne librarian cards ingest /tmp/b.json`. (No API key — see below.)
 
 ### What can go in the Librarian?
 
@@ -86,9 +86,9 @@ adapter away (tracked in techne#96; the contract is `core/transcripts.py::Transc
 
 ```sh
 techne search "outbox backpressure" --table knowledge   # find the gist card
-techne library card 268                                  # gist + fetch the full doc
-techne library search "transactional outbox pattern"     # search full document text
-techne library                                           # counts
+techne librarian card 268                                  # gist + fetch the full doc
+techne librarian search "transactional outbox pattern"     # search full document text
+techne librarian                                           # counts
 ```
 
 ---
@@ -109,20 +109,20 @@ to think about the two files; the commands route to the right one.
 > **card** (gist); fetch the full document **on demand** — never dump whole transcripts into
 > context.
 >
-> **Set it up (once per machine):** run `techne library index-transcripts` to index this
-> project's Claude Code transcripts, and `techne library index-markdown <dir> --source-type
+> **Set it up (once per machine):** run `techne librarian index-transcripts` to index this
+> project's Claude Code transcripts, and `techne librarian index-markdown <dir> --source-type
 > <name>` for any docs the operator points you at. Both are idempotent — safe to re-run at the
 > start of a session to pick up new material.
 >
 > **Use it during work:**
 > - To recall a past decision/discussion: `techne search "<topic>" --table knowledge` (finds
->   the gist card), then `techne library card <id>` to pull the full transcript/doc *only if*
+>   the gist card), then `techne librarian card <id>` to pull the full transcript/doc *only if*
 >   you need the detail.
-> - To search document *content* (not just gists): `techne library search "<text>"`.
+> - To search document *content* (not just gists): `techne librarian search "<text>"`.
 > - **Fill gists (no API key needed):** for pending document cards (single-topic docs),
->   `techne library cards emit -o /tmp/cards.json`, write a sharp 1–2 sentence gist into each
+>   `techne librarian cards emit -o /tmp/cards.json`, write a sharp 1–2 sentence gist into each
 >   item's `summary` field (read each item's `prompt`, which contains the document), then
->   `techne library cards ingest /tmp/cards.json`. Transcript cards are auto-gisted (thread
+>   `techne librarian cards ingest /tmp/cards.json`. Transcript cards are auto-gisted (thread
 >   index) — don't prose-summarize a long multi-topic session; that's dishonest.
 > - Be honest in gists: if a session was trivial (a failed login, a one-line question), say so.
 >
@@ -130,5 +130,5 @@ to think about the two files; the commands route to the right one.
 > Librarian so they're recallable. **Don't** paste whole documents into context — recall the
 > card, fetch on demand.
 
-That block plus `techne library --help` (and `cards`/`search`/`card`/`show` subcommands) is
+That block plus `techne librarian --help` (and `cards`/`search`/`card`/`show` subcommands) is
 everything an agent needs.

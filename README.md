@@ -10,6 +10,39 @@ Concretely: a SQLite-backed memory store whose core is a **single local file** (
 >
 > **Tour the pieces:** [`docs/modules.md`](docs/modules.md) — a short sales-pitch for each module (what it does, why it's different, how to enable it).
 
+---
+
+## The four functions
+
+techne has four knowledge domains, and you address each one **by name**:
+
+| | The question it answers | Ask it |
+|---|---|---|
+| **archivist** | *What does the team know?* | `archivist_search` · `techne archivist query` |
+| **librarian** | *What is written down?* | `librarian_search` · `techne librarian search` |
+| **architect** | *What is worth stealing?* | `architect_search` · `techne architect search` |
+| **codex** | *What does the code look like?* | `codex_search` · `techne codex search` |
+
+The codex needs `techne codex index <repo>` run once before it can answer.
+
+Every answer says **what it resolved to** — a `binding` (`absent` / `local` / `store` — not every domain can reach every value)
+and the concrete `target` path — so the call stays the same while the infrastructure
+underneath it changes. `techne bindings` reports all four at once.
+
+The point of learning four names rather than four file paths is that the names
+outlive this tool: an operator learns *archivist, librarian, architect, codex* here
+and keeps them when the work grows into liminal and cabal, where a local librarian may
+become a persona and later a deployed service.
+
+**→ [The four functions](docs/four-functions.md)** — the tutorial: ask each one, read
+the `binding`, and watch the same call answer from a different store. Start there.
+
+`techne_recall` remains the default for *"what do we know about X"* — it escalates
+across all four. Address a domain by name when you already know which function you
+want.
+
+---
+
 ```bash
 git clone https://github.com/tenishai/techne.git
 cd techne
@@ -59,7 +92,7 @@ techne init
 | **Identity** | Key-value store for who-the-agent-is and who-it-works-with. Ingests structured markdown (`contacts.md`, `invariants.md`) and YAML on init. |
 | **Outbox** | Pluggable sync for shipping curated knowledge to a team-memory backend. Default adapter is `noop`; ships with a `filesystem` adapter; the protocol is open for custom adapters via entry points. |
 | **Search** | FTS5 across all content layers. Optional vector search via `sqlite-vec` + `fastembed` for semantic similarity. |
-| **Domain stores** | `techne.db` is personal memory; larger/team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **Librarian** (`librarian.db`, documents), **Architect** (`architect.db`, patterns), **Codex** (code graph, *experimental* — **one db per repo** at `codex/<slug>-<hash>.db`). Each db carries only its own schema. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
+| **Domain stores** | Where [the four functions](#the-four-functions) keep their data — the *layout*, not the mental model. `techne.db` is personal memory and answers as the **archivist** when unbound; larger or team-scoped domains get their own db file behind a `StoreAdapter` (db-per-domain) — **librarian** (`librarian.db`, documents), **architect** (`architect.db`, patterns), **codex** (code graph, *experimental* — **one db per repo** at `codex/<slug>-<hash>.db`). Each db carries only its own schema. Address the domain by name; the db path is what it happens to resolve to today, and the answer's `target` tells you. See [Domain stores](#domain-stores-db-per-domain) and `docs/db-per-domain.md`. |
 
 The schema and triggers all live in `techne/core/database.py`. Schema migrations are tracked in a `schema_version` table; `connect()` is lazy-init so library callers don't need to remember to call `init_db()` first.
 
@@ -393,16 +426,16 @@ techne probe [--runtime claude-code|opencode] [--mode off-test|pull|differential
 
 # Domain stores — db-per-domain (each in its own db file beside techne.db)
 # Librarian (librarian.db) — documents: transcripts + markdown; recall the gist, fetch full on demand
-techne library                             # document + card counts
-techne library index-transcripts [--platform claude-code] [--dir DIR]
-techne library index-markdown DIR [--source-type docs]
-techne library search QUERY                # full-text over document content
-techne library show DOC_ID                 # full document (the fetch-on-demand half)
-techne library card CARD_ID                # gist + resolve the document cross-db
-techne library cards emit|ingest|list|gist-transcripts
+techne librarian                           # document + card counts
+techne librarian index-transcripts [--platform claude-code] [--dir DIR]
+techne librarian index-markdown DIR [--source-type docs]
+techne librarian search QUERY              # full-text over document content
+techne librarian show DOC_ID               # full document (the fetch-on-demand half)
+techne librarian card CARD_ID              # gist + resolve the document cross-db
+techne librarian cards emit|ingest|list|gist-transcripts
                                            # agent-assisted gist fill (no API key)
-techne library doctor                      # cross-db health check: dangling or stale cards
-techne library migrate-store               # one-time: move documents techne.db → librarian.db
+techne librarian doctor                    # cross-db health check: dangling or stale cards
+techne librarian migrate-store             # one-time: move documents techne.db → librarian.db
 
 # Architect (architect.db) — the architectural-patterns corpus
 techne architect                           # pattern / investigation counts

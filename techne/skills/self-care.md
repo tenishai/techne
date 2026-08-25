@@ -60,7 +60,7 @@ The banner names what is stale. Work it down:
 - **Consolidate** — `techne_consolidate_emit` / `_ingest` (dedup), then `techne_faithfulness_emit` / `_ingest` to check that the staged merges preserve each source's load-bearing claims.
 - **Dream** — `techne_dream_emit` / `_ingest`. Speculative and low-confidence by design; low priority when time is short.
 - **Vectors** — `techne vectors status`, then `techne vectors backfill` if coverage has drifted.
-- **Librarian transcript index** — the audit-log search layer (`source_type='claude-code-transcript'`), and the *only* index with no automatic feeder: `techne library index-transcripts` is a manual command wired to no hook or cron. Left alone it silently decays, and a 4%-coverage search looks exactly like a working one.
+- **Librarian transcript index** — the audit-log search layer (`source_type='claude-code-transcript'`), and the *only* index with no automatic feeder: `techne librarian index-transcripts` is a manual command wired to no hook or cron. Left alone it silently decays, and a 4%-coverage search looks exactly like a working one.
 
   **Its default `--dir` is the CURRENT CWD's project dir**, not all of `~/.claude/projects`. Run it from the wrong directory and it indexes the wrong project while reporting success. Always pass `--dir` explicitly. The glob is also non-recursive, so nested `subagents/` and `workflows/` transcripts are correctly skipped — only top-level session transcripts count. Safe to re-run: dedup is by `source_url` + content hash (`stored` vs `unchanged` in the output), and cards upsert rather than duplicate.
 

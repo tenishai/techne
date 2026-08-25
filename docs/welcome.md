@@ -68,6 +68,59 @@ review`) — memory is *yours*, so nothing touches the live store without a nod.
 
 ---
 
+## And four functions — who you ask
+
+The four verbs are what your memory *does*. The four **functions** are who you *ask*.
+Everything techne knows sits behind one of four names, and you address each one by
+name:
+
+| | The question it answers |
+|---|---|
+| **archivist** | *What does the team know?* |
+| **librarian** | *What is written down?* |
+| **architect** | *What is worth stealing?* |
+| **codex** | *What does the code look like?* |
+
+```bash
+techne bindings
+```
+
+```
+  archivist  local        resolves to this instance's own knowledge — no second store
+  librarian  local        documents at the default librarian.db (created on first write)
+  architect  local        patterns at the default architect.db (created on first write)
+  codex      absent       no index for the active repo — `techne codex index <repo>`
+```
+
+That is a genuinely fresh install, and **three of the four say `local` while the codex
+says `absent` — both are correct answers rather than degraded ones.**
+
+`local` means *"this resolves to something here"*. The archivist resolving to your own
+knowledge is what *"what does the team know"* means when the team is you. The same call keeps working when a
+team store appears — the answer's `binding` and `target` change, and it *tells you*
+they did, so you never have to guess which store you just read.
+
+`absent` means *"there is deliberately nothing here"*, and **which domains can say it
+is decided by the domain, not by you**. On the codex it means *you have not indexed this
+repo yet* — a fact about where you are standing rather than a fault, and the row hands you
+the command. On the archivist it means *you configured `archivist: none`*. **The librarian
+and architect have no `absent` at all** — they always resolve somewhere, so the only
+question they can raise is whether that somewhere is readable. (Full statement:
+[reading the answer](four-functions.md#reading-the-answer).)
+
+That is the whole reason to learn four names instead of four file paths: `librarian.db`
+is where documents happen to live today; **the librarian is the function you are
+asking.** One of those survives your setup growing. The other does not.
+
+You will rarely call them by hand at first — `techne_recall` escalates across all four
+for you, and that is the right default. Reach for a name when you already know which
+function you want.
+
+**→ [The four functions](four-functions.md)** — the tutorial: ask each one, read the
+`binding`, and watch the same call answer from a different store.
+
+---
+
 ## The good bits you'd never find on your own
 
 These are the features a first-time downloader has no way to discover — the ones that
@@ -258,6 +311,9 @@ was the whole point.
   included.
 - **[`docs/modules.md`](./modules.md)** — a short sales-pitch for each module (what it
   does, why it's different, how to enable it).
+- **[`docs/four-functions.md`](./four-functions.md)** — the four domains, addressed by
+  name: what each answers, how to read the `binding` it resolved to, and the same call
+  against a different store.
 - **[`docs/mcp-tools.md`](./mcp-tools.md)** — every MCP tool your agent can call,
   grouped by purpose. The complete agent-facing surface in one place.
 - **[`docs/codex-usage.md`](./codex-usage.md)** — when to reach for the code graph and,
