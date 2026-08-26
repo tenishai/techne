@@ -690,10 +690,26 @@ def read_manifest(src_dir: Path) -> dict:
         manifest = json.loads(mpath.read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise RestoreError(f"unreadable manifest: {e}") from e
+    # SHAPE BEFORE CONTENT, at BOTH levels (techne#759). This function is the gate
+    # that decides whether a directory is a restorable set, and its contract is to
+    # raise RestoreError -- a traceback here surfaces during a RESTORE, which is
+    # exactly when a stack trace is least useful and most alarming. Valid JSON says
+    # nothing about shape: a top-level array reached `.get` on a list, and a
+    # `databases` value that was a string / null / array reached `.get` on those.
+    if not isinstance(manifest, dict):
+        raise RestoreError(
+            f"malformed manifest: expected a JSON object, found "
+            f"{type(manifest).__name__}"
+        )
     dbs = manifest.get("databases")
     if not isinstance(dbs, dict) or not dbs:
         raise RestoreError("manifest lists no databases")
     for domain, meta in dbs.items():
+        if not isinstance(meta, dict):
+            raise RestoreError(
+                f"malformed manifest: entry for '{domain}' should be an object, "
+                f"found {type(meta).__name__}"
+            )
         f = src_dir / meta.get("file", f"{domain}.db")
         if not f.exists():
             raise RestoreError(f"backup set is incomplete: {f.name} missing for '{domain}'")
