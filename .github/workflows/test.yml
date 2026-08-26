@@ -27,15 +27,22 @@ name: test
 # job -- but the CONTAINER is not: `restart: unless-stopped` reuses it for hundreds
 # of jobs (RestartCount 847 before its last replacement). setup-python installs into
 # the runner tool cache, which is an ordinary directory in that container's writable
-# layer -- verified on the live runner: RUNNER_TOOL_CACHE unset,
-# /opt/hostedtoolcache absent, and the container has ZERO mounts, so nothing is
-# redirected to a volume or tmpfs. It would therefore download once per CONTAINER,
-# not once per job.
+# layer. The observation that carries this: the container has ZERO mounts, so
+# `_work/_tool` is in the writable layer and setup-python would download once per
+# CONTAINER, not once per job. (RUNNER_TOOL_CACHE being unset in a `docker exec`
+# shell proves nothing -- the runner sets it PER JOB -- and /opt/hostedtoolcache is
+# the hosted-runner path, expected to be absent. Do not lean on either.)
 #
-# The conclusion still holds on a better reason than download cost: `uv venv` runs
-# under UV_PYTHON_PREFERENCE=only-system / UV_PYTHON_DOWNLOADS=never (below), so the
-# interpreters have to BE on the system already, from a provenance we control. Baking
-# them into the image is what makes those two pins mean anything. `fork-pr` DOES use it, because a
+# THE REASON IS PROVENANCE, NOT COST, and specifically not the `only-system` pin:
+# `fork-pr` uses actions/setup-python under the SAME workflow-level
+# UV_PYTHON_PREFERENCE=only-system / UV_PYTHON_DOWNLOADS=never and passes, because
+# setup-python puts its interpreter on PATH as a SYSTEM one -- this file says so at
+# the fork-pr job. So "the interpreters must be on the system" is equally true of the
+# option it would be offered as a reason to reject. What distinguishes them is WHO
+# BUILT THEM: image-baked interpreters are the operator's, where setup-python
+# resolves `3.12` to whatever patch actions/python-versions serves at download time,
+# over network egress from a host this file already treats as a trust boundary
+# (techne#556). `fork-pr` DOES use it, because a
 # hosted runner bakes in neither uv nor the matrix interpreters — the reasoning
 # above is about this image, not a blanket ban (#556).
 # NO `branches:` FILTER ON pull_request, AND THAT ABSENCE IS LOAD-BEARING (#530).
@@ -299,7 +306,12 @@ jobs:
       # IMPORTABILITY, so the extra un-skips the tests — but the ones that matter
       # then EMBED FOR REAL (test_cli_vectors.py:56 says so in as many words:
       # "exercises the real backfill_vectors() path, not a mock"), and an
-      # un-cached model means every job on every matrix entry re-downloads it.
+      # un-cached model means a re-download once per container per matrix entry --
+      # NOT once per job (techne#780). `~/.cache/fastembed` is in the container's
+      # writable layer, which survives every job on that container. This said "every
+      # job on every matrix entry" until 2026-08-26; the identical sentence in the
+      # fork-pr job IS true and should stay, because that job is ubuntu-latest -- a
+      # fresh VM per job.
       # model2vec 0.8.2 defaults force_download=True (embeddings.py:271), so
       # without force_download=False a restored cache is dead weight — that is
       # Prudence's #403 finding, reused here rather than rediscovered.
@@ -470,12 +482,22 @@ jobs:
         # 0.8.2 defaults it to True — see embeddings.py:271); otherwise the
         # actions/cache step above would be dead weight. (#403 review — Prudence.)
         #
-        # The cache matters LESS here than on a hosted runner, and still matters.
-        # A hosted runner is a fresh VM per job, so ~/.cache/huggingface is ALWAYS
-        # cold and actions/cache is the only thing preventing a download. Here the
-        # cache lives in the container's writable layer and survives every job, so it
-        # is cold only after a container replacement -- rare, but it does happen, and
-        # this step is what keeps that run from re-downloading the model.
+        # The cache matters LESS here than on a hosted runner, and still matters --
+        # for a reason that is NOT just "replacements are rare".
+        #
+        # Hosted is a fresh VM per job: always cold, one cold job in one. Here the
+        # cache is in the container's writable layer and survives every job ON THAT
+        # CONTAINER -- RestartCount reached 847 in one container's life, and with an
+        # ephemeral registration a restart is roughly a job, so call it one cold job
+        # in 847. Eviction does not change that: GitHub's 7-day and 10 GB limits
+        # apply to the REMOTE entry, never to the writable-layer copy.
+        #
+        # TWO COLD TRIGGERS, NOT ONE. A container replacement is the obvious one. The
+        # other is `dev02` being a POOL LABEL rather than a host (see the top of this
+        # file): legs distribute across it, so a job landing on a host that has not
+        # served this matrix entry before finds nothing, however warm the other host
+        # is. actions/cache is the ONLY thing that carries a warm cache ACROSS hosts,
+        # and that is the job it is really doing here.
         #
         # CORRECTED TWICE (techne#780). It first said "dies with each job", the claim
         # the 2026-08-26 incident falsified -- a container up three days discarded
@@ -483,8 +505,11 @@ jobs:
         # but kept the "matters MORE" comparison it was the only support for, which
         # inverts once the premise goes (Prudence, #779 r2 I2).
         #
-        # Bears on the #535 analysis at :320-327: cold-cache runs are RARER than that
-        # note assumes, so it understates its own case rather than overstating it.
+        # Bears on the #535 analysis further up this job: cold-cache runs are RARER
+        # than that note assumes, so it understates its own case rather than
+        # overstating it. (An earlier version of this pointed at the actions/cache
+        # step itself, which makes no persistence claim at all -- the claim was in the
+        # fastembed pre-fetch comment above, now corrected.)
         working-directory: techne
         run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
