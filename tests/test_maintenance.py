@@ -1274,9 +1274,14 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
 #
 # `read_manifest` is the gate that decides whether a directory is a restorable
 # backup set, and its docstring promises RestoreError on a malformed one. Valid
-# JSON says nothing about shape, and for four shapes it raised AttributeError
-# instead -- a traceback surfacing during a RESTORE, which is when a stack trace
-# is least useful and most alarming. Each case below tracebacked before the fix.
+# JSON says nothing about shape. Each case below tracebacked before the fix.
+#
+# NOT A CLOSED SET, and the first attempt claimed it was. Round 1 enumerated by
+# SYMPTOM -- the two `.get()` calls that raised AttributeError -- and walked past a
+# third on the same line: `meta.get("file", ...)` returns a non-string happily and
+# fails one operator later on `Path.__truediv__` as a TypeError. Different
+# exception, so a symptom-shaped search could not see it (Prudence, #777 I1).
+# Enumerate by EXPRESSION, not by traceback type, if this list ever grows again.
 
 @pytest.mark.parametrize(
     "label,payload,expected",
@@ -1286,6 +1291,13 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
         ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, "'techne'"),
         ("manifest is a JSON array", [{"databases": {}}], "expected a JSON object"),
         ("manifest is a JSON string", "techne", "expected a JSON object"),
+        # `file` present but not a string: `.get` returns it, `Path / it` explodes.
+        ("file is an int", {"databases": {"techne": {"file": 7}}}, "'file' for 'techne'"),
+        ("file is None", {"databases": {"techne": {"file": None}}}, "'file' for 'techne'"),
+        ("file is a list", {"databases": {"techne": {"file": ["t.db"]}}}, "'file' for 'techne'"),
+        ("file is a dict", {"databases": {"techne": {"file": {"n": "t"}}}}, "'file' for 'techne'"),
+        ("file is a bool", {"databases": {"techne": {"file": True}}}, "'file' for 'techne'"),
+        ("file is empty", {"databases": {"techne": {"file": "  "}}}, "'file' for 'techne'"),
     ],
 )
 def test_a_malformed_manifest_raises_restore_error_not_a_traceback(
@@ -1308,3 +1320,53 @@ def test_the_malformed_manifest_message_names_what_it_found(tmp_path):
     msg = str(excinfo.value)
     assert "librarian" in msg, "the failing entry is not named"
     assert "int" in msg, "the type actually found is not named"
+
+
+def test_a_malformed_file_value_does_not_kill_the_whole_retention_run(tmp_path):
+    """THE PAIR, ONE LEVEL DEEPER (Prudence, #777 I2).
+
+    `_classify_backup_set` carried its own copy of `meta.get("file", ...)`, so a
+    guard added only to `read_manifest` did not protect it. A non-string `file`
+    raised TypeError out of `prune_backup_sets` ENTIRELY — retention died for every
+    set, not just the unreadable one, routing around the `failed` channel the pruner
+    built so an unprunable set is reported rather than fatal. Measured before the
+    fix: with keep=0 and one bad set present, a perfectly good set was left on disk,
+    which is the disk-filling cron job `prune_backup_sets`' own docstring exists to
+    prevent.
+
+    Both readers now go through `_manifest_db_filename`, so they cannot drift again.
+    """
+    backups = tmp_path / "backups"
+    good = backups / "backup-20260101-000000"
+    good.mkdir(parents=True)
+    (good / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "techne.db"}},
+            }
+        )
+    )
+    (good / "techne.db").write_text("x")
+
+    bad = backups / "backup-20260201-000000"
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-02-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": 7}},
+            }
+        )
+    )
+
+    removed, failed = prune_backup_sets(backups, keep=0)
+
+    assert bad.exists(), "pruned a set techne cannot read as a backup"
+    assert [p for p, _ in failed] == [bad], "the unreadable set was not REPORTED"
+    assert removed == [good], "retention did not run for the readable set"
+    # And the pair stays honest: restore refuses the same set.
+    with pytest.raises(RestoreError, match="'file' for 'techne'"):
+        read_manifest(bad)
