@@ -364,6 +364,11 @@ All notable changes to techne are documented here. Format loosely follows
   and nothing was reported on the `failed` channel — a real backup destroyed by a
   run that exited as a success.
 
+  `docs/deployment.md`'s exit-3 table is updated to match: the row for `lists a
+  database file that is not there` now names the directory case as a cause and tells
+  the operator to check the manifest's `file` values before hunting for a deleted
+  file, because the two causes have opposite remedies.
+
   Two guards cover it, and they are worth naming separately in a release whose
   subject is guards drifting between call sites. `""` and whitespace-only are
   refused in the shared resolver, as a malformed `file` value. `.`, `..`, `./`,
