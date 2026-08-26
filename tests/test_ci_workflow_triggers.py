@@ -1066,3 +1066,65 @@ def test_any_job_pulling_a_vector_backend_must_warm_the_model_cache():
         "do not pull in a vector backend at all, so the vector tests skip visibly "
         "under `-rs`."
     )
+
+
+def test_every_default_suite_job_fetches_origin_main():
+    """A JOB THAT RUNS THE DEFAULT SUITE MUST FETCH `origin/main` (techne#690).
+
+    `doctor`'s `runtime:revision` runs `git rev-parse --short origin/main` and
+    returns UNKNOWN when it fails, which breaks "All checks passed" and fails four
+    `test_cli_doctor` tests. On a push the checked-out ref IS main; on a
+    pull_request `actions/checkout` fetches only the merge ref at depth 1, so the
+    ref has to be fetched explicitly.
+
+    THE INVARIANT NOW LIVES IN THREE JOBS, WHICH THIS FILE ALREADY CALLS A HAZARD.
+    Its own note at the fork guard says: "THE GUARD IS REPEATED THREE TIMES AND
+    THAT IS A HAZARD... a new job inherits the runner and not the guard... Do not
+    delete it in favour of a comment; a comment is what let this regrow twice."
+    A comment is exactly what held this together until now (Prudence, #779 Nit 2).
+
+    Derived, not hardcoded: the job list comes from which jobs actually run an
+    unmarked pytest, so a new default-suite job is caught rather than a new name
+    being added here by hand.
+    """
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+
+    def runs_default_suite(job):
+        for step in job.get("steps", []):
+            # PER LINE, not per step: a `run:` block is often multi-line (a pip
+            # install followed by the pytest call), and treating the block as one
+            # string matched a `pytest` on one line against a `-m` on another --
+            # which classified crash-recovery, a marker-only job, as running the
+            # default suite.
+            for line in step.get("run", "").splitlines():
+                # Anchor on the INVOCATION form, not the bare word. Every pytest
+                # call in this workflow is `python -m pytest`; matching "pytest"
+                # alone also matched `pip install -e ".[codex]" pytest`, which
+                # installs the package and runs nothing.
+                if "-m pytest" not in line:
+                    continue
+                args = line.split("-m pytest", 1)[1]
+                # `-m <marker>` selects a subset; a bare pytest is the whole suite,
+                # and only the whole suite reaches tests/test_cli_doctor.py.
+                if " -m " not in args:
+                    return True
+        return False
+
+    def fetches_main(job):
+        return any(
+            "refs/remotes/origin/main" in step.get("run", "")
+            for step in job.get("steps", [])
+        )
+
+    needs = {name for name, job in jobs.items() if runs_default_suite(job)}
+    assert needs == {"test", "eval-vec", "fork-pr"}, (
+        f"the set of default-suite jobs changed: {sorted(needs)}. Each one runs "
+        "tests/test_cli_doctor.py and so needs origin/main fetched."
+    )
+
+    missing = sorted(n for n in needs if not fetches_main(jobs[n]))
+    assert not missing, (
+        f"{missing} run(s) the default suite without fetching origin/main — "
+        "doctor's runtime:revision will return UNKNOWN and fail four "
+        "test_cli_doctor tests on every pull_request (techne#690)"
+    )
