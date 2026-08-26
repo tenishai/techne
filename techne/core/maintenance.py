@@ -380,8 +380,32 @@ def _manifest_db_filename(
     # pins to THAT guard. ".." and "../" do escape, and are refused here instead:
     # the parent of the set is outside the set, and "lists a database file that is
     # not there" was the wrong cause for them all along.
-    base = Path(src_dir).resolve()
-    candidate = (base / name).resolve()
+    # A NUL BYTE MUST NEVER REACH `resolve()` (Prudence, #784 r1). Every path
+    # syscall rejects an embedded NUL with ValueError -- NOT OSError -- so the
+    # containment check below raised straight out of `prune_backup_sets`, killing
+    # retention for EVERY set rather than refusing this one, and routing around the
+    # `failed` channel this resolver exists to feed. Measured at 5a21643: a set
+    # carrying {"file": "a\x00b"} took down a run that main handles gracefully, so
+    # this was a REGRESSION THIS GUARD INTRODUCED, not a pre-existing hole. Exactly
+    # the #759 shape one type over -- a value that IS a str and still is not a
+    # usable path.
+    if "\x00" in name:
+        return None, f"'file' for '{domain}' contains a NUL byte"
+    # AND THE CONTRACT, RESTORED (Prudence, #784 r1). This function's signature is
+    # its promise: it RETURNS (name, problem) and never raises, which is what lets
+    # every caller route a bad entry to `failed` instead of dying. A bare
+    # `.resolve()` broke that promise for a whole class of values. The NUL check
+    # above is the one we can name and message well; this is the guarantee that a
+    # value we did NOT anticipate degrades to a refusal instead of taking retention
+    # down with it. Prudence swept the neighbouring classes (long names, deep paths,
+    # `//etc/passwd`, `~/`, backslashes, trailing newline) and found NUL the only
+    # live escape -- so this catch should be unreachable today, and is here because
+    # "unreachable" is a claim about inputs we have thought of.
+    try:
+        base = Path(src_dir).resolve()
+        candidate = (base / name).resolve()
+    except (ValueError, OSError) as e:
+        return None, f"'file' for '{domain}' is not a usable path: {type(e).__name__}"
     if candidate != base and base not in candidate.parents:
         # Name the source the operator actually wrote: with no `file` key the
         # traversal lives in the domain key, and blaming `'file'` would send them

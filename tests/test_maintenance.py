@@ -1593,6 +1593,83 @@ def test_a_file_in_a_subdirectory_of_the_set_stays_accepted(tmp_path):
     assert read_manifest(src)["databases"]["techne"]["file"] == "sub/techne.db"
 
 
+def test_a_nul_byte_is_refused_rather_than_raised(tmp_path):
+    """A `file` containing a NUL is a str that is not a usable path (techne#784 r1).
+
+    THE CONTRACT IS "RETURNS A PROBLEM, NEVER RAISES", and containment broke it.
+    Every path syscall rejects an embedded NUL with ValueError -- not OSError -- so
+    `Path.resolve()` threw straight through `_manifest_db_filename`. Measured at
+    5a21643, before this guard: `read_manifest` died with an UNCAUGHT ValueError
+    ("lstat: embedded null character in path") instead of the RestoreError its own
+    docstring promises. A traceback during a restore is the thing that function
+    exists to avoid.
+
+    Same shape as the TypeError in #759, one type over: a value that passes
+    `isinstance(name, str)` and still cannot be joined to a path.
+    """
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "a\x00b"}},
+            }
+        )
+    )
+    with pytest.raises(RestoreError, match="NUL byte"):
+        read_manifest(tmp_path)
+
+
+def test_a_nul_byte_does_not_kill_the_whole_retention_run(tmp_path):
+    """THE HALF WITH TEETH for the NUL (Prudence, #784 r1).
+
+    `read_manifest` merely refused; `prune_backup_sets` DIED. `cli.py` calls it with
+    no `except`, so the ValueError raised out and retention stopped for EVERY set --
+    a prunable stale set survived alongside the good one, nothing was reported on
+    the `failed` channel, and the run looked like nothing needed doing.
+
+    That is verbatim the failure `_manifest_db_filename`'s own comment says it
+    exists to prevent, reintroduced by the guard added for #782 -- so it is pinned
+    at the reader that DELETES, not only at the one that refuses. Measured before
+    the fix: this test raised ValueError; on main (no containment at all) it passed.
+    A regression that only a caller-level test can see.
+    """
+    backups = tmp_path / "backups"
+    for stamp in ("backup-20260101-000000", "backup-20260201-000000"):
+        s = backups / stamp
+        s.mkdir(parents=True)
+        s.joinpath("manifest.json").write_text(
+            json.dumps(
+                {
+                    "created_at": f"{stamp[7:11]}-01-01T00:00:00Z",
+                    "techne_version": "0.15.0",
+                    "databases": {"techne": {"file": "techne.db"}},
+                }
+            )
+        )
+        s.joinpath("techne.db").write_text("REAL DATA")
+
+    poisoned = backups / "backup-20260301-000000"
+    poisoned.mkdir(parents=True)
+    poisoned.joinpath("manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-03-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "a\x00b"}},
+            }
+        )
+    )
+
+    removed, failed = prune_backup_sets(backups, keep=1)
+
+    # The run COMPLETED -- that is the whole point; before the fix it raised.
+    assert [p.name for p in removed] == ["backup-20260101-000000"], (
+        "retention did not do its job around the poisoned set"
+    )
+    assert [p for p, _ in failed] == [poisoned], "the poisoned set was not REPORTED"
+
+
 @pytest.mark.parametrize("name", ["/etc/passwd", "../../evil.db", "..", "../"])
 def test_an_escaping_file_never_takes_a_retention_slot(tmp_path, name):
     """THE HALF WITH TEETH, for the escape class (techne#782).
