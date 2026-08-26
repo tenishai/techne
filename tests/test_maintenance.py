@@ -1498,7 +1498,7 @@ def test_a_malformed_file_value_does_not_kill_the_whole_retention_run(tmp_path):
         read_manifest(bad)
 
 
-def test_a_rows_example_values_reach_that_rows_phrase():
+def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
     """An example a doc row offers must actually be refused BY that row's phrase.
 
     Not a test of prose (Prudence, #783 — pushing back on my claim that there was
@@ -1516,7 +1516,6 @@ def test_a_rows_example_values_reach_that_rows_phrase():
     guards WHICH ROWS EXIST, this one guards WHETHER A ROW'S EXAMPLES ARE TRUE.
     """
     import re
-    import tempfile
 
     doc = (Path(__file__).parent.parent / "docs" / "deployment.md").read_text()
     table = doc[doc.index("What `3` actually means") :]
@@ -1528,15 +1527,23 @@ def test_a_rows_example_values_reach_that_rows_phrase():
         cells = line.split("|")
         if len(cells) < 3:
             continue
-        phrase = cells[1].strip().strip("`")
-        if phrase not in RETENTION_REFUSAL_PHRASES:
+        cell = cells[1].strip().strip("`")
+        # MATCH BY CONTAINMENT, NOT EQUALITY (#783 r2). Several rows DECORATE the
+        # phrase -- `manifest is unreadable (...)`, `created_at ... is in the
+        # future` -- so exact membership silently skipped FOUR of the nine rows,
+        # and an example added to any of them would never have been checked while
+        # this test still reported green. Longest match wins, so a phrase that is a
+        # substring of another cannot claim the row.
+        matches = [p for p in RETENTION_REFUSAL_PHRASES if p in cell]
+        if not matches:
             continue
+        phrase = max(matches, key=len)
         # backticked JSON-string literals in the CAUSE cell are the examples
         for example in re.findall(r'`"([^"]*)"`', cells[2]):
-            backups = Path(tempfile.mkdtemp()) / "backups"
-            s = backups / "backup-20260101-000000"
-            s.mkdir(parents=True)
-            (s / "manifest.json").write_text(
+            backups = tmp_path / str(checked) / "backups"
+            st = backups / "backup-20260101-000000"
+            st.mkdir(parents=True)
+            (st / "manifest.json").write_text(
                 json.dumps(
                     {
                         "created_at": "2026-01-01T00:00:00Z",
@@ -1545,6 +1552,14 @@ def test_a_rows_example_values_reach_that_rows_phrase():
                     }
                 )
             )
+            # A REAL DATABASE IN THE SET (#783 r2). With the set empty, EVERY
+            # well-formed string is refused as "lists a database file that is not
+            # there" whatever it names -- so a WRONG example like `"techne.db"`, a
+            # perfectly valid filename that belongs to no row here, passed
+            # spuriously. With the file present it is not refused at all and the
+            # assertion below catches it, which is what makes this a test of the
+            # row's claim rather than of the set being empty.
+            (st / "techne.db").write_text("REAL DATA")
             _, failed = prune_backup_sets(backups, keep=0)
             reason = failed[0][1] if failed else "<not refused at all>"
             assert phrase in reason, (
@@ -1553,4 +1568,11 @@ def test_a_rows_example_values_reach_that_rows_phrase():
             )
             checked += 1
 
-    assert checked >= 2, f"parsed {checked} examples — the table format changed"
+    # Four today: two examples in each of the two rows that carry any. This is a
+    # PARSE guard -- if the table format drifts, `checked` collapses to 0 -- so the
+    # message must name both causes rather than blaming the format for what may be
+    # a row that legitimately dropped an example (in which case update this floor).
+    assert checked >= 4, (
+        f"parsed {checked} examples from the table, expected at least 4 — either a "
+        "row dropped an example (update this floor) or the table stopped parsing"
+    )
