@@ -354,10 +354,18 @@ All notable changes to techne are documented here. Format loosely follows
   Measured: with `--keep 0` and one bad set present, a perfectly good set was left on disk.
 
   **One thing is now refused that was previously accepted**, rather than merely
-  raising a different exception: a `file` naming the set directory itself. Before
-  this, `{"file": ""}` was accepted — `src_dir / ""` *is* the set directory, and it
-  exists — so a set whose "database file" was a folder passed validation. `""`,
-  whitespace, `.` and `..` are all refused now.
+  raising a different exception: a `file` naming the set directory instead of a
+  database. `{"file": ""}` was accepted before this, because `src_dir / ""` *is*
+  the set directory and it exists — so a set whose "database file" was a folder
+  passed validation as restorable.
+
+  That mattered beyond a confusing restore. Such a set took a **retention slot**:
+  at `--keep 1` it counted as the one set to keep and the genuine backup was
+  deleted, with nothing reported on the `failed` channel. It is now refused, and
+  refused by asking the question directly — *is this a file?* — rather than by
+  listing spellings, so `""`, whitespace, `.`, `..`, `./`, `.//`, `./.` and `../`
+  are all covered by one predicate rather than the four of them anyone thought to
+  enumerate.
 
   All three readers now resolve entries through one shared helper, so a guard cannot be added to
   one and missed by the others again. An unreadable set is **reported** through retention's

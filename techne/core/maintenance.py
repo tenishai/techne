@@ -340,18 +340,14 @@ def _manifest_db_filename(domain: str, meta: object) -> tuple[str | None, str | 
             f"'file' for '{domain}' should be a non-empty string, "
             f"found {type(name).__name__}"
         )
-    # `.` and `..` NAME THE SET DIRECTORY ITSELF, like "" and "  " above -- they are
-    # non-empty strings that join to the set dir and its parent, so the existence
-    # check passes and restore stages a DIRECTORY over a live db. It fails safely
-    # one function later (shutil.copy2 raises IsADirectoryError, an OSError, which
-    # the staging handler turns into RestoreError with live untouched), so this is
-    # tidiness rather than a hole -- but closing two spellings of "names the
-    # directory" and leaving the third is the wrong place to stop
-    # (Prudence, #777 r4 Nit 3).
-    if name.strip() in (".", ".."):
-        return None, (
-            f"'file' for '{domain}' names a directory, not a database file: {name!r}"
-        )
+    # NO SPELLING LIST HERE, DELIBERATELY. An earlier version rejected the literals
+    # "." and ".." and read as though it closed the class. It did not: "./", ".//",
+    # "./." and "../" all still named the set directory, and the predicate tested
+    # `name.strip()` while the behaviour depends on `name` -- so " . " was refused
+    # with "names a directory" for a path that is not one. The question is not "is
+    # this string one of two magic values" but "does this name a database FILE",
+    # which the callers answer directly with `.is_file()` instead of `.exists()`
+    # (Prudence, #777 r5 I1).
     return name, None
 
 
@@ -603,7 +599,11 @@ def _classify_backup_set(child: Path) -> SetClass:
         name, problem = _manifest_db_filename(domain, meta)
         if problem:
             malformed.append(domain)
-        elif not (child / name).exists():
+        # is_file(), NOT exists(): a `file` naming the set directory ("./", "../",
+        # "./.") makes exists() true, so the set was classified RESTORABLE, took a
+        # keep slot, and at keep=1 EVICTED THE GENUINE SET with failed: [] -- while
+        # `restore` then refused the survivor (Prudence, #777 r5 I1).
+        elif not (child / name).is_file():
             missing.append(domain)
     if malformed:
         return SetClass(
@@ -777,7 +777,9 @@ def read_manifest(src_dir: Path) -> dict:
         if problem:
             raise RestoreError(f"malformed manifest: {problem}")
         f = src_dir / name
-        if not f.exists():
+        # is_file(), not exists() -- see _classify_backup_set. A directory here
+        # passed validation and was staged over a live db one function later.
+        if not f.is_file():
             raise RestoreError(f"backup set is incomplete: {f.name} missing for '{domain}'")
     return manifest
 
