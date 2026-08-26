@@ -1521,6 +1521,7 @@ def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
     table = doc[doc.index("What `3` actually means") :]
 
     checked = 0
+    matched_rows = 0
     for line in table.splitlines():
         if not line.startswith("| `"):
             continue
@@ -1538,6 +1539,7 @@ def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
         if not matches:
             continue
         phrase = max(matches, key=len)
+        matched_rows += 1
         # backticked JSON-string literals in the CAUSE cell are the examples
         for example in re.findall(r'`"([^"]*)"`', cells[2]):
             backups = tmp_path / str(checked) / "backups"
@@ -1572,6 +1574,24 @@ def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
     # PARSE guard -- if the table format drifts, `checked` collapses to 0 -- so the
     # message must name both causes rather than blaming the format for what may be
     # a row that legitimately dropped an example (in which case update this floor).
+    # THE WITNESS FOR THE MATCHER ITSELF (Prudence, #783 r2). `checked` counts
+    # EXAMPLES and cannot see the matcher: widening it moved rows-matched 5 -> 8
+    # while leaving `checked` at 4, because the three newly-reached rows carry no
+    # examples. So reverting to exact membership left the whole suite green and
+    # Nit 1's fix had no witness anywhere in the tree. Row COVERAGE is the thing
+    # the widening changed, so row coverage is what has to be asserted.
+    #
+    # Self-invalidating by construction: every phrase in the tuple must own a row,
+    # so adding a phrase without documenting it fails here, and narrowing the
+    # matcher fails here. 8 today; under the exact-membership regression, 5.
+    # `[Errno N] <anything else>` is the ninth table row and matches no phrase by
+    # design — it is the errno passthrough, not a refusal — which is why this
+    # compares against the PHRASE count and not the row count.
+    assert matched_rows == len(RETENTION_REFUSAL_PHRASES), (
+        f"{matched_rows} table rows matched a refusal phrase, expected "
+        f"{len(RETENTION_REFUSAL_PHRASES)} — a phrase lost its row, or the matcher "
+        "narrowed and is silently skipping rows again"
+    )
     assert checked >= 4, (
         f"parsed {checked} examples from the table, expected at least 4 — either a "
         "row dropped an example (update this floor) or the table stopped parsing"
