@@ -166,12 +166,32 @@ def _strip_trailing_rule(body: str) -> str:
     back to the clean body and its original id, rather than fixing the growth rate
     while leaving the damage.
 
+    A POPPED RULE MUST BE PRECEDED BY A BLANK LINE (or be the whole body). Without
+    that condition this also eats a trailing SETEXT heading underline, silently
+    demoting a heading to a paragraph:
+
+        'Alpha beta.\n\nCaveats\n---'  ->  'Alpha beta.\n\nCaveats'
+
+    The format itself distinguishes the two and the strip should use it:
+    `export_patterns_md` ALWAYS emits the separator after a blank line
+    (patterns.py: body, "", "---", ""), whereas a setext underline is by
+    definition attached to the non-blank line above it. Convergence is unaffected —
+    accreted rules are all of the form `\n\n---`, so they still collapse.
+    (Prudence, #778 Nit 2.)
+
     A rule inside a fenced block is safe: the closing ``` is the last line, so the
     loop stops before reaching it.
     """
     lines = body.rstrip().splitlines()
-    while lines and (not lines[-1].strip() or _RULE_RE.match(lines[-1])):
-        lines.pop()
+    while lines:
+        last = lines[-1]
+        if not last.strip():
+            lines.pop()
+            continue
+        if _RULE_RE.match(last) and (len(lines) == 1 or not lines[-2].strip()):
+            lines.pop()
+            continue
+        break
     return "\n".join(lines).strip()
 
 
