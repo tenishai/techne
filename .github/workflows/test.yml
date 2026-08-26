@@ -19,9 +19,13 @@ name: test
 # Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so the self-hosted jobs
-# deliberately use NO actions/setup-python: the runner is EPHEMERAL, and
-# setup-python would re-download every interpreter on every job rather than reusing
-# a tool cache that does not survive the container. `fork-pr` DOES use it, because a
+# deliberately use NO actions/setup-python: setup-python would re-download every
+# interpreter on every job rather than reusing a tool cache that does not survive
+# the container. (The REGISTRATION is ephemeral -- the runner deregisters after each
+# job. The CONTAINER is not: `restart: unless-stopped` reuses it for hundreds of
+# jobs, RestartCount was 847 before it was last recreated, and everything under it
+# persists between them. See techne#780; the conclusion here is unchanged because
+# the tool cache genuinely does not survive a CONTAINER replacement.) `fork-pr` DOES use it, because a
 # hosted runner bakes in neither uv nor the matrix interpreters — the reasoning
 # above is about this image, not a blanket ban (#556).
 # NO `branches:` FILTER ON pull_request, AND THAT ABSENCE IS LOAD-BEARING (#530).
@@ -248,6 +252,11 @@ jobs:
       # a clean before/after at 13:20Z across four branches.
       #
       # One ref, depth 1: enough for the comparison, and not a full-history clone.
+      # KNOWN COST of --depth=1 (Prudence, #779 Nit 3): the two histories are then
+      # disjoint, `git merge-base` finds nothing, and `rev-list --left-right --count`
+      # returns 1 1. So the CI log's "N commit(s) behind origin/main" (checks.py) is
+      # an artifact, not a distance. The VERDICT is unaffected -- DORMANT is reached
+      # via the branch gate, not the count -- but do not read that number off a CI log.
       - name: Fetch origin/main for runtime:revision
         working-directory: techne
         run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
@@ -418,6 +427,11 @@ jobs:
       # a clean before/after at 13:20Z across four branches.
       #
       # One ref, depth 1: enough for the comparison, and not a full-history clone.
+      # KNOWN COST of --depth=1 (Prudence, #779 Nit 3): the two histories are then
+      # disjoint, `git merge-base` finds nothing, and `rev-list --left-right --count`
+      # returns 1 1. So the CI log's "N commit(s) behind origin/main" (checks.py) is
+      # an artifact, not a distance. The VERDICT is unaffected -- DORMANT is reached
+      # via the branch gate, not the count -- but do not read that number off a CI log.
       - name: Fetch origin/main for runtime:revision
         working-directory: techne
         run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
@@ -446,9 +460,15 @@ jobs:
         # 0.8.2 defaults it to True — see embeddings.py:271); otherwise the
         # actions/cache step above would be dead weight. (#403 review — Prudence.)
         #
-        # The cache matters MORE on the ephemeral runner than it did on hosted:
-        # ~/.cache/huggingface lives inside the container and dies with each job,
-        # so without a restore this re-downloads the model every single run.
+        # The cache matters MORE on the self-hosted runner than it did on hosted:
+        # ~/.cache/huggingface lives inside the CONTAINER, so without a restore this
+        # re-downloads the model whenever that container is replaced.
+        #
+        # CORRECTED (techne#780): this said "dies with each job", which is the exact
+        # claim the 2026-08-26 incident falsified -- a container up for three days
+        # discarded neither `_work` nor this cache between jobs. That matters for the
+        # #535 analysis at :320-327 too: cold-cache runs are RARER than that note
+        # assumes, so it understates its own case rather than overstating it.
         working-directory: techne
         run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
@@ -587,6 +607,11 @@ jobs:
       # a clean before/after at 13:20Z across four branches.
       #
       # One ref, depth 1: enough for the comparison, and not a full-history clone.
+      # KNOWN COST of --depth=1 (Prudence, #779 Nit 3): the two histories are then
+      # disjoint, `git merge-base` finds nothing, and `rev-list --left-right --count`
+      # returns 1 1. So the CI log's "N commit(s) behind origin/main" (checks.py) is
+      # an artifact, not a distance. The VERDICT is unaffected -- DORMANT is reached
+      # via the branch gate, not the count -- but do not read that number off a CI log.
       - name: Fetch origin/main for runtime:revision
         working-directory: techne
         run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
