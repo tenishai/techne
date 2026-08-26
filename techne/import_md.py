@@ -147,6 +147,34 @@ def parse(text: str) -> ParseResult:
     return ParseResult(patterns=patterns, no_lifts=no_lifts, skipped=tuple(skipped))
 
 
+
+# A markdown horizontal rule: ---, ***, or ___ (3+), optionally indented up to 3
+# spaces, alone on its line.
+_RULE_RE = re.compile(r"^ {0,3}(?:-{3,}|\*{3,}|_{3,})\s*$")
+
+
+def _strip_trailing_rule(body: str) -> str:
+    """Drop the `---` separators `export_patterns_md` writes AFTER each entry.
+
+    Without this the separator is absorbed into the preceding section's body, and
+    since a pattern id is a content hash of (name, source_url, body), the id
+    changes on every export -> ingest cycle and the store ACCRETES a near-duplicate
+    each time instead of recognising the pattern it already holds (techne#770).
+
+    Strips ALL trailing rules, not one, so the fix is CONVERGENT: re-ingesting a
+    corpus that already carries `---\n\n---\n\n---` from earlier cycles normalises
+    back to the clean body and its original id, rather than fixing the growth rate
+    while leaving the damage.
+
+    A rule inside a fenced block is safe: the closing ``` is the last line, so the
+    loop stops before reaching it.
+    """
+    lines = body.rstrip().splitlines()
+    while lines and (not lines[-1].strip() or _RULE_RE.match(lines[-1])):
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
 def _split_into_sections(text: str) -> list[tuple[str, str]]:
     """Return [(heading, body), ...] split on `## ` top-level headings.
 
@@ -171,14 +199,16 @@ def _split_into_sections(text: str) -> list[tuple[str, str]]:
         # Skip detection while inside a fenced code block.
         if not in_fence and line.startswith("## ") and not line.startswith("### "):
             if current_heading is not None:
-                sections.append((current_heading, "\n".join(current_body).strip()))
+                sections.append(
+                    (current_heading, _strip_trailing_rule("\n".join(current_body)))
+                )
             current_heading = line[3:].strip()
             current_body = []
         elif current_heading is not None:
             current_body.append(line)
 
     if current_heading is not None:
-        sections.append((current_heading, "\n".join(current_body).strip()))
+        sections.append((current_heading, _strip_trailing_rule("\n".join(current_body))))
 
     return sections
 
