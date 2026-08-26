@@ -363,6 +363,37 @@ def _marker_expr(argv: list[str]) -> str | None:
     return found
 
 
+def _fetches_origin_main(step: dict) -> bool:
+    """True when this step actually runs a `git fetch` landing on origin/main.
+
+    PARSES, DOES NOT SCAN, and checks `if:` -- because the first version of this
+    was `"refs/remotes/origin/main" in step["run"]`, which is the shape this file
+    spent four rounds of #532 killing. Both of these passed it (Prudence, #779 r3):
+
+      * the fetch commented out inside a `run: |` block -- "commenting a step out
+        is how people disable CI for an afternoon and forget" (:390);
+      * `if: github.event_name == 'push'`, one negation off from a plausible
+        optimisation, which skips the step on the ONLY event that needs it.
+
+    A conditional step is rejected outright rather than interpreted: an expression
+    language is not something to half-parse, and no `if:` is wanted here today.
+    """
+    import shlex
+
+    if step.get("if") is not None:
+        return False
+    for line in step.get("run", "").splitlines():
+        try:
+            tok = shlex.split(line, comments=True)
+        except ValueError:
+            continue
+        if len(tok) < 2 or Path(tok[0]).name != "git" or tok[1] != "fetch":
+            continue
+        if any(a.endswith("refs/remotes/origin/main") for a in tok[2:]):
+            return True
+    return False
+
+
 def _is_default_suite(argv: list[str]) -> bool:
     """True when argv narrows nothing: no selector flag and no positional."""
     expect_value = False
@@ -1080,7 +1111,11 @@ def test_every_default_suite_job_fetches_origin_main():
     the fork guard: "Do not delete it in favour of a comment; a comment is what let
     this regrow twice." A comment is what held this together until now.
 
-    USES `_pytest_argv` / `_is_default_suite`, NOT A SUBSTRING SCAN. The first
+    BOTH HALVES PARSE RATHER THAN SCAN -- the detector via `_pytest_argv` /
+    `_is_default_suite`, the assertion via `_fetches_origin_main`. An earlier
+    version said "NOT A SUBSTRING SCAN" while the assertion half still was one,
+    which is a claim about the test that was true of only the half it described.
+    The first
     version of this test hand-rolled a scanner and was vacuous three separate ways
     before review, then still passed two probe jobs that needed the fetch and
     lacked it — a bare `.venv-ci/bin/pytest` console script, and a NEGATIVE marker
@@ -1103,10 +1138,7 @@ def test_every_default_suite_job_fetches_origin_main():
         return False
 
     def fetches_main(job):
-        return any(
-            "refs/remotes/origin/main" in step.get("run", "")
-            for step in job.get("steps", [])
-        )
+        return any(_fetches_origin_main(step) for step in job.get("steps", []))
 
     needs = {name for name, job in jobs.items() if runs_default_suite(job)}
     assert needs == {"test", "eval-vec", "fork-pr"}, (
