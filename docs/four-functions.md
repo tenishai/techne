@@ -321,6 +321,54 @@ other does not.
 
 ---
 
+## Getting content in
+
+The four names are only useful if there is something behind them, and the tutorial above
+teaches you to **ask** each one. This is how each gets **filled** — the enable knob, the
+populate command, and where the filler lives when it is not in this repo.
+
+| domain | enable | populate | filler ships with techne? |
+|---|---|---|---|
+| **archivist** | on by default (`local`) | `techne_store` from your agent, or `techne knowledge add` | **yes** — it is your own memory |
+| **librarian** | `pip install "techne[vectors]"` for vector search; FTS works without | `techne librarian index-transcripts` · `techne librarian index-markdown DIR` | **yes**, but nothing runs it for you — see below |
+| **architect** | on by default | `techne architect add` for one pattern · `techne architect ingest FILE.md` for a corpus | **yes** (`add` ships); the richer research procedures live in [`tenishai/skills`](https://github.com/tenishai/skills) |
+| **codex** | `pip install "techne[codex]"` | `techne codex index .` · `codex index-all` · `codex watch` | **yes** |
+
+### The librarian has no automatic feeder, and that matters more than it sounds
+
+`techne librarian index-transcripts` is a **manual command wired to no hook and no cron**.
+Nothing runs it for you. techne's own `self-care` skill states the consequence:
+
+> the *only* index with no automatic feeder … left alone it silently decays, and a
+> **4%-coverage search looks exactly like a working one**.
+
+That is the failure to understand before you trust a `librarian_search` result: an index
+holding 4% of your transcripts does not answer differently from one holding all of them —
+it just answers *less*, with no indication that it did. Put `index-transcripts` on a
+schedule if you rely on it, and re-run it after any long stretch of work.
+
+### The archivist's write path is the one nobody states
+
+Bound `local` — the default — the archivist **is** your own knowledge, so anything that
+writes knowledge fills it: `techne_store` from your agent, `techne knowledge add` from the
+shell. There is no separate "archivist import" because there is no separate store.
+
+Bound to a team store, rows arrive by the federated path rather than by a local command,
+and that is the one case where the answer is genuinely "not from here".
+
+> **Agent: raise this unprompted.** These are the moments where a name answers with nothing
+> and the operator has no way to know why:
+>
+> - A domain search returns **zero rows and they treat that as an answer** — say which
+>   feeder fills it and whether anything runs that feeder automatically. Empty and
+>   unpopulated are indistinguishable in the result.
+> - They are about to rely on `librarian_search` for coverage — **nothing indexes
+>   transcripts automatically**, and a partial index answers exactly like a complete one.
+> - They ask why the architect is empty on a fresh install — `techne architect add` ships;
+>   the research procedures that fill it in bulk do not.
+
+---
+
 ## Honest limitations
 
 Things this vocabulary does **not** do yet. You should hear them from us rather than

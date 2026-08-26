@@ -63,7 +63,21 @@ pip install "techne[llm]"   # OPTIONAL: autonomous/headless model passes
 
 ---
 
-## Librarian — `librarian.db`  ·  *full documents, without bloating recall*
+## Archivist — *what does the team know?*  ·  `techne.db`, or a team store
+
+The first of the four names, and the one this tour was missing entirely. Ask it what is
+*known* — decisions, facts, corrections, the reasoning you would hate to redo — as opposed
+to what is written down (Librarian), what is worth stealing (Architect), or what the code
+looks like (Codex).
+
+**Why it's different:** the archivist is the only one of the four whose binding changes
+whose knowledge you are asking about. Bound `local` — the default — it resolves to *this
+instance's own* memory and there is no second store. Bound to a team store it answers for
+the team, and the same call reports which it resolved to, so the caller never has to guess.
+
+---
+
+## Librarian — *what is written down?*  ·  `librarian.db`
 
 Personal recall stays fast because it ranks **gist cards**, not full documents. The Librarian holds the **full content** of transcripts and docs in its own db, with its own FTS + vector index.
 
@@ -71,7 +85,7 @@ Personal recall stays fast because it ranks **gist cards**, not full documents. 
 
 ---
 
-## Architect — `architect.db`  ·  *the team's "what's worth stealing"*
+## Architect — *what is worth stealing?*  ·  `architect.db`
 
 A curated corpus of **architectural patterns** lifted from other projects' code — design decisions and trade-offs worth reusing — linked into a `[[wikilink]]` relation graph (`pattern_search`, `pattern_related`). Team-scoped: its own file, grantable, shareable.
 
@@ -79,7 +93,7 @@ A curated corpus of **architectural patterns** lifted from other projects' code 
 
 ---
 
-## Codex — `codex.db`  ·  *a code-graph your agent can query*  ·  **experimental**
+## Codex — *what does the code look like?*  ·  `codex.db`  ·  **experimental**
 
 Point it at a repo (`techne codex index`) and it extracts a **symbol + call/import graph** with tree-sitter (Python + TypeScript today). The agent can then ask **`codex_search`** (find a function/class) and **`codex_blast_radius`** (what does this reach / what reaches this — transitive callers/callees over the graph).
 

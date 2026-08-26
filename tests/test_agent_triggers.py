@@ -487,6 +487,9 @@ TRIGGER_WITNESSES = {
     "do I have backups?": "test_the_absence_the_backup_trigger_asserts_is_still_absent",
     "machine migration, a wipe": "test_the_absence_the_migration_trigger_asserts_is_still_absent",
     "They are restoring": "test_the_restore_trigger_is_still_all_or_nothing",
+    "zero rows": "test_an_unpopulated_domain_is_indistinguishable_from_no_matches",
+    "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
+    "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
 }
 
 
@@ -600,4 +603,68 @@ def test_backup_without_keep_really_does_grow_without_bound(config_free_tmp_home
     assert len(sets) == 3, (
         f"{len(sets)} sets after 3 unbounded runs — `backup` may now prune by default, "
         "which would make deployment.md's `--keep` trigger wrong"
+    )
+
+
+def test_an_unpopulated_domain_is_indistinguishable_from_no_matches(config_free_tmp_home):
+    """THE CLAIM THE ZERO-ROWS TRIGGER RESTS ON. An empty index and a populated index with
+    no match return the SAME THING, so an operator reading zero rows cannot tell "techne
+    does not know" from "nothing feeds this". That is why the agent has to volunteer the
+    feeder rather than wait to be asked — the result carries no signal to ask about.
+
+    (Distinct from an UNREADABLE domain, which four-functions.md documents as answering
+    with a reason. Readable-and-empty is the case with no signal.)"""
+    from techne.core.documents import search_documents, store_document
+    from techne.core.librarian import librarian_db
+
+    db = librarian_db(config_free_tmp_home)
+
+    empty_index = search_documents(db, "anything at all", limit=5)
+
+    store_document(db, source_type="x", source_url="u", content="a stored document", title="T")
+    populated_no_match = search_documents(db, "zqxjkv nothing matches this", limit=5)
+
+    assert empty_index == [] and populated_no_match == [], (
+        "one of these returned a distinguishing signal — if so the trigger can be softened"
+    )
+
+
+def test_nothing_automatically_indexes_transcripts(config_free_tmp_home):
+    """"nothing indexes transcripts automatically" — an absence, and the one the librarian
+    trigger turns on. `self-care.md` states the consequence: the only index with no
+    automatic feeder, and a 4%-coverage search looks exactly like a working one.
+
+    Pinned at the IMPORT surface: if a hook or the lifecycle ever drives transcript
+    indexing, this fails and the trigger has to be rewritten."""
+    importers = {
+        str(f.relative_to(REPO))
+        for f in (REPO / "techne").rglob("*.py")
+        if "transcript_library" in f.read_text() and f.name != "transcript_library.py"
+    }
+
+    assert importers == {"techne/cli.py"}, (
+        f"transcript indexing gained a caller: {sorted(importers)}. four-functions.md tells "
+        "operators nothing runs `index-transcripts` for them. If one of these does, that is "
+        "now false."
+    )
+
+
+def test_the_architect_feeder_ships_and_the_research_skills_do_not(config_free_tmp_home):
+    """The architect trigger makes two claims at once: `techne architect add` SHIPS, and the
+    procedures that fill the store in bulk DO NOT. Both are checked, because half of it
+    going stale would make the advice wrong in either direction."""
+    import click
+
+    from techne.cli import main
+
+    assert "add" in main.commands["architect"].commands, (
+        "`techne architect add` no longer ships — the trigger offers a command that is gone"
+    )
+    assert isinstance(main.commands["architect"], click.Group)
+
+    bundled = {f.stem for f in (REPO / "techne" / "skills").glob("*.md")}
+
+    assert not bundled & {"investigate-url", "survey-field"}, (
+        f"a research skill now ships with techne ({sorted(bundled)}) — four-functions.md "
+        "tells operators they live in tenishai/skills"
     )
