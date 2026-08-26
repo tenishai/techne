@@ -145,12 +145,23 @@ class TestDebouncer:
         """A smoke test over the REAL threading.Timer, so the fake cannot drift
         from it (techne#593). Deliberately generous — it exists to catch a seam
         that stopped matching production, not to pin the coalescing window."""
+        # WINDOW SET BY SCHEDULING NOISE, NOT BY AMBITION. At `delay_ms=50` this required
+        # three CONSECUTIVE STATEMENTS to complete within 50ms of each other, and a loaded
+        # runner under `-n 4` does not guarantee that — it failed on 3.12 while 3.13 passed,
+        # on a PR whose diff was AGENTS.md and one unrelated test file. Measured: coalescing
+        # holds at gaps of 0/10/30ms and breaks at 60ms, so the old margin sat right at the
+        # noise floor.
+        #
+        # Widening costs about a second and loses nothing this test is for: the docstring
+        # says it exists to catch a seam that stopped matching production, NOT to pin the
+        # coalescing window. Coalescing genuinely broken still fires three times and still
+        # fails, which is verified rather than assumed.
         seen: list[Path] = []
-        d = Debouncer(lambda p: seen.append(p), delay_ms=50)
+        d = Debouncer(lambda p: seen.append(p), delay_ms=500)
         d.schedule(Path("/tmp/x"))
         d.schedule(Path("/tmp/x"))
         d.schedule(Path("/tmp/x"))
-        time.sleep(0.4)
+        time.sleep(1.5)
         assert seen == [Path("/tmp/x")]
 
     def test_different_keys_fire_independently(self) -> None:
