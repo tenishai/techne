@@ -341,6 +341,34 @@ All notable changes to techne are documented here. Format loosely follows
   The stderr line is unchanged for pattern sections — `kind` renders as `section`, so it still
   reads `skipped section "My pattern": …`.
 
+- **A hand-authored manifest could name a database outside the backup set** (#782).
+  `read_manifest` accepted `{"file": "/etc/passwd"}` and `{"databases": {"../../evil": {}}}`,
+  validated the set as complete, and `restore_all_dbs` then staged a file from outside the set
+  over a live database. The first works because `src_dir / "/etc/passwd"` **discards `src_dir`
+  entirely** — pathlib semantics for an absolute right-hand side, not a bug in the join. The
+  second needs no `file` key at all: with it absent the name falls back to `f"{domain}.db"`, so
+  the domain key alone carries the traversal.
+
+  `_manifest_db_filename` — the single resolver all three readers go through since #759 — now
+  resolves the name against the set directory and refuses anything that lands outside it, so
+  `read_manifest`, `_classify_backup_set` and `restore_all_dbs` are covered by one predicate.
+  The check **resolves and compares** rather than matching on `".."`: a plain basename inside
+  the set can still be a symlink pointing out of it, which no spelling check sees.
+
+  **Scope, stated plainly.** Nothing techne writes produces either shape — the writer always
+  emits `{"file": <plain basename>, "size_bytes": <int>}` — so this needs a manifest that was
+  hand-edited or supplied by someone else. It is not a privilege escalation either: restore
+  runs as the operator and reads what the operator could already read. What it fixes is a live
+  database being overwritten from an unexpected source while the manifest claims the set is
+  self-contained, which is the promise `docs/deployment.md` makes for restore.
+
+  **One refusal message changed.** A `file` of `".."` or `"../"` names the set's *parent*, so
+  it is now refused as a malformed entry ("escapes the backup set") rather than as a missing
+  file ("backup set is incomplete"). Both were already refused and neither ever took a
+  retention slot; only the stated cause changed, and it changed to the accurate one. The other
+  directory spellings (`"."`, `"./"`, `".//"`, `"./."`) resolve to the set directory itself,
+  are not escapes, and still refuse exactly as before.
+
 - **`architect export` → `architect ingest` accreted a near-duplicate every cycle** (#770).
   `export_patterns_md` writes a `---` separator after each entry and the parser absorbed it
   into that entry's body. A pattern id is a content hash of `(name, source_url, body)`, so

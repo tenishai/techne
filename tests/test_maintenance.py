@@ -1340,9 +1340,7 @@ def test_a_malformed_manifest_raises_restore_error_not_a_traceback(
         read_manifest(tmp_path)
 
 
-@pytest.mark.parametrize(
-    "name", [".", "..", "./", ".//", "./.", "../", " . "]
-)
+@pytest.mark.parametrize("name", [".", "./", ".//", "./.", " . "])
 def test_a_file_naming_the_set_directory_is_refused(tmp_path, name):
     """A `file` that names the set directory is not a database file (techne#759).
 
@@ -1358,6 +1356,15 @@ def test_a_file_naming_the_set_directory_is_refused(tmp_path, name):
     Asserting the message, not just the type: "backup set is incomplete" belongs
     to this guard alone, so it distinguishes refused-as-a-directory from
     refused-as-malformed — the discrimination r4 had to add to the entry cases.
+
+
+    ".." AND "../" LEFT THIS LIST IN techne#782, and did not stop being refused.
+    They resolve to the set's PARENT, which is outside the set, so containment in
+    `_manifest_db_filename` now refuses them BEFORE `is_file()` is reached —
+    "lists a database file that is not there" was the wrong cause for them all
+    along. `test_a_file_escaping_the_backup_set_is_refused` carries them now. The
+    five spellings left here all resolve to the set directory ITSELF (or, for
+    " . ", a file inside it that does not exist), which is not an escape.
     """
     (tmp_path / "manifest.json").write_text(
         json.dumps(
@@ -1372,7 +1379,7 @@ def test_a_file_naming_the_set_directory_is_refused(tmp_path, name):
         read_manifest(tmp_path)
 
 
-@pytest.mark.parametrize("name", [".", "..", "./", ".//", "./.", "../", " . "])
+@pytest.mark.parametrize("name", [".", "./", ".//", "./.", " . "])
 def test_a_directory_naming_set_never_takes_a_retention_slot(tmp_path, name):
     """THE HALF WITH TEETH, and it had no witness (Prudence, #777 r6 I1).
 
@@ -1390,6 +1397,12 @@ def test_a_directory_naming_set_never_takes_a_retention_slot(tmp_path, name):
     The guard has to be pinned at BOTH readers, which is this PR's own subject:
     a check present at one call site and unproven at the other is exactly what
     `_manifest_db_filename` exists to prevent.
+
+
+    ".." and "../" moved to `test_an_escaping_file_never_takes_a_retention_slot`
+    in techne#782 — same protective property (the genuine set survives, the bad
+    set is REPORTED), refused by the malformed route [6] rather than the
+    missing-file route [7] this test pins.
     """
     backups = tmp_path / "backups"
     good = backups / "backup-20260101-000000"
@@ -1432,6 +1445,203 @@ def test_a_directory_naming_set_never_takes_a_retention_slot(tmp_path, name):
     assert [p for p, _ in failed] == [bad], "the unreadable set was not REPORTED"
     ((_, reason),) = failed
     assert RETENTION_REFUSAL_PHRASES[7] in reason, f"refused by the wrong guard: {reason!r}"
+
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "/etc/passwd",       # absolute: `src_dir / name` DISCARDS `src_dir` entirely
+        "../../evil.db",     # traversal in the `file` value
+        "..",                # the set's parent is outside the set
+        "../",
+        "sub/../../evil.db", # traversal that only appears part-way along the path
+    ],
+)
+def test_a_file_escaping_the_backup_set_is_refused(tmp_path, name):
+    """A `file` that resolves outside the set is not part of the set (techne#782).
+
+    MEASURED ACCEPTED at 7529ca9, both shapes: `{"file": "/etc/passwd"}` passed
+    `read_manifest` as a COMPLETE set and `restore_all_dbs` then staged /etc/passwd
+    over a live database. The join is not the bug — `src_dir / "/etc/passwd"` is
+    `/etc/passwd` because that is what pathlib does with an absolute right-hand
+    side — which is exactly why a guard that inspects the NAME has to run before
+    anything inspects the joined path.
+
+    The refusal is `read_manifest`'s contract (RestoreError, not a traceback), and
+    it fires under the promise at `restore_all_dbs`' step 1 that the WHOLE set is
+    validated before any live file is touched.
+    """
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": name}},
+            }
+        )
+    )
+    with pytest.raises(RestoreError, match="escapes the backup set"):
+        read_manifest(tmp_path)
+
+
+def test_an_escaping_file_is_refused_even_when_the_target_exists(tmp_path):
+    """The one that is a real overwrite, not merely a bad name (techne#782).
+
+    Every other case in this class fails `is_file()` anyway, so a reader could
+    conclude the old code was already safe by accident. It was not: with the target
+    PRESENT, the pre-#782 path validated the set as complete and reached the staging
+    copy. This test puts a real file at the far end of the traversal so the refusal
+    is proven to come from containment and not from the file simply being absent.
+    """
+    outside = tmp_path / "outside.db"
+    outside.write_text("NOT PART OF THE SET")
+    src = tmp_path / "set"
+    src.mkdir()
+    (src / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "../outside.db"}},
+            }
+        )
+    )
+    with pytest.raises(RestoreError, match="escapes the backup set"):
+        read_manifest(src)
+
+
+def test_a_domain_key_carrying_the_traversal_is_refused(tmp_path):
+    """The traversal needs no `file` key at all (techne#782).
+
+    With `file` absent the name falls back to `f"{domain}.db"`, so the DOMAIN KEY
+    becomes the filename and carries the escape by itself — `{"../../evil": {}}`
+    reaches `src_dir/../../evil.db`. Pinned separately from the `file` cases
+    because it enters through a different field, and a guard written only against
+    `meta["file"]` would read as though it closed the class while leaving this open.
+
+    The message must name the domain key rather than `'file'`: blaming a field the
+    operator's manifest does not contain sends them looking for the wrong line.
+    """
+    outside = tmp_path / "evil.db"
+    outside.write_text("NOT PART OF THE SET")
+    src = tmp_path / "a" / "set"
+    src.mkdir(parents=True)
+    (src / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"../../evil": {}},
+            }
+        )
+    )
+    with pytest.raises(RestoreError) as excinfo:
+        read_manifest(src)
+    msg = str(excinfo.value)
+    assert "escapes the backup set" in msg
+    assert "domain name" in msg, f"blamed the wrong field: {msg!r}"
+
+
+def test_a_basename_symlinked_out_of_the_set_is_refused(tmp_path):
+    """WHY THE PREDICATE RESOLVES INSTEAD OF MATCHING ".." (techne#782).
+
+    This name is a plain basename with no traversal to spell — every string check
+    passes it — and it still reads a file outside the set. Resolve-and-compare sees
+    it; `".." in name` does not. That is the whole argument for the more expensive
+    predicate, and without this test the cheaper one would look equivalent.
+    """
+    outside = tmp_path / "outside.db"
+    outside.write_text("NOT PART OF THE SET")
+    src = tmp_path / "set"
+    src.mkdir()
+    (src / "techne.db").symlink_to(outside)
+    (src / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "techne.db"}},
+            }
+        )
+    )
+    with pytest.raises(RestoreError, match="escapes the backup set"):
+        read_manifest(src)
+
+
+def test_a_file_in_a_subdirectory_of_the_set_stays_accepted(tmp_path):
+    """The predicate is INSIDE-THE-SET, not IS-A-BASENAME (techne#782).
+
+    `maintenance.py`'s writer only ever emits plain basenames, so this shape does
+    not occur in a set techne wrote. It is pinned anyway to fix the boundary in
+    place: the check added for #782 is containment, and tightening it later to
+    "basename only" would be a different, stricter rule that this test forces
+    anyone to make deliberately rather than by drift.
+    """
+    src = tmp_path / "set"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "techne.db").write_text("DATA")
+    (src / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "sub/techne.db"}},
+            }
+        )
+    )
+    assert read_manifest(src)["databases"]["techne"]["file"] == "sub/techne.db"
+
+
+@pytest.mark.parametrize("name", ["/etc/passwd", "../../evil.db", "..", "../"])
+def test_an_escaping_file_never_takes_a_retention_slot(tmp_path, name):
+    """THE HALF WITH TEETH, for the escape class (techne#782).
+
+    Mirrors `test_a_directory_naming_set_never_takes_a_retention_slot`, and exists
+    for the same reason: `read_manifest` merely refuses, while `_classify_backup_set`
+    DELETES. A containment check proven at the reader that fails safely and unproven
+    at the reader that destroys things is precisely the asymmetry
+    `_manifest_db_filename` was created to close — so the guard is pinned at both.
+
+    Route matters as well as outcome: an escaping entry is refused as MALFORMED
+    (phrase [6]), not as a missing file (phrase [7]), because the name is invalid
+    rather than absent.
+    """
+    backups = tmp_path / "backups"
+    good = backups / "backup-20260101-000000"
+    good.mkdir(parents=True)
+    (good / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "techne.db"}},
+            }
+        )
+    )
+    (good / "techne.db").write_text("REAL DATA")
+
+    bad = backups / "backup-20260201-000000"
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-02-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": name}},
+            }
+        )
+    )
+
+    removed, failed = prune_backup_sets(backups, keep=1)
+
+    assert good.exists(), f"{name!r} took a retention slot and the genuine set was deleted"
+    assert (good / "techne.db").read_text() == "REAL DATA"
+    assert removed == [], f"pruned {[p.name for p in removed]} to keep an unreadable set"
+    assert [p for p, _ in failed] == [bad], "the escaping set was not REPORTED"
+    ((_, reason),) = failed
+    assert RETENTION_REFUSAL_PHRASES[6] in reason, f"refused by the wrong guard: {reason!r}"
+
 
 
 def test_the_malformed_manifest_message_names_what_it_found(tmp_path):
