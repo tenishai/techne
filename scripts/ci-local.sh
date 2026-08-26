@@ -98,7 +98,14 @@ for PY in "${MATRIX[@]}"; do
   # ways, ran the shards serially and then concurrently, and got byte-identical
   # pass/fail/skip counts. Keep the FLAG in sync with test.yml; the number is
   # free.
-  "$VENV/bin/python" -m pytest -q -n auto || FAILED+=("$PY: pytest")
+  # `-rs` MIRRORS test.yml:360 AND IS NOT OPTIONAL HERE. The comment above says
+  # to keep the flag in sync and that only the worker count is free; this line
+  # had drifted off it. test.yml's own note explains the cost: "a count is not a
+  # report", and it names LOCAL runs as the side that skips more (18 vs 5). The
+  # tz capability skips (techne#773) fire on THIS runner and nowhere else, so
+  # without `-rs` the only place they occur is the only place they are invisible
+  # -- folded anonymously into a skip total under an "ALL GREEN" banner.
+  "$VENV/bin/python" -m pytest -q -rs -n auto || FAILED+=("$PY: pytest")
 
   # CLI -m overrides pyproject's addopts exclusion. Easy to forget locally, which
   # is exactly why it's here: these gates are excluded from a bare `pytest` run.

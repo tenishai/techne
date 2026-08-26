@@ -32,10 +32,29 @@ B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 # `time.tzset()` is a Unix capability, not a guaranteed one: uv's managed
 # python-build-standalone interpreters ship WITHOUT it, so these tests raise
-# AttributeError on `./scripts/ci-local.sh 3.13` while passing in GitHub
-# Actions, whose setup-python interpreters have it (techne#773). Skip rather
-# than fail -- "this build cannot run the test" is not "the code is broken",
-# and a red that CI never reproduces teaches you to ignore the local runner.
+# AttributeError on `./scripts/ci-local.sh 3.13` while passing in CI
+# (techne#773). Skip rather than fail -- "this build cannot run the test" is not
+# "the code is broken", and a red that CI never reproduces teaches you to ignore
+# the local runner.
+#
+# WHAT KEEPS THIS FROM FIRING IN CI -- name the right mechanism, because this is
+# the fact to re-check if the guard ever goes wrong. It is NOT actions/setup-python:
+# test.yml:22-23 declines to use it at all, and the one job that does (`fork-pr`,
+# test.yml:521/536, ubuntu-latest) has never been observed to run -- no fork of
+# this repo exists, and it reports `skipping` on every PR. The `test` job is
+# `runs-on: [self-hosted, linux, x64, dev02]` (test.yml:220) and builds its venv
+# with `uv venv --python ${{ matrix.python-version }}` (test.yml:242) against
+# interpreters BAKED INTO THE RUNNER IMAGE, under `UV_PYTHON_PREFERENCE: only-system`
+# and `UV_PYTHON_DOWNLOADS: never` (test.yml:79-80). That second pin is precisely
+# what stops uv from substituting a managed standalone build there the way it did
+# here. So the dependency is the dev02 image plus those two pins -- rebuilt on a
+# different cadence by a different process than anything in this repo.
+#
+# Established by log, not by inference: CI runs `pytest -q -rs -n 4`, which
+# enumerates every skip by reason. Job 98062971053 on PR #748 reports
+# `3613 passed, 6 skipped` with all six named (LSP x2, model2vec x3,
+# real-transcripts x1) -- neither of these tests among them. At that head both
+# called `time.tzset()` unguarded, so a PASS entails the attribute resolved.
 requires_tzset = pytest.mark.skipif(
     not hasattr(time, "tzset"),
     reason="time.tzset() absent on this interpreter (python-build-standalone)",
