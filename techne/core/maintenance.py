@@ -340,6 +340,18 @@ def _manifest_db_filename(domain: str, meta: object) -> tuple[str | None, str | 
             f"'file' for '{domain}' should be a non-empty string, "
             f"found {type(name).__name__}"
         )
+    # `.` and `..` NAME THE SET DIRECTORY ITSELF, like "" and "  " above -- they are
+    # non-empty strings that join to the set dir and its parent, so the existence
+    # check passes and restore stages a DIRECTORY over a live db. It fails safely
+    # one function later (shutil.copy2 raises IsADirectoryError, an OSError, which
+    # the staging handler turns into RestoreError with live untouched), so this is
+    # tidiness rather than a hole -- but closing two spellings of "names the
+    # directory" and leaving the third is the wrong place to stop
+    # (Prudence, #777 r4 Nit 3).
+    if name.strip() in (".", ".."):
+        return None, (
+            f"'file' for '{domain}' names a directory, not a database file: {name!r}"
+        )
     return name, None
 
 

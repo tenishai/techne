@@ -1286,16 +1286,26 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
 @pytest.mark.parametrize(
     "label,payload,expected",
     [
-        ("databases dict-of-strings", {"databases": {"techne": "techne.db"}}, "'techne'"),
-        ("databases dict-of-None", {"databases": {"techne": None}}, "'techne'"),
-        ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, "'techne'"),
+        ("databases dict-of-strings", {"databases": {"techne": "techne.db"}}, "entry for 'techne' should be an object"),
+        ("databases dict-of-None", {"databases": {"techne": None}}, "entry for 'techne' should be an object"),
+        ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, "entry for 'techne' should be an object"),
+        # THE `match=` MUST DISCRIMINATE, not merely appear. These asserted
+        # match="'techne'" until #777 r4 -- but that substring also occurs in the
+        # OTHER refusal this function raises, "backup set is incomplete: techne.db
+        # missing for 'techne'", which is precisely what the code emits when the
+        # entry guard stops firing and the entry falls through to the default
+        # filename. So four of these five passed with the guard deleted: letting
+        # bool through alone left the dict-of-bools case itself GREEN. Only
+        # `number` was held, and by a different test asserting "int" in msg.
+        # Match the malformed-entry message specifically.
+        #
         # MIRROR THE TOP LEVEL. Round 2 added number/null/bool up there and did not
         # mirror them one level down, which is how a fifteen-element set was counted
         # as thirteen — and left `bool` with no witness anywhere in the suite, so
         # `isinstance(meta, (dict, bool))` passed the whole suite green
         # (Prudence, #777 r3).
-        ("databases dict-of-numbers", {"databases": {"techne": 7}}, "'techne'"),
-        ("databases dict-of-bools", {"databases": {"techne": True}}, "'techne'"),
+        ("databases dict-of-numbers", {"databases": {"techne": 7}}, "entry for 'techne' should be an object"),
+        ("databases dict-of-bools", {"databases": {"techne": True}}, "entry for 'techne' should be an object"),
         ("manifest is a JSON array", [{"databases": {}}], "expected a JSON object"),
         ("manifest is a JSON string", "techne", "expected a JSON object"),
         # The remaining top-level shapes, so all THIRTEEN that tracebacked pre-fix
@@ -1310,6 +1320,10 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
         ("file is a dict", {"databases": {"techne": {"file": {"n": "t"}}}}, "'file' for 'techne'"),
         ("file is a bool", {"databases": {"techne": {"file": True}}}, "'file' for 'techne'"),
         ("file is empty", {"databases": {"techne": {"file": "  "}}}, "'file' for 'techne'"),
+        # `.` and `..` are the third and fourth spellings of "names the set
+        # directory" -- non-empty, so `.strip()` does not catch them.
+        ("file is dot", {"databases": {"techne": {"file": "."}}}, "names a directory"),
+        ("file is dotdot", {"databases": {"techne": {"file": ".."}}}, "names a directory"),
     ],
 )
 def test_a_malformed_manifest_raises_restore_error_not_a_traceback(
