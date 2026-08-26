@@ -1496,3 +1496,61 @@ def test_a_malformed_file_value_does_not_kill_the_whole_retention_run(tmp_path):
     # And the pair stays honest: restore refuses the same set.
     with pytest.raises(RestoreError, match="'file' for 'techne'"):
         read_manifest(bad)
+
+
+def test_a_rows_example_values_reach_that_rows_phrase():
+    """An example a doc row offers must actually be refused BY that row's phrase.
+
+    Not a test of prose (Prudence, #783 — pushing back on my claim that there was
+    no checkable invariant here, correctly). The remedy cell is never read. What is
+    checkable is that a row offering `"."` as an example of its cause is telling the
+    truth about which refusal `"."` produces.
+
+    It caught the PR that added it: row 148 offered `""`, which is refused one guard
+    EARLIER — `not name.strip()` in the resolver — and emits the OTHER phrase. So the
+    row sent an operator to a remedy about missing files for a manifest whose
+    databases are all present and intact. That is the same "two causes, opposite
+    remedies" defect #783 exists to fix, committed while fixing it.
+
+    Sits beside `test_every_exit_3_cause_has_a_row_in_deployment_md`: that one
+    guards WHICH ROWS EXIST, this one guards WHETHER A ROW'S EXAMPLES ARE TRUE.
+    """
+    import re
+    import tempfile
+
+    doc = (Path(__file__).parent.parent / "docs" / "deployment.md").read_text()
+    table = doc[doc.index("What `3` actually means") :]
+
+    checked = 0
+    for line in table.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 3:
+            continue
+        phrase = cells[1].strip().strip("`")
+        if phrase not in RETENTION_REFUSAL_PHRASES:
+            continue
+        # backticked JSON-string literals in the CAUSE cell are the examples
+        for example in re.findall(r'`"([^"]*)"`', cells[2]):
+            backups = Path(tempfile.mkdtemp()) / "backups"
+            s = backups / "backup-20260101-000000"
+            s.mkdir(parents=True)
+            (s / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "techne_version": "0.15.0",
+                        "databases": {"techne": {"file": example}},
+                    }
+                )
+            )
+            _, failed = prune_backup_sets(backups, keep=0)
+            reason = failed[0][1] if failed else "<not refused at all>"
+            assert phrase in reason, (
+                f"the row for {phrase!r} offers {example!r} as an example, "
+                f"but that value is refused as: {reason!r}"
+            )
+            checked += 1
+
+    assert checked >= 2, f"parsed {checked} examples — the table format changed"
