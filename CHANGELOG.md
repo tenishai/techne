@@ -7,6 +7,25 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- **The docs teach how to FILL each domain, not only how to ask it** (#753). The 0.16.0
+  tutorial taught four names against four stores it never explained how to populate, which
+  reads as broken on day one for exactly the audience the release is aimed at. `four-functions.md`
+  gains a **Getting content in** section: per domain, the enable knob, the populate command,
+  and where the filler lives when it is not in this repo.
+
+  Two things it states that were true and undocumented. **Nothing in techne itself indexes
+  transcripts** — `index-transcripts`' only in-repo caller is the CLI command, and a
+  4%-coverage search answers exactly like a complete one, so a partial index is invisible in
+  the result. (Deployments can wire a hook as a shell string, which no import graph sees;
+  techne#704 forced that same correction on `vectors backfill`.) And
+  **the archivist's write path**: bound `local` it *is* your own knowledge, so `techne_store`
+  fills it and there is no separate import.
+
+- **`docs/modules.md` was missing the archivist entirely** (#753). It introduced three of the
+  four names *as database files* — the layout framing this release exists to demote them out
+  of — and `grep -ci archivist` returned **0**. All four are now headed by function with the
+  db file as subtitle, matching the README's treatment.
+
 - **`techne backup --keep N` — retention** (#742). `backup` wrote a full set every run
   and pruned nothing, which made it safe to run by hand and unsafe to put on a timer: a
   nightly job with no ceiling is a disk-filling cron job dressed as a backup story.

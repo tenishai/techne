@@ -321,6 +321,85 @@ other does not.
 
 ---
 
+## Getting content in
+
+The four names are only useful if there is something behind them, and the tutorial above
+teaches you to **ask** each one. This is how each gets **filled** — the enable knob, the
+populate command, and where the filler lives when it is not in this repo.
+
+| domain | enable | populate | filler ships with techne? |
+|---|---|---|---|
+| **archivist** | on by default (`local`); `pip install "techne[vectors]"` adds vector search, then `techne vectors backfill` for rows already stored | `techne_store` from your agent, or `techne knowledge add` | **yes** — it is your own memory |
+| **librarian** | on by default — **FTS only, by construction** | `techne librarian index-transcripts` · `techne librarian index-markdown DIR` | **yes**, but nothing runs it for you — see below |
+| **architect** | on by default | `techne architect add` for one pattern · `techne architect ingest FILE.md` for a corpus | **yes** (`add` ships); the richer research procedures live in [`tenishai/skills`](https://github.com/tenishai/skills) |
+| **codex** | `pip install "techne[codex]"` | `techne codex index .` · `codex index-all` · `codex watch` | **yes** |
+
+### Installing `[vectors]` does not backfill what you already stored
+
+The extra adds vector search to the **archivist** — `search_vec`, reached through
+`core/search.search`. It does nothing for the librarian, whose document search is a single
+FTS `MATCH` **by construction rather than by degradation**: there is no vector branch to
+enable and no `documents_vec` table to fill.
+
+And installing it does not embed rows that are already there. Run `techne vectors backfill`
+afterwards, or the vector channel is half-built — which fails in this release's signature
+way, because **FTS keeps answering**. A partially embedded store returns results, ranks
+them plausibly, and never says that half its corpus is unreachable by meaning.
+
+### Nothing in techne indexes transcripts for you, and that matters more than it sounds
+
+**Nothing in this repo runs `techne librarian index-transcripts` for you** — its only
+caller is the CLI command itself. That is the strongest claim the call graph can support,
+and deliberately not "nothing runs it": deployments wire hooks as shell strings in the
+host's `settings.json`, which no import graph can see. techne#704 forced exactly this
+correction on the identical reasoning about `vectors backfill`
+([`docs/arch/search-embeddings.md`](arch/search-embeddings.md)), so **check your own hooks
+before concluding nothing is indexing.**
+
+If nothing is, techne's own `self-care` skill states the consequence. The quote is the
+corrected wording: the previous version said "no automatic feeder" flatly, and **the
+ellipsis here elided exactly that fragment** — so this document leaned on an uncorrected
+claim while presenting the correction. Both are fixed now, which is the only reason the
+quote can be trusted as authority:
+
+> the only index nothing in techne feeds automatically … left alone it silently decays,
+> and a **4%-coverage search looks exactly like a working one**.
+
+That is the failure to understand before you trust a `librarian_search` result: an index
+holding 4% of your transcripts does not answer differently from one holding all of them —
+it just answers *less*, with no indication that it did. Put `index-transcripts` on a
+schedule if you rely on it, and re-run it after any long stretch of work.
+
+### The archivist's write path is the one nobody states
+
+Bound `local` — the default — the archivist **is** your own knowledge, so anything that
+writes knowledge fills it: `techne_store` from your agent, `techne knowledge add` from the
+shell. There is no separate "archivist import" because there is no separate store.
+
+Bound to a team store, rows arrive by the federated path rather than by a local command,
+and that is the one case where the answer is genuinely "not from here".
+
+> **Agent: raise this unprompted.** These are the moments where a name answers with nothing
+> and the operator has no way to know why:
+>
+> - A search of the **archivist, librarian or architect** returns **zero rows** — say which
+>   feeder fills it and whether anything runs that feeder automatically. For those three,
+>   empty and unpopulated are indistinguishable in the result, so the moment to speak is
+>   when the zero appears, not once they have concluded something from it.
+>   **The codex is the exception:** its empty answer carries a *qualification* rather than a
+>   bare empty list — it says which kind of nothing it means. `binding: 'absent'` with "run
+>   `techne codex index <repo>`" when no index resolves; a distinct "THE INDEX IS EMPTY
+>   (0 files)" when one resolved and holds nothing; and four more, two of which name no
+>   remedy because none exists (techne#595). Those states never appear together. The
+>   qualification is what the other three lack.
+> - They are about to rely on `librarian_search` for coverage — **nothing in techne itself
+>   indexes transcripts**, so ask whether their deployment wires one; a partial index
+>   answers exactly like a complete one.
+> - They ask why the architect is empty on a fresh install — `techne architect add` ships;
+>   the research procedures that fill it in bulk do not.
+
+---
+
 ## Honest limitations
 
 Things this vocabulary does **not** do yet. You should hear them from us rather than

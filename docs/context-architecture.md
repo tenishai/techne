@@ -92,7 +92,7 @@ existing seam (render in core, write/inject in `platforms/claude_code`), never i
 - **`JsonlTranscriptSource` can index them** into techne — but currently stores a truncated
   4 KB redacted preview for search, not the verbatim body. The verbatim still lives only in
   the JSONL.
-- **`librarian.db` (documents domain) is built for full content** (documents + fts + vec) and
+- **`librarian.db` (documents domain) is built for full content** (documents + fts; **no vec** — document search is FTS-only) and
   is the natural home for a complete, indexed transcript archive.
 
 **So "rebuild full context" = yes from CC's JSONL (which techne *can* ingest), no from

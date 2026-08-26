@@ -851,7 +851,10 @@ def search_vec(
                         if live >= limit:
                             break
 
-        # documents vector search lives with the Librarian store now (techne#99).
+        # documents live with the Librarian store now (techne#99) — and there is NO
+        # document vector search: librarian.db has one virtual table, `documents_fts`.
+        # This comment previously said 'documents vector search lives with the
+        # Librarian store', which asserted a `documents_vec` that has never existed.
 
         results.sort(key=lambda x: x.get("distance", 999))
         return results[:limit]

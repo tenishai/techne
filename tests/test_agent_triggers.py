@@ -487,6 +487,9 @@ TRIGGER_WITNESSES = {
     "do I have backups?": "test_the_absence_the_backup_trigger_asserts_is_still_absent",
     "machine migration, a wipe": "test_the_absence_the_migration_trigger_asserts_is_still_absent",
     "They are restoring": "test_the_restore_trigger_is_still_all_or_nothing",
+    "zero rows": "test_only_the_codex_distinguishes_an_empty_index_from_no_match",
+    "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
+    "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
 }
 
 
@@ -600,4 +603,144 @@ def test_backup_without_keep_really_does_grow_without_bound(config_free_tmp_home
     assert len(sets) == 3, (
         f"{len(sets)} sets after 3 unbounded runs — `backup` may now prune by default, "
         "which would make deployment.md's `--keep` trigger wrong"
+    )
+
+
+def test_only_the_codex_distinguishes_an_empty_index_from_no_match(config_free_tmp_home, tmp_path):
+    """ASSERTED AT THE ENVELOPE, WHICH IS THE SURFACE AN AGENT READS (Prudence, #771 round
+    2 — Question A's second direction, still unfixed after round 1). My previous version
+    called `zero_result_notice`, a core function; `_with_binding`'s own docstring records
+    Prudence catching the identical miss in techne#725, where "the domain tests asserted
+    the envelope of `domains.codex_search`, which no MCP caller reaches".
+
+    BOTH STATES, because Prudence found the arrangement I could not (#771 round 3). The
+    missing ingredient was `git init`, NOT the db: `resolve_repo_db_for_query` calls
+    `primary_repo_root()` FIRST and returns None for a non-repo, short-circuiting before it
+    looks at the db at all. She teeth-checked the diagnosis by removing only the `git init`
+    and reproducing the `absent` I had been getting. Recording a gap was the honest fallback;
+    closing it is better."""
+    import subprocess
+
+    from techne.core.codex import codex_db_for_repo
+    from techne.mcp_server import _codex_search
+
+    # STATE 1 — nothing resolves: a plain directory, not a repo
+    unindexed = tmp_path / "not-a-repo"
+    unindexed.mkdir()
+    absent = _codex_search({"query": "zqxjkv_no_such_symbol", "repo": str(unindexed)},
+                           config_free_tmp_home)
+
+    assert absent["results"] == [] and absent.get("notice"), "no qualification on the absent state"
+    assert absent["binding"] == "absent", absent["binding"]
+    assert "codex index" in absent["notice"], absent["notice"]
+
+    # STATE 2 — an index that RESOLVED and holds nothing
+    empty = tmp_path / "empty-repo"
+    empty.mkdir()
+    subprocess.run(["git", "init", "-q", str(empty)], check=True)
+    codex_db_for_repo(config_free_tmp_home, empty)
+    resolved = _codex_search({"query": "zqxjkv_no_such_symbol", "repo": str(empty)},
+                             config_free_tmp_home)
+
+    assert resolved["binding"] == "local", (
+        f"expected a resolved binding for an initialised repo, got {resolved['binding']!r}"
+    )
+    assert "INDEX IS EMPTY" in (resolved.get("notice") or ""), (
+        f"the resolved-but-empty state lost its qualification: {resolved.get('notice')!r}"
+    )
+    assert absent["notice"] != resolved["notice"], (
+        "the two states now give the same notice — the doc says they are distinguishable"
+    )
+
+
+def test_the_other_three_domains_give_no_such_signal(config_free_tmp_home):
+    """THE WORD `only` IN THE SIBLING TEST'S NAME WAS UNASSERTED (Prudence, #771 round 4).
+    That test pins the codex exception well and never touches the archivist, librarian or
+    architect — so "for those three, empty and unpopulated are indistinguishable", which is
+    the premise the agent's ACTION rests on, had no witness at all. She probed it: all three
+    return `count: 0`, `results: []`, and no `notice` key. True today, and now pinned.
+
+    If any of the three gains a qualification, this fails and the trigger should be narrowed
+    to exclude it — the same way the codex is excluded now."""
+    from techne.core import domains
+
+    unqualified = {}
+    for name in ("archivist", "librarian", "architect"):
+        fn = getattr(domains, f"{name}_search")
+        result = fn(config_free_tmp_home, "zqxjkv_no_such_term")
+        unqualified[name] = {
+            "count": result.get("count"),
+            "results": result.get("results"),
+            "has_notice": bool(result.get("notice")),
+        }
+
+    for name, shape in unqualified.items():
+        assert shape["results"] == [] and shape["count"] == 0, f"{name}: {shape}"
+        assert not shape["has_notice"], (
+            f"{name} now qualifies its empty answer ({shape}) — four-functions.md tells "
+            "operators the codex is the ONLY domain that does. Narrow the trigger."
+        )
+
+
+def test_nothing_automatically_indexes_transcripts(config_free_tmp_home):
+    """"nothing indexes transcripts automatically" — an absence, and the one the librarian
+    trigger turns on. `self-care.md` states the consequence: the only index with no
+    automatic feeder, and a 4%-coverage search looks exactly like a working one.
+
+    PINNED AT THE IMPORT SURFACE, WHICH IS WHAT IT CAN SEE — and the doc is now phrased to
+    match, saying "nothing IN THIS REPO runs it" rather than "nothing runs it". A
+    deployment can wire `index-transcripts` into a `settings.json` hook as a shell string,
+    which no import graph reaches; techne#704 forced that same correction on the identical
+    reasoning about `vectors backfill`. A test that cannot see shell hooks must not back a
+    sentence that claims there are none."""
+    importers = {
+        str(f.relative_to(REPO))
+        for f in (REPO / "techne").rglob("*.py")
+        if "transcript_library" in f.read_text() and f.name != "transcript_library.py"
+    }
+
+    assert importers == {"techne/cli.py"}, (
+        f"transcript indexing gained a caller: {sorted(importers)}. four-functions.md tells "
+        "operators nothing runs `index-transcripts` for them. If one of these does, that is "
+        "now false."
+    )
+
+
+def test_the_architect_feeder_ships_and_the_research_skills_do_not(config_free_tmp_home):
+    """The architect trigger makes two claims at once: `techne architect add` SHIPS, and the
+    procedures that fill the store in bulk DO NOT. Both are checked, because half of it
+    going stale would make the advice wrong in either direction."""
+    import click
+
+    from techne.cli import main
+
+    assert "add" in main.commands["architect"].commands, (
+        "`techne architect add` no longer ships — the trigger offers a command that is gone"
+    )
+    assert isinstance(main.commands["architect"], click.Group)
+
+    bundled = {f.stem for f in (REPO / "techne" / "skills").glob("*.md")}
+
+    assert not bundled & {"investigate-url", "survey-field"}, (
+        f"a research skill now ships with techne ({sorted(bundled)}) — four-functions.md "
+        "tells operators they live in tenishai/skills"
+    )
+
+
+def test_every_indexed_document_still_carries_a_trigger_block():
+    """THE THIRD DIRECTION, which the gate was not enforcing. It checked that a document
+    with a block has a row, and that a row's anchor resolves — but not that an indexed
+    document still HAS a block. So deleting the last trigger from a document left its rows
+    behind, pointing an agent at a section with nothing to raise.
+
+    Found by mutation while fixing #753's block: removing the marker correctly left the
+    other two checks silent, and nothing else spoke. The arch-card gate this convention
+    models itself on enforces both directions, and `AGENTS.md` says this one does too."""
+    indexed = {doc for doc, _ in _index_rows()}
+    without_blocks = sorted(indexed - _docs_with_trigger_blocks())
+
+    assert not without_blocks, (
+        f"indexed in AGENTS.md but carrying no trigger block: {without_blocks}. Remove the "
+        "row, or restore the block — a row pointing at nothing sends an agent to read a "
+        "section with no trigger in it."
     )
