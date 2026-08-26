@@ -1291,6 +1291,11 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
         ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, "'techne'"),
         ("manifest is a JSON array", [{"databases": {}}], "expected a JSON object"),
         ("manifest is a JSON string", "techne", "expected a JSON object"),
+        # The remaining top-level shapes, so all THIRTEEN that tracebacked pre-fix
+        # are pinned rather than ten of them (Prudence, #777 r2 Nit 2).
+        ("manifest is a JSON number", 7, "expected a JSON object"),
+        ("manifest is JSON null", None, "expected a JSON object"),
+        ("manifest is a JSON bool", True, "expected a JSON object"),
         # `file` present but not a string: `.get` returns it, `Path / it` explodes.
         ("file is an int", {"databases": {"techne": {"file": 7}}}, "'file' for 'techne'"),
         ("file is None", {"databases": {"techne": {"file": None}}}, "'file' for 'techne'"),
