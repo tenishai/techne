@@ -56,7 +56,7 @@ CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 #: silently dropping `[0.15.0]`, `[0.14.0]` and `[0.13.0]` from the duplicate-heading
 #: check — collection went 11 tests to 8. A guard that loses coverage when it misfires is
 #: worse than one that only misfires.
-_DETAILS = re.compile(r"^\s*(?P<tag></?details>)", re.M)
+_DETAILS = re.compile(r"^\s*<(?P<slash>/?)details\b[^>]*>", re.M)
 
 
 def _strip_collapsed(text: str) -> str:
@@ -67,7 +67,7 @@ def _strip_collapsed(text: str) -> str:
     """
     out, depth, cut = [], 0, 0
     for m in _DETAILS.finditer(text):
-        if m.group("tag") == "<details>":
+        if not m.group("slash"):
             if depth == 0:
                 out.append(text[cut : m.start()])
             depth += 1
@@ -129,10 +129,42 @@ def test_every_details_block_is_closed():
 
     depth = 0
     for m in _DETAILS.finditer(text):
-        depth += 1 if m.group("tag") == "<details>" else -1
+        depth += 1 if not m.group("slash") else -1
         assert depth >= 0, (
             f"`</details>` at offset {m.start()} closes a block that was never opened — "
             "counts can still balance while the nesting is inverted"
         )
 
     assert depth == 0, f"{depth} `<details>` block(s) never closed"
+
+
+def test_an_attribute_bearing_details_tag_is_read_as_an_opener():
+    """`<details open>` is legal, common, and was matched only on its CLOSER.
+
+    `_DETAILS` was `</?details>`, requiring the immediate `>`. A single
+    well-formed `<details open>…</details>` block therefore contributed one tag
+    instead of two, counted as -1, and failed with *"closes a block that was
+    never opened"* — an error naming the closer when the opener is what the
+    pattern could not see. Worse for `_strip_collapsed`: with no opener the
+    region is never cut, so a collapsed archive's repeated headings flow into
+    the duplicate-heading check, which is the exact failure the strip exists to
+    prevent (Prudence, #748 r2 N3).
+
+    Nothing in CHANGELOG.md uses the attribute form today. That is why this is
+    pinned rather than left to the file: the guard would misfire on the first
+    one added, and the message would send the reader to the wrong tag.
+    """
+    for markup in ("<details open>", '<details class="archive">', "<details>"):
+        text = f"# Head\n\n{markup}\n## [0.1.0]\n</details>\n\n## [0.1.0]\n"
+
+        depth = 0
+        for m in _DETAILS.finditer(text):
+            depth += 1 if not m.group("slash") else -1
+            assert depth >= 0, f"{markup} read as a closer — inverted nesting"
+        assert depth == 0, f"{markup} left depth={depth}, expected balanced"
+
+        stripped = _strip_collapsed(text)
+        assert stripped.count("## [0.1.0]") == 1, (
+            f"{markup}: the collapsed region was not cut, so its repeated "
+            f"heading survives into the duplicate-heading check"
+        )
