@@ -159,17 +159,17 @@ def test_add_accepts_every_url_shape_ingest_accepts(cli_config, url):
 
 
 @pytest.mark.parametrize(
-    "raw,stored",
+    "raw",
     [
-        ("https://github.com/x/y", "https://github.com/x/y"),
+        "https://github.com/x/y",
         # the shape `export_patterns_md` itself teaches — a URL followed by a path
-        ("https://github.com/x/y — src/foo.ts", "https://github.com/x/y"),
-        ("see https://github.com/x/y for details", "https://github.com/x/y"),
-        ("https://github.com/x/y).", "https://github.com/x/y"),
-        ("(https://github.com/x/y;", "https://github.com/x/y"),
+        "https://github.com/x/y — src/foo.ts",
+        "see https://github.com/x/y for details",
+        "https://github.com/x/y).",
+        "(https://github.com/x/y;",
     ],
 )
-def test_add_stores_what_ingest_would_store(cli_config, raw, stored):
+def test_add_stores_what_ingest_would_store(cli_config, raw):
     """PARITY OF WHAT LANDS IN THE DATABASE, not of what is accepted (Prudence, #758
     Critical). `_URL_RE` and `_DATE_RE` are unanchored EXTRACTORS — `_DATE_RE` carries a
     capture group so callers take `group(1)`, and `_parse_pattern_body` does. `add` used
@@ -184,13 +184,25 @@ def test_add_stores_what_ingest_would_store(cli_config, raw, stored):
     The oracle my previous test could not be: its three fixtures were the subset where raw
     equals normalized, so it was unfalsifiable by construction — and no mutant could have
     exposed it, because AN ABSENT TRANSFORMATION HAS NO MUTANT to kill."""
+    # THE EXPECTATION IS DERIVED FROM `parse`, NOT HARDCODED. The first version of this
+    # test parametrised the expected value and asserted `add` matched it — while its own
+    # failure message claimed to be comparing against ingest. That is the absent-link shape
+    # again: nothing tied `add` to `parse`, so a change to `_parse_pattern_body`'s
+    # extraction would silently re-open the gap with every one of these cases still green.
+    # Running the SAME source through `parse` makes the link the thing under test.
+    parsed = parse(
+        f"## P\n\n- **Source**: {raw}\n- **Surveyed**: 2026-01-01\n\nb\n"
+    ).patterns
+    assert len(parsed) == 1, f"fixture is not one ingest accepts: {raw!r}"
+    ingest_would_store = parsed[0].source_url
+
     result = _add("--name", "P", "--source", raw, "--surveyed", "2026-01-01", "--body", "b")
 
     assert result.exit_code == 0, result.output
-
-    db = architect_db(cli_config)
-    urls = [r[0] for r in _query(db, "SELECT url FROM investigations")]
-    assert urls == [stored], f"add stored {urls}, ingest would store [{stored!r}]"
+    urls = [r[0] for r in _query(architect_db(cli_config), "SELECT url FROM investigations")]
+    assert urls == [ingest_would_store], (
+        f"add stored {urls}, parse extracts [{ingest_would_store!r}] from the same source"
+    )
 
 
 def test_add_and_ingest_agree_on_one_investigation_per_url(cli_config, tmp_path):
