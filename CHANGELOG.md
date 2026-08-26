@@ -337,8 +337,10 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **A malformed backup manifest is refused, not tracebacked** (#759). `read_manifest` decides
   whether a directory is a restorable backup set and its contract is to raise `RestoreError`.
-  For **fifteen** shapes — every non-object shape at the top level
-  and at each `databases` entry, plus every non-string `file` — it raised `AttributeError` or `TypeError` instead — a raw stack trace
+  For **fifteen** shapes it raised `AttributeError` or `TypeError` instead of
+  `RestoreError` — every non-object shape at the top level and at each `databases`
+  entry, plus every non-string `file`. (Fifteen by JSON *kind*: `number` counts once,
+  not `int` and `float`. That count has been got wrong twice.) A raw stack trace
   reaching the operator **mid-restore**, which is when it is least useful and most alarming.
   `cli.py` catches `RestoreError` and nothing else, so none of these were handled.
 
@@ -351,8 +353,14 @@ All notable changes to techne are documented here. Format loosely follows
   someone for a failure that did not happen. It is exit `3` and a named set now.
   Measured: with `--keep 0` and one bad set present, a perfectly good set was left on disk.
 
+  **One thing is now refused that was previously accepted**, rather than merely
+  raising a different exception: a `file` naming the set directory itself. Before
+  this, `{"file": ""}` was accepted — `src_dir / ""` *is* the set directory, and it
+  exists — so a set whose "database file" was a folder passed validation. `""`,
+  whitespace, `.` and `..` are all refused now.
+
   All three readers now resolve entries through one shared helper, so a guard cannot be added to
-  one and missed by the other again. An unreadable set is **reported** through retention's
+  one and missed by the others again. An unreadable set is **reported** through retention's
   existing `failed` channel and never pruned, and `restore` refuses the same set — the two
   agree by contract rather than by coincidence.
 
