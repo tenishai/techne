@@ -258,14 +258,22 @@ def test_add_builds_the_relation_graph_like_ingest_does(cli_config):
     # survives a `backfill_graph` that resolves NOTHING — she mutated it to no-op and this
     # file stayed 24/24, because unresolved rows still count. The claim is that Alpha's
     # `[[Beta]]` reaches Beta, so that is what is asserted.
+    # ASSERT THE RESOLUTION, NOT THE ROW (Prudence, #758 round 3 — my round-2 repair
+    # survived her mutation VERBATIM). `dst_name` is the raw wikilink text and is written
+    # identically for UNRESOLVED rows, so with the index empty the row still comes back
+    # with `dst_pattern_id=None, resolution_status='unresolved'` and the assertion passed.
+    # The claim is that Alpha's `[[Beta]]` RESOLVES TO Beta's row, so the resolved id is
+    # what has to be checked.
     rows = _query(
         architect_db(cli_config),
-        "SELECT p.name, r.dst_name FROM pattern_relations r "
-        "JOIN patterns p ON p.id = r.src_pattern_id",
+        "SELECT src.name, r.dst_name, dst.name, r.resolution_status "
+        "FROM pattern_relations r "
+        "JOIN patterns src ON src.id = r.src_pattern_id "
+        "LEFT JOIN patterns dst ON dst.id = r.dst_pattern_id",
     )
 
-    assert ("Alpha", "Beta") in [(a, b) for a, b in rows], (
-        f"the [[Beta]] wikilink in Alpha's body did not become an edge: {rows}"
+    assert ("Alpha", "Beta", "Beta", "resolved") in rows, (
+        f"the [[Beta]] wikilink did not RESOLVE to Beta's row: {rows}"
     )
 
 
@@ -321,8 +329,13 @@ def test_add_reads_stdin_only_when_it_is_piped(tmp_path):
     # branch was not taken; it never shows stdin is actually READ, because an empty read
     # and no read both end at "the body is empty". Piping a body and asserting it is STORED
     # is what distinguishes them.
+    # THE NEEDLE MUST APPEAR ONLY IN THE BODY (Prudence, #758 round 3). My first version
+    # named the pattern `FromStdin` and searched `"arrived on stdin"` — and the token
+    # `stdin` matches the NAME, which arrives on the command line. With `sys.stdin.read()`
+    # replaced by a constant the test still passed. The name is now unrelated to the body,
+    # and the needle is a nonsense token that can only have come through the pipe.
     piped = subprocess.run(
-        cmd + ["--name", "FromStdin"], input="a body that arrived on stdin",
+        cmd + ["--name", "PipedPattern"], input="zqxjkv unique body token",
         capture_output=True, text=True, timeout=60, env=env,
     )
 
@@ -334,11 +347,12 @@ def test_add_reads_stdin_only_when_it_is_piped(tmp_path):
     )
     assert piped.returncode == 0, piped.stdout + piped.stderr
     stored = subprocess.run(
-        [sys.executable, "-m", "techne.cli", "architect", "search", "arrived on stdin"],
+        [sys.executable, "-m", "techne.cli", "architect", "search", "zqxjkv"],
         capture_output=True, text=True, timeout=60, env=env,
     )
-    assert "FromStdin" in stored.stdout, (
-        f"the piped body was not read into the store:\n{stored.stdout}"
+    assert "PipedPattern" in stored.stdout, (
+        f"the piped body never reached the store — searching for a token that exists "
+        f"ONLY in the piped body found nothing:\n{stored.stdout}"
     )
 
 
