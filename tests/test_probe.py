@@ -466,7 +466,9 @@ def test_pi_fresh_session_pull_allowed_no_gating(monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(runtimes.subprocess, "run", fake_run)
-    runtimes.PiAdapter(model="provider/model").fresh_session("q", disable_native=False, allow_techne_tools=True)
+    runtimes.PiAdapter(model="provider/model").fresh_session(
+        "q", disable_native=False, allow_techne_tools=True
+    )
     assert "--no-tools" not in captured["argv"]  # no gating when pull is allowed
     assert "--model" in captured["argv"] and "provider/model" in captured["argv"]
 

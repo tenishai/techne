@@ -75,8 +75,10 @@ export TECHNE_BIN="/ABS/PATH/techne/.venv/bin/techne"
 ### What it captures
 
 - **`tool_execution_end`** → one observation per tool run (`tool_name` = the pi
-  tool, content = the tool result, capped at 4000 chars). The extension's own
-  plumbing tools (`techne`, `mcp`) are skipped.
+  tool, content = the tool result, capped at 4000 chars). Only techne's own
+  plumbing is skipped — the `techne` CLI, `mcp`/`mcpScript` gateway calls that
+  target techne, and `mcp__techne__*` tools; calls to other MCP servers are
+  real work and get captured.
 - **`message_end`** (user role) → a `UserPrompt` observation per user prompt (so
   memory records what was asked, not just what tools ran).
 - **`agent_settled`** (run fully done — no retry/compaction/follow-up left) →

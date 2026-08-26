@@ -3303,15 +3303,22 @@ def probe(ctx, runtime, mode, model, timeout, keep):
     checks whether techne carried the codeword into context. `differential` also
     seeds a native-only control and leaves native memory ON. Exit 0 = pass, 1 = fail.
 
-    Note: opencode has no native auto-memory, so `differential` there has no
-    control and `off-test` already proves the only techne path (the plugin push).
+    Note: opencode and pi have no native auto-memory, so `differential` there
+    has no control and `off-test` already proves the only techne path (the
+    plugin/extension push).
     """
     config = ctx.obj["config"]
     if not config.db_path.exists():
         click.echo("techne not initialized. Run: techne init", err=True)
         ctx.exit(1)
 
-    from techne.probe import ClaudeCodeAdapter, OpencodeAdapter, PiAdapter, run_differential, run_probe
+    from techne.probe import (
+        ClaudeCodeAdapter,
+        OpencodeAdapter,
+        PiAdapter,
+        run_differential,
+        run_probe,
+    )
 
     if runtime == "opencode":
         adapter = OpencodeAdapter(timeout=timeout, **({"model": model} if model else {}))

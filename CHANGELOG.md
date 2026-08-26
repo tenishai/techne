@@ -349,10 +349,13 @@ open and is not reversible — back up first.
   `pi --print` in a throwaway workspace with `--no-tools`, so the extension's
   push injection is the only channel — closing the whole class of pull paths
   at once instead of a denylist against a moving target). pi has no native
-  memory, so
-  `off-test` isolates the only techne path, as on opencode. Wired into the
-  probe CLI, exported from `techne.probe`, and covered by the same unit tests
-  the other adapters have plus a `@pytest.mark.probe` end-to-end.
+  memory, so `off-test` isolates the only techne path, as on opencode. Wired
+  into the probe CLI, exported from `techne.probe`, and covered by the same
+  unit tests the other adapters have plus a `@pytest.mark.probe` end-to-end.
+
+  One lane the non-Claude-Code clients still lack: pi (like opencode) has no
+  compaction checkpoint/restore — Claude Code's `PreCompact`/`PostCompact`
+  hooks have no pi equivalent, so pi has no compaction handling at all.
 
 - **Agent triggers are indexed, and the claims they rest on are tested** (#756, #757). Parts of
   the docs are written as *triggers* — conditions under which an agent should speak up
