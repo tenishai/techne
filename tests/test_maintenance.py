@@ -1307,7 +1307,7 @@ _ENTRY_MSG = "entry for 'techne' should be an object"
         #
         # MIRROR THE TOP LEVEL. Round 2 added number/null/bool up there and did not
         # mirror them one level down, which is how a fifteen-element set was counted
-        # as fifteen — and left `bool` with no witness anywhere in the suite, so
+        # as thirteen — and left `bool` with no witness anywhere in the suite, so
         # `isinstance(meta, (dict, bool))` passed the whole suite green
         # (Prudence, #777 r3).
         ("databases dict-of-numbers", {"databases": {"techne": 7}}, _ENTRY_MSG),
@@ -1325,7 +1325,11 @@ _ENTRY_MSG = "entry for 'techne' should be an object"
         ("file is a list", {"databases": {"techne": {"file": ["t.db"]}}}, "'file' for 'techne'"),
         ("file is a dict", {"databases": {"techne": {"file": {"n": "t"}}}}, "'file' for 'techne'"),
         ("file is a bool", {"databases": {"techne": {"file": True}}}, "'file' for 'techne'"),
-        ("file is empty", {"databases": {"techne": {"file": "  "}}}, "'file' for 'techne'"),
+        # `""` is the case the CHANGELOG names as motivating, and only `"  "` was
+        # parametrized — same branch, but the named case being the unwitnessed one
+        # is worth one line (Prudence, #777 r6 Nit 3).
+        ("file is empty string", {"databases": {"techne": {"file": ""}}}, "'file' for 'techne'"),
+        ("file is whitespace", {"databases": {"techne": {"file": "  "}}}, "'file' for 'techne'"),
     ],
 )
 def test_a_malformed_manifest_raises_restore_error_not_a_traceback(
@@ -1366,6 +1370,59 @@ def test_a_file_naming_the_set_directory_is_refused(tmp_path, name):
     )
     with pytest.raises(RestoreError, match="backup set is incomplete"):
         read_manifest(tmp_path)
+
+
+@pytest.mark.parametrize("name", [".", "..", "./", ".//", "./.", "../", " . "])
+def test_a_directory_naming_set_never_takes_a_retention_slot(tmp_path, name):
+    """THE HALF WITH TEETH, and it had no witness (Prudence, #777 r6 I1).
+
+    `test_a_file_naming_the_set_directory_is_refused` covers `read_manifest` —
+    the reader that was already failing safely. This covers `_classify_backup_set`,
+    the one that DELETES. Reverting only that caller's `is_file()` back to
+    `exists()` left the full suite green at 3609 passed, so nothing stood between
+    a manifest typo and a destroyed backup.
+
+    Measured with that line reverted: six of the seven spellings pruned the genuine
+    set and reported `failed: []` — a real backup gone, and the run counted as a
+    success. Only `" . "` survived, because it names a file that does not exist
+    rather than the directory.
+
+    The guard has to be pinned at BOTH readers, which is this PR's own subject:
+    a check present at one call site and unproven at the other is exactly what
+    `_manifest_db_filename` exists to prevent.
+    """
+    backups = tmp_path / "backups"
+    good = backups / "backup-20260101-000000"
+    good.mkdir(parents=True)
+    (good / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": "techne.db"}},
+            }
+        )
+    )
+    (good / "techne.db").write_text("REAL DATA")
+
+    bad = backups / "backup-20260201-000000"
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-02-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": name}},
+            }
+        )
+    )
+
+    removed, failed = prune_backup_sets(backups, keep=1)
+
+    assert good.exists(), f"{name!r} took a retention slot and the genuine set was deleted"
+    assert (good / "techne.db").read_text() == "REAL DATA"
+    assert removed == [], f"pruned {[p.name for p in removed]} to keep an unreadable set"
+    assert [p for p, _ in failed] == [bad], "the unreadable set was not REPORTED"
 
 
 def test_the_malformed_manifest_message_names_what_it_found(tmp_path):
