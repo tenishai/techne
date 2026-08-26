@@ -735,11 +735,15 @@ def test_unorderable_sets_are_reported_so_they_cannot_pile_up_silently(config, m
 @pytest.mark.parametrize("dbs", [{"techne": "techne.db"}, {"techne": None}, {"techne": ["x"]}])
 def test_prune_leaves_a_set_restore_cannot_read_alone(tmp_path, dbs):
     """THE ONE SHAPE THAT STILL GOT THROUGH (Prudence, #755 round 3 Nit 3). A `databases`
-    dict whose VALUES are not dicts satisfied "non-empty dict" while `read_manifest` cannot
-    read it at all — it raises AttributeError from `meta.get(...)`, not RestoreError. So
-    round 2's asymmetry survived here: the pruner called it ours and would rmtree it while
-    restore tracebacked on it. Asserted against `read_manifest` in the same body, so the
-    pair is pinned rather than the symptom."""
+    dict whose VALUES are not dicts satisfied "non-empty dict" while `read_manifest` could
+    not read it at all. Round 2's asymmetry survived here: the pruner called it ours and
+    would rmtree it while restore blew up on it. Asserted against `read_manifest` in the
+    same body, so the pair is pinned rather than the symptom.
+
+    UPDATED BY techne#759, exactly as the note below predicted. The asymmetry is closed
+    from the other side now: `read_manifest` raises RestoreError for these shapes instead
+    of AttributeError, so both halves of the pair agree that the set is unreadable, and
+    they agree by CONTRACT rather than by coincidence."""
     b = tmp_path / "backups"
     ours = _set(b, "backup-20260101-000000", "2026-01-01T00:00:00Z")
     unreadable = b / "backup-20260201-000000"
@@ -749,11 +753,11 @@ def test_prune_leaves_a_set_restore_cannot_read_alone(tmp_path, dbs):
     )
 
     # ONE DOOR, NOT TWO (Prudence, #755 round 5, question D). `raises((RestoreError,
-    # AttributeError))` passes whichever happens, so it cannot notice the behaviour
-    # changing. Today it is AttributeError — which is the defect #759 exists to fix, so
-    # pinning it precisely means #759 must come back and update this line. That is the
-    # point: a test that has to be revisited when the behaviour changes is doing its job.
-    with pytest.raises(AttributeError):
+    # AttributeError))` would pass whichever happens, so it could not notice the behaviour
+    # changing. It was pinned to AttributeError precisely so that #759 would have to come
+    # back and change this line — and it did. Keep it pinned to ONE exception for the same
+    # reason: the next change to this contract should be forced through here too.
+    with pytest.raises(RestoreError):
         read_manifest(unreadable)
 
     removed, _ = prune_backup_sets(b, keep=0)
@@ -1264,3 +1268,43 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
     assert [p.name for p, _ in failed] == [broken.name]
     assert "not there" in failed[0][1]
     assert broken.exists(), "deleted a set that still holds real database files"
+
+
+# --- manifest SHAPE, not just validity (techne#759) ---------------------------
+#
+# `read_manifest` is the gate that decides whether a directory is a restorable
+# backup set, and its docstring promises RestoreError on a malformed one. Valid
+# JSON says nothing about shape, and for four shapes it raised AttributeError
+# instead -- a traceback surfacing during a RESTORE, which is when a stack trace
+# is least useful and most alarming. Each case below tracebacked before the fix.
+
+@pytest.mark.parametrize(
+    "label,payload,expected",
+    [
+        ("databases dict-of-strings", {"databases": {"techne": "techne.db"}}, "'techne'"),
+        ("databases dict-of-None", {"databases": {"techne": None}}, "'techne'"),
+        ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, "'techne'"),
+        ("manifest is a JSON array", [{"databases": {}}], "expected a JSON object"),
+        ("manifest is a JSON string", "techne", "expected a JSON object"),
+    ],
+)
+def test_a_malformed_manifest_raises_restore_error_not_a_traceback(
+    tmp_path, label, payload, expected
+):
+    (tmp_path / "manifest.json").write_text(json.dumps(payload))
+    with pytest.raises(RestoreError, match=expected):
+        read_manifest(tmp_path)
+
+
+def test_the_malformed_manifest_message_names_what_it_found(tmp_path):
+    """The message has to be actionable: which entry, and what was there instead.
+
+    'malformed manifest' alone sends the operator to open the file and guess;
+    naming the domain and the type found points at the line to fix.
+    """
+    (tmp_path / "manifest.json").write_text(json.dumps({"databases": {"librarian": 7}}))
+    with pytest.raises(RestoreError) as excinfo:
+        read_manifest(tmp_path)
+    msg = str(excinfo.value)
+    assert "librarian" in msg, "the failing entry is not named"
+    assert "int" in msg, "the type actually found is not named"
