@@ -38,14 +38,19 @@ import pytest
 CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
 
-#: NOT WIDENED TO THE ATTRIBUTE FORM, and this is a deliberate non-fix (#748 r2 nit 3).
-#: `<details open>` does not match, so it would read as a stray closer and blame the wrong
-#: tag. I tried `</?details\\b[^>]*>` and it made the parse test and the balance test fail
-#: on a file whose structure is sound, in a way I could not explain from the code in the
-#: time available. Shipping a guard I cannot explain is worse than the nit it closes:
-#: nothing in this file uses the attribute form, the current failure is loud rather than
-#: silent, and a wrong diagnostic beats a guard with unexplained behaviour. Reopen with a
-#: reproduction if the attribute form ever appears.
+#: WIDENED TO THE ATTRIBUTE FORM in #748 r3, and the earlier failed attempt is worth
+#: recording because it explains the shape of the pattern rather than just its history.
+#: An earlier round tried `</?details\\b[^>]*>` — the same widening, WITHOUT the `^\\s*`
+#: anchor — and the balance and parse tests failed on a file whose structure is sound,
+#: for a reason I could not explain at the time. It is explainable now (Prudence, r3 I1):
+#:
+#:     unanchored  </?details\\b[^>]*>          -> 3 matches  (odd -> unbalanced)
+#:     anchored    ^\\s*<(?P<slash>/?)details\\b[^>]*>  -> 2 matches  (balanced)
+#:
+#: The third match is CHANGELOG.md:515 — a `<details>` mentioned in PROSE, inside
+#: backticks. So widening was never the problem; dropping the anchor was. Both halves of
+#: this pattern are load-bearing and neither can be removed without the other's failure
+#: reappearing.
 #:
 #: A `<details>` tag that OPENS A LINE is markup. One inside prose — `<details>` in a
 #: sentence, in backticks, in a fenced block — is the file TALKING ABOUT the convention,
@@ -57,6 +62,27 @@ CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 #: check — collection went 11 tests to 8. A guard that loses coverage when it misfires is
 #: worse than one that only misfires.
 _DETAILS = re.compile(r"^\s*<(?P<slash>/?)details\b[^>]*>", re.M)
+
+
+def _details_depth(text: str) -> int:
+    """Net `<details>` nesting depth, raising if a closer ever precedes its opener.
+
+    A module-level helper rather than a loop inside the test, so the `slash`
+    conditional is EXERCISED by anything that pins it. When the test re-implemented
+    this loop, reverting this conditional to a literal `== "<details>"` comparison
+    left the suite fully green (Prudence, #748 r3 I2, mutation M2): the real
+    CHANGELOG.md contains no attribute form, so the literal comparison still worked
+    there, and the only test covering the attribute form was checking its own copy
+    of the logic.
+    """
+    depth = 0
+    for m in _DETAILS.finditer(text):
+        depth += 1 if not m.group("slash") else -1
+        assert depth >= 0, (
+            f"`</details>` at offset {m.start()} closes a block that was never opened — "
+            "counts can still balance while the nesting is inverted"
+        )
+    return depth
 
 
 def _strip_collapsed(text: str) -> str:
@@ -126,16 +152,7 @@ def test_every_details_block_is_closed():
     convention, not markup, and treating it as markup broke this guard once.
     """
     text = CHANGELOG.read_text(encoding="utf-8")
-
-    depth = 0
-    for m in _DETAILS.finditer(text):
-        depth += 1 if not m.group("slash") else -1
-        assert depth >= 0, (
-            f"`</details>` at offset {m.start()} closes a block that was never opened — "
-            "counts can still balance while the nesting is inverted"
-        )
-
-    assert depth == 0, f"{depth} `<details>` block(s) never closed"
+    assert _details_depth(text) == 0, "`<details>` block(s) never closed"
 
 
 def test_an_attribute_bearing_details_tag_is_read_as_an_opener():
@@ -157,14 +174,20 @@ def test_an_attribute_bearing_details_tag_is_read_as_an_opener():
     for markup in ("<details open>", '<details class="archive">', "<details>"):
         text = f"# Head\n\n{markup}\n## [0.1.0]\n</details>\n\n## [0.1.0]\n"
 
-        depth = 0
-        for m in _DETAILS.finditer(text):
-            depth += 1 if not m.group("slash") else -1
-            assert depth >= 0, f"{markup} read as a closer — inverted nesting"
-        assert depth == 0, f"{markup} left depth={depth}, expected balanced"
+        assert _details_depth(text) == 0, (
+            f"{markup} did not balance — read as a closer, or never closed"
+        )
 
         stripped = _strip_collapsed(text)
         assert stripped.count("## [0.1.0]") == 1, (
             f"{markup}: the collapsed region was not cut, so its repeated "
             f"heading survives into the duplicate-heading check"
+        )
+        # THE COUNT ALONE CANNOT TELL THE TWO FAILURES APART (Prudence r3 I2, M3).
+        # Misread the opener as a closer and `cut` jumps past it: the heading INSIDE
+        # the block is dropped and the one OUTSIDE survives — count 1 either way, for
+        # opposite reasons, and everything before the block is silently deleted.
+        assert "# Head" in stripped, (
+            f"{markup}: text BEFORE the block was deleted — the opener was read as "
+            f"a closer, which the heading count cannot distinguish"
         )
