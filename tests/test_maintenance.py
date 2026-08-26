@@ -1289,6 +1289,13 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
         ("databases dict-of-strings", {"databases": {"techne": "techne.db"}}, "'techne'"),
         ("databases dict-of-None", {"databases": {"techne": None}}, "'techne'"),
         ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, "'techne'"),
+        # MIRROR THE TOP LEVEL. Round 2 added number/null/bool up there and did not
+        # mirror them one level down, which is how a fifteen-element set was counted
+        # as thirteen — and left `bool` with no witness anywhere in the suite, so
+        # `isinstance(meta, (dict, bool))` passed the whole suite green
+        # (Prudence, #777 r3).
+        ("databases dict-of-numbers", {"databases": {"techne": 7}}, "'techne'"),
+        ("databases dict-of-bools", {"databases": {"techne": True}}, "'techne'"),
         ("manifest is a JSON array", [{"databases": {}}], "expected a JSON object"),
         ("manifest is a JSON string", "techne", "expected a JSON object"),
         # The remaining top-level shapes, so all THIRTEEN that tracebacked pre-fix
