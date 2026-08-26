@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from textwrap import dedent
 
+import pytest
+
 from techne.import_md import (
     NoLiftEntry,
     ParsedPattern,
@@ -172,3 +174,37 @@ def test_parser_skips_template_inside_code_block() -> None:
     # Both Template and the inner placeholder must NOT produce a pattern;
     # Template is skipped (meta), placeholder never becomes a section.
     assert result.patterns == []
+
+
+# --- the entry separator, and what must NOT be mistaken for one (techne#770) ---
+
+@pytest.mark.parametrize(
+    "label,body,expected",
+    [
+        ("trailing separator", "Alpha beta.\n\n---", "Alpha beta."),
+        ("accreted separators", "Alpha beta.\n\n---\n\n---\n\n---", "Alpha beta."),
+        ("no separator", "Alpha beta.", "Alpha beta."),
+        ("asterisk rule", "Alpha beta.\n\n***", "Alpha beta."),
+        ("underscore rule", "Alpha beta.\n\n___", "Alpha beta."),
+        # A setext H2 underline is ATTACHED to its heading — no blank line above.
+        # Popping it demotes a heading to a paragraph (Prudence, #778 Nit 2).
+        ("setext H2 underline", "Alpha beta.\n\nCaveats\n---", "Alpha beta.\n\nCaveats\n---"),
+        ("setext H1 underline", "Alpha beta.\n\nCaveats\n===", "Alpha beta.\n\nCaveats\n==="),
+    ],
+)
+def test_strip_trailing_rule_removes_separators_but_not_setext_headings(label, body, expected):
+    """`export_patterns_md` ALWAYS writes the separator after a blank line
+    (`body`, `""`, `"---"`, `""`), so requiring a blank line above the rule
+    separates a thematic break from a setext underline using the format's own
+    signal rather than a guess about what bodies contain."""
+    from techne.import_md import _strip_trailing_rule
+
+    assert _strip_trailing_rule(body) == expected
+
+
+def test_a_body_that_is_only_a_rule_collapses_to_empty():
+    """Guards the `len(lines) == 1` arm of the precondition — with nothing above
+    it, a lone rule cannot be a setext underline, so it is a separator."""
+    from techne.import_md import _strip_trailing_rule
+
+    assert _strip_trailing_rule("---") == ""

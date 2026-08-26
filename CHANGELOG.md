@@ -305,6 +305,36 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`architect export` → `architect ingest` accreted a near-duplicate every cycle** (#770).
+  `export_patterns_md` writes a `---` separator after each entry and the parser absorbed it
+  into that entry's body. A pattern id is a content hash of `(name, source_url, body)`, so
+  every round trip minted a **new** id and the store grew — 1 → 2 → 3 → 4 patterns for one
+  pattern, each body carrying one more trailing rule than the last. Anyone who round-tripped
+  their corpus to reformat it, review it, or move it between machines grew it instead.
+
+  **What changes for an existing store, because this is not invisible.** The strip removes
+  *all* trailing rules rather than one, which makes the fix convergent: a damaged body
+  normalises back to the clean body and its **original** id. Two consequences follow, and
+  both are yours to expect rather than to discover:
+
+  - **Ids change.** For a corpus round-tripped before this release, the next
+    `architect ingest` produces different ids than the store holds today — the *original*
+    ones, which is the point, but different from what is there now.
+  - **A damaged store gains one row, once.** The clean pattern appears alongside the
+    accreted ones; the accreted rows are not deleted. So `architect ingest` reports one more
+    pattern than expected, which is this project's signature failure shape — it looks like
+    success. It stops there; the growth does not resume.
+
+  **There is no automatic cleanup, deliberately.** Deciding which of several near-identical
+  rows is canonical is a curation judgment, and silently deleting rows from a store whose
+  whole job is to remember is the wrong default. `techne architect tag <id> --superseded-by
+  <clean-id>` is the tool — it stamps `status`/`superseded_by`/`absorbed` atomically and
+  writes a resolved `supersedes` edge, so the history stays legible instead of vanishing.
+
+  A trailing **setext heading underline** is not mistaken for a separator: `export` always
+  writes the rule after a blank line, while a setext underline is attached to the line above,
+  so only the former is stripped.
+
 - **An injected `Config` was silently discarded** (#766). `main` called
   `ctx.ensure_object(dict)` — which reads as "honour what the caller passed in" — and then
   unconditionally overwrote `ctx.obj["config"]`. So `CliRunner(...).invoke(main, args,
