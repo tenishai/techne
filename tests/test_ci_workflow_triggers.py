@@ -1150,5 +1150,11 @@ def test_every_default_suite_job_fetches_origin_main():
     assert not missing, (
         f"{missing} run(s) the default suite without fetching origin/main — "
         "doctor's runtime:revision will return UNKNOWN and fail four "
-        "test_cli_doctor tests on every pull_request (techne#690)"
+        "test_cli_doctor tests on every pull_request (techne#690).\n"
+        "NOTE: _fetches_origin_main is deliberately strict and fails CLOSED. It "
+        "rejects any step carrying an `if:`, and recognises only a bare `git "
+        "fetch` (argv[0]) whose refspec ends in `refs/remotes/origin/main` — so "
+        "`git -C … fetch`, `env … git fetch`, `cd x && git fetch` and "
+        "`git fetch origin main` all read as absent even though they work. "
+        "If your step really does fetch, widen the guard; do not delete it."
     )
