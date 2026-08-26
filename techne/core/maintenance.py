@@ -306,7 +306,6 @@ RETENTION_REFUSAL_PHRASES = (
 )
 
 
-
 def _manifest_db_filename(domain: str, meta: object) -> tuple[str | None, str | None]:
     """Resolve one manifest entry to its db filename. Returns (filename, problem).
 
