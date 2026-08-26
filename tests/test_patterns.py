@@ -1005,3 +1005,103 @@ def test_the_cli_verdict_default_is_what_makes_ingest_the_declined_path(db, tmp_
         "therefore leave the date alone. If this fails, cli.py's --verdict default "
         "changed and the mechanism recorded in patterns.py is no longer true."
     )
+
+
+# --- round-trip idempotence (techne#770) --------------------------------------
+#
+# `test_export_roundtrips_with_ingest` above re-ingests into a FRESH db, which is
+# the one arrangement where this defect is invisible: with nothing already stored,
+# the first cycle's wrong id is indistinguishable from the right one. The drift
+# only shows on the SECOND cycle, against a store that already holds the pattern.
+#
+# The oracle matters as much as the arrangement. A COUNT can be right while every
+# id changed, so these assert IDS, which is what an id-addressed store is keyed on.
+
+def _pattern_ids(db_path):
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        return {r[0] for r in conn.execute("SELECT id FROM patterns")}
+
+
+_ROUNDTRIP_MD = (
+    "## Capability probing\n\n"
+    "- **Source**: https://github.com/x/repo\n"
+    "- **Surveyed**: 2026-06-09\n\n"
+    "Probe for sqlite-vec; branch on availability.\n\n"
+    "---\n\n"
+)
+
+
+def test_export_ingest_is_idempotent_against_a_populated_store(db):
+    """export -> ingest against a NON-EMPTY store must be a no-op, forever.
+
+    Before techne#770 the `---` separator export writes after each entry was
+    absorbed into that entry's body. Pattern ids are content hashes of
+    (name, source_url, body), so every cycle minted a new id and the store grew:
+    1 -> 2 -> 3 -> 4 patterns for one pattern, each body carrying one more
+    trailing rule than the last. An operator round-tripping their corpus to
+    reformat or move it accreted near-duplicates silently.
+    """
+    from techne.core.patterns import export_patterns_md
+
+    ingest_patterns_md(db, _ROUNDTRIP_MD)
+    original = _pattern_ids(db)
+    assert len(original) == 1
+
+    for cycle in range(1, 4):
+        ingest_patterns_md(db, export_patterns_md(db))
+        assert _pattern_ids(db) == original, (
+            f"cycle {cycle}: ids changed, so the store accreted a near-duplicate "
+            f"instead of recognising the pattern it already held"
+        )
+
+
+def test_ingest_normalises_a_corpus_already_damaged_by_earlier_cycles(db, tmp_path):
+    """The fix is CONVERGENT, not merely a stop to the growth.
+
+    A store round-tripped before techne#770 holds bodies ending in `---\\n\\n---\\n\\n---`.
+    Stripping ALL trailing rules rather than one means re-ingesting such a corpus
+    lands on the SAME id as the clean body, so the damage heals instead of being
+    frozen at whatever depth it reached.
+    """
+    from techne.core.architect import ARCHITECT_SCHEMA
+
+    head = (
+        "## Capability probing\n\n"
+        "- **Source**: https://github.com/x/repo\n"
+        "- **Surveyed**: 2026-06-09\n\n"
+        "Probe for sqlite-vec; branch on availability.\n\n"
+    )
+    ingest_patterns_md(db, head)
+
+    damaged = tmp_path / "damaged.db"
+    SqliteStore("architect", damaged).migrate(ARCHITECT_SCHEMA)
+    ingest_patterns_md(damaged, head + "---\n\n---\n\n---\n\n")
+
+    assert _pattern_ids(damaged) == _pattern_ids(db)
+
+
+def test_a_rule_inside_a_fenced_block_is_not_stripped(db):
+    """Only the TRAILING separator goes. A `---` inside a fence is content.
+
+    The closing ``` is the last line of such a body, so the strip loop stops
+    before reaching the rule — this pins that reasoning rather than trusting it.
+    """
+    md = (
+        "## Fenced rule\n\n"
+        "- **Source**: https://github.com/y/repo\n"
+        "- **Surveyed**: 2026-06-09\n\n"
+        "Example:\n\n"
+        "```\n"
+        "---\n"
+        "```\n\n"
+        "---\n\n"
+    )
+    ingest_patterns_md(db, md)
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        body = conn.execute("SELECT body FROM patterns").fetchone()[0]
+    assert "```" in body and "---" in body, "the fenced rule was stripped as a separator"
+    assert not body.rstrip().endswith("\n---"), "the trailing separator survived"
