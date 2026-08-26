@@ -606,31 +606,34 @@ def test_backup_without_keep_really_does_grow_without_bound(config_free_tmp_home
     )
 
 
-def test_only_the_codex_distinguishes_an_empty_index_from_no_match(config_free_tmp_home):
-    """THE CLAIM, AT THE SURFACE IT IS MADE ABOUT (Prudence, #771). My first version
-    asserted that one domain's `search_documents` returned `[]` twice — a proposition
-    narrower than the doc's in two directions: one domain of four, and a core function
-    rather than the envelope an agent actually reads. And the wider claim was ALREADY FALSE
-    at the wider surface: the codex attaches a notice saying its index is empty, which
-    techne#595 built precisely so that absence would not read as an answer.
+def test_only_the_codex_distinguishes_an_empty_index_from_no_match(config_free_tmp_home, tmp_path):
+    """ASSERTED AT THE ENVELOPE, WHICH IS THE SURFACE AN AGENT READS (Prudence, #771 round
+    2 — Question A's second direction, still unfixed after round 1). My previous version
+    called `zero_result_notice`, a core function; `_with_binding`'s own docstring records
+    Prudence catching the identical miss in techne#725, where "the domain tests asserted
+    the envelope of `domains.codex_search`, which no MCP caller reaches".
 
-    So the trigger now names the three domains where the ambiguity is real, and this pins
-    the exception rather than asserting a blanket that is untrue."""
-    from techne.core.codegraph import zero_result_notice
+    WHAT THIS DOES NOT COVER, said rather than implied: the `INDEX IS EMPTY (0 files)`
+    branch needs a db that RESOLVES while holding nothing, and I could not construct that
+    state from the envelope in two attempts — creating the index db alone still answers
+    `absent`. So this pins the reachable state and the doc claims only the qualification
+    both states share. The empty-index branch is covered by codegraph's own tests, not by
+    this one."""
+    from techne.mcp_server import _codex_search
 
-    # The real shape `zero_result_notice` reads — my first call passed two keys it does not
-    # use and omitted six it does, which is a fixture inventing an interface again.
-    empty_index_notice = zero_result_notice(
-        {"files": 0, "fresh": 0, "stale": 0, "missing": 0,
-         "unknown": 0, "unindexed": 0, "coverage": 0.0}
+    repo = tmp_path / "unindexed-repo"
+    repo.mkdir()
+
+    envelope = _codex_search({"query": "zqxjkv_no_such_symbol", "repo": str(repo)},
+                             config_free_tmp_home)
+
+    assert envelope["results"] == []
+    assert envelope.get("notice"), (
+        "the codex returned a bare empty result — the trigger names it as the one domain "
+        "that qualifies its nothing, and four-functions.md tells operators so"
     )
-
-    assert "INDEX IS EMPTY" in empty_index_notice, (
-        "the codex no longer distinguishes an empty index from no match — if so, the "
-        "trigger's exception is wrong and all four domains need the prompt"
-    )
-    assert "codex index" in empty_index_notice, (
-        "the codex's empty-index notice no longer names the command that fixes it"
+    assert "codex index" in envelope["notice"], (
+        f"the notice no longer names the remedy: {envelope['notice']!r}"
     )
 
 

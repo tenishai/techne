@@ -346,7 +346,7 @@ afterwards, or the vector channel is half-built — which fails in this release'
 way, because **FTS keeps answering**. A partially embedded store returns results, ranks
 them plausibly, and never says that half its corpus is unreachable by meaning.
 
-### The librarian has no automatic feeder, and that matters more than it sounds
+### Nothing in techne indexes transcripts for you, and that matters more than it sounds
 
 **Nothing in this repo runs `techne librarian index-transcripts` for you** — its only
 caller is the CLI command itself. That is the strongest claim the call graph can support,
@@ -356,7 +356,8 @@ correction on the identical reasoning about `vectors backfill`
 ([`docs/arch/search-embeddings.md`](arch/search-embeddings.md)), so **check your own hooks
 before concluding nothing is indexing.**
 
-If nothing is, techne's own `self-care` skill states the consequence:
+If nothing is, techne's own `self-care` skill states the consequence — it is describing
+techne's own wiring, which is the scope it can speak to:
 
 > the *only* index with no automatic feeder … left alone it silently decays, and a
 > **4%-coverage search looks exactly like a working one**.
@@ -382,11 +383,14 @@ and that is the one case where the answer is genuinely "not from here".
 >   feeder fills it and whether anything runs that feeder automatically. For those three,
 >   empty and unpopulated are indistinguishable in the result, so the moment to speak is
 >   when the zero appears, not once they have concluded something from it.
->   **The codex is the exception and needs no prompting:** it reports
->   `binding: 'absent'` and attaches *"NO MATCH, and THE INDEX IS EMPTY (0 files)"* with the
->   command to fix it (techne#595). That is what the other three do not do.
-> - They are about to rely on `librarian_search` for coverage — **nothing indexes
->   transcripts automatically**, and a partial index answers exactly like a complete one.
+>   **The codex is the exception:** its empty answer carries a *notice naming the remedy*
+>   rather than a bare empty list — `binding: 'absent'` with "run `techne codex index
+>   <repo>`" when no index resolves, and a distinct "THE INDEX IS EMPTY (0 files)" notice
+>   for an index that resolved and holds nothing (techne#595). Those are two different
+>   states and never appear together. That qualification is what the other three lack.
+> - They are about to rely on `librarian_search` for coverage — **nothing in techne itself
+>   indexes transcripts**, so ask whether their deployment wires one; a partial index
+>   answers exactly like a complete one.
 > - They ask why the architect is empty on a fresh install — `techne architect add` ships;
 >   the research procedures that fill it in bulk do not.
 

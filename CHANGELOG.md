@@ -13,9 +13,11 @@ All notable changes to techne are documented here. Format loosely follows
   gains a **Getting content in** section: per domain, the enable knob, the populate command,
   and where the filler lives when it is not in this repo.
 
-  Two things it states that were true and undocumented. **The librarian has no automatic
-  feeder** — `index-transcripts` is wired to no hook and no cron, and a 4%-coverage search
-  answers exactly like a complete one, so a partial index is invisible in the result. And
+  Two things it states that were true and undocumented. **Nothing in techne itself indexes
+  transcripts** — `index-transcripts`' only in-repo caller is the CLI command, and a
+  4%-coverage search answers exactly like a complete one, so a partial index is invisible in
+  the result. (Deployments can wire a hook as a shell string, which no import graph sees;
+  techne#704 forced that same correction on `vectors backfill`.) And
   **the archivist's write path**: bound `local` it *is* your own knowledge, so `techne_store`
   fills it and there is no separate import.
 

@@ -79,7 +79,7 @@ the team, and the same call reports which it resolved to, so the caller never ha
 
 ## Librarian — *what is written down?*  ·  `librarian.db`
 
-Personal recall stays fast because it ranks **gist cards**, not full documents. The Librarian holds the **full content** of transcripts and docs in its own db, with its own FTS + vector index.
+Personal recall stays fast because it ranks **gist cards**, not full documents. The Librarian holds the **full content** of transcripts and docs in its own db, with its own **FTS index** — one virtual table, `documents_fts`. Document search is full-text by construction; the `[vectors]` extra adds vector search to the **archivist**, not here.
 
 **Why it's different — federation as a keyed `get`, not a federated search.** A document's gist lives in your personal recall; when you actually need the full text, the card's pointer resolves cross-db to the Librarian. You never rank across databases at query time — the rankable summary is already local, and the boundary is crossed only to fetch one known document.
 

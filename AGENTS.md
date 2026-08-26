@@ -25,7 +25,7 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | plans a machine migration, a wipe, or a disk replacement | [deployment.md](docs/deployment.md#what-is-not-automated-stated-plainly) |
 | is restoring | [db-per-domain.md](docs/db-per-domain.md#operational-contract-backuprestore--fsck-techne139) |
 | gets **zero rows** from the archivist, librarian or architect | [four-functions.md](docs/four-functions.md#getting-content-in) |
-| is about to rely on `librarian_search` for coverage | [four-functions.md](docs/four-functions.md#the-librarian-has-no-automatic-feeder-and-that-matters-more-than-it-sounds) |
+| is about to rely on `librarian_search` for coverage | [four-functions.md](docs/four-functions.md#nothing-in-techne-indexes-transcripts-for-you-and-that-matters-more-than-it-sounds) |
 | asks why the architect is empty on a fresh install | [four-functions.md](docs/four-functions.md#getting-content-in) |
 
 **Adding a trigger?** Put the block in the document and its condition in this table.
