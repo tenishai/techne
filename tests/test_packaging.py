@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _get_dist_requires():
     """Return (requires_list, from_pyproject) where from_pyproject is True if we
@@ -118,4 +120,41 @@ sys.exit(0)
     )
     assert result.returncode == 0, (
         f"core/hook import path loaded litellm.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_installed_version_matches_pyproject():
+    """`techne.__version__` resolves through `importlib.metadata.version()` — the
+    INSTALLED dist-info — not `pyproject.toml`. An editable install made at an
+    older version keeps reporting that older version indefinitely, so the running
+    code believes it is a release it is not.
+
+    That value is not cosmetic: `backup_all_dbs` stamps it into every backup
+    manifest as `techne_version`, which is exactly what an operator reads to
+    answer "what wrote this set, and can this techne restore it?" (techne#763).
+
+    This test is green on any fresh install — including CI, which installs from
+    the tree under test — and red for precisely the person who needs to know: a
+    developer on a stale editable install, whose remedy is in the message.
+    """
+    import tomllib
+
+    pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+    if not pyproject_path.exists():
+        pytest.skip("running against an installed package, not a source tree")
+
+    with pyproject_path.open("rb") as fh:
+        declared = tomllib.load(fh)["project"]["version"]
+
+    import techne
+
+    installed = techne.__version__
+    if installed == "0.0.0+unknown":
+        pytest.skip("techne is not installed as a distribution")
+
+    assert installed == declared, (
+        f"techne.__version__ is {installed!r} but pyproject.toml declares "
+        f"{declared!r}. The dist-info in this environment is stale, so every "
+        f"backup manifest written here would be stamped {installed!r}. "
+        f"Remedy: pip install -e ."
     )
