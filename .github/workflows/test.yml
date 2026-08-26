@@ -232,6 +232,26 @@ jobs:
         with:
           path: techne
 
+      # MAKE `origin/main` RESOLVE, because a shipped check reads it (techne#690).
+      # `doctor`'s `runtime:revision` runs `git rev-parse --short origin/main` and
+      # returns UNKNOWN when it fails (checks.py), which fails four test_cli_doctor
+      # tests and the whole job. On a PUSH the checked-out ref IS main, so it
+      # resolves; on a PULL_REQUEST actions/checkout fetches only the merge ref at
+      # depth 1 and `origin/main` does not exist locally.
+      #
+      # THIS PASSED FOR MONTHS ON LEFTOVER STATE, which is the part worth recording.
+      # `actions/checkout` fetches into an EXISTING repo dir rather than re-cloning,
+      # and the self-hosted runner container had been up for days with a `_work`
+      # clone that had accumulated `origin/main` from earlier main-branch runs. Every
+      # PR silently inherited that ref. Recreating the container on 2026-08-26 wiped
+      # `_work`, and every PR run failed from that moment while `main` stayed green —
+      # a clean before/after at 13:20Z across four branches.
+      #
+      # One ref, depth 1: enough for the comparison, and not a full-history clone.
+      - name: Fetch origin/main for runtime:revision
+        working-directory: techne
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
       # uv + the interpreters are baked into the runner image. `uv venv --python`
       # selects the matrix version explicitly — without setup-python, a bare
       # `python` would NOT be the matrix version, so every step below runs through
@@ -382,6 +402,26 @@ jobs:
         with:
           path: techne
 
+      # MAKE `origin/main` RESOLVE, because a shipped check reads it (techne#690).
+      # `doctor`'s `runtime:revision` runs `git rev-parse --short origin/main` and
+      # returns UNKNOWN when it fails (checks.py), which fails four test_cli_doctor
+      # tests and the whole job. On a PUSH the checked-out ref IS main, so it
+      # resolves; on a PULL_REQUEST actions/checkout fetches only the merge ref at
+      # depth 1 and `origin/main` does not exist locally.
+      #
+      # THIS PASSED FOR MONTHS ON LEFTOVER STATE, which is the part worth recording.
+      # `actions/checkout` fetches into an EXISTING repo dir rather than re-cloning,
+      # and the self-hosted runner container had been up for days with a `_work`
+      # clone that had accumulated `origin/main` from earlier main-branch runs. Every
+      # PR silently inherited that ref. Recreating the container on 2026-08-26 wiped
+      # `_work`, and every PR run failed from that moment while `main` stayed green —
+      # a clean before/after at 13:20Z across four branches.
+      #
+      # One ref, depth 1: enough for the comparison, and not a full-history clone.
+      - name: Fetch origin/main for runtime:revision
+        working-directory: techne
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
       - name: Create venv on Python 3.14
         working-directory: techne
         run: |
@@ -530,6 +570,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: techne
+
+      # MAKE `origin/main` RESOLVE, because a shipped check reads it (techne#690).
+      # `doctor`'s `runtime:revision` runs `git rev-parse --short origin/main` and
+      # returns UNKNOWN when it fails (checks.py), which fails four test_cli_doctor
+      # tests and the whole job. On a PUSH the checked-out ref IS main, so it
+      # resolves; on a PULL_REQUEST actions/checkout fetches only the merge ref at
+      # depth 1 and `origin/main` does not exist locally.
+      #
+      # THIS PASSED FOR MONTHS ON LEFTOVER STATE, which is the part worth recording.
+      # `actions/checkout` fetches into an EXISTING repo dir rather than re-cloning,
+      # and the self-hosted runner container had been up for days with a `_work`
+      # clone that had accumulated `origin/main` from earlier main-branch runs. Every
+      # PR silently inherited that ref. Recreating the container on 2026-08-26 wiped
+      # `_work`, and every PR run failed from that moment while `main` stayed green —
+      # a clean before/after at 13:20Z across four branches.
+      #
+      # One ref, depth 1: enough for the comparison, and not a full-history clone.
+      - name: Fetch origin/main for runtime:revision
+        working-directory: techne
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
 
       # The self-hosted image bakes in both uv and the interpreters; a hosted
       # runner has neither at the matrix versions, so they are provided here.
