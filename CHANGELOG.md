@@ -5,7 +5,42 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+<!-- AUDIT NOTE (#726/#748), 2026-08-26. Two merged changes are DELIBERATELY not listed here,
+     recorded so a later audit does not read the absence as an oversight — the distinction this
+     PR exists to make, since "excluded on purpose" and "missed" are indistinguishable in
+     silence:
+
+       #765 (techne#249) — widened a decay-drift test's tolerance from 1e-9 to 1e-6
+       #768             — widened a debounce smoke test's window from 50ms to 500ms
+
+     Both are TEST TOLERANCES with no user-facing behaviour change. Both were flakes whose real
+     cause is tracked in #769: the CI runner is capped at --cpus=8, four xdist workers exceed
+     it, and the kernel throttles the whole cgroup in 46% of scheduling periods — 116.8s of
+     cumulative stall in one pipeline, measured. Neither tolerance change is a bar being
+     lowered: each was verified to still fail on the defect it guards. -->
+
+
 ### Added
+
+- **Agent triggers are indexed, and the claims they rest on are tested** (#756, #757). Parts of
+  the docs are written as *triggers* — conditions under which an agent should speak up
+  unprompted, because techne's failures are overwhelmingly silent and a document that waits to
+  be consulted is the wrong shape for them. Two things were missing when that convention
+  shipped.
+
+  **A trigger that lives only in a document fires only if that document was already open** —
+  the failure the documents were meant to fix, one level up. `AGENTS.md` now carries a table of
+  *conditions and links*: the condition must be in loaded context or it never fires, the
+  explanation is fetched once it has. Enforced three ways — a document with a trigger block and
+  no row fails, a row pointing at a missing section fails, and a row pointing at a document that
+  no longer carries a block fails.
+
+  **And the claims are tested rather than trusted.** Four bullets *look* like statements about
+  SQLite and are not: they hold because techne opens its databases in WAL mode, one line in
+  `core/database.py`. Absences ("`techne doctor` does not check this", "nothing archives
+  transcripts") cannot be proved by grep, so the relevant *surface* is pinned — the registered
+  check names, the whole command tree — and any change trips the test and forces a re-read. Each
+  bullet names the test that witnesses it, both directions enforced.
 
 - **The docs teach how to FILL each domain, not only how to ask it** (#753). The 0.16.0
   tutorial taught four names against four stores it never explained how to populate, which
@@ -270,6 +305,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **An injected `Config` was silently discarded** (#766). `main` called
+  `ctx.ensure_object(dict)` — which reads as "honour what the caller passed in" — and then
+  unconditionally overwrote `ctx.obj["config"]`. So `CliRunner(...).invoke(main, args,
+  obj={"config": cfg})` ran against the **ambient store**, with no error and exit 0.
+
+  Found the hard way rather than by inspection: a reviewer believed they were scoped to a temp
+  store and four `techne backup` runs went against a live one under a mutation setting
+  `--keep 1`. Nothing was lost, verified independently. It matters most for exactly the commands
+  where it is least recoverable — `backup` writes, `--keep` deletes, `restore` overwrites — and
+  a test author who believes they are sandboxed is the person most likely to exercise a
+  destructive path. Nothing caught it because every scoped-config test patches `Config.load`,
+  which works *precisely because* it patches the call that was doing the overwriting.
+
 - **A codex read from inside a `git worktree` resolves to the primary index** (#719,
   tenishai/agents#53). `db-per-repo` silently meant *db-per-checkout*: a linked worktree
   has its own `.git`, so every query from a review worktree or a worktree-per-session
@@ -432,6 +480,15 @@ All notable changes to techne are documented here. Format loosely follows
   fixes it; disabled + stale `ok` read LIVE — silent, wrong, and comfortable.
 
 ### Docs
+
+- **Sessions and threads are not the same thing, and now the docs say so** (#762). A session is
+  a container the *client* hands techne — it starts when you open a client and ends at `/clear`
+  or when the process dies. A thread is a unit of *work* techne derives afterwards. One session
+  usually holds several threads; one thread usually spans several sessions. Measured on a real
+  store: **534 sessions produced 2,209 threads, 1,242 of them chained to a parent in an earlier
+  session.** `docs/threads.md` covers the scoring signals against the 0.7 threshold, the four
+  merge rules, the content-addressed thread id and the FK hazard behind it (#92), and the
+  `active → completed → stale` lifecycle.
 
 - **Scoped the "nothing auto-runs `backfill_vectors`" claim to this repo** (#704) — it
   was true of the source and false of any deployment that schedules it, which is a claim
