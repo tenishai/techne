@@ -335,6 +335,23 @@ All notable changes to techne are documented here. Format loosely follows
   writes the rule after a blank line, while a setext underline is attached to the line above,
   so only the former is stripped.
 
+- **A malformed backup manifest is refused, not tracebacked** (#759). `read_manifest` decides
+  whether a directory is a restorable backup set and its contract is to raise `RestoreError`.
+  For nine shapes it raised `AttributeError` or `TypeError` instead — a raw stack trace
+  reaching the operator **mid-restore**, which is when it is least useful and most alarming.
+  `cli.py` catches `RestoreError` and nothing else, so none of these were handled.
+
+  Two levels were unguarded, and the second one mattered more. `_classify_backup_set` carried
+  its own copy of the same `meta.get("file", ...)` expression, so a non-string `file` raised
+  out of `prune_backup_sets` **entirely** — retention died for *every* set rather than the
+  unreadable one, and a scheduled `techne backup --keep N` silently stopped reclaiming disk.
+  Measured: with `--keep 0` and one bad set present, a perfectly good set was left on disk.
+
+  Both readers now resolve entries through one shared helper, so a guard cannot be added to
+  one and missed by the other again. An unreadable set is **reported** through retention's
+  existing `failed` channel and never pruned, and `restore` refuses the same set — the two
+  agree by contract rather than by coincidence.
+
 - **An injected `Config` was silently discarded** (#766). `main` called
   `ctx.ensure_object(dict)` — which reads as "honour what the caller passed in" — and then
   unconditionally overwrote `ctx.obj["config"]`. So `CliRunner(...).invoke(main, args,

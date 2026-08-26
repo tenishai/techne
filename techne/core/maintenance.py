@@ -306,6 +306,41 @@ RETENTION_REFUSAL_PHRASES = (
 )
 
 
+
+def _manifest_db_filename(domain: str, meta: object) -> tuple[str | None, str | None]:
+    """Resolve one manifest entry to its db filename. Returns (filename, problem).
+
+    ONE resolver for the TWO readers of a manifest entry — `read_manifest` and
+    `_classify_backup_set` — because they carried the same expression twice and a
+    guard added to one did not protect the other (techne#759, Prudence #777 I2).
+    That asymmetry is the whole thing `test_prune_leaves_a_set_restore_cannot_read
+    _alone` exists to prevent, so the fix is a shared resolver rather than a second
+    copy of the same isinstance check.
+
+    `meta.get("file", ...)` DOES NOT RAISE on a non-string value — it returns it,
+    and the failure lands one operator later on `Path.__truediv__` as a TypeError.
+    Enumerating by symptom (`AttributeError`) walked straight past it. Measured
+    before the guard: int / None / list / dict / bool all reached
+    `unsupported operand type(s) for /: 'PosixPath' and ...`.
+
+    `maintenance.py`'s writer always emits `{"file": <str>, "size_bytes": <int>}`,
+    so a non-string `file` means a foreign, hand-edited or corrupted manifest —
+    exactly the class the surrounding guards already exist for.
+    """
+    if not isinstance(meta, dict):
+        return None, (
+            f"entry for '{domain}' should be an object, found {type(meta).__name__}"
+        )
+    name = meta.get("file", f"{domain}.db")
+    # bool is an int subclass but not a str, so it is caught here too.
+    if not isinstance(name, str) or not name.strip():
+        return None, (
+            f"'file' for '{domain}' should be a non-empty string, "
+            f"found {type(name).__name__}"
+        )
+    return name, None
+
+
 @dataclass(frozen=True)
 class SetClass:
     """What one directory under `backups/` is, in the three terms retention needs.
@@ -542,11 +577,30 @@ def _classify_backup_set(child: Path) -> SetClass:
     # "safe to delete unconditionally?", to which the honest answer here is no. A later
     # caller that reads `holds_data` without first checking `stamp` would otherwise get a
     # lie. What actually keeps this set out of the empty-set reclamation is the `None` stamp.
-    missing = sorted(
-        domain
-        for domain, meta in dbs.items()
-        if not (child / meta.get("file", f"{domain}.db")).exists()
-    )
+    # SAME RESOLVER AS `read_manifest`, deliberately. Before techne#759 this line
+    # carried its own copy of `meta.get("file", ...)`, so a non-string `file` raised
+    # TypeError out of `prune_backup_sets` entirely — killing retention for EVERY
+    # set, not just the unreadable one, and routing around the `failed` channel this
+    # function built so an unprunable set is REPORTED rather than fatal. Measured:
+    # with keep=0 and one bad set present, a perfectly good set was left on disk.
+    malformed: list[str] = []
+    missing: list[str] = []
+    for domain, meta in dbs.items():
+        name, problem = _manifest_db_filename(domain, meta)
+        if problem:
+            malformed.append(domain)
+        elif not (child / name).exists():
+            missing.append(domain)
+    if malformed:
+        return SetClass(
+            None,
+            (
+                f"{RETENTION_REFUSAL_PHRASES[6]} ({', '.join(sorted(malformed))}) — "
+                "`restore` refuses it, so it is not counted as a backup and is never pruned"
+            ),
+            holds_data=True,
+        )
+    missing = sorted(missing)
     if missing:
         return SetClass(
             None,
@@ -705,12 +759,10 @@ def read_manifest(src_dir: Path) -> dict:
     if not isinstance(dbs, dict) or not dbs:
         raise RestoreError("manifest lists no databases")
     for domain, meta in dbs.items():
-        if not isinstance(meta, dict):
-            raise RestoreError(
-                f"malformed manifest: entry for '{domain}' should be an object, "
-                f"found {type(meta).__name__}"
-            )
-        f = src_dir / meta.get("file", f"{domain}.db")
+        name, problem = _manifest_db_filename(domain, meta)
+        if problem:
+            raise RestoreError(f"malformed manifest: {problem}")
+        f = src_dir / name
         if not f.exists():
             raise RestoreError(f"backup set is incomplete: {f.name} missing for '{domain}'")
     return manifest
