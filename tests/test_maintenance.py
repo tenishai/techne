@@ -1422,7 +1422,16 @@ def test_a_directory_naming_set_never_takes_a_retention_slot(tmp_path, name):
     assert good.exists(), f"{name!r} took a retention slot and the genuine set was deleted"
     assert (good / "techne.db").read_text() == "REAL DATA"
     assert removed == [], f"pruned {[p.name for p in removed]} to keep an unreadable set"
+    # ASSERT THE ROUTE, NOT JUST THE OUTCOME. `== [bad]` alone discards the reason,
+    # and the r5 spelling-list mutation passed unnoticed because of it: the set was
+    # still refused, just by the OTHER branch. The two are distinguishable —
+    # RETENTION_REFUSAL_PHRASES[6] is the malformed-entry route, [7] the
+    # missing-file route this guard takes — so pin which one refused it
+    # (Prudence, #777 r7 Nit 1). Same discrimination r4 required of the entry
+    # messages, one function over.
     assert [p for p, _ in failed] == [bad], "the unreadable set was not REPORTED"
+    ((_, reason),) = failed
+    assert RETENTION_REFUSAL_PHRASES[7] in reason, f"refused by the wrong guard: {reason!r}"
 
 
 def test_the_malformed_manifest_message_names_what_it_found(tmp_path):
