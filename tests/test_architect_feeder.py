@@ -383,5 +383,33 @@ def test_a_no_lift_only_corpus_is_not_called_a_failure(cli_config, tmp_path):
     result = CliRunner().invoke(main, ["architect", "ingest", str(md)])
 
     counts = json.loads(result.stdout)
-    assert counts["no_lifts_added"] == 1, counts
+    assert counts["no_lifts_seen"] == 1, counts
     assert "nothing was ingested" not in result.output
+
+
+def test_re_ingesting_an_unchanged_corpus_is_not_called_a_failure(cli_config, tmp_path):
+    """`patterns_added` COUNTS WRITES, AND WRITES DEDUP. Keying "was this file understood?"
+    on it gave the wrong answer for a re-ingest: everything parses, nothing is written, and
+    the operator was told `no pattern sections found — sections must start with "## "`
+    about a file whose headings are correct.
+
+    That is the same defect the message was added to fix, reintroduced by the fix for it —
+    found by attacking my own round-3 brief rather than by review. The counters the message
+    keys on now report what was PARSED."""
+    md = tmp_path / "good.md"
+    md.write_text(
+        "## Good pattern\n\n- **Source**: https://github.com/x/y\n"
+        "- **Surveyed**: 2026-01-01\n\nA real body.\n"
+    )
+
+    first = CliRunner().invoke(main, ["architect", "ingest", str(md)])
+    second = CliRunner().invoke(main, ["architect", "ingest", str(md)])
+
+    assert json.loads(first.stdout)["patterns_added"] == 1
+    counts = json.loads(second.stdout)
+    assert counts["patterns_added"] == 0, "fixture is wrong — the second write was not a dedup"
+    assert counts["patterns_seen"] == 1, counts
+    assert "must start with" not in second.output, (
+        f"a correct file was told its headings are wrong on re-ingest:\n{second.output}"
+    )
+    assert "nothing was ingested" not in second.output

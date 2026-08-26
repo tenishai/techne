@@ -3493,7 +3493,10 @@ def architect_ingest(ctx, markdown_file, verdict):
     # entry verbatim, for a mistake at least as guessable as the bold markers. Worse than
     # the silence it replaced, in fact, because operators have now learned that ingest
     # speaks up when something is wrong.
-    if not counts["patterns_added"] and not counts.get("no_lifts_added"):
+    # KEYED ON WHAT WAS PARSED, NOT ON WHAT WAS WRITTEN. The question this message answers
+    # is "did techne understand your file?", and writes dedup — so a re-ingest of a correct
+    # corpus writes nothing and would otherwise be told its headings are wrong.
+    if not counts["patterns_seen"] and not counts["no_lifts_seen"]:
         if not counts["skipped"]:
             click.echo(
                 f"no pattern sections found in {markdown_file.name} — sections must start "
