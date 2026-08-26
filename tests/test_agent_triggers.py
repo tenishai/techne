@@ -253,6 +253,14 @@ def test_the_absence_the_backup_trigger_asserts_is_still_absent():
 #: the same way an arch card is re-blessed when its seam moves.
 COMMAND_TREE_AT_LAST_REVIEW = {
     "architect",
+    # RE-BLESSED 2026-08-26 after #758 landed `architect add`. The question this pin asks
+    # is not "did the CLI change" but "does the new command falsify the trigger", and it
+    # was answered rather than waved through: `architect add` writes ONE pattern to
+    # architect.db from --name/--source/--body, and has no transcript path of any kind.
+    # deployment.md's migration trigger — "nothing archives session transcripts" — still
+    # holds. This is the pin's first real firing, and it did the job it was built for:
+    # it made a CLI change stop and answer a documentation question.
+    "architect add",
     "architect applies",
     "architect backfill",
     "architect export",
