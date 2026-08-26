@@ -1240,4 +1240,28 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
     # Materialize the relation/applies graph from the bodies we just stored, and
     # re-resolve any edges that earlier ingests left dangling (P2 write-path).
     graph = backfill_graph(db_path)
-    return {"patterns_added": patterns_added, "graph": graph, **stats(db_path)}
+    return {
+        "patterns_added": patterns_added,
+        # SEEN, NOT ADDED — and the distinction is load-bearing, not pedantry.
+        #
+        # `patterns_added` counts WRITES, which dedup. A caller keying "was this file
+        # understood?" on it gets the wrong answer for a RE-INGEST of an unchanged corpus:
+        # everything parses, nothing is written, and the caller reports the file was
+        # unreadable. Measured before this fix — a second `ingest` of a correct file
+        # printed "no pattern sections found … must start with `## `", which is a false
+        # statement about a file whose headings are right.
+        #
+        # That is the same defect the message was added to fix, reintroduced by the fix for
+        # it, so the counters the message keys on now report what was PARSED.
+        "patterns_seen": len(parsed.patterns),
+        "no_lifts_seen": len(parsed.no_lifts),
+        # SECTIONS THAT LOOKED LIKE PATTERNS AND WERE DROPPED (techne#754). Returned so a
+        # caller can say which and why. Without this the command printed `patterns: 0` and
+        # exited 0 on a file the operator had just written — the bold markers in
+        # `- **Source**:` are load-bearing, `- Source:` parses as body text, and a
+        # plausible first attempt therefore failed in the one way this project keeps
+        # failing: silently, looking like success.
+        "skipped": [{"heading": sk.heading, "reason": sk.reason} for sk in parsed.skipped],
+        "graph": graph,
+        **stats(db_path),
+    }

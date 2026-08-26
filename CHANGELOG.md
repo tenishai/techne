@@ -43,6 +43,27 @@ All notable changes to techne are documented here. Format loosely follows
   and says plainly that the verification step will not tell you it is missing — without
   lingering the user manager stops at logout and the timer never fires, while
   `list-timers` shows it healthy for as long as you stay logged in.
+- **`techne architect add` — the feeder that ships** (#754). techne teaches four domain
+  names, and on a fresh install the architect — *"what is worth stealing"* — had no way in
+  that came with the tool. `ingest` takes a markdown corpus; the procedures that actually
+  fill the store (`/investigate-url`, `/survey-field`) live in `tenishai/skills`, a
+  separate install. So an operator installed techne, read the tutorial, learned to ask the
+  architect, and the thing that fills it shipped from somewhere we never mentioned.
+
+  `add` takes the fields directly — `--name`, `--source`, `--surveyed`, and a body from
+  `--body`, `--body-file` or stdin — and writes through the same store API `ingest` uses
+  after parsing. **A command rather than a bundled skill**, because `techne init
+  --platform` advertises five platforms and a skill installs into Claude Code's
+  `commands/` and nowhere else. The richer research procedures stay canonical in
+  `tenishai/skills`; this is the smallest thing that gets a pattern in, not a copy of them.
+
+- **`techne architect ingest` says which sections it dropped** (#754). A section missing
+  its `- **Source**:` line was skipped with a log line nobody sees, so the command printed
+  `"patterns": 0` and exited 0 on a file the operator had just written by hand. The bold
+  markers are load-bearing — `- Source:` parses as body text — and that is not guessable,
+  so the realistic first attempt failed in the one way that is hardest to notice: silently,
+  shaped exactly like success. Skipped sections are now reported with the reason and the
+  missing marker named, and a run that ingested nothing points at `architect add`.
 
 - **The four knowledge domains are addressable by name** (#724). `archivist_search`,
   `librarian_search`, `architect_search` and `codex_search` — the archivist, librarian,

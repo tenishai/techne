@@ -3490,7 +3490,168 @@ def architect_ingest(ctx, markdown_file, verdict):
     counts = ingest_patterns_md(
         architect_db(config), markdown_file.read_text(encoding="utf-8"), verdict=verdict
     )
+    # SAY WHAT WAS DROPPED, BEFORE the JSON (techne#754). A section missing its
+    # `- **Source**:` line was skipped with a log line nobody sees, so this printed
+    # `"patterns": 0` and exited 0 on a hand-written file — and the bold markers are
+    # load-bearing, which is not guessable. stderr, so `| jq` over the JSON still works.
+    for sk in counts["skipped"]:
+        click.echo(f'skipped section "{sk["heading"]}": {sk["reason"]}', err=True)
+    # GATED ON "NOTHING LANDED", NOT ON "SOMETHING WAS SKIPPED" (Prudence, #758 round 2).
+    # `skipped` only fills for sections that reached `_parse_pattern_body`, which requires
+    # exactly `## `. So a file using `# My pattern` with perfect metadata bullets printed
+    # `"patterns_added": 0`, exit 0, and NOTHING on stderr — this command's own CHANGELOG
+    # entry verbatim, for a mistake at least as guessable as the bold markers. Worse than
+    # the silence it replaced, in fact, because operators have now learned that ingest
+    # speaks up when something is wrong.
+    # KEYED ON WHAT WAS PARSED, NOT ON WHAT WAS WRITTEN. The question this message answers
+    # is "did techne understand your file?", and writes dedup — so a re-ingest of a correct
+    # corpus writes nothing and would otherwise be told its headings are wrong.
+    if not counts["patterns_seen"] and not counts["no_lifts_seen"]:
+        if not counts["skipped"]:
+            click.echo(
+                f"no pattern sections found in {markdown_file.name} — sections must start "
+                "with `## ` (two hashes) at the top level.",
+                err=True,
+            )
+        click.echo(
+            "nothing was ingested. `techne architect add` takes the fields directly "
+            "if you would rather not hand-write the markdown.",
+            err=True,
+        )
     click.echo(json.dumps(counts, indent=2))
+
+
+@architect.command("add")
+@click.option("--name", required=True, help="What the pattern is called. Becomes its heading.")
+@click.option("--source", required=True, help="URL the pattern was lifted from.")
+@click.option(
+    "--surveyed",
+    default=None,
+    help="Date you looked at it, YYYY-MM-DD. Defaults to today.",
+)
+@click.option("--body", default=None, help="The pattern itself. Or --body-file, or stdin.")
+@click.option(
+    "--body-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Read the body from a file instead of --body.",
+)
+@click.option(
+    "--verdict",
+    type=click.Choice(["skip", "skip-with-flag", "patterns-only", "full-eval"]),
+    default=None,
+    help="Your judgment for this URL. Omit to record 'patterns-only' (the modal outcome).",
+)
+@click.option("--surveyed-by", default="raven", show_default=True)
+@click.option("--lens", default="infra", show_default=True)
+@click.pass_context
+def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens):
+    """Add ONE pattern to architect.db from its fields — the feeder that ships.
+
+    THE ARCHITECT HAD NO WAY IN THAT CAME WITH techne (techne#754). `ingest` takes a
+    markdown corpus, and `investigate-url` / `survey-field` — the skills that actually
+    fill the store — live in tenishai/skills, a separate install we never mention. So an
+    operator installs techne, reads the tutorial, learns to ask the architect, and the
+    thing that fills it ships from somewhere else.
+
+    A COMMAND RATHER THAN A BUNDLED SKILL, because `techne init --platform` advertises
+    five platforms and `techne/platforms/` holds one renderer. A skill installs into
+    Claude Code's `commands/` and nowhere else; a CLI command works on all five.
+
+    AND NOT A MARKDOWN GENERATOR. `ingest`'s format is not guessable — `- Source:` and
+    `- **Source**:` differ by two asterisks and the first is silently parsed as body
+    text — so a feeder that rendered markdown and re-parsed it would still fail in that
+    way, one layer down. This writes through the same store API `ingest` writes through
+    after parsing, so there is no format to get wrong.
+    """
+    import sys
+    from datetime import datetime, timezone
+
+    config = ctx.obj["config"]
+    from techne.core.architect import architect_db
+    from techne.core.patterns import (
+        DEFAULT_INGEST_VERDICT,
+        add_pattern,
+        backfill_graph,
+        upsert_investigation,
+    )
+
+    sources = [s for s in (body, body_file) if s is not None]
+    if len(sources) > 1:
+        raise click.UsageError("pass --body or --body-file, not both")
+    if body_file is not None:
+        body = body_file.read_text(encoding="utf-8")
+    elif body is None:
+        # stdin only when it is a PIPE. On a tty this would hang looking like the command
+        # is working, which is the failure this command exists to stop making.
+        if sys.stdin.isatty():
+            raise click.UsageError("no body: pass --body, --body-file, or pipe it on stdin")
+        body = sys.stdin.read()
+    if not body.strip():
+        raise click.UsageError("the body is empty — a pattern with no body is not a pattern")
+
+    # NORMALIZE THE WAY THE PARSER DOES, NOT MERELY ACCEPT WHAT IT ACCEPTS (Prudence, #758
+    # Critical). `_URL_RE` and `_DATE_RE` are UNANCHORED EXTRACTORS — `_DATE_RE` carries a
+    # capture group precisely so callers take `group(1)`, and `_parse_pattern_body` does.
+    # This used them as booleans and then stored the RAW argument, so sharing the regex
+    # bought acceptance parity while normalization — where the disagreement actually lives
+    # — was never shared at all. Measured at the database:
+    #
+    #   `--source "https://github.com/x/y — src/foo.ts"`, which is the shape
+    #   `export_patterns_md` itself teaches, stored whole. `investigations` is
+    #   UNIQUE(url, surveyed_by, lens), so add and ingest MINT DIFFERENT ROWS FOR ONE URL:
+    #   add → export → re-ingest turned one investigation into two, against the invariant
+    #   `test_export_roundtrips_with_ingest` already names.
+    #
+    #   `--surveyed "surveyed 2026-01-01 roughly"` accepted and stored raw. patterns.py:50
+    #   records that `surveyed_at` is a zero-padded ISO date BECAUSE import_md enforces it
+    #   at parse time, and calls that scoping "the sweep's only safety property" — so the
+    #   sweep's own predicate returns [] for such a row, since 's' > '2'.
+    #
+    # The date is checked against `_ISO_DATE_RE`, which is ANCHORED and already lives in
+    # the module this command writes into — the right regex was one import away.
+    from techne.core.patterns import _ISO_DATE_RE
+    from techne.import_md import _URL_RE
+
+    surveyed = surveyed or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not _ISO_DATE_RE.match(surveyed):
+        raise click.UsageError(f"--surveyed must be exactly YYYY-MM-DD; got {surveyed!r}")
+    url_match = _URL_RE.search(source)
+    if url_match is None:
+        raise click.UsageError(f"--source must be an http(s) URL; got {source!r}")
+    # `.group(0).rstrip("),.;")` — character-for-character what import_md.py:250 stores.
+    source = url_match.group(0).rstrip("),.;")
+
+    db = architect_db(config)
+    inv_id = upsert_investigation(
+        db,
+        url=source,
+        surveyed_at=surveyed,
+        verdict=DEFAULT_INGEST_VERDICT if verdict is None else verdict,
+        surveyed_by=surveyed_by,
+        lens=lens,
+        # Same rules `ingest` applies: a stated verdict overwrites, the fallback is
+        # insert-only so a `reverdict` judgment survives, and storing a pattern proves the
+        # URL yielded one, so a stale skip must not outlive it.
+        overwrite_verdict=verdict is not None,
+        clears_skip=True,
+    )
+    pid, stored = add_pattern(
+        db, investigation_id=inv_id, name=name, source_url=source, body=body.strip()
+    )
+    # AND THE GRAPH, WHICH `ingest` BUILDS AND THIS DID NOT (Prudence, #758 Important B).
+    # `ingest_patterns_md` writes FOUR things: the investigation, the pattern, typed
+    # relations declared in the body, and then `backfill_graph` to materialise wikilink
+    # edges and re-resolve anything earlier ingests left dangling. This wrote two — so
+    # `pattern_relations` stayed EMPTY for every pattern fed through `add`, and the
+    # operator this command exists for got a silently graphless store while
+    # `architect related` and `architect graph` returned nothing.
+    backfill_graph(db)
+    if stored:
+        click.echo(f"added {pid}  {name}")
+    else:
+        # Ids are content hashes, so this is the same pattern, not a name collision.
+        click.echo(f"already present {pid}  {name}")
 
 
 @architect.command("reverdict")
