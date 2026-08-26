@@ -140,6 +140,13 @@ def test_add_refuses_before_writing_anything(cli_config, args, expected):
 
     assert result.exit_code != 0
     assert expected in result.output
+    # "BEFORE WRITING ANYTHING" IS IN THE NAME AND WAS NOT ASSERTED (Prudence, #758 round
+    # 4). She moved the `_ISO_DATE_RE` guard below `upsert_investigation` and this stayed
+    # 5/5 green while an orphan row landed carrying `surveyed_at='25-08-2026'` — the exact
+    # non-ISO shape the round-1 Critical was about. A test that names three claims and
+    # checks two is a test that reads as stronger than it is.
+    rows = _query(architect_db(cli_config), "SELECT COUNT(*) FROM investigations")
+    assert rows[0][0] == 0, "a rejected `add` wrote an investigation row anyway"
 
 
 @pytest.mark.parametrize("url", ["https://x.com/a", "http://x.com/a", "https://x.com/a/b?c=1"])
@@ -266,13 +273,18 @@ def test_add_builds_the_relation_graph_like_ingest_does(cli_config):
     # what has to be checked.
     rows = _query(
         architect_db(cli_config),
-        "SELECT src.name, r.dst_name, dst.name, r.resolution_status "
+        # `kind` INCLUDED (Prudence, #758 round 4). Relabelling `backfill_graph`'s
+        # `'related'` literal to `'supersedes'` — which would retype every wikilink edge in
+        # the store — passes both this test without it AND all 43 of
+        # `test_patterns_graph.py`. That literal is untested repo-wide; one column closes
+        # it here for the path this command actually walks.
+        "SELECT src.name, r.dst_name, dst.name, r.resolution_status, r.kind "
         "FROM pattern_relations r "
         "JOIN patterns src ON src.id = r.src_pattern_id "
         "LEFT JOIN patterns dst ON dst.id = r.dst_pattern_id",
     )
 
-    assert ("Alpha", "Beta", "Beta", "resolved") in rows, (
+    assert ("Alpha", "Beta", "Beta", "resolved", "related") in rows, (
         f"the [[Beta]] wikilink did not RESOLVE to Beta's row: {rows}"
     )
 
@@ -409,7 +421,13 @@ def test_re_ingesting_an_unchanged_corpus_is_not_called_a_failure(cli_config, tm
 
     That is the same defect the message was added to fix, reintroduced by the fix for it —
     found by attacking my own round-3 brief rather than by review. The counters the message
-    keys on now report what was PARSED."""
+    keys on now report what was PARSED.
+
+    PRUDENCE'S EXAMPLE IS THE ONE THAT MATTERS, and is better than the plain re-ingest
+    tested below: a `--verdict` re-ingest is THE DOCUMENTED multi-row correction path
+    (`ingest_patterns_md`'s own docstring points at it), and it rewrote `patterns-only` →
+    `full-eval` — a real, intended write — while being told nothing was ingested. Keying on
+    `patterns_seen` covers it, because the file parses either way."""
     md = tmp_path / "good.md"
     md.write_text(
         "## Good pattern\n\n- **Source**: https://github.com/x/y\n"
