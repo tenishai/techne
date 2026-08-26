@@ -13,7 +13,7 @@ Each domain/persona gets its **own db file**, behind a `StoreAdapter`:
 | db | owner | holds |
 |---|---|---|
 | `techne.db` | personal memory (you) | sessions, threads, observations, **knowledge** (incl. document *cards*), identity, outbox |
-| `librarian.db` | Librarian | `documents` + fts/vec (full content of transcripts, docs) |
+| `librarian.db` | Librarian | `documents` + fts (full content of transcripts, docs) — **FTS only**; there is no `documents_vec` |
 | `architect.db` | Architect | patterns (the architectural-patterns corpus) |
 | `codex.db` | Codex | repo/graph domain (nodes/edges) |
 

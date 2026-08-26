@@ -356,11 +356,14 @@ correction on the identical reasoning about `vectors backfill`
 ([`docs/arch/search-embeddings.md`](arch/search-embeddings.md)), so **check your own hooks
 before concluding nothing is indexing.**
 
-If nothing is, techne's own `self-care` skill states the consequence — it is describing
-techne's own wiring, which is the scope it can speak to:
+If nothing is, techne's own `self-care` skill states the consequence. The quote is the
+corrected wording: the previous version said "no automatic feeder" flatly, and **the
+ellipsis here elided exactly that fragment** — so this document leaned on an uncorrected
+claim while presenting the correction. Both are fixed now, which is the only reason the
+quote can be trusted as authority:
 
-> the *only* index with no automatic feeder … left alone it silently decays, and a
-> **4%-coverage search looks exactly like a working one**.
+> the only index nothing in techne feeds automatically … left alone it silently decays,
+> and a **4%-coverage search looks exactly like a working one**.
 
 That is the failure to understand before you trust a `librarian_search` result: an index
 holding 4% of your transcripts does not answer differently from one holding all of them —
@@ -383,11 +386,12 @@ and that is the one case where the answer is genuinely "not from here".
 >   feeder fills it and whether anything runs that feeder automatically. For those three,
 >   empty and unpopulated are indistinguishable in the result, so the moment to speak is
 >   when the zero appears, not once they have concluded something from it.
->   **The codex is the exception:** its empty answer carries a *notice naming the remedy*
->   rather than a bare empty list — `binding: 'absent'` with "run `techne codex index
->   <repo>`" when no index resolves, and a distinct "THE INDEX IS EMPTY (0 files)" notice
->   for an index that resolved and holds nothing (techne#595). Those are two different
->   states and never appear together. That qualification is what the other three lack.
+>   **The codex is the exception:** its empty answer carries a *qualification* rather than a
+>   bare empty list — it says which kind of nothing it means. `binding: 'absent'` with "run
+>   `techne codex index <repo>`" when no index resolves; a distinct "THE INDEX IS EMPTY
+>   (0 files)" when one resolved and holds nothing; and four more, two of which name no
+>   remedy because none exists (techne#595). Those states never appear together. The
+>   qualification is what the other three lack.
 > - They are about to rely on `librarian_search` for coverage — **nothing in techne itself
 >   indexes transcripts**, so ask whether their deployment wires one; a partial index
 >   answers exactly like a complete one.

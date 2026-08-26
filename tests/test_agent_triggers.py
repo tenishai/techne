@@ -613,27 +613,43 @@ def test_only_the_codex_distinguishes_an_empty_index_from_no_match(config_free_t
     Prudence catching the identical miss in techne#725, where "the domain tests asserted
     the envelope of `domains.codex_search`, which no MCP caller reaches".
 
-    WHAT THIS DOES NOT COVER, said rather than implied: the `INDEX IS EMPTY (0 files)`
-    branch needs a db that RESOLVES while holding nothing, and I could not construct that
-    state from the envelope in two attempts — creating the index db alone still answers
-    `absent`. So this pins the reachable state and the doc claims only the qualification
-    both states share. The empty-index branch is covered by codegraph's own tests, not by
-    this one."""
+    BOTH STATES, because Prudence found the arrangement I could not (#771 round 3). The
+    missing ingredient was `git init`, NOT the db: `resolve_repo_db_for_query` calls
+    `primary_repo_root()` FIRST and returns None for a non-repo, short-circuiting before it
+    looks at the db at all. She teeth-checked the diagnosis by removing only the `git init`
+    and reproducing the `absent` I had been getting. Recording a gap was the honest fallback;
+    closing it is better."""
+    import subprocess
+
+    from techne.core.codex import codex_db_for_repo
     from techne.mcp_server import _codex_search
 
-    repo = tmp_path / "unindexed-repo"
-    repo.mkdir()
+    # STATE 1 — nothing resolves: a plain directory, not a repo
+    unindexed = tmp_path / "not-a-repo"
+    unindexed.mkdir()
+    absent = _codex_search({"query": "zqxjkv_no_such_symbol", "repo": str(unindexed)},
+                           config_free_tmp_home)
 
-    envelope = _codex_search({"query": "zqxjkv_no_such_symbol", "repo": str(repo)},
+    assert absent["results"] == [] and absent.get("notice"), "no qualification on the absent state"
+    assert absent["binding"] == "absent", absent["binding"]
+    assert "codex index" in absent["notice"], absent["notice"]
+
+    # STATE 2 — an index that RESOLVED and holds nothing
+    empty = tmp_path / "empty-repo"
+    empty.mkdir()
+    subprocess.run(["git", "init", "-q", str(empty)], check=True)
+    codex_db_for_repo(config_free_tmp_home, empty)
+    resolved = _codex_search({"query": "zqxjkv_no_such_symbol", "repo": str(empty)},
                              config_free_tmp_home)
 
-    assert envelope["results"] == []
-    assert envelope.get("notice"), (
-        "the codex returned a bare empty result — the trigger names it as the one domain "
-        "that qualifies its nothing, and four-functions.md tells operators so"
+    assert resolved["binding"] == "local", (
+        f"expected a resolved binding for an initialised repo, got {resolved['binding']!r}"
     )
-    assert "codex index" in envelope["notice"], (
-        f"the notice no longer names the remedy: {envelope['notice']!r}"
+    assert "INDEX IS EMPTY" in (resolved.get("notice") or ""), (
+        f"the resolved-but-empty state lost its qualification: {resolved.get('notice')!r}"
+    )
+    assert absent["notice"] != resolved["notice"], (
+        "the two states now give the same notice — the doc says they are distinguishable"
     )
 
 
