@@ -148,9 +148,14 @@ def parse(text: str) -> ParseResult:
 
 
 
-# A markdown horizontal rule: ---, ***, or ___ (3+), optionally indented up to 3
-# spaces, alone on its line.
-_RULE_RE = re.compile(r"^ {0,3}(?:-{3,}|\*{3,}|_{3,})\s*$")
+# The entry separator `export_patterns_md` writes: ---, ***, or ___ (3+), alone on
+# its line, at COLUMN 0. Deliberately NOT tolerating leading indentation
+# (Prudence, #778 r2 Nit 1): export always emits the separator unindented
+# (patterns.py), so allowing up to 3 spaces made this recognise "a markdown rule"
+# when its job is to recognise "export's separator" — and the difference is real,
+# since `'- alpha\n\n  ---'` is a divider inside a trailing list item, which the
+# wider form ate. Convergence is untouched; every accreted rule is unindented.
+_RULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})\s*$")
 
 
 def _strip_trailing_rule(body: str) -> str:
@@ -179,8 +184,13 @@ def _strip_trailing_rule(body: str) -> str:
     accreted rules are all of the form `\n\n---`, so they still collapse.
     (Prudence, #778 Nit 2.)
 
-    A rule inside a fenced block is safe: the closing ``` is the last line, so the
-    loop stops before reaching it.
+    A rule inside a CLOSED fenced block is safe: the closing ``` is the last line,
+    so the loop stops before reaching it. This helper has no fence awareness of its
+    own, so the guarantee is that narrow one — an UNCLOSED fence ending in blank +
+    rule would have its rule stripped. That is unreachable in practice for a louder
+    reason: an unclosed fence already swallows every subsequent `## ` heading in
+    `_split_into_sections`, so the document fails long before this matters
+    (Prudence, #778 r2 Nit 2).
     """
     lines = body.rstrip().splitlines()
     while lines:

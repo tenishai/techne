@@ -190,6 +190,10 @@ def test_parser_skips_template_inside_code_block() -> None:
         # Popping it demotes a heading to a paragraph (Prudence, #778 Nit 2).
         ("setext H2 underline", "Alpha beta.\n\nCaveats\n---", "Alpha beta.\n\nCaveats\n---"),
         ("setext H1 underline", "Alpha beta.\n\nCaveats\n===", "Alpha beta.\n\nCaveats\n==="),
+        # export writes the separator at COLUMN 0; an indented rule is a divider
+        # inside a list item, not an entry separator (Prudence, #778 r2 Nit 1).
+        ("indented rule in a list", "- alpha\n\n  ---", "- alpha\n\n  ---"),
+        ("indented rule after prose", "Alpha beta.\n\n   ---", "Alpha beta.\n\n   ---"),
     ],
 )
 def test_strip_trailing_rule_removes_separators_but_not_setext_headings(label, body, expected):
