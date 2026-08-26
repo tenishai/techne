@@ -33,7 +33,13 @@ name: test
 # shell proves nothing -- the runner sets it PER JOB -- and /opt/hostedtoolcache is
 # the hosted-runner path, expected to be absent. Do not lean on either.)
 #
-# THE REASON IS PROVENANCE, NOT COST, and specifically not the `only-system` pin:
+# THE REASON THAT SURVIVES IS PROVENANCE, NOT COST -- the cost argument is
+# falsified above and provenance is what is left standing. Stated that way on
+# purpose: the two claims this replaces were FALSIFIABLE ("ephemeral", "every
+# job") and were checked against RestartCount and mount state. "This is the
+# reason" is a claim about a decision, which the tree cannot witness -- and an
+# unfalsifiable claim written in the register of a verified one is how both of
+# the previous versions got their confidence. Specifically NOT the only-system pin:
 # `fork-pr` uses actions/setup-python under the SAME workflow-level
 # UV_PYTHON_PREFERENCE=only-system / UV_PYTHON_DOWNLOADS=never and passes, because
 # setup-python puts its interpreter on PATH as a SYSTEM one -- this file says so at
@@ -505,11 +511,14 @@ jobs:
         # but kept the "matters MORE" comparison it was the only support for, which
         # inverts once the premise goes (Prudence, #779 r2 I2).
         #
-        # Bears on the #535 analysis further up this job: cold-cache runs are RARER
+        # Bears on the #535 analysis further up this FILE, in the `test` job (there
+        # is none in this one): cold-cache runs are RARER
         # than that note assumes, so it understates its own case rather than
         # overstating it. (An earlier version of this pointed at the actions/cache
         # step itself, which makes no persistence claim at all -- the claim was in the
-        # fastembed pre-fetch comment above, now corrected.)
+        # fastembed pre-fetch comment in the `test` job, now corrected. Mis-aiming a
+        # pointer inside the very sentence recording a mis-aimed pointer is not a
+        # coincidence worth repeating; check the job bounds before writing "above".)
         working-directory: techne
         run: .venv-ci/bin/python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M', force_download=False)"
 
