@@ -1283,12 +1283,18 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
 # exception, so a symptom-shaped search could not see it (Prudence, #777 I1).
 # Enumerate by EXPRESSION, not by traceback type, if this list ever grows again.
 
+# Hoisted: inlining this pushed five parametrize lines to 110-120 chars against the
+# repo's line-length = 100 (Prudence, #777 r5 Nit 3 -- the same class as r4's 133-char
+# line, reintroduced by r4's own fix).
+_ENTRY_MSG = "entry for 'techne' should be an object"
+
+
 @pytest.mark.parametrize(
     "label,payload,expected",
     [
-        ("databases dict-of-strings", {"databases": {"techne": "techne.db"}}, "entry for 'techne' should be an object"),
-        ("databases dict-of-None", {"databases": {"techne": None}}, "entry for 'techne' should be an object"),
-        ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, "entry for 'techne' should be an object"),
+        ("databases dict-of-strings", {"databases": {"techne": "techne.db"}}, _ENTRY_MSG),
+        ("databases dict-of-None", {"databases": {"techne": None}}, _ENTRY_MSG),
+        ("databases dict-of-lists", {"databases": {"techne": ["techne.db"]}}, _ENTRY_MSG),
         # THE `match=` MUST DISCRIMINATE, not merely appear. These asserted
         # match="'techne'" until #777 r4 -- but that substring also occurs in the
         # OTHER refusal this function raises, "backup set is incomplete: techne.db
@@ -1301,14 +1307,14 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
         #
         # MIRROR THE TOP LEVEL. Round 2 added number/null/bool up there and did not
         # mirror them one level down, which is how a fifteen-element set was counted
-        # as thirteen — and left `bool` with no witness anywhere in the suite, so
+        # as fifteen — and left `bool` with no witness anywhere in the suite, so
         # `isinstance(meta, (dict, bool))` passed the whole suite green
         # (Prudence, #777 r3).
-        ("databases dict-of-numbers", {"databases": {"techne": 7}}, "entry for 'techne' should be an object"),
-        ("databases dict-of-bools", {"databases": {"techne": True}}, "entry for 'techne' should be an object"),
+        ("databases dict-of-numbers", {"databases": {"techne": 7}}, _ENTRY_MSG),
+        ("databases dict-of-bools", {"databases": {"techne": True}}, _ENTRY_MSG),
         ("manifest is a JSON array", [{"databases": {}}], "expected a JSON object"),
         ("manifest is a JSON string", "techne", "expected a JSON object"),
-        # The remaining top-level shapes, so all THIRTEEN that tracebacked pre-fix
+        # The remaining top-level shapes, so all FIFTEEN that tracebacked pre-fix
         # are pinned rather than ten of them (Prudence, #777 r2 Nit 2).
         ("manifest is a JSON number", 7, "expected a JSON object"),
         ("manifest is JSON null", None, "expected a JSON object"),
@@ -1320,10 +1326,6 @@ def test_an_unrestorable_set_never_takes_a_slot_from_a_restorable_one(tmp_path):
         ("file is a dict", {"databases": {"techne": {"file": {"n": "t"}}}}, "'file' for 'techne'"),
         ("file is a bool", {"databases": {"techne": {"file": True}}}, "'file' for 'techne'"),
         ("file is empty", {"databases": {"techne": {"file": "  "}}}, "'file' for 'techne'"),
-        # `.` and `..` are the third and fourth spellings of "names the set
-        # directory" -- non-empty, so `.strip()` does not catch them.
-        ("file is dot", {"databases": {"techne": {"file": "."}}}, "names a directory"),
-        ("file is dotdot", {"databases": {"techne": {"file": ".."}}}, "names a directory"),
     ],
 )
 def test_a_malformed_manifest_raises_restore_error_not_a_traceback(
@@ -1331,6 +1333,38 @@ def test_a_malformed_manifest_raises_restore_error_not_a_traceback(
 ):
     (tmp_path / "manifest.json").write_text(json.dumps(payload))
     with pytest.raises(RestoreError, match=expected):
+        read_manifest(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "name", [".", "..", "./", ".//", "./.", "../", " . "]
+)
+def test_a_file_naming_the_set_directory_is_refused(tmp_path, name):
+    """A `file` that names the set directory is not a database file (techne#759).
+
+    THE PREDICATE IS `is_file()`, NOT A LIST OF SPELLINGS. An earlier version
+    rejected the literals "." and ".." and read as though the class were closed.
+    It was not: `./`, `.//`, `./.` and `../` all still resolved to the set
+    directory or its parent, `.exists()` was true, and `_classify_backup_set`
+    therefore called such a set RESTORABLE. It took a keep slot, and at `keep=1`
+    it EVICTED THE GENUINE SET with `failed: []` — while `restore` refused the
+    survivor. That is a real backup lost to a manifest naming a folder
+    (Prudence, #777 r5 I1).
+
+    Asserting the message, not just the type: "backup set is incomplete" belongs
+    to this guard alone, so it distinguishes refused-as-a-directory from
+    refused-as-malformed — the discrimination r4 had to add to the entry cases.
+    """
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-01-01T00:00:00Z",
+                "techne_version": "0.15.0",
+                "databases": {"techne": {"file": name}},
+            }
+        )
+    )
+    with pytest.raises(RestoreError, match="backup set is incomplete"):
         read_manifest(tmp_path)
 
 
