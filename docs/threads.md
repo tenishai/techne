@@ -33,13 +33,15 @@ threshold.
 
 ### The signals
 
-Each signal contributes additively (`techne/core/threads/scoring.py`):
+Each signal contributes additively (`techne/core/threads/scoring.py`) — **except the three
+gap tiers, which are mutually exclusive.** Only the highest one fires (`_score_signals` uses
+`if / elif / elif`), so a 65-minute gap scores `1.0`, not `1.0 + 0.6 + 0.3`:
 
 | signal | weight | what it notices |
 |---|---|---|
-| `gap_hard` (≥ 60 min) | 1.0 | on its own, enough to cut |
-| `gap_medium` (≥ 30 min) | 0.6 | usually a break |
-| `gap_soft` (≥ 10 min) | 0.3 | mild |
+| `gap_hard` (≥ 60 min) | 1.0 | on its own, enough to cut — *one tier only* |
+| `gap_medium` (30–60 min) | 0.6 | usually a break |
+| `gap_soft` (10–30 min) | 0.3 | mild |
 | `repo_change` | 0.5 | the work moved to a different repository |
 | `zero_entity_overlap` | 0.3 | both sides name entities and share none |
 | `zero_file_overlap` | 0.2 | both sides touch files and share none |
