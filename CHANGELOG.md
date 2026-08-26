@@ -337,14 +337,18 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **A malformed backup manifest is refused, not tracebacked** (#759). `read_manifest` decides
   whether a directory is a restorable backup set and its contract is to raise `RestoreError`.
-  For nine shapes it raised `AttributeError` or `TypeError` instead — a raw stack trace
+  For **thirteen** shapes — every non-object shape at either
+  level, plus a non-string `file` — it raised `AttributeError` or `TypeError` instead — a raw stack trace
   reaching the operator **mid-restore**, which is when it is least useful and most alarming.
   `cli.py` catches `RestoreError` and nothing else, so none of these were handled.
 
   Two levels were unguarded, and the second one mattered more. `_classify_backup_set` carried
   its own copy of the same `meta.get("file", ...)` expression, so a non-string `file` raised
   out of `prune_backup_sets` **entirely** — retention died for *every* set rather than the
-  unreadable one, and a scheduled `techne backup --keep N` silently stopped reclaiming disk.
+  unreadable one, and a scheduled `techne backup --keep N` reported it as exit `1`, which
+  `docs/deployment.md` defines as *"the backup itself failed"*, for a backup that had in fact
+  succeeded. On the only channel a timer has, that named the wrong half of the run and paged
+  someone for a failure that did not happen. It is exit `3` and a named set now.
   Measured: with `--keep 0` and one bad set present, a perfectly good set was left on disk.
 
   Both readers now resolve entries through one shared helper, so a guard cannot be added to

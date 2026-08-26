@@ -310,9 +310,12 @@ RETENTION_REFUSAL_PHRASES = (
 def _manifest_db_filename(domain: str, meta: object) -> tuple[str | None, str | None]:
     """Resolve one manifest entry to its db filename. Returns (filename, problem).
 
-    ONE resolver for the TWO readers of a manifest entry — `read_manifest` and
-    `_classify_backup_set` — because they carried the same expression twice and a
-    guard added to one did not protect the other (techne#759, Prudence #777 I2).
+    ONE resolver for the THREE readers of a manifest entry — `read_manifest`,
+    `_classify_backup_set` and `restore_all_dbs` — because they carried the same
+    expression three times and a guard added to one did not protect the others
+    (techne#759, Prudence #777 I2 and r2 Nit 3). Only the first two are reachable
+    with an unvalidated entry; the third is routed here anyway so this sentence
+    cannot drift from what `grep 'meta.get("file"'` finds.
     That asymmetry is the whole thing `test_prune_leaves_a_set_restore_cannot_read
     _alone` exists to prevent, so the fix is a shared resolver rather than a second
     copy of the same isinstance check.
@@ -808,7 +811,16 @@ def restore_all_dbs(
             skipped_unknown.append(domain)
             continue
         target = live[domain]
-        src_file = src_dir / meta.get("file", f"{domain}.db")
+        # THE THIRD READER, routed through the same resolver (Prudence, #777 r2 Nit 3).
+        # Safe by construction rather than by luck: `read_manifest` runs as this
+        # function's first statement and validates the very dict this loop walks, so
+        # `problem` cannot be set here. It goes through the resolver anyway -- a no-op
+        # that cannot rot beats a comment claiming two readers while
+        # `grep 'meta.get("file"'` finds three.
+        name, problem = _manifest_db_filename(domain, meta)
+        if problem:  # pragma: no cover - read_manifest already rejected these
+            raise RestoreError(f"malformed manifest: {problem}")
+        src_file = src_dir / name
         plan.append((domain, src_file, target, target.with_name(target.name + ".restore-tmp")))
 
     # STAGE — copy all sources to temps beside their targets. Live is UNTOUCHED until commit.
