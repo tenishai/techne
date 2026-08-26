@@ -30,6 +30,18 @@ B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 # ---------------------------------------------------------------------------
 
 
+# `time.tzset()` is a Unix capability, not a guaranteed one: uv's managed
+# python-build-standalone interpreters ship WITHOUT it, so these tests raise
+# AttributeError on `./scripts/ci-local.sh 3.13` while passing in GitHub
+# Actions, whose setup-python interpreters have it (techne#773). Skip rather
+# than fail -- "this build cannot run the test" is not "the code is broken",
+# and a red that CI never reproduces teaches you to ignore the local runner.
+requires_tzset = pytest.mark.skipif(
+    not hasattr(time, "tzset"),
+    reason="time.tzset() absent on this interpreter (python-build-standalone)",
+)
+
+
 def test_broadcast_seen_by_peer_not_self(db_path):
     coord.send(db_path, A, "hi all", to="coord", from_name="claude_1")
     assert [m["body"] for m in coord.inbox(db_path, B)] == ["hi all"]
@@ -1107,6 +1119,7 @@ def test_a_recycled_pid_does_not_demote_a_unique_name(db_path, monkeypatch):
     assert coord.reader_key(A) == "name:poe_1"
 
 
+@requires_tzset
 def test_procstart_is_read_as_utc_not_local(monkeypatch):
     """Pins the epoch/TZ insight the whole fix rests on, with LITERAL inputs.
 
