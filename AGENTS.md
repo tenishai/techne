@@ -24,13 +24,14 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | asks "do I have backups?" | [deployment.md](docs/deployment.md#scheduled-backups-techne742) |
 | plans a machine migration, a wipe, or a disk replacement | [deployment.md](docs/deployment.md#what-is-not-automated-stated-plainly) |
 | is restoring | [db-per-domain.md](docs/db-per-domain.md#operational-contract-backuprestore--fsck-techne139) |
-| gets **zero rows** from a domain and treats that as an answer | [four-functions.md](docs/four-functions.md#getting-content-in) |
+| gets **zero rows** from the archivist, librarian or architect | [four-functions.md](docs/four-functions.md#getting-content-in) |
 | is about to rely on `librarian_search` for coverage | [four-functions.md](docs/four-functions.md#the-librarian-has-no-automatic-feeder-and-that-matters-more-than-it-sounds) |
 | asks why the architect is empty on a fresh install | [four-functions.md](docs/four-functions.md#getting-content-in) |
 
 **Adding a trigger?** Put the block in the document and its condition in this table.
-`tests/test_agent_triggers.py` enforces both directions — a document carrying a trigger
-block with no row here fails, and a row pointing at a section that does not exist fails.
+`tests/test_agent_triggers.py` enforces all three directions — a document carrying a
+trigger block with no row here fails, a row pointing at a section that does not exist
+fails, and a row pointing at a document that no longer carries a block fails.
 Same rule as architecture cards below, for the same reason: an unindexed trigger is one
 that never fires.
 

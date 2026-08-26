@@ -487,7 +487,7 @@ TRIGGER_WITNESSES = {
     "do I have backups?": "test_the_absence_the_backup_trigger_asserts_is_still_absent",
     "machine migration, a wipe": "test_the_absence_the_migration_trigger_asserts_is_still_absent",
     "They are restoring": "test_the_restore_trigger_is_still_all_or_nothing",
-    "zero rows": "test_an_unpopulated_domain_is_indistinguishable_from_no_matches",
+    "zero rows": "test_only_the_codex_distinguishes_an_empty_index_from_no_match",
     "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
     "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
 }
@@ -606,26 +606,31 @@ def test_backup_without_keep_really_does_grow_without_bound(config_free_tmp_home
     )
 
 
-def test_an_unpopulated_domain_is_indistinguishable_from_no_matches(config_free_tmp_home):
-    """THE CLAIM THE ZERO-ROWS TRIGGER RESTS ON. An empty index and a populated index with
-    no match return the SAME THING, so an operator reading zero rows cannot tell "techne
-    does not know" from "nothing feeds this". That is why the agent has to volunteer the
-    feeder rather than wait to be asked — the result carries no signal to ask about.
+def test_only_the_codex_distinguishes_an_empty_index_from_no_match(config_free_tmp_home):
+    """THE CLAIM, AT THE SURFACE IT IS MADE ABOUT (Prudence, #771). My first version
+    asserted that one domain's `search_documents` returned `[]` twice — a proposition
+    narrower than the doc's in two directions: one domain of four, and a core function
+    rather than the envelope an agent actually reads. And the wider claim was ALREADY FALSE
+    at the wider surface: the codex attaches a notice saying its index is empty, which
+    techne#595 built precisely so that absence would not read as an answer.
 
-    (Distinct from an UNREADABLE domain, which four-functions.md documents as answering
-    with a reason. Readable-and-empty is the case with no signal.)"""
-    from techne.core.documents import search_documents, store_document
-    from techne.core.librarian import librarian_db
+    So the trigger now names the three domains where the ambiguity is real, and this pins
+    the exception rather than asserting a blanket that is untrue."""
+    from techne.core.codegraph import zero_result_notice
 
-    db = librarian_db(config_free_tmp_home)
+    # The real shape `zero_result_notice` reads — my first call passed two keys it does not
+    # use and omitted six it does, which is a fixture inventing an interface again.
+    empty_index_notice = zero_result_notice(
+        {"files": 0, "fresh": 0, "stale": 0, "missing": 0,
+         "unknown": 0, "unindexed": 0, "coverage": 0.0}
+    )
 
-    empty_index = search_documents(db, "anything at all", limit=5)
-
-    store_document(db, source_type="x", source_url="u", content="a stored document", title="T")
-    populated_no_match = search_documents(db, "zqxjkv nothing matches this", limit=5)
-
-    assert empty_index == [] and populated_no_match == [], (
-        "one of these returned a distinguishing signal — if so the trigger can be softened"
+    assert "INDEX IS EMPTY" in empty_index_notice, (
+        "the codex no longer distinguishes an empty index from no match — if so, the "
+        "trigger's exception is wrong and all four domains need the prompt"
+    )
+    assert "codex index" in empty_index_notice, (
+        "the codex's empty-index notice no longer names the command that fixes it"
     )
 
 
@@ -634,8 +639,12 @@ def test_nothing_automatically_indexes_transcripts(config_free_tmp_home):
     trigger turns on. `self-care.md` states the consequence: the only index with no
     automatic feeder, and a 4%-coverage search looks exactly like a working one.
 
-    Pinned at the IMPORT surface: if a hook or the lifecycle ever drives transcript
-    indexing, this fails and the trigger has to be rewritten."""
+    PINNED AT THE IMPORT SURFACE, WHICH IS WHAT IT CAN SEE — and the doc is now phrased to
+    match, saying "nothing IN THIS REPO runs it" rather than "nothing runs it". A
+    deployment can wire `index-transcripts` into a `settings.json` hook as a shell string,
+    which no import graph reaches; techne#704 forced that same correction on the identical
+    reasoning about `vectors backfill`. A test that cannot see shell hooks must not back a
+    sentence that claims there are none."""
     importers = {
         str(f.relative_to(REPO))
         for f in (REPO / "techne").rglob("*.py")
@@ -667,4 +676,23 @@ def test_the_architect_feeder_ships_and_the_research_skills_do_not(config_free_t
     assert not bundled & {"investigate-url", "survey-field"}, (
         f"a research skill now ships with techne ({sorted(bundled)}) — four-functions.md "
         "tells operators they live in tenishai/skills"
+    )
+
+
+def test_every_indexed_document_still_carries_a_trigger_block():
+    """THE THIRD DIRECTION, which the gate was not enforcing. It checked that a document
+    with a block has a row, and that a row's anchor resolves — but not that an indexed
+    document still HAS a block. So deleting the last trigger from a document left its rows
+    behind, pointing an agent at a section with nothing to raise.
+
+    Found by mutation while fixing #753's block: removing the marker correctly left the
+    other two checks silent, and nothing else spoke. The arch-card gate this convention
+    models itself on enforces both directions, and `AGENTS.md` says this one does too."""
+    indexed = {doc for doc, _ in _index_rows()}
+    without_blocks = sorted(indexed - _docs_with_trigger_blocks())
+
+    assert not without_blocks, (
+        f"indexed in AGENTS.md but carrying no trigger block: {without_blocks}. Remove the "
+        "row, or restore the block — a row pointing at nothing sends an agent to read a "
+        "section with no trigger in it."
     )
