@@ -1072,41 +1072,33 @@ def test_every_default_suite_job_fetches_origin_main():
     """A JOB THAT RUNS THE DEFAULT SUITE MUST FETCH `origin/main` (techne#690).
 
     `doctor`'s `runtime:revision` runs `git rev-parse --short origin/main` and
-    returns UNKNOWN when it fails, which breaks "All checks passed" and fails four
+    returns UNKNOWN when it fails, breaking "All checks passed" and failing four
     `test_cli_doctor` tests. On a push the checked-out ref IS main; on a
-    pull_request `actions/checkout` fetches only the merge ref at depth 1, so the
-    ref has to be fetched explicitly.
+    pull_request `actions/checkout` fetches only the merge ref at depth 1.
 
-    THE INVARIANT NOW LIVES IN THREE JOBS, WHICH THIS FILE ALREADY CALLS A HAZARD.
-    Its own note at the fork guard says: "THE GUARD IS REPEATED THREE TIMES AND
-    THAT IS A HAZARD... a new job inherits the runner and not the guard... Do not
-    delete it in favour of a comment; a comment is what let this regrow twice."
-    A comment is exactly what held this together until now (Prudence, #779 Nit 2).
+    THE INVARIANT LIVES IN THREE JOBS, which this file already calls a hazard at
+    the fork guard: "Do not delete it in favour of a comment; a comment is what let
+    this regrow twice." A comment is what held this together until now.
 
-    Derived, not hardcoded: the job list comes from which jobs actually run an
-    unmarked pytest, so a new default-suite job is caught rather than a new name
-    being added here by hand.
+    USES `_pytest_argv` / `_is_default_suite`, NOT A SUBSTRING SCAN. The first
+    version of this test hand-rolled a scanner and was vacuous three separate ways
+    before review, then still passed two probe jobs that needed the fetch and
+    lacked it — a bare `.venv-ci/bin/pytest` console script, and a NEGATIVE marker
+    expression (`-m "not eval and not crash"`) which selects the unmarked doctor
+    tests rather than narrowing away from them. Both are already handled sixty
+    lines up: `_pytest_argv` shlex-parses and anchors at argv[0], and
+    `_is_default_suite` asks whether argv narrows ANYTHING rather than whether a
+    `-m` appears. Those helpers were hardened across four rounds of #532 for
+    exactly this reason — 9 of 12 mutants survived a `"pytest" in line` check.
+    Do not reintroduce a scanner here (Prudence, #779 r2 I1).
     """
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
 
     def runs_default_suite(job):
         for step in job.get("steps", []):
-            # PER LINE, not per step: a `run:` block is often multi-line (a pip
-            # install followed by the pytest call), and treating the block as one
-            # string matched a `pytest` on one line against a `-m` on another --
-            # which classified crash-recovery, a marker-only job, as running the
-            # default suite.
             for line in step.get("run", "").splitlines():
-                # Anchor on the INVOCATION form, not the bare word. Every pytest
-                # call in this workflow is `python -m pytest`; matching "pytest"
-                # alone also matched `pip install -e ".[codex]" pytest`, which
-                # installs the package and runs nothing.
-                if "-m pytest" not in line:
-                    continue
-                args = line.split("-m pytest", 1)[1]
-                # `-m <marker>` selects a subset; a bare pytest is the whole suite,
-                # and only the whole suite reaches tests/test_cli_doctor.py.
-                if " -m " not in args:
+                argv = _pytest_argv(line)
+                if argv is not None and _is_default_suite(argv):
                     return True
         return False
 
