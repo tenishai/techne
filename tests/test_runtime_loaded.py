@@ -44,6 +44,18 @@ _PS_LINUX = (
 )
 
 
+# `time.tzset()` is a Unix capability, not a guaranteed one: uv's managed
+# python-build-standalone interpreters ship WITHOUT it, so these tests raise
+# AttributeError on `./scripts/ci-local.sh 3.13` while passing in GitHub
+# Actions, whose setup-python interpreters have it (techne#773). Skip rather
+# than fail -- "this build cannot run the test" is not "the code is broken",
+# and a red that CI never reproduces teaches you to ignore the local runner.
+requires_tzset = pytest.mark.skipif(
+    not hasattr(time, "tzset"),
+    reason="time.tzset() absent on this interpreter (python-build-standalone)",
+)
+
+
 def _epoch(stamp: str) -> float:
     """Local-time interpretation, matching what `ps` emits and mktime consumes."""
     return time.mktime(time.strptime(stamp, "%a %b %d %H:%M:%S %Y"))
@@ -257,6 +269,7 @@ class TestVerdicts:
         assert r.verdict is Verdict.LIVE
         assert r.remedy is None
 
+    @requires_tzset
     def test_local_time_is_not_read_as_utc(self, monkeypatch, local_tz):
         """Regression pin for the tz footgun named in `_running_techne_processes`.
 

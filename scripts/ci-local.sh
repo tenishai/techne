@@ -76,6 +76,14 @@ for PY in "${MATRIX[@]}"; do
   uv pip install --python "$VENV/bin/python" -e ".[dev,codex]" --quiet \
     || { FAILED+=("$PY: install"); continue; }
 
+  # WHICH BUILD DID uv ACTUALLY RESOLVE? (techne#773) Not cosmetic: `uv venv
+  # --python 3.13` silently downloads a python-build-standalone interpreter when
+  # no system 3.13 exists, and that build OMITS `time.tzset`. Two tests then
+  # failed here with AttributeError while GitHub Actions stayed green — a red CI
+  # cannot reproduce is the one thing a local runner does not survive. Printing
+  # base_prefix turns "why is 3.13 red" into a glance.
+  "$VENV/bin/python" -c "import sys; print(f'  interpreter: {sys.version.split()[0]}  ({sys.base_prefix})')"
+
   # Advisory in CI (`|| true`), so advisory here — reported, never fatal.
   "$VENV/bin/python" -m ruff check techne tests || echo "  (ruff advisory — non-blocking, same as CI)"
 
