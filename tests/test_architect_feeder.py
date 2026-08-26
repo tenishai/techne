@@ -162,6 +162,13 @@ def test_add_accepts_every_url_shape_ingest_accepts(cli_config, url):
     "raw",
     [
         "https://github.com/x/y",
+        # A TRAILING SLASH, which is the case that catches an ADDITION to the parser
+        # (Prudence, #758 round 2). The derived oracle catches extraction being REMOVED;
+        # her mutation added `.rstrip("/")` to `_parse_pattern_body` and every fixture
+        # stayed green, because none of them had a trailing slash to strip. Deriving the
+        # expectation is necessary and not sufficient — the fixtures still have to contain
+        # the character a new transformation would act on.
+        "https://github.com/x/y/",
         # the shape `export_patterns_md` itself teaches — a URL followed by a path
         "https://github.com/x/y — src/foo.ts",
         "see https://github.com/x/y for details",
@@ -247,9 +254,19 @@ def test_add_builds_the_relation_graph_like_ingest_does(cli_config):
     _add("--name", "Alpha", "--source", "https://x.com/a", "--body", "mentions [[Beta]]")
     _add("--name", "Beta", "--source", "https://x.com/b", "--body", "the other one")
 
-    rows = _query(architect_db(cli_config), "SELECT COUNT(*) FROM pattern_relations")
+    # ASSERT THE EDGE, NOT A COUNT (Prudence, #758 round 2, weakest oracle). `COUNT(*) > 0`
+    # survives a `backfill_graph` that resolves NOTHING — she mutated it to no-op and this
+    # file stayed 24/24, because unresolved rows still count. The claim is that Alpha's
+    # `[[Beta]]` reaches Beta, so that is what is asserted.
+    rows = _query(
+        architect_db(cli_config),
+        "SELECT p.name, r.dst_name FROM pattern_relations r "
+        "JOIN patterns p ON p.id = r.src_pattern_id",
+    )
 
-    assert rows[0][0] > 0, "add fed the store but built no graph"
+    assert ("Alpha", "Beta") in [(a, b) for a, b in rows], (
+        f"the [[Beta]] wikilink in Alpha's body did not become an edge: {rows}"
+    )
 
 
 def test_prose_before_the_metadata_is_diagnosed_as_misplaced_not_missing():
@@ -289,18 +306,24 @@ def test_add_reads_stdin_only_when_it_is_piped(tmp_path):
 
     env = {**os.environ, "TECHNE_HOME": str(tmp_path)}
     cmd = [sys.executable, "-m", "techne.cli", "architect", "add",
-           "--name", "P", "--source", "https://x.com/a"]
+           "--source", "https://x.com/a"]
 
     controller, follower = pty.openpty()
     try:
         with_tty = subprocess.run(
-            cmd, stdin=follower, capture_output=True, text=True, timeout=60, env=env
+            cmd + ["--name", "P"], stdin=follower, capture_output=True, text=True,
+            timeout=60, env=env,
         )
     finally:
         os.close(controller)
         os.close(follower)
+    # PIPE REAL CONTENT, NOT "" (Prudence, #758 round 2). `input=""` only proves the tty
+    # branch was not taken; it never shows stdin is actually READ, because an empty read
+    # and no read both end at "the body is empty". Piping a body and asserting it is STORED
+    # is what distinguishes them.
     piped = subprocess.run(
-        cmd, input="", capture_output=True, text=True, timeout=60, env=env
+        cmd + ["--name", "FromStdin"], input="a body that arrived on stdin",
+        capture_output=True, text=True, timeout=60, env=env,
     )
 
     assert "pipe it on stdin" in with_tty.stdout + with_tty.stderr, (
@@ -309,3 +332,56 @@ def test_add_reads_stdin_only_when_it_is_piped(tmp_path):
     assert "pipe it on stdin" not in piped.stdout + piped.stderr, (
         "a piped run must READ stdin, not refuse — the two branches are not distinguished"
     )
+    assert piped.returncode == 0, piped.stdout + piped.stderr
+    stored = subprocess.run(
+        [sys.executable, "-m", "techne.cli", "architect", "search", "arrived on stdin"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert "FromStdin" in stored.stdout, (
+        f"the piped body was not read into the store:\n{stored.stdout}"
+    )
+
+
+def test_a_single_hash_heading_is_reported_not_silently_ignored(cli_config, tmp_path):
+    """THE HINT HAD THE DEFECT IT WAS WRITTEN TO FIX (Prudence, #758 round 2). It was gated
+    on `counts["skipped"]`, and `skipped` only fills for sections that reached
+    `_parse_pattern_body` — which requires exactly `## `. So `# My pattern` with perfect
+    metadata printed `"patterns_added": 0`, exit 0, and NOTHING on stderr: this command's
+    own CHANGELOG entry verbatim, for a mistake at least as guessable as the bold markers.
+
+    Worse than the silence it replaced, in fact, because operators have now learned that
+    ingest speaks up when something is wrong — so silence reads as 'the file was fine'."""
+    md = tmp_path / "onehash.md"
+    md.write_text(
+        "# My pattern\n\n- **Source**: https://github.com/x/y\n"
+        "- **Surveyed**: 2026-01-01\n\nBody.\n"
+    )
+
+    result = CliRunner().invoke(main, ["architect", "ingest", str(md)])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["patterns_added"] == 0
+    assert "must start with `## `" in result.output, (
+        f"a file whose headings ingest cannot see produced no diagnosis:\n{result.output}"
+    )
+
+
+def test_a_no_lift_only_corpus_is_not_called_a_failure(cli_config, tmp_path):
+    """The other side of the same condition. A corpus of only no-lift bullets ingests
+    investigations while `patterns_added` stays 0, and a message keyed on patterns alone
+    would call that nothing-was-ingested. It is not — which is why the count is now
+    reported rather than inferred."""
+    md = tmp_path / "nolift.md"
+    # The shape `_NO_LIFT_RE` actually accepts: `- <url> — surveyed <date> — <reason>`.
+    # My first fixture invented a different one and parsed to zero entries — a fixture
+    # asserting a shape the product refuses, which is the third time in this PR.
+    md.write_text(
+        "## Surveyed (no patterns worth saving)\n\n"
+        "- https://github.com/x/y — surveyed 2026-01-01 — nothing reusable here\n"
+    )
+
+    result = CliRunner().invoke(main, ["architect", "ingest", str(md)])
+
+    counts = json.loads(result.stdout)
+    assert counts["no_lifts_added"] == 1, counts
+    assert "nothing was ingested" not in result.output

@@ -1242,6 +1242,11 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
     graph = backfill_graph(db_path)
     return {
         "patterns_added": patterns_added,
+        # REPORTED SO THE CALLER CAN TELL "NOTHING LANDED" FROM "NO PATTERNS LANDED"
+        # (techne#754). A corpus of only no-lift bullets ingests investigations while
+        # `patterns_added` stays 0, and a caller keying its "nothing was ingested" message
+        # on patterns alone would call that a failure. It is not.
+        "no_lifts_added": len(parsed.no_lifts),
         # SECTIONS THAT LOOKED LIKE PATTERNS AND WERE DROPPED (techne#754). Returned so a
         # caller can say which and why. Without this the command printed `patterns: 0` and
         # exited 0 on a file the operator had just written — the bold markers in

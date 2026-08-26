@@ -3486,7 +3486,20 @@ def architect_ingest(ctx, markdown_file, verdict):
     # load-bearing, which is not guessable. stderr, so `| jq` over the JSON still works.
     for sk in counts["skipped"]:
         click.echo(f'skipped section "{sk["heading"]}": {sk["reason"]}', err=True)
-    if counts["skipped"] and not counts["patterns_added"]:
+    # GATED ON "NOTHING LANDED", NOT ON "SOMETHING WAS SKIPPED" (Prudence, #758 round 2).
+    # `skipped` only fills for sections that reached `_parse_pattern_body`, which requires
+    # exactly `## `. So a file using `# My pattern` with perfect metadata bullets printed
+    # `"patterns_added": 0`, exit 0, and NOTHING on stderr — this command's own CHANGELOG
+    # entry verbatim, for a mistake at least as guessable as the bold markers. Worse than
+    # the silence it replaced, in fact, because operators have now learned that ingest
+    # speaks up when something is wrong.
+    if not counts["patterns_added"] and not counts.get("no_lifts_added"):
+        if not counts["skipped"]:
+            click.echo(
+                f"no pattern sections found in {markdown_file.name} — sections must start "
+                "with `## ` (two hashes) at the top level.",
+                err=True,
+            )
         click.echo(
             "nothing was ingested. `techne architect add` takes the fields directly "
             "if you would rather not hand-write the markdown.",
