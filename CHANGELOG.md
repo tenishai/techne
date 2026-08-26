@@ -439,12 +439,14 @@ All notable changes to techne are documented here. Format loosely follows
   reported *ahead of* the missing-file check and therefore masks one, so "the
   manifest is wrong" must not be read as "the set is intact".
 
-  Two guards cover it, and they are worth naming separately in a release whose
+  Three guards cover it now, and they are worth naming separately in a release whose
   subject is guards drifting between call sites. `""` and whitespace-only are
-  refused in the shared resolver, as a malformed `file` value. `.`, `..`, `./`,
-  `.//`, `./.` and `../` reach the readers and are refused there, by asking the
-  question directly — *is this a file?* — rather than by matching spellings, which
-  is what an earlier attempt did and what left four of those six open.
+  refused in the shared resolver, as a malformed `file` value. `..` and `../` are
+  refused in the resolver too — see the #782 entry above; they name the set's parent,
+  so containment reaches them before any reader does. `.`, `./`, `.//` and `./.`
+  reach the readers and are refused there, by asking the question directly — *is this
+  a file?* — rather than by matching spellings, which is what an earlier attempt did
+  and what left four of those six directory spellings open.
 
   All three readers now resolve entries through one shared helper, so a guard cannot be added to
   one and missed by the others again. An unreadable set is **reported** through retention's
