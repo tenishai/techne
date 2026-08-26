@@ -68,7 +68,7 @@ This is the elegant part: **the card model makes federation a keyed `get`, not a
 ### Per-db breakdown
 
 - **`techne.db`** — unchanged tables: sessions, threads, observations, knowledge (incl. `document_card` rows), identity, outbox, knowledge_candidates. `documents`/`_fts`/`_vec` are **removed from `SCHEMA_SQL`**.
-- **`librarian.db`** — `documents` + `documents_fts` + `documents_vec`. The Librarian schema lives in the Librarian domain module, applied via `StoreAdapter.migrate()`, not core.
+- **`librarian.db`** — `documents` + `documents_fts`. **No `documents_vec`** — document search is FTS-only; the `[vectors]` extra serves the archivist, not the librarian. The Librarian schema lives in the Librarian domain module, applied via `StoreAdapter.migrate()`, not core.
 - **`architect.db`** — patterns (per #87 spec). Pure team knowledge, queried directly from the store; *not* carded into personal recall by default (it isn't your personal memory).
 - **`codex.db`** — repo/graph domain (#89): nodes/edges (graphqlite). Same pattern.
 

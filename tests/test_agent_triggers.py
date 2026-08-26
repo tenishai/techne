@@ -653,6 +653,35 @@ def test_only_the_codex_distinguishes_an_empty_index_from_no_match(config_free_t
     )
 
 
+def test_the_other_three_domains_give_no_such_signal(config_free_tmp_home):
+    """THE WORD `only` IN THE SIBLING TEST'S NAME WAS UNASSERTED (Prudence, #771 round 4).
+    That test pins the codex exception well and never touches the archivist, librarian or
+    architect — so "for those three, empty and unpopulated are indistinguishable", which is
+    the premise the agent's ACTION rests on, had no witness at all. She probed it: all three
+    return `count: 0`, `results: []`, and no `notice` key. True today, and now pinned.
+
+    If any of the three gains a qualification, this fails and the trigger should be narrowed
+    to exclude it — the same way the codex is excluded now."""
+    from techne.core import domains
+
+    unqualified = {}
+    for name in ("archivist", "librarian", "architect"):
+        fn = getattr(domains, f"{name}_search")
+        result = fn(config_free_tmp_home, "zqxjkv_no_such_term")
+        unqualified[name] = {
+            "count": result.get("count"),
+            "results": result.get("results"),
+            "has_notice": bool(result.get("notice")),
+        }
+
+    for name, shape in unqualified.items():
+        assert shape["results"] == [] and shape["count"] == 0, f"{name}: {shape}"
+        assert not shape["has_notice"], (
+            f"{name} now qualifies its empty answer ({shape}) — four-functions.md tells "
+            "operators the codex is the ONLY domain that does. Narrow the trigger."
+        )
+
+
 def test_nothing_automatically_indexes_transcripts(config_free_tmp_home):
     """"nothing indexes transcripts automatically" — an absence, and the one the librarian
     trigger turns on. `self-care.md` states the consequence: the only index with no
