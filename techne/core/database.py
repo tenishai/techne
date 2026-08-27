@@ -525,18 +525,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
 -- re-enqueue, or it silently destroys the debt.
 --
 -- TWO WAYS A ROW IS REMOVED, and only one of them looks like a delete:
---   1. An explicit DELETE. `redetect_threads` (lifecycle.py) is the only one,
---      and it re-enqueues IN THE SAME TRANSACTION (#527 r5), so a failure rolls
---      the whole redetect back rather than stranding it half-applied.
+--   1. An explicit DELETE. There is exactly ONE site in the tree —
+--      `persist_detection`'s PRUNE (lifecycle.py), which deletes only
+--      superseded, unreferenced, unpaid rows (techne#797). It is NEVER a
+--      whole-session wipe; that form is what broke run_session_end on any store
+--      with history. `redetect_threads` has no DELETE of its own — it calls
+--      persist_detection and goes through the same prune. The prune re-enqueues
+--      IN THE SAME TRANSACTION (#527 r5), so a failure rolls back rather than
+--      stranding a half-applied detection.
 --   2. INSERT OR REPLACE, whose conflict resolution deletes the existing row and
---      fires this CASCADE. OR IGNORE does not. `save_threads` picks between them
---      on whether the thread has a boundary_signal, so `run_session_end` DOES
---      drop the debt for legacy threads, and its re-enqueue is a separate
---      best-effort call after the save. That window is pre-existing and out of
---      #527's scope, but it is real: nothing re-derives debt for an emittable
---      thread with no queue row.
--- Don't take the verb behaviour on trust from this comment — run it:
+--      fires this CASCADE. OR IGNORE does not.
+-- CORRECTED techne#797: this used to say `save_threads` PICKS between OR REPLACE
+-- and OR IGNORE on whether the thread has a boundary_signal, and that
+-- `run_session_end` therefore drops the debt for legacy threads. It no longer
+-- picks — it is a single `ON CONFLICT(id) DO UPDATE` upsert, which fires neither
+-- the CASCADE nor a delete, so route 2 has no caller in this tree today. It is
+-- documented because a future caller can still reintroduce it.
+-- Don't take SQLite's verb behaviour on trust from this comment — run it:
 -- test_reflect.py::test_the_cascade_fires_on_or_replace_not_only_on_delete.
+-- NOTE WHAT THAT TEST DOES AND DOES NOT WITNESS: it executes its own literal
+-- OR REPLACE / OR IGNORE statements, so it pins SQLITE'S semantics and is green
+-- regardless of which verb `save_threads` uses. For that, see
+-- test_detection_replace.py::test_a_kept_threads_summary_still_refreshes.
 -- A new caller doing either without re-enqueueing destroys debt with no error
 -- and no trace. Check both verbs, not just the word DELETE.
 CREATE TABLE IF NOT EXISTS reflection_queue (

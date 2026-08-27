@@ -3,6 +3,7 @@ card: arch-card:techne-reflect-pipeline
 updated: 2026-08-27
 anchor: techne/core/reflect.py sha=957154cb0e842170b04764bcc70d562c482dac65
 anchor: techne/core/sleepdream.py sha=fa629d589f34d30f5edb51fb7682b897bc3ead04
+anchor: techne/lifecycle.py sha=9ae887bbe03a01a3452ea376cfa56b1c687ab5df
 ---
 # reflect / consolidate / dream — self-maintenance
 
@@ -25,7 +26,7 @@ PIECES:
 API: MCP pairs techne_reflect_emit/ingest, techne_consolidate_emit/ingest, techne_faithfulness_emit/ingest, techne_dream_emit/ingest, techne_memory_claims_emit/ingest; CLI techne reflect/consolidate/dream. The /techne-promote skill drives this end-to-end each session.
 INVARIANTS:
 - reflection_queue.drained_at is NULLABLE, not a status enum: pending is the ABSENCE of a drain, so there is no second source of truth to disagree with the timestamp. Drain is guarded on `drained_at IS NULL` so a re-drain never rewrites the first payment.
-- reflection_queue.thread_id is `REFERENCES threads(id) ON DELETE CASCADE` and the CASCADE is REQUIRED: re-detection deletes and re-inserts a session's whole thread set in one transaction (lifecycle.py), so a plain reference makes the queue BLOCK re-detection with a FOREIGN KEY failure.
+- THE FK GRAPH AROUND threads(id), WHICH IS WHAT #797 TURNED ON. FOUR columns reference it and only ONE cascades: reflection_queue.thread_id (CASCADE), threads.parent_thread_id, knowledge_candidates.source_thread_id and observations.thread_id (all NO ACTION). The CASCADE on reflection_queue is REQUIRED and load-bearing — pruning a superseded thread retires its queue row for free, which is how #646's stale rows are cleared. THE OTHER THREE ARE WHY re-detection NO LONGER DELETES A SESSION'S WHOLE THREAD SET. This line used to say it did, and that a plain reference would make the queue block re-detection; the second half is still true, but the first half described behaviour that raised `IntegrityError: FOREIGN KEY constraint failed` on any store with history and took run_session_end down with it (#793 put it on the per-turn path; the defect was latent in redetect_threads long before). `lifecycle.persist_detection` now PRUNES: it deletes only session threads that are (1) absent from the detection about to be saved, (2) unreferenced by any of the three NO ACTION columns, and (3) not carrying a DRAINED queue row. Condition (1) also preserves reflection-debt AGE — the cascade would take a still-current thread's PENDING row and the re-enqueue would re-date it, and nothing restores enqueued_at. Threads the prune SPARES keep their stale queue rows; `techne reflect reconcile` retires those. tests/test_detection_replace.py derives the guard list from `PRAGMA foreign_key_list` so a fifth referencing column is caught when it is added rather than when it breaks.
 - Every consolidate cluster has a stable cluster_hash (prompt_hash col) → a cluster already proposed (pending, promoted, OR kept-distinct) is never re-judged (_already_proposed) — stops the anti-bloat feature from bloating its own review queue.
 - _FAITHFULNESS_GATED_ACTIONS={'merge','supersede'}: promoting a merge/supersede candidate needs a prior faithfulness check (raises FaithfulnessGateError unless force=True); keep this gate in sync with faithfulness_emit's SQL filter.
 
