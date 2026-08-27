@@ -1668,6 +1668,15 @@ def test_a_nul_byte_does_not_kill_the_whole_retention_run(tmp_path):
         "retention did not do its job around the poisoned set"
     )
     assert [p for p, _ in failed] == [poisoned], "the poisoned set was not REPORTED"
+    # DISCRIMINATE THE ROUTE, not just "it was refused somehow" (Prudence, #784 r2
+    # Nit 2). The two assertions above are OVER-DETERMINED: this set carries no db
+    # file either, so an ordinary absent `techne.db` with no NUL anywhere satisfies
+    # both of them identically — measured. Pinning the MALFORMED route [6] rather
+    # than the missing-file route [7] makes the test bite on the guard it is named
+    # for. It still does not name the NUL to the operator; that waits on #785,
+    # where `_classify_backup_set` stops discarding the `problem` string it built.
+    ((_, reason),) = failed
+    assert RETENTION_REFUSAL_PHRASES[6] in reason, f"refused by the wrong guard: {reason!r}"
 
 
 @pytest.mark.parametrize("name", ["/etc/passwd", "../../evil.db", "..", "../"])

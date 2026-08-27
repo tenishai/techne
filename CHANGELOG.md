@@ -362,12 +362,23 @@ All notable changes to techne are documented here. Format loosely follows
   database being overwritten from an unexpected source while the manifest claims the set is
   self-contained, which is the promise `docs/deployment.md` makes for restore.
 
-  **One refusal message changed.** A `file` of `".."` or `"../"` names the set's *parent*, so
-  it is now refused as a malformed entry ("escapes the backup set") rather than as a missing
-  file ("backup set is incomplete"). Both were already refused and neither ever took a
-  retention slot; only the stated cause changed, and it changed to the accurate one. The other
-  directory spellings (`"."`, `"./"`, `".//"`, `"./."`) resolve to the set directory itself,
-  are not escapes, and still refuse exactly as before.
+  **Some refusals changed their stated cause.** Named as a class rather than counted, because
+  the count was wrong: three distinct inputs now report differently, and they do not all come
+  from the same guard.
+
+  - A `file` of `".."` or `"../"` names the set's *parent*, so it is refused as a malformed
+    entry ("escapes the backup set") rather than as a missing file ("backup set is incomplete").
+  - A `file` that reaches outside the set by any other route — an absolute path, a traversal
+    part-way along, a basename that is a symlink out — refuses the same way, where before it
+    was either accepted or reported as missing.
+  - A `file` containing a **NUL byte** now refuses with "contains a NUL byte". This one is not
+    a containment refusal at all: `Path.is_file()` silently swallows the `ValueError` a NUL
+    raises, so on previous releases such a set reported "backup set is incomplete".
+
+  In every case the set was already refused and never took a retention slot; what changed is
+  the stated cause, and it changed to the accurate one. The directory spellings that resolve to
+  the set directory *itself* (`"."`, `"./"`, `".//"`, `"./."`) are not escapes and refuse
+  exactly as before.
 
 - **`architect export` → `architect ingest` accreted a near-duplicate every cycle** (#770).
   `export_patterns_md` writes a `---` separator after each entry and the parser absorbed it

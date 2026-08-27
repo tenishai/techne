@@ -389,8 +389,17 @@ def _manifest_db_filename(
     # this was a REGRESSION THIS GUARD INTRODUCED, not a pre-existing hole. Exactly
     # the #759 shape one type over -- a value that IS a str and still is not a
     # usable path.
+    # ONE `source`, COMPUTED ONCE, USED BY EVERY REFUSAL BELOW (Prudence, #784 r2
+    # Nit 1). The containment refusal had this and the two new returns did not, so
+    # a manifest with NO `file` key -- {"databases": {"a\x00b": {}}}, reachable
+    # through ordinary JSON by the same route as the domain-key traversal this PR
+    # already handles -- was refused with "'file' for ..." naming a field that is
+    # not in the operator's file. Half 1 exists so the message names the cause; on
+    # one of its two routes it was naming the wrong thing.
+    source = "'file'" if "file" in meta else "the domain name"
+
     if "\x00" in name:
-        return None, f"'file' for '{domain}' contains a NUL byte"
+        return None, f"{source} for '{domain}' contains a NUL byte"
     # AND THE CONTRACT, RESTORED (Prudence, #784 r1). This function's signature is
     # its promise: it RETURNS (name, problem) and never raises, which is what lets
     # every caller route a bad entry to `failed` instead of dying. A bare
@@ -401,16 +410,25 @@ def _manifest_db_filename(
     # `//etc/passwd`, `~/`, backslashes, trailing newline) and found NUL the only
     # live escape -- so this catch should be unreachable today, and is here because
     # "unreachable" is a claim about inputs we have thought of.
+    # TWO ARMS, NOT ONE (Prudence, #784 r2 Nit 3). `src_dir` is supplied by the
+    # CALLER and is not the untrusted value; half 2's rationale is explicitly about
+    # a value we did not anticipate arriving IN THE MANIFEST. Covering both in one
+    # `try` widened the catch past its own justification and past the only
+    # expression that can carry a hostile input. Splitting them bounds what the
+    # untestable arm is allowed to swallow to a single expression -- which is the
+    # honest answer to "you cannot test it": you cannot, but you can bound it.
+    #
+    # Hoisting `base` out UNGUARDED would be the trap: it would re-break the very
+    # contract half 2 restores. Each arm names its own cause instead.
     try:
         base = Path(src_dir).resolve()
+    except OSError as e:
+        return None, f"the backup set directory is unreadable: {type(e).__name__}"
+    try:
         candidate = (base / name).resolve()
     except (ValueError, OSError) as e:
-        return None, f"'file' for '{domain}' is not a usable path: {type(e).__name__}"
+        return None, f"{source} for '{domain}' is not a usable path: {type(e).__name__}"
     if candidate != base and base not in candidate.parents:
-        # Name the source the operator actually wrote: with no `file` key the
-        # traversal lives in the domain key, and blaming `'file'` would send them
-        # looking for a field that is not in their manifest.
-        source = "'file'" if "file" in meta else "the domain name"
         return None, f"{source} for '{domain}' escapes the backup set: {name!r}"
     return name, None
 
