@@ -269,30 +269,81 @@ def test_a_well_formed_no_lift_bullet_reports_nothing() -> None:
     assert result.skipped == ()
 
 
-def test_prose_under_the_no_lift_heading_is_not_flagged() -> None:
-    """The predicate is A BULLET CARRYING A URL, not any bullet (techne#787).
+#: The boundary of `_URL_BULLET_RE`, pinned line by line (Prudence, #788 r1).
+#: The first version matched a URL ANYWHERE in a bullet and flagged the three
+#: `False` rows below. That is not merely noise: `architect ingest` gates its
+#: heading-level advice on `if not counts["skipped"]`, so a false positive
+#: SUPPRESSES a correct diagnosis — the #787 defect inverted.
+_BULLET_BOUNDARY = [
+    # (label, line, should_be_flagged)
+    ("motivating case", "- https://github.com/foo/bar — RE-SURVEYED 2026-08-26 — r", True),
+    ("en dashes", "- https://github.com/foo/bar – surveyed 2026-08-26 – r", True),
+    ("hyphens", "- https://github.com/foo/bar - surveyed 2026-08-26 - r", True),
+    ("no reason clause", "- https://github.com/foo/bar — surveyed 2026-08-26", True),
+    ("bad date format", "- https://github.com/foo/bar — surveyed 26-08-2026 — r", True),
+    ("angle-bracketed url", "- <https://github.com/foo/bar> — RE-SURVEYED 2026-08-26 — r", True),
+    (
+        "commentary with a markdown link",
+        "- Context lives in [the notes](https://example.com/n).",
+        False,
+    ),
+    ("nested sub-bullet note", "  - the near-miss: https://github.com/foo/bar/auth.ts", False),
+    ("task-list TODO", "- [ ] revisit https://example.com next quarter", False),
+    ("bare note, no URL at all", "- a bare note with no URL in it at all", False),
+]
 
-    Under this heading a line with an `http(s)://` in it is unambiguously an entry
-    that failed to parse. A bullet WITHOUT one is plausibly commentary, and flagging
-    it would make the report noisy in exactly the situation where the operator most
-    needs to trust it. This is the false-positive half of the boundary, and without
-    it "just flag every unmatched bullet" looks equivalent and is not.
+
+@pytest.mark.parametrize(
+    "label,line,flagged", _BULLET_BOUNDARY, ids=[c[0] for c in _BULLET_BOUNDARY]
+)
+def test_only_a_url_first_bullet_is_treated_as_a_malformed_entry(label, line, flagged) -> None:
+    """Both halves of the predicate, one row at a time (techne#787, #788 r1).
+
+    The `True` rows are malformed ENTRIES and must be reported — losing any of them
+    reopens #787. The `False` rows are ordinary prose under the same heading and
+    must NOT be, because a wrong accusation is the failure this whole change exists
+    to remove, and because flagging one silences the heading-level advice that would
+    otherwise be correct.
+
+    Parametrised rather than bundled so a regression names WHICH construction broke;
+    the previous single test asserted `skipped == ()` on a no-URL bullet, which
+    guarded only half the boundary and passed happily while all three false
+    positives were live.
+    """
+    body = "## Surveyed (no patterns worth saving)\n\n" + line + "\n"
+    result = parse(body)
+    was_flagged = any(sk.kind == "no-lift bullet" for sk in result.skipped)
+    assert was_flagged is flagged, (
+        f"{label!r}: expected flagged={flagged}, got {was_flagged} for {line!r}"
+    )
+
+
+def test_a_fenced_counter_example_is_not_flagged() -> None:
+    """A `what not to write` block is not an entry (Prudence, #788 r1 Nit).
+
+    `_split_into_sections` already tracks fence state; this was the one line-walker
+    in the module that did not inherit it. The URL-first anchoring does NOT cover
+    this — a fenced counter-example is usually a well-formed-LOOKING entry, which is
+    the entire point of showing it — so it needs its own guard and its own witness.
     """
     result = parse(
         dedent(
             """\
             ## Surveyed (no patterns worth saving)
 
-            Some framing prose about this list.
+            Do not write it like this:
 
-            - a bare note with no URL in it at all
+            ```
+            - https://example.com - surveyed 2026-01-01 - hyphens, not em-dashes
+            ```
+
             - https://github.com/foo/bar — surveyed 2026-08-26 — a real entry
             """
         )
     )
 
     assert len(result.no_lifts) == 1
-    assert result.skipped == (), "commentary was flagged as a malformed entry"
+    assert result.skipped == (), "a fenced counter-example was reported as an entry"
 
 
 def test_a_skipped_pattern_section_still_reports_as_a_section() -> None:

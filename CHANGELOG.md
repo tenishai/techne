@@ -319,9 +319,13 @@ All notable changes to techne are documented here. Format loosely follows
   path never got.
 
   The bullet now reports itself, quoted back with the required form. The predicate is **a bullet
-  carrying an `http(s)://` URL**, not any bullet: under that heading a line with a URL is
-  unambiguously an entry that failed to parse, while a bullet without one is plausibly commentary,
-  and flagging that would make the report noisy exactly where it most needs to be trusted.
+  whose first token is an `http(s)://` URL** — the position the required form puts it in. Anchoring
+  there rather than matching a URL anywhere in the line matters more than it looks: `architect
+  ingest` gates its heading-level advice on `if not skipped`, so a bullet wrongly flagged
+  *suppresses* a correct diagnosis. A commentary bullet carrying a markdown link, a nested
+  sub-bullet note and a `- [ ]` task item are all ordinary under that heading and are not reported.
+  Lines inside a fenced block are skipped too, so a "what not to write" counter-example is not
+  accused of being the thing it warns about.
 
   **Internal API change**: `SkippedSection.heading` is now `.label`, and the field gained a `kind`
   (`"section"` / `"no-lift bullet"`). `ingest_patterns_md`'s `skipped` dicts carry `label` + `kind`

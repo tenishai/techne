@@ -359,10 +359,27 @@ _NO_LIFT_RE = re.compile(
 )
 
 
-#: A bullet that carries an http(s) URL. Used ONLY to decide whether an unmatched
-#: line under the no-lift heading is a malformed ENTRY or ordinary prose — see
-#: `_parse_no_lift_bullets`. Deliberately not reused as the entry parser.
-_URL_BULLET_RE = re.compile(r"^\s*-\s+.*?https?://\S+")
+#: A bullet whose FIRST token is an http(s) URL. Used ONLY to decide whether an
+#: unmatched line under the no-lift heading is a malformed ENTRY or ordinary prose
+#: — see `_parse_no_lift_bullets`. Deliberately not reused as the entry parser.
+#:
+#: ANCHORED, NOT `.*?` (Prudence, #788 r1 Important). The first version matched a
+#: URL ANYWHERE in the bullet, which is not the predicate its own docstring
+#: promised, and it flagged three ordinary constructions — a commentary bullet
+#: carrying a markdown link, a nested sub-bullet note, and a `- [ ]` task item.
+#: Worse than noise: `architect ingest` gates its heading-level advice on
+#: `if not counts["skipped"]`, so a false positive SUPPRESSES a correct
+#: diagnosis. Measured — a file with a single-hash heading plus one commentary
+#: bullet lost the right message and gained a wrong one, which is precisely the
+#: #787 defect inverted. The required form puts the URL first, so anchoring there
+#: keeps every malformed-entry case (including the motivating `— RE-SURVEYED —`)
+#: and drops all three false positives.
+#:
+#: KNOWN AND ACCEPTED GIVE-UP: `- [foo](https://…) — surveyed … — reason`, a
+#: genuinely malformed entry whose URL is wrapped in a link, is no longer flagged.
+#: Missing it returns the operator to main's behaviour; a false positive is a wrong
+#: accusation. This module's ordering says the accusation is worse.
+_URL_BULLET_RE = re.compile(r"^\s*-\s+<?https?://\S+")
 
 
 def _parse_no_lift_bullets(body: str) -> tuple[list[NoLiftEntry], list[SkippedSection]]:
@@ -385,7 +402,19 @@ def _parse_no_lift_bullets(body: str) -> tuple[list[NoLiftEntry], list[SkippedSe
     """
     out: list[NoLiftEntry] = []
     malformed: list[SkippedSection] = []
+    # FENCED LINES ARE NOT ENTRIES (Prudence, #788 r1). A counter-example shown
+    # under this heading as "what not to write" is the exact shape this function
+    # now accuses, and `_split_into_sections` already tracks precisely this state —
+    # this was the one line-walker in the module that did not inherit it. The
+    # URL-first anchoring above does NOT cover this case: a fenced counter-example
+    # is usually a well-formed-looking entry, which is the point of showing it.
+    in_fence = False
     for line in body.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         match = _NO_LIFT_RE.match(line)
         if match is not None:
             out.append(
