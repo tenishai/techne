@@ -6,6 +6,8 @@ anchor: techne/core/sleepdream.py sha=fa629d589f34d30f5edb51fb7682b897bc3ead04
 ---
 # reflect / consolidate / dream — self-maintenance
 
+OPERATOR-FACING COUNTERPART: [`docs/reflect-guide.md`](../reflect-guide.md) — the learner-altitude explanation of this seam, plus the agent-trigger block indexed in `AGENTS.md`. Several of its claims are witnessed by tests in `tests/test_agent_triggers.py`; changing the behaviour behind one fails there, which is the signal to update the guide in the same change.
+
 SEAM: resident-model emit/ingest (techne#19) — self-maintenance runs on the AGENT'S OWN model in its own loop, NOT a headless API call → no API key / inference bill. _emit packages a prompt (PROMPT_TEMPLATE) + injectable generate_fn (core/threads.py:_make_generate_fn); the agent answers; _ingest parses the JSON-array (core/_resident.py:extract_json_array) into knowledge_candidates rows. NEVER auto-mutates live knowledge/identity (opt-in via config.reflect.enabled, off by default).
 TRIGGER (techne#514): reflection debt is DURABLY QUEUED, not re-derived from recency. session_end enqueues one reflection_queue row per thread (THREAD IDS, re-rendered at drain time — a stored prompt would embed a snapshot that drifts from the ledger it renders from). Before #514 session_end COUNTED the debt and enqueued nothing, so reflection survived only the polite exit path; every crash/timeout dropped it silently. The queue DECOUPLES producer from reflector: any session can drain another's threads, because answering a rendered prompt needs the thread's observations, not the original session's context.
 PIECES:

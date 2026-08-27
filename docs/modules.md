@@ -51,7 +51,7 @@ Within a session, techne detects distinct topics with a **structural heuristic**
 
 The part most memory systems skip. techne keeps memory *honest and lean* through **five distinct passes**, each driven by **the live agent's own model** (the `emit` / `ingest` pattern — techne renders a prompt, the agent answers, techne stores the result). **No API key. No extra inference cost.**
 
-- **Reflect** — at session end, distill a finished session's observations into durable knowledge *candidates* (add-only; opt-in, off by default; enable via `reflect.enabled`).
+- **Reflect** — at session end, distill a finished session's observations into durable knowledge *candidates* (add-only; opt-in, off by default; enable via `reflect.enabled`). See [the reflect guide](reflect-guide.md).
 - **Consolidate** ("sleep") — dedup and merge near-duplicate live knowledge, fighting memory bloat over time.
 - **Dream** (recombine) — surface *non-obvious* connections across knowledge entries (A + B ⇒ C) as LOW-confidence, review-gated candidates. *Speculative* — for discovery, not assertion.
 - **Evidence gate** (#105) — verify an agent's *structured* claims (committed / tested / wrote-file) against the observation ledger *deterministically* (`backed` / `unbacked` / `unverifiable`). **Caveat:** commit/test/action claims come from Bash output, which is off by default (`capture_bash`), so those return `unverifiable` — not `unbacked` — until enabled.
