@@ -212,3 +212,108 @@ def test_a_body_that_is_only_a_rule_collapses_to_empty():
     from techne.import_md import _strip_trailing_rule
 
     assert _strip_trailing_rule("---") == ""
+
+
+def test_a_malformed_no_lift_bullet_is_reported_not_dropped() -> None:
+    """A bullet one word wrong must name ITSELF, not the heading (techne#787).
+
+    THE DEFECT THIS REPLACES, measured on main. `_parse_no_lift_bullets` returned
+    only the entries it matched, so a bullet reading `— RE-SURVEYED 2026-08-26 —`
+    instead of `— surveyed 2026-08-26 —` vanished with `skipped` left empty. That
+    empty list is what routes `architect ingest` into its heading-level branch, so
+    the operator was told "sections must start with `## ` (two hashes)" about a file
+    whose heading was EXACTLY that. Being sent to fix something that is not broken
+    is worse than a vague error — the same sentence `_parse_pattern_body` already
+    carries about misplaced markers, which the no-lift path never got.
+
+    Asserts the KIND and that the offending line is quoted back, because those are
+    what make the report actionable; the reason wording is free to change.
+    """
+    result = parse(
+        dedent(
+            """\
+            ## Surveyed (no patterns worth saving)
+
+            - https://github.com/foo/bar — RE-SURVEYED 2026-08-26 — one word wrong
+            """
+        )
+    )
+
+    assert result.no_lifts == []
+    assert len(result.skipped) == 1
+    (skip,) = result.skipped
+    assert skip.kind == "no-lift bullet"
+    assert "RE-SURVEYED" in skip.label, "the offending line is not quoted back"
+    assert "surveyed" in skip.reason, "the reason does not name the required form"
+
+
+def test_a_well_formed_no_lift_bullet_reports_nothing() -> None:
+    """The other direction, and the one that keeps the report trustworthy.
+
+    A guard that fires on correct input is worse than no guard: operators learn to
+    ignore it, and this whole change exists because a WRONG message is worse than a
+    vague one. Pinned so a widening of the malformed-bullet predicate cannot start
+    flagging entries that parse.
+    """
+    result = parse(
+        dedent(
+            """\
+            ## Surveyed (no patterns worth saving)
+
+            - https://github.com/foo/bar — surveyed 2026-08-26 — perfectly fine
+            """
+        )
+    )
+
+    assert len(result.no_lifts) == 1
+    assert result.skipped == ()
+
+
+def test_prose_under_the_no_lift_heading_is_not_flagged() -> None:
+    """The predicate is A BULLET CARRYING A URL, not any bullet (techne#787).
+
+    Under this heading a line with an `http(s)://` in it is unambiguously an entry
+    that failed to parse. A bullet WITHOUT one is plausibly commentary, and flagging
+    it would make the report noisy in exactly the situation where the operator most
+    needs to trust it. This is the false-positive half of the boundary, and without
+    it "just flag every unmatched bullet" looks equivalent and is not.
+    """
+    result = parse(
+        dedent(
+            """\
+            ## Surveyed (no patterns worth saving)
+
+            Some framing prose about this list.
+
+            - a bare note with no URL in it at all
+            - https://github.com/foo/bar — surveyed 2026-08-26 — a real entry
+            """
+        )
+    )
+
+    assert len(result.no_lifts) == 1
+    assert result.skipped == (), "commentary was flagged as a malformed entry"
+
+
+def test_a_skipped_pattern_section_still_reports_as_a_section() -> None:
+    """`kind` defaults so the pre-techne#787 case is unchanged.
+
+    `architect ingest` prints `skipped {kind} "{label}"`, and one test pins the
+    exact string `skipped section "My pattern"`. Widening `SkippedSection` to carry
+    bullets must not quietly re-word the message for the case that already worked.
+    """
+    result = parse(
+        dedent(
+            """\
+            ## My pattern
+
+            No metadata bullets at all, so this cannot be parsed.
+            """
+        )
+    )
+
+    assert result.patterns == []
+    assert len(result.skipped) == 1
+    (skip,) = result.skipped
+    assert skip.kind == "section"
+    assert skip.label == "My pattern"

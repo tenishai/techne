@@ -305,6 +305,30 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`architect ingest` blamed the heading when a no-lift bullet was malformed** (#787). A bullet
+  under `## Surveyed (no patterns worth saving)` that was one word wrong — `— RE-SURVEYED
+  2026-08-26 —` for `— surveyed 2026-08-26 —` — was dropped without a trace. #754 and #758 had
+  already made the command speak up when nothing lands, but only pattern *sections* recorded a
+  reason, so `skipped` stayed empty and the command fell into its heading-level branch:
+
+  > no pattern sections found in x.md — sections must start with `## ` (two hashes) at the top level.
+
+  Said about a file whose heading was exactly that. **"nothing was ingested" still fired**, so no
+  write was lost silently — the cost was being sent to fix something that is not broken, which is
+  the failure `_parse_pattern_body` already guards against for misplaced markers and the no-lift
+  path never got.
+
+  The bullet now reports itself, quoted back with the required form. The predicate is **a bullet
+  carrying an `http(s)://` URL**, not any bullet: under that heading a line with a URL is
+  unambiguously an entry that failed to parse, while a bullet without one is plausibly commentary,
+  and flagging that would make the report noisy exactly where it most needs to be trusted.
+
+  **Internal API change**: `SkippedSection.heading` is now `.label`, and the field gained a `kind`
+  (`"section"` / `"no-lift bullet"`). `ingest_patterns_md`'s `skipped` dicts carry `label` + `kind`
+  instead of `heading`. A key named `heading` holding a bullet line is a field whose name is a lie.
+  The stderr line is unchanged for pattern sections — `kind` renders as `section`, so it still
+  reads `skipped section "My pattern": …`.
+
 - **`architect export` → `architect ingest` accreted a near-duplicate every cycle** (#770).
   `export_patterns_md` writes a `---` separator after each entry and the parser absorbed it
   into that entry's body. A pattern id is a content hash of `(name, source_url, body)`, so

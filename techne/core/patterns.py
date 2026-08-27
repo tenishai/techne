@@ -1261,7 +1261,13 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
         # `- **Source**:` are load-bearing, `- Source:` parses as body text, and a
         # plausible first attempt therefore failed in the one way this project keeps
         # failing: silently, looking like success.
-        "skipped": [{"heading": sk.heading, "reason": sk.reason} for sk in parsed.skipped],
+        # `label` + `kind`, not `heading` (techne#787): this list now carries
+        # malformed no-lift BULLETS as well as pattern sections, and a key called
+        # `heading` holding a bullet is a field whose name is a lie.
+        "skipped": [
+            {"label": sk.label, "kind": sk.kind, "reason": sk.reason}
+            for sk in parsed.skipped
+        ],
         "graph": graph,
         **stats(db_path),
     }

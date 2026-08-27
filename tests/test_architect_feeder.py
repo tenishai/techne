@@ -43,7 +43,10 @@ def test_a_section_missing_its_bold_markers_is_reported_not_only_logged():
     )
 
     assert result.patterns == []
-    assert [s.heading for s in result.skipped] == ["A pattern"]
+    # `.label`, not `.heading` (techne#787): the field was renamed when
+    # SkippedSection was widened to carry malformed no-lift bullets too, where a
+    # key called `heading` holding a bullet line would be a lie.
+    assert [s.label for s in result.skipped] == ["A pattern"]
     assert "bold markers" in result.skipped[0].reason
 
 
