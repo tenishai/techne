@@ -27,7 +27,7 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | gets **zero rows** from the archivist, librarian or architect | [four-functions.md](docs/four-functions.md#getting-content-in) |
 | is about to rely on `librarian_search` for coverage | [four-functions.md](docs/four-functions.md#nothing-in-techne-indexes-transcripts-for-you-and-that-matters-more-than-it-sounds) |
 | asks why the architect is empty on a fresh install | [four-functions.md](docs/four-functions.md#getting-content-in) |
-| proposes sweeping/deleting `reflection_queue` rows, or asks why reflection debt never reaches zero | [reflect-guide.md](docs/reflect-guide.md#the-debt-number-is-two-populations) |
+| proposes sweeping/deleting `reflection_queue` rows, or asks why reflection debt never reaches zero | [reflect-guide.md](docs/reflect-guide.md#the-debt-number-is-more-than-one-population) |
 | sets `reflect.enabled: false` to quiet a rail that looks dead | [reflect-guide.md](docs/reflect-guide.md#the-two-switches-and-why-they-are-not-one-switch) |
 | asks whether reflection is running, or why it produced nothing | [reflect-guide.md](docs/reflect-guide.md#the-two-switches-and-why-they-are-not-one-switch) |
 | edits `~/.techne/config.yaml` while a techne MCP server is live | [reflect-guide.md](docs/reflect-guide.md#where-the-answers-land-write_to) |

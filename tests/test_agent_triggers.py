@@ -916,6 +916,28 @@ def test_an_unbound_automatic_pass_is_the_default_posture(tmp_path, monkeypatch)
     from techne.config import ReflectConfig
     from techne.core.reflect import reflect_on_session
 
+    # THE DEFAULTS THE GUIDE DOES ARITHMETIC AGAINST (Prudence, #792 r3). Nothing in the
+    # repo held these, and three places in the guide depend on them: the bullet claiming
+    # emit_max_chars "defaults above what clients accept", the "inside the 100,000 budget"
+    # reasoning, and "(25 threads or 100k chars)" in the agent block. The pointed part is
+    # that the most likely future change to emit_max_chars is the one this guide's own
+    # advice recommends — someone lowers the shipped default and the guide simultaneously
+    # claims it defaults above what clients accept, reasons against 100,000, and advises
+    # lowering it to a value it already holds, with the suite green.
+    assert ReflectConfig().emit_max_chars == 100_000, (
+        "reflect.emit_max_chars default moved — reflect-guide.md quotes 100,000 in three "
+        "places and reasons about refusals sitting inside it."
+    )
+    assert ReflectConfig().emit_max_threads == 25, (
+        "reflect.emit_max_threads default moved — reflect-guide.md quotes 25 as the slice "
+        "size in both the prose and the copy-paste agent block."
+    )
+    assert ReflectConfig().min_confidence == "medium", (
+        "reflect.min_confidence default moved — the copy-paste agent block tells agents "
+        "anything marked 'low' is dropped on ingest. If the floor moved to 'low', that "
+        "block now tells them to avoid a level that works."
+    )
+
     assert ReflectConfig().model == "", (
         "reflect.model no longer defaults to empty — the guide's table and the trigger both "
         "tell operators that unbound is the shipped posture."
@@ -1107,6 +1129,19 @@ def test_emit_is_a_bounded_cursor_not_one_unbounded_pass(tmp_path):
     )
 
     second = emit_reflection_pass(cfg, session_id)
+    # ASSERT DELIVERY BEFORE ASSERTING NON-REPETITION (Prudence, #792 r3). `repeats` is
+    # empty both when the cursor advanced correctly AND when the second pass returned
+    # nothing at all, so on its own it certifies a cursor that drops the leftover thread —
+    # under which "loop until the batch comes back empty" terminates immediately and looks
+    # successful with the session half-drained. She demonstrated it: collapse `newly` to
+    # every current id and derive `truncated` independently, and the old assertions passed
+    # green with thread 2 permanently lost. They only held before because `truncated`
+    # happens to be derived from the same `emitted_ids` set the cursor persists, which is
+    # an implementation coupling rather than the claim.
+    assert len(second["batch"]) == 1, (
+        "the second pass delivered nothing — the leftover thread was lost, so 'loop until "
+        "the batch comes back empty' terminates with the session half-drained."
+    )
     repeats = {i["thread_id"] for i in first["batch"]} & {
         i["thread_id"] for i in second["batch"]
     }

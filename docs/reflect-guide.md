@@ -133,24 +133,35 @@ advanced — so every further pass returns that same one item and the batch neve
 Stop on `oversized` and say so: that thread cannot be drained until per-thread chunking
 lands (the #269 follow-up), and looping on it just re-answers the same prompt forever.
 
+**Read stderr, not just the file.** `-o` writes the *bare batch array* — `truncated`,
+`remaining` and `oversized` live on the result object and never reach it. The CLI prints
+`note` to **stderr**, and on an oversized batch that note says so explicitly. An agent that
+reads only `/tmp/batch.json` cannot see any of the three signals this loop turns on.
+
 **Prefer the `-o` route over the MCP tool for large sessions**, for two reasons:
 
 - The batch goes to **disk instead of into the model's context**, so the agent reads it
   thread by thread rather than carrying tens of kB of rendered prompts in-window.
 - **`emit_max_chars` is set above what the client will accept.** The 14 emit calls this
   store has had refused by the client's tool-result cap ran 56,974–98,755 characters —
-  every one of them *inside* the 100,000 budget. The client's ceiling sits below techne's.
-  A refusal is not silent data loss (the harness spills the payload to a file and hands
-  back the path), but it does cost you the round trip.
+  every one of them *inside* the 100,000 budget. A refusal is not silent data loss (the
+  harness spills the payload to a file and hands back the path), but it does cost you the
+  round trip.
 
-  **If your client is refusing emit results, lower `reflect.emit_max_chars`** — ~50,000
-  would have prevented all 14. Note the budget is not an absolute bound either: the trim
-  loop keeps the first item unconditionally, so a lone thread larger than the budget is
-  still delivered whole.
+  What that sample can and cannot tell you is worth being precise about, because refusals
+  are one-sided evidence. The smallest refusal bounds the ceiling **from above**: it is at
+  or below 56,974 characters. Nothing here bounds it from *below* — that would take the
+  largest result the client *accepted*, which this store does not record. So the honest
+  advice is **set `emit_max_chars` under the smallest refusal you have observed, with
+  margin**, rather than any particular number.
+
+  And the budget is not an absolute bound in any case: the trim loop keeps the first item
+  unconditionally, so a lone thread larger than the budget is still delivered whole.
+  Lowering `emit_max_chars` does nothing for a single-item batch.
 
 `techne_reflect_ingest` is small and fine over either route.
 
-### The debt number is two populations
+### The debt number is more than one population
 
 `emit` may report fewer prompts than the queue has rows, and say so:
 
@@ -158,16 +169,33 @@ lands (the #269 follow-up), and looping on it just re-answers the same prompt fo
 { "count": 0, "unemittable_queued": 7, "unemittable_note": "…tenishai/techne#646" }
 ```
 
-Those rows are **real debt whose prompt is impossible** — the emittability predicate is
-evaluated twice against separately-derived observation buckets, and when the two disagree
-the row can never be drained by doing the work. They are **left standing on purpose.**
+Those rows are **real debt whose prompt is impossible**, and they come in two kinds. The
+distinction decides what you should do about them, so it is worth keeping straight:
 
-> Draining an unemittable row restores a clean banner and destroys the only evidence the
-> class exists, which is exactly how it survived once already.
+- **Superseded** — the queued thread id is not in the session's *current* detection at all.
+  Thread ids derive from where boundaries fall, so a re-detection over a grown observation
+  set can re-key a thread; the row then points at a thread that no longer exists. Nothing is
+  unreflected: those observations are still covered by a current thread, under a different
+  id. **Retire these** with `techne reflect reconcile` (dry by default, `--apply` to write).
+- **Below threshold** — the id *is* current, but re-partitioning left the thread under
+  `reflect.min_observations_per_thread`, so no prompt can render for it. **Leave these
+  standing.** They are the population techne#646 exists to keep visible, and `reconcile`
+  deliberately does not touch them.
 
-So the headline debt number overstates payable work by however many of these you have.
-Before a drain, emit every queued session and split the two counts — otherwise you are
-measuring against a target you cannot reach.
+`techne reflect reconcile` prints the split per session, which is the cheapest way to see
+which kind you have.
+
+**A historical note, because the old explanation is still quoted in places.** techne#646
+originally attributed all of this to the emittability predicate being "evaluated twice
+against separately-derived observation buckets". That hypothesis was measured and refuted in
+techne#793: the predicate is fine, and the two calls were running over *different partitions*
+because `run_session_end` replaced the boundary table but not the thread table. The
+"evidence, not residue" instruction still holds — but only for the below-threshold kind.
+Blanket-draining is still wrong; retiring a provably-superseded row is not draining.
+
+So the headline debt number overstates payable work by however many of both you have. Before
+a drain, run `reconcile` and read the split — otherwise you are measuring against a target
+you cannot reach.
 
 ---
 
@@ -175,10 +203,13 @@ measuring against a target you cannot reach.
 > remedies are backwards, so the operator gets no error and no instinct to ask:
 >
 > - They propose deleting, sweeping or "cleaning up" `reflection_queue` rows, or ask why
->   the reflection debt never reaches zero — **unemittable rows are evidence, not
->   residue.** `unemittable_queue_rows` reports them and deliberately does not drain them;
->   sweeping restores a clean banner and destroys the only signal the defect class exists.
->   Offer to split the count with `techne reflect emit` per session instead.
+>   the reflection debt never reaches zero — **offer `techne reflect reconcile`** (dry by
+>   default) rather than a hand-rolled DELETE. It splits the undrainable rows into
+>   *superseded* (thread gone from the current detection — safe to retire) and *below
+>   threshold* (thread still current, under the observation floor). Retiring the first kind
+>   is sanctioned; blanket-draining the second is not, because those rows are the only
+>   visible evidence of a live defect class. Do not repeat techne#646's original "evaluated
+>   twice" explanation — techne#793 measured and refuted it.
 > - They set `reflect.enabled: false` to quiet a rail that looks dead — **that disables the
 >   route that produces everything**, not the one that is quiet, and the debt keeps
 >   accruing regardless because the session-end queue write is not gated on it. The rail
@@ -218,7 +249,9 @@ measuring against a target you cannot reach.
 > forever. On `oversized`, stop and tell the operator. Prefer the `-o` route over the MCP
 > tool: it keeps the batch on disk instead of in your context, and `emit_max_chars` defaults
 > above what clients accept, so MCP emit results can be refused at sizes techne considers
-> in-budget.
+> in-budget. The `-o` file holds only the batch array — `truncated`, `remaining` and
+> `oversized` do NOT appear in it; the CLI prints `note` to stderr, so read stderr too or
+> you will never see the signal that stops the loop.
 >
 > **Be strict.** Return `[]` when a thread holds nothing durable — most do. Note that
 > `reflect.min_confidence` defaults to `medium`, so anything you mark `"low"` is dropped on
