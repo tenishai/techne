@@ -525,10 +525,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_reflect_dedup
 -- re-enqueue, or it silently destroys the debt.
 --
 -- TWO WAYS A ROW IS REMOVED, and only one of them looks like a delete:
---   1. An explicit DELETE. TWO callers now: `redetect_threads` (whole session)
---      and `persist_detection`'s PRUNE (superseded, unreferenced, unpaid rows
---      only — techne#797). Both re-enqueue IN THE SAME TRANSACTION (#527 r5), so
---      a failure rolls back rather than stranding a half-applied detection.
+--   1. An explicit DELETE. There is exactly ONE site in the tree —
+--      `persist_detection`'s PRUNE (lifecycle.py), which deletes only
+--      superseded, unreferenced, unpaid rows (techne#797). It is NEVER a
+--      whole-session wipe; that form is what broke run_session_end on any store
+--      with history. `redetect_threads` has no DELETE of its own — it calls
+--      persist_detection and goes through the same prune. The prune re-enqueues
+--      IN THE SAME TRANSACTION (#527 r5), so a failure rolls back rather than
+--      stranding a half-applied detection.
 --   2. INSERT OR REPLACE, whose conflict resolution deletes the existing row and
 --      fires this CASCADE. OR IGNORE does not.
 -- CORRECTED techne#797: this used to say `save_threads` PICKS between OR REPLACE

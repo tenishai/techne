@@ -423,14 +423,21 @@ def save_threads(
     """Persist threads to the database.
 
     If `conn` is provided the caller owns the transaction (no commit/close
-    here). Pass a connection to make DELETE + insert atomic in redetection.
+    here). Pass a connection to make the prune + insert atomic when
+    `persist_detection` replaces a detection.
 
     When a Thread carries a ``boundary_signal`` (set by the heuristic
     detector) the row ID is derived from
-    ``bucket_hash(session_id, first_obs_id, boundary_signal)`` and the row
-    is written with ``INSERT OR IGNORE`` so that replaying the same session
-    is a no-op.  Threads without a ``boundary_signal`` fall back to the
-    legacy ``"{session_id}-{thread_num}"`` format with ``INSERT OR REPLACE``.
+    ``bucket_hash(session_id, first_obs_id, boundary_signal)``.  Threads without
+    one fall back to the legacy ``"{session_id}-{thread_num}"`` format.
+
+    THE VERB DOES NOT DEPEND ON THAT FIELD (techne#797).  This used to say the
+    boundary_signal path wrote ``INSERT OR IGNORE`` and the legacy path
+    ``INSERT OR REPLACE``; both are retired.  It is one
+    ``ON CONFLICT(id) DO UPDATE`` upsert for both, so replaying a session is
+    still a no-op for CONTENT that has not changed, while a re-detected
+    label/summary actually lands.  See the comment on the statement itself for
+    why each half of that matters.
     """
     from techne.core.database import connect
 
@@ -470,8 +477,12 @@ def save_threads(
             # not do this, because it never updated. The trigger is a CLOCK, not a race:
             # `link_threads` skips candidates with status='stale', and `age_threads` (which
             # run_session_end calls every turn) walks active -> completed -> stale, so ~32
-            # days after a parent is written it stops being re-derivable and the child's
-            # link is silently erased. There is no integrity reason to ever clear this
+            # days after a parent's session GOES QUIET it stops being re-derivable and
+            # the child's link is silently erased. (Not 32 days after the link is
+            # written: this upsert refreshes updated_at on every re-save, so a parent
+            # in a still-live session stays `active` and the erasure is deferred —
+            # Prudence, #798 r3 N3. The common case is a parent in an ended session,
+            # where the arithmetic holds.) There is no integrity reason to ever clear this
             # column: it has an FK, and persist_detection's guard 1 is what protects it.
             sql = (
                 "INSERT INTO threads"
