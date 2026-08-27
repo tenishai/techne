@@ -497,6 +497,11 @@ TRIGGER_WITNESSES = {
     "zero rows": "test_only_the_codex_distinguishes_an_empty_index_from_no_match",
     "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
     "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
+    "cleaning up": "test_the_unemittable_reporter_still_refuses_to_drain",
+    "reflect.enabled: false": "test_disabling_reflect_silences_the_nudge_but_not_the_debt",
+    "whether reflection is running": "test_an_unbound_automatic_pass_is_the_default_posture",
+    "live techne MCP server": "test_the_mcp_server_pins_config_before_it_serves",
+    "drain a large session": "test_the_cli_emit_can_write_the_batch_to_a_file",
 }
 
 
@@ -750,4 +755,255 @@ def test_every_indexed_document_still_carries_a_trigger_block():
         f"indexed in AGENTS.md but carrying no trigger block: {without_blocks}. Remove the "
         "row, or restore the block — a row pointing at nothing sends an agent to read a "
         "section with no trigger in it."
+    )
+
+
+# ------------------------------------------------- #791: the reflect-guide triggers
+
+
+def _reflect_config(tmp_path, *, enabled: bool = True, min_obs: int = 3):
+    """A throwaway store whose emittability threshold is small enough to straddle."""
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "reflect.db"
+    cfg.data_dir = tmp_path
+    cfg.reflect.enabled = enabled
+    cfg.reflect.min_observations_per_thread = min_obs
+    cfg.reflect.include_existing_knowledge = False  # skip FTS
+    init_db(cfg.db_path).close()
+    return cfg
+
+
+def _seed_thread(cfg, *, n_obs: int):
+    """One session, one persisted thread, `n_obs` observations against it."""
+    from techne.core.state import start_session
+    from techne.core.threads import Thread, save_threads
+
+    session_id = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+    conn = connect_db(cfg.db_path)
+    try:
+        for i in range(n_obs):
+            conn.execute(
+                "INSERT INTO observations (session_id, tool_name, content) VALUES (?,?,?)",
+                (session_id, "Bash", f"obs {i}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=list(range(n_obs)))
+    save_threads([thread], session_id, cfg.db_path, parent_links=[(f"{session_id}-1", None)])
+    return session_id, thread
+
+
+def connect_db(path):
+    from techne.core.database import connect
+
+    return connect(path)
+
+
+def test_the_unemittable_reporter_still_refuses_to_drain(tmp_path):
+    """`reflect-guide.md` tells the operator NOT to sweep these rows, and tells the agent to
+    raise it unprompted — both rest on `unemittable_queue_rows` being a REPORTER. The day it
+    starts draining (or stops seeing sub-threshold rows) that advice inverts: the guide would
+    be telling people to preserve evidence the code is already destroying.
+
+    Straddles the threshold deliberately — one observation under `min_observations_per_thread`
+    — because that is the exact shape #646 produces, and asserts the row is BOTH reported and
+    still undrained afterwards. Reporting without the second half would pass even if the
+    function drained as a side effect."""
+    from techne.core.reflect import enqueue_reflection_debt, unemittable_queue_rows
+
+    cfg = _reflect_config(tmp_path, min_obs=3)
+    session_id, _ = _seed_thread(cfg, n_obs=1)  # 1 < 3, so no prompt can ever render
+
+    conn = connect_db(cfg.db_path)
+    try:
+        tid = conn.execute(
+            "SELECT id FROM threads WHERE session_id = ?", (session_id,)
+        ).fetchone()["id"]
+    finally:
+        conn.close()
+    # Enqueue directly: this is the divergence #646 describes, where session_end queued a
+    # row that emit will not produce a prompt for.
+    enqueue_reflection_debt(cfg.db_path, session_id, thread_ids=[tid])
+
+    stuck = unemittable_queue_rows(cfg, session_id)
+
+    assert stuck == [tid], (
+        f"unemittable_queue_rows returned {stuck}, expected the sub-threshold row {tid!r}. "
+        "reflect-guide.md tells operators this surface is what splits payable debt from "
+        "impossible debt, and tells agents to offer it instead of sweeping."
+    )
+    conn = connect_db(cfg.db_path)
+    try:
+        drained = conn.execute(
+            "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", (tid,)
+        ).fetchone()["drained_at"]
+    finally:
+        conn.close()
+    assert drained is None, (
+        "unemittable_queue_rows DRAINED the row it reported. The guide's whole instruction — "
+        "'evidence, not residue', do not sweep — assumes this function only looks."
+    )
+
+
+def test_disabling_reflect_silences_the_nudge_but_not_the_debt(tmp_path, monkeypatch):
+    """The trigger claims `reflect.enabled: false` is backwards: it silences the route that
+    works while the debt keeps accruing. That is TWO claims about two different call sites,
+    and the surprising half is the second one — `lifecycle.run_session_end` enqueues outside
+    the `if config.reflect.enabled:` block that guards the automatic pass.
+
+    Gate the enqueue on `enabled` and this test fails; without it the guide would be telling
+    operators that disabling still accrues debt when it had quietly stopped."""
+    from techne.lifecycle import run_session_end
+
+    cfg = _reflect_config(tmp_path, enabled=False, min_obs=1)
+    session_id, _ = _seed_thread(cfg, n_obs=4)
+
+    run_session_end(cfg, session_id)
+
+    conn = connect_db(cfg.db_path)
+    try:
+        queued = conn.execute(
+            "SELECT COUNT(*) AS n FROM reflection_queue WHERE session_id = ?", (session_id,)
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+
+    assert queued > 0, (
+        "session_end enqueued NO reflection debt while reflect.enabled was false. "
+        "reflect-guide.md tells operators that disabling does not stop the debt, only the "
+        "nudge — if the enqueue is now gated, that sentence is wrong advice."
+    )
+
+
+def test_an_unbound_automatic_pass_is_the_default_posture(tmp_path, monkeypatch):
+    """"Empty means the unattended pass is unbound by design and never ran; that is a normal
+    posture, not a fault" — the agent is told to check this BEFORE calling reflection broken.
+
+    Two halves: the shipped default really is empty, and an unbound pass really declines to
+    call an LLM rather than falling back to `config.model`. The fallback is what #709 removed;
+    restoring it would make the trigger's reassurance false and start unattended calls on
+    stores that never opted in."""
+    from techne.config import ReflectConfig
+    from techne.core.reflect import reflect_on_session
+
+    assert ReflectConfig().model == "", (
+        "reflect.model no longer defaults to empty — the guide's table and the trigger both "
+        "tell operators that unbound is the shipped posture."
+    )
+
+    cfg = _reflect_config(tmp_path, enabled=True, min_obs=1)
+    cfg.reflect.model = ""
+    cfg.model = "some-model-the-operator-never-chose-for-this"
+    session_id, thread = _seed_thread(cfg, n_obs=4)
+
+    # NOT via `generate_fn=` — an injected callable IS a binding by this function's own
+    # contract, so passing one bypasses the guard under test. Trip the BUILDER instead:
+    # if the fallback to `config.model` came back, this is what it would reach for.
+    def _explode(*a, **k):  # pragma: no cover - the point is that it is never reached
+        raise AssertionError(
+            "an unbound reflect pass built a generate_fn — it fell back to config.model, "
+            "which is the #555 defect and makes reflect-guide.md's 'no LLM is called behind "
+            "your back' false."
+        )
+
+    monkeypatch.setattr("techne.core.reflect._make_generate_fn", _explode)
+    observations = [{"tool_name": "Bash", "content": f"obs {i}"} for i in range(4)]
+    result = reflect_on_session(cfg, session_id, [thread], observations)
+
+    assert result["candidates_written"] == 0
+    assert not result.get("errors"), (
+        f"an unbound pass reported errors {result.get('errors')} — the guide calls this a "
+        "normal working posture, so it must be a clean no-op, not a failure."
+    )
+
+
+def test_the_mcp_server_pins_config_before_it_serves(tmp_path):
+    """The `write_to` warning — 'the tool call succeeds and writes to the wrong place, with
+    no error' — is true only because `main()` loads config ONCE, ahead of the serve loop.
+
+    Asserted structurally on the AST rather than by running a server: the mutation that
+    falsifies the doc is moving `Config.load()` INTO the request loop (which would make the
+    advice unnecessary and the trigger noise). A grep for the call cannot tell those two
+    arrangements apart; their position relative to the loop is the whole claim."""
+    import ast
+
+    src = (REPO / "techne" / "mcp_server.py").read_text()
+    main_fn = next(
+        n
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+
+    loads = [
+        n.lineno
+        for n in ast.walk(main_fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "load"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "Config"
+    ]
+    loops = [n for n in main_fn.body if isinstance(n, (ast.For, ast.While))]
+
+    assert loads, "mcp_server.main() no longer calls Config.load() at all"
+    assert loops, "mcp_server.main() no longer has a top-level serve loop to compare against"
+
+    serve_loop = loops[0]
+    assert max(loads) < serve_loop.lineno, (
+        f"Config.load() at line(s) {loads} is not strictly before the serve loop at line "
+        f"{serve_loop.lineno}. reflect-guide.md warns operators that editing config.yaml "
+        "under a live MCP server has no effect until restart; a per-request load makes that "
+        "warning wrong."
+    )
+    inner = [
+        n.lineno
+        for n in ast.walk(serve_loop)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "load"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "Config"
+    ]
+    assert not inner, (
+        f"Config.load() is called INSIDE the serve loop at {inner} — config is no longer pinned"
+    )
+
+
+def test_the_cli_emit_can_write_the_batch_to_a_file(tmp_path, monkeypatch):
+    """The escape hatch the trigger offers when MCP emit would blow the tool-result cap.
+    Driven through the real CLI, because the claim is about the shipped command surface —
+    `--output/-o` existing AND actually producing a file the agent can read thread by thread.
+
+    Pinning only the option's declared existence would survive a change that accepted the
+    flag and still printed to stdout, which is precisely the failure the advice is meant to
+    route around."""
+    import json
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    cfg = _reflect_config(tmp_path, enabled=True, min_obs=1)
+    session_id, _ = _seed_thread(cfg, n_obs=4)
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+
+    out = tmp_path / "batch.json"
+    result = CliRunner().invoke(main, ["reflect", "emit", "--session", session_id, "-o", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert out.exists(), (
+        "`techne reflect emit -o <file>` wrote no file. reflect-guide.md tells agents to use "
+        "this instead of the MCP tool for large sessions; without it there is no route that "
+        "stays under the tool-result cap."
+    )
+    batch = json.loads(out.read_text())
+    assert isinstance(batch, list) and batch, f"expected a non-empty batch array, got {batch!r}"
+    assert "prompt" in batch[0] and "raw_response" in batch[0], (
+        f"batch items are missing the fields the documented loop fills in: {sorted(batch[0])}"
     )

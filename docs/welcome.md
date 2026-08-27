@@ -57,7 +57,7 @@ Everything techne does reduces to a loop. Learn the loop and you understand the 
 |---|---|---|
 | **Recall** | Before assuming | The agent asks its memory before it guesses. `techne_recall(topic)` at the start of a task; `techne_resume` at the start of a session. |
 | **Store** | When it learns something durable | A fact, a decision, a correction, hard-won reasoning — `techne_store` writes the *conclusion*, not the transcript. |
-| **Reflect** | When wrapping up | At session end, techne distills each thread of work into candidate knowledge — the agent answers its own reflection prompts with its own model. |
+| **Reflect** | When wrapping up | At session end, techne distills each thread of work into candidate knowledge — the agent answers its own reflection prompts with its own model. [Full guide](./reflect-guide.md). |
 | **Sleep** | While idle | Dedup overlapping entries (*consolidate*), surface non-obvious connections (*dream*), and check that merges didn't drop load-bearing claims (*faithfulness*). |
 
 The thing to internalize: **you never have to run the loop by hand.** Sessions are
@@ -320,7 +320,9 @@ was the whole point.
   grouped by purpose. The complete agent-facing surface in one place.
 - **[`docs/codex-usage.md`](./codex-usage.md)** — when to reach for the code graph and,
   just as important, when *not* to.
-- **[`docs/memory-system-architecture.md`](./memory-system-architecture.md)** — how the
-  recall / store / reflect machinery actually works under the hood.
+- **[`docs/reflect-guide.md`](./reflect-guide.md)** — the Reflect verb in full: the two
+  switches people confuse, where candidates land, and how to drain a backlog.
+- **[`docs/memory-system-architecture.md`](./memory-system-architecture.md)** — the
+  multi-domain / federation model: how techne behaves as one store among several.
 
 Welcome aboard. Your agent has a memory now — go give it something worth remembering.
