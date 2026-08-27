@@ -375,27 +375,38 @@ _NO_LIFT_RE = re.compile(
 #: keeps every malformed-entry case (including the motivating `— RE-SURVEYED —`)
 #: and drops all three false positives.
 #:
-#: DECORATIONS BEFORE THE URL ARE ALLOWED, and the reason is that the narrower
-#: anchor cost more than it looked like (Prudence, #788 r2). `<?` alone dropped
-#: FOUR malformed spellings, not the one the earlier comment declared:
-#: link-wrapped `- [foo](https://…)`, backticked ``- `https://…` ``, and both
-#: emphasis forms `- **https://…**` / `- *https://…*`.
+#: DECORATIONS BEFORE THE URL ARE ALLOWED, and this comment does NOT claim the
+#: list is closed (Prudence, #788 r2 and r3). The narrow `<?` anchor dropped four
+#: malformed spellings while declaring one, and its cost was misstated: main's
+#: behaviour on a dropped entry is not silence, it is the #787 misdiagnosis.
+#: Measured through the real CLI — a link-wrapped entry under a correct `## `
+#: heading made ingest answer "sections must start with `## ` (two hashes)".
 #:
-#: And the cost was misstated. The earlier note said missing them "returns the
-#: operator to main's behaviour", contrasting a silent miss against a wrong
-#: accusation — but main's behaviour HERE IS THE #787 DEFECT. Measured through the
-#: real CLI on a link-wrapped file whose heading is a correct `## `: ingest reports
-#: "sections must start with `## ` (two hashes)". So the give-up did not cost
-#: coverage, it cost a MISDIAGNOSIS, on four spellings — the very failure this
-#: predicate exists to remove.
+#: COVERED: bare, `<angle-bracketed>`, `[link-wrapped](…)`, and a run of
+#: `` ` `` / `*` / `_` / `~` (so `` `code` ``, `*i*`, `**b**`, `_i_`, `__b__`,
+#: `~~s~~`). NOT EXHAUSTIVE, and deliberately not presented as such: quoted
+#: `"https://…"` and parenthesised `(https://…)` are still dropped, and someone
+#: will write a decoration none of us imagined. An uncovered decoration falls back
+#: to main's behaviour, which is the #787 misdiagnosis — that is the standing cost
+#: of this predicate, not a defect to be surprised by. r3 rejected "add `_`" as the
+#: fix precisely because chasing spellings has no natural end; the durable change
+#: is a comment that stays true when the next one appears.
 #:
-#: The optional group admits only decorations that can legitimately precede the
-#: URL, so every false positive the r2 anchor removed stays removed:
-#: `- Context lives in [the notes](https://…)` still does not match, because `](`
-#: must sit immediately after the bullet; nor does `- [ ] revisit https://…`
-#: (`] r`, not `](`); nor `- [x] https://… was checked`. _BULLET_BOUNDARY pins all
-#: of these in both directions rather than leaving the next reader to re-derive it.
-_URL_BULLET_RE = re.compile(r"^\s*-\s+(?:<|\[[^\]]*\]\(|[`*]+)?https?://\S+")
+#: THE ACCEPTED TRADE — LINK-FIRST PROSE IS ACCUSED. `- [foo](url) — surveyed … — r`
+#: (an entry) and `- [foo](url) explains why.` (commentary) are structurally
+#: identical up to the first token, so no prefix anchor can separate them; `](`
+#: after the bullet separates link-FIRST from link-LATER, not entry from prose.
+#: Link-first commentary is therefore reported, and `_BULLET_BOUNDARY` pins that as
+#: a deliberate True so the next reader inherits the trade instead of re-deriving
+#: it. Separating them properly means keying on the REMAINDER (does the rest carry
+#: `surveyed` and a date?) rather than the prefix — filed rather than done here,
+#: because adding capability in a terminator round is how the last three rounds
+#: each introduced something.
+#:
+#: Link-LATER prose stays out, which is what `](`-immediately-after-the-bullet
+#: does buy: `- Context lives in [the notes](https://…)` does not match, nor
+#: `- [ ] revisit https://…` (`] r`, not `](`), nor `- [x] https://… was checked`.
+_URL_BULLET_RE = re.compile(r"^\s*-\s+(?:<|\[[^\]]*\]\(|[`*_~]+)?https?://\S+")
 
 
 def _parse_no_lift_bullets(body: str) -> tuple[list[NoLiftEntry], list[SkippedSection]]:

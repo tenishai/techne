@@ -320,15 +320,20 @@ All notable changes to techne are documented here. Format loosely follows
 
   The bullet now reports itself, quoted back with the required form. The predicate is **a bullet
   whose URL comes first**, optionally decorated — bare, `<angle-bracketed>`, `[link-wrapped](…)`,
-  `` `backticked` ``, `**bold**` or `*italic*` all count, because each is a spelling of a genuinely
-  malformed entry. Anchoring on the URL's *position* rather than matching a URL anywhere in the
-  line matters more than it looks: `architect ingest` gates its heading-level advice on
-  `if not skipped`, so a bullet wrongly flagged *suppresses* a correct diagnosis. A commentary
-  bullet carrying a markdown link, a nested sub-bullet note and `- [ ]` / `- [x]` task items are
-  all ordinary under that heading and are not reported — the `](` form has to sit immediately
-  after the bullet, which is what separates a decorated entry from prose that happens to link.
-  Lines inside a fenced block are skipped too, so a "what not to write" counter-example is not
-  accused of being the thing it warns about.
+  or wrapped in `` ` ``/`*`/`_`/`~` — because each is a spelling of a genuinely malformed entry.
+  Anchoring on the URL's *position* rather than matching a URL anywhere in the line matters more
+  than it looks: `architect ingest` gates its heading-level advice on `if not skipped`, so a
+  bullet wrongly flagged *suppresses* a correct diagnosis.
+
+  **Two limits, stated plainly because the alternative is a wrong accusation you were not
+  warned about.** The decoration list is *not* exhaustive — a quoted or parenthesised URL is
+  still not reported, and an uncovered spelling falls back to the pre-fix behaviour, which is
+  the misdiagnosis this entry is about. And a bullet whose *first* token is a link is reported
+  even when it is prose: `- [the tracker](…) explains why.` is structurally identical to
+  `- [foo](…) — surveyed … — r` up to that token, so no prefix rule separates them. Link-*later*
+  prose stays out — `- Context lives in [the notes](…)`, `- [ ]` / `- [x]` task items — as do
+  lines inside a fenced block, so a "what not to write" counter-example is not accused of being
+  the thing it warns about.
 
   **Internal API change**: `SkippedSection.heading` is now `.label`, and the field gained a `kind`
   (`"section"` / `"no-lift bullet"`). `ingest_patterns_md`'s `skipped` dicts carry `label` + `kind`

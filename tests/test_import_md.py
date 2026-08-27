@@ -295,6 +295,34 @@ _BULLET_BOUNDARY = [
     ("backticked url", "- `https://github.com/foo/bar` — surveyed 2026-08-26 — r", True),
     ("bold url", "- **https://github.com/foo/bar** — surveyed 2026-08-26 — r", True),
     ("italic url", "- *https://github.com/foo/bar* — surveyed 2026-08-26 — r", True),
+    # CommonMark has FOUR emphasis spellings, not two (Prudence, #788 r3). The r2
+    # comment said "both emphasis forms" and named `*` and `**`; `_`, `__` and `~~`
+    # were all still dropped, i.e. still misdiagnosed.
+    ("underscore italic url", "- _https://github.com/foo/bar_ — surveyed 2026-08-26 — r", True),
+    ("underscore bold url", "- __https://github.com/foo/bar__ — surveyed 2026-08-26 — r", True),
+    ("strikethrough url", "- ~~https://github.com/foo/bar~~ — surveyed 2026-08-26 — r", True),
+    # AND THE SPELLINGS STILL NOT COVERED, pinned as False so the gap is a recorded
+    # fact rather than a surprise. The predicate is deliberately not exhaustive; an
+    # uncovered decoration falls back to main's #787 misdiagnosis.
+    (
+        "quoted url (not covered)",
+        '- "https://github.com/foo/bar" — surveyed 2026-08-26 — r',
+        False,
+    ),
+    (
+        "parenthesised url (not covered)",
+        "- (https://github.com/foo/bar) — surveyed 2026-08-26 — r",
+        False,
+    ),
+    # THE ACCEPTED TRADE (Prudence, #788 r3 Important 1). Link-FIRST commentary is
+    # structurally identical to a link-wrapped entry up to the first token, so it is
+    # accused. Recorded as a deliberate True, not an oversight; separating them means
+    # keying on the remainder rather than the prefix, which is filed, not done here.
+    (
+        "link-first prose (accepted false positive)",
+        "- [the upstream tracker](https://github.com/x/y/issues/787) explains why.",
+        True,
+    ),
     # AND THE FALSE POSITIVES THE WIDENING MUST NOT REINTRODUCE. `](` has to sit
     # immediately after the bullet, which is what keeps prose and task items out.
     ("task-list DONE with url first", "- [x] https://example.com was checked", False),
