@@ -1735,7 +1735,16 @@ def test_cli_ingest_does_not_drain_on_a_parse_failure(tmp_path):
 
 
 def test_unemittable_queue_rows_are_reported_and_never_drained(tmp_path):
-    """#646: the min_observations gate is evaluated twice, against different buckets.
+    """#646: a queued row whose prompt can never render must be REPORTED, not swept.
+
+    THE CAUSE IN THE OLD DOCSTRING WAS RETRACTED (techne#795). This said "the
+    min_observations gate is evaluated twice, against different buckets" — measured
+    2026-08-27 and refuted: the predicate is fine, and the two calls were running over
+    DIFFERENT PARTITIONS because run_session_end replaced the boundary table and not the
+    thread table (techne#793/#797). The mechanism below is still a valid way to MAKE the
+    below-threshold population; it just is not the cause #646 was reporting. Correcting
+    it here because a maintainer verifying the fix reads the test first, and this repo has
+    already priced trusting a stale comment at two months (reflect.py:695).
 
     Enqueue threads that ARE emittable at session_end, then make them
     sub-threshold at emit time by raising the floor. Those rows are now real debt
@@ -1754,7 +1763,8 @@ def test_unemittable_queue_rows_are_reported_and_never_drained(tmp_path):
     owed = len(pending_reflection_queue(config.db_path))
     assert owed >= 1
 
-    # The second evaluation disagrees with the first — the divergence #646 measures.
+    # Force the BELOW-THRESHOLD population directly. (Not "the second evaluation
+    # disagrees" — that was the retracted cause; techne#795.)
     config.reflect.min_observations_per_thread = 9999
 
     stuck = unemittable_queue_rows(config, session_id)
@@ -1763,7 +1773,20 @@ def test_unemittable_queue_rows_are_reported_and_never_drained(tmp_path):
     result = emit_reflection_pass(config, session_id)
     assert result["count"] == 0
     assert result["unemittable_queued"] == owed
-    assert "646" in result["unemittable_note"]
+    # PINS WHAT THE NOTE SAYS, NOT THAT IT MENTIONS AN ISSUE NUMBER (Prudence, #804).
+    # The only assertion here used to be `"646" in note`, and the OLD refuted
+    # single-population wording contained that too — she swapped the new note back for the
+    # old one, kept the reference, and the FULL SUITE stayed green at 3705 passed. An
+    # operator-facing string with no witness is how this fleet has shipped decaying prose
+    # three times this week.
+    note = result["unemittable_note"]
+    assert "646" in note
+    for token in ("superseded", "below", "reconcile"):
+        assert token in note, (
+            f"the operator-facing note no longer says {token!r}: {note!r}. It must name BOTH "
+            "populations and the remedy — a note that reports only the below-threshold half "
+            "sends the operator to hand-delete rows `techne reflect reconcile` retires safely."
+        )
     assert len(pending_reflection_queue(config.db_path)) == owed, (
         "an unemittable row must stay queued — reporting it is the fix, draining it is the bug"
     )

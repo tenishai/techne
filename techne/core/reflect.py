@@ -1220,7 +1220,8 @@ def emit_reflection_pass(
             "detection (superseded — retire these with `techne reflect reconcile`), or "
             "it is still current but now below reflect.min_observations_per_thread "
             f"({config.reflect.min_observations_per_thread}), so no prompt can render "
-            "for it. `techne reflect reconcile` prints the split. Do not delete them by "
+            "for it. `techne reflect reconcile` prints the split, across all sessions. Do "
+            "not delete them by "
             "hand: the below-threshold rows are the only visible evidence of "
             "tenishai/techne#646."
         )

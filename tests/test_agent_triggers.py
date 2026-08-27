@@ -1149,3 +1149,35 @@ def test_emit_is_a_bounded_cursor_not_one_unbounded_pass(tmp_path):
         f"the second pass re-delivered {repeats} — the cursor did not advance, so the "
         "documented loop would never terminate."
     )
+
+
+def test_the_copy_paste_block_teaches_both_populations():
+    """THE BLOCK BELOW THE TRIGGERS IS UNPROTECTED, AND IT IS THE ONE THAT TRAVELS
+    (Prudence, #804).
+
+    `TRIGGER_WITNESSES` keys on phrases inside the `Agent: raise this unprompted` block, so
+    the "For your Claude — copy this into your agent's context" block underneath it is
+    covered by nothing. She reverted `docs/reflect-guide.md` wholesale to base — restoring
+    the pre-#793 single-population rule, "never drain or delete them" — and all 39 tests in
+    this file passed.
+
+    That block is the one artifact in the document DESIGNED TO TRAVEL: it goes into an
+    operator's CLAUDE.md and is then read in isolation, away from the trigger table, and the
+    line after it calls it "everything an agent needs". An agent carrying only the reverted
+    version would tell an operator that provably-superseded rows must stay — which is
+    techne#646's confusion reproduced in the most portable component of the fix for it."""
+    guide = (REPO / "docs" / "reflect-guide.md").read_text()
+    marker = "For your Claude — copy this into your agent's context"
+    assert marker in guide, "the copy-paste block heading moved; re-anchor this test"
+    block = guide[guide.index(marker) :]
+
+    assert "reconcile" in block, (
+        "the copy-paste block no longer mentions `techne reflect reconcile`. It is the "
+        "sanctioned remedy for superseded rows, and without it an agent carrying this block "
+        "tells the operator that undrainable rows must all stay."
+    )
+    assert "superseded" in block, (
+        "the copy-paste block no longer distinguishes the superseded population from the "
+        "below-threshold one — the distinction techne#793 established and #646's original "
+        "single-population framing got wrong."
+    )

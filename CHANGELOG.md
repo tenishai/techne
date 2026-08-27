@@ -333,11 +333,14 @@ All notable changes to techne are documented here. Format loosely follows
   heuristic summary and the debt enqueue were all silently lost.
 
   Replaced by a **prune**: only threads that are absent from the detection about to be saved,
-  unreferenced by any of the four columns, and not carrying a paid queue row. Referenced
+  unreferenced by any of the three NO ACTION columns, and not carrying a paid queue row. Referenced
   threads are history and stay. `save_threads` became a single upsert at the same time, which
   fixed a second defect — under `INSERT OR IGNORE` a thread whose id was stable had its
   `label`, `summary` and `resume_points` frozen at the first detection of the session, so
-  `techne_resume` served the opening minutes of a long session indefinitely.
+  `techne_resume` served the opening minutes of a long session indefinitely. The legacy
+  `INSERT OR REPLACE` path carried the mirror defect — it is DELETE+INSERT, and with
+  `recursive_triggers` off the implicit delete never fired `threads_ad`, so the FTS shadow kept
+  indexing the old label. One upsert closes both.
 
 - **`architect ingest` blamed the heading when a no-lift bullet was malformed** (#787). A bullet
   under `## Surveyed (no patterns worth saving)` that was one word wrong — `— RE-SURVEYED
@@ -688,7 +691,7 @@ All notable changes to techne are documented here. Format loosely follows
   by tests: sweeping the reflection queue by hand, disabling the rail to quiet it, asking
   whether reflection is running, editing `config.yaml` under a live MCP server (which pins
   config at startup), and draining a large session through the MCP tool rather than the CLI.
-  Reflect had the largest silent-failure surface of any subsystem and the only documentation
+  Reflect had the largest silent-failure surface of any subsystem and the only guide-level documentation
   was its architecture card, which is written for someone changing the seam rather than
   learning it.
 
