@@ -264,7 +264,7 @@ def persist_detection(
     from techne.core.database import connect
     from techne.core.heuristic_threads import boundary_indices_from_segments, save_boundaries
     from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
-    from techne.core.threads import save_threads
+    from techne.core.threads import save_threads, thread_row_id
 
     boundary_a_indices = (
         boundary_indices_from_segments([t.observation_indices for t in threads])
@@ -281,7 +281,57 @@ def persist_detection(
                 (session_id,),
             )
         }
-        conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
+        # PRUNE, DO NOT WIPE (techne#797). This was `DELETE FROM threads WHERE
+        # session_id = ?`, and on a store with history that raises
+        # IntegrityError: FOREIGN KEY constraint failed — which broke
+        # `run_session_end` on every affected session. FOUR columns reference
+        # threads(id) and only ONE cascades:
+        #
+        #     threads.parent_thread_id              NO ACTION   (1249 live links)
+        #     knowledge_candidates.source_thread_id NO ACTION   (547 live rows)
+        #     observations.thread_id                NO ACTION   (unused in practice)
+        #     reflection_queue.thread_id            CASCADE
+        #
+        # `link_threads` links similar threads ACROSS sessions, so one session's
+        # threads are routinely the parent of another's — meaning a whole-session
+        # wipe is unsafe on any store that has been used for more than a few days.
+        # It was latent in `redetect_threads` all along; #793 promoted it from a
+        # rarely-run path to a per-turn one.
+        #
+        # THE NARROWER DELETE IS ALSO THE MORE CORRECT ONE. What #646 actually
+        # needed was for the QUEUE to stop pointing at superseded partitions, and
+        # `reflection_queue.thread_id` cascades — so pruning the superseded thread
+        # rows retires their queue rows for free. A thread that another session's
+        # lineage points at, or that produced a knowledge candidate, is referenced
+        # HISTORY: deleting it destroys a record something else depends on, which
+        # was never the goal. Those rows stay, and `techne reflect reconcile`
+        # retires their stale queue entries instead.
+        #
+        # Three conditions, and each is load-bearing:
+        #   1. not in the detection we are about to save — current threads are
+        #      untouched, so no cascade churn for rows that are still correct;
+        #   2. unreferenced — cannot violate an FK, by construction rather than by
+        #      luck;
+        #   3. not carrying a DRAINED queue row — a paid debt is ledger history and
+        #      the cascade would take it. Measured on the operator's store: 1 of the
+        #      947 prunable rows. Negligible is not the same as safe, and this is
+        #      the payment ledger.
+        keep = [thread_row_id(session_id, t) for t in threads]
+        placeholders = ",".join("?" * len(keep)) if keep else "NULL"
+        conn.execute(
+            f"""DELETE FROM threads
+                 WHERE session_id = ?
+                   AND id NOT IN ({placeholders})
+                   AND NOT EXISTS (
+                         SELECT 1 FROM threads x WHERE x.parent_thread_id = threads.id)
+                   AND NOT EXISTS (
+                         SELECT 1 FROM knowledge_candidates k
+                          WHERE k.source_thread_id = threads.id)
+                   AND NOT EXISTS (
+                         SELECT 1 FROM reflection_queue r
+                          WHERE r.thread_id = threads.id AND r.drained_at IS NOT NULL)""",
+            (session_id, *keep),
+        )
         conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
         if scores and boundary_a_indices is not None:
             save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
