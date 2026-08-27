@@ -1518,16 +1518,30 @@ def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
     import re
 
     doc = (Path(__file__).parent.parent / "docs" / "deployment.md").read_text()
-    table = doc[doc.index("What `3` actually means") :]
+    # BOUNDED AT THE END OF THE TABLE (Prudence, #783 r3 Nit 3). This slice used to
+    # run to end-of-document, which was cosmetic while it fed only a floor and a
+    # substring test. It now feeds an EXACT-EQUALITY assertion, so any future table
+    # below this one whose rows begin "| `" and mention a phrase would push the
+    # counts up and fail here reporting "a phrase lost its row" — which would not be
+    # true. Measured at the time of writing: 9 candidate rows inside the slice, 8
+    # more above it (the placeholder and exit-code tables) already safely outside.
+    start = doc.index("What `3` actually means")
+    table = doc[start:]
+    end = table.find("\n\n", table.index("| the message says"))
+    if end != -1:
+        table = table[:end]
 
     checked = 0
     matched_rows = 0
+    candidate_rows = 0
+    matched_phrases: set[str] = set()
     for line in table.splitlines():
         if not line.startswith("| `"):
             continue
         cells = line.split("|")
         if len(cells) < 3:
             continue
+        candidate_rows += 1
         cell = cells[1].strip().strip("`")
         # MATCH BY CONTAINMENT, NOT EQUALITY (#783 r2). Several rows DECORATE the
         # phrase -- `manifest is unreadable (...)`, `created_at ... is in the
@@ -1540,6 +1554,7 @@ def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
             continue
         phrase = max(matches, key=len)
         matched_rows += 1
+        matched_phrases.add(phrase)
         # backticked JSON-string literals in the CAUSE cell are the examples
         for example in re.findall(r'`"([^"]*)"`', cells[2]):
             backups = tmp_path / str(checked) / "backups"
@@ -1574,25 +1589,52 @@ def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
     # PARSE guard -- if the table format drifts, `checked` collapses to 0 -- so the
     # message must name both causes rather than blaming the format for what may be
     # a row that legitimately dropped an example (in which case update this floor).
-    # THE WITNESS FOR THE MATCHER ITSELF (Prudence, #783 r2). `checked` counts
-    # EXAMPLES and cannot see the matcher: widening it moved rows-matched 5 -> 8
-    # while leaving `checked` at 4, because the three newly-reached rows carry no
-    # examples. So reverting to exact membership left the whole suite green and
-    # Nit 1's fix had no witness anywhere in the tree. Row COVERAGE is the thing
-    # the widening changed, so row coverage is what has to be asserted.
-    #
-    # Self-invalidating by construction: every phrase in the tuple must own a row,
-    # so adding a phrase without documenting it fails here, and narrowing the
-    # matcher fails here. 8 today; under the exact-membership regression, 5.
-    # `[Errno N] <anything else>` is the ninth table row and matches no phrase by
-    # design — it is the errno passthrough, not a refusal — which is why this
-    # compares against the PHRASE count and not the row count.
-    assert matched_rows == len(RETENTION_REFUSAL_PHRASES), (
-        f"{matched_rows} table rows matched a refusal phrase, expected "
-        f"{len(RETENTION_REFUSAL_PHRASES)} — a phrase lost its row, or the matcher "
-        "narrowed and is silently skipping rows again"
-    )
+    # ORDER MATTERS HERE (Prudence, #783 r3 Nit 1). The parse guard goes FIRST: a
+    # format drift collapses `checked`, `matched_rows` AND `matched_phrases` at
+    # once, and the message below is the one deliberately worded to name both
+    # possible causes. Asserting coverage first meant the drift failed with "a
+    # phrase lost its row", which is neither cause — the wrong message winning over
+    # the one written to avoid exactly that.
     assert checked >= 4, (
         f"parsed {checked} examples from the table, expected at least 4 — either a "
         "row dropped an example (update this floor) or the table stopped parsing"
+    )
+
+    # THE WITNESS FOR THE MATCHER ITSELF (Prudence, #783 r2), NOW AIMED AT THE RIGHT
+    # AXIS (Prudence, #783 r3 Important). `checked` counts EXAMPLES and structurally
+    # cannot see the matcher: widening it moved rows-matched 5 -> 8 while leaving
+    # `checked` at 4, because the newly-reached rows carry no examples.
+    #
+    # r3's fix answered that with `matched_rows == len(PHRASES)` — and a count is
+    # not coverage, which is the same mistake one axis over. That assertion holds
+    # whenever the ARITHMETIC balances, including when one phrase owns two rows and
+    # another owns none. Measured: duplicating one row's phrase and moving the
+    # orphaned phrase into the prose below the table (where the sibling gate's
+    # substring check is satisfied) left the suite GREEN at 130 passed, with a
+    # refusal phrase owning no row at all.
+    #
+    # SET EQUALITY IS THE PROPERTY THE COMMENT ALWAYS CLAIMED — every phrase owns a
+    # row. The count stays ALONGSIDE it rather than being replaced: set equality
+    # alone would let a ninth row silently claim an already-claimed phrase, and the
+    # count is what fails on the exact-membership revert (5 != 8). Neither alone
+    # pins the bijection; together they do.
+    assert matched_phrases == set(RETENTION_REFUSAL_PHRASES), (
+        "phrases with no row of their own: "
+        f"{sorted(set(RETENTION_REFUSAL_PHRASES) - matched_phrases)}"
+    )
+    assert matched_rows == len(RETENTION_REFUSAL_PHRASES), (
+        f"{matched_rows} table rows matched a refusal phrase, expected "
+        f"{len(RETENTION_REFUSAL_PHRASES)} — two rows claim one phrase, or the "
+        "matcher narrowed and is silently skipping rows again"
+    )
+    # AND THE ONE ROW NO OTHER GATE CAN SEE (Prudence, #783 r3 Nit 2).
+    # `[Errno N] <anything else>` matches no phrase by design — it is the errno
+    # passthrough, not a refusal — which is why the assertions above compare against
+    # the PHRASE count. The cost of that correctness is that the row is invisible to
+    # every gate: deleting it outright left the suite green at 130 passed, and it is
+    # the first row of the table and the one an operator hits most often (EACCES,
+    # EROFS, EBUSY, a full disk), with the prose below it left dangling.
+    assert candidate_rows == matched_rows + 1, (
+        f"{candidate_rows} candidate rows for {matched_rows} phrases — the errno "
+        "passthrough row is the only one that should match no phrase"
     )
