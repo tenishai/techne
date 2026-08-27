@@ -1496,3 +1496,145 @@ def test_a_malformed_file_value_does_not_kill_the_whole_retention_run(tmp_path):
     # And the pair stays honest: restore refuses the same set.
     with pytest.raises(RestoreError, match="'file' for 'techne'"):
         read_manifest(bad)
+
+
+def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
+    """An example a doc row offers must actually be refused BY that row's phrase.
+
+    Not a test of prose (Prudence, #783 — pushing back on my claim that there was
+    no checkable invariant here, correctly). The remedy cell is never read. What is
+    checkable is that a row offering `"."` as an example of its cause is telling the
+    truth about which refusal `"."` produces.
+
+    It caught the PR that added it: row 148 offered `""`, which is refused one guard
+    EARLIER — `not name.strip()` in the resolver — and emits the OTHER phrase. So the
+    row sent an operator to a remedy about missing files for a manifest whose
+    databases are all present and intact. That is the same "two causes, opposite
+    remedies" defect #783 exists to fix, committed while fixing it.
+
+    Sits beside `test_every_exit_3_cause_has_a_row_in_deployment_md`: that one
+    guards WHICH ROWS EXIST, this one guards WHETHER A ROW'S EXAMPLES ARE TRUE.
+    """
+    import re
+
+    doc = (Path(__file__).parent.parent / "docs" / "deployment.md").read_text()
+    # BOUNDED AT THE END OF THE TABLE (Prudence, #783 r3 Nit 3). This slice used to
+    # run to end-of-document, which was cosmetic while it fed only a floor and a
+    # substring test. It now feeds an EXACT-EQUALITY assertion, so any future table
+    # below this one whose rows begin "| `" and mention a phrase would push the
+    # counts up and fail here reporting "a phrase lost its row" — which would not be
+    # true. Measured at the time of writing: 9 candidate rows inside the slice, 8
+    # more above it (the placeholder and exit-code tables) already safely outside.
+    start = doc.index("What `3` actually means")
+    table = doc[start:]
+    end = table.find("\n\n", table.index("| the message says"))
+    if end != -1:
+        table = table[:end]
+
+    checked = 0
+    matched_rows = 0
+    candidate_rows = 0
+    matched_phrases: set[str] = set()
+    for line in table.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 3:
+            continue
+        candidate_rows += 1
+        cell = cells[1].strip().strip("`")
+        # MATCH BY CONTAINMENT, NOT EQUALITY (#783 r2). Several rows DECORATE the
+        # phrase -- `manifest is unreadable (...)`, `created_at ... is in the
+        # future` -- so exact membership silently skipped FOUR of the nine rows,
+        # and an example added to any of them would never have been checked while
+        # this test still reported green. Longest match wins, so a phrase that is a
+        # substring of another cannot claim the row.
+        matches = [p for p in RETENTION_REFUSAL_PHRASES if p in cell]
+        if not matches:
+            continue
+        phrase = max(matches, key=len)
+        matched_rows += 1
+        matched_phrases.add(phrase)
+        # backticked JSON-string literals in the CAUSE cell are the examples
+        for example in re.findall(r'`"([^"]*)"`', cells[2]):
+            backups = tmp_path / str(checked) / "backups"
+            st = backups / "backup-20260101-000000"
+            st.mkdir(parents=True)
+            (st / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "techne_version": "0.15.0",
+                        "databases": {"techne": {"file": example}},
+                    }
+                )
+            )
+            # A REAL DATABASE IN THE SET (#783 r2). With the set empty, EVERY
+            # well-formed string is refused as "lists a database file that is not
+            # there" whatever it names -- so a WRONG example like `"techne.db"`, a
+            # perfectly valid filename that belongs to no row here, passed
+            # spuriously. With the file present it is not refused at all and the
+            # assertion below catches it, which is what makes this a test of the
+            # row's claim rather than of the set being empty.
+            (st / "techne.db").write_text("REAL DATA")
+            _, failed = prune_backup_sets(backups, keep=0)
+            reason = failed[0][1] if failed else "<not refused at all>"
+            assert phrase in reason, (
+                f"the row for {phrase!r} offers {example!r} as an example, "
+                f"but that value is refused as: {reason!r}"
+            )
+            checked += 1
+
+    # Four today: two examples in each of the two rows that carry any. This is a
+    # PARSE guard -- if the table format drifts, `checked` collapses to 0 -- so the
+    # message must name both causes rather than blaming the format for what may be
+    # a row that legitimately dropped an example (in which case update this floor).
+    # ORDER MATTERS HERE (Prudence, #783 r3 Nit 1). The parse guard goes FIRST: a
+    # format drift collapses `checked`, `matched_rows` AND `matched_phrases` at
+    # once, and the message below is the one deliberately worded to name both
+    # possible causes. Asserting coverage first meant the drift failed with "a
+    # phrase lost its row", which is neither cause — the wrong message winning over
+    # the one written to avoid exactly that.
+    assert checked >= 4, (
+        f"parsed {checked} examples from the table, expected at least 4 — either a "
+        "row dropped an example (update this floor) or the table stopped parsing"
+    )
+
+    # THE WITNESS FOR THE MATCHER ITSELF (Prudence, #783 r2), NOW AIMED AT THE RIGHT
+    # AXIS (Prudence, #783 r3 Important). `checked` counts EXAMPLES and structurally
+    # cannot see the matcher: widening it moved rows-matched 5 -> 8 while leaving
+    # `checked` at 4, because the newly-reached rows carry no examples.
+    #
+    # r3's fix answered that with `matched_rows == len(PHRASES)` — and a count is
+    # not coverage, which is the same mistake one axis over. That assertion holds
+    # whenever the ARITHMETIC balances, including when one phrase owns two rows and
+    # another owns none. Measured: duplicating one row's phrase and moving the
+    # orphaned phrase into the prose below the table (where the sibling gate's
+    # substring check is satisfied) left the suite GREEN at 130 passed, with a
+    # refusal phrase owning no row at all.
+    #
+    # SET EQUALITY IS THE PROPERTY THE COMMENT ALWAYS CLAIMED — every phrase owns a
+    # row. The count stays ALONGSIDE it rather than being replaced: set equality
+    # alone would let a ninth row silently claim an already-claimed phrase, and the
+    # count is what fails on the exact-membership revert (5 != 8). Neither alone
+    # pins the bijection; together they do.
+    assert matched_phrases == set(RETENTION_REFUSAL_PHRASES), (
+        "phrases with no row of their own: "
+        f"{sorted(set(RETENTION_REFUSAL_PHRASES) - matched_phrases)}"
+    )
+    assert matched_rows == len(RETENTION_REFUSAL_PHRASES), (
+        f"{matched_rows} table rows matched a refusal phrase, expected "
+        f"{len(RETENTION_REFUSAL_PHRASES)} — two rows claim one phrase, or the "
+        "matcher narrowed and is silently skipping rows again"
+    )
+    # AND THE ONE ROW NO OTHER GATE CAN SEE (Prudence, #783 r3 Nit 2).
+    # `[Errno N] <anything else>` matches no phrase by design — it is the errno
+    # passthrough, not a refusal — which is why the assertions above compare against
+    # the PHRASE count. The cost of that correctness is that the row is invisible to
+    # every gate: deleting it outright left the suite green at 130 passed, and it is
+    # the first row of the table and the one an operator hits most often (EACCES,
+    # EROFS, EBUSY, a full disk), with the prose below it left dangling.
+    assert candidate_rows == matched_rows + 1, (
+        f"{candidate_rows} candidate rows for {matched_rows} phrases — the errno "
+        "passthrough row is the only one that should match no phrase"
+    )

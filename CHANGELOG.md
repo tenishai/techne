@@ -364,6 +364,17 @@ All notable changes to techne are documented here. Format loosely follows
   and nothing was reported on the `failed` channel — a real backup destroyed by a
   run that exited as a success.
 
+  `docs/deployment.md`'s exit-3 table is updated to match — **both** rows, because
+  the two guards split the spellings between them. The row for `lists a database
+  file that is not there` now names the directory case as a cause and tells the
+  operator to check the manifest's `file` values before hunting for a deleted file,
+  because the two causes have opposite remedies. The row for `lists databases in a
+  shape techne cannot read` gains the empty/whitespace `file` case, and its remedy
+  no longer leads with salvage-by-hand: for that cause the databases may be fine and
+  the fix is one string in `manifest.json`. That row also warns that the phrase is
+  reported *ahead of* the missing-file check and therefore masks one, so "the
+  manifest is wrong" must not be read as "the set is intact".
+
   Two guards cover it, and they are worth naming separately in a release whose
   subject is guards drifting between call sites. `""` and whitespace-only are
   refused in the shared resolver, as a malformed `file` value. `.`, `..`, `./`,
