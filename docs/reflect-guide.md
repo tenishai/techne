@@ -110,14 +110,15 @@ indistinguishable from something a human actually read.
 
 **`emit` hands you a slice, not the session.** This is the thing to internalise before
 running it. Each call delivers the next batch, advances a per-session cursor
-(`reflect:emitted:<session>`), and tells you what is left in `truncated`, `remaining` and
-`note`. Two limits shape the slice, both configurable: `reflect.emit_max_threads` (25) and
-`reflect.emit_max_chars` (100,000), whichever binds first.
+(`reflect:emitted:<session>`) *when it delivered something*, and tells you what is left in
+`truncated`, `remaining` and `note`. Two limits shape the slice, both configurable:
+`reflect.emit_max_threads` (25) and `reflect.emit_max_chars` (100,000), whichever binds
+first.
 
 So draining a session is a **loop**, not a command:
 
 ```sh
-# repeat until the batch comes back empty
+# repeat until the batch comes back empty — OR comes back `oversized`
 techne reflect emit --session <session-id> -o /tmp/batch.json
 # your agent reads each item's `prompt` and writes its JSON answer into `raw_response`
 techne reflect ingest /tmp/batch.json
@@ -126,15 +127,26 @@ techne reflect ingest /tmp/batch.json
 Run it once against a 31-thread backlog and you drain at most 25, with nothing in the
 procedure telling you to go again. The CLI does echo `note` to stderr — read it.
 
-**Prefer the `-o` route over the MCP tool for large sessions**, for two reasons that are
-easy to state wrongly:
+**The one case where "until empty" never arrives.** A single thread whose rendered prompt
+alone exceeds `emit_max_chars` sets `oversized`, and the cursor is deliberately *not*
+advanced — so every further pass returns that same one item and the batch never empties.
+Stop on `oversized` and say so: that thread cannot be drained until per-thread chunking
+lands (the #269 follow-up), and looping on it just re-answers the same prompt forever.
+
+**Prefer the `-o` route over the MCP tool for large sessions**, for two reasons:
 
 - The batch goes to **disk instead of into the model's context**, so the agent reads it
-  thread by thread rather than carrying ~100 kB of rendered prompts in-window.
-- `emit_max_chars` bounds what techne *assembles*; it does not bound the serialized
-  tool-result the client has to accept. Measured on this store: **18 `techne_reflect_emit`
-  calls rejected outright** by the client's tool-result cap — median 75,437 characters,
-  largest 141,692, and two of them above the 100,000 budget itself.
+  thread by thread rather than carrying tens of kB of rendered prompts in-window.
+- **`emit_max_chars` is set above what the client will accept.** The 14 emit calls this
+  store has had refused by the client's tool-result cap ran 56,974–98,755 characters —
+  every one of them *inside* the 100,000 budget. The client's ceiling sits below techne's.
+  A refusal is not silent data loss (the harness spills the payload to a file and hands
+  back the path), but it does cost you the round trip.
+
+  **If your client is refusing emit results, lower `reflect.emit_max_chars`** — ~50,000
+  would have prevented all 14. Note the budget is not an absolute bound either: the trim
+  loop keeps the first item unconditionally, so a lone thread larger than the budget is
+  still delivered whole.
 
 `techne_reflect_ingest` is small and fine over either route.
 
@@ -180,10 +192,11 @@ measuring against a target you cannot reach.
 >   keep writing to the old destination with no error. Say it, and offer a restart.
 > - They are about to drain a large session through `techne_reflect_emit` — **offer the
 >   `-o` route instead**, and say why: the batch lands on disk rather than in context, and
->   while `emit_max_chars` bounds what techne assembles it does not bound the serialized
->   tool-result the client must accept (18 emit calls on this store were rejected outright,
->   up to 141,692 characters). Also tell them emit is a **cursor**: one bounded slice per
->   call, so draining a large session means looping until the batch is empty.
+>   `emit_max_chars` defaults *above* what clients accept, so emit results get refused at
+>   sizes techne considers in-budget (lower it if that is happening).
+> - They treat one `emit` call as having drained a session — **emit is a cursor**, not a
+>   dump: one bounded slice per call, so draining means looping until the batch comes back
+>   empty, or comes back `oversized`, which never empties and must stop instead.
 
 ---
 
@@ -197,12 +210,15 @@ measuring against a target you cannot reach.
 > for each item, read its `prompt` and write a JSON array of proposed entries into
 > `raw_response` (`scope`/`type`/`content`/`tags`/`confidence`) →
 > `techne reflect ingest /tmp/b.json` → **emit again for the same session until the batch
-> comes back empty.** Emit delivers one bounded slice per call (25 threads or 100k chars,
-> whichever binds first) and advances a cursor; `truncated` / `remaining` / `note` tell you
-> what is left. Stopping after one pass silently leaves most of a large session undrained.
-> Prefer the `-o` route over the MCP tool: it keeps the batch on disk instead of in your
-> context, and the assembled-size budget does not bound the tool-result the client must
-> accept (measured: 18 rejected emit calls on this store, up to 141,692 characters).
+> comes back empty, or comes back `oversized`.** Emit delivers one bounded slice per call
+> (25 threads or 100k chars, whichever binds first) and advances a cursor;
+> `truncated` / `remaining` / `note` tell you what is left. Stopping after one pass silently
+> leaves most of a large session undrained — but `oversized` means a single thread exceeds
+> the budget and the cursor will NOT advance, so looping re-answers that same prompt
+> forever. On `oversized`, stop and tell the operator. Prefer the `-o` route over the MCP
+> tool: it keeps the batch on disk instead of in your context, and `emit_max_chars` defaults
+> above what clients accept, so MCP emit results can be refused at sizes techne considers
+> in-budget.
 >
 > **Be strict.** Return `[]` when a thread holds nothing durable — most do. Note that
 > `reflect.min_confidence` defaults to `medium`, so anything you mark `"low"` is dropped on

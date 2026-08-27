@@ -502,6 +502,7 @@ TRIGGER_WITNESSES = {
     "whether reflection is running": "test_an_unbound_automatic_pass_is_the_default_posture",
     "live techne MCP server": "test_the_mcp_server_pins_config_before_it_serves",
     "drain a large session": "test_the_cli_emit_can_write_the_batch_to_a_file",
+    "having drained a session": "test_emit_is_a_bounded_cursor_not_one_unbounded_pass",
 }
 
 
@@ -1036,4 +1037,80 @@ def test_the_cli_emit_can_write_the_batch_to_a_file(tmp_path, monkeypatch):
     assert isinstance(batch, list) and batch, f"expected a non-empty batch array, got {batch!r}"
     assert "prompt" in batch[0] and "raw_response" in batch[0], (
         f"batch items are missing the fields the documented loop fills in: {sorted(batch[0])}"
+    )
+
+
+def test_emit_is_a_bounded_cursor_not_one_unbounded_pass(tmp_path):
+    """THE THIRD NARROW WITNESS (Prudence, #792 r2). The "drain a large session" bullet had
+    been rewritten to lead with "emit is a CURSOR: one bounded slice per call", while its
+    only witness pinned that `-o` writes a file. She proved the gap by forcing both bounds
+    in `emit_reflection_pass` to 10**9 — making emit one unbounded pass, exactly the
+    #268/#269 defect the bullet warns about — and this file stayed fully green. The bullet
+    is now split so each claim carries its own witness; this is the cursor half.
+
+    NOT solved the way she suggested, and the reason is worth recording twice over:
+
+    1. She proposed pointing a key at `test_emit_cursor_drains_large_session_across_passes`.
+       It does hold the claim, but it lives in `tests/test_mcp_reflect.py`, and
+       `test_every_named_witness_exists` resolves witnesses with `hasattr(module, ...)`
+       against THIS module — naming it there would fail that check.
+    2. She also proposed a SECOND key on the same bullet. That would have been decorative:
+       `_trigger_blocks` collects only a bullet's FIRST line and `test_every_bullet_names_a_
+       witness` is satisfied by `any(key in line ...)`, so a key matching the fifth line
+       would never be consulted. Splitting the bullet is what actually makes the accounting
+       hold, because this file's unit is one bullet, one claim, one witness.
+
+    Observations are written as two clusters two hours apart, because emit RE-DETECTS
+    threads from observations (`load_session_for_reflection`) rather than reading the
+    persisted rows — hand-built Thread rows do not control what emit sees, which cost me a
+    pass here."""
+    from datetime import datetime, timedelta
+
+    from techne.core.reflect import emit_reflection_pass
+    from techne.core.state import start_session
+
+    cfg = _reflect_config(tmp_path, min_obs=1)
+    cfg.reflect.emit_max_threads = 1
+    session_id = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+
+    base = datetime(2026, 1, 1, 12, 0)
+    conn = connect_db(cfg.db_path)
+    try:
+        for cluster in range(2):
+            for i in range(4):
+                ts = base + timedelta(hours=2 * cluster, minutes=i)
+                conn.execute(
+                    "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+                    "VALUES (?,?,?,?)",
+                    (session_id, ts.isoformat(), "Edit", f"/proj/c{cluster}.py step {i}"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Persist the detection, so batch items carry a real `thread_id`. Without this
+    # `persisted_thread_id` returns None for every item and the "did the cursor advance"
+    # comparison degenerates to {None} == {None} — a test that fails for the wrong reason.
+    from techne.lifecycle import run_session_end
+
+    run_session_end(cfg, session_id)
+
+    first = emit_reflection_pass(cfg, session_id)
+    assert len(first["batch"]) == 1, (
+        f"emit returned {len(first['batch'])} items against emit_max_threads=1 — it is not "
+        "bounding the slice, so the bullet's 'one bounded slice per call' is false and "
+        "'looping until empty' is advice for a problem that does not exist."
+    )
+    assert first.get("truncated"), (
+        "a bounded emit that left a thread behind did not report `truncated` — the operator "
+        "has no signal to go again."
+    )
+
+    second = emit_reflection_pass(cfg, session_id)
+    repeats = {i["thread_id"] for i in first["batch"]} & {
+        i["thread_id"] for i in second["batch"]
+    }
+    assert not repeats, (
+        f"the second pass re-delivered {repeats} — the cursor did not advance, so the "
+        "documented loop would never terminate."
     )
