@@ -234,9 +234,10 @@ def persist_detection(
     ("Replace, don't accumulate ... seen live: one session at 37k rows") and applies
     the fix to one table.
 
-    WHY THAT ONE MISSING DELETE PRODUCED #646. `save_threads` writes with
-    `INSERT OR IGNORE` on an id derived from `bucket_hash(session_id, first_obs_id,
-    boundary_signal)`, and `run_session_end` fires ONCE PER TURN, re-detecting
+    WHY THAT ONE MISSING DELETE PRODUCED #646. `save_threads` wrote with
+    `INSERT OR IGNORE` at the time (it is an upsert now — techne#797) on an id derived
+    from `bucket_hash(session_id, first_obs_id, boundary_signal)`, and
+    `run_session_end` fires ONCE PER TURN, re-detecting
     whenever the observation count moved. Shifted boundaries give the same logical
     thread a NEW id, the old row is never removed, and the session accumulates one
     superseded partition per re-detection (measured: 86 rows in `threads` against 51

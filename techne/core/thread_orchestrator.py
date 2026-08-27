@@ -26,9 +26,14 @@ class Thread:
     resume_points: str = ""
     observation_indices: list[int] = field(default_factory=list)
     # Set by heuristic detector.  When present, save_threads derives the row ID
-    # from bucket_hash(session_id, first_obs_id, boundary_signal) and uses
-    # INSERT OR IGNORE so replay is idempotent.  None means fall back to the
-    # legacy "{session_id}-{thread_num}" format.
+    # from bucket_hash(session_id, first_obs_id, boundary_signal).  None means
+    # fall back to the legacy "{session_id}-{thread_num}" format.
+    #
+    # THE VERB NO LONGER DEPENDS ON THIS FIELD (techne#797).  save_threads used
+    # INSERT OR IGNORE here and INSERT OR REPLACE for the legacy form; both were
+    # only correct while the caller deleted the row first.  It is now one upsert
+    # for both, so replay stays idempotent AND a re-detected label/summary
+    # actually lands.
     boundary_signal: str | None = None
 
 
@@ -457,6 +462,17 @@ def save_threads(
             # the FTS shadow kept indexing the old label. DO UPDATE fires `threads_au`,
             # which deletes and re-inserts the FTS row properly, and leaves the rowid
             # stable so nothing else has to move.
+            #
+            # parent_thread_id IS COALESCED, NOT OVERWRITTEN (Prudence, #798 r2). It comes
+            # from `link_map.get(thread_id)`, which is None whenever `link_threads` did not
+            # re-derive a parent this turn — and a bare `excluded.parent_thread_id` then
+            # writes that None over a link already in the row. `INSERT OR IGNORE` could
+            # not do this, because it never updated. The trigger is a CLOCK, not a race:
+            # `link_threads` skips candidates with status='stale', and `age_threads` (which
+            # run_session_end calls every turn) walks active -> completed -> stale, so ~32
+            # days after a parent is written it stops being re-derivable and the child's
+            # link is silently erased. There is no integrity reason to ever clear this
+            # column: it has an FK, and persist_detection's guard 1 is what protects it.
             sql = (
                 "INSERT INTO threads"
                 " (id, session_id, thread_num, label, summary, resume_points,"
@@ -467,7 +483,8 @@ def save_threads(
                 "   label = excluded.label,"
                 "   summary = excluded.summary,"
                 "   resume_points = excluded.resume_points,"
-                "   parent_thread_id = excluded.parent_thread_id,"
+                "   parent_thread_id = COALESCE("
+                "     excluded.parent_thread_id, threads.parent_thread_id),"
                 "   updated_at = CURRENT_TIMESTAMP"
             )
             parent_id = link_map.get(thread_id)

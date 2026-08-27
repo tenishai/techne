@@ -633,14 +633,29 @@ def test_the_prune_guards_every_no_action_fk(tmp_path):
 
     assert unguarded, "no NO ACTION FK to threads found — the probe is not measuring anything"
 
+    # ANCHOR ON THE SQL, NOT THE COMMENT, AND REQUIRE TABLE + COLUMN IN THE SAME CLAUSE
+    # (Prudence, #798 r2). The first version searched from `src.index("DELETE FROM
+    # threads")`, which matches inside the explanatory comment above the query — so a
+    # guard written in PROSE would have counted. Worse, it looked only for
+    # `.<col> = threads.id`, and THREE of the four referencing columns are named
+    # `thread_id`: the cascading `reflection_queue.thread_id` clause is in the searched
+    # text, so it satisfied the needle that `observations.thread_id` was supposed to
+    # require. She proved it by adding a real fifth column
+    # (`thread_notes.thread_id`, entirely unguarded) — the test still passed. Splitting
+    # on NOT EXISTS and demanding `FROM <table>` and `.<col> = threads.id` in the SAME
+    # clause is what makes the forward-looking claim true rather than decorative.
     src = inspect.getsource(persist_detection)
+    start = src.index('"""DELETE FROM threads')
     prune = " ".join(
-        src[
-            src.index("DELETE FROM threads") : src.index("DELETE FROM thread_boundaries")
-        ].split()
+        src[start : src.index("DELETE FROM thread_boundaries", start)].split()
     )
+    clauses = prune.split("NOT EXISTS")
     missing = [
-        f"{table}.{col}" for table, col in unguarded if f".{col} = threads.id" not in prune
+        f"{table}.{col}"
+        for table, col in unguarded
+        if not any(
+            f"FROM {table} " in c and f".{col} = threads.id" in c for c in clauses
+        )
     ]
 
     assert not missing, (
@@ -743,4 +758,126 @@ def test_a_kept_threads_summary_still_refreshes(tmp_path):
     assert after["summary"] != first["summary"], (
         f"a kept thread's summary did not refresh: still {after['summary']!r}. It froze at "
         "the first detection, which is what INSERT OR IGNORE did before the upsert."
+    )
+
+
+def test_a_kept_threads_fts_row_follows_its_summary(tmp_path):
+    """THE OTHER HALF OF THE UPSERT'S RATIONALE, which had no direct witness (Prudence,
+    #798 r2 nit 4). The comment on `save_threads` justifies DO UPDATE over OR REPLACE by
+    the `threads_fts` shadow — and she confirmed `test_a_kept_threads_summary_still_
+    refreshes` PASSES under `INSERT OR REPLACE`, because it reads only the `threads` table.
+    So the stated reason was unheld; OR REPLACE was caught only incidentally, by the
+    debt-age test tripping first.
+
+    `INSERT OR REPLACE` is DELETE+INSERT, and with `recursive_triggers` off the implicit
+    delete does not fire `threads_ad` — so the FTS keeps a row for content that no longer
+    exists and thread search matches stale summaries. `DO UPDATE` fires `threads_au`, which
+    removes the old FTS row and inserts the new one."""
+    from techne.core.database import connect
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+
+    cfg = _config(tmp_path)
+    sid = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+    _add(cfg, sid, 6, start_hour=12)
+    run_session_end(cfg, sid)
+
+    conn = connect(cfg.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, summary FROM threads WHERE session_id = ?", (sid,)
+        ).fetchone()
+        # A token that exists only in the FIRST summary, so a stale FTS row is detectable.
+        conn.execute(
+            "UPDATE threads SET summary = 'zzuniqueoriginal' WHERE id = ?", (row["id"],)
+        )
+        conn.commit()
+        assert conn.execute(
+            "SELECT 1 FROM threads_fts WHERE threads_fts MATCH 'zzuniqueoriginal'"
+        ).fetchone(), "fixture failed: the marker never reached the FTS index"
+    finally:
+        conn.close()
+
+    _add(cfg, sid, 6, start_hour=12, day=1, tool="Read")
+    run_session_end(cfg, sid)
+
+    conn = connect(cfg.db_path)
+    try:
+        stale = conn.execute(
+            "SELECT 1 FROM threads_fts WHERE threads_fts MATCH 'zzuniqueoriginal'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert stale is None, (
+        "threads_fts still matches the replaced summary — the shadow index is serving "
+        "content the threads table no longer holds, so thread search returns stale hits."
+    )
+
+
+def test_a_stored_parent_link_survives_a_turn_that_cannot_rederive_it(tmp_path):
+    """techne#797 / Prudence #798 r2 Important 1 — AND MY OWN FIFTH HOLLOW SPOT.
+
+    I applied her one-word `COALESCE` fix and shipped it with NO witness: reverting it to a
+    bare `excluded.parent_thread_id` left 308 tests passing. This is that witness.
+
+    `parent_id` comes from `link_map.get(thread_id)`, which is None whenever `link_threads`
+    did not re-derive a parent this turn. Under `INSERT OR IGNORE` that was harmless — the
+    row was never updated. Under a naive upsert it writes None over a link already stored.
+
+    The trigger is a CLOCK, not a race: `link_threads` skips candidates with
+    `status='stale'`, and `age_threads` (called by `run_session_end` every turn) walks
+    active -> completed -> stale, so roughly 32 days after a link is written its parent
+    stops being re-derivable and the child's link is silently erased. Driven here through
+    `save_threads` directly, with an empty link map standing in for that clock — the unit
+    under test is the conflict clause, not the ageing schedule."""
+    from techne.core.database import connect
+    from techne.core.state import start_session
+    from techne.core.threads import Thread, save_threads
+
+    cfg = _config(tmp_path)
+    parent_sid = start_session(cfg.db_path, project_path="/tmp/p1", agent_identity="t")
+    child_sid = start_session(cfg.db_path, project_path="/tmp/p2", agent_identity="t")
+
+    conn = connect(cfg.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO threads (id, session_id, thread_num, label, summary, status) "
+            "VALUES ('t-the-parent', ?, 1, 'parent', 's', 'active')",
+            (parent_sid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    child = Thread(thread_num=1, label="child", summary="v1", observation_indices=[0])
+    child_id = f"{child_sid}-1"
+    save_threads([child], child_sid, cfg.db_path, parent_links=[(child_id, "t-the-parent")])
+
+    conn = connect(cfg.db_path)
+    try:
+        linked = conn.execute(
+            "SELECT parent_thread_id FROM threads WHERE id = ?", (child_id,)
+        ).fetchone()["parent_thread_id"]
+    finally:
+        conn.close()
+    assert linked == "t-the-parent", f"fixture failed to establish the link: {linked!r}"
+
+    # A later turn where link_threads re-derives NOTHING — the parent has aged out.
+    child_v2 = Thread(thread_num=1, label="child", summary="v2", observation_indices=[0])
+    save_threads([child_v2], child_sid, cfg.db_path, parent_links=[])
+
+    conn = connect(cfg.db_path)
+    try:
+        row = conn.execute(
+            "SELECT parent_thread_id, summary FROM threads WHERE id = ?", (child_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["summary"] == "v2", "the upsert did not refresh content — wrong failure"
+    assert row["parent_thread_id"] == "t-the-parent", (
+        "a stored parent link was erased by a turn that could not re-derive it. "
+        "`excluded.parent_thread_id` is NULL here; it must be COALESCEd with the stored "
+        "value, because there is no integrity reason to ever clear this column."
     )
