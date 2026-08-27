@@ -395,9 +395,9 @@ def test_session_end_survives_a_thread_referenced_by_another_session(tmp_path):
         assert conn.execute(
             "SELECT 1 FROM threads WHERE id = ?", (target,)
         ).fetchone(), "the referenced parent thread was deleted — its child now dangles"
-        assert conn.execute(
-            "SELECT 1 FROM threads WHERE id = 't-child-of-target'"
-        ).fetchone(), "the child thread in the other session was destroyed"
+        # NOT asserting the child row survives: the DELETE is scoped
+        # `WHERE session_id = ?`, so no mutation of this predicate can falsify that.
+        # It would read as coverage it is not (Prudence, #798 r1 nit 4).
     finally:
         conn.close()
 
@@ -552,4 +552,195 @@ def test_an_unpaid_superseded_thread_IS_pruned(tmp_path):
     assert gone is None, (
         "a superseded, unreferenced, unpaid thread row survived — the prune has been "
         "narrowed into a no-op and #646's accumulation is back."
+    )
+
+
+def test_an_observation_attributed_to_a_thread_blocks_its_prune(tmp_path):
+    """THE FOURTH `NO ACTION` FK, which my predicate enumerated in a comment and then did
+    not guard (Prudence, #798 r1). `observations.thread_id` references `threads(id)` with
+    NO ACTION exactly like `parent_thread_id`, and she built the state and reproduced the
+    same `IntegrityError` on the same line.
+
+    Nothing in the tree writes that column today — every `INSERT INTO observations` and
+    every `UPDATE ... SET thread_id` was checked — so there is no live hazard. That is the
+    point: `parent_thread_id` was also "unused in practice", on a fresh store, for about
+    five days before #797. The column exists and is indexed, so per-thread observation
+    attribution is an obvious next feature, and without this guard whoever wires it up
+    re-detonates #797 on the per-turn path."""
+    from techne.core.database import connect
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+
+    cfg = _config(tmp_path)
+    sid = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+    _add(cfg, sid, 6, start_hour=12)
+    run_session_end(cfg, sid)
+
+    conn = connect(cfg.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO threads (id, session_id, thread_num, label, summary, status) "
+            "VALUES ('t-obs-attributed', ?, 94, 'old partition', 's', 'active')",
+            (sid,),
+        )
+        conn.execute(
+            "UPDATE observations SET thread_id = 't-obs-attributed' "
+            "WHERE session_id = ? AND id = (SELECT MIN(id) FROM observations WHERE session_id = ?)",
+            (sid, sid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _add(cfg, sid, 5, start_hour=15, tool="Edit")
+    run_session_end(cfg, sid)  # must not raise
+
+    conn = connect(cfg.db_path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM threads WHERE id = 't-obs-attributed'"
+        ).fetchone(), "a thread with an observation attributed to it was pruned"
+    finally:
+        conn.close()
+
+
+def test_the_prune_guards_every_no_action_fk(tmp_path):
+    """DERIVE THE GUARD LIST FROM THE SCHEMA, NOT FROM THE INCIDENT (Prudence, #798 r1).
+
+    The predicate was written from the columns that broke rather than the columns that CAN
+    break, which is why `observations.thread_id` was missed. This asks SQLite what actually
+    references `threads(id)` without a cascade and requires each one to appear in
+    `persist_detection`'s prune. It would have caught that miss on the day it was written,
+    and it catches the fifth column on the day someone adds it."""
+    import inspect
+
+    from techne.core.database import connect, init_db
+    from techne.lifecycle import persist_detection
+
+    db = tmp_path / "schema.db"
+    init_db(db)
+    conn = connect(db)
+    try:
+        tables = [r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        unguarded = []
+        for t in tables:
+            for fk in conn.execute(f"PRAGMA foreign_key_list({t})"):
+                if fk["table"] == "threads" and (fk["on_delete"] or "").upper() != "CASCADE":
+                    unguarded.append((t, fk["from"]))
+    finally:
+        conn.close()
+
+    assert unguarded, "no NO ACTION FK to threads found — the probe is not measuring anything"
+
+    src = inspect.getsource(persist_detection)
+    prune = " ".join(
+        src[
+            src.index("DELETE FROM threads") : src.index("DELETE FROM thread_boundaries")
+        ].split()
+    )
+    missing = [
+        f"{table}.{col}" for table, col in unguarded if f".{col} = threads.id" not in prune
+    ]
+
+    assert not missing, (
+        f"these columns reference threads(id) with NO ACTION and are NOT guarded by the "
+        f"prune: {missing}. Deleting a thread they point at raises IntegrityError and takes "
+        "run_session_end down — that is techne#797. Add a NOT EXISTS clause for each."
+    )
+
+
+def test_a_kept_threads_pending_debt_does_not_age_backwards(tmp_path):
+    """Condition (1) preserves DEBT AGE, and nothing else pinned it (Prudence, #798 r1).
+
+    She mutated `keep` to the legacy `f"{session_id}-{thread_num}"` id form — which the
+    codebase still contains — so it matched nothing and every current thread was pruned and
+    re-inserted. The whole file stayed green. The cost is not cosmetic: the CASCADE takes a
+    still-current thread's PENDING queue row and the re-enqueue re-inserts it with today's
+    date. `prior_drained` restores drained stamps; nothing restores `enqueued_at`, which is
+    the column the SessionStart banner's "oldest from" reads. Under a drifted `keep` every
+    turn resets the age of every open debt to now, forever, with no error."""
+    from techne.core.database import connect
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+
+    cfg = _config(tmp_path)
+    sid = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+    _add(cfg, sid, 6, start_hour=12)
+    run_session_end(cfg, sid)
+
+    conn = connect(cfg.db_path)
+    try:
+        rows = [r["thread_id"] for r in conn.execute(
+            "SELECT thread_id FROM reflection_queue WHERE session_id = ? AND drained_at IS NULL",
+            (sid,))]
+        assert rows, "fixture queued no pending debt"
+        conn.execute(
+            "UPDATE reflection_queue SET enqueued_at = '2020-01-01 00:00:00' "
+            "WHERE thread_id = ?", (rows[0],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    _add(cfg, sid, 5, start_hour=15, tool="Edit")
+    run_session_end(cfg, sid)
+
+    conn = connect(cfg.db_path)
+    try:
+        aged = conn.execute(
+            "SELECT enqueued_at FROM reflection_queue WHERE thread_id = ?", (rows[0],)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert aged is not None, "the kept thread's pending queue row was deleted"
+    assert aged["enqueued_at"] == "2020-01-01 00:00:00", (
+        f"a kept thread's pending debt was re-enqueued at {aged['enqueued_at']} — its age "
+        "was reset, so the banner's 'oldest from' will read as minutes old forever."
+    )
+
+
+def test_a_kept_threads_summary_still_refreshes(tmp_path):
+    """Sparing a current thread must not FREEZE it (Prudence, #798 r1, Important 2).
+
+    `save_threads` used `INSERT OR IGNORE`, which was only correct while the caller deleted
+    first. Once the prune spares a thread whose id is unchanged — every turn after the first
+    for a single-thread session — the insert no-opped and `label`/`summary`/`resume_points`
+    stayed as the FIRST detection wrote them. Nothing else refreshes those columns, so
+    `techne_resume` and `threads_fts` would have served the opening minutes of a session
+    forever. It is now an upsert."""
+    from techne.core.database import connect
+    from techne.core.state import start_session
+    from techne.lifecycle import run_session_end
+
+    cfg = _config(tmp_path)
+    sid = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+    _add(cfg, sid, 6, start_hour=12)
+    run_session_end(cfg, sid)
+
+    conn = connect(cfg.db_path)
+    try:
+        first = conn.execute(
+            "SELECT id, summary FROM threads WHERE session_id = ?", (sid,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    # More observations in the SAME cluster: the thread's id is stable, so the prune spares
+    # it — which is exactly the case that used to freeze.
+    _add(cfg, sid, 6, start_hour=12, day=1, tool="Read")
+    run_session_end(cfg, sid)
+
+    conn = connect(cfg.db_path)
+    try:
+        after = conn.execute(
+            "SELECT summary FROM threads WHERE id = ?", (first["id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert after is not None, "the thread vanished"
+    assert after["summary"] != first["summary"], (
+        f"a kept thread's summary did not refresh: still {after['summary']!r}. It froze at "
+        "the first detection, which is what INSERT OR IGNORE did before the upsert."
     )

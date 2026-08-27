@@ -308,16 +308,35 @@ def persist_detection(
         # retires their stale queue entries instead.
         #
         # Three conditions, and each is load-bearing:
-        #   1. not in the detection we are about to save — current threads are
-        #      untouched, so no cascade churn for rows that are still correct;
-        #   2. unreferenced — cannot violate an FK, by construction rather than by
-        #      luck;
+        #   1. not in the detection we are about to save. This spares current threads
+        #      from the cascade, and that is load-bearing for something easy to miss:
+        #      the CASCADE takes a still-current thread's PENDING queue row and the
+        #      re-enqueue re-inserts it with today's date. `prior_drained` restores
+        #      drained stamps, but nothing restores `enqueued_at` — which is exactly
+        #      the column the banner's "oldest from" reads. Let `keep` drift and every
+        #      turn resets the age of every open debt to now, permanently, with no
+        #      error: #527 r2's pathology on the pending half instead of the drained
+        #      half. Pinned by test_a_kept_threads_pending_debt_does_not_age_backwards.
+        #   2. unreferenced by ANY of the three NO ACTION columns above — cannot
+        #      violate an FK by construction rather than by luck. `observations.
+        #      thread_id` is unwritten by every insert path in the tree today, but
+        #      "unused in practice" is a statement about the current row population,
+        #      and that is precisely the reasoning that produced #797:
+        #      `parent_thread_id` was also unused in practice, on a fresh store, for
+        #      about five days. The column exists, it is indexed, and the guard costs
+        #      nothing. test_the_prune_guards_every_no_action_fk derives this list
+        #      from `PRAGMA foreign_key_list` so the next column added is caught on
+        #      the day it appears rather than the day it breaks.
         #   3. not carrying a DRAINED queue row — a paid debt is ledger history and
-        #      the cascade would take it. Measured on the operator's store: 1 of the
-        #      947 prunable rows. Negligible is not the same as safe, and this is
-        #      the payment ledger.
+        #      the cascade would take it. Guard 3 spares 2 rows on the operator's
+        #      store. Negligible is not the same as safe, and this is the payment
+        #      ledger.
         keep = [thread_row_id(session_id, t) for t in threads]
-        placeholders = ",".join("?" * len(keep)) if keep else "NULL"
+        # `id NOT IN (NULL)` is NULL under SQL's three-valued logic, not "in the empty
+        # set" — the WHERE would never match and the prune would silently no-op. An
+        # empty keep list means keep nothing, so say that with a literal that cannot
+        # collide with a real id instead of a bare NULL that reads as if it does.
+        placeholders = ",".join("?" * len(keep)) if keep else "''"
         conn.execute(
             f"""DELETE FROM threads
                  WHERE session_id = ?
@@ -327,6 +346,8 @@ def persist_detection(
                    AND NOT EXISTS (
                          SELECT 1 FROM knowledge_candidates k
                           WHERE k.source_thread_id = threads.id)
+                   AND NOT EXISTS (
+                         SELECT 1 FROM observations o WHERE o.thread_id = threads.id)
                    AND NOT EXISTS (
                          SELECT 1 FROM reflection_queue r
                           WHERE r.thread_id = threads.id AND r.drained_at IS NOT NULL)""",

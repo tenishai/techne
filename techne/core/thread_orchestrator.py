@@ -439,20 +439,37 @@ def save_threads(
     try:
         for t in threads:
             thread_id = thread_row_id(session_id, t)
-            if t.boundary_signal is not None and t.observation_indices:
-                sql = (
-                    "INSERT OR IGNORE INTO threads"
-                    " (id, session_id, thread_num, label, summary, resume_points,"
-                    "  status, parent_thread_id, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
-                )
-            else:
-                sql = (
-                    "INSERT OR REPLACE INTO threads"
-                    " (id, session_id, thread_num, label, summary, resume_points,"
-                    "  status, parent_thread_id, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
-                )
+            # UPSERT, NOT IGNORE-OR-REPLACE (techne#797). Both old forms were only
+            # correct while the caller deleted the row first, which persist_detection
+            # no longer does — it spares threads that are still current.
+            #
+            # `INSERT OR IGNORE` then no-ops on a stable id, so `label`, `summary` and
+            # `resume_points` froze at whatever the FIRST detection wrote. A thread's id
+            # is bucket_hash(session_id, observation_indices[0], boundary_signal), so it
+            # is stable exactly when the partition is stable — every turn after the first
+            # for a single-thread session, which is 440 of 538 sessions on the operator's
+            # store. Nothing else refreshes these columns (the only other UPDATE on
+            # threads sets `status`), so `techne_resume` and `threads_fts` would have
+            # served the opening minutes of a session forever, silently.
+            #
+            # `INSERT OR REPLACE` had the mirror defect: it is DELETE+INSERT, and with
+            # `recursive_triggers` off the implicit delete does NOT fire `threads_ad`, so
+            # the FTS shadow kept indexing the old label. DO UPDATE fires `threads_au`,
+            # which deletes and re-inserts the FTS row properly, and leaves the rowid
+            # stable so nothing else has to move.
+            sql = (
+                "INSERT INTO threads"
+                " (id, session_id, thread_num, label, summary, resume_points,"
+                "  status, parent_thread_id, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                "   thread_num = excluded.thread_num,"
+                "   label = excluded.label,"
+                "   summary = excluded.summary,"
+                "   resume_points = excluded.resume_points,"
+                "   parent_thread_id = excluded.parent_thread_id,"
+                "   updated_at = CURRENT_TIMESTAMP"
+            )
             parent_id = link_map.get(thread_id)
             conn.execute(
                 sql,
