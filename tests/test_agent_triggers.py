@@ -497,7 +497,7 @@ TRIGGER_WITNESSES = {
     "zero rows": "test_only_the_codex_distinguishes_an_empty_index_from_no_match",
     "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
     "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
-    "cleaning up": "test_the_unemittable_reporter_still_refuses_to_drain",
+    "`reflection_queue`": "test_the_unemittable_reporter_still_refuses_to_drain",
     "reflect.enabled: false": "test_disabling_reflect_silences_the_nudge_but_not_the_debt",
     "whether reflection is running": "test_an_unbound_automatic_pass_is_the_default_posture",
     "live techne MCP server": "test_the_mcp_server_pins_config_before_it_serves",
@@ -850,7 +850,7 @@ def test_the_unemittable_reporter_still_refuses_to_drain(tmp_path):
     )
 
 
-def test_disabling_reflect_silences_the_nudge_but_not_the_debt(tmp_path, monkeypatch):
+def test_disabling_reflect_silences_the_nudge_but_not_the_debt(tmp_path):
     """The trigger claims `reflect.enabled: false` is backwards: it silences the route that
     works while the debt keeps accruing. That is TWO claims about two different call sites,
     and the surprising half is the second one — `lifecycle.run_session_end` enqueues outside
@@ -877,6 +877,30 @@ def test_disabling_reflect_silences_the_nudge_but_not_the_debt(tmp_path, monkeyp
         "session_end enqueued NO reflection debt while reflect.enabled was false. "
         "reflect-guide.md tells operators that disabling does not stop the debt, only the "
         "nudge — if the enqueue is now gated, that sentence is wrong advice."
+    )
+
+    # THE OTHER HALF, WHICH NOTHING IN THIS REPO HELD (Prudence, #792 r1). The bullet
+    # claims disabling silences the route that PRODUCES everything, and only the debt
+    # clause was asserted. She flipped `if config.reflect.enabled:` at
+    # hooks/session_start.py to `if True:` — the mutation that makes the first half false —
+    # and the entire suite stayed green, 3651 passed. The accounting read as covered while
+    # the claim underneath was unheld: the #764 shape again, one layer over.
+    from techne.hooks.session_start import _run_phases_2_to_9
+
+    parts: list[str] = []
+    _run_phases_2_to_9(
+        cfg,
+        {"cwd": str(tmp_path), "session_id": session_id},
+        run_ts="2026-01-01T00:00:00+00:00",
+        db_path=cfg.db_path,
+        output_parts=parts,
+        failures=[],
+    )
+    disabled = "\n".join(parts)
+    assert "pending reflection" not in disabled.lower(), (
+        "the SessionStart nudge fired while reflect.enabled was false. The trigger tells "
+        "agents that disabling silences the resident route — if the nudge survives it, the "
+        "operator is being told to switch off something that is already off."
     )
 
 
@@ -923,54 +947,60 @@ def test_an_unbound_automatic_pass_is_the_default_posture(tmp_path, monkeypatch)
 
 
 def test_the_mcp_server_pins_config_before_it_serves(tmp_path):
-    """The `write_to` warning — 'the tool call succeeds and writes to the wrong place, with
-    no error' — is true only because `main()` loads config ONCE, ahead of the serve loop.
+    """The `write_to` warning — "the tool call succeeds and writes to the wrong place, with
+    no error" — is true only because config is read ONCE and never re-read while serving.
 
-    Asserted structurally on the AST rather than by running a server: the mutation that
-    falsifies the doc is moving `Config.load()` INTO the request loop (which would make the
-    advice unnecessary and the trigger noise). A grep for the call cannot tell those two
-    arrangements apart; their position relative to the loop is the whole claim."""
+    PINS THE SENTENCE, NOT THE ARRANGEMENT (Prudence, #792 r1). An earlier version asserted
+    only that `Config.load()` was lexically before the first top-level loop in `main` and
+    not inside it. That leaves the doc falsifiable while the test stays green: a hot-reload
+    added to `handle_request` — a far more natural home for one than the stdin loop — would
+    make the tools stop using startup values without tripping a positional check. Counting
+    every call site in the module closes that: the claim is that there is exactly ONE, at
+    startup, so any second one anywhere fails here regardless of where it lives.
+
+    Also resolves the serve loop by what it iterates rather than by `loops[0]`, so adding a
+    warm-up loop ahead of it cannot quietly move the goalposts."""
     import ast
 
     src = (REPO / "techne" / "mcp_server.py").read_text()
+    tree = ast.parse(src)
+
+    def _is_config_load(n):
+        return (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "load"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "Config"
+        )
+
+    everywhere = [n.lineno for n in ast.walk(tree) if _is_config_load(n)]
+    assert len(everywhere) == 1, (
+        f"Config.load() appears {len(everywhere)} time(s) in mcp_server.py, at {everywhere}. "
+        "reflect-guide.md tells operators that editing config.yaml under a live MCP server "
+        "has no effect until restart — that holds only while the server reads config exactly "
+        "once. A second call site is a re-read, and the warning becomes wrong."
+    )
+
     main_fn = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+    in_main = [n.lineno for n in ast.walk(main_fn) if _is_config_load(n)]
+    assert in_main == everywhere, (
+        f"the sole Config.load() is not inside main(): module {everywhere}, main {in_main}"
+    )
+
+    # The serve loop, identified by what it iterates — `for line in sys.stdin`.
+    serve = [
         n
-        for n in ast.walk(ast.parse(src))
-        if isinstance(n, ast.FunctionDef) and n.name == "main"
-    )
-
-    loads = [
-        n.lineno
         for n in ast.walk(main_fn)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "load"
-        and isinstance(n.func.value, ast.Name)
-        and n.func.value.id == "Config"
+        if isinstance(n, ast.For)
+        and isinstance(n.iter, ast.Attribute)
+        and n.iter.attr == "stdin"
     ]
-    loops = [n for n in main_fn.body if isinstance(n, (ast.For, ast.While))]
-
-    assert loads, "mcp_server.main() no longer calls Config.load() at all"
-    assert loops, "mcp_server.main() no longer has a top-level serve loop to compare against"
-
-    serve_loop = loops[0]
-    assert max(loads) < serve_loop.lineno, (
-        f"Config.load() at line(s) {loads} is not strictly before the serve loop at line "
-        f"{serve_loop.lineno}. reflect-guide.md warns operators that editing config.yaml "
-        "under a live MCP server has no effect until restart; a per-request load makes that "
-        "warning wrong."
-    )
-    inner = [
-        n.lineno
-        for n in ast.walk(serve_loop)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "load"
-        and isinstance(n.func.value, ast.Name)
-        and n.func.value.id == "Config"
-    ]
-    assert not inner, (
-        f"Config.load() is called INSIDE the serve loop at {inner} — config is no longer pinned"
+    assert serve, "mcp_server.main() no longer iterates sys.stdin — find the new serve loop"
+    assert max(in_main) < serve[0].lineno, (
+        f"Config.load() at {in_main} is not before the stdin serve loop at {serve[0].lineno}"
     )
 
 
