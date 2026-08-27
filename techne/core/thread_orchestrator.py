@@ -26,9 +26,14 @@ class Thread:
     resume_points: str = ""
     observation_indices: list[int] = field(default_factory=list)
     # Set by heuristic detector.  When present, save_threads derives the row ID
-    # from bucket_hash(session_id, first_obs_id, boundary_signal) and uses
-    # INSERT OR IGNORE so replay is idempotent.  None means fall back to the
-    # legacy "{session_id}-{thread_num}" format.
+    # from bucket_hash(session_id, first_obs_id, boundary_signal).  None means
+    # fall back to the legacy "{session_id}-{thread_num}" format.
+    #
+    # THE VERB NO LONGER DEPENDS ON THIS FIELD (techne#797).  save_threads used
+    # INSERT OR IGNORE here and INSERT OR REPLACE for the legacy form; both were
+    # only correct while the caller deleted the row first.  It is now one upsert
+    # for both, so replay stays idempotent AND a re-detected label/summary
+    # actually lands.
     boundary_signal: str | None = None
 
 
@@ -418,14 +423,21 @@ def save_threads(
     """Persist threads to the database.
 
     If `conn` is provided the caller owns the transaction (no commit/close
-    here). Pass a connection to make DELETE + insert atomic in redetection.
+    here). Pass a connection to make the prune + insert atomic when
+    `persist_detection` replaces a detection.
 
     When a Thread carries a ``boundary_signal`` (set by the heuristic
     detector) the row ID is derived from
-    ``bucket_hash(session_id, first_obs_id, boundary_signal)`` and the row
-    is written with ``INSERT OR IGNORE`` so that replaying the same session
-    is a no-op.  Threads without a ``boundary_signal`` fall back to the
-    legacy ``"{session_id}-{thread_num}"`` format with ``INSERT OR REPLACE``.
+    ``bucket_hash(session_id, first_obs_id, boundary_signal)``.  Threads without
+    one fall back to the legacy ``"{session_id}-{thread_num}"`` format.
+
+    THE VERB DOES NOT DEPEND ON THAT FIELD (techne#797).  This used to say the
+    boundary_signal path wrote ``INSERT OR IGNORE`` and the legacy path
+    ``INSERT OR REPLACE``; both are retired.  It is one
+    ``ON CONFLICT(id) DO UPDATE`` upsert for both, so replaying a session is
+    still a no-op for CONTENT that has not changed, while a re-detected
+    label/summary actually lands.  See the comment on the statement itself for
+    why each half of that matters.
     """
     from techne.core.database import connect
 
@@ -439,20 +451,53 @@ def save_threads(
     try:
         for t in threads:
             thread_id = thread_row_id(session_id, t)
-            if t.boundary_signal is not None and t.observation_indices:
-                sql = (
-                    "INSERT OR IGNORE INTO threads"
-                    " (id, session_id, thread_num, label, summary, resume_points,"
-                    "  status, parent_thread_id, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
-                )
-            else:
-                sql = (
-                    "INSERT OR REPLACE INTO threads"
-                    " (id, session_id, thread_num, label, summary, resume_points,"
-                    "  status, parent_thread_id, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
-                )
+            # UPSERT, NOT IGNORE-OR-REPLACE (techne#797). Both old forms were only
+            # correct while the caller deleted the row first, which persist_detection
+            # no longer does — it spares threads that are still current.
+            #
+            # `INSERT OR IGNORE` then no-ops on a stable id, so `label`, `summary` and
+            # `resume_points` froze at whatever the FIRST detection wrote. A thread's id
+            # is bucket_hash(session_id, observation_indices[0], boundary_signal), so it
+            # is stable exactly when the partition is stable — every turn after the first
+            # for a single-thread session, which is 440 of 538 sessions on the operator's
+            # store. Nothing else refreshes these columns (the only other UPDATE on
+            # threads sets `status`), so `techne_resume` and `threads_fts` would have
+            # served the opening minutes of a session forever, silently.
+            #
+            # `INSERT OR REPLACE` had the mirror defect: it is DELETE+INSERT, and with
+            # `recursive_triggers` off the implicit delete does NOT fire `threads_ad`, so
+            # the FTS shadow kept indexing the old label. DO UPDATE fires `threads_au`,
+            # which deletes and re-inserts the FTS row properly, and leaves the rowid
+            # stable so nothing else has to move.
+            #
+            # parent_thread_id IS COALESCED, NOT OVERWRITTEN (Prudence, #798 r2). It comes
+            # from `link_map.get(thread_id)`, which is None whenever `link_threads` did not
+            # re-derive a parent this turn — and a bare `excluded.parent_thread_id` then
+            # writes that None over a link already in the row. `INSERT OR IGNORE` could
+            # not do this, because it never updated. The trigger is a CLOCK, not a race:
+            # `link_threads` skips candidates with status='stale', and `age_threads` (which
+            # run_session_end calls every turn) walks active -> completed -> stale, so ~32
+            # days after a parent's session GOES QUIET it stops being re-derivable and
+            # the child's link is silently erased. (Not 32 days after the link is
+            # written: this upsert refreshes updated_at on every re-save, so a parent
+            # in a still-live session stays `active` and the erasure is deferred —
+            # Prudence, #798 r3 N3. The common case is a parent in an ended session,
+            # where the arithmetic holds.) There is no integrity reason to ever clear this
+            # column: it has an FK, and persist_detection's guard 1 is what protects it.
+            sql = (
+                "INSERT INTO threads"
+                " (id, session_id, thread_num, label, summary, resume_points,"
+                "  status, parent_thread_id, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                "   thread_num = excluded.thread_num,"
+                "   label = excluded.label,"
+                "   summary = excluded.summary,"
+                "   resume_points = excluded.resume_points,"
+                "   parent_thread_id = COALESCE("
+                "     excluded.parent_thread_id, threads.parent_thread_id),"
+                "   updated_at = CURRENT_TIMESTAMP"
+            )
             parent_id = link_map.get(thread_id)
             conn.execute(
                 sql,
