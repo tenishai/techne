@@ -215,6 +215,100 @@ def init_session_for_external_id(
     return external_id
 
 
+def persist_detection(
+    config: Config,
+    session_id: str,
+    threads: list,
+    observations: list[dict],
+    *,
+    scores=None,
+    parent_links=None,
+) -> int:
+    """Replace a session's persisted detection — threads, boundary scores, and the
+    reflection debt derived from them — in ONE transaction.
+
+    ONE IMPLEMENTATION, TWO CALLERS (techne#646). `run_session_end` and
+    `redetect_threads` both persist a detection, and they had drifted: redetect
+    deleted `threads` AND `thread_boundaries` before saving, while session_end
+    deleted only `thread_boundaries`. Its comment even reasons about the accumulation
+    ("Replace, don't accumulate ... seen live: one session at 37k rows") and applies
+    the fix to one table.
+
+    WHY THAT ONE MISSING DELETE PRODUCED #646. `save_threads` writes with
+    `INSERT OR IGNORE` on an id derived from `bucket_hash(session_id, first_obs_id,
+    boundary_signal)`, and `run_session_end` fires ONCE PER TURN, re-detecting
+    whenever the observation count moved. Shifted boundaries give the same logical
+    thread a NEW id, the old row is never removed, and the session accumulates one
+    superseded partition per re-detection (measured: 86 rows in `threads` against 51
+    threads in the current detection). Reflection then reads the two apart —
+    `load_session_for_reflection` re-detects from scratch while the queue holds ids
+    from a partition that no longer exists — so the row is real debt whose prompt is
+    impossible. `reflection_queue.thread_id` is `ON DELETE CASCADE` precisely to
+    retire those rows; with nothing deleting the stale partition it never fired.
+
+    THE RESTORE IS NOT OPTIONAL. The CASCADE takes DRAINED rows too, so a
+    delete-and-re-enqueue without it resurrects paid debt as pending and makes the
+    banner's "oldest from" wrong — techne#527 r2, fixed once in redetect and trivially
+    reintroduced here. It rides the SAME transaction as the enqueue it corrects: a
+    restore that can fail separately from the insert it repairs IS the r2 regression.
+
+    Returns the number of reflection-queue rows newly inserted.
+
+    Raises on failure, having rolled back. Callers must not paper over that: a
+    half-applied detection (threads saved, debt not enqueued) is the #514 pathology,
+    and nothing re-derives debt for an emittable thread with no queue row. The
+    session_end hook already catches every exception from `run_session_end`, records a
+    failed hook run and exits 0, so teardown is protected at that boundary rather than
+    by swallowing this.
+    """
+    from techne.core.database import connect
+    from techne.core.heuristic_threads import boundary_indices_from_segments, save_boundaries
+    from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
+    from techne.core.threads import save_threads
+
+    boundary_a_indices = (
+        boundary_indices_from_segments([t.observation_indices for t in threads])
+        if scores
+        else None
+    )
+    conn = connect(config.db_path)
+    try:
+        prior_drained = {
+            r["thread_id"]: r["drained_at"]
+            for r in conn.execute(
+                "SELECT thread_id, drained_at FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NOT NULL",
+                (session_id,),
+            )
+        }
+        conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
+        if scores and boundary_a_indices is not None:
+            save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
+        save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
+        # Both the id lookup and the insert must ride THIS conn (#527 r5) —
+        # persisted_thread_id used to open its own and could not see the uncommitted
+        # rows, which made an inline enqueue raise a FOREIGN KEY failure.
+        queued = enqueue_reflection_debt(
+            config.db_path,
+            session_id,
+            thread_ids=emittable_thread_ids(config, session_id, threads, observations, conn=conn),
+            conn=conn,
+        )
+        for tid, drained in prior_drained.items():
+            conn.execute(
+                "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
+                (drained, tid),
+            )
+        conn.commit()
+        return queued
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def run_session_end(
     config: Config,
     session_id: str,
@@ -231,17 +325,12 @@ def run_session_end(
 
     from techne.core.database import connect
     from techne.core.extension_state import get_state, set_state
-    from techne.core.heuristic_threads import (
-        boundary_indices_from_segments,
-        save_boundaries,
-    )
     from techne.core.state import end_session, get_observations
     from techne.core.threads import (
         age_threads,
         detect_summarize_with_metadata,
         format_combined_summary,
         link_threads,
-        save_threads,
         thread_row_id,
     )
     from techne.sync.outbox import enqueue
@@ -306,41 +395,31 @@ def run_session_end(
     # does read-only FTS queries on its own connection so there's no conflict.
     parent_links = link_threads(threads, session_id, config.db_path, config)
 
+    # Replace the whole detection — threads, boundaries and the debt derived from
+    # them — through the ONE helper redetect_threads also uses (#646). This path
+    # used to DELETE thread_boundaries and then `save_threads` on top of whatever
+    # was already there, so every re-detection left a superseded partition behind.
+    queued_for_reflection = persist_detection(
+        config,
+        session_id,
+        threads,
+        observations,
+        scores=scores,
+        parent_links=parent_links,
+    )
     if scores:
-        # Heuristic detector ran — persist the per-pair score breakdown so
-        # `techne threads show` can read it back without re-running detection.
-        boundary_a_indices = boundary_indices_from_segments(
-            [t.observation_indices for t in threads]
-        )
-        # Write thread_boundaries AND threads in ONE transaction so a crash
-        # between the two writes never leaves committed boundaries with no
-        # threads (#248). This mirrors redetect_threads exactly: one
-        # connection, commit=False on the intermediate writes, single commit
-        # at the end, rollback on any exception.
-        #
-        # Replace, don't accumulate. run_session_end fires once per turn
-        # (Claude Code's Stop hook, opencode's session.idle), so re-inserting
-        # the boundary set without clearing the prior one grows
-        # thread_boundaries unboundedly — the #79 backlog pathology on a
-        # different table (seen live: one session at 37k rows). DELETE+insert
-        # keeps it idempotent, mirroring redetect_threads.
+        # Persist the observation count processed so external tooling (and future
+        # incremental passes) can tell how far the detector has run. Separate write:
+        # it is a cursor about the detector, not part of the detection itself.
         conn = connect(config.db_path)
         try:
-            conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
-            save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
-            # Persist the observation count processed so external tooling (and
-            # future incremental passes) can tell how far the detector has run.
-            ext_key = f"heuristic_threads.{session_id}"
-            set_state(conn, ext_key, {"last_obs_count": len(observations)}, commit=False)
-            save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+            set_state(
+                conn,
+                f"heuristic_threads.{session_id}",
+                {"last_obs_count": len(observations)},
+            )
         finally:
             conn.close()
-    else:
-        save_threads(threads, session_id, config.db_path, parent_links=parent_links)
 
     # techne#514: record the reflection debt DURABLY, not just in the log line
     # below. Until now this function counted threads, printed "N obs, M threads"
@@ -348,20 +427,13 @@ def run_session_end(
     # and every crash/timeout dropped it silently. Best-effort: a queue-write
     # failure must never take down teardown, which is the one thing that still
     # has to persist the session's actual work.
-    queued_for_reflection = 0
-    try:
-        from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
-
-        # Only threads emit will actually produce a prompt for. Queueing every
-        # thread left sub-threshold ones queued, never emittable and therefore
-        # never drainable (#527 r4).
-        queued_for_reflection = enqueue_reflection_debt(
-            config.db_path,
-            session_id,
-            thread_ids=emittable_thread_ids(config, session_id, threads, observations),
-        )
-    except Exception as e:  # pragma: no cover - defensive, mirrors the reflect path
-        print(f"techne: reflection debt enqueue deferred: {e}", file=sys.stderr)
+    # The enqueue now rides persist_detection's transaction (#646), so it is atomic
+    # with the thread write rather than a best-effort follow-up. It used to be
+    # wrapped so a queue failure "must never take down teardown" — but the
+    # session_end HOOK already catches everything from run_session_end, records a
+    # failed hook run and exits 0, so that protection was doubled up, and the cost
+    # was a window where threads were saved and the debt silently was not: the exact
+    # #514 pathology, since nothing re-derives debt for a thread with no queue row.
 
     aged = age_threads(config.db_path, config)
 
@@ -470,18 +542,11 @@ def redetect_threads(
     """
     import os
 
-    from techne.core.database import connect
-    from techne.core.heuristic_threads import (
-        boundary_indices_from_segments,
-        save_boundaries,
-    )
-    from techne.core.reflect import emittable_thread_ids, enqueue_reflection_debt
     from techne.core.state import get_observations, set_session_summary
     from techne.core.threads import (
         detect_summarize_with_metadata,
         format_combined_summary,
         link_threads,
-        save_threads,
         thread_row_id,
     )
     from techne.sync.outbox import enqueue
@@ -493,60 +558,19 @@ def redetect_threads(
     # does read-only FTS queries on its own connection; no conflict).
     parent_links = link_threads(threads, session_id, config.db_path, config)
 
-    # Delete old rows AND insert new ones in a single transaction so a crash
-    # mid-way never leaves the session with no threads.
-    boundary_a_indices = (
-        boundary_indices_from_segments([t.observation_indices for t in threads]) if scores else None
+    # ONE implementation, shared with run_session_end (#646). This path always
+    # replaced both tables; session_end replaced only thread_boundaries, and that
+    # asymmetry is what accumulated superseded partitions. Keeping them on one
+    # function is the point — a two-implementation rail drifts on its BOOKKEEPING
+    # first, because that half is invisible to whoever runs it.
+    persist_detection(
+        config,
+        session_id,
+        threads,
+        observations,
+        scores=scores,
+        parent_links=parent_links,
     )
-    conn = connect(config.db_path)
-    try:
-        prior_drained = {
-            r["thread_id"]: r["drained_at"]
-            for r in conn.execute(
-                "SELECT thread_id, drained_at FROM reflection_queue "
-                "WHERE session_id = ? AND drained_at IS NOT NULL",
-                (session_id,),
-            )
-        }
-        conn.execute("DELETE FROM threads WHERE session_id = ?", (session_id,))
-        conn.execute("DELETE FROM thread_boundaries WHERE session_id = ?", (session_id,))
-        if scores and boundary_a_indices is not None:
-            save_boundaries(conn, session_id, scores, boundary_a_indices, commit=False)
-        save_threads(threads, session_id, config.db_path, parent_links=parent_links, conn=conn)
-        # Re-enqueue INSIDE the transaction: the DELETE above cascades
-        # reflection_queue away and session_end does not re-run for a redetect,
-        # so without this the debt is lost permanently (#527 r1).
-        #
-        # Both the id lookup and the insert must ride THIS conn (#527 r5) —
-        # persisted_thread_id used to open its own and could not see the
-        # uncommitted rows, which is what made an inline enqueue raise a FOREIGN
-        # KEY failure and forced it after the commit. Do not move it back out:
-        # nothing re-derives debt for an emittable thread with no queue row, so
-        # a failure out there is a permanent half-applied redetect, while in
-        # here it rolls back to a state the operator can re-run.
-        enqueue_reflection_debt(
-            config.db_path,
-            session_id,
-            thread_ids=emittable_thread_ids(
-                config, session_id, threads, observations, conn=conn
-            ),
-            conn=conn,
-        )
-        # Re-enqueueing alone resurrects PAID debt as pending, re-firing the
-        # banner and making its "oldest from" age wrong (#527 r2). Same
-        # transaction as the enqueue it corrects: a restore that can fail
-        # separately from the insert it repairs is the r2 regression again.
-        for tid, drained in prior_drained.items():
-            conn.execute(
-                "UPDATE reflection_queue SET drained_at = ? WHERE thread_id = ?",
-                (drained, tid),
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
     set_session_summary(
         config.db_path,

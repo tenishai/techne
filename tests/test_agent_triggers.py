@@ -347,6 +347,13 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "reflect emit",
     "reflect ingest",
     "reflect promote",
+    # RE-BLESSED 2026-08-27 after #646 landed `reflect reconcile`. Answered, not waved
+    # through: it reads `reflection_queue` and deletes undrained rows whose thread is
+    # absent from the session's current detection. It touches no transcript, no session
+    # JSONL and no export path — deployment.md's "nothing archives session transcripts"
+    # still holds. Second real firing of this pin, and again it made a CLI change stop
+    # and answer a documentation question.
+    "reflect reconcile",
     "reflect review",
     "reflect stats",
     "restore",
