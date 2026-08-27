@@ -306,8 +306,16 @@ RETENTION_REFUSAL_PHRASES = (
 )
 
 
-def _manifest_db_filename(domain: str, meta: object) -> tuple[str | None, str | None]:
+def _manifest_db_filename(
+    domain: str, meta: object, src_dir: Path
+) -> tuple[str | None, str | None]:
     """Resolve one manifest entry to its db filename. Returns (filename, problem).
+
+    `src_dir` is the set directory the name is resolved against, and it is REQUIRED
+    rather than optional on purpose (techne#782): the containment check below is
+    only worth having if every reader is forced to supply the base it contains
+    against. An optional parameter would let a fourth reader skip the guard exactly
+    the way the three readers used to skip each other's.
 
     ONE resolver for the THREE readers of a manifest entry — `read_manifest`,
     `_classify_backup_set` and `restore_all_dbs` — because they carried the same
@@ -348,6 +356,95 @@ def _manifest_db_filename(domain: str, meta: object) -> tuple[str | None, str | 
     # this string one of two magic values" but "does this name a database FILE",
     # which the callers answer directly with `.is_file()` instead of `.exists()`
     # (Prudence, #777 r5 I1).
+
+    # CONTAINMENT, BY RESOLVE-AND-COMPARE (techne#782). `src_dir / name` DISCARDS
+    # `src_dir` ENTIRELY when `name` is absolute -- pathlib semantics for an
+    # absolute right-hand side, not a bug in the join -- so
+    # {"file": "/etc/passwd"} validated as a COMPLETE set and `restore_all_dbs`
+    # then staged a file from outside the set over a live database. The same route
+    # reaches `src_dir/../../evil.db` through the DEFAULT filename, so the domain
+    # KEY alone carries the traversal with no `file` key at all. Both measured
+    # ACCEPTED at 7529ca9, and unchanged by #777.
+    #
+    # NOT A STRING MATCH ON "..", DELIBERATELY. Symlinks and mixed separators make
+    # the string form leaky: a plain basename inside the set can still be a symlink
+    # pointing OUT of it, and no spelling check sees that. Resolving both sides and
+    # comparing is the predicate that actually matches the claim -- and this
+    # validator has already been through four rounds of "the check was narrower
+    # than the claim".
+    #
+    # `candidate == base` IS ALLOWED THROUGH, deliberately. A name resolving to the
+    # set directory itself (".", "./", ".//", "./.") is not an escape, and the
+    # `is_file()` check at each caller already refuses it with "backup set is
+    # incomplete" -- a phrase `test_a_file_naming_the_set_directory_is_refused`
+    # pins to THAT guard. ".." and "../" do escape, and are refused here instead:
+    # the parent of the set is outside the set, and "lists a database file that is
+    # not there" was the wrong cause for them all along.
+    # A NUL BYTE MUST NEVER REACH `resolve()` (Prudence, #784 r1). Every path
+    # syscall rejects an embedded NUL with ValueError -- NOT OSError -- so the
+    # containment check below raised straight out of `prune_backup_sets`, killing
+    # retention for EVERY set rather than refusing this one, and routing around the
+    # `failed` channel this resolver exists to feed. Measured at 5a21643: a set
+    # carrying {"file": "a\x00b"} took down a run that main handles gracefully, so
+    # this was a REGRESSION THIS GUARD INTRODUCED, not a pre-existing hole. Exactly
+    # the #759 shape one type over -- a value that IS a str and still is not a
+    # usable path.
+    # ONE `source`, COMPUTED ONCE, USED BY EVERY REFUSAL BELOW (Prudence, #784 r2
+    # Nit 1). The containment refusal had this and the two new returns did not, so
+    # a manifest with NO `file` key -- {"databases": {"a\x00b": {}}}, reachable
+    # through ordinary JSON by the same route as the domain-key traversal this PR
+    # already handles -- was refused with "'file' for ..." naming a field that is
+    # not in the operator's file. Half 1 exists so the message names the cause; on
+    # one of its two routes it was naming the wrong thing.
+    source = "'file'" if "file" in meta else "the domain name"
+
+    if "\x00" in name:
+        return None, f"{source} for '{domain}' contains a NUL byte"
+    # AND THE CONTRACT, RESTORED (Prudence, #784 r1). This function's signature is
+    # its promise: it RETURNS (name, problem) and never raises, which is what lets
+    # every caller route a bad entry to `failed` instead of dying. A bare
+    # `.resolve()` broke that promise for a whole class of values. The NUL check
+    # above is the one we can name and message well; this is the guarantee that a
+    # value we did NOT anticipate degrades to a refusal instead of taking retention
+    # down with it. Prudence swept the neighbouring classes (long names, deep paths,
+    # `//etc/passwd`, `~/`, backslashes, trailing newline) and found NUL the only
+    # live escape -- so this catch should be unreachable today, and is here because
+    # "unreachable" is a claim about inputs we have thought of.
+    # TWO ARMS, NOT ONE (Prudence, #784 r2 Nit 3). `src_dir` is supplied by the
+    # CALLER and is not the untrusted value; half 2's rationale is explicitly about
+    # a value we did not anticipate arriving IN THE MANIFEST. Covering both in one
+    # `try` widened the catch past its own justification and past the only
+    # expression that can carry a hostile input. Splitting them bounds what the
+    # untestable arm is allowed to swallow to a single expression -- which is the
+    # honest answer to "you cannot test it": you cannot, but you can bound it.
+    #
+    # Hoisting `base` out UNGUARDED would be the trap: it would re-break the very
+    # contract half 2 restores. Each arm names its own cause instead.
+    #
+    # BOTH ARMS CATCH ValueError AS WELL AS OSError, and the first arm is the one
+    # that needs saying (Prudence, #784 r3). Splitting the single `except
+    # (ValueError, OSError)` into two gave this arm `except OSError` alone, which
+    # looks tighter and is strictly weaker: `Path(...).resolve()` defaults to
+    # strict=False and swallows ELOOP and non-existent paths without raising, so
+    # OSError out of this line is essentially unreachable on POSIX — while
+    # ValueError demonstrably does come out of it (`Path("a\x00b").resolve()`
+    # raises "embedded null character in path"). The split replaced a live catch
+    # with a dead one and made this function RAISE where it had returned a
+    # problem, against the "never raises" contract ten lines above that half 2
+    # exists to hold. Not reachable through the CLI today — `src_dir` is an
+    # iterdir() result or an argv path and neither carries a NUL — but half 2's
+    # whole justification is unanticipated input, so narrowing it to the inputs we
+    # thought of is the argument it was written to reject.
+    try:
+        base = Path(src_dir).resolve()
+    except (ValueError, OSError) as e:
+        return None, f"the backup set directory is unreadable: {type(e).__name__}"
+    try:
+        candidate = (base / name).resolve()
+    except (ValueError, OSError) as e:
+        return None, f"{source} for '{domain}' is not a usable path: {type(e).__name__}"
+    if candidate != base and base not in candidate.parents:
+        return None, f"{source} for '{domain}' escapes the backup set: {name!r}"
     return name, None
 
 
@@ -596,13 +693,17 @@ def _classify_backup_set(child: Path) -> SetClass:
     malformed: list[str] = []
     missing: list[str] = []
     for domain, meta in dbs.items():
-        name, problem = _manifest_db_filename(domain, meta)
+        name, problem = _manifest_db_filename(domain, meta, child)
         if problem:
             malformed.append(domain)
-        # is_file(), NOT exists(): a `file` naming the set directory ("./", "../",
-        # "./.") makes exists() true, so the set was classified RESTORABLE, took a
-        # keep slot, and at keep=1 EVICTED THE GENUINE SET with failed: [] -- while
+        # is_file(), NOT exists(): a `file` naming the set directory ("./", "./.")
+        # makes exists() true, so the set was classified RESTORABLE, took a keep
+        # slot, and at keep=1 EVICTED THE GENUINE SET with failed: [] -- while
         # `restore` then refused the survivor (Prudence, #777 r5 I1).
+        # ".." AND "../" WERE IN THAT LIST UNTIL techne#782 and are no longer: they
+        # name the set's PARENT, so containment in `_manifest_db_filename` refuses
+        # them before this line is reached. Everything still listed here resolves
+        # to the set directory ITSELF, which is not an escape and is this guard's.
         elif not (child / name).is_file():
             missing.append(domain)
     if malformed:
@@ -773,7 +874,7 @@ def read_manifest(src_dir: Path) -> dict:
     if not isinstance(dbs, dict) or not dbs:
         raise RestoreError("manifest lists no databases")
     for domain, meta in dbs.items():
-        name, problem = _manifest_db_filename(domain, meta)
+        name, problem = _manifest_db_filename(domain, meta, src_dir)
         if problem:
             raise RestoreError(f"malformed manifest: {problem}")
         f = src_dir / name
@@ -830,7 +931,7 @@ def restore_all_dbs(
         # `problem` cannot be set here. It goes through the resolver anyway -- a no-op
         # that cannot rot beats a comment claiming two readers while
         # `grep 'meta.get("file"'` finds three.
-        name, problem = _manifest_db_filename(domain, meta)
+        name, problem = _manifest_db_filename(domain, meta, src_dir)
         if problem:  # pragma: no cover - read_manifest already rejected these
             raise RestoreError(f"malformed manifest: {problem}")
         src_file = src_dir / name

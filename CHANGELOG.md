@@ -341,6 +341,49 @@ All notable changes to techne are documented here. Format loosely follows
   The stderr line is unchanged for pattern sections — `kind` renders as `section`, so it still
   reads `skipped section "My pattern": …`.
 
+- **A hand-authored manifest could name a database outside the backup set** (#782).
+  `read_manifest` accepted `{"file": "/etc/passwd"}` and `{"databases": {"../../evil": {}}}`,
+  validated the set as complete, and `restore_all_dbs` then staged a file from outside the set
+  over a live database. The first works because `src_dir / "/etc/passwd"` **discards `src_dir`
+  entirely** — pathlib semantics for an absolute right-hand side, not a bug in the join. The
+  second needs no `file` key at all: with it absent the name falls back to `f"{domain}.db"`, so
+  the domain key alone carries the traversal.
+
+  `_manifest_db_filename` — the single resolver all three readers go through since #759 — now
+  resolves the name against the set directory and refuses anything that lands outside it, so
+  `read_manifest`, `_classify_backup_set` and `restore_all_dbs` are covered by one predicate.
+  The check **resolves and compares** rather than matching on `".."`: a plain basename inside
+  the set can still be a symlink pointing out of it, which no spelling check sees.
+
+  **Scope, stated plainly.** Nothing techne writes produces either shape — the writer always
+  emits `{"file": <plain basename>, "size_bytes": <int>}` — so this needs a manifest that was
+  hand-edited or supplied by someone else. It is not a privilege escalation either: restore
+  runs as the operator and reads what the operator could already read. What it fixes is a live
+  database being overwritten from an unexpected source while the manifest claims the set is
+  self-contained, which is the promise `docs/deployment.md` makes for restore.
+
+  **Some refusals changed their stated cause.** Named as a class rather than counted, because
+  the count was wrong: three distinct inputs now report differently, and they do not all come
+  from the same guard.
+
+  - A `file` of `".."` or `"../"` names the set's *parent*, so it is refused as a malformed
+    entry ("escapes the backup set") rather than as a missing file ("backup set is incomplete").
+  - A `file` that reaches outside the set by any other route — an absolute path, a traversal
+    part-way along, a basename that is a symlink out — refuses the same way, where before it
+    was either accepted or reported as missing.
+  - A `file` containing a **NUL byte** now refuses with "contains a NUL byte". This one is not
+    a containment refusal at all: `Path.is_file()` silently swallows the `ValueError` a NUL
+    raises, so on previous releases such a set reported "backup set is incomplete".
+
+  **The second bullet is the one that was not merely mislabelled.** For the first and third,
+  the set was already refused and never took a retention slot — `".."` and `"../"` name a
+  directory and a NUL makes `is_file()` answer false, so both read as missing — and what
+  changed is only the stated cause. But an escaping name that resolves to a file that *exists*
+  was **accepted**: the set validated as complete, took a retention slot, and could evict a
+  genuine backup. That is the bug this entry fixes, not a wording change. The directory
+  spellings that resolve to the set directory *itself* (`"."`, `"./"`, `".//"`, `"./."`) are
+  not escapes and refuse exactly as before.
+
 - **`architect export` → `architect ingest` accreted a near-duplicate every cycle** (#770).
   `export_patterns_md` writes a `---` separator after each entry and the parser absorbed it
   into that entry's body. A pattern id is a content hash of `(name, source_url, body)`, so
@@ -411,12 +454,14 @@ All notable changes to techne are documented here. Format loosely follows
   reported *ahead of* the missing-file check and therefore masks one, so "the
   manifest is wrong" must not be read as "the set is intact".
 
-  Two guards cover it, and they are worth naming separately in a release whose
+  Three guards cover it now, and they are worth naming separately in a release whose
   subject is guards drifting between call sites. `""` and whitespace-only are
-  refused in the shared resolver, as a malformed `file` value. `.`, `..`, `./`,
-  `.//`, `./.` and `../` reach the readers and are refused there, by asking the
-  question directly — *is this a file?* — rather than by matching spellings, which
-  is what an earlier attempt did and what left four of those six open.
+  refused in the shared resolver, as a malformed `file` value. `..` and `../` are
+  refused in the resolver too — see the #782 entry above; they name the set's parent,
+  so containment reaches them before any reader does. `.`, `./`, `.//` and `./.`
+  reach the readers and are refused there, by asking the question directly — *is this
+  a file?* — rather than by matching spellings, which is what an earlier attempt did
+  and what left four of those six directory spellings open.
 
   All three readers now resolve entries through one shared helper, so a guard cannot be added to
   one and missed by the others again. An unreadable set is **reported** through retention's
