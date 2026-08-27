@@ -282,6 +282,22 @@ _BULLET_BOUNDARY = [
     ("no reason clause", "- https://github.com/foo/bar — surveyed 2026-08-26", True),
     ("bad date format", "- https://github.com/foo/bar — surveyed 26-08-2026 — r", True),
     ("angle-bracketed url", "- <https://github.com/foo/bar> — RE-SURVEYED 2026-08-26 — r", True),
+    # THE FOUR DECORATED SPELLINGS (Prudence, #788 r2). The `<?`-only anchor dropped
+    # all of these, and the give-up comment declared only the first. Their cost was
+    # not a silent miss either: measured through the real CLI, a link-wrapped entry
+    # under a correct `## ` heading made ingest report "sections must start with
+    # `## `" — the #787 misdiagnosis this predicate exists to remove.
+    (
+        "link-wrapped url",
+        "- [foo](https://github.com/foo/bar) — surveyed 2026-08-26 — r",
+        True,
+    ),
+    ("backticked url", "- `https://github.com/foo/bar` — surveyed 2026-08-26 — r", True),
+    ("bold url", "- **https://github.com/foo/bar** — surveyed 2026-08-26 — r", True),
+    ("italic url", "- *https://github.com/foo/bar* — surveyed 2026-08-26 — r", True),
+    # AND THE FALSE POSITIVES THE WIDENING MUST NOT REINTRODUCE. `](` has to sit
+    # immediately after the bullet, which is what keeps prose and task items out.
+    ("task-list DONE with url first", "- [x] https://example.com was checked", False),
     (
         "commentary with a markdown link",
         "- Context lives in [the notes](https://example.com/n).",

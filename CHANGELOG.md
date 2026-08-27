@@ -319,11 +319,14 @@ All notable changes to techne are documented here. Format loosely follows
   path never got.
 
   The bullet now reports itself, quoted back with the required form. The predicate is **a bullet
-  whose first token is an `http(s)://` URL** — the position the required form puts it in. Anchoring
-  there rather than matching a URL anywhere in the line matters more than it looks: `architect
-  ingest` gates its heading-level advice on `if not skipped`, so a bullet wrongly flagged
-  *suppresses* a correct diagnosis. A commentary bullet carrying a markdown link, a nested
-  sub-bullet note and a `- [ ]` task item are all ordinary under that heading and are not reported.
+  whose URL comes first**, optionally decorated — bare, `<angle-bracketed>`, `[link-wrapped](…)`,
+  `` `backticked` ``, `**bold**` or `*italic*` all count, because each is a spelling of a genuinely
+  malformed entry. Anchoring on the URL's *position* rather than matching a URL anywhere in the
+  line matters more than it looks: `architect ingest` gates its heading-level advice on
+  `if not skipped`, so a bullet wrongly flagged *suppresses* a correct diagnosis. A commentary
+  bullet carrying a markdown link, a nested sub-bullet note and `- [ ]` / `- [x]` task items are
+  all ordinary under that heading and are not reported — the `](` form has to sit immediately
+  after the bullet, which is what separates a decorated entry from prose that happens to link.
   Lines inside a fenced block are skipped too, so a "what not to write" counter-example is not
   accused of being the thing it warns about.
 

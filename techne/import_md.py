@@ -375,11 +375,27 @@ _NO_LIFT_RE = re.compile(
 #: keeps every malformed-entry case (including the motivating `— RE-SURVEYED —`)
 #: and drops all three false positives.
 #:
-#: KNOWN AND ACCEPTED GIVE-UP: `- [foo](https://…) — surveyed … — reason`, a
-#: genuinely malformed entry whose URL is wrapped in a link, is no longer flagged.
-#: Missing it returns the operator to main's behaviour; a false positive is a wrong
-#: accusation. This module's ordering says the accusation is worse.
-_URL_BULLET_RE = re.compile(r"^\s*-\s+<?https?://\S+")
+#: DECORATIONS BEFORE THE URL ARE ALLOWED, and the reason is that the narrower
+#: anchor cost more than it looked like (Prudence, #788 r2). `<?` alone dropped
+#: FOUR malformed spellings, not the one the earlier comment declared:
+#: link-wrapped `- [foo](https://…)`, backticked ``- `https://…` ``, and both
+#: emphasis forms `- **https://…**` / `- *https://…*`.
+#:
+#: And the cost was misstated. The earlier note said missing them "returns the
+#: operator to main's behaviour", contrasting a silent miss against a wrong
+#: accusation — but main's behaviour HERE IS THE #787 DEFECT. Measured through the
+#: real CLI on a link-wrapped file whose heading is a correct `## `: ingest reports
+#: "sections must start with `## ` (two hashes)". So the give-up did not cost
+#: coverage, it cost a MISDIAGNOSIS, on four spellings — the very failure this
+#: predicate exists to remove.
+#:
+#: The optional group admits only decorations that can legitimately precede the
+#: URL, so every false positive the r2 anchor removed stays removed:
+#: `- Context lives in [the notes](https://…)` still does not match, because `](`
+#: must sit immediately after the bullet; nor does `- [ ] revisit https://…`
+#: (`] r`, not `](`); nor `- [x] https://… was checked`. _BULLET_BOUNDARY pins all
+#: of these in both directions rather than leaving the next reader to re-derive it.
+_URL_BULLET_RE = re.compile(r"^\s*-\s+(?:<|\[[^\]]*\]\(|[`*]+)?https?://\S+")
 
 
 def _parse_no_lift_bullets(body: str) -> tuple[list[NoLiftEntry], list[SkippedSection]]:
