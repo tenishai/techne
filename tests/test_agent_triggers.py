@@ -497,6 +497,12 @@ TRIGGER_WITNESSES = {
     "zero rows": "test_only_the_codex_distinguishes_an_empty_index_from_no_match",
     "rely on `librarian_search` for coverage": "test_nothing_automatically_indexes_transcripts",
     "why the architect is empty": "test_the_architect_feeder_ships_and_the_research_skills_do_not",
+    "`reflection_queue`": "test_the_unemittable_reporter_still_refuses_to_drain",
+    "reflect.enabled: false": "test_disabling_reflect_silences_the_nudge_but_not_the_debt",
+    "whether reflection is running": "test_an_unbound_automatic_pass_is_the_default_posture",
+    "live techne MCP server": "test_the_mcp_server_pins_config_before_it_serves",
+    "drain a large session": "test_the_cli_emit_can_write_the_batch_to_a_file",
+    "having drained a session": "test_emit_is_a_bounded_cursor_not_one_unbounded_pass",
 }
 
 
@@ -750,4 +756,396 @@ def test_every_indexed_document_still_carries_a_trigger_block():
         f"indexed in AGENTS.md but carrying no trigger block: {without_blocks}. Remove the "
         "row, or restore the block — a row pointing at nothing sends an agent to read a "
         "section with no trigger in it."
+    )
+
+
+# ------------------------------------------------- #791: the reflect-guide triggers
+
+
+def _reflect_config(tmp_path, *, enabled: bool = True, min_obs: int = 3):
+    """A throwaway store whose emittability threshold is small enough to straddle."""
+    from techne.config import Config
+    from techne.core.database import init_db
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "reflect.db"
+    cfg.data_dir = tmp_path
+    cfg.reflect.enabled = enabled
+    cfg.reflect.min_observations_per_thread = min_obs
+    cfg.reflect.include_existing_knowledge = False  # skip FTS
+    init_db(cfg.db_path).close()
+    return cfg
+
+
+def _seed_thread(cfg, *, n_obs: int):
+    """One session, one persisted thread, `n_obs` observations against it."""
+    from techne.core.state import start_session
+    from techne.core.threads import Thread, save_threads
+
+    session_id = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+    conn = connect_db(cfg.db_path)
+    try:
+        for i in range(n_obs):
+            conn.execute(
+                "INSERT INTO observations (session_id, tool_name, content) VALUES (?,?,?)",
+                (session_id, "Bash", f"obs {i}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    thread = Thread(thread_num=1, label="t", summary="s", observation_indices=list(range(n_obs)))
+    save_threads([thread], session_id, cfg.db_path, parent_links=[(f"{session_id}-1", None)])
+    return session_id, thread
+
+
+def connect_db(path):
+    from techne.core.database import connect
+
+    return connect(path)
+
+
+def test_the_unemittable_reporter_still_refuses_to_drain(tmp_path):
+    """`reflect-guide.md` tells the operator NOT to sweep these rows, and tells the agent to
+    raise it unprompted — both rest on `unemittable_queue_rows` being a REPORTER. The day it
+    starts draining (or stops seeing sub-threshold rows) that advice inverts: the guide would
+    be telling people to preserve evidence the code is already destroying.
+
+    Straddles the threshold deliberately — one observation under `min_observations_per_thread`
+    — because that is the exact shape #646 produces, and asserts the row is BOTH reported and
+    still undrained afterwards. Reporting without the second half would pass even if the
+    function drained as a side effect."""
+    from techne.core.reflect import enqueue_reflection_debt, unemittable_queue_rows
+
+    cfg = _reflect_config(tmp_path, min_obs=3)
+    session_id, _ = _seed_thread(cfg, n_obs=1)  # 1 < 3, so no prompt can ever render
+
+    conn = connect_db(cfg.db_path)
+    try:
+        tid = conn.execute(
+            "SELECT id FROM threads WHERE session_id = ?", (session_id,)
+        ).fetchone()["id"]
+    finally:
+        conn.close()
+    # Enqueue directly: this is the divergence #646 describes, where session_end queued a
+    # row that emit will not produce a prompt for.
+    enqueue_reflection_debt(cfg.db_path, session_id, thread_ids=[tid])
+
+    stuck = unemittable_queue_rows(cfg, session_id)
+
+    assert stuck == [tid], (
+        f"unemittable_queue_rows returned {stuck}, expected the sub-threshold row {tid!r}. "
+        "reflect-guide.md tells operators this surface is what splits payable debt from "
+        "impossible debt, and tells agents to offer it instead of sweeping."
+    )
+    conn = connect_db(cfg.db_path)
+    try:
+        drained = conn.execute(
+            "SELECT drained_at FROM reflection_queue WHERE thread_id = ?", (tid,)
+        ).fetchone()["drained_at"]
+    finally:
+        conn.close()
+    assert drained is None, (
+        "unemittable_queue_rows DRAINED the row it reported. The guide's whole instruction — "
+        "'evidence, not residue', do not sweep — assumes this function only looks."
+    )
+
+
+def test_disabling_reflect_silences_the_nudge_but_not_the_debt(tmp_path):
+    """The trigger claims `reflect.enabled: false` is backwards: it silences the route that
+    works while the debt keeps accruing. That is TWO claims about two different call sites,
+    and the surprising half is the second one — `lifecycle.run_session_end` enqueues outside
+    the `if config.reflect.enabled:` block that guards the automatic pass.
+
+    Gate the enqueue on `enabled` and this test fails; without it the guide would be telling
+    operators that disabling still accrues debt when it had quietly stopped."""
+    from techne.lifecycle import run_session_end
+
+    cfg = _reflect_config(tmp_path, enabled=False, min_obs=1)
+    session_id, _ = _seed_thread(cfg, n_obs=4)
+
+    run_session_end(cfg, session_id)
+
+    conn = connect_db(cfg.db_path)
+    try:
+        queued = conn.execute(
+            "SELECT COUNT(*) AS n FROM reflection_queue WHERE session_id = ?", (session_id,)
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+
+    assert queued > 0, (
+        "session_end enqueued NO reflection debt while reflect.enabled was false. "
+        "reflect-guide.md tells operators that disabling does not stop the debt, only the "
+        "nudge — if the enqueue is now gated, that sentence is wrong advice."
+    )
+
+    # THE OTHER HALF, WHICH NOTHING IN THIS REPO HELD (Prudence, #792 r1). The bullet
+    # claims disabling silences the route that PRODUCES everything, and only the debt
+    # clause was asserted. She flipped `if config.reflect.enabled:` at
+    # hooks/session_start.py to `if True:` — the mutation that makes the first half false —
+    # and the entire suite stayed green, 3651 passed. The accounting read as covered while
+    # the claim underneath was unheld: the #764 shape again, one layer over.
+    from techne.hooks.session_start import _run_phases_2_to_9
+
+    parts: list[str] = []
+    _run_phases_2_to_9(
+        cfg,
+        {"cwd": str(tmp_path), "session_id": session_id},
+        run_ts="2026-01-01T00:00:00+00:00",
+        db_path=cfg.db_path,
+        output_parts=parts,
+        failures=[],
+    )
+    disabled = "\n".join(parts)
+    assert "pending reflection" not in disabled.lower(), (
+        "the SessionStart nudge fired while reflect.enabled was false. The trigger tells "
+        "agents that disabling silences the resident route — if the nudge survives it, the "
+        "operator is being told to switch off something that is already off."
+    )
+
+
+def test_an_unbound_automatic_pass_is_the_default_posture(tmp_path, monkeypatch):
+    """"Empty means the unattended pass is unbound by design and never ran; that is a normal
+    posture, not a fault" — the agent is told to check this BEFORE calling reflection broken.
+
+    Two halves: the shipped default really is empty, and an unbound pass really declines to
+    call an LLM rather than falling back to `config.model`. The fallback is what #709 removed;
+    restoring it would make the trigger's reassurance false and start unattended calls on
+    stores that never opted in."""
+    from techne.config import ReflectConfig
+    from techne.core.reflect import reflect_on_session
+
+    # THE DEFAULTS THE GUIDE DOES ARITHMETIC AGAINST (Prudence, #792 r3). Nothing in the
+    # repo held these, and three places in the guide depend on them: the bullet claiming
+    # emit_max_chars "defaults above what clients accept", the "inside the 100,000 budget"
+    # reasoning, and "(25 threads or 100k chars)" in the agent block. The pointed part is
+    # that the most likely future change to emit_max_chars is the one this guide's own
+    # advice recommends — someone lowers the shipped default and the guide simultaneously
+    # claims it defaults above what clients accept, reasons against 100,000, and advises
+    # lowering it to a value it already holds, with the suite green.
+    assert ReflectConfig().emit_max_chars == 100_000, (
+        "reflect.emit_max_chars default moved — reflect-guide.md quotes 100,000 in three "
+        "places and reasons about refusals sitting inside it."
+    )
+    assert ReflectConfig().emit_max_threads == 25, (
+        "reflect.emit_max_threads default moved — reflect-guide.md quotes 25 as the slice "
+        "size in both the prose and the copy-paste agent block."
+    )
+    assert ReflectConfig().min_confidence == "medium", (
+        "reflect.min_confidence default moved — the copy-paste agent block tells agents "
+        "anything marked 'low' is dropped on ingest. If the floor moved to 'low', that "
+        "block now tells them to avoid a level that works."
+    )
+
+    assert ReflectConfig().model == "", (
+        "reflect.model no longer defaults to empty — the guide's table and the trigger both "
+        "tell operators that unbound is the shipped posture."
+    )
+
+    cfg = _reflect_config(tmp_path, enabled=True, min_obs=1)
+    cfg.reflect.model = ""
+    cfg.model = "some-model-the-operator-never-chose-for-this"
+    session_id, thread = _seed_thread(cfg, n_obs=4)
+
+    # NOT via `generate_fn=` — an injected callable IS a binding by this function's own
+    # contract, so passing one bypasses the guard under test. Trip the BUILDER instead:
+    # if the fallback to `config.model` came back, this is what it would reach for.
+    def _explode(*a, **k):  # pragma: no cover - the point is that it is never reached
+        raise AssertionError(
+            "an unbound reflect pass built a generate_fn — it fell back to config.model, "
+            "which is the #555 defect and makes reflect-guide.md's 'no LLM is called behind "
+            "your back' false."
+        )
+
+    monkeypatch.setattr("techne.core.reflect._make_generate_fn", _explode)
+    observations = [{"tool_name": "Bash", "content": f"obs {i}"} for i in range(4)]
+    result = reflect_on_session(cfg, session_id, [thread], observations)
+
+    assert result["candidates_written"] == 0
+    assert not result.get("errors"), (
+        f"an unbound pass reported errors {result.get('errors')} — the guide calls this a "
+        "normal working posture, so it must be a clean no-op, not a failure."
+    )
+
+
+def test_the_mcp_server_pins_config_before_it_serves(tmp_path):
+    """The `write_to` warning — "the tool call succeeds and writes to the wrong place, with
+    no error" — is true only because config is read ONCE and never re-read while serving.
+
+    PINS THE SENTENCE, NOT THE ARRANGEMENT (Prudence, #792 r1). An earlier version asserted
+    only that `Config.load()` was lexically before the first top-level loop in `main` and
+    not inside it. That leaves the doc falsifiable while the test stays green: a hot-reload
+    added to `handle_request` — a far more natural home for one than the stdin loop — would
+    make the tools stop using startup values without tripping a positional check. Counting
+    every call site in the module closes that: the claim is that there is exactly ONE, at
+    startup, so any second one anywhere fails here regardless of where it lives.
+
+    Also resolves the serve loop by what it iterates rather than by `loops[0]`, so adding a
+    warm-up loop ahead of it cannot quietly move the goalposts."""
+    import ast
+
+    src = (REPO / "techne" / "mcp_server.py").read_text()
+    tree = ast.parse(src)
+
+    def _is_config_load(n):
+        return (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "load"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "Config"
+        )
+
+    everywhere = [n.lineno for n in ast.walk(tree) if _is_config_load(n)]
+    assert len(everywhere) == 1, (
+        f"Config.load() appears {len(everywhere)} time(s) in mcp_server.py, at {everywhere}. "
+        "reflect-guide.md tells operators that editing config.yaml under a live MCP server "
+        "has no effect until restart — that holds only while the server reads config exactly "
+        "once. A second call site is a re-read, and the warning becomes wrong."
+    )
+
+    main_fn = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+    in_main = [n.lineno for n in ast.walk(main_fn) if _is_config_load(n)]
+    assert in_main == everywhere, (
+        f"the sole Config.load() is not inside main(): module {everywhere}, main {in_main}"
+    )
+
+    # The serve loop, identified by what it iterates — `for line in sys.stdin`.
+    serve = [
+        n
+        for n in ast.walk(main_fn)
+        if isinstance(n, ast.For)
+        and isinstance(n.iter, ast.Attribute)
+        and n.iter.attr == "stdin"
+    ]
+    assert serve, "mcp_server.main() no longer iterates sys.stdin — find the new serve loop"
+    assert max(in_main) < serve[0].lineno, (
+        f"Config.load() at {in_main} is not before the stdin serve loop at {serve[0].lineno}"
+    )
+
+
+def test_the_cli_emit_can_write_the_batch_to_a_file(tmp_path, monkeypatch):
+    """The escape hatch the trigger offers when MCP emit would blow the tool-result cap.
+    Driven through the real CLI, because the claim is about the shipped command surface —
+    `--output/-o` existing AND actually producing a file the agent can read thread by thread.
+
+    Pinning only the option's declared existence would survive a change that accepted the
+    flag and still printed to stdout, which is precisely the failure the advice is meant to
+    route around."""
+    import json
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+
+    cfg = _reflect_config(tmp_path, enabled=True, min_obs=1)
+    session_id, _ = _seed_thread(cfg, n_obs=4)
+    monkeypatch.setattr(Config, "load", classmethod(lambda cls, *a, **k: cfg))
+
+    out = tmp_path / "batch.json"
+    result = CliRunner().invoke(main, ["reflect", "emit", "--session", session_id, "-o", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert out.exists(), (
+        "`techne reflect emit -o <file>` wrote no file. reflect-guide.md tells agents to use "
+        "this instead of the MCP tool for large sessions; without it there is no route that "
+        "stays under the tool-result cap."
+    )
+    batch = json.loads(out.read_text())
+    assert isinstance(batch, list) and batch, f"expected a non-empty batch array, got {batch!r}"
+    assert "prompt" in batch[0] and "raw_response" in batch[0], (
+        f"batch items are missing the fields the documented loop fills in: {sorted(batch[0])}"
+    )
+
+
+def test_emit_is_a_bounded_cursor_not_one_unbounded_pass(tmp_path):
+    """THE THIRD NARROW WITNESS (Prudence, #792 r2). The "drain a large session" bullet had
+    been rewritten to lead with "emit is a CURSOR: one bounded slice per call", while its
+    only witness pinned that `-o` writes a file. She proved the gap by forcing both bounds
+    in `emit_reflection_pass` to 10**9 — making emit one unbounded pass, exactly the
+    #268/#269 defect the bullet warns about — and this file stayed fully green. The bullet
+    is now split so each claim carries its own witness; this is the cursor half.
+
+    NOT solved the way she suggested, and the reason is worth recording twice over:
+
+    1. She proposed pointing a key at `test_emit_cursor_drains_large_session_across_passes`.
+       It does hold the claim, but it lives in `tests/test_mcp_reflect.py`, and
+       `test_every_named_witness_exists` resolves witnesses with `hasattr(module, ...)`
+       against THIS module — naming it there would fail that check.
+    2. She also proposed a SECOND key on the same bullet. That would have been decorative:
+       `_trigger_blocks` collects only a bullet's FIRST line and `test_every_bullet_names_a_
+       witness` is satisfied by `any(key in line ...)`, so a key matching the fifth line
+       would never be consulted. Splitting the bullet is what actually makes the accounting
+       hold, because this file's unit is one bullet, one claim, one witness.
+
+    Observations are written as two clusters two hours apart, because emit RE-DETECTS
+    threads from observations (`load_session_for_reflection`) rather than reading the
+    persisted rows — hand-built Thread rows do not control what emit sees, which cost me a
+    pass here."""
+    from datetime import datetime, timedelta
+
+    from techne.core.reflect import emit_reflection_pass
+    from techne.core.state import start_session
+
+    cfg = _reflect_config(tmp_path, min_obs=1)
+    cfg.reflect.emit_max_threads = 1
+    session_id = start_session(cfg.db_path, project_path="/tmp/p", agent_identity="t")
+
+    base = datetime(2026, 1, 1, 12, 0)
+    conn = connect_db(cfg.db_path)
+    try:
+        for cluster in range(2):
+            for i in range(4):
+                ts = base + timedelta(hours=2 * cluster, minutes=i)
+                conn.execute(
+                    "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+                    "VALUES (?,?,?,?)",
+                    (session_id, ts.isoformat(), "Edit", f"/proj/c{cluster}.py step {i}"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Persist the detection, so batch items carry a real `thread_id`. Without this
+    # `persisted_thread_id` returns None for every item and the "did the cursor advance"
+    # comparison degenerates to {None} == {None} — a test that fails for the wrong reason.
+    from techne.lifecycle import run_session_end
+
+    run_session_end(cfg, session_id)
+
+    first = emit_reflection_pass(cfg, session_id)
+    assert len(first["batch"]) == 1, (
+        f"emit returned {len(first['batch'])} items against emit_max_threads=1 — it is not "
+        "bounding the slice, so the bullet's 'one bounded slice per call' is false and "
+        "'looping until empty' is advice for a problem that does not exist."
+    )
+    assert first.get("truncated"), (
+        "a bounded emit that left a thread behind did not report `truncated` — the operator "
+        "has no signal to go again."
+    )
+
+    second = emit_reflection_pass(cfg, session_id)
+    # ASSERT DELIVERY BEFORE ASSERTING NON-REPETITION (Prudence, #792 r3). `repeats` is
+    # empty both when the cursor advanced correctly AND when the second pass returned
+    # nothing at all, so on its own it certifies a cursor that drops the leftover thread —
+    # under which "loop until the batch comes back empty" terminates immediately and looks
+    # successful with the session half-drained. She demonstrated it: collapse `newly` to
+    # every current id and derive `truncated` independently, and the old assertions passed
+    # green with thread 2 permanently lost. They only held before because `truncated`
+    # happens to be derived from the same `emitted_ids` set the cursor persists, which is
+    # an implementation coupling rather than the claim.
+    assert len(second["batch"]) == 1, (
+        "the second pass delivered nothing — the leftover thread was lost, so 'loop until "
+        "the batch comes back empty' terminates with the session half-drained."
+    )
+    repeats = {i["thread_id"] for i in first["batch"]} & {
+        i["thread_id"] for i in second["batch"]
+    }
+    assert not repeats, (
+        f"the second pass re-delivered {repeats} — the cursor did not advance, so the "
+        "documented loop would never terminate."
     )
