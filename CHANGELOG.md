@@ -375,10 +375,14 @@ All notable changes to techne are documented here. Format loosely follows
     a containment refusal at all: `Path.is_file()` silently swallows the `ValueError` a NUL
     raises, so on previous releases such a set reported "backup set is incomplete".
 
-  In every case the set was already refused and never took a retention slot; what changed is
-  the stated cause, and it changed to the accurate one. The directory spellings that resolve to
-  the set directory *itself* (`"."`, `"./"`, `".//"`, `"./."`) are not escapes and refuse
-  exactly as before.
+  **The second bullet is the one that was not merely mislabelled.** For the first and third,
+  the set was already refused and never took a retention slot — `".."` and `"../"` name a
+  directory and a NUL makes `is_file()` answer false, so both read as missing — and what
+  changed is only the stated cause. But an escaping name that resolves to a file that *exists*
+  was **accepted**: the set validated as complete, took a retention slot, and could evict a
+  genuine backup. That is the bug this entry fixes, not a wording change. The directory
+  spellings that resolve to the set directory *itself* (`"."`, `"./"`, `".//"`, `"./."`) are
+  not escapes and refuse exactly as before.
 
 - **`architect export` → `architect ingest` accreted a near-duplicate every cycle** (#770).
   `export_patterns_md` writes a `---` separator after each entry and the parser absorbed it

@@ -1934,3 +1934,39 @@ def test_a_rows_example_values_reach_that_rows_phrase(tmp_path):
         f"{candidate_rows} candidate rows for {matched_rows} phrases — the errno "
         "passthrough row is the only one that should match no phrase"
     )
+
+
+def test_the_nul_refusal_blames_the_domain_when_there_is_no_file_key() -> None:
+    """NIT 1'S FIX, WITNESSED ON THE ROUTE IT CHANGED (Prudence, #784 r2 nit 1, r3 nit 2).
+
+    `_manifest_db_filename` reports which field carried the bad value: `'file'` when the
+    manifest has that key, `the domain name` when it does not. Round 2 corrected the NUL and
+    generic messages, which had hardcoded `'file'` and so named a field that is not in the
+    operator's manifest at all.
+
+    Nothing held it. `test_a_traversal_in_the_domain_key_is_refused` pins `"domain name"` on
+    the CONTAINMENT message, which already computed `source` before this PR — so reverting the
+    NUL message to a hardcoded `'file'` left all 153 relevant tests green (measured by
+    Prudence). A message-only change with no witness is how prose decays into a confident lie,
+    which is the class this whole PR is about.
+
+    Both routes asserted here, because the discriminant is which one fires."""
+    from techne.core.maintenance import _manifest_db_filename
+
+    # The domain route needs a bad DOMAIN, not a bad sibling key: with no `file`, the
+    # name is derived from the domain and nothing else in the dict is ever read. My
+    # first version poisoned `{"path": …}` and got a clean `("mydomain.db", None)` —
+    # the test failing for a reason unrelated to the message it was written to pin.
+    _, no_file_key = _manifest_db_filename("my\x00domain", {}, Path("/tmp"))
+    assert no_file_key is not None
+    assert "the domain name for" in no_file_key, (
+        f"a NUL with no `file` key blamed the wrong field: {no_file_key!r}. With no `file` in "
+        "the manifest, naming it sends the operator looking for a key that is not there."
+    )
+    assert "contains a NUL byte" in no_file_key
+
+    _, with_file_key = _manifest_db_filename("mydomain", {"file": "a\x00b"}, Path("/tmp"))
+    assert with_file_key is not None
+    assert "'file' for 'mydomain'" in with_file_key, (
+        f"a NUL carried by the `file` key did not blame `file`: {with_file_key!r}"
+    )

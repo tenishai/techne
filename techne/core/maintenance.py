@@ -420,9 +420,24 @@ def _manifest_db_filename(
     #
     # Hoisting `base` out UNGUARDED would be the trap: it would re-break the very
     # contract half 2 restores. Each arm names its own cause instead.
+    #
+    # BOTH ARMS CATCH ValueError AS WELL AS OSError, and the first arm is the one
+    # that needs saying (Prudence, #784 r3). Splitting the single `except
+    # (ValueError, OSError)` into two gave this arm `except OSError` alone, which
+    # looks tighter and is strictly weaker: `Path(...).resolve()` defaults to
+    # strict=False and swallows ELOOP and non-existent paths without raising, so
+    # OSError out of this line is essentially unreachable on POSIX — while
+    # ValueError demonstrably does come out of it (`Path("a\x00b").resolve()`
+    # raises "embedded null character in path"). The split replaced a live catch
+    # with a dead one and made this function RAISE where it had returned a
+    # problem, against the "never raises" contract ten lines above that half 2
+    # exists to hold. Not reachable through the CLI today — `src_dir` is an
+    # iterdir() result or an argv path and neither carries a NUL — but half 2's
+    # whole justification is unanticipated input, so narrowing it to the inputs we
+    # thought of is the argument it was written to reject.
     try:
         base = Path(src_dir).resolve()
-    except OSError as e:
+    except (ValueError, OSError) as e:
         return None, f"the backup set directory is unreadable: {type(e).__name__}"
     try:
         candidate = (base / name).resolve()
