@@ -778,6 +778,119 @@ def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
     return [t for t in queued if t not in emittable]
 
 
+def superseded_queue_rows(config: Config, session_id: str) -> list[str]:
+    """Undrained queue rows whose thread id is not in the session's CURRENT detection.
+
+    THE STRICT SUBSET OF `unemittable_queue_rows` THAT IS PROVABLY STALE (techne#646).
+    Both are undrainable, but for different reasons and with different standing:
+
+    - SUPERSEDED (here): the id does not appear in the current detection at all. It
+      belongs to a partition `run_session_end` replaced. Its observations are still
+      covered — by a current thread under a different id — so nothing is unreflected,
+      and the row is bookkeeping about a thread that no longer exists.
+    - BELOW THRESHOLD (the remainder): the id IS current, but re-partitioning moved
+      observations to neighbours and left the thread under
+      `min_observations_per_thread`. That is the genuine disagreement #646 was filed
+      on, and it stays visible.
+
+    The distinction is what makes reconciliation legitimate rather than sweeping. #646
+    forbids draining these rows to make the banner green, because that "destroys the
+    only evidence the class exists" — a rule about blanket-clearing. Retiring a row we
+    can demonstrate points at a partition that no longer exists removes noise while
+    leaving the signal, and the reconciler reports what it removed either way.
+    """
+    threads, observations = load_session_for_reflection(config, session_id)
+    from techne.core.thread_orchestrator import persisted_thread_id
+
+    current = set()
+    for t in threads:
+        tid = persisted_thread_id(config.db_path, session_id, t)
+        if tid:
+            current.add(tid)
+
+    conn = connect(config.db_path)
+    try:
+        queued = [
+            r["thread_id"]
+            for r in conn.execute(
+                "SELECT thread_id FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NULL",
+                (session_id,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    return [t for t in queued if t not in current]
+
+
+def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
+    """Find (and optionally remove) queue rows left behind by a replaced detection.
+
+    DRY BY DEFAULT. `apply=False` reports without writing, because this deletes rows
+    from the ledger the SessionStart banner reads and the operator should see the
+    split before anything moves.
+
+    WHY THIS EXISTS SEPARATELY FROM THE FIX. `persist_detection` stops new superseded
+    rows by retiring the old partition through the existing `ON DELETE CASCADE`, but
+    it only runs when a session sees another detection. Sessions that already ended
+    never will, so their residue needs an explicit pass.
+
+    DELETES THE QUEUE ROW, NOT THE THREAD ROW. Dropping the stale `threads` row would
+    reach the same rows via the CASCADE, but it also takes any DRAINED row with it —
+    losing the record that a thread was reflected — and `threads.parent_thread_id`
+    links point into that table. Narrowing to undrained queue rows keeps the blast
+    radius to exactly the rows that are provably meaningless.
+
+    Returns {sessions, superseded, below_threshold, removed, by_session}.
+    """
+    conn = connect(config.db_path)
+    try:
+        sessions = [
+            r["session_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT session_id FROM reflection_queue WHERE drained_at IS NULL"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    by_session: dict[str, dict] = {}
+    superseded_total = below_total = 0
+    for sid in sessions:
+        stale = superseded_queue_rows(config, sid)
+        unemittable = unemittable_queue_rows(config, sid)
+        below = [t for t in unemittable if t not in set(stale)]
+        if not stale and not below:
+            continue
+        by_session[sid] = {"superseded": stale, "below_threshold": below}
+        superseded_total += len(stale)
+        below_total += len(below)
+
+    removed = 0
+    if apply and superseded_total:
+        conn = connect(config.db_path)
+        try:
+            for sid, rows in by_session.items():
+                for tid in rows["superseded"]:
+                    cur = conn.execute(
+                        "DELETE FROM reflection_queue "
+                        "WHERE thread_id = ? AND session_id = ? AND drained_at IS NULL",
+                        (tid, sid),
+                    )
+                    removed += cur.rowcount or 0
+            conn.commit()
+        finally:
+            conn.close()
+
+    return {
+        "sessions": len(by_session),
+        "superseded": superseded_total,
+        "below_threshold": below_total,
+        "removed": removed,
+        "by_session": by_session,
+    }
+
+
 def reflection_debt_stats(config: Config) -> dict:
     """Queue-level counts: what is owed, what has been paid, and how old the debt is.
 

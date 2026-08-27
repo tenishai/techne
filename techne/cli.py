@@ -3094,6 +3094,52 @@ def reflect_discard(ctx, candidate_id, decided_by, decision_reason):
     click.echo(f"Discarded candidate #{candidate_id}")
 
 
+@reflect.command("reconcile")
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    help="Actually remove the superseded rows (default: dry run).",
+)
+@click.pass_context
+def reflect_reconcile(ctx, apply_):
+    """Retire reflection-queue rows left behind by a replaced thread detection.
+
+    Splits undrainable debt into the two populations #646 conflated: rows whose
+    thread no longer exists in the current detection (superseded — safe to retire)
+    and rows whose thread is current but has fallen below
+    `min_observations_per_thread` (kept, that is the real signal).
+
+    Dry run unless --apply.
+    """
+    config = ctx.obj["config"]
+    from techne.core.reflect import reconcile_reflection_queue
+
+    report = reconcile_reflection_queue(config, apply=apply_)
+    for sid, rows in report["by_session"].items():
+        click.echo(
+            f"{sid[:16]}  superseded={len(rows['superseded'])}  "
+            f"below_threshold={len(rows['below_threshold'])}"
+        )
+    click.echo(
+        json.dumps(
+            {k: v for k, v in report.items() if k != "by_session"},
+            indent=2,
+        )
+    )
+    if not apply_ and report["superseded"]:
+        click.echo(
+            f"Dry run — {report['superseded']} superseded row(s) would be removed. "
+            "Re-run with --apply.",
+        )
+    if report["below_threshold"]:
+        click.echo(
+            f"{report['below_threshold']} row(s) left in place: their thread is current but "
+            "now below reflect.min_observations_per_thread — that is tenishai/techne#646's "
+            "real signal, not residue.",
+        )
+
+
 @reflect.command("stats")
 @click.pass_context
 def reflect_stats(ctx):
