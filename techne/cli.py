@@ -3541,7 +3541,10 @@ def architect_ingest(ctx, markdown_file, verdict):
     # `"patterns": 0` and exited 0 on a hand-written file — and the bold markers are
     # load-bearing, which is not guessable. stderr, so `| jq` over the JSON still works.
     for sk in counts["skipped"]:
-        click.echo(f'skipped section "{sk["heading"]}": {sk["reason"]}', err=True)
+        # `kind` renders as "section" for a pattern section, so this line is
+        # byte-identical to what it printed before techne#787 for that case, and
+        # names a bullet as a bullet for the new one.
+        click.echo(f'skipped {sk["kind"]} "{sk["label"]}": {sk["reason"]}', err=True)
     # GATED ON "NOTHING LANDED", NOT ON "SOMETHING WAS SKIPPED" (Prudence, #758 round 2).
     # `skipped` only fills for sections that reached `_parse_pattern_body`, which requires
     # exactly `## `. So a file using `# My pattern` with perfect metadata bullets printed

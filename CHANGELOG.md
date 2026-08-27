@@ -305,6 +305,42 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **`architect ingest` blamed the heading when a no-lift bullet was malformed** (#787). A bullet
+  under `## Surveyed (no patterns worth saving)` that was one word wrong — `— RE-SURVEYED
+  2026-08-26 —` for `— surveyed 2026-08-26 —` — was dropped without a trace. #754 and #758 had
+  already made the command speak up when nothing lands, but only pattern *sections* recorded a
+  reason, so `skipped` stayed empty and the command fell into its heading-level branch:
+
+  > no pattern sections found in x.md — sections must start with `## ` (two hashes) at the top level.
+
+  Said about a file whose heading was exactly that. **"nothing was ingested" still fired**, so no
+  write was lost silently — the cost was being sent to fix something that is not broken, which is
+  the failure `_parse_pattern_body` already guards against for misplaced markers and the no-lift
+  path never got.
+
+  The bullet now reports itself, quoted back with the required form. The predicate is **a bullet
+  whose URL comes first**, optionally decorated — bare, `<angle-bracketed>`, `[link-wrapped](…)`,
+  or wrapped in `` ` ``/`*`/`_`/`~` — because each is a spelling of a genuinely malformed entry.
+  Anchoring on the URL's *position* rather than matching a URL anywhere in the line matters more
+  than it looks: `architect ingest` gates its heading-level advice on `if not skipped`, so a
+  bullet wrongly flagged *suppresses* a correct diagnosis.
+
+  **Two limits, stated plainly because the alternative is a wrong accusation you were not
+  warned about.** The decoration list is *not* exhaustive — a quoted or parenthesised URL is
+  still not reported, and an uncovered spelling falls back to the pre-fix behaviour, which is
+  the misdiagnosis this entry is about. And a bullet whose *first* token is a link is reported
+  even when it is prose: `- [the tracker](…) explains why.` is structurally identical to
+  `- [foo](…) — surveyed … — r` up to that token, so no prefix rule separates them. Link-*later*
+  prose stays out — `- Context lives in [the notes](…)`, `- [ ]` / `- [x]` task items — as do
+  lines inside a fenced block, so a "what not to write" counter-example is not accused of being
+  the thing it warns about.
+
+  **Internal API change**: `SkippedSection.heading` is now `.label`, and the field gained a `kind`
+  (`"section"` / `"no-lift bullet"`). `ingest_patterns_md`'s `skipped` dicts carry `label` + `kind`
+  instead of `heading`. A key named `heading` holding a bullet line is a field whose name is a lie.
+  The stderr line is unchanged for pattern sections — `kind` renders as `section`, so it still
+  reads `skipped section "My pattern": …`.
+
 - **`architect export` → `architect ingest` accreted a near-duplicate every cycle** (#770).
   `export_patterns_md` writes a `---` separator after each entry and the parser absorbed it
   into that entry's body. A pattern id is a content hash of `(name, source_url, body)`, so

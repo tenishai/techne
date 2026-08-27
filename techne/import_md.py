@@ -63,10 +63,24 @@ class SkippedSection:
     text — which makes a plausible first attempt fail in the one way this project
     keeps failing: silently, looking like success. The caller cannot report what the
     parser does not hand back.
+
+    ALSO CARRIES NO-LIFT BULLETS NOW (techne#787), which is why `kind` exists and
+    why `label` is no longer called `heading`. A malformed bullet under `## Surveyed
+    (no patterns worth saving)` produced no entry here at all, so `architect ingest`
+    fell into its heading-level branch and told the operator that "sections must
+    start with `## `" about a file whose heading was already exactly that. Being
+    sent to fix something that is not broken is worse than a vague error — the same
+    sentence `_parse_pattern_body` carries about misplaced markers. One list rather
+    than two: every consumer wants "what did you drop and why", and a second
+    parallel field is a second thing to forget to print.
     """
 
-    heading: str
+    #: "section" for a `## ` pattern section, "no-lift bullet" for a bullet under
+    #: the no-lift heading. Defaulted so the pattern-section constructions and any
+    #: caller predating techne#787 keep working unchanged.
+    label: str
     reason: str
+    kind: str = "section"
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +147,9 @@ def parse(text: str) -> ParseResult:
     for heading, body in sections:
         heading_lower = heading.lower()
         if heading_lower == NO_LIFT_HEADING:
-            no_lifts.extend(_parse_no_lift_bullets(body))
+            found, malformed = _parse_no_lift_bullets(body)
+            no_lifts.extend(found)
+            skipped.extend(malformed)
             continue
         if any(heading_lower.startswith(skip) for skip in SKIPPED_HEADINGS):
             continue
@@ -142,7 +158,7 @@ def parse(text: str) -> ParseResult:
         if isinstance(parsed, ParsedPattern):
             patterns.append(parsed)
         else:
-            skipped.append(SkippedSection(heading=heading, reason=parsed))
+            skipped.append(SkippedSection(label=heading, reason=parsed))
 
     return ParseResult(patterns=patterns, no_lifts=no_lifts, skipped=tuple(skipped))
 
@@ -343,18 +359,112 @@ _NO_LIFT_RE = re.compile(
 )
 
 
-def _parse_no_lift_bullets(body: str) -> list[NoLiftEntry]:
-    """Walk the body, pulling out each `- <url> — surveyed <date> — <reason>` line."""
+#: A bullet whose FIRST token is an http(s) URL. Used ONLY to decide whether an
+#: unmatched line under the no-lift heading is a malformed ENTRY or ordinary prose
+#: — see `_parse_no_lift_bullets`. Deliberately not reused as the entry parser.
+#:
+#: ANCHORED, NOT `.*?` (Prudence, #788 r1 Important). The first version matched a
+#: URL ANYWHERE in the bullet, which is not the predicate its own docstring
+#: promised, and it flagged three ordinary constructions — a commentary bullet
+#: carrying a markdown link, a nested sub-bullet note, and a `- [ ]` task item.
+#: Worse than noise: `architect ingest` gates its heading-level advice on
+#: `if not counts["skipped"]`, so a false positive SUPPRESSES a correct
+#: diagnosis. Measured — a file with a single-hash heading plus one commentary
+#: bullet lost the right message and gained a wrong one, which is precisely the
+#: #787 defect inverted. The required form puts the URL first, so anchoring there
+#: keeps every malformed-entry case (including the motivating `— RE-SURVEYED —`)
+#: and drops all three false positives.
+#:
+#: DECORATIONS BEFORE THE URL ARE ALLOWED, and this comment does NOT claim the
+#: list is closed (Prudence, #788 r2 and r3). The narrow `<?` anchor dropped four
+#: malformed spellings while declaring one, and its cost was misstated: main's
+#: behaviour on a dropped entry is not silence, it is the #787 misdiagnosis.
+#: Measured through the real CLI — a link-wrapped entry under a correct `## `
+#: heading made ingest answer "sections must start with `## ` (two hashes)".
+#:
+#: COVERED: bare, `<angle-bracketed>`, `[link-wrapped](…)`, and a run of
+#: `` ` `` / `*` / `_` / `~` (so `` `code` ``, `*i*`, `**b**`, `_i_`, `__b__`,
+#: `~~s~~`). NOT EXHAUSTIVE, and deliberately not presented as such: quoted
+#: `"https://…"` and parenthesised `(https://…)` are still dropped, and someone
+#: will write a decoration none of us imagined. An uncovered decoration falls back
+#: to main's behaviour, which is the #787 misdiagnosis — that is the standing cost
+#: of this predicate, not a defect to be surprised by. r3 rejected "add `_`" as the
+#: fix precisely because chasing spellings has no natural end; the durable change
+#: is a comment that stays true when the next one appears.
+#:
+#: THE ACCEPTED TRADE — LINK-FIRST PROSE IS ACCUSED. `- [foo](url) — surveyed … — r`
+#: (an entry) and `- [foo](url) explains why.` (commentary) are structurally
+#: identical up to the first token, so no prefix anchor can separate them; `](`
+#: after the bullet separates link-FIRST from link-LATER, not entry from prose.
+#: Link-first commentary is therefore reported, and `_BULLET_BOUNDARY` pins that as
+#: a deliberate True so the next reader inherits the trade instead of re-deriving
+#: it. Separating them properly means keying on the REMAINDER (does the rest carry
+#: `surveyed` and a date?) rather than the prefix — filed rather than done here,
+#: because adding capability in a terminator round is how the last three rounds
+#: each introduced something.
+#:
+#: Link-LATER prose stays out, which is what `](`-immediately-after-the-bullet
+#: does buy: `- Context lives in [the notes](https://…)` does not match, nor
+#: `- [ ] revisit https://…` (`] r`, not `](`), nor `- [x] https://… was checked`.
+_URL_BULLET_RE = re.compile(r"^\s*-\s+(?:<|\[[^\]]*\]\(|[`*_~]+)?https?://\S+")
+
+
+def _parse_no_lift_bullets(body: str) -> tuple[list[NoLiftEntry], list[SkippedSection]]:
+    """Walk the body, returning (parsed entries, bullets that looked like entries).
+
+    THE SECOND LIST IS THE POINT (techne#787). This used to `continue` past any
+    non-matching line and record nothing, so a bullet that was one word wrong --
+    `— RE-SURVEYED 2026-08-26 —` for `— surveyed 2026-08-26 —` -- vanished, and
+    `architect ingest` then had an empty `skipped` and fell into its heading-level
+    branch: "sections must start with `## ` (two hashes)", said about a file whose
+    heading was exactly that and whose real defect was never named. Measured on main
+    before this change.
+
+    A BULLET CARRYING A URL IS THE PREDICATE, not "any bullet". Under this heading a
+    line with an `http(s)://` in it is unambiguously a no-lift entry that failed to
+    parse; a bullet without one is plausibly commentary, and flagging it would make
+    the report noisy in exactly the situation where the operator most needs to trust
+    it. Narrow on purpose: a false "you got this wrong" is the failure this change
+    exists to remove, so it must not introduce one.
+    """
     out: list[NoLiftEntry] = []
+    malformed: list[SkippedSection] = []
+    # FENCED LINES ARE NOT ENTRIES (Prudence, #788 r1). A counter-example shown
+    # under this heading as "what not to write" is the exact shape this function
+    # now accuses, and `_split_into_sections` already tracks precisely this state —
+    # this was the one line-walker in the module that did not inherit it. The
+    # URL-first anchoring above does NOT cover this case: a fenced counter-example
+    # is usually a well-formed-looking entry, which is the point of showing it.
+    in_fence = False
     for line in body.splitlines():
-        match = _NO_LIFT_RE.match(line)
-        if match is None:
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
             continue
-        out.append(
-            NoLiftEntry(
-                source_url=match.group("url").rstrip("),.;"),
-                surveyed_date=match.group("date"),
-                reason=match.group("reason").strip(),
+        if in_fence:
+            continue
+        match = _NO_LIFT_RE.match(line)
+        if match is not None:
+            out.append(
+                NoLiftEntry(
+                    source_url=match.group("url").rstrip("),.;"),
+                    surveyed_date=match.group("date"),
+                    reason=match.group("reason").strip(),
+                )
             )
-        )
-    return out
+            continue
+        if _URL_BULLET_RE.match(line):
+            # Quote the line rather than describe it: the difference is usually one
+            # token, and an operator comparing their line to the required form spots
+            # it faster than they parse a sentence about it.
+            malformed.append(
+                SkippedSection(
+                    label=line.strip(),
+                    reason=(
+                        "does not match `- <url> — surveyed YYYY-MM-DD — <reason>` "
+                        "(em-dashes —, the literal word `surveyed`, and the date in "
+                        "that order)"
+                    ),
+                    kind="no-lift bullet",
+                )
+            )
+    return out, malformed
