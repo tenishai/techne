@@ -305,6 +305,40 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- **A session's threads accumulated one superseded partition per re-detection** (#646). Thread
+  ids derive from `bucket_hash(session_id, first_obs_id, boundary_signal)` and `save_threads`
+  wrote with `INSERT OR IGNORE`, while `run_session_end` — which fires once per turn — deleted
+  the boundary table before re-saving but never the thread table. Shifted boundaries therefore
+  minted a new id and left the old row behind. Measured on a real store: **86 rows in `threads`
+  against 51 threads in the current detection**.
+
+  Reflection read the two apart. `load_session_for_reflection` re-detects from scratch, so the
+  reflection queue held ids no current detection produces — real debt whose prompt is
+  impossible, which is what techne#646 had been reporting. On that store **26 of 57 queued
+  threads (46%) could never be drained**, so the SessionStart banner overstated owed work by
+  almost half. No memory was lost: every current thread above the observation floor had already
+  been reflected.
+
+  `lifecycle.persist_detection` is now the single replace-and-restore path, called by both
+  `run_session_end` and `redetect_threads` — they had separate implementations that drifted on
+  exactly the bookkeeping half. **`techne reflect reconcile`** (new, dry-run by default) retires
+  the queue rows of partitions that no longer exist and reports what it left alone.
+
+- **That replace then broke `run_session_end` outright on any store with history** (#797).
+  Four columns reference `threads(id)` and only `reflection_queue` cascades; deleting a
+  session's threads raised `IntegrityError: FOREIGN KEY constraint failed` as soon as another
+  session's thread lineage or a knowledge candidate pointed at them — 1249 and 547 such rows
+  respectively on the store where it was found. The hook caught it and exited 0, so nothing
+  crashed and observations kept flowing, but per affected session the thread write, the
+  heuristic summary and the debt enqueue were all silently lost.
+
+  Replaced by a **prune**: only threads that are absent from the detection about to be saved,
+  unreferenced by any of the four columns, and not carrying a paid queue row. Referenced
+  threads are history and stay. `save_threads` became a single upsert at the same time, which
+  fixed a second defect — under `INSERT OR IGNORE` a thread whose id was stable had its
+  `label`, `summary` and `resume_points` frozen at the first detection of the session, so
+  `techne_resume` served the opening minutes of a long session indefinitely.
+
 - **`architect ingest` blamed the heading when a no-lift bullet was malformed** (#787). A bullet
   under `## Surveyed (no patterns worth saving)` that was one word wrong — `— RE-SURVEYED
   2026-08-26 —` for `— surveyed 2026-08-26 —` — was dropped without a trace. #754 and #758 had
@@ -643,6 +677,20 @@ All notable changes to techne are documented here. Format loosely follows
   fixes it; disabled + stale `ok` read LIVE — silent, wrong, and comfortable.
 
 ### Docs
+
+- **A guide for Reflect, and five agent triggers** (#791). `docs/reflect-guide.md` explains the
+  verb at a learner's altitude — the two switches operators routinely confuse (`reflect.enabled`
+  is the feature and the resident route; `reflect.model` binds only the unattended pass, and
+  empty is a normal posture), where candidates land, how to drain a backlog, and a
+  copy-pasteable block for an agent's own context.
+
+  It also carries an `Agent: raise this unprompted` block, indexed in `AGENTS.md` and witnessed
+  by tests: sweeping the reflection queue by hand, disabling the rail to quiet it, asking
+  whether reflection is running, editing `config.yaml` under a live MCP server (which pins
+  config at startup), and draining a large session through the MCP tool rather than the CLI.
+  Reflect had the largest silent-failure surface of any subsystem and the only documentation
+  was its architecture card, which is written for someone changing the seam rather than
+  learning it.
 
 - **Sessions and threads are not the same thing, and now the docs say so** (#762). A session is
   a container the *client* hands techne — it starts when you open a client and ends at `/clear`
