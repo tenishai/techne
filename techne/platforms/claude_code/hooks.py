@@ -604,7 +604,16 @@ def _backfill_command() -> str:
 
 
 # Harness-level per-hook timeouts, in seconds, by event (Claude Code's
-# settings.json `timeout` field; default is 600 for command hooks). Only
+# settings.json `timeout` field).
+#
+# THE 600s DEFAULT IS NOT WITNESSED ANYWHERE IN THIS TREE and it is load-bearing:
+# if the real default were below 120 this constant would LENGTHEN the stall it
+# claims to shorten. Source is the harness documentation
+# (code.claude.com/docs/en/hooks, "Common fields": command/http/mcp_tool default
+# to 600s; a timed-out hook is cancelled and its output discarded), read
+# 2026-08-28. It is a property of the host, not of techne, so it can change
+# under us without any signal here — re-read the docs before trusting this
+# number in an argument. Only
 # SessionStart carries one: it is the sole chain that can reach the network at
 # all. A SIGALRM budget does not bound a Hub fetch — the harness cancelling the
 # subprocess does. This is a stall breaker, not a performance budget: measured
@@ -750,14 +759,21 @@ def register_hooks(config: Config):
     # drift it is about to fix. `;` not `&&`, matching the guard above — a
     # backfill failure must never suppress the banner.
     #
-    # COLD-CACHE EXPOSURE, bounded but not eliminated. backfill_vectors keeps
-    # allow_download=True (README's cold-cache recovery requires it), and a Hub
-    # fetch is signal-deaf, so bounded_hook's SIGALRM cannot preempt it — see
-    # core/embeddings.py, which spells out why having a SIGALRM budget and
-    # lacking one are equally exposed here. The harness-level `timeout` on the
-    # registration below is what actually bounds it. Note backfill_vectors
-    # returns early when no embedding backend is importable, so an install
-    # without the extra never reaches the network at all.
+    # COLD CACHE: CLOSED, not merely bounded. This chain cannot reach the
+    # network — `_backfill_command()` passes `--no-download`, so an uncached
+    # model raises in ~0.2s and the backfill degrades to "swept, embedded
+    # nothing". The bare CLI keeps allow_download=True, which is what README's
+    # cold-cache recovery needs; see core/embeddings.py for why the two
+    # directions are both correct. An install with no embedding backend at all
+    # returns earlier still.
+    #
+    # SO THE `timeout` BELOW IS DEFENCE IN DEPTH, NOT THE PRIMARY GUARD, and an
+    # earlier revision of this comment said otherwise — it claimed the harness
+    # timeout "is what actually bounds it", which was true when the segment
+    # still downloaded and became false one commit later. Do not restore that
+    # reading. What the timeout covers now is everything the flag does not:
+    # a hung filesystem, a wedged interpreter, an sqlite lock. Not a Hub fetch,
+    # because there is no longer one to bound.
     session_start = (
         f"{_preflight_command()} ; {_backfill_command()} ; "
         f"{_hook_command('techne.hooks.session_start')}"

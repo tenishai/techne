@@ -24,10 +24,10 @@ All notable changes to techne are documented here. Format loosely follows
   only signal, and its remedy is a one-shot that fixes the number and leaves the
   hook absent.
 - The SessionStart registration now carries Claude Code's per-hook `timeout`
-  (120s; the default for a command hook is 600s). The backfill can reach a
-  blocking Hugging Face download on a cold model cache, and a Hub fetch is
-  signal-deaf — `bounded_hook`'s SIGALRM cannot preempt it, so only the harness
-  cancelling the subprocess bounds the stall (#704, #814).
+  (120s; the default for a command hook is 600s). With `--no-download` below
+  this is defence in depth rather than the primary guard — it covers a hung
+  filesystem or a wedged interpreter, not a Hugging Face fetch, since the chain
+  no longer makes one (#704, #814).
 - The SessionStart backfill now runs with `--no-download`, a new flag on
   `techne vectors backfill`. Owning the hook chain is what made this possible:
   operator shell and hook previously invoked the identical string, so there was
