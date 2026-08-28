@@ -117,3 +117,26 @@ markers = [
     "eval_gate: retrieval-correctness regression gate (#385); excluded from default runs",
     "eval_vec: vector/hybrid retrieval gate + RRF-vs-simple ablation (#399); needs sqlite-vec + a cached model2vec model, else skipped",
 ]
+
+# Ship the OPERATOR-FACING guides inside the package (techne#754, 0.16.0).
+#
+# WHY THIS EXISTS. techne's agent education lives in markdown — the trigger blocks
+# in these files are how an agent learns to raise a silent failure before the
+# operator hits it (techne#1374). None of it shipped: the wheel carried code, two
+# skills and two grammars, so every trigger reached agents working ON techne and
+# nobody else. An installed user's agent saw the MCP tool list and nothing else,
+# which is the "learned techne_* instead" failure 0.16.0 exists to fix.
+#
+# NOT THE WHOLE docs/ TREE. `docs/arch/` cards and `docs/proposals/` are
+# contributor material — they describe seams to people changing them, and they
+# carry anchor shas that mean nothing outside a git checkout. Shipping them would
+# quadruple the payload to teach nobody. These seven are the ones an operator or
+# their agent reads, and six of the seven carry trigger blocks.
+[tool.hatch.build.targets.wheel.force-include]
+"docs/four-functions.md" = "techne/docs/four-functions.md"
+"docs/reflect-guide.md" = "techne/docs/reflect-guide.md"
+"docs/db-per-domain.md" = "techne/docs/db-per-domain.md"
+"docs/deployment.md" = "techne/docs/deployment.md"
+"docs/welcome.md" = "techne/docs/welcome.md"
+"docs/mcp-tools.md" = "techne/docs/mcp-tools.md"
+"AGENTS.md" = "techne/docs/AGENTS.md"

@@ -1244,6 +1244,43 @@ def archivist_query(ctx, sql, limit, as_json):
 
 
 @main.command()
+@click.argument("name", required=False)
+@click.pass_context
+def guide(ctx, name):
+    """Print a bundled guide, or list them. The docs an installed techne carries.
+
+    WHY THIS COMMAND EXISTS (techne#754). techne's agent education is markdown —
+    the `Agent: raise this unprompted` blocks are how an agent learns to surface a
+    silent failure before the operator meets it. Until 0.16.0 none of it shipped:
+    the wheel held code, two skills and two grammars, so every trigger reached
+    agents working ON techne and reached an installed user's agent never. Those
+    guides now ride in the package, and this is what reads them — no repo checkout,
+    no network, works on all five platforms `init --platform` advertises.
+
+    AN AGENT IS THE EXPECTED CALLER, which is why the output is the raw markdown
+    rather than a rendered page: it is meant to be read into context, not admired.
+    """
+    from techne.docs import bundled_guide, guide_names
+
+    if not name:
+        click.echo("Bundled guides — `techne guide <name>`:\n")
+        for n in guide_names():
+            click.echo(f"  {n}")
+        click.echo(
+            "\nStart with four-functions: it walks the archivist, librarian, architect"
+            "\nand codex, and shows how to read the `binding` an answer resolved to."
+        )
+        return
+
+    try:
+        click.echo(bundled_guide(name))
+    except KeyError:
+        raise SystemExit(
+            f"No bundled guide named {name!r}. Run `techne guide` for the list."
+        ) from None
+
+
+@main.command()
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw report.")
 @click.pass_context
 def bindings(ctx, as_json):
@@ -3534,7 +3571,13 @@ def architect_ingest(ctx, markdown_file, verdict):
     from techne.core.patterns import ingest_patterns_md
 
     counts = ingest_patterns_md(
-        architect_db(config), markdown_file.read_text(encoding="utf-8"), verdict=verdict
+        architect_db(config),
+        markdown_file.read_text(encoding="utf-8"),
+        verdict=verdict,
+        # Same config value `add` uses — otherwise the two feeders write different
+        # halves of UNIQUE(url, surveyed_by, lens) and one URL becomes two rows.
+        surveyed_by=config.architect.surveyed_by,
+        lens=config.architect.lens,
     )
     # SAY WHAT WAS DROPPED, BEFORE the JSON (techne#754). A section missing its
     # `- **Source**:` line was skipped with a log line nobody sees, so this printed
@@ -3591,8 +3634,20 @@ def architect_ingest(ctx, markdown_file, verdict):
     default=None,
     help="Your judgment for this URL. Omit to record 'patterns-only' (the modal outcome).",
 )
-@click.option("--surveyed-by", default="raven", show_default=True)
-@click.option("--lens", default="infra", show_default=True)
+@click.option(
+    "--surveyed-by",
+    default=None,
+    help="Who surveyed it. Defaults to config `architect.surveyed_by`"
+    " ('operator' unless you set it). Part of a row's identity —"
+    " UNIQUE(url, surveyed_by, lens) — so a store with history wants"
+    " the value it already uses.",
+)
+@click.option(
+    "--lens",
+    default=None,
+    help="Angle the survey was done from. Defaults to config"
+    " `architect.lens` ('infra').",
+)
 @click.pass_context
 def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens):
     """Add ONE pattern to architect.db from its fields — the feeder that ships.
@@ -3617,6 +3672,11 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     from datetime import datetime, timezone
 
     config = ctx.obj["config"]
+    # None means 'not given on the command line' — fall back to config rather
+    # than to a persona name (techne#754). These two are part of a row's identity
+    # via UNIQUE(url, surveyed_by, lens), so the fallback must be stable.
+    surveyed_by = surveyed_by or config.architect.surveyed_by
+    lens = lens or config.architect.lens
     from techne.core.architect import architect_db
     from techne.core.patterns import (
         DEFAULT_INGEST_VERDICT,
@@ -3711,8 +3771,20 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     required=True,
     help="The corrected judgment for this URL.",
 )
-@click.option("--surveyed-by", default="raven", show_default=True)
-@click.option("--lens", default="infra", show_default=True)
+@click.option(
+    "--surveyed-by",
+    default=None,
+    help="Who surveyed it. Defaults to config `architect.surveyed_by`"
+    " ('operator' unless you set it). Part of a row's identity —"
+    " UNIQUE(url, surveyed_by, lens) — so a store with history wants"
+    " the value it already uses.",
+)
+@click.option(
+    "--lens",
+    default=None,
+    help="Angle the survey was done from. Defaults to config"
+    " `architect.lens` ('infra').",
+)
 @click.pass_context
 def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
     """Correct one investigation's verdict (techne#428).
@@ -3720,6 +3792,8 @@ def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
     Does not touch surveyed_at — correcting a judgment is not a re-survey.
     """
     config = ctx.obj["config"]
+    surveyed_by = surveyed_by or config.architect.surveyed_by
+    lens = lens or config.architect.lens
     from techne.core.architect import architect_db
     from techne.core.patterns import set_verdict
 

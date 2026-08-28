@@ -448,3 +448,84 @@ def test_re_ingesting_an_unchanged_corpus_is_not_called_a_failure(cli_config, tm
         f"a correct file was told its headings are wrong on re-ingest:\n{second.output}"
     )
     assert "nothing was ingested" not in second.output
+
+
+def test_the_feeder_does_not_stamp_a_stranger_with_our_persona(tmp_path, monkeypatch):
+    """`architect add` defaulted `--surveyed-by` to "raven" — one of THIS project's agent
+    names — hardcoded at cli.py. A stranger who installed techne and fed the architect got
+    every pattern attributed to someone they had never heard of, and `core/architect.py`
+    called the field "persona-agnostic" while the default shipped a persona.
+
+    Not cosmetic: `investigations` is UNIQUE(url, surveyed_by, lens), so the value is part
+    of row identity. This asserts the DEFAULT is neutral; the next test asserts an operator
+    with history can pin it back, which is why the fix is a config key and not a new literal.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    res = CliRunner().invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source", "https://example.com/x", "--body", "b"],
+    )
+    assert res.exit_code == 0, res.output
+
+    import sqlite3
+
+    rows = sqlite3.connect(tmp_path / "architect.db").execute(
+        "SELECT surveyed_by FROM investigations"
+    ).fetchall()
+    assert rows == [("operator",)], rows
+
+    # NOT a raw-bytes scan of the db: the first version of this test asserted
+    # b"raven" was absent from the file and failed on a CORRECT store, because the
+    # DDL comment on the column named the personas and sqlite_master keeps schema
+    # text verbatim. Assert on the stored VALUES, and separately on the schema.
+    schema = sqlite3.connect(tmp_path / "architect.db").execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'investigations'"
+    ).fetchone()[0]
+    assert "raven" not in schema, "a persona name still ships in the schema comment"
+
+
+def test_an_operator_with_history_can_pin_surveyed_by_so_rows_still_join(tmp_path, monkeypatch):
+    """The reason the fix is a config key rather than a changed literal.
+
+    A store with 360 investigations under one `surveyed_by` would mint a SECOND row for
+    every URL it already held if the default simply moved. Setting `architect.surveyed_by`
+    keeps new rows joining the old ones.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("architect:\n  surveyed_by: raven\n  lens: infra\n")
+    res = CliRunner().invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source", "https://example.com/y", "--body", "b"],
+    )
+    assert res.exit_code == 0, res.output
+
+    import sqlite3
+
+    rows = sqlite3.connect(tmp_path / "architect.db").execute(
+        "SELECT surveyed_by, lens FROM investigations"
+    ).fetchall()
+    assert rows == [("raven", "infra")], rows
+
+
+def test_the_architect_config_survives_a_save_round_trip(tmp_path):
+    """techne#601/#167, the same trap twice already: a key parsed by `_from_dict` but not
+    written back by `save()` is silently reset by `techne init`, which is save()'s only
+    caller. An operator who pinned surveyed_by would lose it on their next init and their
+    corpus would split anyway — the exact failure the config key exists to prevent.
+    """
+    from techne.config import Config
+
+    cfg = Config()
+    cfg.architect.surveyed_by = "raven"
+    cfg.save(tmp_path / "config.yaml")
+
+    assert "surveyed_by: raven" in (tmp_path / "config.yaml").read_text()
+    assert Config.load(tmp_path / "config.yaml").architect.surveyed_by == "raven"

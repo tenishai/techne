@@ -256,6 +256,33 @@ class HeuristicConfig:
 
 
 @dataclass
+class ArchitectConfig:
+    """Who the architect records as having surveyed a pattern (techne#754).
+
+    THIS DEFAULTED TO A PERSONA NAME. `techne architect add` shipped with
+    `--surveyed-by raven` hardcoded at the CLI — one of this project's own agent
+    names — so a stranger who installed techne and fed the architect got every
+    pattern attributed to someone they had never heard of. `core/architect.py`
+    calls the field "persona-agnostic: a plain string id", which was true of the
+    schema and false of the default.
+
+    IT IS NOT COSMETIC, because `investigations` is UNIQUE(url, surveyed_by,
+    lens): the value participates in row identity, so changing the default
+    outright would mint a SECOND investigation for every URL an existing corpus
+    already held under the old value. That is why this is a config key with a
+    neutral default rather than a changed literal — an operator with history sets
+    it once to what their store already uses and nothing splits.
+    """
+
+    #: Recorded as `investigations.surveyed_by`. Neutral by default; set it to
+    #: your existing value (`raven`, an agent name, a handle) if the store has
+    #: history under one, or the new rows will not join the old ones.
+    surveyed_by: str = "operator"
+    #: Recorded as `investigations.lens` — the angle the survey was done from.
+    lens: str = "infra"
+
+
+@dataclass
 class SearchConfig:
     recency_weight: float = 0.3
     bm25_weight: float = 0.7
@@ -476,6 +503,7 @@ class Config:
     heuristic: HeuristicConfig = field(default_factory=HeuristicConfig)
     reflect: ReflectConfig = field(default_factory=ReflectConfig)
     custodian: CustodianConfig = field(default_factory=CustodianConfig)
+    architect: ArchitectConfig = field(default_factory=ArchitectConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     injection: InjectionConfig = field(default_factory=InjectionConfig)
     posture: PostureConfig = field(default_factory=PostureConfig)
@@ -960,6 +988,12 @@ class Config:
                 emit_max_chars=int(r.get("emit_max_chars", 100_000)),
             )
 
+        if "architect" in raw and isinstance(raw["architect"], dict):
+            a = raw["architect"]
+            cfg.architect = ArchitectConfig(
+                surveyed_by=str(a.get("surveyed_by", "operator")),
+                lens=str(a.get("lens", "infra")),
+            )
         if "search" in raw and isinstance(raw["search"], dict):
             s = raw["search"]
             cfg.search = SearchConfig(
@@ -1118,6 +1152,12 @@ class Config:
                 "log_raw_response": self.reflect.log_raw_response,
                 "emit_max_threads": self.reflect.emit_max_threads,
                 "emit_max_chars": self.reflect.emit_max_chars,
+            },
+            # Serialized for the same reason embedding_backend is: init's
+            # load->save round-trip drops anything parsed but not written back.
+            "architect": {
+                "surveyed_by": self.architect.surveyed_by,
+                "lens": self.architect.lens,
             },
             "search": {
                 "recency_weight": self.search.recency_weight,

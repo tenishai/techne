@@ -195,7 +195,7 @@ def upsert_investigation(
     url: str,
     surveyed_at: str,
     verdict: str,
-    surveyed_by: str = "raven",
+    surveyed_by: str = "operator",
     lens: str = "infra",
     summary: str | None = None,
     skip_reason: str | None = None,
@@ -282,7 +282,7 @@ def set_verdict(
     *,
     url: str,
     verdict: str,
-    surveyed_by: str = "raven",
+    surveyed_by: str = "operator",
     lens: str = "infra",
 ) -> bool:
     """Correct one investigation's verdict in place. True if a row was updated.
@@ -935,7 +935,7 @@ def graph_data(db_path: Path, topic: str | None = None) -> dict:
 
 
 def investigation_exists(
-    db_path: Path, url: str, *, surveyed_by: str = "raven", lens: str = "infra"
+    db_path: Path, url: str, *, surveyed_by: str = "operator", lens: str = "infra"
 ) -> bool:
     """Lens-aware dedup probe — the fast SELECT the flat md couldn't do."""
     conn = plain_connect(db_path)
@@ -1156,7 +1156,14 @@ def export_patterns_md(db_path: Path) -> str:
     return "\n".join(out)
 
 
-def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) -> dict:
+def ingest_patterns_md(
+    db_path: Path,
+    md_text: str,
+    verdict: str | None = None,
+    *,
+    surveyed_by: str = "operator",
+    lens: str = "infra",
+) -> dict:
     """Seed architect.db from architectural-patterns.md (reuses import_md.parse):
     patterns → grouped by url into investigations + patterns;
     no-lift bullets → investigations(verdict=skip-with-flag). Idempotent.
@@ -1205,6 +1212,11 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
             url=p.source_url,
             surveyed_at=p.surveyed_date,
             verdict=verdict,
+            # Carried from the caller so `add` and `ingest` land on ONE row per URL.
+            # These two are half of UNIQUE(url, surveyed_by, lens); letting either
+            # fall back to its own default is how one URL becomes two investigations.
+            surveyed_by=surveyed_by,
+            lens=lens,
             # A stated --verdict overwrites; the fallback is insert-only, so a
             # judgment recorded via `reverdict` survives a later plain re-ingest.
             overwrite_verdict=stated,
@@ -1229,6 +1241,8 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
             surveyed_at=nl.surveyed_date,
             verdict="skip-with-flag",
             skip_reason=nl.reason,
+            surveyed_by=surveyed_by,
+            lens=lens,
             # Insert-only here too. "Correct by construction" is only half true: the
             # section header proves the URL was surveyed and nothing was lifted, but
             # NOT whether the operator's judgment is `skip` or `skip-with-flag` —

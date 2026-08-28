@@ -36,6 +36,30 @@ open and is not reversible — back up first.
 
 ### Added
 
+- **The guides ship with techne, and the agent is told they exist** (#754). techne's agent
+  education is markdown — the `Agent: raise this unprompted` blocks are how an agent names a
+  silent failure before the operator concludes something from it. None of it shipped: the
+  wheel held code, two skills and two grammars, so every trigger reached agents working *on*
+  techne and reached an installed user's agent never. An `AGENTS.md` row pointing at
+  `docs/reflect-guide.md` resolved to nothing on a machine with the package and not the repo.
+
+  Seven operator-facing docs now ride in the wheel (`techne/docs/`), and **`techne guide`**
+  lists them while `techne guide <name>` prints one — raw markdown, because an agent is the
+  expected caller. There is still exactly one copy of each file: `pyproject.toml`'s
+  force-include maps them in at build time, and a source checkout falls back to the repo
+  rather than vendoring a second copy that would drift. `docs/arch/` and `docs/proposals/`
+  deliberately do not ship — they describe seams to people changing them and carry anchor
+  shas that mean nothing outside a checkout.
+
+  **The MCP instructions now teach the four domains.** That field is techne's one automatic
+  channel into every connected agent's context, and it still described the pre-0.16.0
+  product: it named `pattern_search` (the mechanism) and never mentioned the archivist, the
+  librarian, `binding`, or how to fill anything. It now names all four domains, says every
+  answer carries the binding it resolved to, and names each feeder — because an empty domain
+  and an unpopulated one are indistinguishable in the result, so the zero is the agent's to
+  explain when it appears.
+
+
 - **Agent triggers are indexed, and the claims they rest on are tested** (#756, #757). Parts of
   the docs are written as *triggers* — conditions under which an agent should speak up
   unprompted, because techne's failures are overwhelmingly silent and a document that waits to
@@ -318,6 +342,22 @@ open and is not reversible — back up first.
   `knowledge`, never the mirror.
 
 ### Fixed
+
+- **`techne architect add` stamped a stranger's patterns with one of our persona names**
+  (#754). `--surveyed-by` defaulted to `"raven"`, hardcoded at the CLI, with three more
+  `"raven"` defaults in `core/patterns.py` and a schema comment listing `raven | rook |
+  architect` that shipped in every user's `sqlite_master`. `core/architect.py` called the
+  field "persona-agnostic", which was true of the schema and false of the default.
+
+  Not cosmetic: `investigations` is `UNIQUE(url, surveyed_by, lens)`, so the value is part of
+  row identity — which is also why the fix is a **config key** rather than a changed literal.
+  Moving the default outright would mint a second investigation for every URL an existing
+  corpus already held. `architect.surveyed_by` / `architect.lens` now default to `operator` /
+  `infra`, and an operator with history sets them once to what their store already uses.
+  `ingest` reads the same values as `add`, because the two feeders writing different halves
+  of that key is how one URL becomes two rows — a regression the existing
+  `test_add_and_ingest_agree_on_one_investigation_per_url` caught during this change.
+
 
 - **A session's threads accumulated one superseded partition per re-detection** (#646).
   Heuristic thread ids derive from `bucket_hash(session_id, first_obs_id, boundary_signal)`,

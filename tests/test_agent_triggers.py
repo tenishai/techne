@@ -312,6 +312,11 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "custodian status",
     "deposit",
     "doctor",
+    # techne#754 — prints bundled markdown from techne/docs/. Re-read
+    # deployment.md's migration trigger when adding it: `guide` reads files
+    # OUT of the package and writes nothing, so "nothing archives transcripts"
+    # is unaffected. Claim re-verified, not merely re-pinned.
+    "guide",
     "evidence",
     "fsck",
     "history",
