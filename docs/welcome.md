@@ -78,7 +78,7 @@ name:
 |---|---|
 | **archivist** | *What does the team know?* |
 | **librarian** | *What is written down?* |
-| **architect** | *What is worth stealing?* |
+| **architect** | *What is worth borrowing?* |
 | **codex** | *What does the code look like?* |
 
 ```bash

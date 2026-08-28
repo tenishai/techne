@@ -6,7 +6,7 @@ techne has four knowledge domains, and you address each one **by name**:
 |---|---|
 | **archivist** | *What does the team know?* |
 | **librarian** | *What is written down?* |
-| **architect** | *What is worth stealing?* |
+| **architect** | *What is worth borrowing?* |
 | **codex** | *What does the code look like?* |
 
 That is the whole vocabulary. This page walks you through asking each one, reading
@@ -119,7 +119,7 @@ is what lets the corpus grow (transcripts today, a design-docs directory tomorro
 without the call changing. See [Using the Librarian](librarian-guide.md) for getting
 your transcripts in.
 
-## 3. The architect — what is worth stealing?
+## 3. The architect — what is worth borrowing?
 
 Architectural patterns lifted from other people's code.
 

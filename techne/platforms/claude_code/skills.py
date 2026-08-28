@@ -68,7 +68,11 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _load_manifest(config: Config) -> dict:
+def _load_manifest(config: Config, key: str = STATE_KEY) -> dict:
+    """What techne last wrote, by name -> sha. `key` is a parameter so the agent
+    installer (techne#754) reuses this rather than duplicating it: the ownership
+    discipline these two functions encode is security-relevant, and two copies of it
+    is two places to fix the day it is wrong."""
     from techne.core.database import connect
     from techne.core.extension_state import get_state
 
@@ -76,12 +80,12 @@ def _load_manifest(config: Config) -> dict:
         return {}
     conn = connect(config.db_path)
     try:
-        return get_state(conn, STATE_KEY) or {}
+        return get_state(conn, key) or {}
     finally:
         conn.close()
 
 
-def _save_manifest(config: Config, manifest: dict) -> None:
+def _save_manifest(config: Config, manifest: dict, key: str = STATE_KEY) -> None:
     from techne.core.database import connect
     from techne.core.extension_state import set_state
 
@@ -89,7 +93,7 @@ def _save_manifest(config: Config, manifest: dict) -> None:
         return
     conn = connect(config.db_path)
     try:
-        set_state(conn, STATE_KEY, manifest)
+        set_state(conn, key, manifest)
     finally:
         conn.close()
 

@@ -93,7 +93,7 @@ def librarian_search(config, query: str, limit: int = 20) -> dict:
 
 
 def architect_search(config, query: str, limit: int = 20) -> dict:
-    """Architectural patterns — the "what is worth stealing" corpus in architect.db."""
+    """Architectural patterns — the "what is worth borrowing" corpus in architect.db."""
     from techne.core.architect import architect_db
     from techne.core.patterns import search_patterns
 

@@ -1244,6 +1244,43 @@ def archivist_query(ctx, sql, limit, as_json):
 
 
 @main.command()
+@click.argument("name", required=False)
+@click.pass_context
+def guide(ctx, name):
+    """Print a bundled guide, or list them. The docs an installed techne carries.
+
+    WHY THIS COMMAND EXISTS (techne#754). techne's agent education is markdown —
+    the `Agent: raise this unprompted` blocks are how an agent learns to surface a
+    silent failure before the operator meets it. Until 0.16.0 none of it shipped:
+    the wheel held code, two skills and two grammars, so every trigger reached
+    agents working ON techne and reached an installed user's agent never. Those
+    guides now ride in the package, and this is what reads them — no repo checkout,
+    no network, works on all five platforms `init --platform` advertises.
+
+    AN AGENT IS THE EXPECTED CALLER, which is why the output is the raw markdown
+    rather than a rendered page: it is meant to be read into context, not admired.
+    """
+    from techne.docs import bundled_guide, guide_names
+
+    if not name:
+        click.echo("Bundled guides — `techne guide <name>`:\n")
+        for n in guide_names():
+            click.echo(f"  {n}")
+        click.echo(
+            "\nStart with four-functions: it walks the archivist, librarian, architect"
+            "\nand codex, and shows how to read the `binding` an answer resolved to."
+        )
+        return
+
+    try:
+        click.echo(bundled_guide(name))
+    except KeyError:
+        raise SystemExit(
+            f"No bundled guide named {name!r}. Run `techne guide` for the list."
+        ) from None
+
+
+@main.command()
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw report.")
 @click.pass_context
 def bindings(ctx, as_json):
@@ -2212,10 +2249,21 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
         # above: if register_hooks refuses this install, we have not scattered
         # markdown into ~/.claude for an install that is about to fail.
         if install_skills:
+            from techne.platforms.claude_code.agents import register_agents
             from techne.platforms.claude_code.skills import register_skills
 
             for r in register_skills(config, force=force_skills):
                 line = f"Skill {r.name}: {r.action}"
+                if r.detail:
+                    line += f" — {r.detail}"
+                click.echo(line)
+
+            # The research sandbox rides the same flag as the procedures (techne#754).
+            # It is not optional in a different way: `techne guide investigating` tells
+            # an agent to research inside it, so an install that has the guide and not
+            # the definition ships an instruction nobody can follow.
+            for r in register_agents(config, force=force_skills):
+                line = f"Agent {r.name}: {r.action}"
                 if r.detail:
                     line += f" — {r.detail}"
                 click.echo(line)
@@ -2766,6 +2814,79 @@ def memory_sync_cmd(ctx):
 
     stored = CCMemorySource(config).initial_walk()
     click.echo(f"memory sync — {stored} file(s) drained (stored/updated) of {found} found")
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def agents(ctx):
+    """Install and inspect techne's bundled subagent definitions (techne#754).
+
+    ONE DEFINITION TODAY: `research-readonly`, the web-only sandbox that
+    `techne guide investigating` tells an agent to research inside. That instruction
+    is UNENFORCEABLE without this file — an operator who does not have it reaches for
+    a general research agent, which has a shell, and an agent that can both read
+    attacker-controlled pages and write to the pattern store is one injection away
+    from writing whatever a page tells it to.
+
+    SEPARATE FROM `techne skills` because the failure modes differ. A drifted skill
+    gives worse research. A drifted sandbox gives an agent more tools than the
+    procedure assumes, so `status` calls out a widened tool list specifically rather
+    than reporting a bare "user-modified".
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    ctx.invoke(agents_status_cmd)
+
+
+@agents.command("status")
+@click.pass_context
+def agents_status_cmd(ctx):
+    """Report each definition as unchanged / edited / widened / absent."""
+    from techne.platforms.claude_code.agents import agents_dir, agents_status
+
+    # Name the directory. On a non-Claude-Code install the bare "not installed, run
+    # `techne agents install`" gives no hint that it means ~/.claude/agents, which is
+    # the asymmetry with `skills status` Prudence flagged (#807 r1).
+    click.echo(f"  target: {agents_dir()}")
+    for r in agents_status(ctx.obj["config"]):
+        line = f"  {r.name:22} {r.action}"
+        click.echo(line)
+        if r.detail:
+            click.echo(f"      {r.detail}")
+
+
+@agents.command("install")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite a definition you have edited. Off by default: techne reports a "
+    "diverged copy rather than silently restoring its own.",
+)
+@click.pass_context
+def agents_install(ctx, force):
+    """Write the bundled subagent definitions into the platform's agents directory."""
+    from techne.platforms.claude_code.agents import register_agents
+
+    for r in register_agents(ctx.obj["config"], force=force):
+        click.echo(f"  {r.name:22} {r.action}  {r.path}")
+        if r.detail:
+            click.echo(f"      {r.detail}")
+
+
+@agents.command("remove")
+@click.pass_context
+def agents_remove(ctx):
+    """Remove only the copies techne wrote and still owns."""
+    from techne.platforms.claude_code.agents import unregister_agents
+
+    results = unregister_agents(ctx.obj["config"])
+    if not results:
+        click.echo("nothing installed by techne to remove")
+    for r in results:
+        click.echo(f"  {r.name:22} {r.action}  {r.path}")
+        if r.detail:
+            click.echo(f"      {r.detail}")
 
 
 @main.group(invoke_without_command=True)
@@ -3534,7 +3655,13 @@ def architect_ingest(ctx, markdown_file, verdict):
     from techne.core.patterns import ingest_patterns_md
 
     counts = ingest_patterns_md(
-        architect_db(config), markdown_file.read_text(encoding="utf-8"), verdict=verdict
+        architect_db(config),
+        markdown_file.read_text(encoding="utf-8"),
+        verdict=verdict,
+        # Same config value `add` uses — otherwise the two feeders write different
+        # halves of UNIQUE(url, surveyed_by, lens) and one URL becomes two rows.
+        surveyed_by=config.architect.surveyed_by,
+        lens=config.architect.lens,
     )
     # SAY WHAT WAS DROPPED, BEFORE the JSON (techne#754). A section missing its
     # `- **Source**:` line was skipped with a log line nobody sees, so this printed
@@ -3591,8 +3718,20 @@ def architect_ingest(ctx, markdown_file, verdict):
     default=None,
     help="Your judgment for this URL. Omit to record 'patterns-only' (the modal outcome).",
 )
-@click.option("--surveyed-by", default="raven", show_default=True)
-@click.option("--lens", default="infra", show_default=True)
+@click.option(
+    "--surveyed-by",
+    default=None,
+    help="Who surveyed it. Defaults to config `architect.surveyed_by`"
+    " ('operator' unless you set it). Part of a row's identity —"
+    " UNIQUE(url, surveyed_by, lens) — so a store with history wants"
+    " the value it already uses.",
+)
+@click.option(
+    "--lens",
+    default=None,
+    help="Angle the survey was done from. Defaults to config"
+    " `architect.lens` ('infra').",
+)
 @click.pass_context
 def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens):
     """Add ONE pattern to architect.db from its fields — the feeder that ships.
@@ -3617,6 +3756,11 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     from datetime import datetime, timezone
 
     config = ctx.obj["config"]
+    # None means 'not given on the command line' — fall back to config rather
+    # than to a persona name (techne#754). These two are part of a row's identity
+    # via UNIQUE(url, surveyed_by, lens), so the fallback must be stable.
+    surveyed_by = surveyed_by or config.architect.surveyed_by
+    lens = lens or config.architect.lens
     from techne.core.architect import architect_db
     from techne.core.patterns import (
         DEFAULT_INGEST_VERDICT,
@@ -3711,8 +3855,20 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
     required=True,
     help="The corrected judgment for this URL.",
 )
-@click.option("--surveyed-by", default="raven", show_default=True)
-@click.option("--lens", default="infra", show_default=True)
+@click.option(
+    "--surveyed-by",
+    default=None,
+    help="Who surveyed it. Defaults to config `architect.surveyed_by`"
+    " ('operator' unless you set it). Part of a row's identity —"
+    " UNIQUE(url, surveyed_by, lens) — so a store with history wants"
+    " the value it already uses.",
+)
+@click.option(
+    "--lens",
+    default=None,
+    help="Angle the survey was done from. Defaults to config"
+    " `architect.lens` ('infra').",
+)
 @click.pass_context
 def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
     """Correct one investigation's verdict (techne#428).
@@ -3720,6 +3876,8 @@ def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
     Does not touch surveyed_at — correcting a judgment is not a re-survey.
     """
     config = ctx.obj["config"]
+    surveyed_by = surveyed_by or config.architect.surveyed_by
+    lens = lens or config.architect.lens
     from techne.core.architect import architect_db
     from techne.core.patterns import set_verdict
 
@@ -3802,6 +3960,79 @@ def architect_export(ctx, output):
         click.echo(f"Exported to {output} ({md.count(chr(10))} lines)", err=True)
     else:
         click.echo(md)
+
+
+@architect.command("dedup")
+@click.argument("url")
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.pass_context
+def architect_dedup(ctx, url, as_json):
+    """Has this URL been investigated before? Exit 0 if seen, 1 if new.
+
+    THE CHECK `search` CANNOT DO (techne#754). `architect search` runs FTS over
+    pattern NAME and BODY only — `source_url` is never indexed — so searching a URL
+    reports "No patterns matched" for a repo that is demonstrably in the store. This
+    queries the columns directly, and it reads BOTH tables: a `skip-with-flag`
+    investigation records a verdict and a reason with no pattern row, which is
+    exactly the population a patterns-only check misses and exactly the one worth
+    catching, since "so we don't re-investigate this" is why the verdict was kept.
+    """
+    import json as _json
+
+    from techne.core.architect import architect_db
+    from techne.core.patterns import dedup_url
+
+    config = ctx.obj["config"]
+    res = dedup_url(architect_db(config), url)
+
+    if as_json:
+        click.echo(_json.dumps(res, indent=2))
+    elif not res["seen"]:
+        click.echo(f"new — no prior contact with {url}")
+    else:
+        for p in res["patterns"]:
+            click.echo(f"  {p['id']}  {p['name']}")
+            click.echo(f"    {p['source_url']}")
+        for i in res["investigations"]:
+            line = f"  investigated {i['surveyed_at']} verdict={i['verdict']}"
+            if i["skip_reason"]:
+                line += f" reason={i['skip_reason']}"
+            click.echo(line)
+        # The pair can come from DIFFERENT investigations: `ingest` overwrites
+        # surveyed_at unconditionally but preserves verdict unless --verdict is
+        # passed, so a re-ingested row shows today's date beside a months-old
+        # judgment (techne#711). Do not read the two as one event.
+        click.echo("\nSeen before. Ask before re-investigating.")
+
+    raise SystemExit(0 if res["seen"] else 1)
+
+
+@architect.command("snapshot")
+@click.pass_context
+def architect_snapshot(ctx):
+    """Content hash of the pattern corpus — the read-only-subagent backstop.
+
+    Take it before spawning a research subagent and compare after. A difference
+    means something wrote to the store that should not have, and the correct
+    response is to treat the whole result as compromised: you cannot distinguish
+    subagent-authored content from injection-authored content after the fact.
+
+    WHAT THE DIGEST COVERS, stated because the useful reading is the converse — "no
+    difference means nothing wrote" is the branch you proceed on. It covers EVERY column
+    of `patterns`, `investigations` AND `pattern_outcomes`, including `status`, so a soft
+    delete (status -> superseded), a new skip-with-flag row and a recorded outcome all
+    move it. It does NOT cover the derived graph — `pattern_relations` and
+    `pattern_applies` — because `backfill_graph` rebuilds both from content this does
+    cover, so a change there alone means the graph was refreshed, not edited.
+
+    (An earlier version of this text listed a third exclusion, `topics`. No such table
+    exists; the real sibling missing from the list was `pattern_outcomes`, which is
+    derived from nothing and is now covered.)
+    """
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+
+    click.echo(store_snapshot(architect_db(ctx.obj["config"])))
 
 
 @architect.command("search")
