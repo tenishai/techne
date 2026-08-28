@@ -737,6 +737,22 @@ def test_snapshot_covers_the_writes_the_operator_reads_it_for(tmp_path, monkeypa
     "a,b,same,label",
     [
         ("https://github.com/Owner/Repo", "github.com/owner/repo/", True, "owner/repo folds"),
+        # NOT A MUTANT-KILLER ON ITS OWN — the row above passes under BOTH the buggy
+        # whole-path fold and the bounded one, so a partially-applied mutation could show
+        # three failures here and read as full teeth (Prudence, #807 r3, answering push 4).
+        # These two kill it: the first needs the bound, the second needs the ordering.
+        (
+            "https://github.com/Owner/Repo?tab=readme-ov-file#readme",
+            "https://github.com/owner/repo?tab=readme-ov-file",
+            True,
+            "a fragment is stripped even when a query follows it",
+        ),
+        (
+            "https://example.com?Q=A",
+            "https://example.com?q=a",
+            False,
+            "a query on a path-less URL is not folded",
+        ),
         # THE FOLD RELOCATED INSIDE github (Prudence, #807 r2 I2). Only owner and repo live
         # in GitHub's namespace; everything deeper is served out of git, where tree paths
         # and refs are byte-exact. Folding the whole path reproduced the wikipedia defect
@@ -798,3 +814,50 @@ def test_snapshot_covers_pattern_outcomes(tmp_path, monkeypatch):
     before = store_snapshot(db)
     record_outcome(db, pattern_id=pid, ref="x", kind="pr", state="shipped")
     assert store_snapshot(db) != before, "an outcome write left the digest unchanged"
+
+
+def test_a_missing_table_changes_the_digest_rather_than_narrowing_it(tmp_path, monkeypatch):
+    """NEW CODE ON THE TRUST SURFACE, GUARDED ONLY BY A REVIEW UNTIL NOW (Prudence, #807 r3
+    nit 2). The `absent` sentinel was written by reasoning about silent narrowing, not from
+    a failing case — which is how this repo's hollow tests got written.
+
+    HONEST ABOUT ITS OWN TEETH, because the first version of this docstring was not.
+    Mutation-checked: removing the `absent` sentinel leaves this test GREEN. The property
+    it asserts — a store missing the table digests differently — holds structurally
+    without the sentinel, because a PRESENT table always contributes its column list and
+    an absent one contributes nothing, so the two can never collide.
+
+    The sentinel is therefore belt-and-braces, not the thing under test, and this is a
+    coverage assertion rather than a mutant-killer. Said plainly because a test whose
+    docstring claims teeth it does not have is worse than no test: it retires the question.
+    What IS guarded here is the coverage itself — if `pattern_outcomes` is dropped from the
+    digest's table list, the first assertion fails.
+    """
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    CliRunner().invoke(
+        main, ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "b"]
+    )
+    db = architect_db(Config.load())
+    with_table = store_snapshot(db)
+
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE pattern_outcomes")
+    conn.commit()
+    conn.close()
+    assert store_snapshot(db) != with_table, "a dropped table left the digest unchanged"
+
+    # ...and the sentinel is not confusable with a real table shaped like it.
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE pattern_outcomes (absent TEXT)")
+    conn.commit()
+    conn.close()
+    assert store_snapshot(db) != with_table, "a differently-shaped table matched the original"

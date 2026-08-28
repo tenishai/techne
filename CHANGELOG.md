@@ -474,14 +474,16 @@ open and is not reversible — back up first.
   every hashed column stays identical, and missed a whole new `skip-with-flag`
   investigation, the population `dedup` exists to protect. Now digests every column of
   both tables; the derived graph stays out by design and the CLI help says so.
+  *(Superseded within this release — see the `pattern_outcomes` entry above: the
+  digest covers three tables, not two.)*
 
 - **`architect dedup` folded path case and could suppress a real investigation** (#811).
   Lowercasing the whole URL made `wiki/Python` and `wiki/python` one entry, so `dedup`
   exited 0 and printed "Seen before" for a page nobody had surveyed. Case-folding is now a
   property of the **host**, established by measurement rather than assumption: GitHub
   returns 200 for both casings of a repo path, while Wikipedia returns 301 for the
-  lowercase variant — a different URL that redirects. Fragments and a `.git` suffix fold
-  too; query strings deliberately do not, since they can select content.
+  lowercase variant — a different URL that redirects. A fragment terminates the URL and a
+  `.git` suffix folds; query strings deliberately do not, since they can select content.
 
 
 - **`techne architect add` stamped a stranger's patterns with one of our persona names**

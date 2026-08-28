@@ -4019,10 +4019,15 @@ def architect_snapshot(ctx):
 
     WHAT THE DIGEST COVERS, stated because the useful reading is the converse — "no
     difference means nothing wrote" is the branch you proceed on. It covers EVERY column
-    of `patterns` and of `investigations`, including `status`, so a soft delete
-    (status -> superseded) and a new skip-with-flag row both move it. It does NOT cover
-    the derived graph (relations, topics, applies): those are rebuilt from content this
-    does cover, so a change there alone means the graph was refreshed, not edited.
+    of `patterns`, `investigations` AND `pattern_outcomes`, including `status`, so a soft
+    delete (status -> superseded), a new skip-with-flag row and a recorded outcome all
+    move it. It does NOT cover the derived graph — `pattern_relations` and
+    `pattern_applies` — because `backfill_graph` rebuilds both from content this does
+    cover, so a change there alone means the graph was refreshed, not edited.
+
+    (An earlier version of this text listed a third exclusion, `topics`. No such table
+    exists; the real sibling missing from the list was `pattern_outcomes`, which is
+    derived from nothing and is now covered.)
     """
     from techne.core.architect import architect_db
     from techne.core.patterns import store_snapshot

@@ -1319,40 +1319,33 @@ def _canonical_url(url: str) -> str:
             u = u[len(prefix) :]
             break
 
-    # LOWERCASE THE AUTHORITY ALWAYS; THE PATH ONLY WHERE THE HOST SAYS SO.
+    # ORDER MATTERS AND IT BIT TWICE (Prudence, #807 r3 I1 + nit 1). Each of these steps
+    # was individually right and two of them ran in the wrong place:
     #
-    # Folding every path made `wiki/Python` and `wiki/python` one URL — a false "seen"
-    # that exits 0 and suppresses an investigation nobody ran (Prudence, #807 r1 I4).
-    # That is the dangerous direction: over-folding hides work, under-folding only costs
-    # a subagent. But refusing to fold ANY path breaks the case this function exists for,
-    # because an operator pasting `github.com/Owner/Repo` for a corpus that holds
-    # `github.com/owner/repo` must get a hit.
+    #   - the fragment strip ran AFTER the query was partitioned off, so on any URL with a
+    #     query the fragment rode along inside `query` and survived — and
+    #     `?tab=readme-ov-file#readme` is exactly what a browser holds on a GitHub README
+    #     tab, which is the paste this function exists to fold;
+    #   - the query split ran AFTER host/path partition, so a URL with NO path put the
+    #     whole query into `host`, which is then unconditionally lowercased — folding a
+    #     query for every host, which is the over-fold direction.
     #
-    # MEASURED 2026-08-28 rather than assumed, because the two hosts genuinely differ:
-    #   github.com/PrimeIntellect-ai/prime-agent  -> 200
-    #   github.com/primeintellect-ai/PRIME-AGENT  -> 200   (same repo)
-    #   en.wikipedia.org/wiki/Python_(...)        -> 200
-    #   en.wikipedia.org/wiki/python_(...)        -> 301   (a DIFFERENT url that redirects)
-    # So the fold is a property of the host, and the list below is evidence, not a guess.
-    # Add a host only with a measurement like the one above.
+    # So: terminate at the fragment, remove the query, THEN split authority from path.
+    # Nothing downstream can reach past a step that already ran.
+    u = u.split("#", 1)[0]
+    u, qmark, query = u.partition("?")
     host, slash, path = u.partition("/")
+
     host = host.lower()
     if host.startswith("www."):
         host = host[4:]
-    # Split the query off BEFORE folding. `partition("/")` leaves `?q=Foo` inside `path`,
-    # so lowercasing the path also lowercased the query — contradicting the comment below
-    # that says query strings are left alone, for the one host where it mattered.
-    path, qmark, query = path.partition("?")
+
     depth = _CASE_INSENSITIVE_PATH_SEGMENTS.get(host)
     if depth:
         segs = path.split("/")
-        path = "/".join([s.lower() for s in segs[:depth]] + segs[depth:])
+        path = "/".join([seg.lower() for seg in segs[:depth]] + segs[depth:])
 
-    # A fragment is never part of the resource, and it is what a URL carries when it is
-    # pasted from a browser — the input this function was written for. A `.git` suffix and
-    # a trailing slash name the same repo. Query strings are left alone: they can select
-    # content, so folding them could merge two genuinely different pages.
-    path = path.split("#", 1)[0]
+    # A `.git` suffix and a trailing slash name the same repo.
     if path.endswith(".git"):
         path = path[: -len(".git")]
     return (host + slash + path + qmark + query).rstrip("/")
