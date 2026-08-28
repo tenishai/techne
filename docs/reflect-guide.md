@@ -260,13 +260,19 @@ you cannot reach.
 > and skip anything already in the prompt's "what the agent already knows" block or
 > obvious from re-reading the code.
 >
-> **Do NOT sweep the queue.** If `emit` reports `unemittable_queued`, those rows are
-> deliberate evidence of a known defect class — report the count to the operator, never
-> drain or delete them to make the banner green.
+> **Do NOT sweep the queue by hand — offer `techne reflect reconcile` instead.** If `emit`
+> reports `unemittable_queued`, that count is TWO populations: rows whose thread is gone from
+> the current detection (*superseded* — `reconcile` retires these, dry-run by default), and
+> rows whose thread is still current but has fallen under the observation floor (*below
+> threshold* — leave them, they are the only visible evidence of a known defect class).
+> `reconcile` prints the split. Retiring a provably-superseded row is not the same act as
+> draining an undrainable one, and a hand-rolled DELETE cannot tell them apart.
 >
-> **Before claiming reflection is broken**, check the two switches: `reflect.enabled` is
-> the feature (and your route), `reflect.model` binds only the unattended pass, and an
-> empty `reflect.model` is a normal working posture.
+> **Before claiming reflection is broken**, check the two switches: `reflect.enabled` turns on
+> the SessionStart nudge (your route), `reflect.model` binds only the unattended pass, and an
+> empty `reflect.model` is a normal working posture. Disabling the feature does NOT stop debt
+> accruing — the session-end enqueue is not gated on it — so a quiet banner is not an empty
+> ledger.
 
 That block plus `techne reflect --help` is everything an agent needs.
 
