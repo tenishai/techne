@@ -10,6 +10,17 @@ by Prudence reviewing it:
         on an always-loaded surface. `AGENTS.md` is that surface, and this file enforces the
         index BOTH DIRECTIONS, the same rule `check_arch_cards.py` applies to cards.
 
+  #804  THIS FILE ALSO COVERS THE GUIDE'S OTHER AGENT-FACING BLOCK, and that is not
+        implied by the two issues above. `docs/reflect-guide.md`'s "copy this into your
+        agent's context" block sits BELOW the trigger block, so `_trigger_blocks()` does
+        not see it and `TRIGGER_WITNESSES` cannot key on it — it is outside the
+        both-directions gate entirely. Prudence reverted that block wholesale to base and
+        all 39 tests here passed. `test_the_copy_paste_block_teaches_both_populations` is
+        its only witness, and nothing names IT as a witness, so deleting it would leave
+        the suite green and the accounting looking complete — verbatim the failure this
+        file already records below. Said here because a docstring is the only place that
+        can say it.
+
   #757  Architecture cards have `anchor:` shas; trigger blocks had nothing. A bullet saying
         "`techne doctor` does not check this" keeps firing, confidently, after that stops
         being true. What is mechanically checkable is checked here; what is not is MARKED,
@@ -1169,7 +1180,14 @@ def test_the_copy_paste_block_teaches_both_populations():
     guide = (REPO / "docs" / "reflect-guide.md").read_text()
     marker = "For your Claude — copy this into your agent's context"
     assert marker in guide, "the copy-paste block heading moved; re-anchor this test"
-    block = guide[guide.index(marker) :]
+    # BOUNDED AT THE NEXT SECTION (Prudence, #804 r2 §4b). Running to EOF swallowed
+    # `## Where to go next`, so the pin would silently start passing on tokens from a
+    # section that has nothing to do with the copy-paste block. Honest today only
+    # because that section happens to mention neither word.
+    start = guide.index(marker)
+    rest = guide[start:]
+    nxt = rest.find("\n## ", 1)
+    block = rest[:nxt] if nxt != -1 else rest
 
     assert "reconcile" in block, (
         "the copy-paste block no longer mentions `techne reflect reconcile`. It is the "

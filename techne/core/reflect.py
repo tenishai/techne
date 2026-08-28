@@ -764,9 +764,11 @@ def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
       - SUPERSEDED — the id is absent from the current detection. Provably stale,
         nothing is unreflected, and `techne reflect reconcile` retires these. Use
         `superseded_queue_rows` to get exactly this subset.
-      - BELOW THRESHOLD — the id IS current but re-partitioning left the thread
-        under `min_observations_per_thread`. This is the population #646 exists to
-        keep visible.
+      - BELOW THRESHOLD — the id IS current but the thread now sits under
+        `min_observations_per_thread`. Two routes in: re-partitioning moved observations
+        to neighbours (the #646-relevant one), or the floor itself was raised, which is
+        how `test_unemittable_queue_rows_are_reported_and_never_drained` builds it. This
+        is the population #646 exists to keep visible.
 
     Deliberately does NOT drain either. Blanket-draining restores a clean banner and
     destroys the only evidence the class exists, which is exactly how it survived

@@ -305,10 +305,11 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
-- **A session's threads accumulated one superseded partition per re-detection** (#646). Thread
-  ids derive from `bucket_hash(session_id, first_obs_id, boundary_signal)` and `save_threads`
-  wrote with `INSERT OR IGNORE`, while `run_session_end` — which fires once per turn — deleted
-  the boundary table before re-saving but never the thread table. Shifted boundaries therefore
+- **A session's threads accumulated one superseded partition per re-detection** (#646).
+  Heuristic thread ids derive from `bucket_hash(session_id, first_obs_id, boundary_signal)`,
+  and the heuristic path of `save_threads` wrote with `INSERT OR IGNORE`, while
+  `run_session_end` — which fires once per turn — deleted the boundary table before
+  re-saving but never the thread table. Shifted boundaries therefore
   minted a new id and left the old row behind. Measured on a real store: **86 rows in `threads`
   against 51 threads in the current detection**.
 
@@ -691,7 +692,7 @@ All notable changes to techne are documented here. Format loosely follows
   by tests: sweeping the reflection queue by hand, disabling the rail to quiet it, asking
   whether reflection is running, editing `config.yaml` under a live MCP server (which pins
   config at startup), and draining a large session through the MCP tool rather than the CLI.
-  Reflect had the largest silent-failure surface of any subsystem and the only guide-level documentation
+  Reflect had the largest silent-failure surface of any subsystem, and its only documentation
   was its architecture card, which is written for someone changing the seam rather than
   learning it.
 
