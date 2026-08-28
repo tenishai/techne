@@ -5,7 +5,7 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
-## [0.16.0] — 2026-08-27
+## [0.16.0] — 2026-08-28
 
 The release about addressing memory by name. 0.15.0 went after what the store is
 willing to *claim*; this one goes after how you *reach* it — four domains you call by
@@ -200,17 +200,22 @@ open and is not reversible — back up first.
   `list-timers` shows it healthy for as long as you stay logged in.
 - **`techne architect add` — the feeder that ships** (#754). techne teaches four domain
   names, and on a fresh install the architect — *"what is worth borrowing"* — had no way in
-  that came with the tool. `ingest` takes a markdown corpus; the procedures that actually
-  fill the store (`/investigate-url`, `/survey-field`) live in `tenishai/skills`, a
-  separate install. So an operator installed techne, read the tutorial, learned to ask the
-  architect, and the thing that fills it shipped from somewhere we never mentioned.
+  that came with the tool. `ingest` takes a markdown corpus, and when this landed the
+  procedures that actually fill the store lived in a separate repo, so an operator installed
+  techne, read the tutorial, learned to ask the architect, and the thing that fills it
+  shipped from somewhere we never mentioned. **Later in this same release those procedures
+  came home** — see *The two research procedures come home* below; the paragraph that
+  follows records why `add` was built as a command first, which is still why it is a
+  command.
 
   `add` takes the fields directly — `--name`, `--source`, `--surveyed`, and a body from
   `--body`, `--body-file` or stdin — and writes through the same store API `ingest` uses
   after parsing. **A command rather than a bundled skill**, because `techne init
   --platform` advertises five platforms and a skill installs into Claude Code's
-  `commands/` and nowhere else. The richer research procedures stay canonical in
-  `tenishai/skills`; this is the smallest thing that gets a pattern in, not a copy of them.
+  `commands/` and nowhere else — a CLI command works on all five, which is the same
+  reasoning that later made `techne guide` the delivery mechanism for the procedures
+  themselves. `add` is the smallest thing that gets a pattern in; it was never meant to be
+  the research procedure, and it still is not.
 
 - **`techne architect ingest` says which sections it dropped** (#754). A section missing
   its `- **Source**:` line was skipped with a log line nobody sees, so the command printed
@@ -354,6 +359,14 @@ open and is not reversible — back up first.
   listing offering two words for one domain teaches the ambiguity the fix exists to remove.
 
 ### Changed
+
+- **The architect borrows; it does not steal.** The domain's tagline was *"what is worth
+  stealing"* in thirteen places, including two in-product MCP tool descriptions
+  (`architect_search`, `pattern_search`) and the schema comment that ships in every user's
+  `sqlite_master`. Now *"what is worth borrowing"*, and `pattern_search` describes patterns
+  as **borrowed** from other projects rather than "lifted". A wording change, listed because
+  it is visible in tool descriptions an integrator may have pinned.
+
 
 - **BREAKING (0.16.0): `techne backup --out DIR` now names the backups *root*, not the
   set** (#742). The version is stated here rather than left to the heading because
@@ -525,9 +538,13 @@ open and is not reversible — back up first.
   - A `file` that reaches outside the set by any other route — an absolute path, a traversal
     part-way along, a basename that is a symlink out — refuses the same way, where before it
     was either accepted or reported as missing.
-  - A `file` containing a **NUL byte** now refuses with "contains a NUL byte". This one is not
-    a containment refusal at all: `Path.is_file()` silently swallows the `ValueError` a NUL
-    raises, so on previous releases such a set reported "backup set is incomplete".
+  - A `file` containing a **NUL byte** now refuses with "contains a NUL byte" **on the
+    restore path**. This one is not a containment refusal at all: `Path.is_file()` silently
+    swallows the `ValueError` a NUL raises, so on previous releases such a set reported
+    "backup set is incomplete". *Retention still shows the generic cause* — `_classify_backup_set`
+    records the domain and discards the reason, so `techne backup --keep` reports "lists
+    databases in a shape techne cannot read" and does not name the NUL. Both refuse; only one
+    says why. Naming it there waits on #785.
 
   **The second bullet is the one that was not merely mislabelled.** For the first and third,
   the set was already refused and never took a retention slot — `".."` and `"../"` name a
