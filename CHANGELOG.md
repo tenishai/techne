@@ -307,10 +307,9 @@ All notable changes to techne are documented here. Format loosely follows
 
 - **A session's threads accumulated one superseded partition per re-detection** (#646).
   Heuristic thread ids derive from `bucket_hash(session_id, first_obs_id, boundary_signal)`,
-  and the heuristic path of `save_threads` wrote with `INSERT OR IGNORE`, while
-  `run_session_end` — which fires once per turn — deleted the boundary table before
-  re-saving but never the thread table. Shifted boundaries therefore
-  minted a new id and left the old row behind. Measured on a real store: **86 rows in `threads`
+  and `run_session_end` — which fires once per turn — deleted the boundary table before
+  re-saving but never the thread table. A shifted boundary therefore minted a *new* id, so
+  the insert never conflicted under any verb, and nothing removed the row it replaced. Measured on a real store: **86 rows in `threads`
   against 51 threads in the current detection**.
 
   Reflection read the two apart. `load_session_for_reflection` re-detects from scratch, so the
@@ -682,7 +681,7 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Docs
 
-- **A guide for Reflect, and five agent triggers** (#791). `docs/reflect-guide.md` explains the
+- **A guide for Reflect, and six agent triggers** (#791). `docs/reflect-guide.md` explains the
   verb at a learner's altitude — the two switches operators routinely confuse (`reflect.enabled`
   is the feature and the resident route; `reflect.model` binds only the unattended pass, and
   empty is a normal posture), where candidates land, how to drain a backlog, and a
@@ -691,8 +690,9 @@ All notable changes to techne are documented here. Format loosely follows
   It also carries an `Agent: raise this unprompted` block, indexed in `AGENTS.md` and witnessed
   by tests: sweeping the reflection queue by hand, disabling the rail to quiet it, asking
   whether reflection is running, editing `config.yaml` under a live MCP server (which pins
-  config at startup), and draining a large session through the MCP tool rather than the CLI.
-  Reflect had the largest silent-failure surface of any subsystem, and its only documentation
+  config at startup), draining a large session through the MCP tool rather than the CLI, and
+  reporting a session drained when one `emit` call returned only its first slice.
+  Reflect had the largest silent-failure surface of any subsystem, and its only guide-level documentation
   was its architecture card, which is written for someone changing the seam rather than
   learning it.
 

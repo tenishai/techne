@@ -32,6 +32,7 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | asks whether reflection is running, or why it produced nothing | [reflect-guide.md](docs/reflect-guide.md#the-two-switches-and-why-they-are-not-one-switch) |
 | edits `~/.techne/config.yaml` while a techne MCP server is live | [reflect-guide.md](docs/reflect-guide.md#where-the-answers-land-write_to) |
 | is about to drain a large session through `techne_reflect_emit` | [reflect-guide.md](docs/reflect-guide.md#draining-a-backlog) |
+| treats one `techne_reflect_emit` call as having drained a session | [reflect-guide.md](docs/reflect-guide.md#draining-a-backlog) |
 
 **Adding a trigger?** Put the block in the document and its condition in this table.
 `tests/test_agent_triggers.py` enforces all three directions — a document carrying a
