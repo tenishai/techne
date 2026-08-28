@@ -112,7 +112,7 @@ open and is not reversible — back up first.
   lingering the user manager stops at logout and the timer never fires, while
   `list-timers` shows it healthy for as long as you stay logged in.
 - **`techne architect add` — the feeder that ships** (#754). techne teaches four domain
-  names, and on a fresh install the architect — *"what is worth stealing"* — had no way in
+  names, and on a fresh install the architect — *"what is worth borrowing"* — had no way in
   that came with the tool. `ingest` takes a markdown corpus; the procedures that actually
   fill the store (`/investigate-url`, `/survey-field`) live in `tenishai/skills`, a
   separate install. So an operator installed techne, read the tutorial, learned to ask the

@@ -1,7 +1,7 @@
 """The architect's feeder that ships, and the silence it replaces (techne#754).
 
 techne teaches four domain names. On a fresh install the architect — "what is worth
-stealing" — had no way in that came with the tool: `ingest` takes a markdown corpus in an
+borrowing" — had no way in that came with the tool: `ingest` takes a markdown corpus in an
 undocumented shape, and the skills that actually fill the store live in a separate repo.
 """
 

@@ -1064,7 +1064,7 @@ TOOLS = [
     {
         "name": "architect_search",
         "description": (
-            "Architectural PATTERNS — the 'what is worth stealing' corpus. Same "
+            "Architectural PATTERNS — the 'what is worth borrowing' corpus. Same "
             "corpus as pattern_search, addressed by the domain name rather than "
             "the mechanism. "
             "One of techne's four knowledge domains (archivist, librarian, architect, "
@@ -1086,8 +1086,8 @@ TOOLS = [
         "name": "pattern_search",
         "description": (
             "Search the Architect's architectural-pattern corpus (architect.db) — design "
-            "patterns lifted from other projects' code, the team-shared 'what's worth "
-            "stealing' store. Optionally scope to patterns that apply to a project "
+            "patterns borrowed from other projects' code, the team-shared 'what's worth "
+            "borrowing' store. Optionally scope to patterns that apply to a project "
             f"(target={_KNOWN_TARGET_HINT}); with a target and no query, lists "
             "all patterns for that project."
         ),

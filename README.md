@@ -20,7 +20,7 @@ techne has four knowledge domains, and you address each one **by name**:
 |---|---|---|
 | **archivist** | *What does the team know?* | `archivist_search` · `techne archivist query` |
 | **librarian** | *What is written down?* | `librarian_search` · `techne librarian search` |
-| **architect** | *What is worth stealing?* | `architect_search` · `techne architect search` |
+| **architect** | *What is worth borrowing?* | `architect_search` · `techne architect search` |
 | **codex** | *What does the code look like?* | `codex_search` · `techne codex search` |
 
 The codex needs `techne codex index <repo>` run once before it can answer.

@@ -164,7 +164,7 @@ grow without the call changing.
 
 ### `architect_search`
 
-Architectural PATTERNS — the "what is worth stealing" corpus. Same corpus as
+Architectural PATTERNS — the "what is worth borrowing" corpus. Same corpus as
 `pattern_search`, addressed by the domain name rather than the mechanism.
 
 The codex is the fourth domain and it has TWO calls rather than one, because the graph
@@ -197,7 +197,7 @@ you want. `techne bindings` reports what each name currently resolves to.
 
 ### `pattern_search`
 
-Search the Architect's architectural-pattern corpus (architect.db) — design patterns lifted from other projects' code, the team-shared 'what's worth stealing' store. Optionally scope to patterns that apply to a project (target=agent-infra|agora|argus|cabal|daedalus|kaminos|ladon|liminal|prudence|techne); with a target and no query, lists all patterns for that project.
+Search the Architect's architectural-pattern corpus (architect.db) — design patterns borrowed from other projects' code, the team-shared 'what's worth borrowing' store. Optionally scope to patterns that apply to a project (target=agent-infra|agora|argus|cabal|daedalus|kaminos|ladon|liminal|prudence|techne); with a target and no query, lists all patterns for that project.
 
 ### `pattern_related`
 
