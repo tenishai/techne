@@ -581,6 +581,29 @@ def _hook_command(module: str) -> str:
     return f"/bin/sh {shlex.quote(str(_launcher_path()))} -m {module}"
 
 
+def _backfill_command() -> str:
+    """The `techne vectors backfill` step of the SessionStart chain.
+
+    Routed through the launcher like every other segment (#276) and invoked as
+    `-m techne.cli` rather than a bare `techne`, because the console script's
+    location is an install detail (pipx shim, venv bin, Homebrew prefix) that a
+    baked absolute path gets wrong the moment the install moves. Output is
+    discarded: this runs before the banner and its result is reported there.
+    """
+    return f"{_hook_command('techne.cli')} vectors backfill >/dev/null 2>&1"
+
+
+# Harness-level per-hook timeouts, in seconds, by event (Claude Code's
+# settings.json `timeout` field; default is 600 for command hooks). Only
+# SessionStart carries one: it is the sole chain that can reach a blocking
+# Hugging Face download, via the backfill segment above. A SIGALRM budget does
+# not bound that fetch — the harness cancelling the subprocess does. The cost of
+# expiry is the whole chain, guard and banner included, so this is set well
+# above a warm-cache backfill (~1.5s observed) and is a stall breaker, not a
+# performance budget.
+_HOOK_TIMEOUTS_S = {"SessionStart": 120}
+
+
 def _matcher_of(group: dict) -> str:
     """A group's `matcher` as a STRING, whatever settings.json actually holds.
 
@@ -694,8 +717,31 @@ def register_hooks(config: Config):
     # guard must not regress the normal hook when the pointer was fine anyway.
     # Both halves route through the launcher (#276) so interpreter-death heal
     # fires before either the guard or session_start tries to import anything.
+    # BACKFILL SITS BETWEEN THE GUARD AND THE BANNER, and it belongs in this
+    # template rather than in the operator's settings.json (techne#704). It was
+    # hand-wired here for weeks; because the strip below removes any group whose
+    # command contains "techne" and re-appends this freshly-built string, every
+    # `techne init` silently deleted it. The edit verified clean and vanished
+    # later with no error — five days of drift (883 observations, 62 knowledge
+    # rows) before anyone noticed. A config this function rewrites cannot hold a
+    # hand edit, so the fix is to own the segment.
+    #
+    # ORDER IS LOAD-BEARING: before session_start, so the banner's
+    # `vectors:coverage` measures a just-embedded store rather than reporting
+    # drift it is about to fix. `;` not `&&`, matching the guard above — a
+    # backfill failure must never suppress the banner.
+    #
+    # COLD-CACHE EXPOSURE, bounded but not eliminated. backfill_vectors keeps
+    # allow_download=True (README's cold-cache recovery requires it), and a Hub
+    # fetch is signal-deaf, so bounded_hook's SIGALRM cannot preempt it — see
+    # core/embeddings.py, which spells out why having a SIGALRM budget and
+    # lacking one are equally exposed here. The harness-level `timeout` on the
+    # registration below is what actually bounds it. Note backfill_vectors
+    # returns early when no embedding backend is importable, so an install
+    # without the extra never reaches the network at all.
     session_start = (
-        f"{_preflight_command()} ; {_hook_command('techne.hooks.session_start')}"
+        f"{_preflight_command()} ; {_backfill_command()} ; "
+        f"{_hook_command('techne.hooks.session_start')}"
     )
     commands_per_event = {
         "SessionStart": session_start,
@@ -712,12 +758,10 @@ def register_hooks(config: Config):
         # This also migrates a hand-wired preflight hook: its command contains
         # "techne", so it's recognized, removed, and replaced by the packaged one.
         groups[:] = [g for g in groups if not _group_contains_techne(g)]
-        groups.append(
-            {
-                "matcher": "",
-                "hooks": [{"type": "command", "command": command}],
-            }
-        )
+        entry: dict = {"type": "command", "command": command}
+        if event in _HOOK_TIMEOUTS_S:
+            entry["timeout"] = _HOOK_TIMEOUTS_S[event]
+        groups.append({"matcher": "", "hooks": [entry]})
 
     # PreToolUse grep-assist (techne#206) — OPT-IN, experimental. Only registered
     # when hooks.codex_grep_assist is ON. It's the sole techne PreToolUse entry —

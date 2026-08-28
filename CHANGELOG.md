@@ -5,6 +5,22 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `techne init` no longer deletes the `techne vectors backfill` step from the
+  Claude Code SessionStart chain. The step had to be hand-wired into
+  `settings.json`, and `register_hooks` strips every hook group whose command
+  mentions techne and re-appends its own template — which did not contain it. A
+  hand edit therefore verified clean and disappeared at the next init, with no
+  error: one machine drifted 883 observations and 62 knowledge rows behind
+  before the missing segment was traced. The template now owns the segment, so
+  re-init preserves it (#704).
+- The SessionStart registration now carries Claude Code's per-hook `timeout`
+  (120s; the default for a command hook is 600s). The backfill can reach a
+  blocking Hugging Face download on a cold model cache, and a Hub fetch is
+  signal-deaf — `bounded_hook`'s SIGALRM cannot preempt it, so only the harness
+  cancelling the subprocess bounds the stall (#704).
+
 ## [0.16.0] — 2026-08-28
 
 The release about addressing memory by name. 0.15.0 went after what the store is

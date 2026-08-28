@@ -253,6 +253,74 @@ class TestPreflightGuard:
         assert "preflight_guard.py" in cmd
         assert "-m techne.hooks.session_start" in cmd
 
+    def test_backfill_sequenced_between_guard_and_session_start(self, fake_home, cfg):
+        # techne#704. Order is the whole point: backfill must run BEFORE
+        # session_start so the banner's `vectors:coverage` measures a
+        # just-embedded store. A fix that appended the segment after the banner
+        # would satisfy a bare "is it present" check and still report drift it
+        # had already fixed, so assert the positions, not the membership.
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        assert "vectors backfill" in cmd
+        assert cmd.index("preflight_guard.py") < cmd.index("vectors backfill"), (
+            "guard must run before backfill"
+        )
+        assert cmd.index("vectors backfill") < cmd.index("techne.hooks.session_start"), (
+            "backfill must run before the banner that measures its result"
+        )
+
+    def test_backfill_survives_reinit(self, fake_home, cfg):
+        """THE REGRESSION (techne#704). This exact segment was hand-wired into
+        settings.json and silently deleted by the next `techne init` — the strip
+        removes any group whose command contains "techne", and the old template
+        did not put it back. It verified clean when written and vanished later
+        with no error; the drift (883 observations, 62 knowledge rows) took five
+        days and two sessions to trace. Owning it in the template is the fix,
+        and surviving re-init is what "owned" means.
+        """
+        claude_code.register_hooks(cfg)
+        claude_code.register_hooks(cfg)
+        assert "vectors backfill" in self._session_start_cmd()
+
+    def test_backfill_invokes_the_cli_module_not_a_console_script(self, fake_home, cfg):
+        # A baked absolute path to the `techne` console script (pipx shim, venv
+        # bin, Homebrew prefix) breaks the moment the install moves — the same
+        # class of bug the launcher exists to prevent (#276). Route it through
+        # the launcher as a module invocation like every other segment.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        assert "-m techne.cli vectors backfill" in cmd
+        launcher = str(hooks_mod._launcher_path())
+        backfill = cmd[cmd.index("-m techne.cli") - len(launcher) - 20 :]
+        assert launcher in backfill, f"backfill segment bypasses the launcher: {cmd!r}"
+
+    def test_session_start_carries_a_harness_timeout(self, fake_home, cfg):
+        """The backfill can reach a blocking Hugging Face download, and a Hub
+        fetch is signal-deaf — bounded_hook's SIGALRM cannot preempt it (see
+        core/embeddings.py). Only the harness cancelling the subprocess bounds
+        it, so the registration must carry Claude Code's `timeout` field; the
+        default for a command hook is 600s, which is a ten-minute stall.
+        """
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        entry = settings["hooks"]["SessionStart"][0]["hooks"][0]
+        assert entry.get("timeout") == 120, entry
+
+    def test_only_session_start_carries_a_timeout(self, fake_home, cfg):
+        # Scope guard. SessionStart is the sole chain that can reach the
+        # network; blanket-bounding the others would cap unrelated hooks at a
+        # number chosen for a download.
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        for event, groups in settings["hooks"].items():
+            if event == "SessionStart":
+                continue
+            for group in groups:
+                for h in group["hooks"]:
+                    assert "timeout" not in h, f"{event} should not be bounded: {h!r}"
+
     def test_migrates_hand_wired_preflight(self, fake_home, cfg):
         # A hand-wired preflight (command contains "techne") is recognized and
         # replaced by the packaged one — not duplicated.
@@ -354,21 +422,23 @@ class TestLauncher:
                         f"{event} hook missing launcher path: {h['command']!r}"
                     )
 
-    def test_session_start_chains_both_through_launcher(self, fake_home, cfg):
-        # Both the preflight guard and session_start sides of the `;`-chain
-        # must route through the launcher — heal fires before either side runs.
+    def test_session_start_chains_every_segment_through_launcher(self, fake_home, cfg):
+        # Every segment of the `;`-chain must route through the launcher — heal
+        # fires before any of them runs. Was two segments (guard, session_start)
+        # until techne#704 added backfill between them; the count stays EXACT
+        # rather than becoming `>= 2`, so a future segment that bypasses the
+        # launcher fails here instead of passing a loosened bound.
         from techne.platforms.claude_code import hooks as hooks_mod
 
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         launcher = str(hooks_mod._launcher_path())
-        # Both halves of the chain reference the launcher
-        assert cmd.count(launcher) == 2, (
-            "both guard and session_start sides must use the launcher; "
+        assert cmd.count(" ; ") == 2, f"expected a three-segment chain: {cmd!r}"
+        assert cmd.count(launcher) == 3, (
+            "guard, backfill and session_start segments must all use the launcher; "
             f"found {cmd.count(launcher)} reference(s) in: {cmd!r}"
         )
-        assert " ; " in cmd
 
     def test_launcher_regenerated_on_reinit(self, fake_home, cfg):
         # re-running register_hooks must regenerate the launcher (keeps in sync
