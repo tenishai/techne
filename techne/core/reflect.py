@@ -751,15 +751,29 @@ def emit_reflection_batch(
 def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
     """Undrained queue rows for *session_id* that no emit can produce a prompt for.
 
-    THE #646 VISIBILITY SURFACE. `emittable_thread_ids` is the single source of
-    truth for "is this thread owed reflection", but it is evaluated TWICE against
-    separately-derived observation buckets — once at session_end (lifecycle) and
-    again here at emit time. When the two disagree the queue row is real and the
-    prompt is impossible, so the row can never be drained by doing the work.
+    THE #646 VISIBILITY SURFACE, WITH ITS CAUSE CORRECTED (techne#795). This used to
+    say `emittable_thread_ids` "is evaluated TWICE against separately-derived
+    observation buckets" and that the disagreement was the cause. MEASURED
+    2026-08-27 and refuted: the predicate is fine, and the two calls were running
+    over DIFFERENT PARTITIONS because `run_session_end` replaced the boundary table
+    and not the thread table. Fixed in techne#793/#797; see
+    `docs/arch/reflect-pipeline.md` and `docs/reflect-guide.md`.
 
-    Deliberately does NOT drain them. Draining an unemittable row restores a clean
-    banner and destroys the only evidence the class exists, which is exactly how
-    it survived #527 r4. Report, don't sweep.
+    WHAT THIS FUNCTION RETURNS IS STILL THE UNION OF BOTH POPULATIONS, so callers
+    must not treat it as one thing:
+      - SUPERSEDED — the id is absent from the current detection. Provably stale,
+        nothing is unreflected, and `techne reflect reconcile` retires these. Use
+        `superseded_queue_rows` to get exactly this subset.
+      - BELOW THRESHOLD — the id IS current but the thread now sits under
+        `min_observations_per_thread`. Two routes in: re-partitioning moved observations
+        to neighbours (the #646-relevant one), or the floor itself was raised, which is
+        how `test_unemittable_queue_rows_are_reported_and_never_drained` builds it. This
+        is the population #646 exists to keep visible.
+
+    Deliberately does NOT drain either. Blanket-draining restores a clean banner and
+    destroys the only evidence the class exists, which is exactly how it survived
+    #527 r4. Report, don't sweep — and retire the superseded subset through
+    `reconcile`, which is a different act from draining.
     """
     threads, observations = load_session_for_reflection(config, session_id)
     emittable = set(emittable_thread_ids(config, session_id, threads, observations))
@@ -1198,11 +1212,20 @@ def emit_reflection_pass(
     stuck = unemittable_queue_rows(config, session_id)
     if stuck:
         result["unemittable_queued"] = len(stuck)
+        # NAMES THE MEASURED CAUSE AND THE REMEDY (techne#795). This used to tell the
+        # operator every stuck row was below the observation threshold, which is true
+        # of only one of the two populations, and to attribute it to a cause techne#793
+        # measured and refuted.
         result["unemittable_note"] = (
-            f"{len(stuck)} queued thread(s) for this session are below "
-            f"reflect.min_observations_per_thread ({config.reflect.min_observations_per_thread}) "
-            "at emit time, so no prompt can be rendered for them and reflecting can never "
-            "drain them (tenishai/techne#646). They are left queued deliberately."
+            f"{len(stuck)} queued thread(s) for this session cannot be drained by "
+            "reflecting: either the thread is absent from the session's current "
+            "detection (superseded — retire these with `techne reflect reconcile`), or "
+            "it is still current but now below reflect.min_observations_per_thread "
+            f"({config.reflect.min_observations_per_thread}), so no prompt can render "
+            "for it. `techne reflect reconcile` prints the split, across all sessions. Do "
+            "not delete them by "
+            "hand: the below-threshold rows are the only visible evidence of "
+            "tenishai/techne#646."
         )
     return result
 
@@ -1434,9 +1457,12 @@ def reflect_on_session(
     # inheriting. It no longer does.
     #
     # UNBOUND IS A CORRECT AND COMMON POSTURE, NOT A FAULT. `reflect.enabled` also
-    # gates the SessionStart nudge and the reflection-debt queue, which drive the
-    # resident emit→ingest route — the route that actually produces candidates on an
-    # instance with no headless binding. So enabled-and-unbound must leave that route
+    # gates the SessionStart nudge — NOT the reflection-debt queue (techne#794); the
+    # session_end enqueue in lifecycle.py sits outside that flag, deliberately, so
+    # the ledger survives the feature being switched off and re-enabling later does
+    # not have amnesia. The nudge is what drives the resident emit→ingest route —
+    # the route that actually produces candidates on an instance with no headless
+    # binding. So enabled-and-unbound must leave that route
     # working and simply not attempt an LLM call here, rather than failing loudly or
     # forcing the operator to disable reflection wholesale to silence it.
     #

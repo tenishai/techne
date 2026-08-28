@@ -316,9 +316,11 @@ class ReflectConfig:
 
     TWO SWITCHES, AND THEY ARE NOT THE SAME SWITCH.
 
-    `enabled` turns the FEATURE on: the SessionStart nudge and the reflection-debt
-    queue, which drive the resident emit→ingest route where a live agent answers the
-    prompts with its own model. That route needs no binding and no key, and on most
+    `enabled` turns the FEATURE on: chiefly the SessionStart nudge, which drives the
+    resident emit→ingest route where a live agent answers the prompts with its own
+    model. It does NOT gate the reflection-debt queue (techne#794) — the session_end
+    enqueue sits outside this flag on purpose, so switching the feature off stops the
+    nudge without losing the ledger. That route needs no binding and no key, and on most
     instances it is the only one that ever runs.
 
     `model` binds the AUTOMATIC pass — the unattended run at session teardown. Empty
