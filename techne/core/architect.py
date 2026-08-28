@@ -11,7 +11,8 @@ url×surveyed_by×lens — two lenses on a URL = a join, not a diff); `patterns`
 off it; `pattern_relations` (the [[wikilink]] graph) and `pattern_applies` (which
 projects) are first-class but populated later (P2 write-path).
 
-Persona-agnostic: `surveyed_by` is a plain string id ('raven'/'rook'/'architect') —
+Persona-agnostic: `surveyed_by` is a plain string id, defaulted from
+config `architect.surveyed_by` ('operator') rather than any agent name —
 no cabal↔techne coupling. Backend: SQLite via the #98 store; Postgres is P3.
 """
 
@@ -59,7 +60,7 @@ ARCHITECT_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS investigations (
     id           TEXT PRIMARY KEY,            -- hash(url, surveyed_by, lens)
     url          TEXT NOT NULL,
-    surveyed_by  TEXT NOT NULL,               -- raven | rook | architect | …
+    surveyed_by  TEXT NOT NULL,               -- who surveyed it; see config architect.surveyed_by
     lens         TEXT NOT NULL,               -- infra | sre | product | …
     surveyed_at  TEXT NOT NULL,
     -- Operator's judgment. Vocabulary is enforced in patterns.VERDICTS, not by a

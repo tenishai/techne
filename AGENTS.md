@@ -33,6 +33,12 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | edits `~/.techne/config.yaml` while a techne MCP server is live | [reflect-guide.md](docs/reflect-guide.md#where-the-answers-land-write_to) |
 | is about to drain a large session through `techne_reflect_emit` | [reflect-guide.md](docs/reflect-guide.md#draining-a-backlog) |
 | treats one reflection `emit` call (CLI or `techne_reflect_emit`) as having drained a session | [reflect-guide.md](docs/reflect-guide.md#draining-a-backlog) |
+| pastes a repo URL and asks what is interesting in it | [investigating.md](docs/investigating.md#the-steps) |
+| asks you to "look at" or "check out" a project you are about to fetch | [investigating.md](docs/investigating.md#security-model) |
+| asks how patterns get into the architect | [investigating.md](docs/investigating.md#the-steps) |
+| runs an investigation while `techne agents status` reports the sandbox absent or widened | [investigating.md](docs/investigating.md#security-model) |
+| is about to build something substantial without asking what already exists | [surveying.md](docs/surveying.md#what-a-survey-is-for) |
+| asks for "the landscape" or "who else does this" | [surveying.md](docs/surveying.md#the-steps) |
 
 **Adding a trigger?** Put the block in the document and its condition in this table.
 `tests/test_agent_triggers.py` enforces all three directions — a document carrying a
@@ -41,7 +47,7 @@ fails, and a row pointing at a document that no longer carries a block fails.
 Same rule as architecture cards below, for the same reason: an unindexed trigger is one
 that never fires.
 
-**Staleness is checked, not marked.** Every bullet in all four current blocks is a claim about
+**Staleness is checked, not marked.** Every bullet in all six current blocks is a claim about
 techne and all of them are tested — including the `-wal` ones, which look like statements
 about SQLite and are not: they are true *because* techne opens its databases in WAL mode,
 one line in `core/database.py`. Flip it to `DELETE` and all four become confidently wrong

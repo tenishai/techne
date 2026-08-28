@@ -69,7 +69,7 @@ pip install "techne[llm]"   # OPTIONAL: autonomous/headless model passes
 
 The first of the four names, and the one this tour was missing entirely. Ask it what is
 *known* — decisions, facts, corrections, the reasoning you would hate to redo — as opposed
-to what is written down (Librarian), what is worth stealing (Architect), or what the code
+to what is written down (Librarian), what is worth borrowing (Architect), or what the code
 looks like (Codex).
 
 **Why it's different:** the archivist is the only one of the four whose binding changes
@@ -87,7 +87,7 @@ Personal recall stays fast because it ranks **gist cards**, not full documents. 
 
 ---
 
-## Architect — *what is worth stealing?*  ·  `architect.db`
+## Architect — *what is worth borrowing?*  ·  `architect.db`
 
 A curated corpus of **architectural patterns** lifted from other projects' code — design decisions and trade-offs worth reusing — linked into a `[[wikilink]]` relation graph (`pattern_search`, `pattern_related`). Team-scoped: its own file, grantable, shareable.
 

@@ -166,6 +166,22 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     # it can misattribute a row, which is an integrity concern for the receiving
     # store, but it cannot send memory anywhere new.
     "instance_name",
+    # THE SAME JUDGMENT AS `instance_name` ONE LINE UP, and cited deliberately
+    # (techne#754). `architect.surveyed_by` and `architect.lens` are stamped onto
+    # `investigations` rows as attribution — who looked at a URL, from what angle.
+    # They select no path, endpoint, model route or sink; where a pattern is written
+    # is decided by `stores`, which IS in EGRESS_KEYS (there is no `architect_db_path` field —
+    # the architect's path is governed through `stores`; the classification was right and the
+    # cited control was not a thing. Prudence, #807 r1). The whole block
+    # is listed rather than each sub-key because NEITHER is a destination, so this is
+    # not the partially-governed case the dotted-name rule exists for.
+    #
+    # They DO participate in row identity — UNIQUE(url, surveyed_by, lens) — so an
+    # edit can split a corpus into two investigations for one URL, or merge two that
+    # were deliberately kept apart. That is an integrity concern of exactly the shape
+    # `instance_name`'s comment already names ("can misattribute a row"), and it is
+    # still not a destination: nothing new leaves the machine.
+    "architect",
     # NUANCE WORTH THE NEXT READER'S TIME (Prudence, #709): `custodian.rails` changes
     # the KIND of data leaving, not merely the volume — switching on `faithfulness`
     # ships candidate content plus source rows, and `memory_claims` ships curated

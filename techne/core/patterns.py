@@ -195,7 +195,7 @@ def upsert_investigation(
     url: str,
     surveyed_at: str,
     verdict: str,
-    surveyed_by: str = "raven",
+    surveyed_by: str = "operator",
     lens: str = "infra",
     summary: str | None = None,
     skip_reason: str | None = None,
@@ -282,7 +282,7 @@ def set_verdict(
     *,
     url: str,
     verdict: str,
-    surveyed_by: str = "raven",
+    surveyed_by: str = "operator",
     lens: str = "infra",
 ) -> bool:
     """Correct one investigation's verdict in place. True if a row was updated.
@@ -935,7 +935,7 @@ def graph_data(db_path: Path, topic: str | None = None) -> dict:
 
 
 def investigation_exists(
-    db_path: Path, url: str, *, surveyed_by: str = "raven", lens: str = "infra"
+    db_path: Path, url: str, *, surveyed_by: str = "operator", lens: str = "infra"
 ) -> bool:
     """Lens-aware dedup probe — the fast SELECT the flat md couldn't do."""
     conn = plain_connect(db_path)
@@ -1156,7 +1156,14 @@ def export_patterns_md(db_path: Path) -> str:
     return "\n".join(out)
 
 
-def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) -> dict:
+def ingest_patterns_md(
+    db_path: Path,
+    md_text: str,
+    verdict: str | None = None,
+    *,
+    surveyed_by: str = "operator",
+    lens: str = "infra",
+) -> dict:
     """Seed architect.db from architectural-patterns.md (reuses import_md.parse):
     patterns → grouped by url into investigations + patterns;
     no-lift bullets → investigations(verdict=skip-with-flag). Idempotent.
@@ -1205,6 +1212,11 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
             url=p.source_url,
             surveyed_at=p.surveyed_date,
             verdict=verdict,
+            # Carried from the caller so `add` and `ingest` land on ONE row per URL.
+            # These two are half of UNIQUE(url, surveyed_by, lens); letting either
+            # fall back to its own default is how one URL becomes two investigations.
+            surveyed_by=surveyed_by,
+            lens=lens,
             # A stated --verdict overwrites; the fallback is insert-only, so a
             # judgment recorded via `reverdict` survives a later plain re-ingest.
             overwrite_verdict=stated,
@@ -1229,6 +1241,8 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
             surveyed_at=nl.surveyed_date,
             verdict="skip-with-flag",
             skip_reason=nl.reason,
+            surveyed_by=surveyed_by,
+            lens=lens,
             # Insert-only here too. "Correct by construction" is only half true: the
             # section header proves the URL was surveyed and nothing was lifted, but
             # NOT whether the operator's judgment is `skip` or `skip-with-flag` —
@@ -1271,3 +1285,179 @@ def ingest_patterns_md(db_path: Path, md_text: str, verdict: str | None = None) 
         "graph": graph,
         **stats(db_path),
     }
+
+
+#: host -> how many leading path segments that host case-folds.
+#:
+#: NOT THE WHOLE PATH, which was this fix's own second defect (Prudence, #807 r2 I2).
+#: `github.com` folds `owner/repo` because those live in GitHub's namespace; everything
+#: deeper is served out of git, where tree paths and refs are byte-exact. Folding the
+#: whole path relocated the wikipedia over-fold inside github:
+#:     /o/r/blob/main/Setup.py  ==  /o/r/blob/main/setup.py   <- different files
+#:     /o/r/tree/Release-1.0    ==  /o/r/tree/release-1.0     <- different refs
+#: The measurement that justifies the entry was `owner/repo`, and `owner/repo` is what it
+#: supports. Gists, raw.githubusercontent.com and enterprise hosts are absent on purpose:
+#: absence under-folds, which costs a subagent, and guessing over-folds, which hides work.
+_CASE_INSENSITIVE_PATH_SEGMENTS = {"github.com": 2}
+
+
+def _canonical_url(url: str) -> str:
+    """Fold the spellings of one URL that mean the same page.
+
+    THE DEDUP CHECK IS ONLY AS GOOD AS THIS (techne#754). A prior investigation
+    recorded as `https://github.com/Owner/Repo` must be found when the operator
+    pastes `github.com/owner/repo/`, or the check reports "never seen" and a
+    subagent is spent re-deriving a judgment already on the record — which is the
+    whole failure the check exists to prevent.
+
+    SUB-PATHS STAY DISTINCT on purpose: `owner/repo` must not match
+    `owner/repo-extended`, so only a TRAILING slash is stripped, never a segment.
+    """
+    u = url.strip()
+    for prefix in ("https://", "http://", "//"):
+        if u.lower().startswith(prefix):
+            u = u[len(prefix) :]
+            break
+
+    # ORDER MATTERS AND IT BIT TWICE (Prudence, #807 r3 I1 + nit 1). Each of these steps
+    # was individually right and two of them ran in the wrong place:
+    #
+    #   - the fragment strip ran AFTER the query was partitioned off, so on any URL with a
+    #     query the fragment rode along inside `query` and survived — and
+    #     `?tab=readme-ov-file#readme` is exactly what a browser holds on a GitHub README
+    #     tab, which is the paste this function exists to fold;
+    #   - the query split ran AFTER host/path partition, so a URL with NO path put the
+    #     whole query into `host`, which is then unconditionally lowercased — folding a
+    #     query for every host, which is the over-fold direction.
+    #
+    # So: terminate at the fragment, remove the query, THEN split authority from path.
+    # Nothing downstream can reach past a step that already ran.
+    u = u.split("#", 1)[0]
+    u, qmark, query = u.partition("?")
+    host, slash, path = u.partition("/")
+
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+
+    depth = _CASE_INSENSITIVE_PATH_SEGMENTS.get(host)
+    if depth:
+        segs = path.split("/")
+        path = "/".join([seg.lower() for seg in segs[:depth]] + segs[depth:])
+
+    # A `.git` suffix and a trailing slash name the same repo.
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    return (host + slash + path + qmark + query).rstrip("/")
+
+
+def dedup_url(db_path: Path, url: str) -> dict:
+    """Every prior contact with a URL — patterns AND verdicts, which differ in meaning.
+
+    TWO TABLES, BECAUSE ONE OF THEM IS THE WHOLE POINT. A `skip-with-flag`
+    investigation records a verdict and a reason but NO pattern row, so a
+    patterns-only check misses exactly the set the dedup exists to catch: the URLs
+    someone already looked at and deliberately passed over. Measured on a real
+    corpus, 96 of 357 investigations had no pattern row, all of them skips.
+
+    AND `architect search` CANNOT DO THIS. Its FTS index covers name and body only
+    — `source_url` is never offered to it — so searching a URL returns "No patterns
+    matched" for a repo that is demonstrably in the store. A confirmed miss, not a
+    theoretical one, which is why this queries the columns directly.
+    """
+    canon = _canonical_url(url)
+    conn = plain_connect(db_path)
+    try:
+        patterns = [
+            {"id": r[0], "name": r[1], "source_url": r[2]}
+            for r in conn.execute(
+                "SELECT id, name, source_url FROM patterns WHERE source_url IS NOT NULL"
+            ).fetchall()
+            if _canonical_url(r[2] or "") == canon
+        ]
+        investigations = [
+            {
+                "url": r[0],
+                "surveyed_by": r[1],
+                "surveyed_at": r[2],
+                "verdict": r[3],
+                "skip_reason": r[4],
+            }
+            for r in conn.execute(
+                "SELECT url, surveyed_by, surveyed_at, verdict, skip_reason FROM investigations"
+            ).fetchall()
+            if _canonical_url(r[0] or "") == canon
+        ]
+    finally:
+        conn.close()
+
+    return {
+        "url": url,
+        "canonical": canon,
+        "seen": bool(patterns or investigations),
+        "patterns": patterns,
+        "investigations": investigations,
+    }
+
+
+def store_snapshot(db_path: Path) -> str:
+    """A content digest of the corpus, for the read-only-subagent backstop.
+
+    THE OPERATOR USES THE CONVERSE, WHICH IS WHY COVERAGE MATTERS (Prudence, #807 r1 I3).
+    Nobody reads this as "a difference means something wrote". They read "no difference
+    means nothing wrote", because that is the branch where they proceed with the
+    subagent's findings. So every column this does NOT cover is a write the operator is
+    told did not happen.
+
+    The first version hashed id+name+body+source_url — 4 of the `patterns` table's 15
+    columns — and its docstring claimed an id-only hash "catches an insert or a delete".
+    It did not catch `status` -> 'superseded', which IS a delete: the row stops appearing
+    in search while every hashed column stays byte-identical. It also missed a whole new
+    `investigations` row, which is not out of scope by this module's own argument —
+    `dedup_url` exists precisely because a `skip-with-flag` with no pattern row is the
+    population worth protecting.
+
+    So: every column of `patterns`, plus a second pass over `investigations`. Both are
+    ordered by id so the digest is stable across row order. `pattern_relations`,
+    `pattern_topics` and `pattern_applies` remain outside it — they are derived by
+    `backfill_graph` from content this DOES cover, so a change there without a change
+    here means the graph was rebuilt, not that the corpus was edited. That is a
+    deliberate boundary rather than an oversight, and `techne architect snapshot --help`
+    states what the digest covers so the converse can be read honestly.
+
+    `pattern_outcomes` IS COVERED, and leaving it out was the same defect one table over
+    (Prudence, #807 r2 I3). Nothing derives it — `record_outcome` writes it with a real
+    INSERT and `techne architect realized` exposes that from the CLI — so it failed the
+    exclusion test the other two pass. The tell was that the first version of this
+    docstring listed `pattern_topics` among the exclusions: no such table exists, and the
+    real sibling that got dropped from the list was the one that is not derived.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    conn = plain_connect(db_path)
+    try:
+        for table in ("patterns", "investigations", "pattern_outcomes"):
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            if not cols:
+                # A missing table would silently NARROW the digest, which is the shape
+                # this function exists to eliminate. Fold its absence in instead, so a
+                # store that gains or loses one does not read as unchanged.
+                h.update(f"{table}:absent".encode("utf-8"))
+                h.update(b"\x1d")
+                continue
+            # Column names go into the digest too: adding a column is a schema change
+            # that alters what "the whole row" means, and the snapshot should not read
+            # as unchanged across it.
+            h.update(f"{table}:{','.join(cols)}".encode("utf-8"))
+            h.update(b"\x1e")
+            order = "id" if "id" in cols else cols[0]
+            select = ", ".join(f'COALESCE(CAST("{c}" AS TEXT), \'\')' for c in cols)
+            for row in conn.execute(f'SELECT {select} FROM "{table}" ORDER BY "{order}"'):
+                for field in row:
+                    h.update(str(field).encode("utf-8"))
+                    h.update(b"\x1f")
+            h.update(b"\x1d")
+    finally:
+        conn.close()
+    return h.hexdigest()

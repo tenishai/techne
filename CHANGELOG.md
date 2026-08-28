@@ -5,6 +5,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-08-28
+
+The release about addressing memory by name. 0.15.0 went after what the store is
+willing to *claim*; this one goes after how you *reach* it — four domains you call by
+name rather than by database file, every answer reporting what it resolved to, and one
+command that tells you what everything is bound to. The vocabulary is the deliverable:
+an operator learns *archivist, librarian, architect, codex* here and keeps those names
+when the work grows into liminal and cabal, where the same call may resolve somewhere
+else entirely.
+
+Two things to read before upgrading: `techne backup --out DIR` changes meaning (see
+**BREAKING** under Changed), and the core schema moves 24 → 25, which migrates on first
+open and is not reversible — back up first.
+
 <!-- AUDIT NOTE (#726/#748), 2026-08-26. Two merged changes are DELIBERATELY not listed here,
      recorded so a later audit does not read the absence as an oversight — the distinction this
      PR exists to make, since "excluded on purpose" and "missed" are indistinguishable in
@@ -21,6 +35,93 @@ All notable changes to techne are documented here. Format loosely follows
 
 
 ### Added
+
+- **`techne_guide` — the guides are reachable without a shell** (#754). The server
+  instructions tell every connected agent that techne ships guides, but the only way to
+  read one was `techne guide <name>`, a **shell** command. A client connected purely over
+  MCP got the pointer and could not collect what it pointed at, which is worse than not
+  advertising them. Both doors now call the same accessor, so there is one copy of each
+  guide and no second rendering path to drift. Costs ~218 tokens of schema per session
+  (2.5% of techne's MCP footprint — see #808 for the rest).
+
+
+- **The research sandbox ships too — `techne agents install`** (#754). `techne guide
+  investigating` tells an agent to do its fetching inside a subagent restricted to
+  web-only tools. That instruction is **unenforceable** without a definition to name: an
+  operator who lacks one reaches for a general research agent, which has a shell, and an
+  agent that can both read attacker-controlled pages *and* write to the pattern store is
+  one injection away from writing whatever a page tells it to. Afterwards nobody can
+  separate agent-authored content from injection-authored content.
+
+  So `research-readonly` now ships in the wheel and installs alongside the procedures.
+  **This is the one place the guide-stub trick does not apply**: a procedure can say "run
+  `techne guide <name>` and follow it" because an agent reads it at run time, but an agent
+  definition is configuration the *harness* parses before any agent exists — the security
+  property is the literal `tools: WebFetch, WebSearch` line. Point it at a guide and there
+  is nothing left to enforce.
+
+  `techne agents status` reports absent / unchanged / edited / **widened**, and widened is
+  its own state on purpose: a drifted procedure gives worse research, while a drifted
+  sandbox gives the research agent tools the procedure assumes it cannot have. An edited
+  definition is kept rather than overwritten, the same discipline the skills installer
+  uses — techne would rather tell you your copy diverged than silently restore its own.
+
+
+- **The two research procedures come home, and an agent can give itself the skill** (#754).
+  `investigate-url` and `survey-field` lived in a separate repo an operator had to know
+  about and install. They now ship as `techne guide investigating` / `techne guide
+  surveying`, alongside the operational procedures — `techne guide` lists all eleven.
+
+  **The generated skill is a stub, not a copy.** The MCP instructions tell an agent that if
+  its host supports skills it can write itself one whose entire body is *"run `techne guide
+  <name>` and follow it"* — never the procedure itself. A copy is a second spelling that
+  goes stale in silence; a stub re-reads the installed version on every run, so it cannot
+  drift. That is what makes the external repo retirable rather than merely duplicated, and
+  it works on every platform `init --platform` advertises rather than the one that has a
+  command directory.
+
+  **The drift was not hypothetical — the external copy was already wrong.** It told agents
+  `architect search` cannot match a source URL because the FTS index covers name and body
+  only. #430 fixed that in this same release: `patterns_fts` is `fts5(name, body,
+  source_url)` and all three triggers populate it. An external procedure had been quietly
+  disagreeing with the code for a release, and nothing failed. `search` still cannot see a
+  `skip-with-flag` (no pattern row), which is what `dedup` is actually for, and that
+  correction is now pinned by a test rather than left in prose.
+
+- **`techne architect dedup` and `techne architect snapshot`** (#754). The two store
+  operations the absorbed procedures need. `dedup` answers "has this URL been investigated"
+  across **both** tables — patterns *and* investigations — because a `skip-with-flag`
+  records a verdict with no pattern row, and that is precisely the set worth catching:
+  someone already decided this was not worth lifting. It folds URL spellings (case, scheme,
+  `www.`, trailing slash) while keeping sub-paths distinct, and exits 0 for seen, 1 for new.
+  `snapshot` hashes pattern **content**, so the read-only-subagent backstop catches an
+  in-place edit and not merely an insert or delete — the more dangerous write, since a
+  poisoned body under an already-reviewed id reads as reviewed.
+
+
+- **The guides ship with techne, and the agent is told they exist** (#754). techne's agent
+  education is markdown — the `Agent: raise this unprompted` blocks are how an agent names a
+  silent failure before the operator concludes something from it. None of it shipped: the
+  wheel held code, two skills and two grammars, so every trigger reached agents working *on*
+  techne and reached an installed user's agent never. An `AGENTS.md` row pointing at
+  `docs/reflect-guide.md` resolved to nothing on a machine with the package and not the repo.
+
+  Seven operator-facing docs now ride in the wheel (`techne/docs/`), and **`techne guide`**
+  lists them while `techne guide <name>` prints one — raw markdown, because an agent is the
+  expected caller. There is still exactly one copy of each file: `pyproject.toml`'s
+  force-include maps them in at build time, and a source checkout falls back to the repo
+  rather than vendoring a second copy that would drift. `docs/arch/` and `docs/proposals/`
+  deliberately do not ship — they describe seams to people changing them and carry anchor
+  shas that mean nothing outside a checkout.
+
+  **The MCP instructions now teach the four domains.** That field is techne's one automatic
+  channel into every connected agent's context, and it still described the pre-0.16.0
+  product: it named `pattern_search` (the mechanism) and never mentioned the archivist, the
+  librarian, `binding`, or how to fill anything. It now names all four domains, says every
+  answer carries the binding it resolved to, and names each feeder — because an empty domain
+  and an unpopulated one are indistinguishable in the result, so the zero is the agent's to
+  explain when it appears.
+
 
 - **Agent triggers are indexed, and the claims they rest on are tested** (#756, #757). Parts of
   the docs are written as *triggers* — conditions under which an agent should speak up
@@ -98,18 +199,23 @@ All notable changes to techne are documented here. Format loosely follows
   lingering the user manager stops at logout and the timer never fires, while
   `list-timers` shows it healthy for as long as you stay logged in.
 - **`techne architect add` — the feeder that ships** (#754). techne teaches four domain
-  names, and on a fresh install the architect — *"what is worth stealing"* — had no way in
-  that came with the tool. `ingest` takes a markdown corpus; the procedures that actually
-  fill the store (`/investigate-url`, `/survey-field`) live in `tenishai/skills`, a
-  separate install. So an operator installed techne, read the tutorial, learned to ask the
-  architect, and the thing that fills it shipped from somewhere we never mentioned.
+  names, and on a fresh install the architect — *"what is worth borrowing"* — had no way in
+  that came with the tool. `ingest` takes a markdown corpus, and when this landed the
+  procedures that actually fill the store lived in a separate repo, so an operator installed
+  techne, read the tutorial, learned to ask the architect, and the thing that fills it
+  shipped from somewhere we never mentioned. **Later in this same release those procedures
+  came home** — see *The two research procedures come home* below; the paragraph that
+  follows records why `add` was built as a command first, which is still why it is a
+  command.
 
   `add` takes the fields directly — `--name`, `--source`, `--surveyed`, and a body from
   `--body`, `--body-file` or stdin — and writes through the same store API `ingest` uses
   after parsing. **A command rather than a bundled skill**, because `techne init
   --platform` advertises five platforms and a skill installs into Claude Code's
-  `commands/` and nowhere else. The richer research procedures stay canonical in
-  `tenishai/skills`; this is the smallest thing that gets a pattern in, not a copy of them.
+  `commands/` and nowhere else — a CLI command works on all five, which is the same
+  reasoning that later made `techne guide` the delivery mechanism for the procedures
+  themselves. `add` is the smallest thing that gets a pattern in; it was never meant to be
+  the research procedure, and it still is not.
 
 - **`techne architect ingest` says which sections it dropped** (#754). A section missing
   its `- **Source**:` line was skipped with a log line nobody sees, so the command printed
@@ -254,6 +360,14 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
+- **The architect borrows; it does not steal.** The domain's tagline was *"what is worth
+  stealing"* in thirteen places, including two in-product MCP tool descriptions
+  (`architect_search`, `pattern_search`) and the schema comment that ships in every user's
+  `sqlite_master`. Now *"what is worth borrowing"*, and `pattern_search` describes patterns
+  as **borrowed** from other projects rather than "lifted". A wording change, listed because
+  it is visible in tool descriptions an integrator may have pinned.
+
+
 - **BREAKING (0.16.0): `techne backup --out DIR` now names the backups *root*, not the
   set** (#742). The version is stated here rather than left to the heading because
   `README.md` and `docs/db-per-domain.md` both say "changed in 0.16.0", and until this
@@ -304,6 +418,89 @@ All notable changes to techne are documented here. Format loosely follows
   `knowledge`, never the mirror.
 
 ### Fixed
+
+- **The frontmatter splitter treated an indented `---` as a document boundary** (#812,
+  Prudence r2 on #807). The same `strip()`-discards-indentation root cause as the round-1
+  finding, moved one function over — and it failed both ways. A legitimate definition whose
+  `description:` block contains a `---` rule got cut short, so `agents status` reported
+  **widened** over a good sandbox, which turns the loud path into noise and makes a real
+  widening read like more of the same. And with the grant re-declared after that inner
+  rule, the truncated slice saw the narrow grant while a compliant parser saw the wide one.
+  The fence must now sit at column 0, reusing the shape `scripts/check_arch_cards.py`
+  already had — which also brings BOM tolerance the hand-rolled loop lacked.
+
+- **`architect dedup` folded too much of a GitHub path** (#811). Case-folding is a property
+  of the host, but only `owner/repo` lives in GitHub's namespace; everything deeper is
+  served out of git, where tree paths and refs are byte-exact. Folding the whole path
+  relocated the very defect it fixed — `blob/main/Setup.py` and `blob/main/setup.py` became
+  one entry, as did two differently-cased refs, and the query string was swept in with them.
+  The fold is now bounded to the two segments the measurement actually covered.
+
+- **`architect snapshot` omitted `pattern_outcomes`** (#811). The exclusion argument holds
+  for the derived graph tables — `backfill_graph` rebuilds those from covered content — and
+  does not hold here: `record_outcome` writes this table with a real INSERT, exposed as
+  `techne architect realized`. A recorded outcome left the digest unchanged.
+
+- **`agents install` dropped its ownership record without a prior `init`** (#812). The
+  manifest lives in `techne.db` and its writer early-returned when the store was absent —
+  and nothing requires `techne init` first. On that path `agents remove` then refused to
+  remove techne's own byte-identical file, telling the operator they had modified it, and
+  the `outdated` reporting added earlier in this release could never fire at all. Install
+  now ensures the store exists.
+
+
+- **The sandbox verifier failed open on four frontmatter shapes** (#812, Prudence r1 on
+  #807). `_sandbox_intact` scanned lines instead of parsing the document, so a `tools:`
+  key nested under `metadata:`, a `tools:` line in the markdown **body**, a decoy inside a
+  `description: |` block scalar, and a duplicate `tools:` key all reported **sandbox
+  intact** over a definition granting a shell — while the YAML sequence spelling reported
+  a false *widened*. Two of those need no adversary: an operator restructuring their own
+  frontmatter, or documenting the tool line in prose, got a green report from the command
+  `AGENTS.md` tells an agent to check before investigating. It now slices the frontmatter,
+  parses it, and compares the grant as a **set** against what a YAML parser resolves —
+  which is what the harness reads, rather than a string that resembles it.
+
+- **`techne agents status` called our upgrade your edit** (#812). It loaded the ownership
+  manifest and never read it, so a file byte-identical to what techne last wrote — the
+  state of every install that upgrades without re-running `agents install` — reported as
+  `kept-user-copy`. Now reports `outdated`, using the comparison `register_agents` already
+  made. `status` also names the directory it is talking about, which matters on a platform
+  where `~/.claude/agents` is not the obvious answer.
+
+- **`architect snapshot` covered 4 of 15 columns and no investigations at all** (#811).
+  The digest is read for its converse — *no difference means nothing wrote* — so every
+  uncovered column was a write the operator was told did not happen. It missed
+  `status → superseded`, which is a soft delete that leaves the row out of search while
+  every hashed column stays identical, and missed a whole new `skip-with-flag`
+  investigation, the population `dedup` exists to protect. Now digests every column of
+  both tables; the derived graph stays out by design and the CLI help says so.
+  *(Superseded within this release — see the `pattern_outcomes` entry above: the
+  digest covers three tables, not two.)*
+
+- **`architect dedup` folded path case and could suppress a real investigation** (#811).
+  Lowercasing the whole URL made `wiki/Python` and `wiki/python` one entry, so `dedup`
+  exited 0 and printed "Seen before" for a page nobody had surveyed. Case-folding is now a
+  property of the **host**, established by measurement rather than assumption: GitHub
+  returns 200 for both casings of a repo path, while Wikipedia returns 301 for the
+  lowercase variant — a different URL that redirects. A fragment terminates the URL and a
+  `.git` suffix folds; query strings deliberately do not, since they can select content.
+
+
+- **`techne architect add` stamped a stranger's patterns with one of our persona names**
+  (#754). `--surveyed-by` defaulted to `"raven"`, hardcoded at the CLI, with three more
+  `"raven"` defaults in `core/patterns.py` and a schema comment listing `raven | rook |
+  architect` that shipped in every user's `sqlite_master`. `core/architect.py` called the
+  field "persona-agnostic", which was true of the schema and false of the default.
+
+  Not cosmetic: `investigations` is `UNIQUE(url, surveyed_by, lens)`, so the value is part of
+  row identity — which is also why the fix is a **config key** rather than a changed literal.
+  Moving the default outright would mint a second investigation for every URL an existing
+  corpus already held. `architect.surveyed_by` / `architect.lens` now default to `operator` /
+  `infra`, and an operator with history sets them once to what their store already uses.
+  `ingest` reads the same values as `add`, because the two feeders writing different halves
+  of that key is how one URL becomes two rows — a regression the existing
+  `test_add_and_ingest_agree_on_one_investigation_per_url` caught during this change.
+
 
 - **A session's threads accumulated one superseded partition per re-detection** (#646).
   Heuristic thread ids derive from `bucket_hash(session_id, first_obs_id, boundary_signal)`,
@@ -408,9 +605,13 @@ All notable changes to techne are documented here. Format loosely follows
   - A `file` that reaches outside the set by any other route — an absolute path, a traversal
     part-way along, a basename that is a symlink out — refuses the same way, where before it
     was either accepted or reported as missing.
-  - A `file` containing a **NUL byte** now refuses with "contains a NUL byte". This one is not
-    a containment refusal at all: `Path.is_file()` silently swallows the `ValueError` a NUL
-    raises, so on previous releases such a set reported "backup set is incomplete".
+  - A `file` containing a **NUL byte** now refuses with "contains a NUL byte" **on the
+    restore path**. This one is not a containment refusal at all: `Path.is_file()` silently
+    swallows the `ValueError` a NUL raises, so on previous releases such a set reported
+    "backup set is incomplete". *Retention still shows the generic cause* — `_classify_backup_set`
+    records the domain and discards the reason, so `techne backup --keep` reports "lists
+    databases in a shape techne cannot read" and does not name the NUL. Both refuse; only one
+    says why. Naming it there waits on #785.
 
   **The second bullet is the one that was not merely mislabelled.** For the first and third,
   the set was already refused and never took a retention slot — `".."` and `"../"` name a

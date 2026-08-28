@@ -20,7 +20,7 @@ techne has four knowledge domains, and you address each one **by name**:
 |---|---|---|
 | **archivist** | *What does the team know?* | `archivist_search` · `techne archivist query` |
 | **librarian** | *What is written down?* | `librarian_search` · `techne librarian search` |
-| **architect** | *What is worth stealing?* | `architect_search` · `techne architect search` |
+| **architect** | *What is worth borrowing?* | `architect_search` · `techne architect search` |
 | **codex** | *What does the code look like?* | `codex_search` · `techne codex search` |
 
 The codex needs `techne codex index <repo>` run once before it can answer.
@@ -56,7 +56,7 @@ techne init
 > across interpreter changes:
 >
 > ```bash
-> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.15.0"
+> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.0"
 > techne init
 > ```
 >
@@ -134,7 +134,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
-`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.15.0"`.
+`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.0"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 

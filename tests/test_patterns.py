@@ -981,10 +981,15 @@ def test_the_cli_verdict_default_is_what_makes_ingest_the_declined_path(db, tmp_
     from click.testing import CliRunner
 
     from techne.cli import main
+    from techne.config import Config
 
     class _Cfg:
         architect_db_path = db
         stores = {}
+        # `architect ingest` reads config.architect for surveyed_by/lens so that it
+        # and `architect add` write the same half of UNIQUE(url, surveyed_by, lens).
+        # A stub missing it fails with AttributeError, not a wrong verdict.
+        architect = Config().architect
 
     monkeypatch.setattr("techne.config.Config.load", lambda *a, **k: _Cfg())
     monkeypatch.setattr("techne.core.architect.architect_db", lambda *a, **k: db)

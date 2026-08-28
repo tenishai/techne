@@ -272,6 +272,20 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     # holds. This is the pin's first real firing, and it did the job it was built for:
     # it made a CLI change stop and answer a documentation question.
     "architect add",
+    # techne#754. Both read architect.db and neither writes anything outside it —
+    # `dedup` queries two tables, `snapshot` hashes pattern content. Re-verified
+    # against deployment.md's migration trigger: "nothing archives transcripts"
+    # is unaffected by either.
+    # techne#754 — the research-sandbox installer. `install`/`remove` write and
+    # delete ONE definition file in the platform config dir; `status` only reads.
+    # Re-verified against deployment.md's migration trigger: none of the three
+    # touches session transcripts, so "nothing archives transcripts" still holds.
+    "agents",
+    "agents install",
+    "agents remove",
+    "agents status",
+    "architect dedup",
+    "architect snapshot",
     "architect applies",
     "architect backfill",
     "architect export",
@@ -312,6 +326,11 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     "custodian status",
     "deposit",
     "doctor",
+    # techne#754 — prints bundled markdown from techne/docs/. Re-read
+    # deployment.md's migration trigger when adding it: `guide` reads files
+    # OUT of the package and writes nothing, so "nothing archives transcripts"
+    # is unaffected. Claim re-verified, not merely re-pinned.
+    "guide",
     "evidence",
     "fsck",
     "history",
@@ -514,6 +533,15 @@ TRIGGER_WITNESSES = {
     "live techne MCP server": "test_the_mcp_server_pins_config_before_it_serves",
     "drain a large session": "test_the_cli_emit_can_write_the_batch_to_a_file",
     "having drained a session": "test_emit_is_a_bounded_cursor_not_one_unbounded_pass",
+    # techne#754 — the two procedures absorbed from the external skills repo.
+    "pastes a repo URL": "test_the_dedup_step_the_url_trigger_names_exists",
+    '"look at" or "check out"': "test_the_dedup_step_the_url_trigger_names_exists",
+    "why the architect is empty, or how patterns get in":
+        "test_the_dedup_step_the_url_trigger_names_exists",
+    "reports `research-readonly` **absent or widened**":
+        "test_the_sandbox_the_trigger_names_is_installable",
+    "about to build something substantial": "test_the_survey_guide_teaches_the_same_sandbox",
+    '"the landscape" or "who else does this"': "test_the_survey_guide_teaches_the_same_sandbox",
 }
 
 
@@ -1199,3 +1227,48 @@ def test_the_copy_paste_block_teaches_both_populations():
         "below-threshold one — the distinction techne#793 established and #646's original "
         "single-population framing got wrong."
     )
+
+
+def test_the_dedup_step_the_url_trigger_names_exists():
+    """The URL triggers all route to a procedure whose FIRST step is `architect dedup`.
+    If that command is gone or renamed, three triggers send an agent at nothing — and a
+    trigger that points at a missing command is worse than none, because it reads as
+    covered. Pins the CLI surface, not the prose."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.docs import bundled_guide
+
+    res = CliRunner().invoke(main, ["architect", "dedup", "--help"])
+    assert res.exit_code == 0, res.output
+
+    guide = bundled_guide("investigating")
+    assert "techne architect dedup" in guide
+    assert "techne architect snapshot" in guide, "the sandbox backstop is unnamed"
+
+
+def test_the_survey_guide_teaches_the_same_sandbox():
+    """A survey fans out MORE untrusted input than an investigation, not less, so the
+    weaker-because-there-are-more-agents mistake is the one to guard. The survey guide must
+    keep pointing at the investigating guide's security model rather than restating a
+    softened version of it."""
+    from techne.docs import bundled_guide
+
+    survey = bundled_guide("surveying")
+    assert "web-only" in survey
+    assert "snapshot" in survey
+    assert "investigating guide" in survey, "the survey guide no longer defers on security"
+
+
+def test_the_sandbox_the_trigger_names_is_installable():
+    """The trigger tells an agent to check `techne agents status` before investigating.
+    If that command or the definition behind it goes away, the trigger sends the agent at
+    nothing — and a security trigger that points at a missing control is worse than none,
+    because it reads as covered."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.platforms.claude_code.agents import REQUIRED_TOOLS_LINE, bundled_agent_text
+
+    assert CliRunner().invoke(main, ["agents", "status", "--help"]).exit_code == 0
+    assert REQUIRED_TOOLS_LINE in bundled_agent_text("research-readonly")

@@ -1,7 +1,7 @@
 """The architect's feeder that ships, and the silence it replaces (techne#754).
 
 techne teaches four domain names. On a fresh install the architect — "what is worth
-stealing" — had no way in that came with the tool: `ingest` takes a markdown corpus in an
+borrowing" — had no way in that came with the tool: `ingest` takes a markdown corpus in an
 undocumented shape, and the skills that actually fill the store live in a separate repo.
 """
 
@@ -448,3 +448,416 @@ def test_re_ingesting_an_unchanged_corpus_is_not_called_a_failure(cli_config, tm
         f"a correct file was told its headings are wrong on re-ingest:\n{second.output}"
     )
     assert "nothing was ingested" not in second.output
+
+
+def test_the_feeder_does_not_stamp_a_stranger_with_our_persona(tmp_path, monkeypatch):
+    """`architect add` defaulted `--surveyed-by` to "raven" — one of THIS project's agent
+    names — hardcoded at cli.py. A stranger who installed techne and fed the architect got
+    every pattern attributed to someone they had never heard of, and `core/architect.py`
+    called the field "persona-agnostic" while the default shipped a persona.
+
+    Not cosmetic: `investigations` is UNIQUE(url, surveyed_by, lens), so the value is part
+    of row identity. This asserts the DEFAULT is neutral; the next test asserts an operator
+    with history can pin it back, which is why the fix is a config key and not a new literal.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    res = CliRunner().invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source", "https://example.com/x", "--body", "b"],
+    )
+    assert res.exit_code == 0, res.output
+
+    import sqlite3
+
+    rows = sqlite3.connect(tmp_path / "architect.db").execute(
+        "SELECT surveyed_by FROM investigations"
+    ).fetchall()
+    assert rows == [("operator",)], rows
+
+    # NOT a raw-bytes scan of the db: the first version of this test asserted
+    # b"raven" was absent from the file and failed on a CORRECT store, because the
+    # DDL comment on the column named the personas and sqlite_master keeps schema
+    # text verbatim. Assert on the stored VALUES, and separately on the schema.
+    schema = sqlite3.connect(tmp_path / "architect.db").execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'investigations'"
+    ).fetchone()[0]
+    assert "raven" not in schema, "a persona name still ships in the schema comment"
+
+
+def test_an_operator_with_history_can_pin_surveyed_by_so_rows_still_join(tmp_path, monkeypatch):
+    """The reason the fix is a config key rather than a changed literal.
+
+    A store with 360 investigations under one `surveyed_by` would mint a SECOND row for
+    every URL it already held if the default simply moved. Setting `architect.surveyed_by`
+    keeps new rows joining the old ones.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("architect:\n  surveyed_by: raven\n  lens: infra\n")
+    res = CliRunner().invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source", "https://example.com/y", "--body", "b"],
+    )
+    assert res.exit_code == 0, res.output
+
+    import sqlite3
+
+    rows = sqlite3.connect(tmp_path / "architect.db").execute(
+        "SELECT surveyed_by, lens FROM investigations"
+    ).fetchall()
+    assert rows == [("raven", "infra")], rows
+
+
+def test_the_architect_config_survives_a_save_round_trip(tmp_path):
+    """techne#601/#167, the same trap twice already: a key parsed by `_from_dict` but not
+    written back by `save()` is silently reset by `techne init`, which is save()'s only
+    caller. An operator who pinned surveyed_by would lose it on their next init and their
+    corpus would split anyway — the exact failure the config key exists to prevent.
+    """
+    from techne.config import Config
+
+    cfg = Config()
+    cfg.architect.surveyed_by = "raven"
+    cfg.save(tmp_path / "config.yaml")
+
+    assert "surveyed_by: raven" in (tmp_path / "config.yaml").read_text()
+    assert Config.load(tmp_path / "config.yaml").architect.surveyed_by == "raven"
+
+
+def test_search_does_index_source_url_now_and_the_guide_must_not_say_otherwise(
+    tmp_path, monkeypatch
+):
+    """A CLAIM I ALMOST SHIPPED STALE (techne#754). The external skill this procedure was
+    absorbed from tells agents "the FTS index covers name and body only — source_url is
+    never offered to it". That WAS true and #430 fixed it in this same release:
+    `patterns_fts` is fts5(name, body, source_url) and all three triggers populate it.
+
+    Pinned as a test rather than left as prose because the external copy drifted from the
+    code for a whole release without anything failing, which is the argument for techne
+    owning the procedure. If #430 is ever reverted, this fails and the guide's paragraph
+    needs rewriting — in the same change, not later.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.docs import bundled_guide
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    url = "https://github.com/someone/a-repo"
+    runner = CliRunner()
+    assert runner.invoke(
+        main, ["architect", "add", "--name", "A Pattern", "--source", url, "--body", "x"]
+    ).exit_code == 0
+
+    hit = runner.invoke(main, ["architect", "search", url])
+    assert "A Pattern" in hit.output, f"search no longer matches a URL: {hit.output}"
+
+    guide = bundled_guide("investigating")
+    assert "cannot find a URL" not in guide, "the guide is repeating the stale claim"
+
+    found = runner.invoke(main, ["architect", "dedup", url])
+    assert found.exit_code == 0, found.output
+    assert "A Pattern" in found.output
+
+
+def test_dedup_folds_the_spellings_of_one_url_but_not_a_sibling(tmp_path, monkeypatch):
+    """A prior survey recorded as `https://github.com/Owner/Repo` must be found when the
+    operator pastes `github.com/owner/repo/`, or the check reports "never seen" and the
+    subagent gets spent re-deriving a judgment already on the record.
+
+    AND `owner/repo` MUST NOT MATCH `owner/repo-extended` — only a trailing slash is
+    stripped, never a path segment, or dedup starts suppressing genuinely new work."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source",
+         "https://github.com/Owner/Repo", "--body", "x"],
+    )
+
+    for variant in (
+        "https://github.com/owner/repo",
+        "http://www.github.com/Owner/Repo/",
+        "github.com/owner/repo/",
+    ):
+        assert runner.invoke(main, ["architect", "dedup", variant]).exit_code == 0, variant
+
+    sibling = runner.invoke(main, ["architect", "dedup", "https://github.com/Owner/Repo-extended"])
+    assert sibling.exit_code == 1, "a sub-path sibling was wrongly folded into the same URL"
+
+
+def test_dedup_reports_a_skip_that_left_no_pattern_row(tmp_path, monkeypatch):
+    """THE POPULATION A PATTERNS-ONLY CHECK MISSES, and the reason dedup reads two tables.
+    A `skip-with-flag` records a verdict and a reason with NO pattern row — which is
+    exactly the set worth catching, since "so we don't re-investigate this" is why the
+    verdict was kept at all."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import upsert_investigation
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    cfg = Config.load()
+    upsert_investigation(
+        architect_db(cfg),
+        url="https://github.com/dead/project",
+        surveyed_at="2026-01-01",
+        verdict="skip-with-flag",
+        skip_reason="abandoned 18 months ago",
+    )
+
+    res = CliRunner().invoke(main, ["architect", "dedup", "https://github.com/dead/project"])
+    assert res.exit_code == 0, res.output
+    assert "skip-with-flag" in res.output
+    assert "abandoned 18 months ago" in res.output
+
+
+def test_snapshot_catches_an_in_place_edit_not_only_an_insert(tmp_path, monkeypatch):
+    """THE BACKSTOP'S WHOLE VALUE. An id-only hash catches inserts and deletes and misses
+    an in-place EDIT — the more dangerous write, because a poisoned body under an id the
+    operator already reviewed reads as reviewed. This mutates a body and nothing else."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+    from techne.core.stores import plain_connect
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "original"],
+    )
+    db = architect_db(Config.load())
+    before = store_snapshot(db)
+
+    conn = plain_connect(db)
+    conn.execute("UPDATE patterns SET body = 'poisoned'")
+    conn.commit()
+    conn.close()
+
+    assert store_snapshot(db) != before, "an in-place body edit did not change the snapshot"
+
+
+@pytest.mark.parametrize(
+    "a,b,same,label",
+    [
+        ("https://github.com/Owner/Repo", "github.com/owner/repo/", True, "github path case"),
+        ("http://www.github.com/O/R", "https://github.com/o/r", True, "www + scheme + case"),
+        ("https://github.com/o/r.git", "https://github.com/o/r", True, ".git suffix"),
+        ("https://github.com/o/r#readme", "https://github.com/o/r", True, "fragment"),
+        # THE REGRESSION (Prudence, #807 r1 I4). Lowercasing the whole URL folded these
+        # into one, so `dedup` exited 0 and printed "Seen before" for a page nobody had
+        # investigated — the direction that SUPPRESSES work rather than wasting a subagent.
+        (
+            "https://en.wikipedia.org/wiki/Python",
+            "https://en.wikipedia.org/wiki/python",
+            False,
+            "generic path case must stay distinct",
+        ),
+        ("https://github.com/o/repo", "https://github.com/o/repo-extended", False, "sibling"),
+    ],
+)
+def test_canonical_url_folds_by_host_not_blindly(a, b, same, label):
+    """MEASURED 2026-08-28, because the two hosts genuinely differ and guessing either way
+    breaks something real:
+
+        github.com/PrimeIntellect-ai/prime-agent  -> 200
+        github.com/primeintellect-ai/PRIME-AGENT  -> 200   (the same repo)
+        en.wikipedia.org/wiki/Python_(...)        -> 200
+        en.wikipedia.org/wiki/python_(...)        -> 301   (a DIFFERENT url that redirects)
+
+    Refusing to fold any path would break the case this function exists for — an operator
+    pasting `github.com/Owner/Repo` against a corpus holding `github.com/owner/repo`.
+    Folding every path suppresses investigations. The fold is a property of the host.
+    """
+    from techne.core.patterns import _canonical_url
+
+    assert (_canonical_url(a) == _canonical_url(b)) is same, label
+
+
+def test_snapshot_covers_the_writes_the_operator_reads_it_for(tmp_path, monkeypatch):
+    """THE OPERATOR USES THE CONVERSE (Prudence, #807 r1 I3): "no difference means nothing
+    wrote" is the branch they proceed on, so every uncovered column is a write they are
+    told did not happen.
+
+    The first version hashed 4 of `patterns`' 15 columns and no `investigations` at all.
+    It missed `status` -> 'superseded', which IS a delete — the row leaves search while
+    every hashed column stays identical — and missed a whole new skip-with-flag row, the
+    population `dedup_url` exists to protect.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+    from techne.core.stores import plain_connect
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    CliRunner().invoke(
+        main, ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "orig"]
+    )
+    db = architect_db(Config.load())
+
+    writes = {
+        "in-place body edit": "UPDATE patterns SET body='poisoned'",
+        "soft delete via status": "UPDATE patterns SET status='superseded'",
+        "new skip-with-flag investigation": (
+            "INSERT INTO investigations (id,url,surveyed_by,lens,surveyed_at,verdict)"
+            " VALUES ('zz','https://e.com/z','x','infra','2026-01-01','skip-with-flag')"
+        ),
+        "verdict rewritten": "UPDATE investigations SET verdict='skip'",
+    }
+    for label, sql in writes.items():
+        before = store_snapshot(db)
+        conn = plain_connect(db)
+        conn.execute(sql)
+        conn.commit()
+        conn.close()
+        assert store_snapshot(db) != before, f"snapshot missed: {label}"
+
+
+@pytest.mark.parametrize(
+    "a,b,same,label",
+    [
+        ("https://github.com/Owner/Repo", "github.com/owner/repo/", True, "owner/repo folds"),
+        # NOT A MUTANT-KILLER ON ITS OWN — the row above passes under BOTH the buggy
+        # whole-path fold and the bounded one, so a partially-applied mutation could show
+        # three failures here and read as full teeth (Prudence, #807 r3, answering push 4).
+        # These two kill it: the first needs the bound, the second needs the ordering.
+        (
+            "https://github.com/Owner/Repo?tab=readme-ov-file#readme",
+            "https://github.com/owner/repo?tab=readme-ov-file",
+            True,
+            "a fragment is stripped even when a query follows it",
+        ),
+        (
+            "https://example.com?Q=A",
+            "https://example.com?q=a",
+            False,
+            "a query on a path-less URL is not folded",
+        ),
+        # THE FOLD RELOCATED INSIDE github (Prudence, #807 r2 I2). Only owner and repo live
+        # in GitHub's namespace; everything deeper is served out of git, where tree paths
+        # and refs are byte-exact. Folding the whole path reproduced the wikipedia defect
+        # at greater depth.
+        (
+            "https://github.com/o/r/blob/main/Setup.py",
+            "https://github.com/o/r/blob/main/setup.py",
+            False,
+            "deep tree paths are different files",
+        ),
+        (
+            "https://github.com/o/r/tree/Release-1.0",
+            "https://github.com/o/r/tree/release-1.0",
+            False,
+            "refs are case-sensitive",
+        ),
+        # partition("/") left the query inside `path`, so the fold caught it too — for the
+        # one host where it mattered, contradicting the comment that says it does not.
+        (
+            "https://github.com/o/r/issues?q=Foo",
+            "https://github.com/o/r/issues?q=foo",
+            False,
+            "query strings are not folded",
+        ),
+    ],
+)
+def test_the_github_fold_stops_at_owner_and_repo(a, b, same, label):
+    from techne.core.patterns import _canonical_url
+
+    assert (_canonical_url(a) == _canonical_url(b)) is same, label
+
+
+def test_snapshot_covers_pattern_outcomes(tmp_path, monkeypatch):
+    """THE EXCLUSION ARGUMENT HAS TO HOLD FOR EVERY EXCLUDED TABLE (Prudence, #807 r2 I3).
+    It holds for `pattern_relations` and `pattern_applies` — `backfill_graph` derives both
+    from covered content. It does not hold for `pattern_outcomes`: `record_outcome` writes
+    it with a real INSERT and `techne architect realized` exposes that.
+
+    The tell was that the docstring listed `pattern_topics` among the exclusions. No such
+    table exists, and the real sibling dropped from that list was the one that is derived
+    from nothing.
+    """
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import record_outcome, store_snapshot
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    CliRunner().invoke(
+        main, ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "b"]
+    )
+    db = architect_db(Config.load())
+    pid = sqlite3.connect(db).execute("SELECT id FROM patterns").fetchone()[0]
+
+    before = store_snapshot(db)
+    record_outcome(db, pattern_id=pid, ref="x", kind="pr", state="shipped")
+    assert store_snapshot(db) != before, "an outcome write left the digest unchanged"
+
+
+def test_a_missing_table_changes_the_digest_rather_than_narrowing_it(tmp_path, monkeypatch):
+    """NEW CODE ON THE TRUST SURFACE, GUARDED ONLY BY A REVIEW UNTIL NOW (Prudence, #807 r3
+    nit 2). The `absent` sentinel was written by reasoning about silent narrowing, not from
+    a failing case — which is how this repo's hollow tests got written.
+
+    HONEST ABOUT ITS OWN TEETH, because the first version of this docstring was not.
+    Mutation-checked: removing the `absent` sentinel leaves this test GREEN. The property
+    it asserts — a store missing the table digests differently — holds structurally
+    without the sentinel, because a PRESENT table always contributes its column list and
+    an absent one contributes nothing, so the two can never collide.
+
+    The sentinel is therefore belt-and-braces, not the thing under test, and this is a
+    coverage assertion rather than a mutant-killer. Said plainly because a test whose
+    docstring claims teeth it does not have is worse than no test: it retires the question.
+    What IS guarded here is the coverage itself — if `pattern_outcomes` is dropped from the
+    digest's table list, the first assertion fails.
+    """
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    CliRunner().invoke(
+        main, ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "b"]
+    )
+    db = architect_db(Config.load())
+    with_table = store_snapshot(db)
+
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE pattern_outcomes")
+    conn.commit()
+    conn.close()
+    assert store_snapshot(db) != with_table, "a dropped table left the digest unchanged"
+
+    # ...and the sentinel is not confusable with a real table shaped like it.
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE pattern_outcomes (absent TEXT)")
+    conn.commit()
+    conn.close()
+    assert store_snapshot(db) != with_table, "a differently-shaped table matched the original"
