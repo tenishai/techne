@@ -3729,8 +3729,7 @@ def architect_ingest(ctx, markdown_file, verdict):
 @click.option(
     "--lens",
     default=None,
-    help="Angle the survey was done from. Defaults to config"
-    " `architect.lens` ('infra').",
+    help="Angle the survey was done from. Defaults to config `architect.lens` ('infra').",
 )
 @click.pass_context
 def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveyed_by, lens):
@@ -3866,8 +3865,7 @@ def architect_add(ctx, name, source, surveyed, body, body_file, verdict, surveye
 @click.option(
     "--lens",
     default=None,
-    help="Angle the survey was done from. Defaults to config"
-    " `architect.lens` ('infra').",
+    help="Angle the survey was done from. Defaults to config `architect.lens` ('infra').",
 )
 @click.pass_context
 def architect_reverdict(ctx, url, verdict, surveyed_by, lens):
@@ -4401,8 +4399,16 @@ def vectors(ctx):
     help="With --tags, re-infer EVERY observation, not just untagged rows "
     "(e.g. after a prototype change).",
 )
+@click.option(
+    "--no-download",
+    "no_download",
+    is_flag=True,
+    help="Never fetch an uncached embedding model from the Hugging Face Hub — "
+    "degrade to 'swept, embedded nothing' instead of blocking on the network. "
+    "Set by the SessionStart hook; omit it for the documented cold-cache recovery.",
+)
 @click.pass_context
-def vectors_backfill(ctx, do_tags, all_tags):
+def vectors_backfill(ctx, do_tags, all_tags, no_download):
     """Embed un-embedded rows; re-embed everything if the backend changed.
 
     Thin CLI wrapper around search.backfill_vectors() (techne#283 stack) —
@@ -4448,7 +4454,7 @@ def vectors_backfill(ctx, do_tags, all_tags):
     # has to check to print a useful message.
     from techne.core.search import backfill_vectors
 
-    counts = backfill_vectors(config.db_path)
+    counts = backfill_vectors(config.db_path, allow_download=not no_download)
 
     if not embeddings_mod.backend_available():
         click.echo(
@@ -5195,9 +5201,7 @@ def backup_cmd(ctx, out, keep):
         for path, err in failed:
             click.echo(f"could not prune {path.name}: {err}", err=True)
         if failed:
-            click.echo(
-                f"retention INCOMPLETE: {len(failed)} set(s) could not be removed", err=True
-            )
+            click.echo(f"retention INCOMPLETE: {len(failed)} set(s) could not be removed", err=True)
             retention_incomplete = True
     if res.skipped_absent:
         click.echo(f"skipped (absent): {', '.join(res.skipped_absent)}")

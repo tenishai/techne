@@ -106,10 +106,7 @@ def _is_worktree_path(p: Path) -> bool:
     # Retained as a belt-and-braces fallback: catches the harness's worktree dir
     # even if the marker is missing or unreadable.
     parts = p.parts
-    return any(
-        parts[i] == ".claude" and parts[i + 1] == "worktrees"
-        for i in range(len(parts) - 1)
-    )
+    return any(parts[i] == ".claude" and parts[i + 1] == "worktrees" for i in range(len(parts) - 1))
 
 
 def _launcher_path() -> Path:
@@ -567,10 +564,7 @@ def _preflight_command() -> str:
     # install-method heal before the guard runs. The guard is still invoked by
     # absolute path — it cannot ``import techne``, so ``-m`` would be a
     # chicken-and-egg trap; see preflight_guard.py for the full rationale.
-    return (
-        f"/bin/sh {shlex.quote(str(_launcher_path()))} "
-        f"{shlex.quote(str(PREFLIGHT_GUARD))}"
-    )
+    return f"/bin/sh {shlex.quote(str(_launcher_path()))} {shlex.quote(str(PREFLIGHT_GUARD))}"
 
 
 def _hook_command(module: str) -> str:
@@ -579,6 +573,62 @@ def _hook_command(module: str) -> str:
     # the launcher bakes in sys.executable at register time; the happy-path overhead
     # is a single -x stat then exec.
     return f"/bin/sh {shlex.quote(str(_launcher_path()))} -m {module}"
+
+
+def _backfill_command() -> str:
+    """The `techne vectors backfill` step of the SessionStart chain.
+
+    Routed through the launcher like every other segment (#276) and invoked as
+    `-m techne.cli` rather than a bare `techne`, because the console script's
+    location is an install detail (pipx shim, venv bin, Homebrew prefix) that a
+    baked absolute path gets wrong the moment the install moves.
+
+    `>/dev/null` IS PROTOCOL, NOT TIDINESS — do not remove it to see the output.
+    `vectors backfill` prints its counts blob on stdout unconditionally, even
+    when it embeds nothing, and for SessionStart Claude Code consumes the whole
+    chain's stdout. Unredirected, those counts prepend to session_start's payload
+    and corrupt it on EVERY session start — a total loss of the banner, dressed
+    as a working hook. Measured on PR #815 review; there is a test pinning it.
+
+    STDERR IS DELIBERATELY LEFT OPEN (no `2>&1`). A hook that exits 0 has its
+    stderr sent to the debug log only — never the transcript, and Claude never
+    sees it — so keeping it costs nothing in noise and is the only channel that
+    can say why a backfill failed. Closing it was the state this review called
+    "no diagnostic on any channel".
+
+    `--no-download` keeps a cold model cache from blocking session start on a
+    Hugging Face fetch. See `backfill_vectors`: the bare CLI still downloads, so
+    README's cold-cache recovery is unaffected.
+    """
+    return f"{_hook_command('techne.cli')} vectors backfill --no-download >/dev/null"
+
+
+# Harness-level per-hook timeouts, in seconds, by event (Claude Code's
+# settings.json `timeout` field).
+#
+# THE 600s DEFAULT IS NOT WITNESSED ANYWHERE IN THIS TREE and it is load-bearing:
+# if the real default were below 120 this constant would LENGTHEN the stall it
+# claims to shorten. Source is the harness documentation
+# (code.claude.com/docs/en/hooks, "Common fields": command/http/mcp_tool default
+# to 600s; a timed-out hook is cancelled and its output discarded), read
+# 2026-08-28. It is a property of the host, not of techne, so it can change
+# under us without any signal here — re-read the docs before trusting this
+# number in an argument. Only
+# SessionStart carries one: it is the sole chain that can reach the network at
+# all. A SIGALRM budget does not bound a Hub fetch — the harness cancelling the
+# subprocess does. This is a stall breaker, not a performance budget: measured
+# backfill throughput is ~10.7k rows/s, so 120s covers ~1.29M rows and volume
+# cannot blow it.
+#
+# IT IS ALSO A CEILING OVER `hooks.timeout_s`, and the relationship is written
+# down nowhere else. That knob is operator-facing, unclamped, documented at
+# README.md:552 (default 5.0, read at config.py:883, applied at
+# session_start.py:202) and bounds session_start's own blocking work. At
+# defaults there is 24x headroom, but an operator who raised it past ~115 would
+# have the harness cancel the WHOLE chain — guard and banner included — and
+# docs/arch/liveness.md:44 notes this path is fail-open, so they would get no
+# diagnostic. Raise this constant with that knob, or clamp that knob to this.
+_HOOK_TIMEOUTS_S = {"SessionStart": 120}
 
 
 def _matcher_of(group: dict) -> str:
@@ -609,6 +659,7 @@ def _group_contains_techne(group: dict) -> bool:
     ``techne`` via both the launcher filename (``techne-hook.sh``) and the
     ``-m techne.hooks.X`` module argument, so this check requires no change.
     """
+
     # isinstance at the DEREFERENCE, not another clause in the shape validator.
     # A non-string `command` (a JSON number/bool) makes `"techne" in 5` raise
     # TypeError — measured: `techne status` exits 1 with a traceback, and at session
@@ -694,8 +745,38 @@ def register_hooks(config: Config):
     # guard must not regress the normal hook when the pointer was fine anyway.
     # Both halves route through the launcher (#276) so interpreter-death heal
     # fires before either the guard or session_start tries to import anything.
+    # BACKFILL SITS BETWEEN THE GUARD AND THE BANNER, and it belongs in this
+    # template rather than in the operator's settings.json (techne#704). It was
+    # hand-wired here for weeks; because the strip below removes any group whose
+    # command contains "techne" and re-appends this freshly-built string, every
+    # `techne init` silently deleted it. The edit verified clean and vanished
+    # later with no error — five days of drift (883 observations, 62 knowledge
+    # rows) before anyone noticed. A config this function rewrites cannot hold a
+    # hand edit, so the fix is to own the segment.
+    #
+    # ORDER IS LOAD-BEARING: before session_start, so the banner's
+    # `vectors:coverage` measures a just-embedded store rather than reporting
+    # drift it is about to fix. `;` not `&&`, matching the guard above — a
+    # backfill failure must never suppress the banner.
+    #
+    # COLD CACHE: CLOSED, not merely bounded. This chain cannot reach the
+    # network — `_backfill_command()` passes `--no-download`, so an uncached
+    # model raises in ~0.2s and the backfill degrades to "swept, embedded
+    # nothing". The bare CLI keeps allow_download=True, which is what README's
+    # cold-cache recovery needs; see core/embeddings.py for why the two
+    # directions are both correct. An install with no embedding backend at all
+    # returns earlier still.
+    #
+    # SO THE `timeout` BELOW IS DEFENCE IN DEPTH, NOT THE PRIMARY GUARD, and an
+    # earlier revision of this comment said otherwise — it claimed the harness
+    # timeout "is what actually bounds it", which was true when the segment
+    # still downloaded and became false one commit later. Do not restore that
+    # reading. What the timeout covers now is everything the flag does not:
+    # a hung filesystem, a wedged interpreter, an sqlite lock. Not a Hub fetch,
+    # because there is no longer one to bound.
     session_start = (
-        f"{_preflight_command()} ; {_hook_command('techne.hooks.session_start')}"
+        f"{_preflight_command()} ; {_backfill_command()} ; "
+        f"{_hook_command('techne.hooks.session_start')}"
     )
     commands_per_event = {
         "SessionStart": session_start,
@@ -712,12 +793,10 @@ def register_hooks(config: Config):
         # This also migrates a hand-wired preflight hook: its command contains
         # "techne", so it's recognized, removed, and replaced by the packaged one.
         groups[:] = [g for g in groups if not _group_contains_techne(g)]
-        groups.append(
-            {
-                "matcher": "",
-                "hooks": [{"type": "command", "command": command}],
-            }
-        )
+        entry: dict = {"type": "command", "command": command}
+        if event in _HOOK_TIMEOUTS_S:
+            entry["timeout"] = _HOOK_TIMEOUTS_S[event]
+        groups.append({"matcher": "", "hooks": [entry]})
 
     # PreToolUse grep-assist (techne#206) — OPT-IN, experimental. Only registered
     # when hooks.codex_grep_assist is ON. It's the sole techne PreToolUse entry —

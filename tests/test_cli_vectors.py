@@ -57,7 +57,9 @@ class TestVectorsBackfill:
         pytest.importorskip("sqlite_vec")
 
         store_knowledge(cfg.db_path, "The observatory recorded an unusual meteor shower.")
-        store_knowledge(cfg.db_path, "The archive team migrated records to the new shelving system.")
+        store_knowledge(
+            cfg.db_path, "The archive team migrated records to the new shelving system."
+        )
 
         result = _invoke(["vectors", "backfill"])
         assert result.exit_code == 0, result.output
@@ -66,6 +68,49 @@ class TestVectorsBackfill:
         assert counts["knowledge"] == 2
         assert counts["threads"] == 0
         assert counts["observations"] == 0
+
+    @pytest.mark.parametrize(
+        "argv, expected",
+        [
+            (["vectors", "backfill"], True),
+            (["vectors", "backfill", "--no-download"], False),
+        ],
+    )
+    def test_no_download_flag_reaches_allow_download(self, cfg, monkeypatch, argv, expected):
+        """THE NEGATION HAS EXACTLY ONE HOME AND NOTHING WAS WATCHING IT
+        (PR #815 review r2). `allow_download=not no_download` in cli.py is the
+        only place the flag inverts. The hook test pins `--no-download` in the
+        shell string and the search test pins `allow_download=False` in the
+        Python API, but they sit either side of this line: inverting it to
+        `allow_download=no_download` left the whole suite green while the hook
+        asked for the guard and got a download — the exact defect the flag
+        exists to prevent.
+
+        BOTH ROWS ARE LOAD-BEARING. Asserting only the flagged case would pass
+        with the parameter hard-wired to False, which would strand a fresh
+        install on FTS forever (techne#496 from the other side).
+        """
+        import sys
+
+        seen: dict = {}
+
+        def _spy(db_path, batch_size=100, *, allow_download=True):
+            seen["allow_download"] = allow_download
+            return {"orphans_swept": 0, "sweep_errors": 0}
+
+        # The command exits early when sqlite_vec is absent, which is the state
+        # of any venv without the [vectors] extra — without this stub the test
+        # would pass vacuously there by never reaching the call it pins.
+        monkeypatch.setitem(sys.modules, "sqlite_vec", type("m", (), {})())
+        monkeypatch.setattr("techne.core.search.backfill_vectors", _spy)
+
+        res = _invoke(argv)
+
+        assert res.exit_code == 0, res.output
+        assert seen.get("allow_download") is expected, (
+            f"{' '.join(argv)} produced allow_download={seen.get('allow_download')!r}, "
+            f"expected {expected!r}"
+        )
 
     def test_no_backend_available_is_graceful_exit_zero(self, cfg, monkeypatch):
         """When backend_available() is False, the command must print a
@@ -139,17 +184,21 @@ class TestVectorsStatus:
         # Force the active backend to a 256-d model2vec identity regardless
         # of what's actually importable in this environment — status only
         # needs `_get_embedding_model()` to return something with .name/.dim.
-        fake_backend = EmbeddingBackend(
-            "model2vec", "minishlab/potion-base-8M", impl=None, dim=256
-        )
+        fake_backend = EmbeddingBackend("model2vec", "minishlab/potion-base-8M", impl=None, dim=256)
         monkeypatch.setattr(
             "techne.core.embeddings._get_embedding_model", lambda *a, **k: fake_backend
         )
 
         result = _invoke(["vectors", "status"])
         assert result.exit_code == 0, result.output
-        assert "active embedding backend: model2vec:minishlab/potion-base-8M (dim=256)" in result.output
-        assert "stored identity stamp: fastembed:sentence-transformers/all-MiniLM-L6-v2 (dim=384)" in result.output
+        assert (
+            "active embedding backend: model2vec:minishlab/potion-base-8M (dim=256)"
+            in result.output
+        )
+        assert (
+            "stored identity stamp: fastembed:sentence-transformers/all-MiniLM-L6-v2 (dim=384)"
+            in result.output
+        )
         assert "threads_vec: 1 row(s) (dim=384)" in result.output
         assert "re-embed needed: True" in result.output
         assert "run `techne vectors backfill` to restore it" in result.output
@@ -157,7 +206,9 @@ class TestVectorsStatus:
         # Non-mutating: the table must still exist with its original row.
         conn = connect(cfg.db_path)
         try:
-            rows = conn.execute("SELECT name FROM sqlite_master WHERE name='threads_vec'").fetchall()
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE name='threads_vec'"
+            ).fetchall()
             assert len(rows) == 1
         finally:
             conn.close()

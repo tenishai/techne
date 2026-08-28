@@ -111,6 +111,47 @@ def test_backfill_may_still_download(monkeypatch, tmp_path):
     )
 
 
+def test_backfill_honours_an_explicit_no_download(monkeypatch, tmp_path):
+    """The opt-in surface core/embeddings.py asks for (techne#814, PR #815).
+
+    SIBLING to the test above, which pins the opposite for the DEFAULT path —
+    read them together. The default must stay permissive or a fresh install is
+    stranded on FTS forever; the hook-invoked path must be guarded or session
+    start blocks on a Hub fetch. Both are true, and the flag is what separates
+    them: before #815 the operator's shell and the hook chain invoked the
+    identical string, so there was nothing to branch on.
+    """
+    import sys
+
+    seen: list[dict] = []
+
+    class _StubVec:
+        @staticmethod
+        def load(conn):  # pragma: no cover - trivial
+            return None
+
+    def _spy(config=None, **kwargs):
+        seen.append(kwargs)
+        raise RuntimeError("uncached model — what a cold cache does under the guard")
+
+    monkeypatch.setitem(sys.modules, "numpy", type("m", (), {})())
+    monkeypatch.setitem(sys.modules, "sqlite_vec", _StubVec())
+    monkeypatch.setattr(embeddings_mod, "backend_available", lambda: True)
+    monkeypatch.setattr(search_mod, "_get_embedding_model", _spy)
+
+    counts = search_mod.backfill_vectors(tmp_path / "x.db", allow_download=False)
+
+    assert seen and seen[0].get("allow_download") is False, (
+        f"the guard did not reach the resolver: {seen!r}"
+    )
+    # DEGRADES, does not raise. A traceback here reaches a hook's stderr on
+    # every session start.
+    assert "threads" not in counts, (
+        "nothing was embedded, so the per-table keys must be ABSENT rather than "
+        f"reported as zero — an absent key is the discriminator: {counts!r}"
+    )
+
+
 def test_the_degrade_is_not_silent(monkeypatch, tmp_path, capsys):
     """Restores a signal this fix would otherwise DELETE (review of #728).
 
