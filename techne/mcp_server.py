@@ -71,11 +71,6 @@ SERVER_INSTRUCTIONS = (
     "`reflect-guide` before draining a backlog, and `investigating` before mining a "
     "URL the operator pastes — that one carries the read-only-subagent sandbox and "
     "the verdict tiers, and `techne architect dedup <url>` is its first step.\n"
-    "IF YOUR HOST SUPPORTS SKILLS you can give yourself one: write a THIN STUB whose "
-    "body is 'Run `techne guide <name>` and follow it', never a copy of the "
-    "procedure — a copy is a second spelling that goes stale silently, while a stub "
-    "re-reads the installed version every time. Ask the operator before writing "
-    "anything into their config directory.\n"
     "Capture is automatic where a host hook exists; otherwise call techne_observe each turn."
 )
 

@@ -144,3 +144,51 @@ def test_the_mcp_instructions_point_at_the_reader():
     from techne.mcp_server import SERVER_INSTRUCTIONS
 
     assert "techne guide" in SERVER_INSTRUCTIONS
+
+
+#: What `SERVER_INSTRUCTIONS` is allowed to cost, in characters.
+#:
+#: THIS IS A BUDGET, NOT A STYLE RULE. Everything in that string ships in the context of
+#: EVERY agent that connects this server, on EVERY session, whether or not it ever touches
+#: the thing the sentence describes. Measured 2026-08-28: 2,707 chars before 0.16.0 and
+#: 4,081 after, against ~30,400 chars of tool schemas — so instructions are the small half
+#: of techne's MCP footprint and the easy half to grow without noticing.
+#:
+#: RAISING IT IS ALLOWED AND IS THE POINT. The number exists so that growth is a decision
+#: someone made rather than a drift nobody measured; bump it in the same commit as the text
+#: and say what the tokens bought. What this catches is the OTHER case — a paragraph added
+#: because it seemed useful, costing every session forever, that would have been better as
+#: a section in a guide the agent reads only when it is already doing that work. One
+#: paragraph was moved out for exactly that reason (the skill-stub guidance, ~350 chars,
+#: which lives in `investigating` and `surveying` where an agent meets it in context).
+MCP_INSTRUCTIONS_BUDGET_CHARS = 4400
+
+
+def test_the_per_session_instructions_stay_within_budget():
+    from techne.mcp_server import SERVER_INSTRUCTIONS
+
+    assert len(SERVER_INSTRUCTIONS) <= MCP_INSTRUCTIONS_BUDGET_CHARS, (
+        f"SERVER_INSTRUCTIONS is {len(SERVER_INSTRUCTIONS)} chars against a budget of "
+        f"{MCP_INSTRUCTIONS_BUDGET_CHARS}. This ships in every agent's context on every "
+        "session. Either move the new text into a guide (agents read those on demand, at "
+        "zero per-session cost) or raise the budget in this commit and say what it bought."
+    )
+
+
+def test_guidance_an_agent_needs_only_mid_task_lives_in_the_guides():
+    """The rule the budget encodes, asserted on the one case that prompted it.
+
+    Skill-stub authoring is something an agent needs at the moment it is already reading a
+    procedure — so it belongs in the procedure, not in the per-session preamble. If it
+    reappears in SERVER_INSTRUCTIONS this fails and the budget test probably does too."""
+    from techne.docs import bundled_guide
+    from techne.mcp_server import SERVER_INSTRUCTIONS
+
+    for name in ("investigating", "surveying"):
+        assert "Make this a skill on your platform" in bundled_guide(name), name
+        assert "thin stub" in bundled_guide(name).lower(), name
+
+    assert "THIN STUB" not in SERVER_INSTRUCTIONS, (
+        "the stub guidance moved back into the per-session instructions — it costs every "
+        "session to say something only a mid-task agent needs"
+    )
