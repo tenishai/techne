@@ -67,8 +67,15 @@ SERVER_INSTRUCTIONS = (
     "answer — it says which kind of nothing it means. The other three cannot, which is why "
     "that zero is yours to explain.\n"
     "THE GUIDES SHIP WITH techne — `techne guide` lists them, `techne guide <name>` "
-    "prints one. Read `four-functions` before answering a question about which domain "
-    "to ask, and `reflect-guide` before draining a backlog.\n"
+    "prints one. Read `four-functions` before answering which domain to ask, "
+    "`reflect-guide` before draining a backlog, and `investigating` before mining a "
+    "URL the operator pastes — that one carries the read-only-subagent sandbox and "
+    "the verdict tiers, and `techne architect dedup <url>` is its first step.\n"
+    "IF YOUR HOST SUPPORTS SKILLS you can give yourself one: write a THIN STUB whose "
+    "body is 'Run `techne guide <name>` and follow it', never a copy of the "
+    "procedure — a copy is a second spelling that goes stale silently, while a stub "
+    "re-reads the installed version every time. Ask the operator before writing "
+    "anything into their config directory.\n"
     "Capture is automatic where a host hook exists; otherwise call techne_observe each turn."
 )
 

@@ -38,7 +38,7 @@ def _search_dirs() -> list[Path]:
     their users will get — a guide that renders correctly only from the repo is a
     guide whose defects ship invisibly.
     """
-    dirs = [_DIR]
+    dirs = [_DIR, _DIR.parent / "skills"]
     repo = _DIR.parent.parent  # techne/docs -> techne -> repo root, in a checkout
     if (repo / "pyproject.toml").is_file():
         dirs.extend([repo / "docs", repo])
@@ -65,10 +65,27 @@ _MANIFEST = (
     "db-per-domain",
     "deployment",
     "four-functions",
+    "investigating",
     "mcp-tools",
     "reflect-guide",
+    "self-care",
+    "surveying",
+    "techne-promote",
     "welcome",
 )
+
+#: Guides that live in `techne/skills/` rather than `docs/` because they are ALSO
+#: installed as platform skills (techne#641). Exposing them here as well is not a
+#: second copy — it is the same file, read through a second door.
+#:
+#: THE DOOR MATTERS FOR THESE TWO MORE THAN FOR THE OTHERS. #641 bundles them
+#: because they are version-coupled: `self-care` sweeps the outbox and VACUUMs,
+#: `techne-promote` drives reflect emit/ingest, and a procedure written against
+#: 0.12 can be WRONG for 0.14. But `skills install` COPIES them into the host's
+#: command directory, where the copy goes stale the moment techne upgrades — the
+#: drift check reports that, which is detection, not freshness. `techne guide
+#: self-care` reads the installed version every time, so it cannot drift at all.
+_SKILL_GUIDES = ("self-care", "techne-promote")
 
 
 def guide_path(name: str) -> Path:

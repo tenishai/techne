@@ -36,6 +36,38 @@ open and is not reversible — back up first.
 
 ### Added
 
+- **The two research procedures come home, and an agent can give itself the skill** (#754).
+  `investigate-url` and `survey-field` lived in a separate repo an operator had to know
+  about and install. They now ship as `techne guide investigating` / `techne guide
+  surveying`, alongside the operational procedures — `techne guide` lists all eleven.
+
+  **The generated skill is a stub, not a copy.** The MCP instructions tell an agent that if
+  its host supports skills it can write itself one whose entire body is *"run `techne guide
+  <name>` and follow it"* — never the procedure itself. A copy is a second spelling that
+  goes stale in silence; a stub re-reads the installed version on every run, so it cannot
+  drift. That is what makes the external repo retirable rather than merely duplicated, and
+  it works on every platform `init --platform` advertises rather than the one that has a
+  command directory.
+
+  **The drift was not hypothetical — the external copy was already wrong.** It told agents
+  `architect search` cannot match a source URL because the FTS index covers name and body
+  only. #430 fixed that in this same release: `patterns_fts` is `fts5(name, body,
+  source_url)` and all three triggers populate it. An external procedure had been quietly
+  disagreeing with the code for a release, and nothing failed. `search` still cannot see a
+  `skip-with-flag` (no pattern row), which is what `dedup` is actually for, and that
+  correction is now pinned by a test rather than left in prose.
+
+- **`techne architect dedup` and `techne architect snapshot`** (#754). The two store
+  operations the absorbed procedures need. `dedup` answers "has this URL been investigated"
+  across **both** tables — patterns *and* investigations — because a `skip-with-flag`
+  records a verdict with no pattern row, and that is precisely the set worth catching:
+  someone already decided this was not worth lifting. It folds URL spellings (case, scheme,
+  `www.`, trailing slash) while keeping sub-paths distinct, and exits 0 for seen, 1 for new.
+  `snapshot` hashes pattern **content**, so the read-only-subagent backstop catches an
+  in-place edit and not merely an insert or delete — the more dangerous write, since a
+  poisoned body under an already-reviewed id reads as reviewed.
+
+
 - **The guides ship with techne, and the agent is told they exist** (#754). techne's agent
   education is markdown — the `Agent: raise this unprompted` blocks are how an agent names a
   silent failure before the operator concludes something from it. None of it shipped: the

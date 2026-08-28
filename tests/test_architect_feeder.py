@@ -529,3 +529,126 @@ def test_the_architect_config_survives_a_save_round_trip(tmp_path):
 
     assert "surveyed_by: raven" in (tmp_path / "config.yaml").read_text()
     assert Config.load(tmp_path / "config.yaml").architect.surveyed_by == "raven"
+
+
+def test_search_does_index_source_url_now_and_the_guide_must_not_say_otherwise(
+    tmp_path, monkeypatch
+):
+    """A CLAIM I ALMOST SHIPPED STALE (techne#754). The external skill this procedure was
+    absorbed from tells agents "the FTS index covers name and body only — source_url is
+    never offered to it". That WAS true and #430 fixed it in this same release:
+    `patterns_fts` is fts5(name, body, source_url) and all three triggers populate it.
+
+    Pinned as a test rather than left as prose because the external copy drifted from the
+    code for a whole release without anything failing, which is the argument for techne
+    owning the procedure. If #430 is ever reverted, this fails and the guide's paragraph
+    needs rewriting — in the same change, not later.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.docs import bundled_guide
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    url = "https://github.com/someone/a-repo"
+    runner = CliRunner()
+    assert runner.invoke(
+        main, ["architect", "add", "--name", "A Pattern", "--source", url, "--body", "x"]
+    ).exit_code == 0
+
+    hit = runner.invoke(main, ["architect", "search", url])
+    assert "A Pattern" in hit.output, f"search no longer matches a URL: {hit.output}"
+
+    guide = bundled_guide("investigating")
+    assert "cannot find a URL" not in guide, "the guide is repeating the stale claim"
+
+    found = runner.invoke(main, ["architect", "dedup", url])
+    assert found.exit_code == 0, found.output
+    assert "A Pattern" in found.output
+
+
+def test_dedup_folds_the_spellings_of_one_url_but_not_a_sibling(tmp_path, monkeypatch):
+    """A prior survey recorded as `https://github.com/Owner/Repo` must be found when the
+    operator pastes `github.com/owner/repo/`, or the check reports "never seen" and the
+    subagent gets spent re-deriving a judgment already on the record.
+
+    AND `owner/repo` MUST NOT MATCH `owner/repo-extended` — only a trailing slash is
+    stripped, never a path segment, or dedup starts suppressing genuinely new work."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source",
+         "https://github.com/Owner/Repo", "--body", "x"],
+    )
+
+    for variant in (
+        "https://github.com/owner/repo",
+        "http://www.github.com/Owner/Repo/",
+        "github.com/owner/repo/",
+    ):
+        assert runner.invoke(main, ["architect", "dedup", variant]).exit_code == 0, variant
+
+    sibling = runner.invoke(main, ["architect", "dedup", "https://github.com/Owner/Repo-extended"])
+    assert sibling.exit_code == 1, "a sub-path sibling was wrongly folded into the same URL"
+
+
+def test_dedup_reports_a_skip_that_left_no_pattern_row(tmp_path, monkeypatch):
+    """THE POPULATION A PATTERNS-ONLY CHECK MISSES, and the reason dedup reads two tables.
+    A `skip-with-flag` records a verdict and a reason with NO pattern row — which is
+    exactly the set worth catching, since "so we don't re-investigate this" is why the
+    verdict was kept at all."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.core.architect import architect_db
+    from techne.config import Config
+    from techne.core.patterns import upsert_investigation
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    cfg = Config.load()
+    upsert_investigation(
+        architect_db(cfg),
+        url="https://github.com/dead/project",
+        surveyed_at="2026-01-01",
+        verdict="skip-with-flag",
+        skip_reason="abandoned 18 months ago",
+    )
+
+    res = CliRunner().invoke(main, ["architect", "dedup", "https://github.com/dead/project"])
+    assert res.exit_code == 0, res.output
+    assert "skip-with-flag" in res.output
+    assert "abandoned 18 months ago" in res.output
+
+
+def test_snapshot_catches_an_in_place_edit_not_only_an_insert(tmp_path, monkeypatch):
+    """THE BACKSTOP'S WHOLE VALUE. An id-only hash catches inserts and deletes and misses
+    an in-place EDIT — the more dangerous write, because a poisoned body under an id the
+    operator already reviewed reads as reviewed. This mutates a body and nothing else."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+    from techne.core.stores import plain_connect
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "original"],
+    )
+    db = architect_db(Config.load())
+    before = store_snapshot(db)
+
+    conn = plain_connect(db)
+    conn.execute("UPDATE patterns SET body = 'poisoned'")
+    conn.commit()
+    conn.close()
+
+    assert store_snapshot(db) != before, "an in-place body edit did not change the snapshot"

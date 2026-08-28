@@ -44,10 +44,14 @@ def test_the_wheel_actually_force_includes_markdown():
 
 def test_every_manifest_name_is_in_the_wheel():
     """`techne guide <name>` on an INSTALLED techne can only find what the wheel carries.
-    A name here that the build does not include works in a checkout and fails for users."""
-    from techne.docs import _MANIFEST
+    A name here that the build does not include works in a checkout and fails for users.
 
-    shipped = {Path(dst).stem for dst in _force_included().values()}
+    TWO WAYS TO SHIP, and both count: `docs/*.md` ride in via force-include, while the two
+    skill guides are already package data under `techne/skills/` (techne#641) and need no
+    force-include entry. Requiring an entry for them would be wrong, not stricter."""
+    from techne.docs import _MANIFEST, _SKILL_GUIDES
+
+    shipped = {Path(dst).stem for dst in _force_included().values()} | set(_SKILL_GUIDES)
     missing = sorted(set(_MANIFEST) - shipped)
     assert not missing, f"in _MANIFEST but not shipped in the wheel: {missing}"
 
@@ -67,6 +71,31 @@ def test_every_force_included_source_file_exists(name):
     """An anchor that resolves to nothing builds a wheel with a missing doc and no error."""
     src = [s for s, d in _force_included().items() if d == name][0]
     assert (REPO / src).is_file(), f"force-include names {src}, which does not exist"
+
+
+def test_the_skill_guides_are_actually_package_data():
+    """`_SKILL_GUIDES` claims these ship WITHOUT a force-include entry, because hatchling
+    takes everything under the package. If that ever stops being true they vanish from an
+    installed techne while a checkout keeps working — the silent half of this file's
+    premise, asserted rather than assumed."""
+    from techne.docs import _SKILL_GUIDES
+
+    for name in _SKILL_GUIDES:
+        assert (REPO / "techne" / "skills" / f"{name}.md").is_file(), name
+
+
+def test_the_two_procedures_this_release_absorbed_are_reachable():
+    """techne#754. `investigating` and `surveying` are the procedures that FILL the
+    architect — the gap that made `architect add` a writer with no way to produce what it
+    writes. If either stops shipping, the feeder has no feeder again."""
+    from techne.docs import _MANIFEST, bundled_guide
+
+    for name in ("investigating", "surveying"):
+        assert name in _MANIFEST
+        text = bundled_guide(name)
+        # each must teach the store commands, or it is a procedure with no write step
+        assert "techne architect dedup" in text, f"{name} does not teach the dedup check"
+        assert "techne architect add" in text or "techne architect" in text
 
 
 def test_the_guides_that_carry_triggers_all_ship():

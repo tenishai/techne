@@ -134,6 +134,8 @@ markers = [
 # their agent reads, and six of the seven carry trigger blocks.
 [tool.hatch.build.targets.wheel.force-include]
 "docs/four-functions.md" = "techne/docs/four-functions.md"
+"docs/investigating.md" = "techne/docs/investigating.md"
+"docs/surveying.md" = "techne/docs/surveying.md"
 "docs/reflect-guide.md" = "techne/docs/reflect-guide.md"
 "docs/db-per-domain.md" = "techne/docs/db-per-domain.md"
 "docs/deployment.md" = "techne/docs/deployment.md"

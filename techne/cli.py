@@ -3878,6 +3878,70 @@ def architect_export(ctx, output):
         click.echo(md)
 
 
+@architect.command("dedup")
+@click.argument("url")
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.pass_context
+def architect_dedup(ctx, url, as_json):
+    """Has this URL been investigated before? Exit 0 if seen, 1 if new.
+
+    THE CHECK `search` CANNOT DO (techne#754). `architect search` runs FTS over
+    pattern NAME and BODY only — `source_url` is never indexed — so searching a URL
+    reports "No patterns matched" for a repo that is demonstrably in the store. This
+    queries the columns directly, and it reads BOTH tables: a `skip-with-flag`
+    investigation records a verdict and a reason with no pattern row, which is
+    exactly the population a patterns-only check misses and exactly the one worth
+    catching, since "so we don't re-investigate this" is why the verdict was kept.
+    """
+    import json as _json
+
+    from techne.core.architect import architect_db
+    from techne.core.patterns import dedup_url
+
+    config = ctx.obj["config"]
+    res = dedup_url(architect_db(config), url)
+
+    if as_json:
+        click.echo(_json.dumps(res, indent=2))
+    elif not res["seen"]:
+        click.echo(f"new — no prior contact with {url}")
+    else:
+        for p in res["patterns"]:
+            click.echo(f"  {p['id']}  {p['name']}")
+            click.echo(f"    {p['source_url']}")
+        for i in res["investigations"]:
+            line = f"  investigated {i['surveyed_at']} verdict={i['verdict']}"
+            if i["skip_reason"]:
+                line += f" reason={i['skip_reason']}"
+            click.echo(line)
+        # The pair can come from DIFFERENT investigations: `ingest` overwrites
+        # surveyed_at unconditionally but preserves verdict unless --verdict is
+        # passed, so a re-ingested row shows today's date beside a months-old
+        # judgment (techne#711). Do not read the two as one event.
+        click.echo("\nSeen before. Ask before re-investigating.")
+
+    raise SystemExit(0 if res["seen"] else 1)
+
+
+@architect.command("snapshot")
+@click.pass_context
+def architect_snapshot(ctx):
+    """Content hash of the pattern corpus — the read-only-subagent backstop.
+
+    Take it before spawning a research subagent and compare after. A difference
+    means something wrote to the store that should not have, and the correct
+    response is to treat the whole result as compromised: you cannot distinguish
+    subagent-authored content from injection-authored content after the fact.
+
+    Hashes CONTENT rather than ids, so an in-place edit is caught — the more
+    dangerous write, because a poisoned body under a reviewed id looks reviewed.
+    """
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+
+    click.echo(store_snapshot(architect_db(ctx.obj["config"])))
+
+
 @architect.command("search")
 @click.argument("query")
 @click.option("--limit", default=20)

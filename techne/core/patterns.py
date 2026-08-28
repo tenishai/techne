@@ -1285,3 +1285,99 @@ def ingest_patterns_md(
         "graph": graph,
         **stats(db_path),
     }
+
+
+def _canonical_url(url: str) -> str:
+    """Fold the spellings of one URL that mean the same page.
+
+    THE DEDUP CHECK IS ONLY AS GOOD AS THIS (techne#754). A prior investigation
+    recorded as `https://github.com/Owner/Repo` must be found when the operator
+    pastes `github.com/owner/repo/`, or the check reports "never seen" and a
+    subagent is spent re-deriving a judgment already on the record — which is the
+    whole failure the check exists to prevent.
+
+    SUB-PATHS STAY DISTINCT on purpose: `owner/repo` must not match
+    `owner/repo-extended`, so only a TRAILING slash is stripped, never a segment.
+    """
+    u = url.strip().lower()
+    for prefix in ("https://", "http://"):
+        if u.startswith(prefix):
+            u = u[len(prefix) :]
+            break
+    if u.startswith("www."):
+        u = u[4:]
+    return u.rstrip("/")
+
+
+def dedup_url(db_path: Path, url: str) -> dict:
+    """Every prior contact with a URL — patterns AND verdicts, which differ in meaning.
+
+    TWO TABLES, BECAUSE ONE OF THEM IS THE WHOLE POINT. A `skip-with-flag`
+    investigation records a verdict and a reason but NO pattern row, so a
+    patterns-only check misses exactly the set the dedup exists to catch: the URLs
+    someone already looked at and deliberately passed over. Measured on a real
+    corpus, 96 of 357 investigations had no pattern row, all of them skips.
+
+    AND `architect search` CANNOT DO THIS. Its FTS index covers name and body only
+    — `source_url` is never offered to it — so searching a URL returns "No patterns
+    matched" for a repo that is demonstrably in the store. A confirmed miss, not a
+    theoretical one, which is why this queries the columns directly.
+    """
+    canon = _canonical_url(url)
+    conn = plain_connect(db_path)
+    try:
+        patterns = [
+            {"id": r[0], "name": r[1], "source_url": r[2]}
+            for r in conn.execute(
+                "SELECT id, name, source_url FROM patterns WHERE source_url IS NOT NULL"
+            ).fetchall()
+            if _canonical_url(r[2] or "") == canon
+        ]
+        investigations = [
+            {
+                "url": r[0],
+                "surveyed_by": r[1],
+                "surveyed_at": r[2],
+                "verdict": r[3],
+                "skip_reason": r[4],
+            }
+            for r in conn.execute(
+                "SELECT url, surveyed_by, surveyed_at, verdict, skip_reason FROM investigations"
+            ).fetchall()
+            if _canonical_url(r[0] or "") == canon
+        ]
+    finally:
+        conn.close()
+
+    return {
+        "url": url,
+        "canonical": canon,
+        "seen": bool(patterns or investigations),
+        "patterns": patterns,
+        "investigations": investigations,
+    }
+
+
+def store_snapshot(db_path: Path) -> str:
+    """A content hash of the pattern corpus, for the read-only-subagent backstop.
+
+    HASHES CONTENT, NOT IDS. An id-only hash catches an insert or a delete and
+    misses an in-place EDIT — the more dangerous write, because a poisoned body
+    under an id the operator already reviewed looks reviewed. Ordered by id so the
+    digest is stable regardless of row order.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    conn = plain_connect(db_path)
+    try:
+        for row in conn.execute(
+            "SELECT id, name, COALESCE(body, ''), COALESCE(source_url, '') "
+            "FROM patterns ORDER BY id"
+        ):
+            for field in row:
+                h.update(str(field).encode("utf-8"))
+                h.update(b"\x1f")
+    finally:
+        conn.close()
+    return h.hexdigest()
