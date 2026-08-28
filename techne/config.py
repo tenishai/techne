@@ -991,8 +991,13 @@ class Config:
         if "architect" in raw and isinstance(raw["architect"], dict):
             a = raw["architect"]
             cfg.architect = ArchitectConfig(
-                surveyed_by=str(a.get("surveyed_by", "operator")),
-                lens=str(a.get("lens", "infra")),
+                # `or` rather than a default arg: `surveyed_by:` with no value loads
+                # as None and `str(None)` is the literal 'None' — which then becomes a
+                # third of UNIQUE(url, surveyed_by, lens). An empty string is the same
+                # class. For a field whose whole point is row identity, a floor is
+                # cheaper than the corpus split (Prudence, #807 r1).
+                surveyed_by=str(a.get("surveyed_by") or "operator"),
+                lens=str(a.get("lens") or "infra"),
             )
         if "search" in raw and isinstance(raw["search"], dict):
             s = raw["search"]

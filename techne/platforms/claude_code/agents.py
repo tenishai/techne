@@ -54,23 +54,74 @@ STATE_KEY = "agents:claude-code:installed"
 REQUIRED_TOOLS_LINE = "tools: WebFetch, WebSearch"
 
 
-def _sandbox_intact(text: str) -> bool:
-    """Does this file still grant EXACTLY the two web tools?
+#: The tool grant that IS the sandbox, as a set — compared against what a YAML parser
+#: resolves, not against a string that resembles it.
+REQUIRED_TOOLS = frozenset({"WebFetch", "WebSearch"})
 
-    SUBSTRING MATCHING IS WRONG HERE AND FAILS OPEN, which is the worst direction for a
-    security check. `REQUIRED_TOOLS_LINE in text` is True for a file whose line reads
-    `tools: WebFetch, WebSearch, Bash` — the widening is a SUFFIX, so the check passes
-    on exactly the edit it exists to catch. Caught by its own test, which is the only
-    reason it is not still in here.
 
-    So: find the `tools:` line and compare it whole, after stripping. A file with no
-    `tools:` line at all is not intact either — the harness would fall back to whatever
-    its default grant is, which is not two web tools.
+def _frontmatter(text: str) -> dict | None:
+    """The YAML block between the first two `---` fences, parsed. None if absent/invalid.
+
+    SLICING IS HALF THE FIX. A checker that scans the WHOLE FILE counts a `tools:` line
+    that appears in the markdown body, or inside a `description: |` block scalar, as
+    though it were the grant — and both of those are things an operator writes on
+    purpose, so neither needs an adversary to happen.
     """
-    for line in text.splitlines():
-        if line.strip().startswith("tools:"):
-            return line.strip() == REQUIRED_TOOLS_LINE
-    return False
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            try:
+                import yaml
+
+                block = yaml.safe_load("\n".join(lines[1:i]))
+            except Exception:
+                return None
+            return block if isinstance(block, dict) else None
+    return None
+
+
+def _declared_tools(text: str) -> frozenset[str] | None:
+    """The tool names this definition grants, or None if it grants nothing parseable.
+
+    Accepts BOTH spellings a human writes — the flow scalar `tools: A, B` and the YAML
+    sequence `tools:\n  - A\n  - B` — because they mean the same thing to the harness
+    and a checker that understands only one reports the other as tampered.
+    """
+    fm = _frontmatter(text)
+    if fm is None or "tools" not in fm:
+        return None
+    raw = fm["tools"]
+    if isinstance(raw, str):
+        return frozenset(t.strip() for t in raw.split(",") if t.strip())
+    if isinstance(raw, (list, tuple)):
+        return frozenset(str(t).strip() for t in raw if str(t).strip())
+    return None
+
+
+def _sandbox_intact(text: str) -> bool:
+    """Does this file grant EXACTLY the two web tools?
+
+    THIS FUNCTION HAS FAILED OPEN TWICE, and both times in a way that read as correct.
+    First it was `REQUIRED_TOOLS_LINE in text`, which is True for `tools: WebFetch,
+    WebSearch, Bash` because the widening is a SUFFIX. The replacement compared the
+    stripped `tools:` line, and Prudence broke it four more ways (#807 r1 I1), all from
+    one root cause — it scanned lines instead of parsing the document:
+
+      - `strip()` discards indentation, so a `tools:` nested under `metadata:` counted;
+      - there was no frontmatter boundary, so a `tools:` line in the BODY counted;
+      - it returned the FIRST match while YAML resolves a duplicate key to the LAST;
+      - it understood only the flow spelling, so the sequence form read as widened.
+
+    The first two need no adversary — an operator restructuring their own frontmatter, or
+    documenting the tool line in prose, got `sandbox intact` printed over a definition
+    granting a shell. So: parse the frontmatter and compare a SET against what a YAML
+    parser resolves, which is what the harness reads. A file that grants nothing is not
+    intact either — the harness would fall back to its own default, which is not two web
+    tools.
+    """
+    return _declared_tools(text) == REQUIRED_TOOLS
 
 
 @dataclass
@@ -195,6 +246,25 @@ def agents_status(config: Config) -> list[AgentResult]:
         on_disk = path.read_text(encoding="utf-8")
         if _sha(on_disk) == _sha(bundled_agent_text(name)):
             out.append(AgentResult(name, "unchanged", path))
+        elif _sha(on_disk) == manifest.get(name):
+            # TECHNE SHIPPED A NEW VERSION; THIS INSTALL HAS NOT TAKEN IT. The file is
+            # byte-identical to what techne last wrote, so nobody edited it — and
+            # reporting that as "edited" told every operator who upgraded without
+            # re-running `agents install` that they had changed a file they never
+            # touched, on the command that exists to say whether the sandbox is
+            # trustworthy. `register_agents` already made this comparison; status
+            # loaded the manifest and then ignored it (Prudence, #807 r1 I2).
+            out.append(
+                AgentResult(
+                    name,
+                    "outdated",
+                    path,
+                    detail=(
+                        "techne ships a newer version and this copy is the one it wrote "
+                        "— not an edit of yours. `techne agents install` takes it."
+                    ),
+                )
+            )
         elif not _sandbox_intact(on_disk):
             out.append(
                 AgentResult(

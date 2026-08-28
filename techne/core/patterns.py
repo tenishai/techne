@@ -1287,6 +1287,12 @@ def ingest_patterns_md(
     }
 
 
+#: Hosts whose PATH is case-insensitive, so two spellings name one resource. Everywhere
+#: else a path is case-sensitive and folding it would suppress a real investigation.
+#: Membership is established by measurement — see `_canonical_url`.
+_CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
+
+
 def _canonical_url(url: str) -> str:
     """Fold the spellings of one URL that mean the same page.
 
@@ -1299,14 +1305,43 @@ def _canonical_url(url: str) -> str:
     SUB-PATHS STAY DISTINCT on purpose: `owner/repo` must not match
     `owner/repo-extended`, so only a TRAILING slash is stripped, never a segment.
     """
-    u = url.strip().lower()
-    for prefix in ("https://", "http://"):
-        if u.startswith(prefix):
+    u = url.strip()
+    for prefix in ("https://", "http://", "//"):
+        if u.lower().startswith(prefix):
             u = u[len(prefix) :]
             break
-    if u.startswith("www."):
-        u = u[4:]
-    return u.rstrip("/")
+
+    # LOWERCASE THE AUTHORITY ALWAYS; THE PATH ONLY WHERE THE HOST SAYS SO.
+    #
+    # Folding every path made `wiki/Python` and `wiki/python` one URL — a false "seen"
+    # that exits 0 and suppresses an investigation nobody ran (Prudence, #807 r1 I4).
+    # That is the dangerous direction: over-folding hides work, under-folding only costs
+    # a subagent. But refusing to fold ANY path breaks the case this function exists for,
+    # because an operator pasting `github.com/Owner/Repo` for a corpus that holds
+    # `github.com/owner/repo` must get a hit.
+    #
+    # MEASURED 2026-08-28 rather than assumed, because the two hosts genuinely differ:
+    #   github.com/PrimeIntellect-ai/prime-agent  -> 200
+    #   github.com/primeintellect-ai/PRIME-AGENT  -> 200   (same repo)
+    #   en.wikipedia.org/wiki/Python_(...)        -> 200
+    #   en.wikipedia.org/wiki/python_(...)        -> 301   (a DIFFERENT url that redirects)
+    # So the fold is a property of the host, and the list below is evidence, not a guess.
+    # Add a host only with a measurement like the one above.
+    host, slash, path = u.partition("/")
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host in _CASE_INSENSITIVE_PATH_HOSTS:
+        path = path.lower()
+
+    # A fragment is never part of the resource, and it is what a URL carries when it is
+    # pasted from a browser — the input this function was written for. A `.git` suffix and
+    # a trailing slash name the same repo. Query strings are left alone: they can select
+    # content, so folding them could merge two genuinely different pages.
+    path = path.split("#", 1)[0]
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    return (host + slash + path).rstrip("/")
 
 
 def dedup_url(db_path: Path, url: str) -> dict:
@@ -1359,25 +1394,51 @@ def dedup_url(db_path: Path, url: str) -> dict:
 
 
 def store_snapshot(db_path: Path) -> str:
-    """A content hash of the pattern corpus, for the read-only-subagent backstop.
+    """A content digest of the corpus, for the read-only-subagent backstop.
 
-    HASHES CONTENT, NOT IDS. An id-only hash catches an insert or a delete and
-    misses an in-place EDIT — the more dangerous write, because a poisoned body
-    under an id the operator already reviewed looks reviewed. Ordered by id so the
-    digest is stable regardless of row order.
+    THE OPERATOR USES THE CONVERSE, WHICH IS WHY COVERAGE MATTERS (Prudence, #807 r1 I3).
+    Nobody reads this as "a difference means something wrote". They read "no difference
+    means nothing wrote", because that is the branch where they proceed with the
+    subagent's findings. So every column this does NOT cover is a write the operator is
+    told did not happen.
+
+    The first version hashed id+name+body+source_url — 4 of the `patterns` table's 15
+    columns — and its docstring claimed an id-only hash "catches an insert or a delete".
+    It did not catch `status` -> 'superseded', which IS a delete: the row stops appearing
+    in search while every hashed column stays byte-identical. It also missed a whole new
+    `investigations` row, which is not out of scope by this module's own argument —
+    `dedup_url` exists precisely because a `skip-with-flag` with no pattern row is the
+    population worth protecting.
+
+    So: every column of `patterns`, plus a second pass over `investigations`. Both are
+    ordered by id so the digest is stable across row order. `pattern_relations`,
+    `pattern_topics` and `pattern_applies` remain outside it — they are derived by
+    `backfill_graph` from content this DOES cover, so a change there without a change
+    here means the graph was rebuilt, not that the corpus was edited. That is a
+    deliberate boundary rather than an oversight, and `techne architect snapshot --help`
+    states what the digest covers so the converse can be read honestly.
     """
     import hashlib
 
     h = hashlib.sha256()
     conn = plain_connect(db_path)
     try:
-        for row in conn.execute(
-            "SELECT id, name, COALESCE(body, ''), COALESCE(source_url, '') "
-            "FROM patterns ORDER BY id"
-        ):
-            for field in row:
-                h.update(str(field).encode("utf-8"))
-                h.update(b"\x1f")
+        for table in ("patterns", "investigations"):
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            if not cols:
+                continue
+            # Column names go into the digest too: adding a column is a schema change
+            # that alters what "the whole row" means, and the snapshot should not read
+            # as unchanged across it.
+            h.update(f"{table}:{','.join(cols)}".encode("utf-8"))
+            h.update(b"\x1e")
+            order = "id" if "id" in cols else cols[0]
+            select = ", ".join(f'COALESCE(CAST("{c}" AS TEXT), \'\')' for c in cols)
+            for row in conn.execute(f'SELECT {select} FROM "{table}" ORDER BY "{order}"'):
+                for field in row:
+                    h.update(str(field).encode("utf-8"))
+                    h.update(b"\x1f")
+            h.update(b"\x1d")
     finally:
         conn.close()
     return h.hexdigest()

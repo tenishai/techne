@@ -170,7 +170,9 @@ _NOT_A_DESTINATION: tuple[str, ...] = (
     # (techne#754). `architect.surveyed_by` and `architect.lens` are stamped onto
     # `investigations` rows as attribution — who looked at a URL, from what angle.
     # They select no path, endpoint, model route or sink; where a pattern is written
-    # is decided by `architect_db_path`, classified as egress above. The whole block
+    # is decided by `stores`, which IS in EGRESS_KEYS (there is no `architect_db_path` field —
+    # the architect's path is governed through `stores`; the classification was right and the
+    # cited control was not a thing. Prudence, #807 r1). The whole block
     # is listed rather than each sub-key because NEITHER is a destination, so this is
     # not the partially-governed case the dotted-name rule exists for.
     #

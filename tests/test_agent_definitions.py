@@ -31,6 +31,13 @@ from techne.platforms.claude_code.agents import (
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    # THE OWNERSHIP MANIFEST LIVES IN techne.db, and both _load_manifest and
+    # _save_manifest early-return when the db is absent. Without one, every install
+    # records nothing and `status` can never distinguish our upgrade from your edit —
+    # so a fixture without a db would test a degraded path and call it the real one.
+    from techne.core.database import connect
+
+    connect(tmp_path / "techne.db").close()
     return tmp_path
 
 
@@ -86,7 +93,10 @@ def test_a_WIDENED_tool_list_is_called_out_specifically(home):
     cfg = Config.load()
     register_agents(cfg)
     path = agents_dir() / "research-readonly.md"
-    path.write_text(path.read_text().replace(REQUIRED_TOOLS_LINE, "tools: WebFetch, WebSearch, Bash"))
+    widened = path.read_text().replace(
+        REQUIRED_TOOLS_LINE, "tools: WebFetch, WebSearch, Bash"
+    )
+    path.write_text(widened)
 
     (res,) = register_agents(cfg)
     assert res.action == "kept-user-copy"
@@ -151,24 +161,75 @@ def test_the_installer_names_are_not_empty():
 
 
 @pytest.mark.parametrize(
-    "line,intact",
+    "shape,intact,label",
     [
-        ("tools: WebFetch, WebSearch", True),
-        ("  tools: WebFetch, WebSearch  ", True),
-        # THE ONE THAT BROKE THE FIRST IMPLEMENTATION. A substring check reads this as
-        # intact, because the widening is a SUFFIX of the required line — a security
-        # check that fails OPEN on precisely the edit it exists to catch.
-        ("tools: WebFetch, WebSearch, Bash", False),
-        ("tools: WebFetch, WebSearch, Read, Write", False),
-        ("tools: WebFetch", False),
-        ("tools: *", False),
-        ("", False),  # no tools line at all — the harness grants its own default
+        ("---\nname: x\ntools: WebFetch, WebSearch\n---\nbody\n", True, "flow scalar"),
+        ("---\nname: x\ntools:\n  - WebFetch\n  - WebSearch\n---\n", True, "yaml sequence"),
+        (
+            "---\nname: x\n#tools: Bash\ntools: WebFetch, WebSearch\n---\n",
+            True,
+            "commented decoy",
+        ),
+        ("---\nname: x\ntools: WebFetch, WebSearch, Bash\n---\n", False, "suffix widen"),
+        (
+            "---\ndescription: |\n  tools: WebFetch, WebSearch\n"
+            "tools: WebFetch, WebSearch, Bash\n---\n",
+            False,
+            "decoy in a block scalar, real grant widened",
+        ),
+        (
+            "---\ntools: WebFetch, WebSearch\ntools: Bash, Write, Read\n---\n",
+            False,
+            "duplicate key",
+        ),
+        ("---\nname: x\nmetadata:\n  tools: WebFetch, WebSearch\n---\n", False, "nested key only"),
+        ("---\nname: x\n---\nprose says tools: WebFetch, WebSearch\n", False, "body line only"),
+        ("---\nname: x\ntools: WebFetch\n---\n", False, "narrowed"),
+        ("---\nname: x\n---\n", False, "no grant at all"),
+        ("not frontmatter at all\n", False, "no frontmatter"),
     ],
 )
-def test_sandbox_detection_compares_the_whole_line(line, intact):
-    """Pinned as a table because the failure is a one-character reasoning slip that
-    looks correct in review and passes a happy-path test."""
+def test_sandbox_detection_parses_rather_than_scans(shape, intact, label):
+    """THIS FUNCTION HAS FAILED OPEN TWICE, both times reading as correct.
+
+    v1: `REQUIRED_TOOLS_LINE in text` — True for `tools: WebFetch, WebSearch, Bash`,
+    because the widening is a SUFFIX.
+    v2: compared the stripped `tools:` line — broken four more ways (Prudence, #807 r1):
+    strip() erased indentation so a NESTED key counted; no frontmatter boundary so a
+    BODY line counted; it returned the FIRST match while YAML resolves a duplicate to
+    the LAST; and it knew only the flow spelling, so the SEQUENCE form read as widened.
+
+    Rows 7 and 8 need no adversary — an operator restructuring their own frontmatter, or
+    documenting the tool line in prose, got `sandbox intact` over a shell grant.
+
+    Parametrised because each row is a distinct v2 failure and a single combined
+    assertion would let a partial regression hide behind the others.
+    """
     from techne.platforms.claude_code.agents import _sandbox_intact
 
-    text = f"---\nname: x\n{line}\nmodel: sonnet\n---\nbody\n"
-    assert _sandbox_intact(text) is intact
+    assert _sandbox_intact(shape) is intact, label
+
+
+def test_status_separates_your_edit_from_our_upgrade(home):
+    """`agents_status` loaded the manifest and never read it (Prudence, #807 r1 I2), so it
+    could not tell "the operator edited this" from "techne shipped a newer version and
+    this install has not taken it" — and reported the second as the first, on the command
+    that exists to say whether the sandbox is trustworthy.
+
+    Simulates the upgrade: the file on disk is EXACTLY what techne wrote (manifest sha
+    matches), while the shipped text has moved on.
+    """
+    from unittest.mock import patch
+
+    from techne.platforms.claude_code.agents import agents_status, register_agents
+
+    cfg = Config.load()
+    register_agents(cfg)
+
+    shipped_now = bundled_agent_text("research-readonly") + "\n<!-- later -->\n"
+    target = "techne.platforms.claude_code.agents.bundled_agent_text"
+    with patch(target, return_value=shipped_now):
+        (res,) = agents_status(cfg)
+
+    assert res.action == "outdated", f"an untouched file reported as {res.action!r}"
+    assert "not an edit of yours" in res.detail

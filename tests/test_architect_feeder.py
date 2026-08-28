@@ -605,8 +605,8 @@ def test_dedup_reports_a_skip_that_left_no_pattern_row(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
     from techne.cli import main
-    from techne.core.architect import architect_db
     from techne.config import Config
+    from techne.core.architect import architect_db
     from techne.core.patterns import upsert_investigation
 
     monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
@@ -652,3 +652,82 @@ def test_snapshot_catches_an_in_place_edit_not_only_an_insert(tmp_path, monkeypa
     conn.close()
 
     assert store_snapshot(db) != before, "an in-place body edit did not change the snapshot"
+
+
+@pytest.mark.parametrize(
+    "a,b,same,label",
+    [
+        ("https://github.com/Owner/Repo", "github.com/owner/repo/", True, "github path case"),
+        ("http://www.github.com/O/R", "https://github.com/o/r", True, "www + scheme + case"),
+        ("https://github.com/o/r.git", "https://github.com/o/r", True, ".git suffix"),
+        ("https://github.com/o/r#readme", "https://github.com/o/r", True, "fragment"),
+        # THE REGRESSION (Prudence, #807 r1 I4). Lowercasing the whole URL folded these
+        # into one, so `dedup` exited 0 and printed "Seen before" for a page nobody had
+        # investigated — the direction that SUPPRESSES work rather than wasting a subagent.
+        (
+            "https://en.wikipedia.org/wiki/Python",
+            "https://en.wikipedia.org/wiki/python",
+            False,
+            "generic path case must stay distinct",
+        ),
+        ("https://github.com/o/repo", "https://github.com/o/repo-extended", False, "sibling"),
+    ],
+)
+def test_canonical_url_folds_by_host_not_blindly(a, b, same, label):
+    """MEASURED 2026-08-28, because the two hosts genuinely differ and guessing either way
+    breaks something real:
+
+        github.com/PrimeIntellect-ai/prime-agent  -> 200
+        github.com/primeintellect-ai/PRIME-AGENT  -> 200   (the same repo)
+        en.wikipedia.org/wiki/Python_(...)        -> 200
+        en.wikipedia.org/wiki/python_(...)        -> 301   (a DIFFERENT url that redirects)
+
+    Refusing to fold any path would break the case this function exists for — an operator
+    pasting `github.com/Owner/Repo` against a corpus holding `github.com/owner/repo`.
+    Folding every path suppresses investigations. The fold is a property of the host.
+    """
+    from techne.core.patterns import _canonical_url
+
+    assert (_canonical_url(a) == _canonical_url(b)) is same, label
+
+
+def test_snapshot_covers_the_writes_the_operator_reads_it_for(tmp_path, monkeypatch):
+    """THE OPERATOR USES THE CONVERSE (Prudence, #807 r1 I3): "no difference means nothing
+    wrote" is the branch they proceed on, so every uncovered column is a write they are
+    told did not happen.
+
+    The first version hashed 4 of `patterns`' 15 columns and no `investigations` at all.
+    It missed `status` -> 'superseded', which IS a delete — the row leaves search while
+    every hashed column stays identical — and missed a whole new skip-with-flag row, the
+    population `dedup_url` exists to protect.
+    """
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import store_snapshot
+    from techne.core.stores import plain_connect
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    CliRunner().invoke(
+        main, ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "orig"]
+    )
+    db = architect_db(Config.load())
+
+    writes = {
+        "in-place body edit": "UPDATE patterns SET body='poisoned'",
+        "soft delete via status": "UPDATE patterns SET status='superseded'",
+        "new skip-with-flag investigation": (
+            "INSERT INTO investigations (id,url,surveyed_by,lens,surveyed_at,verdict)"
+            " VALUES ('zz','https://e.com/z','x','infra','2026-01-01','skip-with-flag')"
+        ),
+        "verdict rewritten": "UPDATE investigations SET verdict='skip'",
+    }
+    for label, sql in writes.items():
+        before = store_snapshot(db)
+        conn = plain_connect(db)
+        conn.execute(sql)
+        conn.commit()
+        conn.close()
+        assert store_snapshot(db) != before, f"snapshot missed: {label}"

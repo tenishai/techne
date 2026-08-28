@@ -2842,8 +2842,12 @@ def agents(ctx):
 @click.pass_context
 def agents_status_cmd(ctx):
     """Report each definition as unchanged / edited / widened / absent."""
-    from techne.platforms.claude_code.agents import agents_status
+    from techne.platforms.claude_code.agents import agents_dir, agents_status
 
+    # Name the directory. On a non-Claude-Code install the bare "not installed, run
+    # `techne agents install`" gives no hint that it means ~/.claude/agents, which is
+    # the asymmetry with `skills status` Prudence flagged (#807 r1).
+    click.echo(f"  target: {agents_dir()}")
     for r in agents_status(ctx.obj["config"]):
         line = f"  {r.name:22} {r.action}"
         click.echo(line)
@@ -4013,8 +4017,12 @@ def architect_snapshot(ctx):
     response is to treat the whole result as compromised: you cannot distinguish
     subagent-authored content from injection-authored content after the fact.
 
-    Hashes CONTENT rather than ids, so an in-place edit is caught — the more
-    dangerous write, because a poisoned body under a reviewed id looks reviewed.
+    WHAT THE DIGEST COVERS, stated because the useful reading is the converse — "no
+    difference means nothing wrote" is the branch you proceed on. It covers EVERY column
+    of `patterns` and of `investigations`, including `status`, so a soft delete
+    (status -> superseded) and a new skip-with-flag row both move it. It does NOT cover
+    the derived graph (relations, topics, applies): those are rebuilt from content this
+    does cover, so a change there alone means the graph was refreshed, not edited.
     """
     from techne.core.architect import architect_db
     from techne.core.patterns import store_snapshot

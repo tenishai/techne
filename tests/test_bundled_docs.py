@@ -15,7 +15,6 @@ someone installs. Only comparing the two tables catches either.
 
 from __future__ import annotations
 
-import re
 import tomllib
 from pathlib import Path
 

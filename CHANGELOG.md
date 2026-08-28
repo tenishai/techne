@@ -419,6 +419,41 @@ open and is not reversible — back up first.
 
 ### Fixed
 
+- **The sandbox verifier failed open on four frontmatter shapes** (#812, Prudence r1 on
+  #807). `_sandbox_intact` scanned lines instead of parsing the document, so a `tools:`
+  key nested under `metadata:`, a `tools:` line in the markdown **body**, a decoy inside a
+  `description: |` block scalar, and a duplicate `tools:` key all reported **sandbox
+  intact** over a definition granting a shell — while the YAML sequence spelling reported
+  a false *widened*. Two of those need no adversary: an operator restructuring their own
+  frontmatter, or documenting the tool line in prose, got a green report from the command
+  `AGENTS.md` tells an agent to check before investigating. It now slices the frontmatter,
+  parses it, and compares the grant as a **set** against what a YAML parser resolves —
+  which is what the harness reads, rather than a string that resembles it.
+
+- **`techne agents status` called our upgrade your edit** (#812). It loaded the ownership
+  manifest and never read it, so a file byte-identical to what techne last wrote — the
+  state of every install that upgrades without re-running `agents install` — reported as
+  `kept-user-copy`. Now reports `outdated`, using the comparison `register_agents` already
+  made. `status` also names the directory it is talking about, which matters on a platform
+  where `~/.claude/agents` is not the obvious answer.
+
+- **`architect snapshot` covered 4 of 15 columns and no investigations at all** (#811).
+  The digest is read for its converse — *no difference means nothing wrote* — so every
+  uncovered column was a write the operator was told did not happen. It missed
+  `status → superseded`, which is a soft delete that leaves the row out of search while
+  every hashed column stays identical, and missed a whole new `skip-with-flag`
+  investigation, the population `dedup` exists to protect. Now digests every column of
+  both tables; the derived graph stays out by design and the CLI help says so.
+
+- **`architect dedup` folded path case and could suppress a real investigation** (#811).
+  Lowercasing the whole URL made `wiki/Python` and `wiki/python` one entry, so `dedup`
+  exited 0 and printed "Seen before" for a page nobody had surveyed. Case-folding is now a
+  property of the **host**, established by measurement rather than assumption: GitHub
+  returns 200 for both casings of a repo path, while Wikipedia returns 301 for the
+  lowercase variant — a different URL that redirects. Fragments and a `.git` suffix fold
+  too; query strings deliberately do not, since they can select content.
+
+
 - **`techne architect add` stamped a stranger's patterns with one of our persona names**
   (#754). `--surveyed-by` defaulted to `"raven"`, hardcoded at the CLI, with three more
   `"raven"` defaults in `core/patterns.py` and a schema comment listing `raven | rook |
