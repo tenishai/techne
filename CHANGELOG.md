@@ -36,6 +36,28 @@ open and is not reversible — back up first.
 
 ### Added
 
+- **The research sandbox ships too — `techne agents install`** (#754). `techne guide
+  investigating` tells an agent to do its fetching inside a subagent restricted to
+  web-only tools. That instruction is **unenforceable** without a definition to name: an
+  operator who lacks one reaches for a general research agent, which has a shell, and an
+  agent that can both read attacker-controlled pages *and* write to the pattern store is
+  one injection away from writing whatever a page tells it to. Afterwards nobody can
+  separate agent-authored content from injection-authored content.
+
+  So `research-readonly` now ships in the wheel and installs alongside the procedures.
+  **This is the one place the guide-stub trick does not apply**: a procedure can say "run
+  `techne guide <name>` and follow it" because an agent reads it at run time, but an agent
+  definition is configuration the *harness* parses before any agent exists — the security
+  property is the literal `tools: WebFetch, WebSearch` line. Point it at a guide and there
+  is nothing left to enforce.
+
+  `techne agents status` reports absent / unchanged / edited / **widened**, and widened is
+  its own state on purpose: a drifted procedure gives worse research, while a drifted
+  sandbox gives the research agent tools the procedure assumes it cannot have. An edited
+  definition is kept rather than overwritten, the same discipline the skills installer
+  uses — techne would rather tell you your copy diverged than silently restore its own.
+
+
 - **The two research procedures come home, and an agent can give itself the skill** (#754).
   `investigate-url` and `survey-field` lived in a separate repo an operator had to know
   about and install. They now ship as `techne guide investigating` / `techne guide

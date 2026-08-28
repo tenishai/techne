@@ -16,6 +16,9 @@ you filter them, you decide a verdict, and only you write to the store.
 >   reason this procedure exists rather than just reading the README yourself.
 > - They ask why the architect is empty, or how patterns get in — this is the procedure
 >   that fills it, and `techne architect add` is the write step.
+> - `techne agents status` reports `research-readonly` **absent or widened** and an
+>   investigation is about to run — say so before fetching anything. The sandbox is the
+>   reason findings from an untrusted page are safe to write down.
 
 ## Make this a skill on your platform
 
@@ -79,9 +82,14 @@ The research phase runs in a subagent restricted to **web-only** tools — `WebF
 closes the local-read → fetch exfiltration path. Enforce it two ways:
 
 1. **Capability enforcement (primary).** Use a subagent type whose tools are limited to
-   the read-only web ones. **Do not substitute a type that has shell access** — a
-   general-purpose research agent with a shell can run the ingest itself and write
-   unreviewed patterns into the store.
+   the read-only web ones. techne ships one — `research-readonly` — and
+   `techne agents install` puts it where your platform looks; `techne agents status`
+   says whether it is present and whether its tool list still matches what shipped.
+   **Do not substitute a type that has shell access** — a general-purpose research agent
+   with a shell can run the ingest itself and write unreviewed patterns into the store.
+   If `agents status` reports the definition absent or widened, stop and say so rather
+   than proceeding with whatever agent is available: the rest of this procedure assumes
+   the sandbox holds.
 2. **Verification backstop.** Take `techne architect snapshot` before spawning and
    compare after. It hashes each pattern's *content*, so an in-place edit is caught and
    not just an insert or delete. If it differs, the sandbox was breached: **halt, purge

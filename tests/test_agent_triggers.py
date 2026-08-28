@@ -276,6 +276,14 @@ COMMAND_TREE_AT_LAST_REVIEW = {
     # `dedup` queries two tables, `snapshot` hashes pattern content. Re-verified
     # against deployment.md's migration trigger: "nothing archives transcripts"
     # is unaffected by either.
+    # techne#754 — the research-sandbox installer. `install`/`remove` write and
+    # delete ONE definition file in the platform config dir; `status` only reads.
+    # Re-verified against deployment.md's migration trigger: none of the three
+    # touches session transcripts, so "nothing archives transcripts" still holds.
+    "agents",
+    "agents install",
+    "agents remove",
+    "agents status",
     "architect dedup",
     "architect snapshot",
     "architect applies",
@@ -530,6 +538,8 @@ TRIGGER_WITNESSES = {
     '"look at" or "check out"': "test_the_dedup_step_the_url_trigger_names_exists",
     "why the architect is empty, or how patterns get in":
         "test_the_dedup_step_the_url_trigger_names_exists",
+    "reports `research-readonly` **absent or widened**":
+        "test_the_sandbox_the_trigger_names_is_installable",
     "about to build something substantial": "test_the_survey_guide_teaches_the_same_sandbox",
     '"the landscape" or "who else does this"': "test_the_survey_guide_teaches_the_same_sandbox",
 }
@@ -1248,3 +1258,17 @@ def test_the_survey_guide_teaches_the_same_sandbox():
     assert "web-only" in survey
     assert "snapshot" in survey
     assert "investigating guide" in survey, "the survey guide no longer defers on security"
+
+
+def test_the_sandbox_the_trigger_names_is_installable():
+    """The trigger tells an agent to check `techne agents status` before investigating.
+    If that command or the definition behind it goes away, the trigger sends the agent at
+    nothing — and a security trigger that points at a missing control is worse than none,
+    because it reads as covered."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.platforms.claude_code.agents import REQUIRED_TOOLS_LINE, bundled_agent_text
+
+    assert CliRunner().invoke(main, ["agents", "status", "--help"]).exit_code == 0
+    assert REQUIRED_TOOLS_LINE in bundled_agent_text("research-readonly")

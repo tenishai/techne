@@ -36,6 +36,7 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | pastes a repo URL and asks what is interesting in it | [investigating.md](docs/investigating.md#the-steps) |
 | asks you to "look at" or "check out" a project you are about to fetch | [investigating.md](docs/investigating.md#security-model) |
 | asks how patterns get into the architect | [investigating.md](docs/investigating.md#the-steps) |
+| runs an investigation while `techne agents status` reports the sandbox absent or widened | [investigating.md](docs/investigating.md#security-model) |
 | is about to build something substantial without asking what already exists | [surveying.md](docs/surveying.md#what-a-survey-is-for) |
 | asks for "the landscape" or "who else does this" | [surveying.md](docs/surveying.md#the-steps) |
 

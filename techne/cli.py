@@ -2249,10 +2249,21 @@ def init(ctx, platform, identity_dir, posture, install_skills, force_skills):
         # above: if register_hooks refuses this install, we have not scattered
         # markdown into ~/.claude for an install that is about to fail.
         if install_skills:
+            from techne.platforms.claude_code.agents import register_agents
             from techne.platforms.claude_code.skills import register_skills
 
             for r in register_skills(config, force=force_skills):
                 line = f"Skill {r.name}: {r.action}"
+                if r.detail:
+                    line += f" — {r.detail}"
+                click.echo(line)
+
+            # The research sandbox rides the same flag as the procedures (techne#754).
+            # It is not optional in a different way: `techne guide investigating` tells
+            # an agent to research inside it, so an install that has the guide and not
+            # the definition ships an instruction nobody can follow.
+            for r in register_agents(config, force=force_skills):
+                line = f"Agent {r.name}: {r.action}"
                 if r.detail:
                     line += f" — {r.detail}"
                 click.echo(line)
@@ -2803,6 +2814,75 @@ def memory_sync_cmd(ctx):
 
     stored = CCMemorySource(config).initial_walk()
     click.echo(f"memory sync — {stored} file(s) drained (stored/updated) of {found} found")
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def agents(ctx):
+    """Install and inspect techne's bundled subagent definitions (techne#754).
+
+    ONE DEFINITION TODAY: `research-readonly`, the web-only sandbox that
+    `techne guide investigating` tells an agent to research inside. That instruction
+    is UNENFORCEABLE without this file — an operator who does not have it reaches for
+    a general research agent, which has a shell, and an agent that can both read
+    attacker-controlled pages and write to the pattern store is one injection away
+    from writing whatever a page tells it to.
+
+    SEPARATE FROM `techne skills` because the failure modes differ. A drifted skill
+    gives worse research. A drifted sandbox gives an agent more tools than the
+    procedure assumes, so `status` calls out a widened tool list specifically rather
+    than reporting a bare "user-modified".
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    ctx.invoke(agents_status_cmd)
+
+
+@agents.command("status")
+@click.pass_context
+def agents_status_cmd(ctx):
+    """Report each definition as unchanged / edited / widened / absent."""
+    from techne.platforms.claude_code.agents import agents_status
+
+    for r in agents_status(ctx.obj["config"]):
+        line = f"  {r.name:22} {r.action}"
+        click.echo(line)
+        if r.detail:
+            click.echo(f"      {r.detail}")
+
+
+@agents.command("install")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite a definition you have edited. Off by default: techne reports a "
+    "diverged copy rather than silently restoring its own.",
+)
+@click.pass_context
+def agents_install(ctx, force):
+    """Write the bundled subagent definitions into the platform's agents directory."""
+    from techne.platforms.claude_code.agents import register_agents
+
+    for r in register_agents(ctx.obj["config"], force=force):
+        click.echo(f"  {r.name:22} {r.action}  {r.path}")
+        if r.detail:
+            click.echo(f"      {r.detail}")
+
+
+@agents.command("remove")
+@click.pass_context
+def agents_remove(ctx):
+    """Remove only the copies techne wrote and still owns."""
+    from techne.platforms.claude_code.agents import unregister_agents
+
+    results = unregister_agents(ctx.obj["config"])
+    if not results:
+        click.echo("nothing installed by techne to remove")
+    for r in results:
+        click.echo(f"  {r.name:22} {r.action}  {r.path}")
+        if r.detail:
+            click.echo(f"      {r.detail}")
 
 
 @main.group(invoke_without_command=True)
