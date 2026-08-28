@@ -1287,10 +1287,18 @@ def ingest_patterns_md(
     }
 
 
-#: Hosts whose PATH is case-insensitive, so two spellings name one resource. Everywhere
-#: else a path is case-sensitive and folding it would suppress a real investigation.
-#: Membership is established by measurement — see `_canonical_url`.
-_CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
+#: host -> how many leading path segments that host case-folds.
+#:
+#: NOT THE WHOLE PATH, which was this fix's own second defect (Prudence, #807 r2 I2).
+#: `github.com` folds `owner/repo` because those live in GitHub's namespace; everything
+#: deeper is served out of git, where tree paths and refs are byte-exact. Folding the
+#: whole path relocated the wikipedia over-fold inside github:
+#:     /o/r/blob/main/Setup.py  ==  /o/r/blob/main/setup.py   <- different files
+#:     /o/r/tree/Release-1.0    ==  /o/r/tree/release-1.0     <- different refs
+#: The measurement that justifies the entry was `owner/repo`, and `owner/repo` is what it
+#: supports. Gists, raw.githubusercontent.com and enterprise hosts are absent on purpose:
+#: absence under-folds, which costs a subagent, and guessing over-folds, which hides work.
+_CASE_INSENSITIVE_PATH_SEGMENTS = {"github.com": 2}
 
 
 def _canonical_url(url: str) -> str:
@@ -1331,8 +1339,14 @@ def _canonical_url(url: str) -> str:
     host = host.lower()
     if host.startswith("www."):
         host = host[4:]
-    if host in _CASE_INSENSITIVE_PATH_HOSTS:
-        path = path.lower()
+    # Split the query off BEFORE folding. `partition("/")` leaves `?q=Foo` inside `path`,
+    # so lowercasing the path also lowercased the query — contradicting the comment below
+    # that says query strings are left alone, for the one host where it mattered.
+    path, qmark, query = path.partition("?")
+    depth = _CASE_INSENSITIVE_PATH_SEGMENTS.get(host)
+    if depth:
+        segs = path.split("/")
+        path = "/".join([s.lower() for s in segs[:depth]] + segs[depth:])
 
     # A fragment is never part of the resource, and it is what a URL carries when it is
     # pasted from a browser — the input this function was written for. A `.git` suffix and
@@ -1341,7 +1355,7 @@ def _canonical_url(url: str) -> str:
     path = path.split("#", 1)[0]
     if path.endswith(".git"):
         path = path[: -len(".git")]
-    return (host + slash + path).rstrip("/")
+    return (host + slash + path + qmark + query).rstrip("/")
 
 
 def dedup_url(db_path: Path, url: str) -> dict:
@@ -1417,15 +1431,27 @@ def store_snapshot(db_path: Path) -> str:
     here means the graph was rebuilt, not that the corpus was edited. That is a
     deliberate boundary rather than an oversight, and `techne architect snapshot --help`
     states what the digest covers so the converse can be read honestly.
+
+    `pattern_outcomes` IS COVERED, and leaving it out was the same defect one table over
+    (Prudence, #807 r2 I3). Nothing derives it — `record_outcome` writes it with a real
+    INSERT and `techne architect realized` exposes that from the CLI — so it failed the
+    exclusion test the other two pass. The tell was that the first version of this
+    docstring listed `pattern_topics` among the exclusions: no such table exists, and the
+    real sibling that got dropped from the list was the one that is not derived.
     """
     import hashlib
 
     h = hashlib.sha256()
     conn = plain_connect(db_path)
     try:
-        for table in ("patterns", "investigations"):
+        for table in ("patterns", "investigations", "pattern_outcomes"):
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
             if not cols:
+                # A missing table would silently NARROW the digest, which is the shape
+                # this function exists to eliminate. Fold its absence in instead, so a
+                # store that gains or loses one does not read as unchanged.
+                h.update(f"{table}:absent".encode("utf-8"))
+                h.update(b"\x1d")
                 continue
             # Column names go into the digest too: adding a column is a schema change
             # that alters what "the whole row" means, and the snapshot should not read

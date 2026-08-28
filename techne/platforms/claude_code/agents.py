@@ -34,6 +34,7 @@ shell and a fetch tool. `agents_status` says so rather than reporting a bare
 "kept-user-copy".
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,27 +60,45 @@ REQUIRED_TOOLS_LINE = "tools: WebFetch, WebSearch"
 REQUIRED_TOOLS = frozenset({"WebFetch", "WebSearch"})
 
 
+#: The frontmatter fence, requiring column 0 and tolerating a BOM and CRLF.
+#:
+#: BORROWED SHAPE, NOT A SECOND ONE. `scripts/check_arch_cards.py` already had a correct
+#: frontmatter splitter and this reproduces its rules; the two are separate only because
+#: `scripts/` is not an importable package. If either changes, change both.
+_FRONTMATTER_RE = re.compile(r"\A\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(\r?\n|\Z)", re.S)
+
+
 def _frontmatter(text: str) -> dict | None:
-    """The YAML block between the first two `---` fences, parsed. None if absent/invalid.
+    """The YAML block between the first two column-0 `---` fences, parsed.
 
-    SLICING IS HALF THE FIX. A checker that scans the WHOLE FILE counts a `tools:` line
-    that appears in the markdown body, or inside a `description: |` block scalar, as
-    though it were the grant — and both of those are things an operator writes on
-    purpose, so neither needs an adversary to happen.
+    THE FENCE MUST BE AT COLUMN 0, and getting that wrong was this module's SECOND
+    instance of one root cause (Prudence, #807 r2 I1). The first version of this function
+    tested `line.strip() == "---"`, which discards leading whitespace — so an INDENTED
+    `---`, which YAML treats as ordinary content inside a block scalar, terminated the
+    slice. That failed both directions from the same bug:
+
+      - fail-closed, no adversary: a definition whose `description: |` block contains a
+        `---` rule cut short, `tools:` never seen, `agents status` printing WIDENED over
+        a good sandbox — which makes the loud path noise, and a real widening then reads
+        like more of the same;
+      - fail-open, crafted: the same shape with the grant re-declared after the inner
+        rule. YAML resolves a duplicate key to the LAST one, so a compliant parse sees
+        the widened grant while the truncated slice saw the narrow one.
+
+    A regex anchored at the string start, with the fence at line start, cannot make
+    either mistake, and
+    it picks up BOM tolerance the hand-rolled loop did not have.
     """
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
         return None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            try:
-                import yaml
+    try:
+        import yaml
 
-                block = yaml.safe_load("\n".join(lines[1:i]))
-            except Exception:
-                return None
-            return block if isinstance(block, dict) else None
-    return None
+        block = yaml.safe_load(m.group(1))
+    except Exception:
+        return None
+    return block if isinstance(block, dict) else None
 
 
 def _declared_tools(text: str) -> frozenset[str] | None:
@@ -147,7 +166,20 @@ def bundled_agent_text(name: str) -> str:
 
 
 def register_agents(config: Config, *, force: bool = False) -> list[AgentResult]:
-    """Write the bundled subagent definitions into Claude Code's agents directory."""
+    """Write the bundled subagent definitions into Claude Code's agents directory.
+
+    ENSURES THE STORE EXISTS FIRST (Prudence, #807 r2 I4). The ownership manifest lives in
+    techne.db and `_save_manifest` early-returns when it is absent — and nothing requires
+    `techne init` before `techne agents install`, which `docs/investigating.md` points at
+    with no stated prerequisite. On that path the file was written and the ownership record
+    silently dropped, so `agents remove` then refused to remove techne's own byte-identical
+    copy as "modified since install", and `agents status`'s `outdated` branch could never
+    fire at all — the r1 I2 fix was dead code on a db-less install. Creating the store is
+    cheaper than a class of false "you edited this" claims on the trust-reporting surface.
+    """
+    from techne.core.database import connect
+
+    connect(config.db_path).close()
     target_dir = agents_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     manifest = _load_manifest(config, STATE_KEY)

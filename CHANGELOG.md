@@ -419,6 +419,36 @@ open and is not reversible — back up first.
 
 ### Fixed
 
+- **The frontmatter splitter treated an indented `---` as a document boundary** (#812,
+  Prudence r2 on #807). The same `strip()`-discards-indentation root cause as the round-1
+  finding, moved one function over — and it failed both ways. A legitimate definition whose
+  `description:` block contains a `---` rule got cut short, so `agents status` reported
+  **widened** over a good sandbox, which turns the loud path into noise and makes a real
+  widening read like more of the same. And with the grant re-declared after that inner
+  rule, the truncated slice saw the narrow grant while a compliant parser saw the wide one.
+  The fence must now sit at column 0, reusing the shape `scripts/check_arch_cards.py`
+  already had — which also brings BOM tolerance the hand-rolled loop lacked.
+
+- **`architect dedup` folded too much of a GitHub path** (#811). Case-folding is a property
+  of the host, but only `owner/repo` lives in GitHub's namespace; everything deeper is
+  served out of git, where tree paths and refs are byte-exact. Folding the whole path
+  relocated the very defect it fixed — `blob/main/Setup.py` and `blob/main/setup.py` became
+  one entry, as did two differently-cased refs, and the query string was swept in with them.
+  The fold is now bounded to the two segments the measurement actually covered.
+
+- **`architect snapshot` omitted `pattern_outcomes`** (#811). The exclusion argument holds
+  for the derived graph tables — `backfill_graph` rebuilds those from covered content — and
+  does not hold here: `record_outcome` writes this table with a real INSERT, exposed as
+  `techne architect realized`. A recorded outcome left the digest unchanged.
+
+- **`agents install` dropped its ownership record without a prior `init`** (#812). The
+  manifest lives in `techne.db` and its writer early-returned when the store was absent —
+  and nothing requires `techne init` first. On that path `agents remove` then refused to
+  remove techne's own byte-identical file, telling the operator they had modified it, and
+  the `outdated` reporting added earlier in this release could never fire at all. Install
+  now ensures the store exists.
+
+
 - **The sandbox verifier failed open on four frontmatter shapes** (#812, Prudence r1 on
   #807). `_sandbox_intact` scanned lines instead of parsing the document, so a `tools:`
   key nested under `metadata:`, a `tools:` line in the markdown **body**, a decoy inside a

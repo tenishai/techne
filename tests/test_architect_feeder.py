@@ -731,3 +731,70 @@ def test_snapshot_covers_the_writes_the_operator_reads_it_for(tmp_path, monkeypa
         conn.commit()
         conn.close()
         assert store_snapshot(db) != before, f"snapshot missed: {label}"
+
+
+@pytest.mark.parametrize(
+    "a,b,same,label",
+    [
+        ("https://github.com/Owner/Repo", "github.com/owner/repo/", True, "owner/repo folds"),
+        # THE FOLD RELOCATED INSIDE github (Prudence, #807 r2 I2). Only owner and repo live
+        # in GitHub's namespace; everything deeper is served out of git, where tree paths
+        # and refs are byte-exact. Folding the whole path reproduced the wikipedia defect
+        # at greater depth.
+        (
+            "https://github.com/o/r/blob/main/Setup.py",
+            "https://github.com/o/r/blob/main/setup.py",
+            False,
+            "deep tree paths are different files",
+        ),
+        (
+            "https://github.com/o/r/tree/Release-1.0",
+            "https://github.com/o/r/tree/release-1.0",
+            False,
+            "refs are case-sensitive",
+        ),
+        # partition("/") left the query inside `path`, so the fold caught it too — for the
+        # one host where it mattered, contradicting the comment that says it does not.
+        (
+            "https://github.com/o/r/issues?q=Foo",
+            "https://github.com/o/r/issues?q=foo",
+            False,
+            "query strings are not folded",
+        ),
+    ],
+)
+def test_the_github_fold_stops_at_owner_and_repo(a, b, same, label):
+    from techne.core.patterns import _canonical_url
+
+    assert (_canonical_url(a) == _canonical_url(b)) is same, label
+
+
+def test_snapshot_covers_pattern_outcomes(tmp_path, monkeypatch):
+    """THE EXCLUSION ARGUMENT HAS TO HOLD FOR EVERY EXCLUDED TABLE (Prudence, #807 r2 I3).
+    It holds for `pattern_relations` and `pattern_applies` — `backfill_graph` derives both
+    from covered content. It does not hold for `pattern_outcomes`: `record_outcome` writes
+    it with a real INSERT and `techne architect realized` exposes that.
+
+    The tell was that the docstring listed `pattern_topics` among the exclusions. No such
+    table exists, and the real sibling dropped from that list was the one that is derived
+    from nothing.
+    """
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.core.architect import architect_db
+    from techne.core.patterns import record_outcome, store_snapshot
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    CliRunner().invoke(
+        main, ["architect", "add", "--name", "P", "--source", "https://e.com/a", "--body", "b"]
+    )
+    db = architect_db(Config.load())
+    pid = sqlite3.connect(db).execute("SELECT id FROM patterns").fetchone()[0]
+
+    before = store_snapshot(db)
+    record_outcome(db, pattern_id=pid, ref="x", kind="pr", state="shipped")
+    assert store_snapshot(db) != before, "an outcome write left the digest unchanged"
