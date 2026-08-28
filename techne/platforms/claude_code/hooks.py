@@ -106,10 +106,7 @@ def _is_worktree_path(p: Path) -> bool:
     # Retained as a belt-and-braces fallback: catches the harness's worktree dir
     # even if the marker is missing or unreadable.
     parts = p.parts
-    return any(
-        parts[i] == ".claude" and parts[i + 1] == "worktrees"
-        for i in range(len(parts) - 1)
-    )
+    return any(parts[i] == ".claude" and parts[i + 1] == "worktrees" for i in range(len(parts) - 1))
 
 
 def _launcher_path() -> Path:
@@ -567,10 +564,7 @@ def _preflight_command() -> str:
     # install-method heal before the guard runs. The guard is still invoked by
     # absolute path — it cannot ``import techne``, so ``-m`` would be a
     # chicken-and-egg trap; see preflight_guard.py for the full rationale.
-    return (
-        f"/bin/sh {shlex.quote(str(_launcher_path()))} "
-        f"{shlex.quote(str(PREFLIGHT_GUARD))}"
-    )
+    return f"/bin/sh {shlex.quote(str(_launcher_path()))} {shlex.quote(str(PREFLIGHT_GUARD))}"
 
 
 def _hook_command(module: str) -> str:
@@ -587,20 +581,44 @@ def _backfill_command() -> str:
     Routed through the launcher like every other segment (#276) and invoked as
     `-m techne.cli` rather than a bare `techne`, because the console script's
     location is an install detail (pipx shim, venv bin, Homebrew prefix) that a
-    baked absolute path gets wrong the moment the install moves. Output is
-    discarded: this runs before the banner and its result is reported there.
+    baked absolute path gets wrong the moment the install moves.
+
+    `>/dev/null` IS PROTOCOL, NOT TIDINESS — do not remove it to see the output.
+    `vectors backfill` prints its counts blob on stdout unconditionally, even
+    when it embeds nothing, and for SessionStart Claude Code consumes the whole
+    chain's stdout. Unredirected, those counts prepend to session_start's payload
+    and corrupt it on EVERY session start — a total loss of the banner, dressed
+    as a working hook. Measured on PR #815 review; there is a test pinning it.
+
+    STDERR IS DELIBERATELY LEFT OPEN (no `2>&1`). A hook that exits 0 has its
+    stderr sent to the debug log only — never the transcript, and Claude never
+    sees it — so keeping it costs nothing in noise and is the only channel that
+    can say why a backfill failed. Closing it was the state this review called
+    "no diagnostic on any channel".
+
+    `--no-download` keeps a cold model cache from blocking session start on a
+    Hugging Face fetch. See `backfill_vectors`: the bare CLI still downloads, so
+    README's cold-cache recovery is unaffected.
     """
-    return f"{_hook_command('techne.cli')} vectors backfill >/dev/null 2>&1"
+    return f"{_hook_command('techne.cli')} vectors backfill --no-download >/dev/null"
 
 
 # Harness-level per-hook timeouts, in seconds, by event (Claude Code's
 # settings.json `timeout` field; default is 600 for command hooks). Only
-# SessionStart carries one: it is the sole chain that can reach a blocking
-# Hugging Face download, via the backfill segment above. A SIGALRM budget does
-# not bound that fetch — the harness cancelling the subprocess does. The cost of
-# expiry is the whole chain, guard and banner included, so this is set well
-# above a warm-cache backfill (~1.5s observed) and is a stall breaker, not a
-# performance budget.
+# SessionStart carries one: it is the sole chain that can reach the network at
+# all. A SIGALRM budget does not bound a Hub fetch — the harness cancelling the
+# subprocess does. This is a stall breaker, not a performance budget: measured
+# backfill throughput is ~10.7k rows/s, so 120s covers ~1.29M rows and volume
+# cannot blow it.
+#
+# IT IS ALSO A CEILING OVER `hooks.timeout_s`, and the relationship is written
+# down nowhere else. That knob is operator-facing, unclamped, documented at
+# README.md:552 (default 5.0, read at config.py:883, applied at
+# session_start.py:202) and bounds session_start's own blocking work. At
+# defaults there is 24x headroom, but an operator who raised it past ~115 would
+# have the harness cancel the WHOLE chain — guard and banner included — and
+# docs/arch/liveness.md:44 notes this path is fail-open, so they would get no
+# diagnostic. Raise this constant with that knob, or clamp that knob to this.
 _HOOK_TIMEOUTS_S = {"SessionStart": 120}
 
 
@@ -632,6 +650,7 @@ def _group_contains_techne(group: dict) -> bool:
     ``techne`` via both the launcher filename (``techne-hook.sh``) and the
     ``-m techne.hooks.X`` module argument, so this check requires no change.
     """
+
     # isinstance at the DEREFERENCE, not another clause in the shape validator.
     # A non-string `command` (a JSON number/bool) makes `"techne" in 5` raise
     # TypeError — measured: `techne status` exits 1 with a traceback, and at session

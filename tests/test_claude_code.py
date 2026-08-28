@@ -209,6 +209,17 @@ class TestPreflightGuard:
     would race — the guard must sequence before session_start within one command.
     """
 
+    def _session_start_entry(self):
+        """The SessionStart hook entry, with the same single-group/single-entry
+        invariant `_session_start_cmd` asserts. Indexing `[0]` directly reads
+        whichever group sorted first, which is not necessarily techne's — a real
+        shape when a hand-wired sibling group is present (PR #815 review)."""
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        ss = settings["hooks"]["SessionStart"]
+        assert len(ss) == 1, "SessionStart must be a single chained group"
+        assert len(ss[0]["hooks"]) == 1, "single command entry, not two"
+        return ss[0]["hooks"][0]
+
     def _session_start_cmd(self):
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         ss = settings["hooks"]["SessionStart"]
@@ -296,6 +307,44 @@ class TestPreflightGuard:
         backfill = cmd[cmd.index("-m techne.cli") - len(launcher) - 20 :]
         assert launcher in backfill, f"backfill segment bypasses the launcher: {cmd!r}"
 
+    def test_backfill_stdout_is_redirected_away_from_the_chain(self, fake_home, cfg):
+        """THE MUTATION THAT SURVIVED THE SUITE (PR #815 review). Removing the
+        redirect failed no test, and it is not cosmetic: `vectors backfill`
+        prints its counts blob on stdout unconditionally — even embedding
+        nothing — and Claude Code consumes the whole chain's stdout for
+        SessionStart. Unredirected it prepends to session_start's payload and
+        corrupts it every session, which is a lost banner dressed as a working
+        hook. Measured: as shipped the chain's stdout parses; with the redirect
+        removed it does not.
+        """
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        backfill, _, rest = cmd.partition(" ; ")[2].partition(" ; ")
+        assert "vectors backfill" in backfill, cmd
+        assert ">/dev/null" in backfill, (
+            f"backfill stdout must not reach the chain's stdout: {backfill!r}"
+        )
+
+    def test_backfill_stderr_is_left_open_as_a_diagnostic(self, fake_home, cfg):
+        # Deliberately NOT `2>&1`. A hook exiting 0 has its stderr sent to the
+        # debug log only — never the transcript, and Claude never sees it — so
+        # keeping it costs no noise and is the only channel that can explain a
+        # failed backfill. Closing it is the "no diagnostic on any channel"
+        # state the review flagged.
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        assert "2>&1" not in cmd, f"stderr must stay open as a diagnostic: {cmd!r}"
+
+    def test_backfill_never_downloads_a_model(self, fake_home, cfg):
+        """A cold model cache must not block session start on a Hub fetch. This
+        PR is what wires the chain for every install, so it is also what makes
+        the download non-explicit — `--no-download` is the opt-in surface
+        core/embeddings.py asks for. The bare CLI keeps the permissive default,
+        so README's cold-cache recovery still works.
+        """
+        claude_code.register_hooks(cfg)
+        assert "vectors backfill --no-download" in self._session_start_cmd()
+
     def test_session_start_carries_a_harness_timeout(self, fake_home, cfg):
         """The backfill can reach a blocking Hugging Face download, and a Hub
         fetch is signal-deaf — bounded_hook's SIGALRM cannot preempt it (see
@@ -304,8 +353,7 @@ class TestPreflightGuard:
         default for a command hook is 600s, which is a ten-minute stall.
         """
         claude_code.register_hooks(cfg)
-        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
-        entry = settings["hooks"]["SessionStart"][0]["hooks"][0]
+        entry = self._session_start_entry()
         assert entry.get("timeout") == 120, entry
 
     def test_only_session_start_carries_a_timeout(self, fake_home, cfg):

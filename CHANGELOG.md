@@ -14,12 +14,27 @@ All notable changes to techne are documented here. Format loosely follows
   hand edit therefore verified clean and disappeared at the next init, with no
   error: one machine drifted 883 observations and 62 knowledge rows behind
   before the missing segment was traced. The template now owns the segment, so
-  re-init preserves it (#704).
+  re-init preserves it (#704, #814).
+
+  **Existing installs must re-run `techne init` to pick this up.** The fix ships
+  in the template `init` writes, and nothing rewrites `settings.json` on upgrade.
+  `techne doctor`'s hook-drift check compares `(event, matcher)` and never the
+  command, so it reports no drift while the segment is missing — an upgraded
+  install looks healthy and keeps drifting. The `vectors:coverage` warning is the
+  only signal, and its remedy is a one-shot that fixes the number and leaves the
+  hook absent.
 - The SessionStart registration now carries Claude Code's per-hook `timeout`
   (120s; the default for a command hook is 600s). The backfill can reach a
   blocking Hugging Face download on a cold model cache, and a Hub fetch is
   signal-deaf — `bounded_hook`'s SIGALRM cannot preempt it, so only the harness
-  cancelling the subprocess bounds the stall (#704).
+  cancelling the subprocess bounds the stall (#704, #814).
+- The SessionStart backfill now runs with `--no-download`, a new flag on
+  `techne vectors backfill`. Owning the hook chain is what made this possible:
+  operator shell and hook previously invoked the identical string, so there was
+  no signal to branch on. A cold model cache now degrades to "swept, embedded
+  nothing" instead of blocking session start on a Hugging Face fetch. The bare
+  CLI keeps the permissive default, so the documented cold-cache recovery is
+  unchanged (#814).
 
 ## [0.16.0] — 2026-08-28
 

@@ -1017,8 +1017,20 @@ def search(
     return out[:limit]
 
 
-def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
+def backfill_vectors(
+    db_path: Path, batch_size: int = 100, *, allow_download: bool = True
+) -> dict[str, int]:
     """Embed un-embedded rows. Returns counts of newly embedded items.
+
+    `allow_download=False` IS THE OPT-IN SURFACE the module docstring of
+    `core/embeddings.py` asks for (techne#814). Until the SessionStart chain was
+    owned by `register_hooks`, operator shell and hook chain invoked the
+    identical `techne vectors backfill` string, so there was no signal to branch
+    on and the permissive default was the only option. The hook now passes
+    `--no-download`, which lands here: a cold model cache degrades to "swept,
+    embedded nothing" in ~0.2s instead of blocking session start on a Hub fetch.
+    The bare CLI keeps the permissive default, so README's cold-cache recovery
+    still downloads.
 
     `orphans_swept` is present ONLY when the sweep actually ran (#408). Its
     ABSENCE means the function returned before reaching it — no numpy, no
@@ -1087,7 +1099,22 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
         conn.close()
         return counts
 
-    model = _get_embedding_model()
+    try:
+        model = _get_embedding_model(allow_download=allow_download)
+    except Exception:
+        if allow_download:
+            # Unchanged behaviour for the default path: a failure here is a real
+            # error and must not be swallowed into a counts dict that reads like
+            # success — the #496 defect from the other side.
+            raise
+        # allow_download=False on a cold cache raises by design (fastembed's
+        # local_files_only / model2vec's scoped HF_HUB_OFFLINE). Degrade exactly
+        # like the no-backend path above: the sweep ran and `orphans_swept` says
+        # so, `threads`/`observations`/`knowledge` are absent because nothing was
+        # embedded. A traceback here would reach a hook's stderr on every single
+        # session start.
+        conn.close()
+        return counts
 
     counts.update({"threads": 0, "observations": 0, "knowledge": 0})
 
@@ -1121,12 +1148,19 @@ def backfill_vectors(db_path: Path, batch_size: int = 100) -> dict[str, int]:
             # backfill_vectors in production today". That is a claim about THIS REPO —
             # where cli.py's `techne vectors backfill` is the only non-test caller — and
             # it was wrongly stated as a claim about the deployed system. At least one
-            # real deployment chains the CLI into its SessionStart hook as a shell string:
-            #     preflight_guard.py ; techne vectors backfill ; -m techne.hooks.session_start
-            # Deployment wiring lives in the host's settings.json, which no amount of
-            # grepping this repo can see. So: do not re-derive "nothing calls this in
-            # production" from the Python call graph. It can only tell you that nothing
-            # in THIS REPO calls it, which is a strictly weaker statement.
+            # real deployment chained the CLI into its SessionStart hook as a shell
+            # string, and deployment wiring lives in the host's settings.json, which no
+            # amount of grepping this repo can see.
+            #
+            # SUPERSEDED AGAIN BY techne#814 — READ THIS BEFORE REASONING ABOUT CALLERS.
+            # That hand-wired chain was the bug, not the design: `register_hooks` rewrites
+            # settings.json wholesale, so the hand edit was deleted by every `techne init`
+            # and one store drifted 883 observations behind. The segment now lives in
+            # `register_hooks`' own SessionStart template, so THIS REPO ships the auto-run
+            # caller. It is still not in the Python call graph — it is a shell string this
+            # package writes — which is the durable lesson: check
+            # platforms/claude_code/hooks.py, not just the import graph, before claiming
+            # anything about who calls this in production.
             if tbl == "knowledge" and _purge_superseded_knowledge_vec(conn):
                 conn.commit()
             id_col = "rowid" if tbl == "threads" else "id"

@@ -50,19 +50,31 @@ passes `allow_download=False` since it's the hook-reachable path; search.py's
 `backfill_vectors` keeps the default `allow_download=True` so an operator's
 first explicit backfill can still fetch the model.
 
-CAVEAT ON THAT DEFAULT (techne#704). This docstring used to justify
-`allow_download=True` on the grounds that `backfill_vectors` is "never
-hook-invoked". That premise is only safe for the code in THIS repo, where the
-`techne vectors backfill` CLI command is the sole non-test caller. A deployment
-is free to chain that CLI into a hook as a shell string — one observed
-SessionStart hook does exactly that:
+RESOLVED, AND THE OPT-IN SURFACE NOW EXISTS (techne#814). This section used to
+say the `allow_download` default was "a deployment-shape decision, not a settled
+invariant" — because one observed deployment hand-wired `techne vectors backfill`
+into its SessionStart hook, and settings.json wiring is invisible to the Python
+call graph. Two things changed.
 
-    preflight_guard.py ; techne vectors backfill ; -m techne.hooks.session_start
+First, techne itself now writes that chain: `platforms/claude_code/hooks.py`
+puts the backfill segment in `register_hooks`' SessionStart template, because
+the hand edit it replaced was silently deleted by every `techne init`. So the
+hook-invoked path is no longer some deployment's private choice — it is the
+shipped default, on every install.
 
-and settings.json wiring is invisible to the Python call graph. In that shape the
-cold-cache download this section exists to prevent is reachable from session
-startup — startup simply blocks on the Hub fetch. The `allow_download` default
-is therefore a deployment-shape decision, not a settled invariant.
+Second, that is exactly what made the fix below actionable. The paragraph that
+used to sit here said "make the auto-invoked path pass `allow_download=False`"
+was impossible, since operator shell and hook chain invoked the identical string
+with no in-process signal to branch on. Owning the chain CREATES the branch
+point: the hook passes `--no-download`, which reaches `backfill_vectors`'
+`allow_download` parameter. A cold cache degrades in ~0.2s instead of blocking
+session start on a Hub fetch.
+
+THE DEFAULT IS STILL PERMISSIVE, and must stay that way: the bare CLI is
+README's documented cold-cache recovery, so guarding it too would leave nothing
+able to fetch the weights — techne#496's never-green shape from the other side.
+Both directions are pinned by test in tests/test_cold_cache_no_hang.py; read the
+two as a pair, since each looks wrong alone.
 
 DO NOT REASON ABOUT THESE PATHS VIA THE SIGALRM BUDGET (PR #705 review r3, which
 caught an earlier draft of this paragraph doing exactly that). It is tempting to
@@ -72,16 +84,19 @@ does not bound it on ANY path. That is precisely why inference.py passes
 `allow_download=False` even though it already runs under `bounded_hook`. Having
 a budget and lacking one are equally exposed; only the kwarg helps.
 
-AND THE OBVIOUS FIX DOES NOT EXIST YET FOR THIS PATH — read the scope
-carefully, it is `backfill_vectors` ONLY (PR #705 review r1). "Make the
-auto-invoked path pass `allow_download=False`" is not actionable HERE: both
-the operator's shell and the hook chain invoke the identical string `techne
-vectors backfill`, landing on the same `cli.py` command, so
-in-process there is NO signal to branch on. Flipping the default instead would
-break README.md's documented cold-cache recovery, which REQUIRES the download —
-rebuilding the never-green #496 defect from the other side (a documented remedy
-that provably cannot work). A real fix needs a new opt-in surface — a
-`--no-download` flag or an env var the hook sets — which is its own change.
+THE OPT-IN SURFACE THIS PARAGRAPH USED TO ASK FOR NOW EXISTS — scope it
+carefully, it is `backfill_vectors` ONLY (PR #705 review r1). The obstacle was
+real: operator shell and hook chain invoked the identical string `techne vectors
+backfill`, landing on the same `cli.py` command, so in-process there was NO
+signal to branch on. Flipping the default instead would break README.md's
+documented cold-cache recovery, which REQUIRES the download — rebuilding the
+never-green #496 defect from the other side.
+
+What removed the obstacle was techne#814 putting the segment in
+`register_hooks`' template: the branch point that does not exist in-process
+exists in the shell string this package now writes. The flag is `--no-download`
+(cli.py's `vectors backfill`), reaching `backfill_vectors(allow_download=...)`.
+The hook sets it; the bare CLI does not.
 
 SECOND HOOK-REACHABLE PATH, AND THIS ONE *DOES* HAVE A BRANCH POINT (PR #705
 review r2). Do not read the paragraph above as covering the whole module. The
