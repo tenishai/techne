@@ -1,12 +1,12 @@
 ---
 card: repo-card:techne
 updated: 2026-08-19
-anchor: pyproject.toml sha=bd17310592c734da6ae5057fd2eea40d02c9d4ec
+anchor: pyproject.toml sha=de020915a31d9a1e32e258052e005483e626f88b
 ---
 # techne — repo card
 
 WHAT: local-first, single-SQLite-file persistent memory for AI coding agents (mainly Claude Code). Captures sessions/threads/observations, curates durable knowledge, self-maintains (reflect/consolidate/dream) on the agent's OWN model — no API key.
-STATE: main, v0.15.0, Alpha, active (the claims pass — 0.14.0 stopped the instruments lying about whether rails RAN; this one went after what they ASSERT when they do. search() reported its source TABLE as the row's kind; `status='uncertain'` ranked instead of filtering, so we injected what we are on record as not believing; the call graph asserted 19,345 edges it had resolved NONE of, and now marks each one exact vs name-inferred; `guarded_migrate` folded 'already there' together with 'ahead of the code', so architect.db skipped six days of migrations in total silence; fsck named faults it gave you no way to clear. Plus the half that makes any of it reach a user: `techne capabilities` — 8 of 8 off on a fresh install — and the self-care / techne-promote workflows now ship with the release).
+STATE: main, v0.16.0, Alpha, active (the claims pass — 0.14.0 stopped the instruments lying about whether rails RAN; this one went after what they ASSERT when they do. search() reported its source TABLE as the row's kind; `status='uncertain'` ranked instead of filtering, so we injected what we are on record as not believing; the call graph asserted 19,345 edges it had resolved NONE of, and now marks each one exact vs name-inferred; `guarded_migrate` folded 'already there' together with 'ahead of the code', so architect.db skipped six days of migrations in total silence; fsck named faults it gave you no way to clear. Plus the half that makes any of it reach a user: `techne capabilities` — 8 of 8 off on a fresh install — and the self-care / techne-promote workflows now ship with the release).
 STACK: Python 3.11+ (CI 3.12/3.13 matrix + a separate 3.14 `eval-vec` arm), Click CLI, stdlib sqlite3 (WAL) = sole store. Optional extras: sqlite-vec+fastembed/model2vec (vec search), tree-sitter (codegraph), litellm (headless). pip/pipx pkg `techne` + stdio MCP server. Dockerfile present.
 ENTRY:
 - CLI techne → techne/cli.py:main (init/status/threads/search/reflect/consolidate/dream/architect/codex/library/coord…)

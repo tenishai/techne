@@ -5,6 +5,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-08-27
+
+The release about addressing memory by name. 0.15.0 went after what the store is
+willing to *claim*; this one goes after how you *reach* it — four domains you call by
+name rather than by database file, every answer reporting what it resolved to, and one
+command that tells you what everything is bound to. The vocabulary is the deliverable:
+an operator learns *archivist, librarian, architect, codex* here and keeps those names
+when the work grows into liminal and cabal, where the same call may resolve somewhere
+else entirely.
+
+Two things to read before upgrading: `techne backup --out DIR` changes meaning (see
+**BREAKING** under Changed), and the core schema moves 24 → 25, which migrates on first
+open and is not reversible — back up first.
+
 <!-- AUDIT NOTE (#726/#748), 2026-08-26. Two merged changes are DELIBERATELY not listed here,
      recorded so a later audit does not read the absence as an oversight — the distinction this
      PR exists to make, since "excluded on purpose" and "missed" are indistinguishable in
