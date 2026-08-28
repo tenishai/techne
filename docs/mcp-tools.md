@@ -38,6 +38,16 @@ System health and database statistics
 
 What techne can do on THIS install, and what is switched OFF — grounded in the user's own store. Call this when the user asks what techne is, what it can do, what changed after an upgrade, or why a feature they heard about does not seem to happen. Returns data, not prose: narrate it as a short conversation, lead with what is off and what it would buy THEM, and quote the evidence counts — they…
 
+### `techne_guide`
+
+Read one of techne's bundled guides. Call with no name to list them. These are the procedures techne ships: `four-functions` (which domain answers what, and how to read the `binding` in an answer), `reflect-guide` (draining a backlog), `investigating` (mining a URL the user pasted for patterns — carries the read-only-subagent sandbox and the verdict tiers), `surveying` (mapping a whole field), `db-per-domain`, `deployment`, `welcome`, `mcp-tools`, `AGENTS`, `self-care`, `techne-promote`. Returns the raw markdown to read into your context, not a rendered page. Exists so a client with no shell can still reach them — `techne guide <name>` is the same content from the CLI.
+
+**Why it exists as a tool and not only a CLI command.** The server instructions tell every
+connected agent that these guides ship. Reading them used to require `techne guide`, a
+shell command — so a client without a shell got the pointer and could not collect what it
+pointed at. Both doors call the same accessor, so there is one copy of each guide and no
+second rendering path to drift.
+
 ## Interrogate — ask team memory a question nobody wrote an endpoint for
 
 ### `techne_archivist_query`

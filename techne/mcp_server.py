@@ -66,8 +66,8 @@ SERVER_INSTRUCTIONS = (
     "`techne codex index <repo>`. The codex is the exception that qualifies its own empty "
     "answer — it says which kind of nothing it means. The other three cannot, which is why "
     "that zero is yours to explain.\n"
-    "THE GUIDES SHIP WITH techne — `techne guide` lists them, `techne guide <name>` "
-    "prints one. Read `four-functions` before answering which domain to ask, "
+    "THE GUIDES SHIP WITH techne — call `techne_guide` (or `techne guide <name>` if "
+    "you have a shell). Read `four-functions` before answering which domain to ask, "
     "`reflect-guide` before draining a backlog, and `investigating` before mining a "
     "URL the operator pastes — that one carries the read-only-subagent sandbox and "
     "the verdict tiers, and `techne architect dedup <url>` is its first step.\n"
@@ -906,6 +906,30 @@ TOOLS = [
                     ),
                 },
                 "limit": {"type": "integer", "default": 100},
+            },
+        },
+    },
+    {
+        "name": "techne_guide",
+        "description": (
+            "Read one of techne's bundled guides. Call with no name to list them. These "
+            "are the procedures techne ships: `four-functions` (which domain answers "
+            "what, and how to read the `binding` in an answer), `reflect-guide` "
+            "(draining a backlog), `investigating` (mining a URL the user pasted for "
+            "patterns — carries the read-only-subagent sandbox and the verdict tiers), "
+            "`surveying` (mapping a whole field), `db-per-domain`, `deployment`, "
+            "`welcome`, `mcp-tools`, `AGENTS`, `self-care`, `techne-promote`. Returns "
+            "the raw markdown to read into your context, not a rendered page. Exists so "
+            "a client with no shell can still reach them — `techne guide <name>` is the "
+            "same content from the CLI."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Guide to read. Omit to list what is available.",
+                }
             },
         },
     },
@@ -1870,6 +1894,37 @@ def _techne_archivist_query(args: dict, config: Config) -> dict:
         }
 
 
+def _techne_guide(args: dict, config: Config) -> dict:
+    """Serve a bundled guide over MCP (techne#754).
+
+    WHY THIS EXISTS SEPARATELY FROM THE CLI. The guides ship as files and `techne guide`
+    reads them, which reaches any agent that has a shell. The MCP instructions tell every
+    connected agent those guides exist — and a client with no shell could not collect
+    what that sentence advertises. A pointer to something unreachable is worse than no
+    pointer, so the same content is served here through the same accessor.
+
+    ONE COPY STILL. This calls `techne.docs.bundled_guide`, exactly as the CLI command
+    does; there is no second rendering path to drift.
+    """
+    from techne.docs import _MANIFEST, bundled_guide
+
+    name = (args or {}).get("name")
+    if not name:
+        return {
+            "guides": list(_MANIFEST),
+            "hint": (
+                "Call techne_guide with a name to read one. Start with four-functions."
+            ),
+        }
+    try:
+        return {"name": name, "markdown": bundled_guide(name)}
+    except KeyError:
+        return {
+            "error": f"no bundled guide named {name!r}",
+            "guides": list(_MANIFEST),
+        }
+
+
 def _techne_capabilities(args: dict, config: Config) -> dict:
     """What is on, what is off, and what is not installed (techne#638).
 
@@ -2423,6 +2478,7 @@ TOOL_HANDLERS = {
     "codex_search": _codex_search,
     "codex_blast_radius": _codex_blast_radius,
     "techne_archivist_query": _techne_archivist_query,
+    "techne_guide": _techne_guide,
     "techne_capabilities": _techne_capabilities,
     "archivist_search": _archivist_search,
     "librarian_search": _librarian_search,

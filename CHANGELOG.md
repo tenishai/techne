@@ -36,6 +36,15 @@ open and is not reversible — back up first.
 
 ### Added
 
+- **`techne_guide` — the guides are reachable without a shell** (#754). The server
+  instructions tell every connected agent that techne ships guides, but the only way to
+  read one was `techne guide <name>`, a **shell** command. A client connected purely over
+  MCP got the pointer and could not collect what it pointed at, which is worse than not
+  advertising them. Both doors now call the same accessor, so there is one copy of each
+  guide and no second rendering path to drift. Costs ~218 tokens of schema per session
+  (2.5% of techne's MCP footprint — see #808 for the rest).
+
+
 - **The research sandbox ships too — `techne agents install`** (#754). `techne guide
   investigating` tells an agent to do its fetching inside a subagent restricted to
   web-only tools. That instruction is **unenforceable** without a definition to name: an

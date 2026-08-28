@@ -192,3 +192,48 @@ def test_guidance_an_agent_needs_only_mid_task_lives_in_the_guides():
         "the stub guidance moved back into the per-session instructions — it costs every "
         "session to say something only a mid-task agent needs"
     )
+
+
+def test_a_client_with_no_shell_can_still_reach_the_guides():
+    """THE POINTER MUST NOT OUTRUN THE DELIVERY (techne#754). `SERVER_INSTRUCTIONS` tells
+    every connected agent the guides exist. For a while the only way to collect them was
+    `techne guide`, a SHELL command — so an MCP client without a shell got the
+    advertisement and not the goods, which is worse than not advertising.
+
+    Asserts the tool is registered and served by the same accessor the CLI uses, so there
+    is no second rendering path to drift."""
+    from techne.mcp_server import TOOL_HANDLERS, TOOLS
+
+    assert any(t["name"] == "techne_guide" for t in TOOLS), "techne_guide is not exposed"
+    assert "techne_guide" in TOOL_HANDLERS
+
+
+def test_the_guide_tool_lists_reads_and_refuses(tmp_path, monkeypatch):
+    from techne.config import Config
+    from techne.docs import _MANIFEST
+    from techne.mcp_server import _techne_guide
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    cfg = Config.load()
+
+    assert _techne_guide({}, cfg)["guides"] == list(_MANIFEST)
+    assert len(_techne_guide({"name": "investigating"}, cfg)["markdown"]) > 5000
+
+    # Same fixed-tuple membership check the CLI path uses: traversal is unrepresentable,
+    # not filtered. An MCP argument is no more trustworthy than a CLI one.
+    for hostile in ("../../../etc/passwd", "/etc/passwd", ".."):
+        assert "error" in _techne_guide({"name": hostile}, cfg)
+
+
+def test_the_tool_and_the_cli_serve_byte_identical_text(tmp_path, monkeypatch):
+    """One copy, two doors. If these ever diverge, one of them grew its own rendering."""
+    from click.testing import CliRunner
+
+    from techne.cli import main
+    from techne.config import Config
+    from techne.mcp_server import _techne_guide
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    via_cli = CliRunner().invoke(main, ["guide", "surveying"]).output
+    via_mcp = _techne_guide({"name": "surveying"}, Config.load())["markdown"]
+    assert via_mcp.strip() == via_cli.strip()
