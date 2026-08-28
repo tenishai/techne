@@ -209,6 +209,17 @@ class TestPreflightGuard:
     would race — the guard must sequence before session_start within one command.
     """
 
+    def _session_start_entry(self):
+        """The SessionStart hook entry, with the same single-group/single-entry
+        invariant `_session_start_cmd` asserts. Indexing `[0]` directly reads
+        whichever group sorted first, which is not necessarily techne's — a real
+        shape when a hand-wired sibling group is present (PR #815 review)."""
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        ss = settings["hooks"]["SessionStart"]
+        assert len(ss) == 1, "SessionStart must be a single chained group"
+        assert len(ss[0]["hooks"]) == 1, "single command entry, not two"
+        return ss[0]["hooks"][0]
+
     def _session_start_cmd(self):
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         ss = settings["hooks"]["SessionStart"]
@@ -252,6 +263,111 @@ class TestPreflightGuard:
         cmd = self._session_start_cmd()
         assert "preflight_guard.py" in cmd
         assert "-m techne.hooks.session_start" in cmd
+
+    def test_backfill_sequenced_between_guard_and_session_start(self, fake_home, cfg):
+        # techne#704. Order is the whole point: backfill must run BEFORE
+        # session_start so the banner's `vectors:coverage` measures a
+        # just-embedded store. A fix that appended the segment after the banner
+        # would satisfy a bare "is it present" check and still report drift it
+        # had already fixed, so assert the positions, not the membership.
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        assert "vectors backfill" in cmd
+        assert cmd.index("preflight_guard.py") < cmd.index("vectors backfill"), (
+            "guard must run before backfill"
+        )
+        assert cmd.index("vectors backfill") < cmd.index("techne.hooks.session_start"), (
+            "backfill must run before the banner that measures its result"
+        )
+
+    def test_backfill_survives_reinit(self, fake_home, cfg):
+        """THE REGRESSION (techne#704). This exact segment was hand-wired into
+        settings.json and silently deleted by the next `techne init` — the strip
+        removes any group whose command contains "techne", and the old template
+        did not put it back. It verified clean when written and vanished later
+        with no error; the drift (883 observations, 62 knowledge rows) took five
+        days and two sessions to trace. Owning it in the template is the fix,
+        and surviving re-init is what "owned" means.
+        """
+        claude_code.register_hooks(cfg)
+        claude_code.register_hooks(cfg)
+        assert "vectors backfill" in self._session_start_cmd()
+
+    def test_backfill_invokes_the_cli_module_not_a_console_script(self, fake_home, cfg):
+        # A baked absolute path to the `techne` console script (pipx shim, venv
+        # bin, Homebrew prefix) breaks the moment the install moves — the same
+        # class of bug the launcher exists to prevent (#276). Route it through
+        # the launcher as a module invocation like every other segment.
+        from techne.platforms.claude_code import hooks as hooks_mod
+
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        assert "-m techne.cli vectors backfill" in cmd
+        launcher = str(hooks_mod._launcher_path())
+        backfill = cmd[cmd.index("-m techne.cli") - len(launcher) - 20 :]
+        assert launcher in backfill, f"backfill segment bypasses the launcher: {cmd!r}"
+
+    def test_backfill_stdout_is_redirected_away_from_the_chain(self, fake_home, cfg):
+        """THE MUTATION THAT SURVIVED THE SUITE (PR #815 review). Removing the
+        redirect failed no test, and it is not cosmetic: `vectors backfill`
+        prints its counts blob on stdout unconditionally — even embedding
+        nothing — and Claude Code consumes the whole chain's stdout for
+        SessionStart. Unredirected it prepends to session_start's payload and
+        corrupts it every session, which is a lost banner dressed as a working
+        hook. Measured: as shipped the chain's stdout parses; with the redirect
+        removed it does not.
+        """
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        backfill, _, rest = cmd.partition(" ; ")[2].partition(" ; ")
+        assert "vectors backfill" in backfill, cmd
+        assert ">/dev/null" in backfill, (
+            f"backfill stdout must not reach the chain's stdout: {backfill!r}"
+        )
+
+    def test_backfill_stderr_is_left_open_as_a_diagnostic(self, fake_home, cfg):
+        # Deliberately NOT `2>&1`. A hook exiting 0 has its stderr sent to the
+        # debug log only — never the transcript, and Claude never sees it — so
+        # keeping it costs no noise and is the only channel that can explain a
+        # failed backfill. Closing it is the "no diagnostic on any channel"
+        # state the review flagged.
+        claude_code.register_hooks(cfg)
+        cmd = self._session_start_cmd()
+        assert "2>&1" not in cmd, f"stderr must stay open as a diagnostic: {cmd!r}"
+
+    def test_backfill_never_downloads_a_model(self, fake_home, cfg):
+        """A cold model cache must not block session start on a Hub fetch. This
+        PR is what wires the chain for every install, so it is also what makes
+        the download non-explicit — `--no-download` is the opt-in surface
+        core/embeddings.py asks for. The bare CLI keeps the permissive default,
+        so README's cold-cache recovery still works.
+        """
+        claude_code.register_hooks(cfg)
+        assert "vectors backfill --no-download" in self._session_start_cmd()
+
+    def test_session_start_carries_a_harness_timeout(self, fake_home, cfg):
+        """The backfill can reach a blocking Hugging Face download, and a Hub
+        fetch is signal-deaf — bounded_hook's SIGALRM cannot preempt it (see
+        core/embeddings.py). Only the harness cancelling the subprocess bounds
+        it, so the registration must carry Claude Code's `timeout` field; the
+        default for a command hook is 600s, which is a ten-minute stall.
+        """
+        claude_code.register_hooks(cfg)
+        entry = self._session_start_entry()
+        assert entry.get("timeout") == 120, entry
+
+    def test_only_session_start_carries_a_timeout(self, fake_home, cfg):
+        # Scope guard. SessionStart is the sole chain that can reach the
+        # network; blanket-bounding the others would cap unrelated hooks at a
+        # number chosen for a download.
+        claude_code.register_hooks(cfg)
+        settings = json.loads(claude_code.SETTINGS_PATH.read_text())
+        for event, groups in settings["hooks"].items():
+            if event == "SessionStart":
+                continue
+            for group in groups:
+                for h in group["hooks"]:
+                    assert "timeout" not in h, f"{event} should not be bounded: {h!r}"
 
     def test_migrates_hand_wired_preflight(self, fake_home, cfg):
         # A hand-wired preflight (command contains "techne") is recognized and
@@ -354,21 +470,23 @@ class TestLauncher:
                         f"{event} hook missing launcher path: {h['command']!r}"
                     )
 
-    def test_session_start_chains_both_through_launcher(self, fake_home, cfg):
-        # Both the preflight guard and session_start sides of the `;`-chain
-        # must route through the launcher — heal fires before either side runs.
+    def test_session_start_chains_every_segment_through_launcher(self, fake_home, cfg):
+        # Every segment of the `;`-chain must route through the launcher — heal
+        # fires before any of them runs. Was two segments (guard, session_start)
+        # until techne#704 added backfill between them; the count stays EXACT
+        # rather than becoming `>= 2`, so a future segment that bypasses the
+        # launcher fails here instead of passing a loosened bound.
         from techne.platforms.claude_code import hooks as hooks_mod
 
         claude_code.register_hooks(cfg)
         settings = json.loads(claude_code.SETTINGS_PATH.read_text())
         cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         launcher = str(hooks_mod._launcher_path())
-        # Both halves of the chain reference the launcher
-        assert cmd.count(launcher) == 2, (
-            "both guard and session_start sides must use the launcher; "
+        assert cmd.count(" ; ") == 2, f"expected a three-segment chain: {cmd!r}"
+        assert cmd.count(launcher) == 3, (
+            "guard, backfill and session_start segments must all use the launcher; "
             f"found {cmd.count(launcher)} reference(s) in: {cmd!r}"
         )
-        assert " ; " in cmd
 
     def test_launcher_regenerated_on_reinit(self, fake_home, cfg):
         # re-running register_hooks must regenerate the launcher (keeps in sync
