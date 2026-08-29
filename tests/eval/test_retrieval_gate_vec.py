@@ -207,4 +207,3 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     #     just the negative class (same whole-list net as #385). ---
     leaks = [r["id"] for r in rows if r["fpr"] > 0.0]
     assert not leaks, f"forbidden id(s) leaked into top-{fpr_k} for task(s): {leaks}"
-

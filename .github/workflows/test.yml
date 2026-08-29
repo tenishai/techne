@@ -569,7 +569,11 @@ jobs:
       # marker registry come from BASE. That is wording rather than behaviour
       # today (the residual asymmetry fails loudly, and the repo has no root
       # conftest.py), but a maintainer editing addopts should know the two legs
-      # would then read different pytest config.
+      # would then read different pytest config. NOTE the asymmetry warns rather
+      # than fails: `[tool.pytest.ini_options]` sets neither `--strict-markers`
+      # nor `filterwarnings = error`, so a base pyproject.toml missing a marker
+      # HEAD added does not error. Selection is unaffected — the CLI's
+      # `-m eval_vec` overrides addopts' `-m` in both legs (#833 r3).
       #
       # `cd` into the worktree is what makes its `techne/` win over the editable
       # install: `python -m` puts cwd at sys.path[0]. WHAT ENTITLES IT TO WIN is
@@ -592,8 +596,16 @@ jobs:
       # LIBRARY changes only. A PR that edits `tests/eval/` — the gold set, the
       # scoring — moves both runs together and is invisible here. That needs a
       # human; see compare_retrieval_metrics.py's `_regressions` docstring.
+      # `!cancelled()` because a bare `if:` still ANDs the implicit success(), so a
+      # HEAD run that trips its own kill-gate would SKIP the comparison — the
+      # mirror of the emit-before-gates fix, and the case where "did main already
+      # fail this, or did I break it?" is most expensive to answer by hand. The
+      # head dump was written either way; this is what lets it be used. An
+      # unrelated earlier failure now reaches the step and trips the
+      # `test -s "$HEAD_METRICS"` guard, whose "(did it skip?)" wording already
+      # covers it. (#833 r3 suggestion.)
       - name: Retrieval diff vs origin/main (#832)
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         working-directory: techne
         env:
           BASE_METRICS: ${{ runner.temp }}/eval-base.json
@@ -607,13 +619,27 @@ jobs:
           # work; if it is wiped, both are free insurance.
           rm -f "$BASE_METRICS"
           # `git worktree add --force` overrides "registered but MISSING". It does
-          # NOT override "the path already EXISTS" — that is a fatal, and under
-          # `set -e` it wedges this step for every subsequent PR until someone
-          # cleans the runner by hand. Reachable: `git worktree remove` is the last
-          # statement of the happy path with no trap, so a cancellation or the
-          # 20-minute timeout landing in the base pytest leaks the directory AND
-          # the registration. Removing the directory heals both halves — verified,
-          # and unlike a trap it also heals a runner that is ALREADY poisoned.
+          # NOT override "the path already EXISTS" — that is a fatal (exit 128,
+          # reproduced with a POPULATED leftover; an EMPTY one is accepted), and
+          # under `set -e` it wedges this step for every subsequent PR until
+          # someone cleans the runner by hand.
+          #
+          # REACHABLE, but narrower than an earlier version of this comment said
+          # (#833 r3 nit 3): `git worktree remove` below is NOT the last statement
+          # of the happy path — the base-metrics check, the error block and the
+          # comparer all follow it. So a failure in the DIFF leaks nothing; only a
+          # cancellation, or the 20-minute timeout, landing at or before the base
+          # pytest leaks the directory and the registration together. Removing the
+          # directory heals both halves, and unlike a `trap` it also heals a runner
+          # that is ALREADY poisoned.
+          #
+          # WHY THIS `rm -rf` IS SAFE, stated correctly (#833 r3 nit 1): NOT
+          # because an unset var degrades to `rm -rf ""`. It cannot — the literal
+          # `/base-worktree` suffix is part of the expression, so an empty
+          # runner.temp would yield `rm -rf "/base-worktree"`, a different string.
+          # What actually protects it is `set -u` on line 1: an UNDEFINED BASE_WT
+          # aborts the step at expansion, before `rm` runs at all. The step-level
+          # `env:` always defines it, so no path reaches here unset.
           rm -rf "$BASE_WT"
           test -s "$HEAD_METRICS" || {
             echo "::error::the eval_vec step produced no head metrics (did it skip?)"
@@ -634,11 +660,14 @@ jobs:
 
           git worktree remove --force "$BASE_WT"
 
+          # ONE annotation, not four. The runner parses stdout line by line and
+          # every `::error::` line is an independent workflow command, so the
+          # multi-line form fragments into sentence pieces in the Checks UI, read
+          # out of order and out of context. `%0A` carries real newlines inside a
+          # single annotation (#833 r3 nit 2). These are the only annotations in
+          # this repo's workflows, so this sets the convention.
           test -s "$BASE_METRICS" || {
-            echo "::error::no base metrics produced — cannot diff. Most likely the"
-            echo "::error::base leg failed to COLLECT: HEAD's tests/ importing a"
-            echo "::error::library symbol origin/main does not have. Check the base"
-            echo "::error::pytest output above for ImportError/AttributeError."
+            echo "::error::no base metrics produced — cannot diff.%0AMost likely the base leg failed to COLLECT: HEAD's tests/ importing a library symbol that origin/main does not have.%0ACheck the base pytest output above for ImportError/AttributeError."
             exit 1; }
           .venv-ci/bin/python scripts/compare_retrieval_metrics.py \
             "$BASE_METRICS" "$HEAD_METRICS"
