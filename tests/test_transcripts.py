@@ -188,3 +188,58 @@ def test_index_reports_zero_unreadable_for_a_source_without_the_field(tmp_path):
 
     assert not hasattr(_FakeSource, "unreadable")
     assert counts["unreadable"] == 0
+
+
+def test_derive_title_default_takes_every_turn_verbatim():
+    """No hook → core stays neutral and knows no client's markers (the old behavior,
+    pinned so the hook can never become a silent core-side filter)."""
+    turns = [TranscriptTurn("user", "<local-command-caveat>Caveat: generated while\nrunning")]
+    assert derive_title(turns) == "<local-command-caveat>Caveat: generated while"
+
+
+def test_derive_title_skips_turns_the_hook_calls_plumbing():
+    """The hook reports plumbing → keep looking, don't give up (techne#2806)."""
+    turns = [
+        TranscriptTurn("user", "PLUMBING wrapper"),
+        TranscriptTurn("assistant", "ignored — titles come from user turns"),
+        TranscriptTurn("user", "design the store\nmore"),
+    ]
+    hook = lambda t: None if t.startswith("PLUMBING") else t  # noqa: E731
+    assert derive_title(turns, dialogue_text=hook) == "design the store"
+
+
+def test_derive_title_uses_text_the_hook_rewrote():
+    """A hook may strip a prefix rather than reject the turn; the title comes from
+    what it returns, not from the raw text."""
+    turns = [TranscriptTurn("user", "<ctx>noise</ctx>the real ask")]
+    hook = lambda t: t.replace("<ctx>noise</ctx>", "")  # noqa: E731
+    assert derive_title(turns, dialogue_text=hook) == "the real ask"
+
+
+def test_derive_title_none_when_hook_rejects_every_turn():
+    """An all-plumbing session has no dialogue to title it with. Returning None lets
+    index_transcripts fall through to its honest `transcript <id>` fallback rather
+    than titling the document with a wrapper."""
+    turns = [TranscriptTurn("user", "PLUMBING a"), TranscriptTurn("user", "PLUMBING b")]
+    hook = lambda t: None  # noqa: E731
+    assert derive_title(turns, dialogue_text=hook) is None
+
+
+def test_index_transcripts_uses_the_sources_dialogue_hook(tmp_path):
+    """End-to-end: a source that exposes the hook gets dialogue-derived titles, and
+    a source that doesn't is completely unaffected."""
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
+
+    turns = [("user", "WRAPPER injected by the client"), ("user", "the actual question")]
+
+    plain = _FakeSource([_t("s-plain", turns)])
+    index_transcripts(config, plain)
+    assert get_document(librarian_db(config), 1)["title"] == "WRAPPER injected by the client"
+
+    hooked = _FakeSource([_t("s-hooked", turns)])
+    hooked.dialogue_text = lambda t: None if t.startswith("WRAPPER") else t
+    index_transcripts(config, hooked)
+    titles = {d["title"] for d in list_documents(librarian_db(config))}
+    assert "the actual question" in titles
