@@ -929,6 +929,12 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
         2                            0.833        0.528
         3 (the first cut)            0.833        0.528
 
+    AND AT limit=5, the per-turn rail's page and the highest-traffic read path
+    (Prudence, #829 r2, patching the gate to limit=5). One slot is 20% of that
+    page — the same PROPORTION that costs a gold at limit=10, so this arm was
+    expected to bite and does not: floor 0 and floor 1 are identical, at
+    paraphrase r@5 0.667 / MRR 0.5, with exact, filter and negative all 1.0.
+
     At 2 and above the gold `g385_dbpool` — sitting at vec-rank 9 — is
     truncated off the head and replaced, on a ZERO-TOKEN-OVERLAP paraphrase
     query, by lexically-matched distractors. The gate's 0.8 floor still passes
@@ -946,6 +952,21 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     only arm anyone HAS measured says 2 already costs a gold. Raising this
     means re-running the ablation above and recording the numbers here.
 
+    THE OTHER HALF OF THE TRADE, so a future reader is not shown only the cost
+    (Prudence, #829 r2). A wider floor DOES buy something measurable, and this
+    is it: on the live store at floor 3, the queries "issue 814" and "ae219b5"
+    reached knowledge #1810 — the entry recording that PR #815 merged as
+    ae219b5 — and at floor 1 they do not; the single slot goes to a raw
+    observation instead. So the choice here is not "1 is free and 3 is costly",
+    it is "3 costs a gold on the paraphrase arm to buy a store-dependent
+    lexical hit". The reason to refuse that trade is that the shortfall has a
+    DIFFERENT cause and therefore a different fix: `search_fts` orders by
+    `recency_weight=0.3 x recency + 0.7 x BM25`, and the live pool is 36.7k
+    observations against 2.6k knowledge rows, so which fts-only row wins rank 1
+    is decided by the reranker, not by how many slots it is handed. A wider
+    floor buys more lottery tickets without changing the draw. That is techne#831,
+    and it is where a fix for identifier recall belongs.
+
     At ``limit=1`` there is no room to reserve and the single slot goes to the
     vector channel, preserving #401's behaviour on a one-row page. At
     ``limit=2`` the reserved slot is exactly half the page — the floor is never
@@ -955,10 +976,24 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     Returns 0 when there is nothing lexical-only to place, so the fused page
     is identical to the pre-#827 one whenever the two channels agree.
 
-    ``n_fts_only`` MUST BE A COUNT OF DISTINCT KEYS. The tail loop dedups via
-    `seen`, so a count inflated by duplicates reserves slots the tail cannot
-    fill and returns a SHORT page (#829 r1 nit 3 — latent, no live producer
-    found, but correct by construction is cheaper than correct by luck).
+    ``n_fts_only`` IS A COUNT OF DISTINCT KEYS, AND AT THIS FLOOR THAT IS
+    DORMANT SCAFFOLDING RATHER THAN A LIVE GUARD (Prudence, #829 r2 Important 1
+    — do not read the green test as a witness). The tail loop dedups via
+    `seen`, so an inflated count would reserve slots the tail cannot fill and
+    return a SHORT page. But the guard above has already established
+    ``n_fts_only > 0``, so ``min(n_fts_only, 1)`` is 1 for every positive count:
+    duplicates take it from 1 to 4 and ``min(4, 1) == min(1, 1)``. The deduped
+    and undeduped sizings are indistinguishable for EVERY possible input while
+    the floor is 1, which is why mutating the caller back to ``len(fts_only)``
+    leaves the whole test file green. It fires the day the floor widens —
+    verified: with the sizing reverted AND the floor at 3, the dupe test fails
+    with an 8-row page. Kept because correct-by-construction costs one set
+    comprehension, and #565 in this repo is the standing lesson about a guard
+    that passes nothing and blocks nothing going unnoticed.
+
+    For the same reason ``min(n_fts_only, ...)`` below is forward-looking
+    scaffolding, not an active constraint: at this floor it reduces to
+    ``return 1``.
     """
     if limit <= 1 or n_fts_only <= 0:
         return 0
@@ -1070,8 +1105,11 @@ def search(
     vec_keys = {(r["source_table"], r["id"]) for r in vec_results}
     fts_only = [r for r in fts_results if (r["source_table"], r["id"]) not in vec_keys]
 
-    # Size the floor off DISTINCT keys: the tail loop dedups, so counting rows
-    # would reserve slots nothing can fill and shorten the page (#829 r1 nit 3).
+    # Size the floor off DISTINCT keys. DORMANT AT THE CURRENT FLOOR (#829 r2):
+    # with floor 1 this is indistinguishable from len(fts_only) for every input,
+    # so no test at this head can separate them. It becomes load-bearing only if
+    # the floor widens, which is when a duplicate-inflated count would reserve
+    # slots the tail cannot fill and shorten the page. See _fts_floor.
     floor = _fts_floor(limit, len({(r["source_table"], r["id"]) for r in fts_only}))
     seen: set[tuple] = set()
     head: list[dict] = []

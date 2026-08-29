@@ -249,7 +249,9 @@ def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
         (3, 50, 1),
         (2, 50, 1),
         (1, 50, 0),    # no room to reserve: the one slot stays with vec (#401)
-        (10, 1, 1),    # never reserve more than there is to place
+        (10, 1, 1),    # never reserve more than there is to place — UNFALSIFIABLE
+                       # at floor 1 (any positive count gives 1); kept for the
+                       # day the floor widens. See _fts_floor (#829 r2).
         (10, 0, 0),    # nothing lexical-only -> page identical to pre-#827
         (0, 5, 0),
     ],
@@ -322,11 +324,19 @@ def test_floor_does_not_shorten_a_page_when_vec_is_thin(db_path, monkeypatch) ->
 def test_duplicate_fts_keys_do_not_shorten_the_page(db_path, monkeypatch) -> None:
     """The floor is sized off DISTINCT keys, not rows (#829 r1 nit 3).
 
-    The tail loop dedups via `seen`, so sizing the floor off `len(fts_only)`
-    would reserve slots the tail cannot fill and hand back a SHORT page — the
-    vec rows that would have filled them are simply lost. Prudence found no live
-    producer of duplicate `(source_table, id)` rows, so this is latent; it is
-    pinned anyway because correct-by-construction costs one set comprehension.
+    THIS TEST DOES NOT CURRENTLY BITE, AND SAYING SO IS THE POINT (#829 r2
+    Important 1). Mutating the caller back to `len(fts_only)` leaves this file
+    green, because `_fts_floor` returns `min(n_fts_only, 1)` after establishing
+    `n_fts_only > 0` — so a count inflated from 1 to 4 by duplicates gives the
+    same 1, and the two sizings are indistinguishable for every possible input
+    while the floor is 1. No test written against this head can separate them.
+
+    It is dormant, not dead: with the sizing reverted AND the floor widened to
+    3, this fails as designed with an 8-row page. It is kept as a pin for the
+    day someone widens the floor, which is the day the distinction matters.
+    Read a green run here as "the floor is still 1", not as "the dedup works" —
+    #565 is this repo's standing example of a guard that passed nothing and
+    blocked nothing while looking healthy.
     """
     dupe = {"source_table": "knowledge", "id": 1, "content": "a", "rank": -1.0}
     fake_fts = [dict(dupe) for _ in range(4)]
