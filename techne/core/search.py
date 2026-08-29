@@ -908,6 +908,33 @@ def _rrf_fuse(
     return sorted(scores.items(), key=lambda x: -x[1])
 
 
+def _fts_floor(limit: int, n_fts_only: int) -> int:
+    """How many TAIL slots of a page are reserved for lexical-only hits (#827).
+
+    The vec-first union (#401) is right about ordering and was wrong about
+    truncation: appending FTS-only hits after a full vector page and then
+    slicing to ``limit`` means they are never returned. This reserves a slice
+    so the lexical channel can reach the caller at all.
+
+    The size is deliberately a minority of the page — vectors keep the head:
+
+        limit=20 -> 6    limit=10 -> 3    limit=5 -> 1
+        limit=3  -> 1    limit=2  -> 1    limit=1 -> 0
+
+    ``limit // 3`` sets the share, ``max(1, ...)`` keeps a small page from
+    rounding the floor away entirely (per-turn recall runs at limit=5), and
+    ``limit // 2`` caps it so the lexical channel can never take half the page
+    or more. At ``limit=1`` there is no room to reserve and the single slot
+    goes to the vector channel, preserving #401's behaviour on a one-row page.
+
+    Returns 0 when there is nothing lexical-only to place, so the fused page
+    is identical to the pre-#827 one whenever the two channels agree.
+    """
+    if limit <= 1 or n_fts_only <= 0:
+        return 0
+    return min(n_fts_only, max(1, limit // 3), limit // 2)
+
+
 def search(
     db_path: Path,
     query: str,
@@ -924,18 +951,31 @@ def search(
     With ``use_vectors=False``: returns BM25-only results (unchanged
     legacy behavior).
 
-    With ``use_vectors=True`` and vector deps installed: runs both channels
-    and returns the vector channel first (best-first by ascending distance),
-    then appends FTS-only hits. Rows present in BOTH channels keep their
-    vector-channel position; agreement is recorded as provenance, not a rank
-    boost. This replaces the earlier Reciprocal Rank Fusion: the #399 ablation
-    showed RRF's rank-sum buries a strong single-channel (vector-only) hit
-    beneath lexically-tempting FTS distractors, losing paraphrase recall@10
-    (0.667 vs 1.0) and MRR (0.144 vs 0.546) while only TYING on
-    exact/filter/negative. Returned rows include:
+    With ``use_vectors=True`` and vector deps installed: runs both channels and
+    returns the vector channel first (best-first by ascending distance), with a
+    reserved tail slice for FTS-only hits (``_fts_floor``, techne#827). Rows
+    present in BOTH channels keep their vector-channel position; agreement is
+    recorded as provenance, not a rank boost. Vec-first replaced Reciprocal Rank
+    Fusion because the #399 ablation showed RRF's rank-sum buries a strong
+    single-channel (vector-only) hit beneath lexically-tempting FTS distractors,
+    losing paraphrase recall@10 (0.667 vs 1.0) and MRR (0.144 vs 0.546) while
+    only TYING on exact/filter/negative.
+
+    THE TAIL FLOOR IS LOAD-BEARING (techne#827). Vec-first originally appended
+    FTS-only hits after the whole vector channel and then sliced to ``limit``,
+    which means a vector channel that fills the page — the normal case for any
+    non-trivial store — silently discarded all of them: measured 108 of 108
+    lexical-only hits dropped across 15 identifier-shaped queries on the live
+    store. That made exact-identifier recall (PR numbers, commit shas, symbol
+    names, config keys) impossible on every read path, since ``techne_recall``,
+    ``techne_search`` and the per-turn injection hook all land here. The floor
+    is a minority of the page, so the paraphrase win #401 bought is intact.
+
+    Returned rows include:
 
       - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
-      - ``fusion``: ``"vec_first"`` — how order was decided
+      - ``fusion``: ``"vec_first"`` — how order was decided. Unchanged by the
+        floor: the vector channel still decides the head of the page.
 
     When vec is requested but no vec results came back (extras not
     installed, vec tables empty, etc.), falls through to FTS-only —
@@ -969,21 +1009,38 @@ def search(
     if not vec_results:
         return fts_results
 
-    # Vec-first union (techne#401). Take the vector channel first — it comes
-    # back already sorted best-first (ascending distance; search_vec sorts
-    # before truncating) — then append FTS-only hits in search_fts's own
+    # Vec-first union with a reserved lexical floor (techne#401, floor #827).
+    # The vector channel leads — it comes back already sorted best-first
+    # (ascending distance; search_vec sorts before truncating) — and FTS-only
+    # hits take a reserved slice of the page TAIL, in search_fts's own
     # recency/BM25/decay order. Dedup on (type, id), truncate to limit.
     # Cross-channel agreement is recorded as provenance (match_source="fts+vec")
-    # but no longer reweights order the way RRF's rank-sum did — that rank-sum
+    # but does not reweight order the way RRF's rank-sum did — that rank-sum
     # was what buried strong single-channel vector hits (#399 ablation).
+    #
+    # WHY THE FLOOR EXISTS (#827). Before it, this union appended the whole vec
+    # channel, then the FTS-only hits, then truncated with `out[:limit]` — so a
+    # vec channel that filled the page, which any non-trivial store does, threw
+    # away every FTS-only hit before the caller saw it. Measured on the live
+    # store: 108 of 108 lexical-only hits dropped across 15 identifier-shaped
+    # queries, i.e. exact-identifier recall (PR numbers, commit shas, symbol
+    # names, config keys) was answered by cosine distance alone, on all three
+    # read paths (techne_recall, techne_search, per-turn injection).
+    # Reserving the tail keeps #401's paraphrase win — vectors still hold the
+    # HEAD of the page — for at most `floor` vector positions.
     # NB: _rrf_fuse / RRF_K are intentionally retained as a library primitive —
-    # the #399 ablation's RRF arm and a possible single-channel-floor fallback
-    # (#401 candidate 4) reference them; they are simply no longer the default.
+    # the #399 ablation's RRF arm references them; not the default.
     fts_by_key = {(r["source_table"], r["id"]): r for r in fts_results}
+    vec_keys = {(r["source_table"], r["id"]) for r in vec_results}
+    fts_only = [r for r in fts_results if (r["source_table"], r["id"]) not in vec_keys]
+
+    floor = _fts_floor(limit, len(fts_only))
     seen: set[tuple] = set()
-    out: list[dict] = []
+    head: list[dict] = []
 
     for r in vec_results:
+        if len(head) >= limit - floor:
+            break
         key = (r["source_table"], r["id"])
         if key in seen:
             continue
@@ -1002,9 +1059,10 @@ def search(
         else:
             row["match_source"] = "vec"
         row["fusion"] = "vec_first"
-        out.append(row)
+        head.append(row)
 
-    for r in fts_results:
+    tail: list[dict] = []
+    for r in fts_only:
         key = (r["source_table"], r["id"])
         if key in seen:
             continue
@@ -1012,9 +1070,11 @@ def search(
         row = dict(r)  # copy — don't mutate the caller's rows
         row["match_source"] = "fts"
         row["fusion"] = "vec_first"
-        out.append(row)
+        tail.append(row)
 
-    return out[:limit]
+    # `head` may be shorter than its budget (a thin vec channel); the tail is
+    # allowed to spend the slack rather than returning a short page.
+    return (head + tail)[:limit]
 
 
 def backfill_vectors(
