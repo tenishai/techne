@@ -23,7 +23,7 @@ run and a HEAD run ON THE SAME RUNNER is the code change, and needs no epsilon.
 
 PER-TASK IS WHERE THE TEETH ARE. The kill-gates score class means over six tasks,
 so one gold collapsing 1.0 -> 0.0 moves the mean by 0.167 and hides. Per-task rows
-see it at full amplitude, which is how this catches 275036a's shape.
+see it at full amplitude, which is how this catches 275035a's shape.
 """
 
 from __future__ import annotations

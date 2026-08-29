@@ -526,7 +526,13 @@ jobs:
         working-directory: techne
         env:
           TECHNE_EVAL_METRICS_OUT: ${{ runner.temp }}/eval-head.json
-        run: .venv-ci/bin/python -m pytest -m eval_vec -s
+        run: |
+          set -euo pipefail
+          # Symmetry with the diff step's rm (#833 r2 nit 3): the `test -s` there
+          # is the one check a leftover dump would defeat, and it is the check
+          # whose message reads "did it skip?".
+          rm -f "$TECHNE_EVAL_METRICS_OUT"
+          .venv-ci/bin/python -m pytest -m eval_vec -s
 
       # (#832) THE ABSOLUTE GATE ABOVE CANNOT SEE A ONE-GOLD REGRESSION. Its
       # paraphrase recall@10 floor is 0.8, and retrieval_gold.yaml sizes it that
@@ -557,9 +563,23 @@ jobs:
       # restore window entirely — there is nothing to restore.
       #
       # HEAD's `tests/` is copied over the base worktree's so the HARNESS IS
-      # CONSTANT across both runs; only `techne/` differs, which is the point.
+      # CONSTANT across both runs. NOT ONLY `techne/` DIFFERS (#833 r2 nit 2):
+      # the base worktree supplies everything outside `tests/`, `pyproject.toml`
+      # included — so `[tool.pytest.ini_options]`, addopts, testpaths and the
+      # marker registry come from BASE. That is wording rather than behaviour
+      # today (the residual asymmetry fails loudly, and the repo has no root
+      # conftest.py), but a maintainer editing addopts should know the two legs
+      # would then read different pytest config.
+      #
       # `cd` into the worktree is what makes its `techne/` win over the editable
-      # install: `python -m` puts cwd at sys.path[0].
+      # install: `python -m` puts cwd at sys.path[0]. WHAT ENTITLES IT TO WIN is
+      # that hatchling writes a BARE-PATH `_editable_impl_techne.pth` — an
+      # ordinary sys.path entry that cwd beats. IF THE WHEEL EVER SETS
+      # `dev-mode-exact`, that becomes a sys.meta_path finder which wins
+      # regardless of cwd, the base leg silently measures HEAD, and this diff
+      # goes vacuously green — the exact failure it exists to abolish,
+      # reintroduced by a build-config change nobody would connect to CI. Do not
+      # set it without replacing the cwd mechanism here.
       #
       # PRs ONLY — on a push the checked-out ref IS main, so base == head.
       #
@@ -581,8 +601,20 @@ jobs:
           BASE_WT: ${{ runner.temp }}/base-worktree
         run: |
           set -euo pipefail
-          # N1: never diff against a dump left by an earlier job on this runner.
+          # Never inherit either leftover from an earlier job on this runner.
+          # These two lines are written under the SAME premise and must agree
+          # (#833 r2 I1): if runner.temp survives between jobs, both do real
+          # work; if it is wiped, both are free insurance.
           rm -f "$BASE_METRICS"
+          # `git worktree add --force` overrides "registered but MISSING". It does
+          # NOT override "the path already EXISTS" — that is a fatal, and under
+          # `set -e` it wedges this step for every subsequent PR until someone
+          # cleans the runner by hand. Reachable: `git worktree remove` is the last
+          # statement of the happy path with no trap, so a cancellation or the
+          # 20-minute timeout landing in the base pytest leaks the directory AND
+          # the registration. Removing the directory heals both halves — verified,
+          # and unlike a trap it also heals a runner that is ALREADY poisoned.
+          rm -rf "$BASE_WT"
           test -s "$HEAD_METRICS" || {
             echo "::error::the eval_vec step produced no head metrics (did it skip?)"
             exit 1; }
@@ -592,7 +624,7 @@ jobs:
           rm -rf "$BASE_WT/tests"
           cp -R tests "$BASE_WT/tests"
 
-          # `|| true` is the ONE intended tolerance: a base that fails its own
+          # `|| echo ::warning` is the ONE intended tolerance: a base that fails its own
           # kill-gates still emits (the gate writes metrics BEFORE asserting), and
           # its numbers are exactly what we want in that case.
           ( cd "$BASE_WT" \
@@ -603,7 +635,11 @@ jobs:
           git worktree remove --force "$BASE_WT"
 
           test -s "$BASE_METRICS" || {
-            echo "::error::no base metrics produced — cannot diff"; exit 1; }
+            echo "::error::no base metrics produced — cannot diff. Most likely the"
+            echo "::error::base leg failed to COLLECT: HEAD's tests/ importing a"
+            echo "::error::library symbol origin/main does not have. Check the base"
+            echo "::error::pytest output above for ImportError/AttributeError."
+            exit 1; }
           .venv-ci/bin/python scripts/compare_retrieval_metrics.py \
             "$BASE_METRICS" "$HEAD_METRICS"
 
