@@ -106,11 +106,21 @@ def _read_ref(git_dir: Path, common_dir: Path, rel: str, _depth: int = 0) -> str
 def _revision_info(package_path: Path) -> dict:
     """Identify the code that is actually imported, not the version it claims.
 
-    ``__version__`` comes from ``importlib.metadata``, which for an *editable*
-    install is stamped once at ``pip install -e`` time and never moves when the
-    checkout does — measured four days apart on this machine (#568). So the
-    version string identifies the code only for a real, non-editable install.
-    For a checkout the honest identifier is the revision.
+    ``__version__`` comes from ``importlib.metadata`` FOR AN INSTALLED BUILD
+    ONLY. It used to come from there always, and for an *editable* install that
+    stamp is written once at ``pip install -e`` time and never moves when the
+    checkout does — measured four days apart on this machine (#568), and again
+    at the 2026-08-28 install (#825). ``techne._resolve_version`` now reads a
+    checkout's version from its own ``pyproject.toml`` instead, using THIS
+    function's build test so the two cannot disagree; on a checkout it never
+    consults the dist-info, and reports ``0.0.0+unknown`` when pyproject is
+    unreadable rather than relapsing to it.
+
+    THE REVISION IS STILL THE FINER IDENTIFIER, for a different reason than the
+    one this docstring used to give. The version is no longer stale — it is
+    COARSE: every commit between two releases declares the same version, so the
+    revision is what distinguishes them. "The version string is only good for a
+    real install" was the old rationale and is now false; do not restore it.
 
     Returns ``build`` plus, for a checkout, ``revision`` / ``remote_revision`` /
     ``branch`` / ``drifted`` / ``remote_ref_age_days``. ``drifted`` is None when
