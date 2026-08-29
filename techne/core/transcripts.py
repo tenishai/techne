@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -60,34 +60,52 @@ class Transcript:
 @runtime_checkable
 class TranscriptSource(Protocol):
     """A platform adapter: discovers and parses that client's transcripts into the
-    canonical shape. The ONLY thing a new client must implement."""
+    canonical shape. The ONLY thing a new client must implement.
+
+    OPTIONAL HOOKS — CONVENTIONS, NOT STRUCTURAL MEMBERS. A source MAY declare:
+
+      ``unreadable: Sequence[tuple[Path, str]]``
+        Transcripts this source could not read at all, as ``(path, error)`` pairs,
+        populated AS IT ITERATES. ``index_transcripts`` reads it via
+        ``getattr(source, "unreadable", ())`` and reports ``len()`` of it, so a
+        source that skips a corrupt file is not silently indistinguishable from a
+        smaller corpus (techne#629).
+
+        It must be SIZED (``len()`` is called on it) and it must be a real
+        attribute on the source, not a generator: a lazy iterator would report 0
+        before the walk and be consumed by the reporting. Omit it and the count
+        is 0.
+
+      ``dialogue_text: Callable[[str], str | None]``
+        Given one turn's raw text, return what the user actually SAID, or None
+        when the turn is this client's harness plumbing rather than dialogue.
+        Read via ``getattr(source, "dialogue_text", None)`` and forwarded to
+        ``derive_title``, so a session's title comes from dialogue instead of
+        whatever wrapper the client injected first.
+
+        Clients inject plenty of text-bearing ``user`` turns that no human typed:
+        slash commands and their output, shell runs, task notifications. Only the
+        adapter can know its own client's markers, so core never guesses — omit
+        this and every turn is taken verbatim, exactly as before (techne#2806).
+
+    NEITHER IS ANNOTATED BELOW, AND THAT IS DELIBERATE (techne#818). This Protocol
+    is ``@runtime_checkable``, and ``isinstance()`` enforces every ANNOTATED
+    non-method data member by ``hasattr`` — on EVERY Python this project supports.
+    Measured 2026-08-29 on 3.9/3.10/3.11/3.12/3.13/3.14: an adapter omitting an
+    annotated member returned False on all six. (An earlier version of this note,
+    and the ``provides`` comment it was modelled on, said "3.12+"; that is wrong
+    and mattered, because ``requires-python`` is >=3.11 while CI matrixes only
+    3.12 and 3.13, so a reader on 3.11 could take it as not their problem.)
+    Annotating an optional hook
+    therefore makes it structurally REQUIRED — an adapter that omits it fails
+    ``isinstance``, which is the opposite of optional. Measured on 3.14: with both
+    annotated, an adapter declaring only ``platform`` and ``iter_transcripts``
+    returned False, as did one that added ``unreadable`` but omitted
+    ``dialogue_text``. The identical hazard and the identical resolution are
+    documented for ``provides`` on ``SourceAdapter`` in ``techne/sync/adapter.py``.
+    """
 
     platform: str
-
-    #: OPTIONAL. Transcripts this source could not read at all, as ``(path, error)``
-    #: pairs, populated AS IT ITERATES. ``index_transcripts`` reads it via
-    #: ``getattr(source, "unreadable", ())`` and reports ``len()`` of it, so a source
-    #: that skips a corrupt file is not silently indistinguishable from a smaller
-    #: corpus. Declared here because it was previously readable from any source and
-    #: documented on none — a new adapter author had no way to learn the attribute
-    #: name or its shape (techne#629).
-    #:
-    #: It must be SIZED (``len()`` is called on it) and it must be a real attribute
-    #: on the source, not a generator: a lazy iterator would report 0 before the
-    #: walk and be consumed by the reporting. Omit it entirely and the count is 0.
-    unreadable: Sequence[tuple[Path, str]]
-
-    #: OPTIONAL. Given one turn's raw text, return what the user actually SAID, or
-    #: None when the turn is this client's harness plumbing rather than dialogue.
-    #: Read via ``getattr(source, "dialogue_text", None)`` — same opt-in shape as
-    #: ``unreadable`` — and forwarded to ``derive_title`` so a session's title comes
-    #: from dialogue instead of whatever wrapper the client injected first.
-    #:
-    #: Clients inject plenty of text-bearing ``user`` turns that no human typed:
-    #: slash commands and their output, shell runs, task notifications. Only the
-    #: adapter can know its own client's markers, so core never guesses — omit this
-    #: and every turn is taken verbatim, exactly as before (techne#2806).
-    dialogue_text: Callable[[str], str | None]
 
     def iter_transcripts(self) -> Iterator[Transcript]:
         """Yield each available transcript as a `Transcript`. Lazy (a generator)
