@@ -102,8 +102,13 @@ OUTCOME_NOTHING = "nothing-known"
 #:     top neighbour (0.961) than a real query about work done that same day (0.974).
 #:     Any threshold would have been a number invented to make the feature look right.
 #:   * `match_source` cannot either. `vec_first` fusion fills the page from the vector
-#:     channel before appending FTS hits: "tier ladder recall archivist" returns 10 FTS
-#:     rows on its own yet 10/10 `vec` through the hybrid path. It measures fusion.
+#:     channel first: "tier ladder recall archivist" returned 10 FTS rows on its own
+#:     yet 10/10 `vec` through the hybrid path. THAT 10/10 IS PRE-#827 — a one-slot
+#:     lexical floor now reserves part of the page, so the ratio no longer holds. The
+#:     conclusion does, and for a sharper reason than "it measures fusion": the floor
+#:     is fed by `search_fts`, which runs the #70 OR-fallback, while `has_direct_match`
+#:     runs implicit-AND with none. So a reserved `fts` slot can hold a row matching a
+#:     SINGLE term of the query — precisely the row `has_direct_match` exists to reject.
 #:
 #: What works is asking directly — see `search.has_direct_match`. Note it is asked of
 #: the KNOWLEDGE layer, not `all`: tiers 1-3 answer "what have we LEARNED", and with

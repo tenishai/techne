@@ -908,6 +908,155 @@ def _rrf_fuse(
     return sorted(scores.items(), key=lambda x: -x[1])
 
 
+def _fts_floor(limit: int, n_fts_only: int) -> int:
+    """How many TAIL slots of a page are reserved for lexical-only hits (#827).
+
+    The vec-first union (#401) is right about ordering and was wrong about
+    truncation: appending FTS-only hits after a full vector page and then
+    slicing to ``limit`` means they are never returned. This reserves a slot
+    so the lexical channel can reach the caller at all.
+
+    THE SIZE IS ONE, AND THAT IS A MEASUREMENT, NOT A TASTE (Prudence, #829 r1).
+    The first cut reserved ``limit // 3`` on the argument that a minority slice
+    is cheap. It is not cheap. Running the eval leg the default suite deselects
+    (``pytest -m eval_vec``, the gate at tests/eval/test_retrieval_gate_vec.py,
+    which calls ``search(use_vectors=True, limit=10)`` directly), same machine,
+    same pinned potion-base-8M, only this module swapped:
+
+        floor at limit=10      paraphrase r@10    MRR
+        0 (pre-#827)                 1.0          0.546
+        1                            1.0          0.546
+        2                            0.833        0.528
+        3 (the first cut)            0.833        0.528
+
+    ONLY THE limit=10 ARM CAN SHOW COST, AND THE OTHER TWO ARE CITED FOR WHAT
+    THEY CANNOT MEASURE UNLESS THIS SAYS SO (Prudence, #829 r4 Important 1).
+    The cost mechanism is `g385_dbpool` at vec-rank 9 being truncated off the
+    head, so it can appear only where the head budget ``limit - floor`` drops
+    below 9. Forced across the whole range on the pinned gold set:
+
+        limit=5,  scored r@5   FLAT at every expressible floor (0.667 / 0.5) —
+                               reserving 4 of 5 slots moves nothing, because the
+                               gold is off the page at ANY floor. This arm
+                               CANNOT show cost.
+        limit=10, scored r@10  floors 0-1: 1.0 / 0.546; floors 2-4: 0.833 /
+                               0.528; floors 5+: 0.667 / 0.5. THE ARM WITH TEETH.
+        limit=15, scored r@10  FLAT through floor 6 (1.0 / 0.546); floor 7:
+                               0.833 / 0.528 — head budget 8, below 9.
+
+    So "identical at limit=5" and "identical at limit=15" are true and nearly
+    uninformative: at 15, floors 3 and 6 are identical too. An earlier draft
+    offered the 5-arm as evidence that "20% of a page is affordable" — the same
+    PROPORTION that costs a gold at 10. That inference was unsound; the arm does
+    not bite because it cannot, not because the proportion is cheap. (The label
+    was Prudence's from #829 r2 and she corrected it herself; the unsound
+    inference built on it was mine.)
+
+    THE PER-TURN RAIL'S REAL PAGE IS 15, AND THE FLOOR USUALLY DOES NOT REACH
+    THE SESSION THROUGH IT. `config.py` sets `per_turn_recall_limit = 5`, but
+    `hooks/user_prompt_submit.py:640` passes `limit=k * _RESEND_OVERFETCH` with
+    `_RESEND_OVERFETCH = 3`, so `search()` is called at 15 and the rail cuts to
+    5 itself at line 656 after dedup and the relevance floor. Since this floor
+    reserves the TAIL, the reserved row lands at index 14 of 15 and the rail's
+    own `[:k]` drops it — see test_the_rail_drops_the_reserved_lexical_row in
+    tests/test_user_prompt_submit_hook.py, which drives the hook rather than
+    asserting a rail property from a seam that cannot observe one.
+    It is "usually not delivered" rather than "never": delivery needs 10+ of the
+    14 head rows dropped between the two cuts, and only TWO steps can drop any —
+    `_drop_pull_only` and session dedup. `_apply_relevance_floor` is inert by
+    default (both `per_turn_recall_floor_*` default to None), so it thins
+    nothing. Session dedup measures 46.1% across deliveries against the ~71% a
+    single turn would need, so "usually not" is if anything generous toward
+    delivery (Prudence, #829 r4). Neither of us has measured the rate directly.
+    THE COST CLAIM IS UNAFFECTED — measured at limit=15, floor 1:
+    paraphrase r@10 1.0 / MRR 0.546, exact/filter/negative 1.0. What is wrong is
+    the DELIVERY claim, not the price. Fixing it means placing the reserved row
+    inside the first k, or having the rail stop discarding it; both are changes
+    to a caller's contract and belong with techne#831, not here.
+
+    At 2 and above the gold `g385_dbpool` — sitting at vec-rank 9 — is
+    truncated off the head and replaced, on a ZERO-TOKEN-OVERLAP paraphrase
+    query, by lexically-matched distractors. The gate's 0.8 floor still passes
+    at 0.833, but retrieval_gold.yaml:97-99 reserves that margin for
+    cross-machine BLAS drift; spending it deterministically leaves the next
+    genuine wobble looking like flake. A floor of 1 delivers #827 — lexical-only
+    hits reach the caller — at a measured cost of zero.
+
+    SO THE FLOOR DOES NOT SCALE WITH ``limit``:
+
+        limit=20 -> 1    limit=10 -> 1    limit=5 -> 1
+        limit=3  -> 1    limit=2  -> 1    limit=1 -> 0
+
+    A WIDER PAGE DOES AFFORD MORE, AND THAT IS A TRAP RATHER THAN A LICENCE.
+    limit=15 tolerates a floor of 6; limit=10 does not tolerate 2. If you widen
+    the floor and re-run "the ablation" at 15 — the page the rail actually uses,
+    and therefore the one that looks production-relevant — you get a clean
+    1.0 / 0.546 up to floor 6 and ship a regression that limit=10 would have
+    caught. RE-RUN THE limit=10 ARM. It is the discriminating one, for the
+    reason given above: it is where the head budget crosses the gold's rank.
+    Record the numbers here when you do.
+
+    THE OTHER HALF OF THE TRADE, so a future reader is not shown only the cost
+    (Prudence, #829 r2). A wider floor DOES buy something measurable, and this
+    is it: on the live store at floor 3, the queries "issue 814" and "ae219b5"
+    reached knowledge #1810 — the entry recording that PR #815 merged as
+    ae219b5 — and at floor 1 they do not; the single slot goes to a raw
+    observation instead. So the choice here is not "1 is free and 3 is costly",
+    it is "3 costs a gold on the paraphrase arm to buy a store-dependent
+    lexical hit". The reason to refuse that trade is that the shortfall has a
+    DIFFERENT cause and therefore a different fix: `search_fts` orders by
+    `recency_weight=0.3 x recency + 0.7 x BM25`, and the live pool is 36.7k
+    observations against 2.6k knowledge rows, so which fts-only row wins rank 1
+    is decided by the reranker, not by how many slots it is handed. A wider
+    floor buys more lottery tickets without changing the draw. That is techne#831,
+    and it is where a fix for identifier recall belongs.
+
+    At ``limit=1`` there is no room to reserve and the single slot goes to the
+    vector channel, preserving #401's behaviour on a one-row page. At
+    ``limit=2`` the reserved slot is exactly half the page — the floor is never
+    MORE than half, which is a weaker claim than the one this docstring made
+    before Prudence checked it against its own table.
+
+    Returns 0 when there is nothing lexical-only to place, so the fused page
+    is identical to the pre-#827 one whenever the two channels agree.
+
+    ``n_fts_only`` IS A COUNT OF DISTINCT KEYS, AND AT THIS FLOOR THAT IS
+    DORMANT SCAFFOLDING RATHER THAN A LIVE GUARD (Prudence, #829 r2 Important 1
+    — do not read the green test as a witness). The tail loop dedups via
+    `seen`, so an inflated count would reserve slots the tail cannot fill and
+    return a SHORT page. But the guard above has already established
+    ``n_fts_only > 0``, so ``min(n_fts_only, 1)`` is 1 for every positive count:
+    duplicates take it from 1 to 4 and ``min(4, 1) == min(1, 1)``. The deduped
+    and undeduped sizings are indistinguishable for EVERY possible input while
+    the floor is 1, which is why mutating the caller back to ``len(fts_only)``
+    leaves the whole test file green.
+
+    AND IT IS NARROWER THAN "DORMANT" (Prudence, #829 r3 Important 2 — this
+    clause has to be exactly right, because the paragraph invokes #565 to
+    justify keeping the guard). NO PRODUCER REACHING THIS FUNCTION CAN EMIT A
+    DUPLICATE KEY AT ALL, at any floor: ``fts_results`` comes only from
+    ``search_fts``, which runs one query per table with each ``*_fts`` rowid
+    joined 1:1 to its base table and each table's rows tagged with a distinct
+    ``source_table``, and the #70 OR-fallback REASSIGNS ``results`` rather than
+    appending, so the AND and OR passes cannot both contribute a row. Measured:
+    6 query shapes x 4 table scopes on a seeded store, including queries that
+    fall through to the OR pass — 0 duplicates in all 24. So this is
+    unreachable from today's producer, not merely inert at today's floor. It is
+    kept to keep ``search()`` correct if a producer ever CAN duplicate — a
+    second knowledge query, or an OR-fallback that unions instead of replacing
+    — which costs one set comprehension. (Under monkeypatch it does behave as
+    described: sizing reverted with the floor at 3 fails the dupe test with an
+    8-row page. That is a property of the test harness, not of the system.)
+
+    For the same reason ``min(n_fts_only, ...)`` below is forward-looking
+    scaffolding, not an active constraint: at this floor it reduces to
+    ``return 1``.
+    """
+    if limit <= 1 or n_fts_only <= 0:
+        return 0
+    return min(n_fts_only, 1)
+
+
 def search(
     db_path: Path,
     query: str,
@@ -924,18 +1073,34 @@ def search(
     With ``use_vectors=False``: returns BM25-only results (unchanged
     legacy behavior).
 
-    With ``use_vectors=True`` and vector deps installed: runs both channels
-    and returns the vector channel first (best-first by ascending distance),
-    then appends FTS-only hits. Rows present in BOTH channels keep their
-    vector-channel position; agreement is recorded as provenance, not a rank
-    boost. This replaces the earlier Reciprocal Rank Fusion: the #399 ablation
-    showed RRF's rank-sum buries a strong single-channel (vector-only) hit
-    beneath lexically-tempting FTS distractors, losing paraphrase recall@10
-    (0.667 vs 1.0) and MRR (0.144 vs 0.546) while only TYING on
-    exact/filter/negative. Returned rows include:
+    With ``use_vectors=True`` and vector deps installed: runs both channels and
+    returns the vector channel first (best-first by ascending distance), with a
+    reserved tail slice for FTS-only hits (``_fts_floor``, techne#827). Rows
+    present in BOTH channels keep their vector-channel position; agreement is
+    recorded as provenance, not a rank boost. Vec-first replaced Reciprocal Rank
+    Fusion because the #399 ablation showed RRF's rank-sum buries a strong
+    single-channel (vector-only) hit beneath lexically-tempting FTS distractors,
+    losing paraphrase recall@10 (0.667 vs 1.0) and MRR (0.144 vs 0.546) while
+    only TYING on exact/filter/negative.
+
+    THE TAIL FLOOR IS LOAD-BEARING (techne#827). Vec-first originally appended
+    FTS-only hits after the whole vector channel and then sliced to ``limit``,
+    which means a vector channel that fills the page — the normal case for any
+    non-trivial store — silently discarded all of them: measured 108 of 108
+    lexical-only hits dropped across 15 identifier-shaped queries on the live
+    store. That made exact-identifier recall (PR numbers, commit shas, symbol
+    names, config keys) impossible on every read path, since ``techne_recall``,
+    ``techne_search`` and the per-turn injection hook all land here. The floor
+    is ONE slot, sized by measurement rather than by argument: at that size the
+    #399/#401 paraphrase arm holds at recall@10 1.0 / MRR 0.546, unchanged from
+    pre-#827, while a floor of 2 or more drops it to 0.833 / 0.528. See
+    ``_fts_floor`` for the ablation and for why this does not scale with limit.
+
+    Returned rows include:
 
       - ``match_source``: ``"fts"``, ``"vec"``, or ``"fts+vec"``
-      - ``fusion``: ``"vec_first"`` — how order was decided
+      - ``fusion``: ``"vec_first"`` — how order was decided. Unchanged by the
+        floor: the vector channel still decides the head of the page.
 
     When vec is requested but no vec results came back (extras not
     installed, vec tables empty, etc.), falls through to FTS-only —
@@ -969,21 +1134,50 @@ def search(
     if not vec_results:
         return fts_results
 
-    # Vec-first union (techne#401). Take the vector channel first — it comes
-    # back already sorted best-first (ascending distance; search_vec sorts
-    # before truncating) — then append FTS-only hits in search_fts's own
+    # Vec-first union with a reserved lexical floor (techne#401, floor #827).
+    # The vector channel leads — it comes back already sorted best-first
+    # (ascending distance; search_vec sorts before truncating) — and FTS-only
+    # hits take a reserved slice of the page TAIL, in search_fts's own
     # recency/BM25/decay order. Dedup on (type, id), truncate to limit.
     # Cross-channel agreement is recorded as provenance (match_source="fts+vec")
-    # but no longer reweights order the way RRF's rank-sum did — that rank-sum
+    # but does not reweight order the way RRF's rank-sum did — that rank-sum
     # was what buried strong single-channel vector hits (#399 ablation).
+    #
+    # WHY THE FLOOR EXISTS (#827). Before it, this union appended the whole vec
+    # channel, then the FTS-only hits, then truncated with `out[:limit]` — so a
+    # vec channel that filled the page, which any non-trivial store does, threw
+    # away every FTS-only hit before the caller saw it. Measured on the live
+    # store: 108 of 108 lexical-only hits dropped across 15 identifier-shaped
+    # queries, i.e. exact-identifier recall (PR numbers, commit shas, symbol
+    # names, config keys) was answered by cosine distance alone, on all three
+    # read paths (techne_recall, techne_search, per-turn injection).
+    # Reserving the tail costs the head `floor` positions, and those positions
+    # are not always pure-vec rows: an `fts+vec` row can be displaced too, and
+    # it cannot be rescued into the tail because `fts_only` excludes every vec
+    # key. That is why the floor is 1 and not a fraction of the page (#829 r1) —
+    # at 1 the paraphrase arm measures exactly as it did pre-#827.
     # NB: _rrf_fuse / RRF_K are intentionally retained as a library primitive —
-    # the #399 ablation's RRF arm and a possible single-channel-floor fallback
-    # (#401 candidate 4) reference them; they are simply no longer the default.
+    # the #399 ablation's RRF arm references them; not the default.
     fts_by_key = {(r["source_table"], r["id"]): r for r in fts_results}
+    vec_keys = {(r["source_table"], r["id"]) for r in vec_results}
+    fts_only = [r for r in fts_results if (r["source_table"], r["id"]) not in vec_keys]
+
+    # Size the floor off DISTINCT keys. UNREACHABLE, NOT MERELY DORMANT (#829
+    # r3/r4): no producer that can reach this function emits a duplicate key at
+    # ANY floor — search_fts joins each *_fts rowid 1:1 to its base table, tags a
+    # distinct source_table per table, and the #70 OR-fallback REASSIGNS results
+    # rather than appending. Widening the floor does NOT make this live; only a
+    # new producer would. Kept so search() stays correct if one ever exists.
+    # (An earlier version of this comment said "becomes load-bearing if the floor
+    # widens". That was wrong and is the claim #829 r3 removed from _fts_floor —
+    # this copy is the one r4 caught still carrying it.)
+    floor = _fts_floor(limit, len({(r["source_table"], r["id"]) for r in fts_only}))
     seen: set[tuple] = set()
-    out: list[dict] = []
+    head: list[dict] = []
 
     for r in vec_results:
+        if len(head) >= limit - floor:
+            break
         key = (r["source_table"], r["id"])
         if key in seen:
             continue
@@ -1002,9 +1196,10 @@ def search(
         else:
             row["match_source"] = "vec"
         row["fusion"] = "vec_first"
-        out.append(row)
+        head.append(row)
 
-    for r in fts_results:
+    tail: list[dict] = []
+    for r in fts_only:
         key = (r["source_table"], r["id"])
         if key in seen:
             continue
@@ -1012,9 +1207,11 @@ def search(
         row = dict(r)  # copy — don't mutate the caller's rows
         row["match_source"] = "fts"
         row["fusion"] = "vec_first"
-        out.append(row)
+        tail.append(row)
 
-    return out[:limit]
+    # `head` may be shorter than its budget (a thin vec channel); the tail is
+    # allowed to spend the slack rather than returning a short page.
+    return (head + tail)[:limit]
 
 
 def backfill_vectors(

@@ -929,3 +929,83 @@ def test_no_stash_is_not_an_error(home):
     init_db(db).close()
     assert _claim_deferred_session_context(db, "no-such-session") is None
     assert _claim_deferred_session_context(db, None) is None
+
+
+def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
+    """THE RAIL DOES NOT DELIVER techne#827's RESERVED SLOT (#829 r4 Important 3).
+
+    THIS IS THE PIN THAT ACTUALLY DRIVES THE RAIL. `test_search_hybrid_reserves_
+    the_tail_slot_outside_the_first_k` in tests/test_search_rrf.py asserts the
+    same shape from `search()`'s own output, which CANNOT observe this: Prudence
+    rewrote user_prompt_submit.py:656 to preserve the lexical row — #831 fixed
+    the rail-side way — and every test in both files stayed green. A pin named
+    for a rail behaviour has to execute the rail.
+
+    THE MECHANISM. `per_turn_recall_limit` is 5, but the rail asks `search()` for
+    `k * _RESEND_OVERFETCH` = 15 (over-fetching so session-dedup cannot thin
+    delivery below k, techne#576) and then cuts to k itself at :656. The #827
+    floor reserves the page TAIL, so the lexical row is index 14 of 15 and the
+    rail's own `[:k]` drops it before the session sees anything.
+
+    INVERT, DO NOT DELETE, WHEN #831 LANDS. Either fix — placing the reserved row
+    inside the first k, or teaching the rail to keep it — should make this fail.
+    That failure is the fix arriving: assert the lexical row IS in the block.
+    """
+    _write_config(home, per_turn_recall=True)
+
+    from techne.config import Config
+
+    k = Config.load().hooks.per_turn_recall_limit
+    page = k * user_prompt_submit._RESEND_OVERFETCH
+
+    # Real rows, so _drop_pull_only's type lookup and _build_context's rendering
+    # run against the database rather than against a fixture's imagination.
+    # A FULL vec channel — `range(page)`, not `page - 1` (#829 r5 Important 1).
+    # One row short and the reserved slot lands at the tail by SLACK rather than
+    # by reservation, which makes the index assertion below witness nothing: with
+    # `_fts_floor` mutated to 0 the short version still passes.
+    vec_ids = [_seed(f"vector channel row {i}", type="fact") for i in range(page)]
+    lex_id = _seed("lexical only row, reachable by identifier XYZZY-827", type="fact")
+
+    def _rows(ids):
+        import sqlite3
+
+        conn = sqlite3.connect(str(Config.load().db_path))
+        try:
+            q = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"SELECT id, type, content FROM knowledge WHERE id IN ({q})", ids
+            )
+            by_id = {r[0]: r for r in cur.fetchall()}
+        finally:
+            conn.close()
+        return [
+            {
+                "source_table": "knowledge",
+                "id": i,
+                "knowledge_type": by_id[i][1],
+                "content": by_id[i][2],
+            }
+            for i in ids
+        ]
+
+    fake_vec = [dict(r, distance=0.1 * n) for n, r in enumerate(_rows(vec_ids))]
+    fake_fts = [dict(r, rank=-1.0) for r in _rows([lex_id] + vec_ids)]
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    out = _run(monkeypatch, capsys, {"prompt": "XYZZY-827", "session_id": "rail-1"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+    # Full delimiters: `techne#1` is a prefix of `techne#15` (#829 r5 nit 4).
+    assert f"⟦techne#{vec_ids[0]}⟧" in ctx, "the rail delivered nothing — fixture is wrong"
+    assert f"⟦techne#{lex_id}⟧" not in ctx, (
+        "the reserved lexical row now reaches the session — if that is deliberate, "
+        "techne#831 has been fixed and this pin should be INVERTED, not deleted"
+    )
+    # And say WHY it is absent, so a future failure is diagnosable: search() put
+    # it on the page, at the tail, outside the k rows the rail keeps.
+    from techne.core.search import search
+
+    full = search(Config.load().db_path, "XYZZY-827", table="knowledge", limit=page)
+    assert [i for i, r in enumerate(full) if r["id"] == lex_id] == [page - 1]
