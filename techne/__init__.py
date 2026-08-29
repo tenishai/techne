@@ -109,9 +109,16 @@ def _resolve_version() -> str:
     build/revision line printed next to it is precisely the failure #825
     describes, so these two must not be allowed to drift apart.
 
-    Falls back to ``importlib.metadata`` when the file is missing or unparseable,
-    and to ``0.0.0+unknown`` when that fails too: an unreadable checkout is a
-    reason to report less confidently, not to raise on ``import techne``.
+    THE TWO BRANCHES DEGRADE DIFFERENTLY, AND THAT ASYMMETRY IS THE POINT. A
+    checkout whose ``pyproject.toml`` cannot be read returns ``0.0.0+unknown``
+    DIRECTLY — it never reaches ``importlib.metadata``, because on a checkout the
+    dist-info is known-unreliable by the paragraph above and falling through to it
+    silently restores #825 under a ``build: "checkout"`` label. An installed build
+    reads the dist-info and returns ``0.0.0+unknown`` only when the distribution is
+    absent. Either way an unreadable tree is a reason to report less confidently,
+    never to raise on ``import techne``: `cli.py`, `mcp_server.py` and
+    `core/health.py` all bind ``__version__`` at module scope, so an exception
+    escaping here is the CLI and the MCP server failing to import.
 
     Cost, MEASURED rather than assumed (2026-08-29, this machine, median of 7
     cold subprocesses each — the hook case, since hooks fire a fresh interpreter
@@ -122,9 +129,22 @@ def _resolve_version() -> str:
     """
     from pathlib import Path
 
+    # BOTH GUARDS BELOW CATCH `Exception` DELIBERATELY, AND THE BREADTH IS THE
+    # CORRECT SHAPE HERE RATHER THAN LAZINESS. Everything they wrap is "locate
+    # ourselves, read a file, pull a string out of it" — an operation with no
+    # failure that ought to be allowed to take down `import techne`. An enumerated
+    # tuple has to be exhaustive over every pyproject and `__file__` shape anyone
+    # will ever construct, and it already failed that test once: `[[project]]`
+    # parses cleanly and then subscripts a LIST, raising TypeError, which the
+    # original tuple did not list and which crashed the CLI and the MCP server.
+    # Review found three more escapes afterwards (RecursionError from deeply
+    # nested TOML; TypeError from a non-str `__file__`; ValueError from
+    # `.resolve()` on a NUL byte) — none reachable in techne's shipped shapes, but
+    # the fact that a second audit found a second set is the argument. Breadth
+    # makes exhaustiveness a non-question instead of a standing re-audit.
     try:
         package_dir = Path(__file__).resolve().parent
-    except NameError:  # frozen / zipimport: no __file__ to locate ourselves by
+    except Exception:  # no usable __file__: frozen, zipimport, or not a str
         package_dir = None
 
     if package_dir is not None and "site-packages" not in str(package_dir):
@@ -151,13 +171,7 @@ def _resolve_version() -> str:
             declared = data["project"]["version"]
             if isinstance(declared, str) and declared:
                 return declared
-        except (OSError, KeyError, TypeError, ValueError, ImportError):
-            # TypeError matters and was missing: `[[project]]` parses fine and
-            # then subscripts a LIST, which escaped the guard and took
-            # `import techne` down with it — and cli.py, mcp_server.py and
-            # core/health.py all do `from techne import __version__` at module
-            # scope, so that is the CLI and the MCP server failing to import,
-            # not a degraded version string.
+        except Exception:  # see the note above the outer guard
             pass
         return "0.0.0+unknown"
 

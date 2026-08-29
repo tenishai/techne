@@ -266,3 +266,27 @@ def test_a_checkout_never_answers_from_the_dist_info(tmp_path, monkeypatch):
         "the checkout branch fell back to the dist-info, which is the exact "
         "stale-version-beside-live-revision failure #825 exists to remove"
     )
+
+
+@pytest.mark.parametrize(
+    "bad_file",
+    [None, 12345, b"/not/a/str"],
+    ids=["none", "int", "bytes"],
+)
+def test_an_unusable_dunder_file_degrades_instead_of_raising(monkeypatch, bad_file):
+    """`__file__` is not guaranteed to be a usable str — and when it is not, we cannot
+    tell a checkout from an install, so the honest move is to trust the dist-info
+    rather than to raise.
+
+    These shapes are unreachable in techne's shipped layouts (a regular package on
+    3.11+ always gets an absolutised str, and absent is handled). They are pinned
+    anyway because the outer guard originally caught `NameError` alone: it was
+    widened in the same commit that widened the inner one, against the same failure
+    mode, and having missed that once is the reason both now catch `Exception`.
+    """
+    import importlib.metadata
+
+    import techne
+
+    monkeypatch.setattr(techne, "__file__", bad_file)
+    assert techne._resolve_version() == importlib.metadata.version("techne")
