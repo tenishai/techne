@@ -80,10 +80,17 @@ class SourceAdapter(Protocol):
     #
     # CONVENTION (not a structural member): adapters MAY declare a class attribute
     #   provides: ClassVar[frozenset[str]]   # {'curated'} | {'raw'} | both
-    # so the #107 reconciler can route them. It is read via getattr(a, 'provides',
-    # frozenset()) — deliberately NOT annotated on this Protocol, because newer
-    # CPython (the runtime_checkable non-method-member check, 3.12+) enforces a
-    # declared data member in isinstance(), which would break existing adapters
+    # intended to be read via getattr(a, 'provides', frozenset()) by a consumer
+    # that needs the routing. NOTHING READS IT TODAY: it is declared once
+    # (sync/cc_memory.py) and asserted in tests, and #107 — the reconciler this
+    # comment was written for — is CLOSED. Stated in the present tense here until
+    # 2026-08-29, which is why the arch card inherited the same false claim; the
+    # CONVENTION above is the load-bearing half and it is unaffected.
+    # Deliberately NOT annotated on this Protocol, because the
+    # runtime_checkable non-method-member check enforces a declared data member in
+    # isinstance() on EVERY Python this project supports (measured 2026-08-29 on
+    # 3.9 through 3.14; this comment previously said "3.12+", which is wrong and
+    # understates the blast radius — see techne#818), which would break adapters
     # that don't declare it (e.g. the isinstance check in test_jsonl_transcript).
     # ---------------------------------------------------------------------------
 

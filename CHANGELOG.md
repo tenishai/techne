@@ -7,6 +7,22 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
+  adapter that omits them satisfies `isinstance` again. `TranscriptSource` is
+  `@runtime_checkable`, and `isinstance()` enforces every *annotated* non-method data
+  member by `hasattr` — measured on 3.9 through 3.14, so on every Python this project
+  supports, not the "3.12+" the old comments claimed. `dialogue_text` (#817) and
+  `unreadable` (#629) were both annotated, so the minimal adapter shape they exist for
+  had already stopped satisfying the Protocol. Both are now documented as docstring
+  conventions read through `getattr`, matching the convention already recorded
+  for `provides` on `SourceAdapter`. Only new-adapter authors were affected — the one shipped adapter
+  declares both (#818).
+- `ClaudeCodeTranscriptSource.dialogue_text`'s `staticmethod` binding is covered on the
+  path production takes. Production reads the hook off an *instance*; every test added
+  with #817 read it off the *class*, so dropping the binding left them all green and the
+  only witness was an unrelated #629 test that happened to drive the real indexer. A
+  test now drives the real adapter through the real indexer and asserts the title
+  (#820).
 - `techne.__version__` reports the version of the code that is actually imported.
   `importlib.metadata` reads the dist-info written at install time, and for an
   *editable* install that stamp never moves when the checkout does — so a checkout
@@ -17,8 +33,11 @@ All notable changes to techne are documented here. Format loosely follows
   the version now comes from the checkout's own `pyproject.toml`, using the same
   build test as `core/health.py::_revision_info` so the two surfaces cannot
   disagree. A real (non-editable) install is unaffected — dist-info stays
-  authoritative there. Falls back to `importlib.metadata`, then `0.0.0+unknown`,
-  if the checkout is unreadable (#825, recurrence of #763).
+  authoritative there. A checkout whose `pyproject.toml` cannot be read reports
+  `0.0.0+unknown` and does **not** fall back to the dist-info: on a checkout that
+  stamp is known-unreliable, so consulting it would silently restore the same
+  stale-version-beside-live-revision lie under a `build: "checkout"` label
+  (#825, recurrence of #763).
 
 - `techne init` no longer deletes the `techne vectors backfill` step from the
   Claude Code SessionStart chain. The step had to be hand-wired into

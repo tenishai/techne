@@ -301,3 +301,44 @@ def test_cc_source_titles_from_dialogue_not_the_slash_command_wrapper(tmp_path):
     assert derive_title(t.turns, dialogue_text=hook) == "why is recall empty"
     # Every turn is still STORED — the hook narrows titles, not the record.
     assert len(t.turns) == 3
+
+
+def test_index_transcripts_titles_from_dialogue_through_a_real_source_instance(tmp_path):
+    """techne#820. Production reads the hook off an INSTANCE
+    (``getattr(source, "dialogue_text", None)`` in ``index_transcripts``), and the
+    ``staticmethod(...)`` binding is what keeps that call from receiving ``self``
+    as the turn text. Every test #817 added reads the hook off the CLASS instead,
+    so deleting the binding left them all green. One OLDER test does red on it --
+    ``test_index_transcripts_surfaces_an_unreadable_archive_end_to_end`` (#629),
+    which drives the real adapter through the real indexer for unrelated reasons
+    and takes the ``TypeError`` on the way past. That is the "covered only by
+    accident" the issue names, recorded here so a bisect landing on two red tests
+    is not a surprise.
+
+    This drives the real adapter through the real indexer, which is the path
+    production takes — drop the ``staticmethod`` and this goes red.
+    """
+    from techne.config import Config
+    from techne.core.database import init_db
+    from techne.core.documents import list_documents
+    from techne.core.librarian import librarian_db
+    from techne.core.transcripts import index_transcripts
+
+    d = tmp_path / "transcripts"
+    d.mkdir()
+    _write_jsonl(
+        d / "sess-slash.jsonl",
+        [
+            {"message": {"role": "user", "content": "<command-name>/model</command-name>"}},
+            {"message": {"role": "user", "content": "why is recall empty"}},
+        ],
+    )
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
+
+    index_transcripts(config, ClaudeCodeTranscriptSource(d), make_cards=False)
+
+    titles = {doc["title"] for doc in list_documents(librarian_db(config))}
+    assert titles == {"why is recall empty"}
