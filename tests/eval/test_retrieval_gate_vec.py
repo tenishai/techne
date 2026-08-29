@@ -31,6 +31,8 @@ vec tables to query) and paraphrase scores collapse back to ~0 — the exact
 failure mode this gate exists to catch.
 """
 
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -56,6 +58,39 @@ def _load_gold_yaml() -> tuple[list[dict], dict]:
 
 def _resolve_ids(keys: list[str], gold: dict[str, str]) -> set[str]:
     return {gold[k] for k in keys}
+
+
+#: techne#832 — where to write machine-readable metrics. Unset means don't.
+_METRICS_ENV = "TECHNE_EVAL_METRICS_OUT"
+
+
+def _emit_metrics(rows: list[dict], per_class: dict) -> None:
+    """Write per-task + per-class metrics to $TECHNE_EVAL_METRICS_OUT, if set.
+
+    PER-TASK IS THE HALF THAT MATTERS, and it is why this is not just a nicer
+    report. The kill-gates score CLASS MEANS over 6 tasks, so a single gold
+    collapsing 1.0 -> 0.0 moves the mean by 0.167 and hides inside a floor sized
+    for drift. That is precisely what 275035a did: `paraphrase-dbpool` went to
+    zero and the class still read 0.833, over a 0.8 floor. A diff over per-task
+    rows sees the collapse at full amplitude.
+
+    Deliberately NOT a committed baseline file. A baseline pinned in the repo
+    would carry this machine's numbers to every other machine and re-introduce
+    the drift problem the diff exists to avoid — the comparison has to be two
+    runs on ONE runner.
+    """
+    dest = os.environ.get(_METRICS_ENV)
+    if not dest:
+        return
+    payload = {
+        "schema": 1,
+        "gate": "retrieval_vec",
+        "per_task": {r["id"]: r for r in rows},
+        "per_class": per_class,
+    }
+    out = Path(dest)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
@@ -120,6 +155,26 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
                 f"  [{cls:<10}] r@5={m['recall_at_5']}  r@10={m['recall_at_10']}  "
                 f"mrr={m['mrr']}  fpr={m['fpr']}  (n={m['n']}, {gated})"
             )
+
+    # --- techne#832: emit the numbers so they can be DIFFED, not just floored ---
+    # BEFORE THE KILL-GATES, DELIBERATELY (Prudence, #833 r1 I1). An assert below
+    # ends the test, so emitting last means a run that FAILS a floor writes no
+    # file — and that is precisely the run whose numbers you want, because the
+    # base-vs-head diff is how you learn whether the PR made an already-unhealthy
+    # base worse. Emitting first also makes the CI step's "diff anyway" path real
+    # instead of unreachable.
+    #
+    # WHY A DIFF AT ALL: the kill-gates below are absolute, and an absolute floor
+    # cannot tell a real regression from cross-machine drift at the same
+    # magnitude. Commit 275035a took paraphrase r@10 from 1.0 to 0.833 and this
+    # gate passed it green, because retrieval_gold.yaml's 0.8 reserves exactly
+    # that much for BLAS wobble. A base-vs-head diff on ONE runner has no such
+    # blind spot: the leg is byte-deterministic run-to-run (model2vec/potion is
+    # numpy-only static, `pinned_model2vec` rebuilds the singleton), so any
+    # movement between two runs on one machine is the CODE. Zero tolerance.
+    #
+    # Off by default: no env var, no file, behaviour identical to pre-#832.
+    _emit_metrics(rows, per_class)
 
     # --- frozen per-class kill-gates (techne#399, ratcheted #401) ---
     # Unlike #385, paraphrase IS gated here — vec-first hybrid recall is

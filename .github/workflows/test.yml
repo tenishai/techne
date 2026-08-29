@@ -524,7 +524,153 @@ jobs:
 
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
-        run: .venv-ci/bin/python -m pytest -m eval_vec -s
+        env:
+          TECHNE_EVAL_METRICS_OUT: ${{ runner.temp }}/eval-head.json
+        run: |
+          set -euo pipefail
+          # Symmetry with the diff step's rm (#833 r2 nit 3): the `test -s` there
+          # is the one check a leftover dump would defeat, and it is the check
+          # whose message reads "did it skip?".
+          rm -f "$TECHNE_EVAL_METRICS_OUT"
+          .venv-ci/bin/python -m pytest -m eval_vec -s
+
+      # (#832) THE ABSOLUTE GATE ABOVE CANNOT SEE A ONE-GOLD REGRESSION. Its
+      # paraphrase recall@10 floor is 0.8, and retrieval_gold.yaml sizes it that
+      # way on purpose so "a single gold slipping rank 10->11 (r@10 1.0->0.833)
+      # still passes" — a tolerance for cross-machine BLAS wobble. A real
+      # regression is the same magnitude: 275035a took that class 1.0 -> 0.833 by
+      # evicting one gold and this job went GREEN. Only a human re-running the leg
+      # against the base caught it.
+      #
+      # So run it AGAINST THE BASE ON THIS RUNNER and diff. Two runs on one
+      # machine need NO tolerance: the leg is byte-deterministic (model2vec/potion
+      # is numpy-only static, and conftest's `pinned_model2vec` rebuilds the
+      # singleton pinned to it) — confirmed across four processes under differing
+      # random hash seeds, full per-task JSON byte-identical. Drift is a
+      # CROSS-machine phenomenon and cannot appear here.
+      #
+      # A SEPARATE WORKTREE, NOT AN IN-PLACE SWAP (Prudence, #833 r1 C1/I2/I3).
+      # The first version did `git checkout origin/main -- techne/` and restored
+      # with `git checkout HEAD -- techne/`. That is not a restore: `git checkout
+      # <ref> -- <path>` WRITES the paths in <ref> and never REMOVES paths absent
+      # from it. So a PR that deletes or renames a library module had it
+      # resurrected by the swap and left behind by the "restore" — staged and on
+      # disk — and the default-suite step below then ran against a tree that was
+      # neither HEAD nor main, able to go green BECAUSE the deleted module was
+      # back. The mirror hole: a module the PR ADDS survives into the base run, so
+      # the base silently measures part of the PR and the diff passes vacuously.
+      # A worktree makes both directions structurally impossible and removes the
+      # restore window entirely — there is nothing to restore.
+      #
+      # HEAD's `tests/` is copied over the base worktree's so the HARNESS IS
+      # CONSTANT across both runs. NOT ONLY `techne/` DIFFERS (#833 r2 nit 2):
+      # the base worktree supplies everything outside `tests/`, `pyproject.toml`
+      # included — so `[tool.pytest.ini_options]`, addopts, testpaths and the
+      # marker registry come from BASE. That is wording rather than behaviour
+      # today (the residual asymmetry fails loudly, and the repo has no root
+      # conftest.py), but a maintainer editing addopts should know the two legs
+      # would then read different pytest config. NOTE the asymmetry warns rather
+      # than fails: `[tool.pytest.ini_options]` sets neither `--strict-markers`
+      # nor `filterwarnings = error`, so a base pyproject.toml missing a marker
+      # HEAD added does not error. Selection is unaffected — the CLI's
+      # `-m eval_vec` overrides addopts' `-m` in both legs (#833 r3).
+      #
+      # `cd` into the worktree is what makes its `techne/` win over the editable
+      # install: `python -m` puts cwd at sys.path[0]. WHAT ENTITLES IT TO WIN is
+      # that hatchling writes a BARE-PATH `_editable_impl_techne.pth` — an
+      # ordinary sys.path entry that cwd beats. IF THE WHEEL EVER SETS
+      # `dev-mode-exact`, that becomes a sys.meta_path finder which wins
+      # regardless of cwd, the base leg silently measures HEAD, and this diff
+      # goes vacuously green — the exact failure it exists to abolish,
+      # reintroduced by a build-config change nobody would connect to CI. Do not
+      # set it without replacing the cwd mechanism here.
+      #
+      # PRs ONLY — on a push the checked-out ref IS main, so base == head.
+      #
+      # WHY origin/main AND NOT THE MERGE BASE: this job fetches --depth=1 (see
+      # the fetch step above), so the histories are disjoint and `git merge-base`
+      # finds nothing. Comparing against main's tip is the right question anyway —
+      # it is what merging will produce.
+      #
+      # KNOWN LIMIT, and it is the price of the constant harness: this diffs
+      # LIBRARY changes only. A PR that edits `tests/eval/` — the gold set, the
+      # scoring — moves both runs together and is invisible here. That needs a
+      # human; see compare_retrieval_metrics.py's `_regressions` docstring.
+      # `!cancelled()` because a bare `if:` still ANDs the implicit success(), so a
+      # HEAD run that trips its own kill-gate would SKIP the comparison — the
+      # mirror of the emit-before-gates fix, and the case where "did main already
+      # fail this, or did I break it?" is most expensive to answer by hand. The
+      # head dump was written either way; this is what lets it be used. An
+      # unrelated earlier failure now reaches the step and trips the
+      # `test -s "$HEAD_METRICS"` guard, whose "(did it skip?)" wording already
+      # covers it. (#833 r3 suggestion.)
+      - name: Retrieval diff vs origin/main (#832)
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        working-directory: techne
+        env:
+          BASE_METRICS: ${{ runner.temp }}/eval-base.json
+          HEAD_METRICS: ${{ runner.temp }}/eval-head.json
+          BASE_WT: ${{ runner.temp }}/base-worktree
+        run: |
+          set -euo pipefail
+          # Never inherit either leftover from an earlier job on this runner.
+          # These two lines are written under the SAME premise and must agree
+          # (#833 r2 I1): if runner.temp survives between jobs, both do real
+          # work; if it is wiped, both are free insurance.
+          rm -f "$BASE_METRICS"
+          # `git worktree add --force` overrides "registered but MISSING". It does
+          # NOT override "the path already EXISTS" — that is a fatal (exit 128,
+          # reproduced with a POPULATED leftover; an EMPTY one is accepted), and
+          # under `set -e` it wedges this step for every subsequent PR until
+          # someone cleans the runner by hand.
+          #
+          # REACHABLE, but narrower than an earlier version of this comment said
+          # (#833 r3 nit 3): `git worktree remove` below is NOT the last statement
+          # of the happy path — the base-metrics check, the error block and the
+          # comparer all follow it. So a failure in the DIFF leaks nothing; only a
+          # cancellation, or the 20-minute timeout, landing at or before the base
+          # pytest leaks the directory and the registration together. Removing the
+          # directory heals both halves, and unlike a `trap` it also heals a runner
+          # that is ALREADY poisoned.
+          #
+          # WHY THIS `rm -rf` IS SAFE, stated correctly (#833 r3 nit 1): NOT
+          # because an unset var degrades to `rm -rf ""`. It cannot — the literal
+          # `/base-worktree` suffix is part of the expression, so an empty
+          # runner.temp would yield `rm -rf "/base-worktree"`, a different string.
+          # What actually protects it is `set -u` on line 1: an UNDEFINED BASE_WT
+          # aborts the step at expansion, before `rm` runs at all. The step-level
+          # `env:` always defines it, so no path reaches here unset.
+          rm -rf "$BASE_WT"
+          test -s "$HEAD_METRICS" || {
+            echo "::error::the eval_vec step produced no head metrics (did it skip?)"
+            exit 1; }
+
+          git worktree add --detach --force "$BASE_WT" origin/main
+          # Constant harness: BASE's library, HEAD's tests.
+          rm -rf "$BASE_WT/tests"
+          cp -R tests "$BASE_WT/tests"
+
+          # `|| echo ::warning` is the ONE intended tolerance: a base that fails its own
+          # kill-gates still emits (the gate writes metrics BEFORE asserting), and
+          # its numbers are exactly what we want in that case.
+          ( cd "$BASE_WT" \
+            && TECHNE_EVAL_METRICS_OUT="$BASE_METRICS" \
+               "$GITHUB_WORKSPACE/techne/.venv-ci/bin/python" -m pytest -m eval_vec -q ) \
+            || echo "::warning::base run did not pass its own kill-gates; diffing anyway"
+
+          git worktree remove --force "$BASE_WT"
+
+          # ONE annotation, not four. The runner parses stdout line by line and
+          # every `::error::` line is an independent workflow command, so the
+          # multi-line form fragments into sentence pieces in the Checks UI, read
+          # out of order and out of context. `%0A` carries real newlines inside a
+          # single annotation (#833 r3 nit 2). These are the only annotations in
+          # this repo's workflows, so this sets the convention.
+          test -s "$BASE_METRICS" || {
+            echo "::error::no base metrics produced — cannot diff.%0AMost likely the base leg failed to COLLECT: HEAD's tests/ importing a library symbol that origin/main does not have.%0ACheck the base pytest output above for ImportError/AttributeError."
+            exit 1; }
+          .venv-ci/bin/python scripts/compare_retrieval_metrics.py \
+            "$BASE_METRICS" "$HEAD_METRICS"
 
       # This is the ONLY job with model2vec: `[vectors]` gates it to py>=3.14
       # (pyproject.toml:45) and the matrix is 3.12/3.13, which get fastembed. So
