@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from techne.core.database import init_db
-from techne.core.search import RRF_K, _rrf_fuse, search
+from techne.core.search import RRF_K, _fts_floor, _rrf_fuse, search
 
 # ---- _rrf_fuse unit tests --------------------------------------------------
 
@@ -200,26 +200,235 @@ def test_search_hybrid_does_not_mutate_caller_dicts(db_path, monkeypatch) -> Non
     assert "fusion" not in fake_vec_row
 
 
-def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
-    """Limit applies to the fused output when both channels return results."""
-    fake_fts = [
+def _canned_channels(n: int = 10):
+    """Two disjoint full channels: FTS ids 1..n, vec ids 101..1xx."""
+    fts = [
         {"source_table": "knowledge", "id": i, "content": str(i), "rank": -float(i)}
-        for i in range(1, 11)
+        for i in range(1, n + 1)
     ]
-    fake_vec = [
-        {"source_table": "knowledge", "id": i + 100, "content": str(i + 100), "distance": 0.1}
-        for i in range(1, 11)
+    vec = [
+        {"source_table": "knowledge", "id": i + 100, "content": str(i + 100), "distance": 0.1 * i}
+        for i in range(1, n + 1)
     ]
+    return fts, vec
+
+
+def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
+    """Limit applies to the fused output when both channels return results.
+
+    UPDATED BY techne#827. This test previously asserted
+    ``[r["id"] for r in results] == [101, 102, 103]`` — i.e. that a full vector
+    channel takes EVERY slot and the FTS-only hits are truncated away. That was
+    the defect written down as the contract, not a property worth keeping: it is
+    exactly what made lexical-only recall unreachable in production. The page is
+    still vec-first (101, 102 lead); the last slot is now the reserved floor.
+    """
+    fake_fts, fake_vec = _canned_channels()
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
     monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
 
     results = search(db_path, "anything", limit=3, use_vectors=True)
     assert len(results) == 3
-    # Vec-first: the limit slices the vec channel first (ids 101, 102, 103).
-    assert [r["id"] for r in results] == [101, 102, 103]
+    # limit=3 -> floor of 1: two vec rows lead, one FTS-only hit takes the tail.
+    assert [r["id"] for r in results] == [101, 102, 1]
+    assert [r["match_source"] for r in results] == ["vec", "vec", "fts"]
     # Fused output carries the fusion tag on every row, never rrf_score.
     assert all(r["fusion"] == "vec_first" for r in results)
     assert all("rrf_score" not in r for r in results)
+
+
+# ---- techne#827: the reserved lexical floor ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "limit,n_fts_only,expected",
+    [
+        (20, 50, 1),   # DOES NOT SCALE with the page — see the ablation below
+        (10, 50, 1),   # techne_recall / techne_search
+        (5, 50, 1),    # smallest page the floor must survive rounding on. NOT
+                       # "the per-turn rail's page" — the rail calls search() at
+                       # k * _RESEND_OVERFETCH = 15 (#829 r3).
+        (3, 50, 1),
+        (2, 50, 1),
+        (1, 50, 0),    # no room to reserve: the one slot stays with vec (#401)
+        (10, 1, 1),    # never reserve more than there is to place — UNFALSIFIABLE
+                       # at floor 1 (any positive count gives 1); kept for the
+                       # day the floor widens. See _fts_floor (#829 r2).
+        (10, 0, 0),    # nothing lexical-only -> page identical to pre-#827
+        (0, 5, 0),
+    ],
+)
+def test_fts_floor_sizing(limit, n_fts_only, expected) -> None:
+    """One slot at any usable page size, zero when there is no room to reserve.
+
+    THE SIZE IS PINNED BECAUSE IT WAS MEASURED, not because it is tidy
+    (Prudence, #829 r1). The first cut reserved ``limit // 3``; running
+    ``pytest -m eval_vec`` — the leg ``pyproject.toml`` deselects from the
+    default suite — showed floor 0 and floor 1 both hold the #399/#401
+    paraphrase arm at recall@10 1.0 / MRR 0.546, while floor 2 and 3 both drop
+    it to 0.833 / 0.528. Widening this without re-running that ablation
+    re-introduces a regression the gate's drift margin was hiding.
+    """
+    assert _fts_floor(limit, n_fts_only) == expected
+    # The invariant behind the sizing: the lexical channel never takes MORE than
+    # half the page. At limit=2 it takes exactly half — the earlier "never half
+    # or more" prose was falsified by this table's own row (#829 r1 nit 4).
+    assert _fts_floor(limit, n_fts_only) <= limit // 2
+
+
+def test_lexical_only_hit_survives_a_full_vec_page(db_path, monkeypatch) -> None:
+    """THE techne#827 REGRESSION.
+
+    A vector channel that fills the page used to evict every FTS-only hit at the
+    `out[:limit]` truncation. Measured consequence on the live store: 108 of 108
+    lexical-only hits dropped across 15 identifier-shaped queries, so a query
+    like "PR 815" could not reach the six knowledge entries whose text contains
+    it while cosine distance happily returned PR #402 and #439 instead.
+
+    Both channels are FULL and DISJOINT here, which is the shape that used to
+    lose everything lexical.
+    """
+    fake_fts, fake_vec = _canned_channels()
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", limit=10, use_vectors=True)
+
+    assert len(results) == 10
+    ids = [r["id"] for r in results]
+    fts_only_returned = [i for i in ids if i <= 10]
+    assert fts_only_returned, "no FTS-only hit survived the fusion — #827 is back"
+    assert len(fts_only_returned) == 1, "limit=10 reserves a floor of exactly 1"
+    # Vec keeps NINE of ten: the measured cost of the floor on the paraphrase
+    # arm is zero at this size and non-zero at every larger one (#829 r1).
+    assert ids[:9] == [101, 102, 103, 104, 105, 106, 107, 108, 109]
+    # The floor is filled in search_fts's own order, best BM25/recency first.
+    assert fts_only_returned == [1]
+
+
+def test_floor_does_not_shorten_a_page_when_vec_is_thin(db_path, monkeypatch) -> None:
+    """A reserved slot is a floor, not a quota carved out of thin air.
+
+    With only two vector rows the tail spends the slack rather than returning a
+    short page — the caller still gets `limit` rows when the union can fill it.
+    """
+    fake_fts, fake_vec = _canned_channels()
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec[:2])
+
+    results = search(db_path, "anything", limit=10, use_vectors=True)
+
+    assert len(results) == 10
+    assert [r["id"] for r in results[:2]] == [101, 102]
+    assert [r["id"] for r in results[2:]] == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_duplicate_fts_keys_do_not_shorten_the_page(db_path, monkeypatch) -> None:
+    """The floor is sized off DISTINCT keys, not rows (#829 r1 nit 3).
+
+    THIS TEST DOES NOT CURRENTLY BITE, AND SAYING SO IS THE POINT (#829 r2
+    Important 1). Mutating the caller back to `len(fts_only)` leaves this file
+    green, because `_fts_floor` returns `min(n_fts_only, 1)` after establishing
+    `n_fts_only > 0` — so a count inflated from 1 to 4 by duplicates gives the
+    same 1, and the two sizings are indistinguishable for every possible input
+    while the floor is 1. No test written against this head can separate them.
+
+    It is dormant, not dead: with the sizing reverted AND the floor widened to
+    3, this fails as designed with an 8-row page. It is kept as a pin for the
+    day someone widens the floor, which is the day the distinction matters.
+    Read a green run here as "the floor is still 1", not as "the dedup works" —
+    #565 is this repo's standing example of a guard that passed nothing and
+    blocked nothing while looking healthy.
+    """
+    dupe = {"source_table": "knowledge", "id": 1, "content": "a", "rank": -1.0}
+    fake_fts = [dict(dupe) for _ in range(4)]
+    _, fake_vec = _canned_channels()
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", limit=10, use_vectors=True)
+
+    assert len(results) == 10, "duplicate FTS keys shortened the page"
+    assert [r["id"] for r in results] == [101, 102, 103, 104, 105, 106, 107, 108, 109, 1]
+
+
+def test_search_hybrid_reserves_the_tail_slot_outside_the_first_k(db_path, monkeypatch) -> None:
+    """THIS PINS `search()`, NOT THE RAIL (#829 r4 Important 3).
+
+    An earlier name — test_the_per_turn_rail_cuts_off_the_reserved_slot — was a
+    lie about the layer. This test monkeypatches both channels and asserts over
+    `search()`'s own output; it never executes user_prompt_submit.py, so A
+    RAIL-SIDE FIX TO techne#831 WILL NOT TRIP IT. Prudence proved that by
+    rewriting the rail's `[:k]` to preserve the lexical row and watching all 29
+    tests here stay green. The pin that flips is
+    test_the_rail_drops_the_reserved_lexical_row in
+    tests/test_user_prompt_submit_hook.py, which drives the hook.
+
+    What this DOES pin, and it is worth pinning: with a page of `k *
+    _RESEND_OVERFETCH` the reserved lexical row lands at the LAST index, outside
+    the first k. That is a property of tail-reservation, and it is the reason the
+    rail's own cut can drop it — so a head/tail flip in the fusion trips here
+    while the rail consequence is narrated rather than asserted.
+    """
+    from techne.config import Config
+    from techne.hooks.user_prompt_submit import _RESEND_OVERFETCH
+
+    k = Config().hooks.per_turn_recall_limit
+    page = k * _RESEND_OVERFETCH
+    fake_fts, fake_vec = _canned_channels(page)
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    rows = search(db_path, "anything", limit=page, use_vectors=True)
+
+    assert len(rows) == page
+    reserved = [i for i, r in enumerate(rows) if r["match_source"] == "fts"]
+    assert reserved == [page - 1], "the reserved slot is not at the tail any more"
+    assert not [r for r in rows[:k] if r["match_source"] == "fts"], (
+        "the reserved row moved inside the first k — if that is deliberate, it is "
+        "the search()-side fix for techne#831 and the rail pin should flip too"
+    )
+
+
+def test_no_fts_only_hits_leaves_the_vec_page_untouched(db_path, monkeypatch) -> None:
+    """When the channels agree completely the floor is 0 and the page is exactly
+    what it was before #827 — the fix is inert on the queries #401 optimised."""
+    fake_vec = [
+        {"source_table": "knowledge", "id": i + 100, "content": str(i + 100), "distance": 0.1 * i}
+        for i in range(1, 11)
+    ]
+    # Every FTS row is also in the vec channel -> no FTS-only hits to place.
+    fake_fts = [
+        {"source_table": "knowledge", "id": r["id"], "content": r["content"], "rank": -1.0}
+        for r in fake_vec
+    ]
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", limit=10, use_vectors=True)
+
+    assert [r["id"] for r in results] == [r["id"] for r in fake_vec]
+    assert all(r["match_source"] == "fts+vec" for r in results)
+
+
+def test_small_page_still_reserves_a_slot(db_path, monkeypatch) -> None:
+    """A 5-row page still gets its slot: 4 vec + 1 lexical, not 5 + 0.
+
+    NOT "the per-turn rail's page", which is what this docstring claimed until
+    #829 r3. `per_turn_recall_limit` IS 5, but the rail multiplies it by
+    `_RESEND_OVERFETCH` before calling `search()` — see the test below. This is
+    the smallest page the floor must survive rounding on, which is a real
+    function-level property and worth its own pin; it is only the justification
+    that was wrong.
+    """
+    fake_fts, fake_vec = _canned_channels()
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", limit=5, use_vectors=True)
+
+    assert [r["match_source"] for r in results] == ["vec", "vec", "vec", "vec", "fts"]
+    assert results[-1]["id"] == 1
 
 
 def test_vec_channel_preserves_knowledge_type_through_fusion(db_path, monkeypatch):
