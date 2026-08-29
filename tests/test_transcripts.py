@@ -10,6 +10,7 @@ from techne.core.documents import get_document, list_documents
 from techne.core.librarian import librarian_db
 from techne.core.transcripts import (
     Transcript,
+    TranscriptSource,
     TranscriptTurn,
     derive_title,
     index_transcripts,
@@ -243,3 +244,48 @@ def test_index_transcripts_uses_the_sources_dialogue_hook(tmp_path):
     index_transcripts(config, hooked)
     titles = {d["title"] for d in list_documents(librarian_db(config))}
     assert "the actual question" in titles
+
+
+def test_optional_hooks_are_not_structural_members_of_the_protocol():
+    """techne#818. ``TranscriptSource`` is ``@runtime_checkable``, and
+    ``isinstance()`` enforces every ANNOTATED non-method data member by ``hasattr``
+    on EVERY Python this project supports — measured 2026-08-29 on 3.9 through
+    3.14, and independently re-measured in review against the verbatim pre-fix
+    member set. NOT "3.12+", which earlier copies of this note claimed: 3.12
+    rewrote the machinery (``__protocol_attrs__`` caching), it did not introduce
+    the enforcement. The distinction matters because ``requires-python`` is >=3.11
+    while CI matrixes only 3.12 and 3.13, so "3.12+" tells the one reader most
+    likely to be checking that the hazard is not theirs.
+
+    Annotating an optional hook therefore makes it REQUIRED, which is
+    the opposite of what both hooks are documented to be: #817 did it to
+    ``dialogue_text`` and #629 had already done it to ``unreadable``, so the
+    minimal adapter shape they exist for stopped satisfying the Protocol.
+
+    Both are conventions read with ``getattr``. Neither may be annotated.
+    """
+
+    class Minimal:
+        """The #96/#666 adapter shape — declares no optional hook at all."""
+
+        platform = "opencode"
+
+        def iter_transcripts(self):
+            return iter(())
+
+    class WithUnreadableOnly:
+        """Takes one hook and skips the other; both directions must pass."""
+
+        platform = "opencode"
+        unreadable = []
+
+        def iter_transcripts(self):
+            return iter(())
+
+    class NotASource:
+        platform = "opencode"  # no iter_transcripts
+
+    assert isinstance(Minimal(), TranscriptSource)
+    assert isinstance(WithUnreadableOnly(), TranscriptSource)
+    # The Protocol keeps its teeth: the one genuinely REQUIRED member still bites.
+    assert not isinstance(NotASource(), TranscriptSource)
