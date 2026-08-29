@@ -245,7 +245,9 @@ def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
     [
         (20, 50, 1),   # DOES NOT SCALE with the page — see the ablation below
         (10, 50, 1),   # techne_recall / techne_search
-        (5, 50, 1),    # per-turn recall injection
+        (5, 50, 1),    # smallest page the floor must survive rounding on. NOT
+                       # "the per-turn rail's page" — the rail calls search() at
+                       # k * _RESEND_OVERFETCH = 15 (#829 r3).
         (3, 50, 1),
         (2, 50, 1),
         (1, 50, 0),    # no room to reserve: the one slot stays with vec (#401)
@@ -350,29 +352,28 @@ def test_duplicate_fts_keys_do_not_shorten_the_page(db_path, monkeypatch) -> Non
     assert [r["id"] for r in results] == [101, 102, 103, 104, 105, 106, 107, 108, 109, 1]
 
 
-def test_the_per_turn_rail_cuts_off_the_reserved_slot(db_path, monkeypatch) -> None:
-    """THE FLOOR DOES NOT REACH THE SESSION THROUGH THE PER-TURN RAIL (#829 r3).
+def test_search_hybrid_reserves_the_tail_slot_outside_the_first_k(db_path, monkeypatch) -> None:
+    """THIS PINS `search()`, NOT THE RAIL (#829 r4 Important 3).
 
-    Pinned because three docs claimed it did. The rail asks `search()` for
-    `per_turn_recall_limit * _RESEND_OVERFETCH` rows — 5 * 3 = 15, over-fetching
-    so session-dedup cannot thin the delivery below k (techne#576) — and then
-    cuts to k itself at user_prompt_submit.py:656. This floor reserves the
-    TAIL, so the lexical row is index 14 of 15 and the rail's own `[:k]` drops
-    it before the session sees anything.
+    An earlier name — test_the_per_turn_rail_cuts_off_the_reserved_slot — was a
+    lie about the layer. This test monkeypatches both channels and asserts over
+    `search()`'s own output; it never executes user_prompt_submit.py, so A
+    RAIL-SIDE FIX TO techne#831 WILL NOT TRIP IT. Prudence proved that by
+    rewriting the rail's `[:k]` to preserve the lexical row and watching all 29
+    tests here stay green. The pin that flips is
+    test_the_rail_drops_the_reserved_lexical_row in
+    tests/test_user_prompt_submit_hook.py, which drives the hook.
 
-    "Usually", not "always": the suppression steps run between the two cuts, so
-    a turn dropping 10+ of the 14 head rows would deliver it. The pin is the
-    full-vec case — the one #827 is about — where nothing is dropped.
-
-    This is a caller-contract problem, not a fusion one: fixing it means placing
-    the reserved row inside the first k, or having the rail stop discarding it.
-    Tracked as techne#831. If this test starts failing because the row now lands
-    inside the cut, that is the fix arriving, and the assertion should be
-    inverted rather than deleted.
+    What this DOES pin, and it is worth pinning: with a page of `k *
+    _RESEND_OVERFETCH` the reserved lexical row lands at the LAST index, outside
+    the first k. That is a property of tail-reservation, and it is the reason the
+    rail's own cut can drop it — so a head/tail flip in the fusion trips here
+    while the rail consequence is narrated rather than asserted.
     """
+    from techne.config import Config
     from techne.hooks.user_prompt_submit import _RESEND_OVERFETCH
 
-    k = 5
+    k = Config().hooks.per_turn_recall_limit
     page = k * _RESEND_OVERFETCH
     fake_fts, fake_vec = _canned_channels(page)
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
@@ -384,8 +385,8 @@ def test_the_per_turn_rail_cuts_off_the_reserved_slot(db_path, monkeypatch) -> N
     reserved = [i for i, r in enumerate(rows) if r["match_source"] == "fts"]
     assert reserved == [page - 1], "the reserved slot is not at the tail any more"
     assert not [r for r in rows[:k] if r["match_source"] == "fts"], (
-        "a lexical row now survives the rail's [:k] cut — if that is deliberate, "
-        "techne#831 has been fixed and this pin should be inverted"
+        "the reserved row moved inside the first k — if that is deliberate, it is "
+        "the search()-side fix for techne#831 and the rail pin should flip too"
     )
 
 

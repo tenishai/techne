@@ -929,12 +929,28 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
         2                            0.833        0.528
         3 (the first cut)            0.833        0.528
 
-    AND AT limit=5, THE SMALLER-PAGE ARM — not, as an earlier draft of this
-    docstring said, "the per-turn rail's page" (Prudence, #829 r2 asked for the
-    arm under that label and corrected it herself in r3). One slot is 20% of a
-    5-row page, the same PROPORTION that costs a gold at limit=10, so the arm
-    was expected to bite and does not: floor 0 and floor 1 are identical, at
-    paraphrase r@5 0.667 / MRR 0.5, with exact, filter and negative all 1.0.
+    ONLY THE limit=10 ARM CAN SHOW COST, AND THE OTHER TWO ARE CITED FOR WHAT
+    THEY CANNOT MEASURE UNLESS THIS SAYS SO (Prudence, #829 r4 Important 1).
+    The cost mechanism is `g385_dbpool` at vec-rank 9 being truncated off the
+    head, so it can appear only where the head budget ``limit - floor`` drops
+    below 9. Forced across the whole range on the pinned gold set:
+
+        limit=5,  scored r@5   FLAT at every expressible floor (0.667 / 0.5) —
+                               reserving 4 of 5 slots moves nothing, because the
+                               gold is off the page at ANY floor. This arm
+                               CANNOT show cost.
+        limit=10, scored r@10  floors 0-1: 1.0 / 0.546; floors 2-4: 0.833 /
+                               0.528; floors 5+: 0.667 / 0.5. THE ARM WITH TEETH.
+        limit=15, scored r@10  FLAT through floor 6 (1.0 / 0.546); floor 7:
+                               0.833 / 0.528 — head budget 8, below 9.
+
+    So "identical at limit=5" and "identical at limit=15" are true and nearly
+    uninformative: at 15, floors 3 and 6 are identical too. An earlier draft
+    offered the 5-arm as evidence that "20% of a page is affordable" — the same
+    PROPORTION that costs a gold at 10. That inference was unsound; the arm does
+    not bite because it cannot, not because the proportion is cheap. (The label
+    was Prudence's from #829 r2 and she corrected it herself; the unsound
+    inference built on it was mine.)
 
     THE PER-TURN RAIL'S REAL PAGE IS 15, AND THE FLOOR USUALLY DOES NOT REACH
     THE SESSION THROUGH IT. `config.py` sets `per_turn_recall_limit = 5`, but
@@ -942,10 +958,17 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     `_RESEND_OVERFETCH = 3`, so `search()` is called at 15 and the rail cuts to
     5 itself at line 656 after dedup and the relevance floor. Since this floor
     reserves the TAIL, the reserved row lands at index 14 of 15 and the rail's
-    own `[:k]` drops it — see test_the_per_turn_rail_cuts_off_the_reserved_slot.
-    It is "usually not delivered" rather than "never": the suppression steps run
-    between the two cuts, so a turn that drops 10+ of the 14 head rows does
-    deliver it. THE COST CLAIM IS UNAFFECTED — measured at limit=15, floor 1:
+    own `[:k]` drops it — see test_the_rail_drops_the_reserved_lexical_row in
+    tests/test_user_prompt_submit_hook.py, which drives the hook rather than
+    asserting a rail property from a seam that cannot observe one.
+    It is "usually not delivered" rather than "never": delivery needs 10+ of the
+    14 head rows dropped between the two cuts, and only TWO steps can drop any —
+    `_drop_pull_only` and session dedup. `_apply_relevance_floor` is inert by
+    default (both `per_turn_recall_floor_*` default to None), so it thins
+    nothing. Session dedup measures 46.1% across deliveries against the ~71% a
+    single turn would need, so "usually not" is if anything generous toward
+    delivery (Prudence, #829 r4). Neither of us has measured the rate directly.
+    THE COST CLAIM IS UNAFFECTED — measured at limit=15, floor 1:
     paraphrase r@10 1.0 / MRR 0.546, exact/filter/negative 1.0. What is wrong is
     the DELIVERY claim, not the price. Fixing it means placing the reserved row
     inside the first k, or having the rail stop discarding it; both are changes
@@ -964,9 +987,14 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
         limit=20 -> 1    limit=10 -> 1    limit=5 -> 1
         limit=3  -> 1    limit=2  -> 1    limit=1 -> 0
 
-    A wider page may well afford more, but nobody has measured one, and the
-    only arm anyone HAS measured says 2 already costs a gold. Raising this
-    means re-running the ablation above and recording the numbers here.
+    A WIDER PAGE DOES AFFORD MORE, AND THAT IS A TRAP RATHER THAN A LICENCE.
+    limit=15 tolerates a floor of 6; limit=10 does not tolerate 2. If you widen
+    the floor and re-run "the ablation" at 15 — the page the rail actually uses,
+    and therefore the one that looks production-relevant — you get a clean
+    1.0 / 0.546 up to floor 6 and ship a regression that limit=10 would have
+    caught. RE-RUN THE limit=10 ARM. It is the discriminating one, for the
+    reason given above: it is where the head budget crosses the gold's rank.
+    Record the numbers here when you do.
 
     THE OTHER HALF OF THE TRADE, so a future reader is not shown only the cost
     (Prudence, #829 r2). A wider floor DOES buy something measurable, and this
@@ -1134,11 +1162,15 @@ def search(
     vec_keys = {(r["source_table"], r["id"]) for r in vec_results}
     fts_only = [r for r in fts_results if (r["source_table"], r["id"]) not in vec_keys]
 
-    # Size the floor off DISTINCT keys. DORMANT AT THE CURRENT FLOOR (#829 r2):
-    # with floor 1 this is indistinguishable from len(fts_only) for every input,
-    # so no test at this head can separate them. It becomes load-bearing only if
-    # the floor widens, which is when a duplicate-inflated count would reserve
-    # slots the tail cannot fill and shorten the page. See _fts_floor.
+    # Size the floor off DISTINCT keys. UNREACHABLE, NOT MERELY DORMANT (#829
+    # r3/r4): no producer that can reach this function emits a duplicate key at
+    # ANY floor — search_fts joins each *_fts rowid 1:1 to its base table, tags a
+    # distinct source_table per table, and the #70 OR-fallback REASSIGNS results
+    # rather than appending. Widening the floor does NOT make this live; only a
+    # new producer would. Kept so search() stays correct if one ever exists.
+    # (An earlier version of this comment said "becomes load-bearing if the floor
+    # widens". That was wrong and is the claim #829 r3 removed from _fts_floor —
+    # this copy is the one r4 caught still carrying it.)
     floor = _fts_floor(limit, len({(r["source_table"], r["id"]) for r in fts_only}))
     seen: set[tuple] = set()
     head: list[dict] = []
