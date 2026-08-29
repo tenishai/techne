@@ -157,6 +157,19 @@ class HookConfig:
     per_turn_recall: bool = False
     # Hard cap on the number of knowledge rows injected per turn.
     per_turn_recall_limit: int = 5
+    #: CHARACTER CAP PER INJECTED ROW (techne#826). Was a bare `[:200]` in
+    #: `_build_context` from the day per-turn recall landed (ffcb1a6) — the only
+    #: fixed number in this rail's tuning surface, and the one that decides
+    #: whether a multi-step SOP arrives as a procedure or as its title.
+    #:
+    #: THE DEFAULT IS DELIBERATELY UNCHANGED. Five rows at 200 is ~250 tokens on
+    #: EVERY prompt, and techne#808 measures per-session context cost as already
+    #: the dominant one; raising this for everyone is a cost decision an operator
+    #: should make, not a default. What changed instead is honesty — see
+    #: `_truncate_for_injection`: the cut now lands on a boundary and announces
+    #: itself, so a severed row can be recognised and pulled in full rather than
+    #: read as the whole rule.
+    per_turn_recall_chars: int = 200
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable
     # (it left no trace before). The SessionStart tier-0 block is logged the same
@@ -889,6 +902,7 @@ class Config:
                 codex_edit_rail_limit=int(h.get("codex_edit_rail_limit", 10)),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
+                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 200)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
                 per_turn_recall_floor_vec_distance=(
                     float(h["per_turn_recall_floor_vec_distance"])

@@ -7,6 +7,19 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- Per-turn recall no longer severs every injected fact mid-word. `_build_context`
+  cut each row with a bare `content[:200]` from the day the rail landed; measured
+  over one real session, **58 of 58 injected facts ended mid-word** — a
+  cross-reference cut at `CORRECTS techne#`, a remedy command cut mid-path. The
+  cut now lands on a sentence boundary when one falls in the last 40% of the
+  budget, else a word boundary, and a truncated row ends in `…` with one header
+  line naming the cap, so a severed row announces itself instead of reading as the
+  whole rule. **The 200-character default is unchanged**: five rows at 200 is
+  ~250 tokens on every prompt and #808 measures per-session context as already the
+  dominant cost, so raising it is an operator decision — now available as
+  `hooks.per_turn_recall_chars`, the last fixed number in this rail's tuning
+  surface (#826).
+
 - Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
   adapter that omits them satisfies `isinstance` again. `TranscriptSource` is
   `@runtime_checkable`, and `isinstance()` enforces every *annotated* non-method data

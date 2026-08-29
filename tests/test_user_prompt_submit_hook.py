@@ -366,10 +366,13 @@ def test_document_card_is_not_pushed(home, monkeypatch, capsys):
     """Arch cards are pull-only on THIS rail too (techne#561, decided 2026-08-13).
 
     This replaces a test that pinned the opposite behaviour while the question was
-    open. What decided it: `_build_context` truncates every row to 200 chars, and
-    an arch card's value is its full body — a 200-char slice chosen by embedding
-    similarity is a pointer at best. #449's edit-fired rail, matching on `anchor:`
-    paths exactly, is the delivery mechanism cards are supposed to get.
+    open. What decided it: `_build_context` truncates every row to
+    `hooks.per_turn_recall_chars` (200 by default), and an arch card's value is
+    its full body — a slice chosen by embedding similarity is a pointer at best.
+    techne#826 made the cap configurable and the cut boundary-aware; neither
+    changes this argument, because a slice is a pointer at any size. #449's
+    edit-fired rail, matching on `anchor:` paths exactly, is the delivery
+    mechanism cards are supposed to get.
     """
     _write_config(home, per_turn_recall=True)
     _seed_raw("Postgres was chosen over MongoDB for join semantics.", "document_card")
@@ -486,15 +489,84 @@ class TestInjectedTypeLabel:
         assert "[note]" in self._ctx([{"id": 5, "content": "c"}])
 
     def test_the_content_truncation_is_pinned(self):
-        """200 chars, and it was pinned by nothing — removing the slice entirely
-        left the suite green (#566 r2) while a recorded `document_card` decision
-        rests on it. An unbounded line here is a per-turn injection whose size is
-        set by whatever the longest matching row happens to be."""
+        """The CAP, still 200 by default, and it was pinned by nothing — removing
+        the slice entirely left the suite green (#566 r2) while a recorded
+        `document_card` decision rests on it. An unbounded line here is a per-turn
+        injection whose size is set by whatever the longest matching row happens to
+        be.
+
+        This row is 500 unbroken `x`, so there is no boundary for techne#826's
+        boundary-seeking to find and the cut is hard at the cap — which is what
+        keeps this assertion a test of the CAP rather than of the cut point. The
+        boundary behaviour is pinned separately below."""
         out = self._ctx(
             [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
         )
         assert "x" * 200 in out
         assert "x" * 201 not in out
+
+    def test_a_cut_row_never_ends_mid_word(self):
+        """techne#826, the measured defect: over one real session 58 of 58 injected
+        facts ended mid-word — a cross-reference severed at `CORRECTS techne#`, a
+        remedy command severed mid-path. The agent receives something that looks
+        like the rule, is topically correct, and is missing the operative half.
+        """
+        body = (
+            "THE VERSION STRING CANNOT IDENTIFY THE RUNNING CODE. Two independent "
+            "defects, both measured 2026-08-13. CORRECTS techne#1078 and supersedes "
+            "the guidance recorded there, which nobody has re-read since. The rest "
+            "of this row exists to carry it past the cap so the cut actually fires."
+        )
+        assert len(body) > 200, "fixture must exceed the cap or it tests nothing"
+        out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": body}])
+        rendered = out.splitlines()[-1]
+        assert rendered.endswith(" …")
+
+        # THE ASSERTION IS "the cut is not inside a word", not "the cut is a full
+        # stop". This fixture's only sentence end sits below the 40% floor, so the
+        # correct behaviour here is the WORD-boundary fallback — an earlier draft
+        # of this test demanded `.!?` and failed against working code.
+        visible = rendered.split("] ", 1)[1].removesuffix(" …")
+        assert body.startswith(visible), "the cut text must be a prefix of the row"
+        assert body[len(visible)] in " \t\n", (
+            f"cut lands mid-word: ...{visible[-30:]!r} then {body[len(visible)]!r}"
+        )
+
+    def test_a_cut_row_announces_itself_and_an_uncut_one_does_not(self):
+        """A truncated row that looks complete is the whole defect. The marker is
+        what lets a reader tell "I have this" from "I have the first sentence of
+        this", and the header names the knob so the remedy is in the block."""
+        long_out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": "word " * 200}])
+        assert " …" in long_out
+        assert "per_turn_recall_chars" in long_out
+
+        short_out = self._ctx([{"id": 2, "knowledge_type": "fact", "content": "short row"}])
+        assert " …" not in short_out
+        assert "per_turn_recall_chars" not in short_out, (
+            "an uncut block must not carry a truncation notice — a warning that "
+            "fires when nothing was cut trains the reader to ignore it"
+        )
+
+    def test_boundary_seeking_falls_back_rather_than_gutting_the_row(self):
+        """THE 40% FLOOR IS THE POINT. Without it, a row whose only sentence end
+        sits at char 12 would be cut to 12 characters in the name of tidiness —
+        boundary-seeking made strictly worse than the bare slice it replaced.
+        """
+        from techne.hooks.user_prompt_submit import _truncate_for_injection
+
+        body = "Yes. " + "a" * 400
+        out, was_cut = _truncate_for_injection(body, 200)
+        assert was_cut
+        assert len(out) > 150, f"gutted to {len(out)} chars at the early full stop"
+
+    def test_the_cap_is_read_from_config_not_hardcoded(self):
+        """techne#826 direction (3): this was the only fixed number in the rail's
+        tuning surface, while `per_turn_recall_limit` beside it was already a knob.
+        """
+        from techne.hooks.user_prompt_submit import _build_context
+
+        rows = [{"id": 1, "knowledge_type": "fact", "content": "word " * 200}]
+        assert len(_build_context(rows, 500)) > len(_build_context(rows, 200))
 
     def test_the_line_shape_is_pinned_including_the_id_prefix(self):
         """The `⟦techne#id⟧` prefix was pinned by nothing — deleting it left the

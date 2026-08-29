@@ -203,8 +203,9 @@ def _startup_block(config, session_id: str | None) -> str | None:
 # `document_card` is the decided half (Richard, 2026-08-13). The case for keeping
 # arch cards here was that a query-driven per-turn rail IS the "pull at the moment
 # of need" #383 and techne#945 wanted. What decided it against: `_build_context`
-# truncates every row to 200 chars, and an arch card's value is its FULL body —
-# that is the entire premise of the gist-plus-pointer design. A 200-char slice
+# truncates every row to `hooks.per_turn_recall_chars` (200 by default, techne#826
+# made it a knob and the cut boundary-aware), and an arch card's value is its FULL
+# body — that is the entire premise of the gist-plus-pointer design. A 200-char slice
 # chosen by embedding similarity is a pointer at best, and at worst it is the
 # #539 hazard in miniature: prose that vouches for a seam nobody re-read. The
 # right delivery already has a design — #449's edit-fired rail, exact path match
@@ -469,7 +470,51 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     ]
 
 
-def _build_context(rows: list[dict]) -> str:
+def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
+    """Cut ``content`` to ``limit`` chars at a boundary, reporting whether it cut.
+
+    techne#826. This rail shipped with a bare ``content[:200]`` from the day it
+    landed, and measured over one real session it severed 58 of 58 injected facts
+    mid-word — a cross-reference cut at ``CORRECTS techne#``, a remedy command cut
+    mid-path. The failure is quiet in the worst way: the agent receives something
+    that looks like the rule, is topically correct, and is missing the operative
+    half, so it reads as "I have this" rather than "I have the first sentence of
+    this".
+
+    TWO CHANGES, AND NEITHER IS A BIGGER BUDGET. The cut lands on a sentence
+    boundary if one is available in the last 40% of the budget, else on a word
+    boundary, else hard; and a cut row ends with a single ``…`` so it ANNOUNCES
+    itself instead of impersonating a complete one. The caller adds one header
+    line naming the cap when any row was cut — one line per block rather than a
+    suffix per row, because a marker that costs more than the content it explains
+    is its own kind of dishonest.
+
+    The floor of 40% is what stops boundary-seeking from being worse than the bare
+    cut: without it, a row whose only full stop sits at char 12 would be truncated
+    to 12 chars in the name of tidiness.
+    """
+    if limit <= 0 or len(content) <= limit:
+        return content, False
+
+    window = content[:limit]
+    floor = int(limit * 0.6)
+
+    # Prefer a sentence end; `. ` and friends, not a bare `.`, so version numbers
+    # and `techne#1.2`-shaped tokens are not read as terminators.
+    best = -1
+    for end in (". ", ".\n", "! ", "?\n", "? ", "!\n"):
+        best = max(best, window.rfind(end))
+    if best >= floor:
+        return window[: best + 1].rstrip() + " …", True
+
+    cut = window.rfind(" ")
+    if cut >= floor:
+        return window[:cut].rstrip() + " …", True
+
+    return window.rstrip() + " …", True
+
+
+def _build_context(rows: list[dict], char_limit: int = 200) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 
     Mirrors egress `_render_line` formatting: each row carries its ⟦techne#id⟧
@@ -483,11 +528,12 @@ def _build_context(rows: list[dict]) -> str:
     reader does not read the fallback as EVIDENCE that it sometimes is, and
     weaken a guard on that basis. The tests already record this.
     """
-    lines = [
+    header = [
         "## techne — durable facts relevant to this prompt",
         "> Per-turn recall (techne#109); recalled memory, not ground truth — verify first.",
-        "",
     ]
+    lines: list[str] = []
+    truncated_any = False
     for r in rows:
         rid = r.get("id")
         # `knowledge_type` FIRST, and the ordering is the whole fix (techne#566).
@@ -516,9 +562,15 @@ def _build_context(rows: list[dict]) -> str:
         # observation) carry no `knowledge_type`, and for those the table IS the
         # most honest label available.
         rtype = r.get("knowledge_type") or r.get("source_table") or "note"
-        content = (r.get("content") or "")[:200]
+        content, was_cut = _truncate_for_injection(r.get("content") or "", char_limit)
+        truncated_any = truncated_any or was_cut
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
-    return "\n".join(lines)
+    if truncated_any:
+        header.append(
+            f"> Rows ending in … are cut at {char_limit} chars "
+            "(hooks.per_turn_recall_chars); recall the id for the full entry."
+        )
+    return "\n".join(header + [""] + lines)
 
 
 def main() -> None:
@@ -654,7 +706,9 @@ def main() -> None:
                 # consume one of the k slots that a clearing row could have used.
                 rows = _apply_relevance_floor(rows, config)
                 rows = rows[:k]
-            recall_block = _build_context(rows) if rows else ""
+            recall_block = (
+                _build_context(rows, config.hooks.per_turn_recall_chars) if rows else ""
+            )
             if recall_block:
                 blocks.append(recall_block)
             # techne#329 — make the READ path auditable (the audit that motivated
