@@ -290,3 +290,25 @@ def test_an_unusable_dunder_file_degrades_instead_of_raising(monkeypatch, bad_fi
 
     monkeypatch.setattr(techne, "__file__", bad_file)
     assert techne._resolve_version() == importlib.metadata.version("techne")
+
+
+def test_a_versionless_dist_info_degrades_instead_of_returning_none(tmp_path, monkeypatch):
+    """`importlib.metadata.version()` does not only raise — it RETURNS None when a
+    dist-info's METADATA has no `Version:` header (measured on 3.14.7, which warns
+    that this will become a KeyError).
+
+    Without this check `_resolve_version` — annotated `-> str` — hands None to
+    `click.version_option()` and to the MCP `serverInfo` string, and on the Python
+    that makes good on the warning it raises KeyError, which is not
+    `PackageNotFoundError` and escapes a narrow guard entirely.
+    """
+    import importlib.metadata
+
+    import techne
+
+    pkg = tmp_path / "site-packages" / "techne"
+    pkg.mkdir(parents=True)
+    monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: None)
+
+    assert techne._resolve_version() == "0.0.0+unknown"

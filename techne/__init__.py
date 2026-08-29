@@ -115,7 +115,19 @@ def _resolve_version() -> str:
     dist-info is known-unreliable by the paragraph above and falling through to it
     silently restores #825 under a ``build: "checkout"`` label. An installed build
     reads the dist-info and returns ``0.0.0+unknown`` only when the distribution is
-    absent. Either way an unreadable tree is a reason to report less confidently,
+    absent or declares no version.
+
+    THERE IS A THIRD ROUTE INTO THAT SECOND BRANCH, and it is not an installed
+    build — it is "we could not tell". When ``__file__`` is unusable (frozen,
+    zipimport, or simply not a str) there is no package path to test and no
+    ``pyproject.toml`` to prefer, so the dist-info is trusted. That is the right
+    answer rather than a concession: staleness is a property of an EDITABLE install
+    whose checkout moved underneath the stamp, and a frozen or zipimported artefact
+    is the one shape where the code cannot drift away from its dist-info at all.
+    Returning ``0.0.0+unknown`` there would degrade the one case that can still
+    answer correctly.
+
+    Either way an unreadable tree is a reason to report less confidently,
     never to raise on ``import techne``: `cli.py`, `mcp_server.py` and
     `core/health.py` all bind ``__version__`` at module scope, so an exception
     escaping here is the CLI and the MCP server failing to import.
@@ -175,12 +187,27 @@ def _resolve_version() -> str:
             pass
         return "0.0.0+unknown"
 
-    from importlib.metadata import PackageNotFoundError, version
+    # THE THIRD GUARD. Two were widened above and this one was left narrow in the
+    # same function — the same oversight, one level along, as widening the inner
+    # tuple while leaving the outer at NameError.
+    #
+    # AND IT IS NOT ONLY THE RAISE THAT NEEDED CHECKING. `version()` RETURNS None
+    # when a dist-info's METADATA carries no `Version:` header — measured on
+    # 3.14.7, which emits "Implicit None on return values is deprecated and will
+    # raise KeyErrors". So today a versionless dist-info makes this `-> str`
+    # function return None into `click.version_option(version=None)` and the MCP
+    # `serverInfo` string, and on the Python that makes good on that warning it
+    # raises KeyError — not PackageNotFoundError, so it would escape a narrow
+    # guard entirely. The RETURN is therefore validated as well as the call.
+    from importlib.metadata import version
 
     try:
-        return version("techne")
-    except PackageNotFoundError:
-        return "0.0.0+unknown"
+        installed = version("techne")
+    except Exception:
+        installed = None
+    if isinstance(installed, str) and installed:
+        return installed
+    return "0.0.0+unknown"
 
 
 def __getattr__(name: str):
