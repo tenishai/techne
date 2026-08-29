@@ -165,6 +165,9 @@ def test_a_checkout_reports_pyproject_not_the_dist_info_stamp(tmp_path, monkeypa
 
     pkg = tmp_path / "techne"
     pkg.mkdir()
+    # `name` is written for realism only — NOTHING consults it, so a checkout
+    # believes any neighbouring pyproject. Unreachable in techne's shipped install
+    # shapes (pipx and pip venvs all sit under site-packages), hence not guarded.
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "techne"\nversion = "9.9.9"\n')
     monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
 
@@ -186,7 +189,11 @@ def test_an_installed_build_still_trusts_dist_info(tmp_path, monkeypatch):
     (pkg.parent / "pyproject.toml").write_text('[project]\nversion = "9.9.9"\n')
     monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
 
-    assert techne._resolve_version() != "9.9.9"
+    import importlib.metadata
+
+    # POSITIVE, not `!= "9.9.9"`: the negative also passes if the dist-info lookup
+    # broke entirely and returned "0.0.0+unknown", which would witness nothing.
+    assert techne._resolve_version() == importlib.metadata.version("techne")
 
 
 @pytest.mark.parametrize(
@@ -196,12 +203,23 @@ def test_an_installed_build_still_trusts_dist_info(tmp_path, monkeypatch):
         "this is not valid toml {{{",  # unparseable
         '[project]\nname = "techne"\n',  # parseable, no version key
         '[project]\nversion = ""\n',  # present but empty
+        '[[project]]\nversion = "9.9.9"\n',  # parseable, WRONG SHAPE: subscripts a list
     ],
-    ids=["missing", "unparseable", "no-version-key", "empty-version"],
+    ids=["missing", "unparseable", "no-version-key", "empty-version", "wrong-shape"],
 )
 def test_an_unreadable_checkout_degrades_instead_of_raising(tmp_path, monkeypatch, contents):
-    """`import techne` must not blow up because a checkout is malformed. Reporting
-    less confidently is the correct failure; raising on import is not.
+    """`import techne` must not blow up because a checkout is malformed, and it must
+    not quietly answer from the dist-info either.
+
+    The `wrong-shape` case is a regression: `[[project]]` parses fine and then
+    subscripts a LIST, raising TypeError — which was missing from the except tuple
+    and escaped `__getattr__`. Because cli.py, mcp_server.py and core/health.py all
+    do `from techne import __version__` at module scope, that was the CLI and the
+    MCP server failing to import, not a degraded string.
+
+    The assertion is `== "0.0.0+unknown"`, not merely "some string": on a checkout
+    the dist-info is known-unreliable by this function's own premise, so falling
+    back to it here would silently restore #825 under a `build: "checkout"` label.
     """
     import techne
 
@@ -211,5 +229,40 @@ def test_an_unreadable_checkout_degrades_instead_of_raising(tmp_path, monkeypatc
         (tmp_path / "pyproject.toml").write_text(contents)
     monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
 
+    assert techne._resolve_version() == "0.0.0+unknown"
+
+
+def test_a_checkout_never_answers_from_the_dist_info(tmp_path, monkeypatch):
+    """The Important-2 regression, stated as the invariant it protects.
+
+    `_revision_info` labels a non-site-packages tree `build: "checkout"` and reads a
+    LIVE revision from git. If `_resolve_version` answers from `importlib.metadata`
+    on that same tree, the banner prints a stale version beside a live revision
+    under a "checkout" label — #825 verbatim, reached by a different route and with
+    no signal that it happened. An earlier revision of this fix did exactly that, by
+    falling through to the installed path when pyproject could not be read.
+
+    This is the discriminating assertion: the checkout branch must NOT return the
+    dist-info value even when it is sitting right there and would look plausible.
+
+    It has to be synthetic. On the real tree the two sources agree (both 0.16.0),
+    so an end-to-end health-payload assertion cannot tell the good behaviour from
+    the bad one — which is the same reason `test_installed_version_matches_pyproject`
+    was green through #763 and #825.
+    """
+    import importlib.metadata
+
+    import techne
+
+    installed = importlib.metadata.version("techne")
+
+    pkg = tmp_path / "techne"
+    pkg.mkdir()  # a checkout with NO pyproject: the branch cannot read a version
+    monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
+
     resolved = techne._resolve_version()
-    assert isinstance(resolved, str) and resolved
+    assert resolved == "0.0.0+unknown"
+    assert resolved != installed, (
+        "the checkout branch fell back to the dist-info, which is the exact "
+        "stale-version-beside-live-revision failure #825 exists to remove"
+    )

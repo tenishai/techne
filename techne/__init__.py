@@ -122,8 +122,28 @@ def _resolve_version() -> str:
     """
     from pathlib import Path
 
-    package_dir = Path(__file__).resolve().parent
-    if "site-packages" not in str(package_dir):
+    try:
+        package_dir = Path(__file__).resolve().parent
+    except NameError:  # frozen / zipimport: no __file__ to locate ourselves by
+        package_dir = None
+
+    if package_dir is not None and "site-packages" not in str(package_dir):
+        # A CHECKOUT. pyproject is the only trustworthy source here, and if it
+        # cannot be read we say so rather than reaching for the dist-info.
+        #
+        # THE FALLBACK IS DELIBERATELY NOT `importlib.metadata` ON THIS BRANCH.
+        # An earlier revision fell through to it, which silently RESTORED the
+        # exact defect this function exists to remove: `_revision_info` still
+        # classifies the tree as `build: "checkout"` and reads a live revision
+        # from git, so a stale dist-info version would print beside a live
+        # revision under a "checkout" label — #825 verbatim, reached by another
+        # route and with no signal that it happened. On a checkout the dist-info
+        # is known-unreliable BY THIS FUNCTION'S OWN PREMISE, so consulting it
+        # here is the one thing that premise forbids.
+        #
+        # `0.0.0+unknown` follows the rule `_revision_info` already sets for
+        # `drifted`: "I could not check" is reported as itself rather than
+        # collapsing into a confident answer.
         try:
             import tomllib
 
@@ -131,8 +151,15 @@ def _resolve_version() -> str:
             declared = data["project"]["version"]
             if isinstance(declared, str) and declared:
                 return declared
-        except (OSError, KeyError, ValueError, ImportError):
-            pass  # unreadable checkout — fall through and report what we can
+        except (OSError, KeyError, TypeError, ValueError, ImportError):
+            # TypeError matters and was missing: `[[project]]` parses fine and
+            # then subscripts a LIST, which escaped the guard and took
+            # `import techne` down with it — and cli.py, mcp_server.py and
+            # core/health.py all do `from techne import __version__` at module
+            # scope, so that is the CLI and the MCP server failing to import,
+            # not a degraded version string.
+            pass
+        return "0.0.0+unknown"
 
     from importlib.metadata import PackageNotFoundError, version
 
