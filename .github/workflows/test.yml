@@ -524,7 +524,55 @@ jobs:
 
       - name: eval_vec gate (#399/#401 — vector/hybrid retrieval + ablation)
         working-directory: techne
+        env:
+          TECHNE_EVAL_METRICS_OUT: ${{ runner.temp }}/eval-head.json
         run: .venv-ci/bin/python -m pytest -m eval_vec -s
+
+      # (#832) THE ABSOLUTE GATE ABOVE CANNOT SEE A ONE-GOLD REGRESSION. Its
+      # paraphrase recall@10 floor is 0.8, and retrieval_gold.yaml sizes it that
+      # way on purpose so "a single gold slipping rank 10->11 (r@10 1.0->0.833)
+      # still passes" — a tolerance for cross-machine BLAS wobble. A real
+      # regression is the same magnitude: 275035a took that class 1.0 -> 0.833 by
+      # evicting one gold and this job went GREEN. Only a human re-running the leg
+      # against the base caught it.
+      #
+      # So run it AGAINST THE BASE ON THIS RUNNER and diff. Two runs on one
+      # machine need NO tolerance: the leg is byte-deterministic (model2vec/potion
+      # is numpy-only static, and conftest's `pinned_model2vec` rebuilds the
+      # singleton pinned to it), verified by running it twice and diffing. Drift
+      # is a CROSS-machine phenomenon and cannot appear here.
+      #
+      # PRs ONLY. On a push the checked-out ref IS main, so base == head and the
+      # comparison is vacuous.
+      #
+      # WHY origin/main AND NOT THE MERGE BASE: this job fetches --depth=1 (see
+      # the fetch step above), so the histories are disjoint and `git merge-base`
+      # finds nothing. Comparing against main's tip is the right question anyway —
+      # it is what merging will produce.
+      #
+      # WHY THE LIBRARY IS SWAPPED RATHER THAN THE WHOLE TREE: the harness has to
+      # be constant across both runs or the measurement moves with the test. So
+      # BASE's `techne/` runs under HEAD's `tests/eval/`. KNOWN LIMIT: a PR whose
+      # eval harness needs a library symbol that main lacks will fail the base run
+      # — loudly, in this step, which is the right direction.
+      - name: Retrieval diff vs origin/main (#832)
+        if: ${{ github.event_name == 'pull_request' }}
+        working-directory: techne
+        env:
+          BASE_METRICS: ${{ runner.temp }}/eval-base.json
+          HEAD_METRICS: ${{ runner.temp }}/eval-head.json
+        run: |
+          set -uo pipefail
+          git checkout origin/main -- techne/
+          TECHNE_EVAL_METRICS_OUT="$BASE_METRICS" \
+            .venv-ci/bin/python -m pytest -m eval_vec -q || \
+            echo "::warning::base run did not pass its own kill-gates; diffing anyway"
+          git checkout HEAD -- techne/
+          test -f "$BASE_METRICS" || {
+            echo "::error::no base metrics produced — cannot diff"; exit 1; }
+          set -e
+          .venv-ci/bin/python scripts/compare_retrieval_metrics.py \
+            "$BASE_METRICS" "$HEAD_METRICS"
 
       # This is the ONLY job with model2vec: `[vectors]` gates it to py>=3.14
       # (pyproject.toml:45) and the matrix is 3.12/3.13, which get fastembed. So
