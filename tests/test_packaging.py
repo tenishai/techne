@@ -124,18 +124,20 @@ sys.exit(0)
 
 
 def test_installed_version_matches_pyproject():
-    """`techne.__version__` resolves through `importlib.metadata.version()` — the
-    INSTALLED dist-info — not `pyproject.toml`. An editable install made at an
-    older version keeps reporting that older version indefinitely, so the running
-    code believes it is a release it is not.
+    """The version a SOURCE TREE reports must be the one its own pyproject declares.
 
-    That value is not cosmetic: `backup_all_dbs` stamps it into every backup
-    manifest as `techne_version`, which is exactly what an operator reads to
-    answer "what wrote this set, and can this techne restore it?" (techne#763).
+    SUPERSEDED IN MECHANISM, KEPT AS A CONTRACT (techne#825). This test used to
+    assert that `techne.__version__` came from `importlib.metadata` and would go
+    red for a developer on a stale editable install. It could not do that job:
+    pytest runs in the repo's own `.venv`, whose dist-info is refreshed whenever
+    anyone runs `pip install -e .`, while the stale stamp that actually bit us
+    lived in the PIPX venv that runs the MCP server and the hooks. Measured
+    2026-08-29: `.venv` dist-info 0.16.0 (green), pipx dist-info 0.15.0 against a
+    0.16.0 checkout (the lie on every banner and backup manifest).
 
-    This test is green on any fresh install — including CI, which installs from
-    the tree under test — and red for precisely the person who needs to know: a
-    developer on a stale editable install, whose remedy is in the message.
+    A test cannot witness an environment it is not running in. So the mechanism
+    moved into the code — `_resolve_version` reads pyproject for a checkout — and
+    what remains here is the end-to-end contract that the two agree.
     """
     import tomllib
 
@@ -148,13 +150,66 @@ def test_installed_version_matches_pyproject():
 
     import techne
 
-    installed = techne.__version__
-    if installed == "0.0.0+unknown":
-        pytest.skip("techne is not installed as a distribution")
+    assert techne.__version__ == declared
 
-    assert installed == declared, (
-        f"techne.__version__ is {installed!r} but pyproject.toml declares "
-        f"{declared!r}. The dist-info in this environment is stale, so every "
-        f"backup manifest written here would be stamped {installed!r}. "
-        f"Remedy: pip install -e ."
-    )
+
+def test_a_checkout_reports_pyproject_not_the_dist_info_stamp(tmp_path, monkeypatch):
+    """techne#825. An editable install stamps dist-info once and never moves it, so
+    for a checkout the dist-info is a known lie and pyproject is the truth.
+
+    Synthetic tree, so this witnesses the RULE rather than whichever environment
+    happens to be running the suite — which is exactly the gap that let the old
+    test stay green through #763 and then #825.
+    """
+    import techne
+
+    pkg = tmp_path / "techne"
+    pkg.mkdir()
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "techne"\nversion = "9.9.9"\n')
+    monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
+
+    assert techne._resolve_version() == "9.9.9"
+
+
+def test_an_installed_build_still_trusts_dist_info(tmp_path, monkeypatch):
+    """The checkout rule must not leak into a real install: there, dist-info IS
+    authoritative and a stray pyproject next to site-packages must be ignored.
+
+    The build test mirrors core/health.py::_revision_info deliberately — a version
+    string that disagrees with the build/revision line printed beside it is the
+    #825 failure itself.
+    """
+    import techne
+
+    pkg = tmp_path / "site-packages" / "techne"
+    pkg.mkdir(parents=True)
+    (pkg.parent / "pyproject.toml").write_text('[project]\nversion = "9.9.9"\n')
+    monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
+
+    assert techne._resolve_version() != "9.9.9"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        None,  # no pyproject.toml at all
+        "this is not valid toml {{{",  # unparseable
+        '[project]\nname = "techne"\n',  # parseable, no version key
+        '[project]\nversion = ""\n',  # present but empty
+    ],
+    ids=["missing", "unparseable", "no-version-key", "empty-version"],
+)
+def test_an_unreadable_checkout_degrades_instead_of_raising(tmp_path, monkeypatch, contents):
+    """`import techne` must not blow up because a checkout is malformed. Reporting
+    less confidently is the correct failure; raising on import is not.
+    """
+    import techne
+
+    pkg = tmp_path / "techne"
+    pkg.mkdir()
+    if contents is not None:
+        (tmp_path / "pyproject.toml").write_text(contents)
+    monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
+
+    resolved = techne._resolve_version()
+    assert isinstance(resolved, str) and resolved

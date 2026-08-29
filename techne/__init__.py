@@ -90,16 +90,61 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
-    # __version__ is resolved lazily too — importlib.metadata.version() alone is
-    # ~35ms, wasted on hook processes that never read the version.
-    if name == "__version__":
-        from importlib.metadata import PackageNotFoundError, version
+def _resolve_version() -> str:
+    """Resolve the version of the code that is actually IMPORTED.
 
+    ``importlib.metadata`` reads the dist-info written at install time, and for
+    an EDITABLE install that stamp never moves when the checkout does — measured
+    four days apart on this machine (#568), then again three days after #763 was
+    closed (#825), where dist-info said ``0.15.0`` while the checkout ran
+    ``0.16.0``. Every surface built on ``__version__`` inherited the lie: the
+    SessionStart banner paired a STALE version with a LIVE revision, so it read
+    as authoritative while half wrong, and ``backup_all_dbs`` stamped the wrong
+    ``techne_version`` into every manifest it wrote.
+
+    For a CHECKOUT the honest source is therefore the checkout's own
+    ``pyproject.toml``, never the dist-info beside it. The build test is
+    ``"site-packages" not in <package path>``, deliberately the SAME rule as
+    ``core/health.py::_revision_info`` — a version string that disagrees with the
+    build/revision line printed next to it is precisely the failure #825
+    describes, so these two must not be allowed to drift apart.
+
+    Falls back to ``importlib.metadata`` when the file is missing or unparseable,
+    and to ``0.0.0+unknown`` when that fails too: an unreadable checkout is a
+    reason to report less confidently, not to raise on ``import techne``.
+
+    Cost: this REPLACES the ~35ms ``importlib.metadata`` call on the checkout
+    path with one small file read and a ``tomllib`` parse, so the lazy-resolution
+    budget this module is built around is preserved rather than spent.
+    """
+    from pathlib import Path
+
+    package_dir = Path(__file__).resolve().parent
+    if "site-packages" not in str(package_dir):
         try:
-            value = version("techne")
-        except PackageNotFoundError:
-            value = "0.0.0+unknown"
+            import tomllib
+
+            data = tomllib.loads((package_dir.parent / "pyproject.toml").read_text())
+            declared = data["project"]["version"]
+            if isinstance(declared, str) and declared:
+                return declared
+        except (OSError, KeyError, ValueError, ImportError):
+            pass  # unreadable checkout — fall through and report what we can
+
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("techne")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+def __getattr__(name: str):
+    # __version__ is resolved lazily too — a version read is wasted on the hook
+    # processes that never look at it. See _resolve_version for WHICH source is
+    # consulted and why it is not always importlib.metadata (#825).
+    if name == "__version__":
+        value = _resolve_version()
         globals()["__version__"] = value
         return value
 
