@@ -85,7 +85,7 @@ class SourceAdapter(Protocol):
     # (sync/cc_memory.py) and asserted in tests, and #107 — the reconciler this
     # comment was written for — is CLOSED. Stated in the present tense here until
     # 2026-08-29, which is why the arch card inherited the same false claim; the
-    # CONVENTION below is the load-bearing half and it is unaffected.
+    # CONVENTION above is the load-bearing half and it is unaffected.
     # Deliberately NOT annotated on this Protocol, because the
     # runtime_checkable non-method-member check enforces a declared data member in
     # isinstance() on EVERY Python this project supports (measured 2026-08-29 on
