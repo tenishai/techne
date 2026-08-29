@@ -312,3 +312,24 @@ def test_a_versionless_dist_info_degrades_instead_of_returning_none(tmp_path, mo
     monkeypatch.setattr(importlib.metadata, "version", lambda _name: None)
 
     assert techne._resolve_version() == "0.0.0+unknown"
+
+
+def test_a_folded_version_header_does_not_leak_a_newline(tmp_path, monkeypatch):
+    """A folded `Version:` header yields a non-empty str with an embedded newline.
+    It is truthy, so a bare `isinstance(...) and installed` check waves it through —
+    into the MCP `serverInfo` string and every backup manifest's `techne_version`.
+
+    `.strip()` would not close this: the newline is INTERIOR, not surrounding.
+    """
+    import importlib.metadata
+
+    import techne
+
+    pkg = tmp_path / "site-packages" / "techne"
+    pkg.mkdir(parents=True)
+    monkeypatch.setattr(techne, "__file__", str(pkg / "__init__.py"))
+    monkeypatch.setattr(importlib.metadata, "version", lambda _n: "0.16.1\n        .dev0")
+
+    resolved = techne._resolve_version()
+    assert "\n" not in resolved
+    assert resolved == "0.16.1 .dev0"

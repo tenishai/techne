@@ -118,9 +118,15 @@ def _resolve_version() -> str:
     absent or declares no version.
 
     THERE IS A THIRD ROUTE INTO THAT SECOND BRANCH, and it is not an installed
-    build — it is "we could not tell". When ``__file__`` is unusable (frozen,
-    zipimport, or simply not a str) there is no package path to test and no
-    ``pyproject.toml`` to prefer, so the dist-info is trusted. That is the right
+    build — it is "we could not tell". When ``__file__`` is ABSENT (a frozen or
+    builtin module) or is not a usable str, there is no package path to test and
+    no ``pyproject.toml`` to prefer, so the dist-info is trusted.
+
+    NOT zipimport, which an earlier draft of this paragraph listed here and which
+    review measured: ``zipimporter`` DOES set ``__file__`` (to e.g.
+    ``p.zip/pkg/__init__.py``, a real str), so a zipped techne takes the CHECKOUT
+    branch, finds no ``pyproject.toml`` inside the archive, and returns
+    ``0.0.0+unknown``. Stated because the opposite is the natural guess. That is the right
     answer rather than a concession: staleness is a property of an EDITABLE install
     whose checkout moved underneath the stamp, and a frozen or zipimported artefact
     is the one shape where the code cannot drift away from its dist-info at all.
@@ -205,8 +211,13 @@ def _resolve_version() -> str:
         installed = version("techne")
     except Exception:
         installed = None
-    if isinstance(installed, str) and installed:
-        return installed
+    if isinstance(installed, str) and installed.strip():
+        # COLLAPSE WHITESPACE, do not merely strip it. A FOLDED `Version:` header
+        # is a non-empty str containing an embedded newline, which would otherwise
+        # pass straight through into the MCP `serverInfo` string and into every
+        # backup manifest's `techne_version`. `.strip()` does not close that; a
+        # split/join does.
+        return " ".join(installed.split())
     return "0.0.0+unknown"
 
 
