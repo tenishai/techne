@@ -247,9 +247,17 @@ def test_index_transcripts_uses_the_sources_dialogue_hook(tmp_path):
 
 
 def test_optional_hooks_are_not_structural_members_of_the_protocol():
-    """techne#818. ``TranscriptSource`` is ``@runtime_checkable``, and on CPython
-    3.12+ ``isinstance()`` enforces every ANNOTATED non-method data member by
-    ``hasattr``. Annotating an optional hook therefore makes it REQUIRED, which is
+    """techne#818. ``TranscriptSource`` is ``@runtime_checkable``, and
+    ``isinstance()`` enforces every ANNOTATED non-method data member by ``hasattr``
+    on EVERY Python this project supports — measured 2026-08-29 on 3.9 through
+    3.14, and independently re-measured in review against the verbatim pre-fix
+    member set. NOT "3.12+", which earlier copies of this note claimed: 3.12
+    rewrote the machinery (``__protocol_attrs__`` caching), it did not introduce
+    the enforcement. The distinction matters because ``requires-python`` is >=3.11
+    while CI matrixes only 3.12 and 3.13, so "3.12+" tells the one reader most
+    likely to be checking that the hazard is not theirs.
+
+    Annotating an optional hook therefore makes it REQUIRED, which is
     the opposite of what both hooks are documented to be: #817 did it to
     ``dialogue_text`` and #629 had already done it to ``unreadable``, so the
     minimal adapter shape they exist for stopped satisfying the Protocol.

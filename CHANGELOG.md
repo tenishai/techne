@@ -14,8 +14,8 @@ All notable changes to techne are documented here. Format loosely follows
   supports, not the "3.12+" the old comments claimed. `dialogue_text` (#817) and
   `unreadable` (#629) were both annotated, so the minimal adapter shape they exist for
   had already stopped satisfying the Protocol. Both are now documented as docstring
-  conventions read through `getattr`, matching how `provides` is handled on
-  `SourceAdapter`. Only new-adapter authors were affected — the one shipped adapter
+  conventions read through `getattr`, matching the convention already recorded
+  for `provides` on `SourceAdapter`. Only new-adapter authors were affected — the one shipped adapter
   declares both (#818).
 - `ClaudeCodeTranscriptSource.dialogue_text`'s `staticmethod` binding is covered on the
   path production takes. Production reads the hook off an *instance*; every test added
