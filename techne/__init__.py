@@ -126,12 +126,13 @@ def _resolve_version() -> str:
     review measured: ``zipimporter`` DOES set ``__file__`` (to e.g.
     ``p.zip/pkg/__init__.py``, a real str), so a zipped techne takes the CHECKOUT
     branch, finds no ``pyproject.toml`` inside the archive, and returns
-    ``0.0.0+unknown``. Stated because the opposite is the natural guess. That is the right
-    answer rather than a concession: staleness is a property of an EDITABLE install
-    whose checkout moved underneath the stamp, and a frozen or zipimported artefact
-    is the one shape where the code cannot drift away from its dist-info at all.
-    Returning ``0.0.0+unknown`` there would degrade the one case that can still
-    answer correctly.
+    ``0.0.0+unknown``. Stated because the opposite is the natural guess.
+
+    TRUSTING THE DIST-INFO ON THAT THIRD ROUTE IS RIGHT, not a concession.
+    Staleness is a property of an EDITABLE install whose checkout moved underneath
+    the stamp, and a frozen or builtin module is the one shape where the code
+    cannot drift away from its dist-info at all. Returning ``0.0.0+unknown`` there
+    would degrade the one case that can still answer correctly.
 
     Either way an unreadable tree is a reason to report less confidently,
     never to raise on ``import techne``: `cli.py`, `mcp_server.py` and
@@ -162,7 +163,7 @@ def _resolve_version() -> str:
     # makes exhaustiveness a non-question instead of a standing re-audit.
     try:
         package_dir = Path(__file__).resolve().parent
-    except Exception:  # no usable __file__: frozen, zipimport, or not a str
+    except Exception:  # no usable __file__: frozen/builtin, or not a str
         package_dir = None
 
     if package_dir is not None and "site-packages" not in str(package_dir):
