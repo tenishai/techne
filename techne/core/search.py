@@ -913,26 +913,56 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
 
     The vec-first union (#401) is right about ordering and was wrong about
     truncation: appending FTS-only hits after a full vector page and then
-    slicing to ``limit`` means they are never returned. This reserves a slice
+    slicing to ``limit`` means they are never returned. This reserves a slot
     so the lexical channel can reach the caller at all.
 
-    The size is deliberately a minority of the page — vectors keep the head:
+    THE SIZE IS ONE, AND THAT IS A MEASUREMENT, NOT A TASTE (Prudence, #829 r1).
+    The first cut reserved ``limit // 3`` on the argument that a minority slice
+    is cheap. It is not cheap. Running the eval leg the default suite deselects
+    (``pytest -m eval_vec``, the gate at tests/eval/test_retrieval_gate_vec.py,
+    which calls ``search(use_vectors=True, limit=10)`` directly), same machine,
+    same pinned potion-base-8M, only this module swapped:
 
-        limit=20 -> 6    limit=10 -> 3    limit=5 -> 1
+        floor at limit=10      paraphrase r@10    MRR
+        0 (pre-#827)                 1.0          0.546
+        1                            1.0          0.546
+        2                            0.833        0.528
+        3 (the first cut)            0.833        0.528
+
+    At 2 and above the gold `g385_dbpool` — sitting at vec-rank 9 — is
+    truncated off the head and replaced, on a ZERO-TOKEN-OVERLAP paraphrase
+    query, by lexically-matched distractors. The gate's 0.8 floor still passes
+    at 0.833, but retrieval_gold.yaml:97-99 reserves that margin for
+    cross-machine BLAS drift; spending it deterministically leaves the next
+    genuine wobble looking like flake. A floor of 1 delivers #827 — lexical-only
+    hits reach the caller — at a measured cost of zero.
+
+    SO THE FLOOR DOES NOT SCALE WITH ``limit``:
+
+        limit=20 -> 1    limit=10 -> 1    limit=5 -> 1
         limit=3  -> 1    limit=2  -> 1    limit=1 -> 0
 
-    ``limit // 3`` sets the share, ``max(1, ...)`` keeps a small page from
-    rounding the floor away entirely (per-turn recall runs at limit=5), and
-    ``limit // 2`` caps it so the lexical channel can never take half the page
-    or more. At ``limit=1`` there is no room to reserve and the single slot
-    goes to the vector channel, preserving #401's behaviour on a one-row page.
+    A wider page may well afford more, but nobody has measured one, and the
+    only arm anyone HAS measured says 2 already costs a gold. Raising this
+    means re-running the ablation above and recording the numbers here.
+
+    At ``limit=1`` there is no room to reserve and the single slot goes to the
+    vector channel, preserving #401's behaviour on a one-row page. At
+    ``limit=2`` the reserved slot is exactly half the page — the floor is never
+    MORE than half, which is a weaker claim than the one this docstring made
+    before Prudence checked it against its own table.
 
     Returns 0 when there is nothing lexical-only to place, so the fused page
     is identical to the pre-#827 one whenever the two channels agree.
+
+    ``n_fts_only`` MUST BE A COUNT OF DISTINCT KEYS. The tail loop dedups via
+    `seen`, so a count inflated by duplicates reserves slots the tail cannot
+    fill and returns a SHORT page (#829 r1 nit 3 — latent, no live producer
+    found, but correct by construction is cheaper than correct by luck).
     """
     if limit <= 1 or n_fts_only <= 0:
         return 0
-    return min(n_fts_only, max(1, limit // 3), limit // 2)
+    return min(n_fts_only, 1)
 
 
 def search(
@@ -969,7 +999,10 @@ def search(
     store. That made exact-identifier recall (PR numbers, commit shas, symbol
     names, config keys) impossible on every read path, since ``techne_recall``,
     ``techne_search`` and the per-turn injection hook all land here. The floor
-    is a minority of the page, so the paraphrase win #401 bought is intact.
+    is ONE slot, sized by measurement rather than by argument: at that size the
+    #399/#401 paraphrase arm holds at recall@10 1.0 / MRR 0.546, unchanged from
+    pre-#827, while a floor of 2 or more drops it to 0.833 / 0.528. See
+    ``_fts_floor`` for the ablation and for why this does not scale with limit.
 
     Returned rows include:
 
@@ -1026,15 +1059,20 @@ def search(
     # queries, i.e. exact-identifier recall (PR numbers, commit shas, symbol
     # names, config keys) was answered by cosine distance alone, on all three
     # read paths (techne_recall, techne_search, per-turn injection).
-    # Reserving the tail keeps #401's paraphrase win — vectors still hold the
-    # HEAD of the page — for at most `floor` vector positions.
+    # Reserving the tail costs the head `floor` positions, and those positions
+    # are not always pure-vec rows: an `fts+vec` row can be displaced too, and
+    # it cannot be rescued into the tail because `fts_only` excludes every vec
+    # key. That is why the floor is 1 and not a fraction of the page (#829 r1) —
+    # at 1 the paraphrase arm measures exactly as it did pre-#827.
     # NB: _rrf_fuse / RRF_K are intentionally retained as a library primitive —
     # the #399 ablation's RRF arm references them; not the default.
     fts_by_key = {(r["source_table"], r["id"]): r for r in fts_results}
     vec_keys = {(r["source_table"], r["id"]) for r in vec_results}
     fts_only = [r for r in fts_results if (r["source_table"], r["id"]) not in vec_keys]
 
-    floor = _fts_floor(limit, len(fts_only))
+    # Size the floor off DISTINCT keys: the tail loop dedups, so counting rows
+    # would reserve slots nothing can fill and shorten the page (#829 r1 nit 3).
+    floor = _fts_floor(limit, len({(r["source_table"], r["id"]) for r in fts_only}))
     seen: set[tuple] = set()
     head: list[dict] = []
 

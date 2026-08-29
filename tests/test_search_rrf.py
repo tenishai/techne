@@ -243,22 +243,32 @@ def test_search_hybrid_respects_limit(db_path, monkeypatch) -> None:
 @pytest.mark.parametrize(
     "limit,n_fts_only,expected",
     [
-        (20, 50, 6),   # default page: a minority slice
-        (10, 50, 3),   # techne_recall / techne_search
-        (5, 50, 1),    # per-turn recall injection — must not round away to 0
+        (20, 50, 1),   # DOES NOT SCALE with the page — see the ablation below
+        (10, 50, 1),   # techne_recall / techne_search
+        (5, 50, 1),    # per-turn recall injection
         (3, 50, 1),
         (2, 50, 1),
         (1, 50, 0),    # no room to reserve: the one slot stays with vec (#401)
-        (10, 2, 2),    # never reserve more than there is to place
+        (10, 1, 1),    # never reserve more than there is to place
         (10, 0, 0),    # nothing lexical-only -> page identical to pre-#827
         (0, 5, 0),
     ],
 )
 def test_fts_floor_sizing(limit, n_fts_only, expected) -> None:
-    """The floor is a documented minority of the page, never half or more."""
+    """One slot at any usable page size, zero when there is no room to reserve.
+
+    THE SIZE IS PINNED BECAUSE IT WAS MEASURED, not because it is tidy
+    (Prudence, #829 r1). The first cut reserved ``limit // 3``; running
+    ``pytest -m eval_vec`` — the leg ``pyproject.toml`` deselects from the
+    default suite — showed floor 0 and floor 1 both hold the #399/#401
+    paraphrase arm at recall@10 1.0 / MRR 0.546, while floor 2 and 3 both drop
+    it to 0.833 / 0.528. Widening this without re-running that ablation
+    re-introduces a regression the gate's drift margin was hiding.
+    """
     assert _fts_floor(limit, n_fts_only) == expected
-    # The invariant behind the sizing: the lexical channel never takes half the
-    # page or more, at any limit. Vectors keep the majority (#401).
+    # The invariant behind the sizing: the lexical channel never takes MORE than
+    # half the page. At limit=2 it takes exactly half — the earlier "never half
+    # or more" prose was falsified by this table's own row (#829 r1 nit 4).
     assert _fts_floor(limit, n_fts_only) <= limit // 2
 
 
@@ -284,11 +294,12 @@ def test_lexical_only_hit_survives_a_full_vec_page(db_path, monkeypatch) -> None
     ids = [r["id"] for r in results]
     fts_only_returned = [i for i in ids if i <= 10]
     assert fts_only_returned, "no FTS-only hit survived the fusion — #827 is back"
-    assert len(fts_only_returned) == 3, "limit=10 reserves a floor of 3"
-    # Vec keeps the HEAD of the page: #401's paraphrase win is not traded away.
-    assert ids[:7] == [101, 102, 103, 104, 105, 106, 107]
+    assert len(fts_only_returned) == 1, "limit=10 reserves a floor of exactly 1"
+    # Vec keeps NINE of ten: the measured cost of the floor on the paraphrase
+    # arm is zero at this size and non-zero at every larger one (#829 r1).
+    assert ids[:9] == [101, 102, 103, 104, 105, 106, 107, 108, 109]
     # The floor is filled in search_fts's own order, best BM25/recency first.
-    assert fts_only_returned == [1, 2, 3]
+    assert fts_only_returned == [1]
 
 
 def test_floor_does_not_shorten_a_page_when_vec_is_thin(db_path, monkeypatch) -> None:
@@ -306,6 +317,27 @@ def test_floor_does_not_shorten_a_page_when_vec_is_thin(db_path, monkeypatch) ->
     assert len(results) == 10
     assert [r["id"] for r in results[:2]] == [101, 102]
     assert [r["id"] for r in results[2:]] == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_duplicate_fts_keys_do_not_shorten_the_page(db_path, monkeypatch) -> None:
+    """The floor is sized off DISTINCT keys, not rows (#829 r1 nit 3).
+
+    The tail loop dedups via `seen`, so sizing the floor off `len(fts_only)`
+    would reserve slots the tail cannot fill and hand back a SHORT page — the
+    vec rows that would have filled them are simply lost. Prudence found no live
+    producer of duplicate `(source_table, id)` rows, so this is latent; it is
+    pinned anyway because correct-by-construction costs one set comprehension.
+    """
+    dupe = {"source_table": "knowledge", "id": 1, "content": "a", "rank": -1.0}
+    fake_fts = [dict(dupe) for _ in range(4)]
+    _, fake_vec = _canned_channels()
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    results = search(db_path, "anything", limit=10, use_vectors=True)
+
+    assert len(results) == 10, "duplicate FTS keys shortened the page"
+    assert [r["id"] for r in results] == [101, 102, 103, 104, 105, 106, 107, 108, 109, 1]
 
 
 def test_no_fts_only_hits_leaves_the_vec_page_untouched(db_path, monkeypatch) -> None:
