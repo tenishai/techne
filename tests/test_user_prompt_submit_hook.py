@@ -960,7 +960,11 @@ def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
 
     # Real rows, so _drop_pull_only's type lookup and _build_context's rendering
     # run against the database rather than against a fixture's imagination.
-    vec_ids = [_seed(f"vector channel row {i}", type="fact") for i in range(page - 1)]
+    # A FULL vec channel — `range(page)`, not `page - 1` (#829 r5 Important 1).
+    # One row short and the reserved slot lands at the tail by SLACK rather than
+    # by reservation, which makes the index assertion below witness nothing: with
+    # `_fts_floor` mutated to 0 the short version still passes.
+    vec_ids = [_seed(f"vector channel row {i}", type="fact") for i in range(page)]
     lex_id = _seed("lexical only row, reachable by identifier XYZZY-827", type="fact")
 
     def _rows(ids):
@@ -993,8 +997,9 @@ def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
     out = _run(monkeypatch, capsys, {"prompt": "XYZZY-827", "session_id": "rail-1"})
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
-    assert f"techne#{vec_ids[0]}" in ctx, "the rail delivered nothing — fixture is wrong"
-    assert f"techne#{lex_id}" not in ctx, (
+    # Full delimiters: `techne#1` is a prefix of `techne#15` (#829 r5 nit 4).
+    assert f"⟦techne#{vec_ids[0]}⟧" in ctx, "the rail delivered nothing — fixture is wrong"
+    assert f"⟦techne#{lex_id}⟧" not in ctx, (
         "the reserved lexical row now reaches the session — if that is deliberate, "
         "techne#831 has been fixed and this pin should be INVERTED, not deleted"
     )
