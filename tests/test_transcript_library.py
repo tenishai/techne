@@ -308,7 +308,12 @@ def test_index_transcripts_titles_from_dialogue_through_a_real_source_instance(t
     (``getattr(source, "dialogue_text", None)`` in ``index_transcripts``), and the
     ``staticmethod(...)`` binding is what keeps that call from receiving ``self``
     as the turn text. Every test #817 added reads the hook off the CLASS instead,
-    so deleting the binding left them all green.
+    so deleting the binding left them all green. One OLDER test does red on it --
+    ``test_index_transcripts_surfaces_an_unreadable_archive_end_to_end`` (#629),
+    which drives the real adapter through the real indexer for unrelated reasons
+    and takes the ``TypeError`` on the way past. That is the "covered only by
+    accident" the issue names, recorded here so a bisect landing on two red tests
+    is not a surprise.
 
     This drives the real adapter through the real indexer, which is the path
     production takes — drop the ``staticmethod`` and this goes red.

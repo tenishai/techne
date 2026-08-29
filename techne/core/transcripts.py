@@ -89,8 +89,14 @@ class TranscriptSource(Protocol):
         this and every turn is taken verbatim, exactly as before (techne#2806).
 
     NEITHER IS ANNOTATED BELOW, AND THAT IS DELIBERATE (techne#818). This Protocol
-    is ``@runtime_checkable``, and on CPython 3.12+ ``isinstance()`` enforces every
-    ANNOTATED non-method data member by ``hasattr``. Annotating an optional hook
+    is ``@runtime_checkable``, and ``isinstance()`` enforces every ANNOTATED
+    non-method data member by ``hasattr`` — on EVERY Python this project supports.
+    Measured 2026-08-29 on 3.9/3.10/3.11/3.12/3.13/3.14: an adapter omitting an
+    annotated member returned False on all six. (An earlier version of this note,
+    and the ``provides`` comment it was modelled on, said "3.12+"; that is wrong
+    and mattered, because ``requires-python`` is >=3.11 while CI matrixes only
+    3.12 and 3.13, so a reader on 3.11 could take it as not their problem.)
+    Annotating an optional hook
     therefore makes it structurally REQUIRED — an adapter that omits it fails
     ``isinstance``, which is the opposite of optional. Measured on 3.14: with both
     annotated, an adapter declaring only ``platform`` and ``iter_transcripts``

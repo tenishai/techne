@@ -7,6 +7,23 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
+  adapter that omits them satisfies `isinstance` again. `TranscriptSource` is
+  `@runtime_checkable`, and `isinstance()` enforces every *annotated* non-method data
+  member by `hasattr` — measured on 3.9 through 3.14, so on every Python this project
+  supports, not the "3.12+" the old comments claimed. `dialogue_text` (#817) and
+  `unreadable` (#629) were both annotated, so the minimal adapter shape they exist for
+  had already stopped satisfying the Protocol. Both are now documented as docstring
+  conventions read through `getattr`, matching how `provides` is handled on
+  `SourceAdapter`. Only new-adapter authors were affected — the one shipped adapter
+  declares both (#818).
+- `ClaudeCodeTranscriptSource.dialogue_text`'s `staticmethod` binding is covered on the
+  path production takes. Production reads the hook off an *instance*; every test added
+  with #817 read it off the *class*, so dropping the binding left them all green and the
+  only witness was an unrelated #629 test that happened to drive the real indexer. A
+  test now drives the real adapter through the real indexer and asserts the title
+  (#820).
+
 - `techne init` no longer deletes the `techne vectors backfill` step from the
   Claude Code SessionStart chain. The step had to be hand-wired into
   `settings.json`, and `register_hooks` strips every hook group whose command
