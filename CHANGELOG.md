@@ -23,6 +23,21 @@ All notable changes to techne are documented here. Format loosely follows
   only witness was an unrelated #629 test that happened to drive the real indexer. A
   test now drives the real adapter through the real indexer and asserts the title
   (#820).
+- `techne.__version__` reports the version of the code that is actually imported.
+  `importlib.metadata` reads the dist-info written at install time, and for an
+  *editable* install that stamp never moves when the checkout does — so a checkout
+  that had advanced to 0.16.0 kept reporting 0.15.0, and every surface built on
+  `__version__` inherited it: the SessionStart banner paired a stale version with a
+  live revision (reading authoritative while half wrong), and `backup_all_dbs`
+  stamped the wrong `techne_version` into every manifest it wrote. For a checkout
+  the version now comes from the checkout's own `pyproject.toml`, using the same
+  build test as `core/health.py::_revision_info` so the two surfaces cannot
+  disagree. A real (non-editable) install is unaffected — dist-info stays
+  authoritative there. A checkout whose `pyproject.toml` cannot be read reports
+  `0.0.0+unknown` and does **not** fall back to the dist-info: on a checkout that
+  stamp is known-unreliable, so consulting it would silently restore the same
+  stale-version-beside-live-revision lie under a `build: "checkout"` label
+  (#825, recurrence of #763).
 
 - `techne init` no longer deletes the `techne vectors backfill` step from the
   Claude Code SessionStart chain. The step had to be hand-wired into

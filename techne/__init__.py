@@ -90,16 +90,144 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
-    # __version__ is resolved lazily too — importlib.metadata.version() alone is
-    # ~35ms, wasted on hook processes that never read the version.
-    if name == "__version__":
-        from importlib.metadata import PackageNotFoundError, version
+def _resolve_version() -> str:
+    """Resolve the version of the code that is actually IMPORTED.
 
+    ``importlib.metadata`` reads the dist-info written at install time, and for
+    an EDITABLE install that stamp never moves when the checkout does — measured
+    four days apart on this machine (#568), then again three days after #763 was
+    closed (#825), where dist-info said ``0.15.0`` while the checkout ran
+    ``0.16.0``. Every surface built on ``__version__`` inherited the lie: the
+    SessionStart banner paired a STALE version with a LIVE revision, so it read
+    as authoritative while half wrong, and ``backup_all_dbs`` stamped the wrong
+    ``techne_version`` into every manifest it wrote.
+
+    For a CHECKOUT the honest source is therefore the checkout's own
+    ``pyproject.toml``, never the dist-info beside it. The build test is
+    ``"site-packages" not in <package path>``, deliberately the SAME rule as
+    ``core/health.py::_revision_info`` — a version string that disagrees with the
+    build/revision line printed next to it is precisely the failure #825
+    describes, so these two must not be allowed to drift apart.
+
+    THE TWO BRANCHES DEGRADE DIFFERENTLY, AND THAT ASYMMETRY IS THE POINT. A
+    checkout whose ``pyproject.toml`` cannot be read returns ``0.0.0+unknown``
+    DIRECTLY — it never reaches ``importlib.metadata``, because on a checkout the
+    dist-info is known-unreliable by the paragraph above and falling through to it
+    silently restores #825 under a ``build: "checkout"`` label. An installed build
+    reads the dist-info and returns ``0.0.0+unknown`` only when the distribution is
+    absent or declares no version.
+
+    THERE IS A THIRD ROUTE INTO THAT SECOND BRANCH, and it is not an installed
+    build — it is "we could not tell". When ``__file__`` is ABSENT (a frozen or
+    builtin module) or is not a usable str, there is no package path to test and
+    no ``pyproject.toml`` to prefer, so the dist-info is trusted.
+
+    NOT zipimport, which an earlier draft of this paragraph listed here and which
+    review measured: ``zipimporter`` DOES set ``__file__`` (to e.g.
+    ``p.zip/pkg/__init__.py``, a real str), so a zipped techne takes the CHECKOUT
+    branch, finds no ``pyproject.toml`` inside the archive, and returns
+    ``0.0.0+unknown``. Stated because the opposite is the natural guess.
+
+    TRUSTING THE DIST-INFO ON THAT THIRD ROUTE IS RIGHT, not a concession.
+    Staleness is a property of an EDITABLE install whose checkout moved underneath
+    the stamp, and a frozen or builtin module is the one shape where the code
+    cannot drift away from its dist-info at all. Returning ``0.0.0+unknown`` there
+    would degrade the one case that can still answer correctly.
+
+    Either way an unreadable tree is a reason to report less confidently,
+    never to raise on ``import techne``: `cli.py`, `mcp_server.py` and
+    `core/health.py` all bind ``__version__`` at module scope, so an exception
+    escaping here is the CLI and the MCP server failing to import.
+
+    Cost, MEASURED rather than assumed (2026-08-29, this machine, median of 7
+    cold subprocesses each — the hook case, since hooks fire a fresh interpreter
+    per tool call): ``importlib.metadata.version()`` 48.8ms, ``tomllib`` parse of
+    ``pyproject.toml`` 7.5ms. So the checkout path is ~41ms CHEAPER than what it
+    replaces, and the lazy-resolution budget this module is built around is
+    preserved rather than spent. The installed path is unchanged.
+    """
+    from pathlib import Path
+
+    # BOTH GUARDS BELOW CATCH `Exception` DELIBERATELY, AND THE BREADTH IS THE
+    # CORRECT SHAPE HERE RATHER THAN LAZINESS. Everything they wrap is "locate
+    # ourselves, read a file, pull a string out of it" — an operation with no
+    # failure that ought to be allowed to take down `import techne`. An enumerated
+    # tuple has to be exhaustive over every pyproject and `__file__` shape anyone
+    # will ever construct, and it already failed that test once: `[[project]]`
+    # parses cleanly and then subscripts a LIST, raising TypeError, which the
+    # original tuple did not list and which crashed the CLI and the MCP server.
+    # Review found three more escapes afterwards (RecursionError from deeply
+    # nested TOML; TypeError from a non-str `__file__`; ValueError from
+    # `.resolve()` on a NUL byte) — none reachable in techne's shipped shapes, but
+    # the fact that a second audit found a second set is the argument. Breadth
+    # makes exhaustiveness a non-question instead of a standing re-audit.
+    try:
+        package_dir = Path(__file__).resolve().parent
+    except Exception:  # no usable __file__: frozen/builtin, or not a str
+        package_dir = None
+
+    if package_dir is not None and "site-packages" not in str(package_dir):
+        # A CHECKOUT. pyproject is the only trustworthy source here, and if it
+        # cannot be read we say so rather than reaching for the dist-info.
+        #
+        # THE FALLBACK IS DELIBERATELY NOT `importlib.metadata` ON THIS BRANCH.
+        # An earlier revision fell through to it, which silently RESTORED the
+        # exact defect this function exists to remove: `_revision_info` still
+        # classifies the tree as `build: "checkout"` and reads a live revision
+        # from git, so a stale dist-info version would print beside a live
+        # revision under a "checkout" label — #825 verbatim, reached by another
+        # route and with no signal that it happened. On a checkout the dist-info
+        # is known-unreliable BY THIS FUNCTION'S OWN PREMISE, so consulting it
+        # here is the one thing that premise forbids.
+        #
+        # `0.0.0+unknown` follows the rule `_revision_info` already sets for
+        # `drifted`: "I could not check" is reported as itself rather than
+        # collapsing into a confident answer.
         try:
-            value = version("techne")
-        except PackageNotFoundError:
-            value = "0.0.0+unknown"
+            import tomllib
+
+            data = tomllib.loads((package_dir.parent / "pyproject.toml").read_text())
+            declared = data["project"]["version"]
+            if isinstance(declared, str) and declared:
+                return declared
+        except Exception:  # see the note above the outer guard
+            pass
+        return "0.0.0+unknown"
+
+    # THE THIRD GUARD. Two were widened above and this one was left narrow in the
+    # same function — the same oversight, one level along, as widening the inner
+    # tuple while leaving the outer at NameError.
+    #
+    # AND IT IS NOT ONLY THE RAISE THAT NEEDED CHECKING. `version()` RETURNS None
+    # when a dist-info's METADATA carries no `Version:` header — measured on
+    # 3.14.7, which emits "Implicit None on return values is deprecated and will
+    # raise KeyErrors". So today a versionless dist-info makes this `-> str`
+    # function return None into `click.version_option(version=None)` and the MCP
+    # `serverInfo` string, and on the Python that makes good on that warning it
+    # raises KeyError — not PackageNotFoundError, so it would escape a narrow
+    # guard entirely. The RETURN is therefore validated as well as the call.
+    from importlib.metadata import version
+
+    try:
+        installed = version("techne")
+    except Exception:
+        installed = None
+    if isinstance(installed, str) and installed.strip():
+        # COLLAPSE WHITESPACE, do not merely strip it. A FOLDED `Version:` header
+        # is a non-empty str containing an embedded newline, which would otherwise
+        # pass straight through into the MCP `serverInfo` string and into every
+        # backup manifest's `techne_version`. `.strip()` does not close that; a
+        # split/join does.
+        return " ".join(installed.split())
+    return "0.0.0+unknown"
+
+
+def __getattr__(name: str):
+    # __version__ is resolved lazily too — a version read is wasted on the hook
+    # processes that never look at it. See _resolve_version for WHICH source is
+    # consulted and why it is not always importlib.metadata (#825).
+    if name == "__version__":
+        value = _resolve_version()
         globals()["__version__"] = value
         return value
 
