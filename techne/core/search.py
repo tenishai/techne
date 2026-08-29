@@ -929,11 +929,27 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
         2                            0.833        0.528
         3 (the first cut)            0.833        0.528
 
-    AND AT limit=5, the per-turn rail's page and the highest-traffic read path
-    (Prudence, #829 r2, patching the gate to limit=5). One slot is 20% of that
-    page — the same PROPORTION that costs a gold at limit=10, so this arm was
-    expected to bite and does not: floor 0 and floor 1 are identical, at
+    AND AT limit=5, THE SMALLER-PAGE ARM — not, as an earlier draft of this
+    docstring said, "the per-turn rail's page" (Prudence, #829 r2 asked for the
+    arm under that label and corrected it herself in r3). One slot is 20% of a
+    5-row page, the same PROPORTION that costs a gold at limit=10, so the arm
+    was expected to bite and does not: floor 0 and floor 1 are identical, at
     paraphrase r@5 0.667 / MRR 0.5, with exact, filter and negative all 1.0.
+
+    THE PER-TURN RAIL'S REAL PAGE IS 15, AND THE FLOOR USUALLY DOES NOT REACH
+    THE SESSION THROUGH IT. `config.py` sets `per_turn_recall_limit = 5`, but
+    `hooks/user_prompt_submit.py:640` passes `limit=k * _RESEND_OVERFETCH` with
+    `_RESEND_OVERFETCH = 3`, so `search()` is called at 15 and the rail cuts to
+    5 itself at line 656 after dedup and the relevance floor. Since this floor
+    reserves the TAIL, the reserved row lands at index 14 of 15 and the rail's
+    own `[:k]` drops it — see test_the_per_turn_rail_cuts_off_the_reserved_slot.
+    It is "usually not delivered" rather than "never": the suppression steps run
+    between the two cuts, so a turn that drops 10+ of the 14 head rows does
+    deliver it. THE COST CLAIM IS UNAFFECTED — measured at limit=15, floor 1:
+    paraphrase r@10 1.0 / MRR 0.546, exact/filter/negative 1.0. What is wrong is
+    the DELIVERY claim, not the price. Fixing it means placing the reserved row
+    inside the first k, or having the rail stop discarding it; both are changes
+    to a caller's contract and belong with techne#831, not here.
 
     At 2 and above the gold `g385_dbpool` — sitting at vec-rank 9 — is
     truncated off the head and replaced, on a ZERO-TOKEN-OVERLAP paraphrase
@@ -985,11 +1001,24 @@ def _fts_floor(limit: int, n_fts_only: int) -> int:
     duplicates take it from 1 to 4 and ``min(4, 1) == min(1, 1)``. The deduped
     and undeduped sizings are indistinguishable for EVERY possible input while
     the floor is 1, which is why mutating the caller back to ``len(fts_only)``
-    leaves the whole test file green. It fires the day the floor widens —
-    verified: with the sizing reverted AND the floor at 3, the dupe test fails
-    with an 8-row page. Kept because correct-by-construction costs one set
-    comprehension, and #565 in this repo is the standing lesson about a guard
-    that passes nothing and blocks nothing going unnoticed.
+    leaves the whole test file green.
+
+    AND IT IS NARROWER THAN "DORMANT" (Prudence, #829 r3 Important 2 — this
+    clause has to be exactly right, because the paragraph invokes #565 to
+    justify keeping the guard). NO PRODUCER REACHING THIS FUNCTION CAN EMIT A
+    DUPLICATE KEY AT ALL, at any floor: ``fts_results`` comes only from
+    ``search_fts``, which runs one query per table with each ``*_fts`` rowid
+    joined 1:1 to its base table and each table's rows tagged with a distinct
+    ``source_table``, and the #70 OR-fallback REASSIGNS ``results`` rather than
+    appending, so the AND and OR passes cannot both contribute a row. Measured:
+    6 query shapes x 4 table scopes on a seeded store, including queries that
+    fall through to the OR pass — 0 duplicates in all 24. So this is
+    unreachable from today's producer, not merely inert at today's floor. It is
+    kept to keep ``search()`` correct if a producer ever CAN duplicate — a
+    second knowledge query, or an OR-fallback that unions instead of replacing
+    — which costs one set comprehension. (Under monkeypatch it does behave as
+    described: sizing reverted with the floor at 3 fails the dupe test with an
+    8-row page. That is a property of the test harness, not of the system.)
 
     For the same reason ``min(n_fts_only, ...)`` below is forward-looking
     scaffolding, not an active constraint: at this floor it reduces to

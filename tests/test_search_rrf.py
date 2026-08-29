@@ -350,6 +350,45 @@ def test_duplicate_fts_keys_do_not_shorten_the_page(db_path, monkeypatch) -> Non
     assert [r["id"] for r in results] == [101, 102, 103, 104, 105, 106, 107, 108, 109, 1]
 
 
+def test_the_per_turn_rail_cuts_off_the_reserved_slot(db_path, monkeypatch) -> None:
+    """THE FLOOR DOES NOT REACH THE SESSION THROUGH THE PER-TURN RAIL (#829 r3).
+
+    Pinned because three docs claimed it did. The rail asks `search()` for
+    `per_turn_recall_limit * _RESEND_OVERFETCH` rows — 5 * 3 = 15, over-fetching
+    so session-dedup cannot thin the delivery below k (techne#576) — and then
+    cuts to k itself at user_prompt_submit.py:656. This floor reserves the
+    TAIL, so the lexical row is index 14 of 15 and the rail's own `[:k]` drops
+    it before the session sees anything.
+
+    "Usually", not "always": the suppression steps run between the two cuts, so
+    a turn dropping 10+ of the 14 head rows would deliver it. The pin is the
+    full-vec case — the one #827 is about — where nothing is dropped.
+
+    This is a caller-contract problem, not a fusion one: fixing it means placing
+    the reserved row inside the first k, or having the rail stop discarding it.
+    Tracked as techne#831. If this test starts failing because the row now lands
+    inside the cut, that is the fix arriving, and the assertion should be
+    inverted rather than deleted.
+    """
+    from techne.hooks.user_prompt_submit import _RESEND_OVERFETCH
+
+    k = 5
+    page = k * _RESEND_OVERFETCH
+    fake_fts, fake_vec = _canned_channels(page)
+    monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
+    monkeypatch.setattr("techne.core.search.search_vec", lambda *a, **kw: fake_vec)
+
+    rows = search(db_path, "anything", limit=page, use_vectors=True)
+
+    assert len(rows) == page
+    reserved = [i for i, r in enumerate(rows) if r["match_source"] == "fts"]
+    assert reserved == [page - 1], "the reserved slot is not at the tail any more"
+    assert not [r for r in rows[:k] if r["match_source"] == "fts"], (
+        "a lexical row now survives the rail's [:k] cut — if that is deliberate, "
+        "techne#831 has been fixed and this pin should be inverted"
+    )
+
+
 def test_no_fts_only_hits_leaves_the_vec_page_untouched(db_path, monkeypatch) -> None:
     """When the channels agree completely the floor is 0 and the page is exactly
     what it was before #827 — the fix is inert on the queries #401 optimised."""
@@ -371,11 +410,15 @@ def test_no_fts_only_hits_leaves_the_vec_page_untouched(db_path, monkeypatch) ->
     assert all(r["match_source"] == "fts+vec" for r in results)
 
 
-def test_per_turn_recall_page_size_still_reserves_a_slot(db_path, monkeypatch) -> None:
-    """hooks/user_prompt_submit.py runs at limit=5 (per_turn_recall_limit).
+def test_small_page_still_reserves_a_slot(db_path, monkeypatch) -> None:
+    """A 5-row page still gets its slot: 4 vec + 1 lexical, not 5 + 0.
 
-    That is the smallest production page and the one most at risk of rounding
-    the floor away, so it gets its own pin: 4 vec + 1 lexical, not 5 + 0.
+    NOT "the per-turn rail's page", which is what this docstring claimed until
+    #829 r3. `per_turn_recall_limit` IS 5, but the rail multiplies it by
+    `_RESEND_OVERFETCH` before calling `search()` — see the test below. This is
+    the smallest page the floor must survive rounding on, which is a real
+    function-level property and worth its own pin; it is only the justification
+    that was wrong.
     """
     fake_fts, fake_vec = _canned_channels()
     monkeypatch.setattr("techne.core.search.search_fts", lambda *a, **kw: fake_fts)
