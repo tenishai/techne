@@ -113,9 +113,12 @@ def _resolve_version() -> str:
     and to ``0.0.0+unknown`` when that fails too: an unreadable checkout is a
     reason to report less confidently, not to raise on ``import techne``.
 
-    Cost: this REPLACES the ~35ms ``importlib.metadata`` call on the checkout
-    path with one small file read and a ``tomllib`` parse, so the lazy-resolution
-    budget this module is built around is preserved rather than spent.
+    Cost, MEASURED rather than assumed (2026-08-29, this machine, median of 7
+    cold subprocesses each — the hook case, since hooks fire a fresh interpreter
+    per tool call): ``importlib.metadata.version()`` 48.8ms, ``tomllib`` parse of
+    ``pyproject.toml`` 7.5ms. So the checkout path is ~41ms CHEAPER than what it
+    replaces, and the lazy-resolution budget this module is built around is
+    preserved rather than spent. The installed path is unchanged.
     """
     from pathlib import Path
 
