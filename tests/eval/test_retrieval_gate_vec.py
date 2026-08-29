@@ -156,6 +156,26 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
                 f"mrr={m['mrr']}  fpr={m['fpr']}  (n={m['n']}, {gated})"
             )
 
+    # --- techne#832: emit the numbers so they can be DIFFED, not just floored ---
+    # BEFORE THE KILL-GATES, DELIBERATELY (Prudence, #833 r1 I1). An assert below
+    # ends the test, so emitting last means a run that FAILS a floor writes no
+    # file — and that is precisely the run whose numbers you want, because the
+    # base-vs-head diff is how you learn whether the PR made an already-unhealthy
+    # base worse. Emitting first also makes the CI step's "diff anyway" path real
+    # instead of unreachable.
+    #
+    # WHY A DIFF AT ALL: the kill-gates below are absolute, and an absolute floor
+    # cannot tell a real regression from cross-machine drift at the same
+    # magnitude. Commit 275035a took paraphrase r@10 from 1.0 to 0.833 and this
+    # gate passed it green, because retrieval_gold.yaml's 0.8 reserves exactly
+    # that much for BLAS wobble. A base-vs-head diff on ONE runner has no such
+    # blind spot: the leg is byte-deterministic run-to-run (model2vec/potion is
+    # numpy-only static, `pinned_model2vec` rebuilds the singleton), so any
+    # movement between two runs on one machine is the CODE. Zero tolerance.
+    #
+    # Off by default: no env var, no file, behaviour identical to pre-#832.
+    _emit_metrics(rows, per_class)
+
     # --- frozen per-class kill-gates (techne#399, ratcheted #401) ---
     # Unlike #385, paraphrase IS gated here — vec-first hybrid recall is
     # exactly the mechanism meant to serve zero-token-overlap queries.
@@ -188,15 +208,3 @@ def test_retrieval_gate_vec(pinned_model2vec, tmp_path, capsys):
     leaks = [r["id"] for r in rows if r["fpr"] > 0.0]
     assert not leaks, f"forbidden id(s) leaked into top-{fpr_k} for task(s): {leaks}"
 
-    # --- techne#832: emit the numbers so they can be DIFFED, not just floored ---
-    # The kill-gates above are absolute, and an absolute floor cannot tell a real
-    # regression from cross-machine drift at the same magnitude: commit 275035a
-    # took paraphrase r@10 from 1.0 to 0.833 and this gate passed it green,
-    # because retrieval_gold.yaml's 0.8 reserves exactly that much for BLAS
-    # wobble. A base-vs-head diff on ONE runner has no such blind spot — the leg
-    # is byte-deterministic run-to-run (model2vec/potion is numpy-only static and
-    # `pinned_model2vec` rebuilds the singleton), so any movement between two
-    # runs on the same machine is the CODE, with zero tolerance required.
-    #
-    # Off by default: no env var, no file, behaviour identical to pre-#832.
-    _emit_metrics(rows, per_class)

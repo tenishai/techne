@@ -48,8 +48,20 @@ def _load(path: Path) -> dict:
 def _regressions(base: dict, head: dict, epsilon: float) -> list[dict]:
     """Every metric that moved the wrong way by more than `epsilon`.
 
-    A task or class present in BASE and missing from HEAD is itself reported: a
-    gold silently dropping out of the set would otherwise read as "no regression".
+    THIS DIFF COVERS LIBRARY REGRESSIONS ONLY, AND THE MISSING-KEY BRANCH IS
+    FORWARD-LOOKING SCAFFOLDING RATHER THAN AN ACTIVE GUARD (Prudence, #833 r1
+    I4). CI swaps only `techne/`, so BOTH runs read HEAD's `retrieval_gold.yaml`
+    and HEAD's `scoring.py` — the harness must be constant or you measure the
+    test instead of the code. The per-task key set is therefore identical by
+    construction and the branch below cannot fire under that invocation.
+
+    The blind spot is the price of the constant harness, and it is worth naming:
+    the realistic way a gold leaves the set is someone EDITING the yaml, and then
+    both dumps lose it together, this diff reports nothing, and the absolute
+    floors — reading the same edited file — report nothing either while the class
+    mean RISES. Changes under `tests/eval/` are outside this tool's reach and
+    need a human. The branch is kept because it is correct if the invocation ever
+    changes (a committed baseline, or a base run with its own harness).
     """
     found: list[dict] = []
     for scope in ("per_task", "per_class"):
@@ -66,8 +78,10 @@ def _regressions(base: dict, head: dict, epsilon: float) -> list[dict]:
                 delta = hv - bv
                 worse = -delta if metric in _HIGHER_IS_BETTER else delta
                 if worse > epsilon:
+                    # round: every input is already round(_, 3), so a raw float
+                    # delta prints -0.16700000000000004 (#833 r1 N2).
                     found.append({"scope": scope, "key": key, "metric": metric,
-                                  "base": bv, "head": hv, "delta": delta})
+                                  "base": bv, "head": hv, "delta": round(delta, 4)})
     return found
 
 
