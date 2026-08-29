@@ -400,3 +400,75 @@ def test_insert_card_redacts_content_defense_in_depth(db, config):
     conn.close()
     assert "ghp_abcdefghijklmnopqrstuvwxyz1234" not in row["content"]
     assert "<redacted:github>" in row["content"]
+
+
+def test_a_pending_cards_title_is_repaired_at_the_same_version(db, config):
+    """techne#819, the half the issue's scope note misses.
+
+    A PENDING card's content IS the document title — the stand-in gist it carries
+    until the agent-assisted pass fills a real one. The `ver:` tag is a CONTENT
+    fingerprint, so a corrected title leaves it unchanged, the upsert no-ops, and
+    the junk title survives as the card's gist. Repairing `documents.title` alone
+    would still leave recall returning the wrapper string, because recall reads the
+    CARD, not the document.
+    """
+    doc_id = _doc(config)
+    first, _ = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="<local-command-caveat>Caveat: The messages below",
+    )
+    second, changed = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",  # SAME version — content did not move, only the title
+        title="why is recall empty",
+    )
+    assert second == first, "a title repair must not supersede the card"
+    assert changed is False, "no new card row was written"
+    card = next(r for r in pending_cards(db) if r["id"] == first)
+    assert card["content"] == "why is recall empty"
+    assert is_pending(card["tags"]), "the card is still awaiting a real gist"
+
+
+def test_a_filled_cards_gist_is_never_overwritten_by_a_title(db, config):
+    """The guard on the repair above. A filled card's gist is real prose that no
+    longer derives from the title, so rewriting it from one would destroy the
+    agent-assisted work `fill_card_summary` exists to produce.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="junk title",
+    )
+    fill_card_summary(db, card_id, "A real gist written by the agent-assisted pass.")
+
+    upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="a different title entirely",
+    )
+    row = db_row_content(db, card_id)
+    assert row == "A real gist written by the agent-assisted pass.", (
+        "a filled gist was clobbered by a title repair"
+    )
+
+
+def db_row_content(db, card_id):
+    from techne.core.database import connect
+
+    conn = connect(db)
+    try:
+        return conn.execute("SELECT content FROM knowledge WHERE id = ?", (card_id,)).fetchone()[
+            "content"
+        ]
+    finally:
+        conn.close()

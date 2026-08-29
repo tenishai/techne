@@ -105,12 +105,39 @@ def upsert_document_card(
         # the insert-first supersede path is transiently two-active. (techne#170)
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
-            """SELECT id, tags FROM knowledge
+            """SELECT id, tags, content FROM knowledge
                WHERE type = ? AND source = ? AND superseded_by IS NULL""",
             (CARD_TYPE, source_url),
         ).fetchone()
 
         if existing is not None and _tag_value(existing["tags"], "ver:") == str(source_version):
+            # PENDING-CARD TITLE REPAIR (techne#819). A pending card's content IS
+            # the document title — the stand-in gist it carries until the
+            # agent-assisted pass fills a real one. The `ver:` tag is a CONTENT
+            # fingerprint, so a corrected title leaves it unchanged and lands here,
+            # and the junk title survives as the card's gist. That is the half of
+            # #819 the issue's own scope note misses: repairing `documents.title`
+            # alone still leaves recall returning the wrapper string, because recall
+            # reads the card, not the document.
+            #
+            # Only PENDING cards. A filled card's gist is real prose that no longer
+            # derives from the title, so rewriting it from a title would destroy
+            # work. Updated in place without superseding, on `fill_card_summary`'s
+            # precedent: the document version has not moved, only the stand-in.
+            # `is_pending(existing["tags"])`, NOT the `pending` computed from this
+            # call's arguments. Those are different questions: `pending` above means
+            # "this CALLER supplied no summary", which every indexer pass does, while
+            # what matters here is whether the STORED card has already been filled.
+            # Reading the caller's flag let an indexer clobber an agent-written gist
+            # — caught by test_a_filled_cards_gist_is_never_overwritten_by_a_title.
+            if is_pending(existing["tags"]) and content != existing["content"]:
+                conn.execute(
+                    """UPDATE knowledge SET content = ?, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (content, existing["id"]),
+                )
+                conn.commit()
+                return existing["id"], False
             conn.commit()  # release the write lock; nothing changed
             return existing["id"], False
 

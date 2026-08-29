@@ -210,6 +210,68 @@ class TestStoreDocument:
 # ---------------------------------------------------------------------------
 
 
+class TestTitleDriftRepair:
+    """techne#819 — a titling FIX must be able to reach rows already stored.
+
+    Both dedup keys here are content-derived and neither includes the title, so
+    re-indexing with a corrected adapter produces byte-identical content, lands in
+    the unchanged branch, and the old title survives. That is how #816's 25
+    `<local-command-caveat>Caveat: …` titles became unrepairable by the obvious
+    remedy — while #817's note invited exactly that inference.
+    """
+
+    def test_a_corrected_title_lands_on_the_same_row(self, db_path):
+        body = "the transcript body, byte-identical across both passes"
+        first, _ = store_document(
+            db_path,
+            source_type="cc-transcript",
+            source_url="cc:s1",
+            title="<local-command-caveat>Caveat: The messages below",
+            content=body,
+        )
+        stats: dict = {}
+        second, stored = store_document(
+            db_path,
+            source_type="cc-transcript",
+            source_url="cc:s1",
+            title="why is recall empty",
+            content=body,
+            stats=stats,
+        )
+        assert second == first, "a repair must not mint a new revision"
+        assert stored is False, (
+            "no new row was written; widening `stored` here would make the "
+            "caller's `unchanged` count wrong"
+        )
+        assert get_document(db_path, first)["title"] == "why is recall empty"
+        assert stats == {"titles_repaired": 1}
+
+    def test_an_unchanged_title_writes_nothing(self, db_path):
+        """The repair must not turn a pure no-op path into a per-index write."""
+        stats: dict = {}
+        for _ in range(2):
+            store_document(
+                db_path,
+                source_type="cc-transcript",
+                source_url="cc:s2",
+                title="stable title",
+                content="stable body",
+                stats=stats,
+            )
+        assert stats == {}, f"spurious repair on an unchanged title: {stats}"
+
+    def test_a_content_change_still_supersedes(self, db_path):
+        """The repair branch must not swallow a genuine revision."""
+        first, _ = store_document(
+            db_path, source_type="x", source_url="cc:s3", title="T1", content="body one"
+        )
+        second, stored = store_document(
+            db_path, source_type="x", source_url="cc:s3", title="T2", content="body two"
+        )
+        assert stored is True
+        assert second != first
+
+
 class TestListDocuments:
     def test_list_returns_active_rows_only(self, db_path):
         url = "https://github.com/acme/repo/issues/7"

@@ -73,7 +73,15 @@ def test_index_neutral_source_stores_and_dedups(tmp_path):
         ]
     )
     counts = index_transcripts(config, source)
-    assert counts == {"total": 3, "stored": 2, "unchanged": 0, "empty": 1, "unreadable": 0}
+    assert counts == {
+        "total": 3,
+        "stored": 2,
+        "unchanged": 0,
+        "empty": 1,
+        "unreadable": 0,
+        # techne#819 — a fresh index repairs nothing; the count is present and zero.
+        "titles_repaired": 0,
+    }
 
     docs = list_documents(librarian_db(config), source_type="fake-client-transcript")
     assert len(docs) == 2

@@ -35,6 +35,7 @@ def index_document(
     make_card: bool = True,
     backing_mode: str = "mirror",
     summary: str | None = None,
+    stats: dict | None = None,
 ) -> tuple[int, bool]:
     """Store one document (redacted, deduped) and upsert its Option D card.
 
@@ -56,6 +57,7 @@ def index_document(
         title=title,
         content=content,
         meta=meta,
+        stats=stats,
     )
     if make_card:
         upsert_document_card(
