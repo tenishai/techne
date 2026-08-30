@@ -1250,6 +1250,8 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     whole row says "there may be more", an unmarked severed row says "this is all of
     it", and only the second is the failure techne#826 exists to fix.
     """
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
     long_fact = " ".join(f"word{i:03d}" for i in range(200))
     assert len(long_fact) > 900, "fixture must exceed the ceiling to test it"
 
@@ -1262,12 +1264,16 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     assert row, f"expected an injected row: {block!r}"
     body = row[0].split("] ", 1)[1]
 
-    # BOTH BOUNDS. An upper bound alone stayed green when the ceiling was LOWERED
-    # (#839 r4 Important 2) — `[:120]` passed a `<= 500` assertion, so the test could
-    # not see the documentation going stale in that direction either.
-    assert 400 < len(body) <= 500, (
-        f"row is {len(body)} chars — search()'s 500 ceiling has moved (techne#842); "
-        "update this test and the _SEARCH_ROW_CEILING constant together"
+    # BOUNDED BY THE CLAMP, NOT BY search() — AND THAT IS THE POINT OF THIS ASSERTION
+    # NOW (#839 r5 Important 1). The hook caps at `_SEARCH_ROW_CEILING - 1` before
+    # `_truncate_for_injection` ever sees the row, so this length is identical whether
+    # search() truncates or not: deleting search.py:416's own `[:500]` left the whole
+    # suite green. The r4 "both bounds" fix landed on an assertion that the r4 clamp
+    # made inert IN THE SAME COMMIT. search()'s ceiling is witnessed directly by
+    # `test_search_itself_truncates_knowledge_rows` below; what THIS pins is that the
+    # clamp is applied and the marker survives.
+    assert 400 < len(body) < _SEARCH_ROW_CEILING, (
+        f"row is {len(body)} chars — expected the clamp at {_SEARCH_ROW_CEILING - 1}"
     )
     assert body.endswith(" …"), (
         "a row at the ceiling shipped UNMARKED — the clamp is gone and the rail is "
@@ -1294,10 +1300,25 @@ def test_both_search_sites_share_one_ceiling():
     from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
 
     src = _P("techne/core/search.py").read_text()
-    sites = re.findall(r'"content":\s*(?:r\["content"\]|k\[2\])\[:(\d+)\]', src)
-    assert len(sites) >= 2, f"expected both knowledge-row sites, found {sites}"
-    assert set(sites) == {str(_SEARCH_ROW_CEILING)}, (
-        f"search.py truncates knowledge rows at {set(sites)} but the hook clamps to "
+
+    # ANCHORED ON THE KNOWLEDGE ROW, NOT ON THE TRUNCATION SHAPE (#839 r5 Important 2).
+    # The first version matched `[:NNN]` on any content field and caught THREE sites —
+    # including search.py:366, the OBSERVATIONS row, which has nothing to do with this
+    # knob. That was wrong in both directions, both demonstrated: deleting :416's
+    # ceiling still left two matching sites so the test stayed GREEN (false negative on
+    # the thing it exists to catch), and editing :366 alone turned it RED with a message
+    # about "knowledge rows" that was not true (false positive, and the kind that gets a
+    # test deleted as noise). Each knowledge block is found by its own source_table
+    # marker, and the count is EXACT so future slack cannot hide a lost site.
+    blocks = re.findall(
+        r'"source_table":\s*"knowledge",.*?\[:(\d+)\]', src, flags=re.S
+    )
+    assert len(blocks) == 2, (
+        f"expected exactly two knowledge-row truncation sites, found {blocks} — "
+        "search.py's shape changed; re-derive this pin rather than widening it"
+    )
+    assert set(blocks) == {str(_SEARCH_ROW_CEILING)}, (
+        f"search.py truncates knowledge rows at {set(blocks)} but the hook clamps to "
         f"{_SEARCH_ROW_CEILING} — they must move together (techne#842)"
     )
 
@@ -1335,4 +1356,34 @@ def test_a_withheld_row_is_not_marked_sent(home, monkeypatch, capsys):
 
     assert second.strip(), (
         "the row was suppressed as already-sent despite never having been injected"
+    )
+
+
+def test_search_itself_truncates_knowledge_rows(home):
+    """techne#842 / #839 r5 Important 1 — WITNESS THE CEILING WHERE IT LIVES.
+
+    The end-to-end test above cannot see this: the hook clamps to
+    `_SEARCH_ROW_CEILING - 1` BEFORE `_truncate_for_injection` runs, so its length
+    assertion is satisfied by the clamp whether or not `search()` truncates at all.
+    Deleting `search.py`'s own ceiling left the full suite green.
+
+    This calls `search()` directly, so the only thing that can satisfy it is
+    `search()`'s own behaviour. It is what makes the constant in `config.py`, the
+    README line and the CHANGELOG line falsifiable — every one of them is keyed to a
+    number that, until now, no test observed at its source.
+    """
+    from techne.config import Config
+    from techne.core.search import search
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
+    long_fact = " ".join(f"word{i:03d}" for i in range(300))
+    assert len(long_fact) > _SEARCH_ROW_CEILING * 2, "fixture must exceed the ceiling"
+    _seed(long_fact, type="fact")
+
+    rows = search(Config.load().db_path, "word001 word002", table="knowledge", limit=5)
+    assert rows, "fixture must be retrievable or this witnesses nothing"
+    longest = max(len(r.get("content") or "") for r in rows)
+    assert longest == _SEARCH_ROW_CEILING, (
+        f"search() returned a {longest}-char knowledge row; the hook and its docs are "
+        f"keyed to {_SEARCH_ROW_CEILING} (techne#842) and must move together"
     )
