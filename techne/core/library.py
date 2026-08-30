@@ -35,6 +35,7 @@ def index_document(
     make_card: bool = True,
     backing_mode: str = "mirror",
     summary: str | None = None,
+    stats: dict | None = None,
 ) -> tuple[int, bool]:
     """Store one document (redacted, deduped) and upsert its Option D card.
 
@@ -56,6 +57,7 @@ def index_document(
         title=title,
         content=content,
         meta=meta,
+        stats=stats,
     )
     if make_card:
         upsert_document_card(
@@ -88,9 +90,17 @@ def index_markdown_dir(
 ) -> dict:
     """Index every *.md under `root` as a Librarian document (+ card). Deduped by
     source_url=`<source_type>:<relpath>`, so re-running only rewrites changed files.
-    Returns counts {total, stored, unchanged, empty}."""
+    Returns counts {total, stored, unchanged, empty, titles_repaired}.
+
+    ``titles_repaired`` counts rows whose CONTENT was unchanged but whose title was
+    corrected in place (techne#819). Threaded here so this path cannot report
+    ``stored: 0, unchanged: N`` while having written — the shape this function's own
+    contract calls a no-op. Drift is near-unreachable on markdown specifically, since
+    `_markdown_title` is a pure function of the content (first heading, else the file
+    stem, and the stem is in the source_url); the count is here so the surface is
+    honest rather than because the number is expected to move."""
     root = Path(root)
-    counts = {"total": 0, "stored": 0, "unchanged": 0, "empty": 0}
+    counts = {"total": 0, "stored": 0, "unchanged": 0, "empty": 0, "titles_repaired": 0}
     for md in sorted(root.glob("**/*.md")):
         counts["total"] += 1
         text = md.read_text(encoding="utf-8").strip()
@@ -106,6 +116,7 @@ def index_markdown_dir(
             content=text,
             meta=json.dumps({"path": str(md), "rel": rel}),
             make_card=make_cards,
+            stats=counts,
         )
         counts["stored" if stored else "unchanged"] += 1
     return counts
