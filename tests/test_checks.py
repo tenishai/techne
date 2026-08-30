@@ -2662,17 +2662,26 @@ class TestPendingCardBacklog:
         )
 
     @staticmethod
-    def _age(config, days=12, hours=None):
+    def _age(config, days=None, hours=None):
         """RELATIVE, never a literal date. A first draft pinned "2026-08-17" and
         asserted "12d" in the detail — true on the day it was written and wrong
         every day after, which is a test that turns into a mystery failure rather
         than a signal."""
         import sqlite3
 
+        # AT MOST ONE UNIT (#841 r3 nit 3). The first version defaulted `days=12` and
+        # let a passed `hours` silently SHADOW it, so `_age(days=3, hours=2)` would
+        # have aged the card two hours without complaint — a trap built into a helper
+        # with eleven call sites and growing. Bare `_age(config)` still means 12 days.
+        assert days is None or hours is None, "pass at most one of days= or hours="
+        if hours is not None:
+            delta = timedelta(hours=hours)
+        else:
+            delta = timedelta(days=12 if days is None else days)
         conn = sqlite3.connect(config.db_path)
         conn.execute(
             "UPDATE knowledge SET created_at=? WHERE type='document_card'",
-            (_iso(timedelta(hours=hours) if hours is not None else timedelta(days=days)),),
+            (_iso(delta),),
         )
         conn.commit()
         conn.close()
@@ -2780,11 +2789,15 @@ class TestPendingCardBacklog:
         hour: an eleven-fold move reds it, and so does any move past 25h or below
         23h. It does NOT pin the comparison operator — I checked rather than
         claiming it, and flipping `<=` to `<` leaves this green, because the two
-        differ only at EXACTLY the interval. Pinning that would need a card aged to
-        the microsecond, which is a flaky test bought for a distinction worth
-        nothing operationally: nobody cares whether a card aged exactly 24h to the
-        instant reads LIVE or STALE. Recorded rather than left implied, because an
-        earlier draft of this docstring claimed both and only one is true.
+        differ only at EXACTLY the interval.
+
+        That is left unpinned because the distinction is worth nothing
+        operationally: nobody cares whether a card aged exactly 24h to the instant
+        reads LIVE or STALE. NOT because pinning it would be flaky — an earlier
+        draft said that and it is FALSE, as review pointed out: monkeypatching
+        `_age` to return the interval exactly pins the boundary with no timing
+        involved at all. The weaker argument was leading, which in a repo where
+        docstrings are the durable record of WHY is worth swapping.
         """
         from techne.core.checks import _PENDING_CARD_STALE_DAYS, check_pending_cards
 
@@ -2857,8 +2870,12 @@ class TestPendingCardBacklog:
         absent = Config(db_path=tmp_path / "nope" / "missing.db", data_dir=tmp_path)
         result = check_pending_cards(absent)
         assert result.verdict is Verdict.DORMANT, result
-        # the NAME's second claim — "not a finding" — which nothing asserted (#841 r2
-        # nit). Breaking `CheckResult.ok` so DORMANT stopped counting left this green.
+        # the NAME's second claim — "not a finding" — which this test's own body did
+        # not assert (#841 r2 nit). NAME-ALIGNMENT, NOT NEW COVERAGE: `.ok` is a
+        # derived property already pinned exhaustively by
+        # TestSeverityInvariants::test_only_live_and_dormant_are_ok, and breaking
+        # DORMANT reds fourteen tests, of which this is one. The value is that the
+        # name stays honest against the body, not that a suite-level gap closes.
         assert result.ok, "DORMANT must not read as a finding"
         assert "no store" in result.evidence
 
