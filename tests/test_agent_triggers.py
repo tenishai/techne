@@ -1284,7 +1284,7 @@ def test_the_sandbox_the_trigger_names_is_installable():
 
 # ------------------------------------------------------- techne#814/#842: upgrading
 
-def test_only_init_writes_the_backfill_segment(tmp_path, monkeypatch):
+def test_only_init_writes_the_backfill_segment(tmp_path):
     """WITNESS for the upgrade trigger's first bullet.
 
     The claim is that the SessionStart chain an install runs is whatever `init`
@@ -1294,25 +1294,24 @@ def test_only_init_writes_the_backfill_segment(tmp_path, monkeypatch):
     DRIVES `register_hooks` AND READS THE EMITTED COMMAND (#843 r1 Important 1).
     The first version grepped `hooks.py` for the substring "vectors backfill",
     which also appears in `_backfill_command`'s own DOCSTRING — so it passed
-    whenever the helper merely existed, regardless of whether the chain carried
-    it. Review reproduced the historical v0.16.0 failure (the segment removed from
-    the assembly, helper and docstring untouched) and the whole trigger suite
-    stayed green: a witness that could not fail for the one bug this release
-    exists to fix.
+    whenever the helper merely existed, regardless of whether the chain carried it.
+    Review reproduced the historical v0.16.0 failure (the segment removed from the
+    assembly, helper and docstring untouched) and the whole trigger suite stayed
+    green: a witness that could not fail for the one bug this release exists to fix.
+
+    NO LOCAL PATH SETUP, DELIBERATELY (#843 r2). `conftest.py`'s autouse
+    `_isolate_host_config` already pins SETTINGS_PATH and MCP_CONFIG_PATH on both
+    modules for every test in the suite. An earlier version of this test
+    hand-copied `test_claude_code.py`'s `fake_home` and `cfg` — fourteen lines that
+    had ALREADY drifted from the fixture they duplicated, since that `cfg` sets
+    `loaded_from` and writes a real config.yaml and this copy did not. A hand copy
+    of a fixture is a fixture that stops tracking.
     """
     import json
 
     from techne.config import Config, HookConfig, SyncConfig
     from techne.platforms import claude_code
     from techne.platforms.claude_code import hooks as hooks_mod
-
-    home = tmp_path / "home"
-    home.mkdir()
-    settings_path = home / ".claude" / "settings.json"
-    monkeypatch.setattr(hooks_mod, "SETTINGS_PATH", settings_path)
-    monkeypatch.setattr(hooks_mod, "MCP_CONFIG_PATH", home / ".claude.json")
-    monkeypatch.setattr(claude_code, "SETTINGS_PATH", settings_path)
-    monkeypatch.setattr(claude_code, "MCP_CONFIG_PATH", home / ".claude.json")
 
     cfg = Config()
     cfg.db_path = tmp_path / "techne.db"
@@ -1322,7 +1321,7 @@ def test_only_init_writes_the_backfill_segment(tmp_path, monkeypatch):
     cfg.sync = SyncConfig(adapter="noop")
 
     claude_code.register_hooks(cfg)
-    groups = json.loads(settings_path.read_text())["hooks"]["SessionStart"]
+    groups = json.loads(hooks_mod.SETTINGS_PATH.read_text())["hooks"]["SessionStart"]
     command = groups[0]["hooks"][0]["command"]
 
     assert "vectors backfill" in command, (

@@ -252,10 +252,13 @@ techne skills install   # an upgrade does not refresh the bundled procedures
 techne vectors backfill  # ONCE, bare — warms the model cache and catches up the backlog
 ```
 
-The third needs the `vectors` extra installed. Without `sqlite_vec` it early-exits with
-"vector search unavailable: no embedding backend installed" and embeds nothing, so on a
-bare `pip install techne` the step that decides whether recall works is a silent no-op.
-`techne[recommended]` pulls it.
+The third is silent when it does nothing, so check its OUTPUT, not its exit code. It
+worked only if it printed a JSON counts block. A `vector search unavailable: no embedding
+backend installed` line means it embedded nothing and exited 0 — and that line appears for
+two different causes: the `vectors` extra absent, or the extra present but the embedding
+backend unable to load. `cli.py` deliberately avoids naming sqlite-vec in the second case,
+because blaming it sends an operator to re-check what they have already ruled out — so
+diagnose from whether you got counts, not from the cause.
 
 > **Agent: raise this unprompted.**
 >

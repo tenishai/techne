@@ -27,10 +27,14 @@ means the cache never warms itself. The bare CLI keeps the permissive default, s
 manual run primes it and catches up the backlog. An install that has never run it has an
 empty vector index and no signal saying so.
 
-**Step three needs the `vectors` extra.** Without `sqlite_vec` the command early-exits with
-"vector search unavailable: no embedding backend installed" and does nothing — so on a bare
-`pip install techne` the step that decides whether recall works is a no-op. `techne[recommended]`
-pulls it, which is what the README's install line uses.
+**Step three is silent when it does nothing, so check the output rather than the exit
+code.** It worked only if it printed a JSON counts block. A `vector search unavailable:
+no embedding backend installed` line means it embedded nothing and still exited 0 — and
+that same line appears for TWO different causes: the `vectors` extra absent, or the extra
+present but the embedding backend unable to load (a cold model cache with no reachable
+Hub). Do not diagnose from the cause; diagnose from whether you got counts.
+`techne[recommended]` pulls the extra, which is what the README's **pipx** line uses — the
+`git clone` block at the top of the README is core only.
 
 `docs/deployment.md` carries the same thing as an agent trigger, so an assistant working
 in your repo raises it unprompted rather than waiting to be asked.

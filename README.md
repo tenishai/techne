@@ -65,9 +65,19 @@ techne init
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
 > Upgrade later with `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
-> (a plain `pipx install` on an already-installed techne refuses without `--force`). **After an
-> upgrade, run `techne skills install`** — an upgrade does not re-run `techne init`, so the
-> bundled procedures below are not refreshed on their own.
+> (a plain `pipx install` on an already-installed techne refuses without `--force`).
+>
+> **An upgrade replaces the code and nothing else. Run all three afterwards:**
+>
+> ```sh
+> techne init              # ONLY init writes the SessionStart hook chain — an upgrade
+>                          #   leaves whatever chain was written last
+> techne skills install    # an upgrade does not refresh the bundled procedures
+> techne vectors backfill  # ONCE, from the CLI — nothing else embeds
+> ```
+>
+> Step three worked only if it printed a JSON counts block. A `vector search unavailable`
+> line means it embedded nothing and exited 0. See the CHANGELOG's Upgrading section.
 > The `git clone` + `pip install -e .` flow above is for **developing** techne (live local edits).
 
 > **Bundled procedures.** `techne init` also installs two operator procedures as slash
