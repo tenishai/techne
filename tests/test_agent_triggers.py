@@ -520,6 +520,10 @@ def test_the_restore_trigger_is_still_all_or_nothing():
 #: kept producing: THE BULLET→TEST LINK EXISTED NOWHERE, so there was nothing to mutate and
 #: no mutant could have exposed it. Naming the witness is what makes the link checkable.
 TRIGGER_WITNESSES = {
+    "have not mentioned `techne init`": "test_only_init_writes_the_backfill_segment",
+    "recall is empty, that semantic search": (
+        "test_the_hook_runs_backfill_no_download_and_the_cli_does_not"
+    ),
     "`cp`, `rsync`, `scp`, `mv` or tar": "test_the_wal_premise_every_wal_trigger_rests_on",
     "file-level backup tool": "test_the_wal_premise_every_wal_trigger_rests_on",
     "propose deleting one": "test_the_wal_premise_every_wal_trigger_rests_on",
@@ -546,6 +550,11 @@ TRIGGER_WITNESSES = {
         "test_the_sandbox_the_trigger_names_is_installable",
     "about to build something substantial": "test_the_survey_guide_teaches_the_same_sandbox",
     '"the landscape" or "who else does this"': "test_the_survey_guide_teaches_the_same_sandbox",
+    # techne#575/#727/#814 — the release checklist. Three releases each dropped a
+    # DIFFERENT step, so the doc is the artifact and these pin the two claims it makes
+    # that code can actually check.
+    '"cut a release"': "test_the_release_checklist_names_a_test_that_exists",
+    "cannot find its GitHub Release": "test_nothing_automates_publishing_the_github_release",
 }
 
 
@@ -1276,3 +1285,134 @@ def test_the_sandbox_the_trigger_names_is_installable():
 
     assert CliRunner().invoke(main, ["agents", "status", "--help"]).exit_code == 0
     assert REQUIRED_TOOLS_LINE in bundled_agent_text("research-readonly")
+
+
+# ------------------------------------------------------- techne#814/#842: upgrading
+
+def test_only_init_writes_the_backfill_segment(tmp_path):
+    """WITNESS for the upgrade trigger's first bullet.
+
+    The claim is that the SessionStart chain an install runs is whatever `init`
+    last wrote, so an upgrade alone leaves the old chain — which is why a stale
+    install never gains the backfill segment on its own.
+
+    DRIVES `register_hooks` AND READS THE EMITTED COMMAND (#843 r1 Important 1).
+    The first version grepped `hooks.py` for the substring "vectors backfill",
+    which also appears in `_backfill_command`'s own DOCSTRING — so it passed
+    whenever the helper merely existed, regardless of whether the chain carried it.
+    Review reproduced the historical v0.16.0 failure (the segment removed from the
+    assembly, helper and docstring untouched) and the whole trigger suite stayed
+    green: a witness that could not fail for the one bug this release exists to fix.
+
+    NO LOCAL PATH SETUP, DELIBERATELY (#843 r2). `conftest.py`'s autouse
+    `_isolate_host_config` already pins SETTINGS_PATH and MCP_CONFIG_PATH on both
+    modules for every test in the suite. An earlier version of this test
+    hand-copied `test_claude_code.py`'s `fake_home` and `cfg` — fourteen lines that
+    had ALREADY drifted from the fixture they duplicated, since that `cfg` sets
+    `loaded_from` and writes a real config.yaml and this copy did not. A hand copy
+    of a fixture is a fixture that stops tracking.
+    """
+    import json
+
+    from techne.config import Config, HookConfig, SyncConfig
+    from techne.platforms import claude_code
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "techne.db"
+    cfg.data_dir = tmp_path
+    cfg.platform = "claude-code"
+    cfg.hooks = HookConfig(post_tool_use=True)
+    cfg.sync = SyncConfig(adapter="noop")
+
+    claude_code.register_hooks(cfg)
+    groups = json.loads(hooks_mod.SETTINGS_PATH.read_text())["hooks"]["SessionStart"]
+    command = groups[0]["hooks"][0]["command"]
+
+    assert "vectors backfill" in command, (
+        "`techne init` no longer writes the backfill segment into the SessionStart "
+        "chain — an install cannot gain it by running init, and "
+        "docs/deployment.md tells operators it can"
+    )
+
+
+def test_the_hook_runs_backfill_no_download_and_the_cli_does_not():
+    """WITNESS for the upgrade trigger's second bullet.
+
+    Two halves, and the trigger is only true if both hold: the HOOK passes
+    `--no-download` (so a cold model cache degrades to "embedded nothing" instead of
+    blocking session start), and the bare CLI does NOT (so one manual run is what
+    warms the cache). If the CLI ever gains the flag by default, the trigger's advice
+    becomes wrong — the manual run would no-op too, and there would be no way left to
+    prime it.
+    """
+    import subprocess
+    import sys
+
+    src = (REPO / "techne/platforms/claude_code/hooks.py").read_text()
+    assert "vectors backfill --no-download" in src, (
+        "the SessionStart hook no longer passes --no-download; a cold cache can now "
+        "block session start on a model fetch"
+    )
+
+    out = subprocess.run(
+        [sys.executable, "-m", "techne.cli", "vectors", "backfill", "--help"],
+        capture_output=True, text=True, cwd=REPO,
+    ).stdout
+    assert "--no-download" in out, "the CLI flag vanished; the hook's invocation is stale"
+    assert "--no-download" not in out.split("Options:")[0], "sanity: parsed the wrong section"
+
+
+def test_the_release_checklist_names_a_test_that_exists():
+    """`docs/releasing.md` step 2 tells the releaser that the `### Upgrading` section is
+    enforced, and names the test doing the enforcing. A named test that has been renamed
+    or deleted leaves the checklist asserting a guard that is not there — and the
+    checklist is read at exactly the moment nobody is in a position to notice.
+
+    This pins the NAME against the collected suite, not against the file's source text: a
+    grep for the string would be satisfied by the doc quoting itself.
+    """
+    import subprocess
+    import sys
+
+    doc = (REPO / "docs" / "releasing.md").read_text(encoding="utf-8")
+    named = re.findall(r"tests/test_\w+\.py::(\w+)", doc)
+
+    assert named, "the checklist names no test — step 2's enforcement claim is unbacked"
+
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/test_changelog.py"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    missing = [t for t in named if t not in collected]
+    assert not missing, (
+        f"docs/releasing.md names {missing}, which pytest does not collect. The checklist "
+        f"tells the releaser these guard the release; rename the doc or restore the test."
+    )
+
+
+def test_nothing_automates_publishing_the_github_release():
+    """The trigger says nothing in CI publishes a Release, so the human must. That is an
+    ABSENCE, and an absence goes stale silently the moment someone adds the automation —
+    at which point the doc would be telling a releaser to do by hand what already
+    happened, and telling an agent to raise an alarm about a step that ran.
+
+    Same shape as the backup and transcript triggers in this file: assert the gap the
+    advice rests on is still a gap.
+    """
+    workflows = REPO / ".github" / "workflows"
+    publishers = [
+        f"{path.name}: {line.strip()[:60]}"
+        for path in sorted(workflows.glob("*.yml"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if any(m in line for m in ("gh release create", "action-gh-release", "create_release"))
+    ]
+
+    assert not publishers, (
+        f"something in CI now publishes a GitHub Release: {publishers}. docs/releasing.md "
+        f"tells the operator to run `gh release create` by hand and the trigger tells an "
+        f"agent to flag a tag with no Release — both are now wrong."
+    )

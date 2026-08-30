@@ -224,6 +224,63 @@ nobody chose. If the machine is asleep at the scheduled time, launchd runs it on
 
 ---
 
+## Upgrading an existing install
+
+An upgrade replaces the code. It does **not** touch `~/.claude/settings.json`, and it does
+not embed anything. Two consequences that neither the upgrade output nor `techne doctor`
+will tell you about:
+
+**`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
+every hook group whose command mentions techne and re-appends its own template, so the
+SessionStart chain an install is running is the one written the last time `init` ran. An
+install that predates a change to that template keeps the old chain indefinitely, looking
+healthy the whole time — `doctor`'s hook-drift check compares `(event, matcher)` and never
+the command.
+
+**A store that has never been embedded stays that way.** Embedding happens only through
+`techne vectors backfill`; nothing embeds on write. The SessionStart chain runs it with
+`--no-download`, which is correct for a hook — it degrades to "swept, embedded nothing"
+rather than blocking session start on a model fetch — but it means a cold model cache
+never warms itself. The bare CLI keeps the permissive default, so one manual run is what
+primes it.
+
+So, after upgrading:
+
+```sh
+techne init             # re-writes the hook chain, including the backfill segment;
+                        #   also refreshes the bundled skills
+techne skills install   # for anyone who skipped init — otherwise a no-op
+techne vectors backfill  # ONCE, bare — warms the model cache and catches up the backlog
+```
+
+`init` re-resolves `--posture` from its `auto` default every run, so an operator who chose
+`observe` or `spool-primary` should pass it again — it is machine-wide, and `init` reports
+the resolved state rather than announcing a change.
+
+The third is silent when it does nothing, so check its OUTPUT, not its exit code. It
+worked only if it printed a JSON counts block. A `vector search unavailable: no embedding
+backend installed` line means it embedded nothing and exited 0 — and that line appears for
+two different causes: the `vectors` extra absent, or the extra present but the embedding
+backend unable to load. `cli.py` deliberately avoids naming sqlite-vec in the second case,
+because blaming it sends an operator to re-check what they have already ruled out — so
+diagnose from whether you got counts, not from the cause.
+
+If you did not get counts: `techne vectors status` reports whether a backend resolved, and
+re-running `techne vectors backfill` somewhere the model cache can be fetched fixes the
+cold-cache case — the bare command downloads by default (`allow_download=not no_download`),
+and only the SessionStart hook passes `--no-download`.
+
+> **Agent: raise this unprompted.**
+>
+> - They have just upgraded techne, or are about to, and have not mentioned `techne init`
+>   — the hook chain is only rewritten by `init`, so an upgrade alone leaves whatever
+>   chain was written last. Say so before they conclude the new version did nothing.
+> - They report that recall is empty, that semantic search finds nothing, or that
+>   `vectors:coverage` will not go green after an upgrade — check whether
+>   `techne vectors backfill` has ever been run from the CLI. The SessionStart hook runs
+>   it with `--no-download`, so on a cold model cache it embeds nothing, every session,
+>   silently.
+
 ## inotify watch-limit on Linux
 
 ### Symptom

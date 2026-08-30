@@ -1,0 +1,91 @@
+# Releasing
+
+Cutting a techne release is seven steps, and no two of the last four releases dropped the
+same one. This file is the checklist, kept here because the failures were not knowledge
+failures — the person cutting each release knew the step existed and did not run it.
+
+> **Agent: raise this unprompted.**
+>
+> - The operator says "cut a release", "tag `vX.Y.Z`", or "ship it" — walk **this list**,
+>   not the steps you remember. Every release below was cut by someone who believed they
+>   had finished.
+> - A version is tagged and you cannot find its GitHub Release. Nothing in CI publishes
+>   one — `git tag` and `gh release create` are separate acts, and the second is the step
+>   most often missed.
+
+## What has actually gone wrong
+
+Three distinct failures, three different releases, none caught at the time:
+
+- **v0.9.0 and v0.10.0 were tagged with no GitHub Release published at all.** Releases had
+  stalled at 0.8.0 and nobody noticed for weeks. `git tag` does not create a Release
+  (techne#727).
+- **v0.11.0–v0.13.0 published Release bodies carrying no migration guidance** — no schema
+  note, no `--force`, nothing. Anyone installing by tag got no instruction about what
+  changed between versions (techne#575). The issue was filed, fixed, and closed; v0.15.0
+  honoured it; **v0.16.0 dropped it again nine days later.**
+- **v0.16.0 shipped no `### Upgrading` section and no `techne init` / `techne vectors
+  backfill` instruction.** Two external users installed the tag and got an install whose
+  hook chain was whatever their previous version wrote and whose vector index was empty.
+  Recall returned nothing and nothing said why (techne#814).
+
+The pattern is not carelessness. It is that a release is a sequence of steps with no
+artifact tying them together, so each one is done from memory and memory drops a different
+item each time.
+
+## The checklist
+
+**1. Audit `[Unreleased]` against the log.** `git log --oneline v<previous>..HEAD` and
+confirm every non-trivial commit has an entry. At the v0.16.0 audit, ten of twenty-one
+merged commits were unlisted — including a schema renumber. Had it been tagged as-is, the
+notes would have described half the release.
+
+**2. Rename the section and write `### Upgrading`.** `[Unreleased]` becomes
+`[X.Y.Z] — YYYY-MM-DD`, and the block must carry an `### Upgrading` section saying what the
+operator runs afterwards — or saying plainly that nothing is needed. This is pinned by
+`tests/test_changelog.py::test_the_newest_released_block_carries_an_upgrading_section`, so
+step 2 is the one step here that fails loudly. It exists because the *next* step cannot.
+
+**3. Bump the version and the pinned refs.** `pyproject.toml`, then grep the tree for the
+previous `@vX.Y.Z` — README and ARCHITECTURE.md carry install lines pinned to a tag, and a
+stale one sends new users to the previous release.
+
+**4. Green the gates.** Full suite, `scripts/check_arch_cards.py`, and `ruff check` on
+changed files. An out-of-sync architecture-card anchor is a hard CI failure.
+
+**5. Merge the PR**, squash, with the PR body as the commit message.
+
+**6. Tag, annotated, and push the tag.**
+
+```sh
+git tag -a vX.Y.Z -m "techne vX.Y.Z — <one line>"
+git push origin vX.Y.Z
+```
+
+**7. Publish the GitHub Release, sourcing its body from the CHANGELOG section.**
+
+```sh
+gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --notes-file <(...)
+```
+
+The body **must** carry the `### Upgrading` text from step 2. This is the whole point of
+the exercise: the Release page is what a `pipx install ... @vX.Y.Z` user reads, and it is
+the only surface no test can check. If you write the body by hand and paraphrase, the
+upgrade steps are exactly what gets paraphrased away — that is what happened to v0.16.0.
+
+**Then verify it from the outside**, as a tag-installer would see it:
+
+```sh
+gh release view vX.Y.Z --json body --jq .body | grep -c "Upgrading"
+```
+
+Zero means the release is published and the upgrade steps are not on it. Fix it with
+`gh release edit` before telling anyone the release is out.
+
+## Repairing a release already published
+
+Release bodies are editable and editing one is not rewriting history — the tag and the
+artifacts are untouched. If a shipped release is missing its upgrade steps, add a short
+block at the top pointing at the fixed version rather than leaving tag-installers to find
+out from a broken install. `gh release edit vX.Y.Z --notes-file -` takes the new body on
+stdin.

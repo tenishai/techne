@@ -5,8 +5,81 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-08-30
+
+### Upgrading
+
+Run all three. An upgrade replaces the code and nothing else — it does not rewrite your
+hook chain and it does not embed anything.
+
+```sh
+techne init             # only `init` writes the SessionStart chain, including the
+                        #   vectors-backfill segment this release depends on. It also
+                        #   refreshes the bundled skills.
+techne skills install   # for anyone who skipped init or passed --no-skills
+techne vectors backfill # ONCE, from the CLI — see below
+```
+
+**The third one is the easy one to skip and the one that decides whether recall works.**
+Embedding happens only through `techne vectors backfill`; nothing embeds on write. The
+SessionStart chain runs it with `--no-download`, which is right for a hook — a cold model
+cache degrades to "swept, embedded nothing" instead of blocking session start — but it
+means the cache never warms itself. The bare CLI keeps the permissive default, so one
+manual run primes it and catches up the backlog. An install that has never run it has an
+empty vector index and no signal saying so.
+
+**Step three is silent when it does nothing, so check the output rather than the exit
+code.** It worked only if it printed a JSON counts block. A `vector search unavailable:
+no embedding backend installed` line means it embedded nothing and still exited 0 — and
+that same line appears for TWO different causes: the `vectors` extra absent, or the extra
+present but the embedding backend unable to load (a cold model cache with no reachable
+Hub). Do not diagnose from the cause; diagnose from whether you got counts.
+
+**If you did not get counts:** `techne vectors status` says whether a backend resolved at
+all, and re-running `techne vectors backfill` where the model cache can be fetched is the
+fix for the second cause — the bare command downloads by default, and only the SessionStart
+hook passes `--no-download`. That asymmetry is deliberate: a hook must never block session
+start on a network fetch, which is exactly why the cache never warms itself and why this
+step is manual.
+`techne[recommended]` pulls the extra, which is what the README's **pipx** line uses — the
+`git clone` block at the top of the README is core only.
+
+**Pass `--posture` to `init` if you ever set one.** It defaults to `auto` and `init`
+re-resolves it every run, so a bare `init` can flip a posture you chose — in either
+direction, including out of `spool-primary`, which puts reflect back on auto-promotion.
+The resolved value is machine-wide and applies to all techne projects, while the detection
+that drives `auto` reads the *current repository*, so the same bare `init` can resolve
+differently depending on where you run it from. `init` reports the resolved state rather
+than announcing a change.
+
+`docs/deployment.md` carries the same thing as an agent trigger, so an assistant working
+in your repo raises it unprompted rather than waiting to be asked.
+
 ### Fixed
 
+- A session is titled from its dialogue rather than from whatever wrapper the client
+  injected first. Claude Code emits text-bearing `user` turns that no human typed —
+  slash commands and their output, shell runs, task notifications — so 25 transcripts
+  were titled `<local-command-caveat>Caveat: …` or `---BEGIN USER MESSAGES---`. Only
+  an adapter can know its own client's markers, so core never guesses: the optional
+  `dialogue_text` hook is read via `getattr` and forwarded to `derive_title`, and a
+  source that omits it is byte-for-byte unaffected (#816, #817).
+- `search()`'s fusion no longer discards the lexical channel. The vec-first union
+  appended FTS-only hits after the whole vector channel and then truncated, so a
+  vector channel that filled the page dropped every one — measured 108 of 108 across
+  15 identifier-shaped queries on a live store, which is the normal case rather than
+  an edge, because on any non-trivial store the vector channel always fills the page.
+  A one-slot tail floor now survives truncation. **The size is measured, not chosen**:
+  at limit 10 a floor of 2 or more costs a gold row, and only the limit-10 arm can
+  show that cost, so re-run that arm before widening it (#827).
+- The retrieval-quality gate now **also** diffs base against head on one runner, rather
+  than relying on the absolute floors alone. The floors are still there and still fire;
+  what they cannot do is notice a regression that lands above them, which is exactly
+  what happened when they passed the #827 work green. A base-vs-head comparison has no
+  such blind spot. Metrics emission is opt-in (`TECHNE_EVAL_METRICS_OUT`), so with no
+  env var set the leg behaves exactly as it did before. The epsilon is zero because the
+  leg is byte-deterministic — verified by running it twice and diffing the per-class means
+  — so any delta is a real change rather than run noise (#832).
 - A corrected document title now reaches rows that were already stored. Both dedup
   keys are content-derived and neither includes the title, so re-indexing with a
   fixed adapter produced byte-identical content, took the `document_unchanged`

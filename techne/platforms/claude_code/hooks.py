@@ -584,10 +584,13 @@ def _backfill_command() -> str:
     baked absolute path gets wrong the moment the install moves.
 
     `>/dev/null` IS PROTOCOL, NOT TIDINESS — do not remove it to see the output.
-    `vectors backfill` prints its counts blob on stdout unconditionally, even
-    when it embeds nothing, and for SessionStart Claude Code consumes the whole
-    chain's stdout. Unredirected, those counts prepend to session_start's payload
-    and corrupt it on EVERY session start — a total loss of the banner, dressed
+    `vectors backfill` writes to stdout on EVERY exit — a JSON counts blob whenever a
+    backend RESOLVED, even if every count is zero, and a prose `vector search
+    unavailable` line when none did (the distinction the 0.16.1 upgrade notes hang
+    their success test on) — and
+    for SessionStart Claude Code consumes the whole chain's stdout. Unredirected,
+    that output prepends to session_start's payload and corrupts it on EVERY
+    session start — a total loss of the banner, dressed
     as a working hook. Measured on PR #815 review; there is a test pinning it.
 
     STDERR IS DELIBERATELY LEFT OPEN (no `2>&1`). A hook that exits 0 has its
