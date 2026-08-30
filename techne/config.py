@@ -169,6 +169,17 @@ class HookConfig:
     #: `_truncate_for_injection`: the cut now lands on a boundary and announces
     #: itself, so a severed row can be recognised and pulled in full rather than
     #: read as the whole rule.
+    #: THERE IS A HARD CEILING OF 500 AND IT IS NOT THIS KNOB'S (techne#842).
+    #: `search()` returns `r["content"][:500]` for the `knowledge` table
+    #: (core/search.py:416), unconditionally and with no marker, so a row reaches
+    #: this rail ALREADY CUT at 500. Setting this above 500 therefore changes
+    #: nothing — and worse, a row arriving at exactly 500 looks un-truncated to
+    #: `_truncate_for_injection`, so it ships severed mid-word with the announcing
+    #: `…` and the header notice both SUPPRESSED. That is the one configuration in
+    #: which this rail is less honest than before techne#826.
+    #:
+    #: The motivating case is the affected one: a multi-step SOP is exactly a row
+    #: over 500 characters. Raising this to 600 does not deliver more of it.
     per_turn_recall_chars: int = 200
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable

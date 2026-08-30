@@ -499,11 +499,16 @@ class TestInjectedTypeLabel:
         boundary-seeking to find and the cut is hard at the cap — which is what
         keeps this assertion a test of the CAP rather than of the cut point. The
         boundary behaviour is pinned separately below."""
+        import inspect
+
+        from techne.hooks.user_prompt_submit import _build_context
+
+        cap = inspect.signature(_build_context).parameters["char_limit"].default
         out = self._ctx(
             [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
         )
-        assert "x" * 200 in out
-        assert "x" * 201 not in out
+        assert "x" * cap in out
+        assert "x" * (cap + 1) not in out
 
     def test_a_cut_row_never_ends_mid_word(self):
         """techne#826, the measured defect: over one real session 58 of 58 injected
@@ -524,7 +529,8 @@ class TestInjectedTypeLabel:
         # staying green (#839 r1). The row is shifted one character so the character
         # AT the cap is non-whitespace — mid-word, in fact, which is precisely the
         # condition the bare slice cannot survive. (#839 r2 nit 1: an earlier comment
-        # here claimed it was a full stop. It is not; the full stop is two later. The
+        # here claimed it was a full stop. It is not; the full stop is at index 201,
+        # one later — an earlier correction said "two", which was itself off by one. The
         # guard was right and only its explanation was wrong — worth correcting
         # because this is the comment that says why the fixture can be trusted.)
         #
@@ -634,7 +640,7 @@ class TestInjectedTypeLabel:
             assert out == "", f"limit={limit} emitted {len(out)} chars"
             assert cut is True, "withheld content must still be marked as cut"
 
-    def test_a_zero_cap_injects_no_block_at_all(self):
+    def test_a_zero_cap_empties_the_rendered_block(self):
         """#839 r2 Important 3. Withholding content is not enough — rendering the
         withheld rows produced a block whose header promised "Rows ending in …"
         above rows that ended in nothing, contradicting itself, and cost a header
@@ -1146,9 +1152,7 @@ def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
         conn = sqlite3.connect(str(Config.load().db_path))
         try:
             q = ",".join("?" * len(ids))
-            cur = conn.execute(
-                f"SELECT id, type, content FROM knowledge WHERE id IN ({q})", ids
-            )
+            cur = conn.execute(f"SELECT id, type, content FROM knowledge WHERE id IN ({q})", ids)
             by_id = {r[0]: r for r in cur.fetchall()}
         finally:
             conn.close()
@@ -1196,6 +1200,13 @@ def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
 
     A generous cap must therefore produce a LONGER injected row than the default,
     driven through `main()` rather than by calling the renderer directly.
+
+    WHAT THE 600 ARM ACTUALLY DEMONSTRATES, corrected (#839 r3 Important 1): NOT a
+    cut at 600. `search()` pre-truncates knowledge rows to 500, so at cap 600 no
+    truncation is applied at all and the row arrives at 500. The test still pins
+    the join — the config value has to reach the renderer for the two arms to
+    differ — but "600 works" is not what it shows, and the ceiling is pinned
+    separately by `test_search_pre_truncates_at_500_which_caps_this_knob`.
     """
     long_fact = " ".join(f"word{i:03d}" for i in range(200))
 
@@ -1208,6 +1219,72 @@ def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
 
     assert wide.strip() and narrow.strip(), "both runs must inject something"
     assert len(wide) > len(narrow), (
-        f"the configured cap never reached the rail: wide={len(wide)} "
-        f"narrow={len(narrow)}"
+        f"the configured cap never reached the rail: wide={len(wide)} narrow={len(narrow)}"
+    )
+
+
+def test_search_pre_truncates_at_500_which_caps_this_knob(home, monkeypatch, capsys):
+    """techne#842 / #839 r3 Important 1 — A CEILING THIS KNOB DOES NOT OWN.
+
+    `search()` returns `r["content"][:500]` for the knowledge table
+    (core/search.py:416), unconditionally and without a marker. So a row reaches
+    this rail already cut at 500, `per_turn_recall_chars` governs nothing above
+    that, and a row arriving at exactly 500 looks UN-truncated to
+    `_truncate_for_injection` — it ships severed mid-word with the `…` and the
+    header notice both suppressed, which is the one configuration where this rail
+    is less honest than before techne#826.
+
+    Pinned rather than fixed, deliberately: threading the cap into `search()`
+    reaches into the retrieval layer and is techne#842. This test exists so the
+    ceiling is a KNOWN, ASSERTED property rather than a surprise, and so it reds
+    when someone raises or removes the 500 in search.py without revisiting here.
+    """
+    long_fact = " ".join(f"word{i:03d}" for i in range(200))
+    assert len(long_fact) > 900, "fixture must exceed the 500 ceiling to test it"
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=600)
+    _seed(long_fact, type="fact")
+    out = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+
+    block = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    row = [ln for ln in block.splitlines() if ln.startswith("- ⟦techne#")]
+    assert row, f"expected an injected row: {block!r}"
+    body = row[0].split("] ", 1)[1]
+
+    assert len(body) <= 500, (
+        f"search() no longer pre-truncates at 500 (row is {len(body)}) — the knob's "
+        "ceiling has moved; see techne#842 and update this test with the new bound"
+    )
+    assert not body.endswith(" …"), (
+        "a row cut by search() carries no marker — if this now holds, the ceiling "
+        "was closed and the honesty gap with it"
+    )
+
+
+def test_a_withheld_row_is_not_marked_sent(home, monkeypatch, capsys):
+    """techne#839 r3 Important 2 — LOGGING A ROW AS DELIVERED SUPPRESSES IT.
+
+    `log_context_injection`'s own contract is "`rows` is what was INJECTED"
+    (_injection_log.py:217), and the hook passed `rows` whether or not anything was
+    emitted. That is not merely an inaccurate audit row: `_already_sent_this_session`
+    reads `hit_ids` back with NO filter on whether the block was empty, so a row
+    logged-but-never-sent is suppressed for the rest of the session segment.
+
+    Two turns, one session, with the cap raised in between — which AGENTS.md lists
+    as a modelled operator behaviour ("edits ~/.techne/config.yaml while a techne
+    MCP server is live"), not a contrived one. A silent recall miss is this
+    project's own named failure class.
+    """
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=0)
+    _seed("the fact that must survive a withheld turn", type="fact")
+
+    first = _run(monkeypatch, capsys, {"session_id": "sup-1", "prompt": "withheld turn"})
+    assert first.strip() == "", f"cap 0 must inject nothing: {first!r}"
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=200)
+    second = _run(monkeypatch, capsys, {"session_id": "sup-1", "prompt": "withheld turn"})
+
+    assert second.strip(), (
+        "the row was suppressed as already-sent despite never having been injected "
+        "— a withheld row must not be logged as delivered"
     )

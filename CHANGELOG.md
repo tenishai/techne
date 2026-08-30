@@ -17,7 +17,8 @@ All notable changes to techne are documented here. Format loosely follows
   whole rule. **The 200-character default is unchanged**: five rows at 200 is
   ~250 tokens on every prompt and #808 measures per-session context as already the
   dominant cost, so raising it is an operator decision — now available as
-  `hooks.per_turn_recall_chars`, the last fixed number in this rail's tuning
+  `hooks.per_turn_recall_chars` — capped in practice at 500, because `search()`
+  already truncates knowledge rows to that (#842) — the last fixed number in this rail's tuning
   surface — a non-positive value injects no block at all rather than removing the
   cap, matching the sibling `per_turn_recall_limit: 0`, since unbounded is the
   expensive direction to reach by accident (#826).

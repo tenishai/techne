@@ -739,9 +739,7 @@ def main() -> None:
                 # consume one of the k slots that a clearing row could have used.
                 rows = _apply_relevance_floor(rows, config)
                 rows = rows[:k]
-            recall_block = (
-                _build_context(rows, config.hooks.per_turn_recall_chars) if rows else ""
-            )
+            recall_block = _build_context(rows, config.hooks.per_turn_recall_chars) if rows else ""
             if recall_block:
                 blocks.append(recall_block)
             # techne#329 — make the READ path auditable (the audit that motivated
@@ -755,7 +753,18 @@ def main() -> None:
                     source="per_turn_recall",
                     session_id=data.get("session_id"),
                     trigger=prompt,
-                    rows=rows,
+                    # `rows` IS WHAT WAS INJECTED (_injection_log.py:217, its own
+                    # words). Logging withheld rows as delivered is not merely an
+                    # inaccurate audit row: `_already_sent_this_session` reads
+                    # `hit_ids` back with no filter on whether anything was emitted,
+                    # so a row logged-but-not-sent is SUPPRESSED for the rest of the
+                    # session segment. Measured: at `per_turn_recall_chars: 0` turn
+                    # one emits nothing and logs hit_ids=[1]; turn two with the cap
+                    # raised to 200 then emits nothing either, because the row is
+                    # already "sent". Editing config.yaml mid-session is a modelled
+                    # operator behaviour (AGENTS.md lists it as a standing trigger),
+                    # and a silent recall miss is this project's named failure class.
+                    rows=rows if recall_block else [],
                     injected_text=recall_block,
                     k_requested=config.hooks.per_turn_recall_limit,
                 )

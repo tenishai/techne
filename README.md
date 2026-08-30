@@ -553,6 +553,8 @@ hooks:
                               #   sentence or word boundary and a shortened row ends in '…',
                               #   so a truncated fact is distinguishable from a whole one.
                               #   Raising this raises per-prompt token cost on EVERY turn.
+                              #   CEILING 500: search() already truncates knowledge rows to
+                              #   500, so values above that do nothing (#842).
   timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
 sync:
