@@ -7,6 +7,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- `techne doctor` and the SessionStart banner now report a pending document-card
+  backlog. A card is created `pending`, holding the document title as a stand-in
+  gist until the agent-assisted fill pass writes a real one — and it rides recall
+  in the meantime, so recall could return a placeholder where a gist was promised.
+  Nothing said one was waiting: 28 cards sat pending for twelve days and were found
+  only because a consolidate cluster happened to surface some of them. The new
+  `cards:pending` check keys on **age**, not count, because a card is pending for
+  the whole normal gap between indexing and the fill pass, and a check that fires
+  on the healthy state trains its reader to ignore it (#824).
+
 - Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
   adapter that omits them satisfies `isinstance` again. `TranscriptSource` is
   `@runtime_checkable`, and `isinstance()` enforces every *annotated* non-method data

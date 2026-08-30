@@ -2727,3 +2727,123 @@ def check_schema_versions(config) -> list[CheckResult]:
                 )
             )
     return results
+
+
+#: How long a card may sit `pending` before it stops being "between indexing and
+#: the fill pass" and becomes a backlog nobody is coming back for (techne#824).
+#: One day, because the fill pass is a deliberate operator action taken in a
+#: session — not a scheduled rail — so anything older has outlived an operator's
+#: attention rather than merely queued behind one.
+_PENDING_CARD_STALE_DAYS = 1
+
+
+def _age_in_days(ts: str | None) -> int | None:
+    """Whole days between a stored timestamp and now, or None if unparseable.
+
+    techne stores timestamps as naive 'YYYY-MM-DD HH:MM:SS' strings in UTC with no
+    zone marker (techne#2667), so they must be parsed explicitly rather than handed
+    to `fromisoformat` and compared against an aware `now()`.
+    """
+    if not ts:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            when = datetime.strptime(ts[:19], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        return max((datetime.now(timezone.utc) - when).days, 0)
+    return None
+
+
+@register_check
+def check_pending_cards(config) -> CheckResult:
+    """Is any document card still carrying a stand-in gist? (techne#824)
+
+    A COVERAGE check, and the same shape as `rail:reflect` before techne#636: the
+    producing half was visible and the CONSUMING half was not. A card is created
+    `pending`, holding the document's TITLE as a placeholder until the
+    agent-assisted `librarian cards emit`/`ingest` pass writes a real gist. Nothing
+    ever said one was waiting. On 2026-08-29, 28 cards had been pending since
+    2026-08-17 — twelve days — and were found only because a consolidate cluster
+    happened to surface some of them.
+
+    A PENDING CARD IS NOT INERT, which is why this is a check and not a report. It
+    rides recall like any other card, so for those twelve days recall could return
+    a stand-in title where a gist was promised; nine of them returned the same
+    80-character wrapper string. `techne librarian cards list` could always answer
+    this, and was the ONLY thing that could — visible to someone who already
+    suspected the backlog and knew the subcommand, which is the opposite of what a
+    check is for.
+
+    AGE, NOT COUNT, DECIDES THE VERDICT. A card pending for a minute is the normal
+    state between indexing and the fill pass, so counting alone would fire on every
+    healthy install that just indexed a document. What is a finding is a card that
+    has been pending long enough that the fill pass plainly is not coming.
+    """
+    from techne.core.cards import CARD_TYPE
+    from techne.core.database import connect
+
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(
+            name="cards:pending",
+            subsystem="librarian",
+            kind=Kind.COVERAGE,
+            verdict=Verdict.DORMANT,
+            evidence=f"no store at {db_path}",
+            detail="no techne store yet — nothing can be pending",
+        )
+
+    # OWN SQL RATHER THAN `pending_cards()`, for two reasons. That helper is the
+    # emit WORK-LIST: it selects (id, content, source, tags) and carries no
+    # `created_at`, so AGE — which is what decides this verdict — is not in its
+    # shape at all. A first draft of this check read `r.get("created_at")` off its
+    # rows, got None every time, and reported LIVE on a twelve-day backlog. And a
+    # COUNT plus a MIN is one row rather than up to a thousand, on a check that
+    # runs behind the SessionStart banner's budget.
+    sql = (
+        "SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM knowledge "
+        "WHERE type = ? AND superseded_by IS NULL AND tags LIKE '%pending%'"
+    )
+    try:
+        conn = connect(db_path)
+        try:
+            row = conn.execute(sql, (CARD_TYPE,)).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:  # a probe that fails is never silently green
+        return CheckResult(
+            name="cards:pending",
+            subsystem="librarian",
+            kind=Kind.COVERAGE,
+            verdict=Verdict.UNKNOWN,
+            evidence=f"{type(e).__name__} reading the card backlog",
+            detail="could not read the card backlog",
+        )
+
+    count = (row["n"] if row else 0) or 0
+    if not count:
+        return CheckResult(
+            name="cards:pending",
+            subsystem="librarian",
+            kind=Kind.COVERAGE,
+            verdict=Verdict.LIVE,
+            evidence="COUNT(*) over pending document_cards → 0",
+            detail="no card is waiting for a gist",
+        )
+
+    oldest = row["oldest"]
+    age_days = _age_in_days(oldest)
+    stale = age_days is not None and age_days >= _PENDING_CARD_STALE_DAYS
+
+    detail = f"{count} card(s) pending"
+    detail += f", oldest {age_days}d old" if age_days is not None else ", age unknown"
+    return CheckResult(
+        name="cards:pending",
+        subsystem="librarian",
+        kind=Kind.COVERAGE,
+        verdict=Verdict.STALE if stale else Verdict.LIVE,
+        evidence=f"oldest pending card created_at={oldest or 'unknown'}",
+        detail=detail,
+        remedy=("techne librarian cards emit -o /tmp/cards.json  # then ingest" if stale else None),
+    )

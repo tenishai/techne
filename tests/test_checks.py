@@ -2633,3 +2633,102 @@ class TestTheThirdLane:
         assert "configure a sync adapter" not in blob, (
             f"offered a remedy that cannot revive this lane: {blob!r}"
         )
+
+
+class TestPendingCardBacklog:
+    """techne#824 — a pending card is a stand-in gist that RIDES RECALL.
+
+    28 cards sat pending for twelve days and were found only because a consolidate
+    cluster happened to surface some of them. `techne librarian cards list` could
+    always answer this and was the only thing that could — which is visibility for
+    someone who already suspects the backlog, i.e. the opposite of a check.
+    """
+
+    @staticmethod
+    def _pend(config, url="u:1", title="a stand-in title"):
+        from techne.core.cards import upsert_document_card
+        from techne.core.documents import store_document
+        from techne.core.librarian import librarian_db
+
+        doc_id, _ = store_document(
+            librarian_db(config),
+            source_type="x",
+            source_url=url,
+            title=title,
+            content=f"body {url}",
+        )
+        upsert_document_card(
+            config.db_path, source_url=url, doc_id=doc_id, source_version="v1", title=title
+        )
+
+    @staticmethod
+    def _age(config, days=12):
+        """RELATIVE, never a literal date. A first draft pinned "2026-08-17" and
+        asserted "12d" in the detail — true on the day it was written and wrong
+        every day after, which is a test that turns into a mystery failure rather
+        than a signal."""
+        import sqlite3
+
+        conn = sqlite3.connect(config.db_path)
+        conn.execute(
+            "UPDATE knowledge SET created_at=? WHERE type='document_card'",
+            (_iso(timedelta(days=days)),),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_no_pending_cards_is_live(self, config):
+        from techne.core.checks import check_pending_cards
+
+        assert check_pending_cards(config).verdict is Verdict.LIVE
+
+    def test_a_freshly_indexed_card_is_not_a_finding(self, config):
+        """THE HALF THAT STOPS THIS FIRING ON EVERY HEALTHY INSTALL. A card is
+        pending for the whole gap between indexing and the fill pass, so counting
+        alone would flag a store that just indexed a document — a check that fires
+        on the normal state trains its reader to ignore it."""
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config)
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.LIVE
+        assert result.remedy is None
+
+    def test_an_aged_backlog_is_stale_and_carries_its_remedy(self, config):
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config)
+        self._age(config)
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.STALE
+        assert "12d" in result.detail, result.detail
+        assert result.remedy and "cards emit" in result.remedy
+        # the evidence must be re-derivable, not a claim (techne#941)
+        assert _iso(timedelta(days=12))[:10] in result.evidence
+
+    def test_the_age_comes_from_the_OLDEST_card_not_the_newest(self, config):
+        """`MIN(created_at)`, and it is load-bearing: the helper this check first
+        used orders by `updated_at DESC`, so reading the first row would report the
+        NEWEST card's age and a long backlog would look fresh forever."""
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config, url="u:old")
+        self._age(config)
+        self._pend(config, url="u:new")  # today, and the most recently updated
+
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.STALE, "the old card must still decide the verdict"
+        assert "2 card(s)" in result.detail
+
+    def test_a_probe_failure_is_unknown_not_green(self, config, monkeypatch):
+        """A check that cannot read its own subject must never report healthy —
+        this branch is what surfaced an undefined `connect` during development
+        instead of silently reporting LIVE."""
+        import techne.core.database as db_mod
+        from techne.core.checks import check_pending_cards
+
+        def boom(*a, **k):
+            raise RuntimeError("db is gone")
+
+        monkeypatch.setattr(db_mod, "connect", boom)
+        assert check_pending_cards(config).verdict is Verdict.UNKNOWN
