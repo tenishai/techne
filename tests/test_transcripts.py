@@ -297,3 +297,49 @@ def test_optional_hooks_are_not_structural_members_of_the_protocol():
     assert isinstance(WithUnreadableOnly(), TranscriptSource)
     # The Protocol keeps its teeth: the one genuinely REQUIRED member still bites.
     assert not isinstance(NotASource(), TranscriptSource)
+
+
+def test_a_repair_is_counted_through_the_transcripts_indexer(tmp_path):
+    """techne#819 — THE PATH AN OPERATOR HEALING #816 ACTUALLY RUNS.
+
+    `stats=` was severable at all three call sites with the suite green. The fix
+    added a nonzero assertion through `index_markdown_dir` — and that closed the
+    wrong one: `index_markdown_dir`'s own docstring concedes the repair is
+    near-unreachable on markdown, because `_markdown_title` is a pure function of
+    the content. So the count was witnessed where the repair cannot happen and
+    unwitnessed where it does.
+
+    Transcripts are where drift is not merely reachable but OBSERVED: `derive_title`
+    plus the platform `dialogue_text` hook is the titling fix, and #816's 25
+    `<local-command-caveat>Caveat: …` documents are what it corrected. The count
+    this test pins is the one `techne librarian index-transcripts` prints and the
+    CHANGELOG points an operator at.
+    """
+    from techne.core.database import connect
+    from techne.core.librarian import librarian_db
+
+    db = tmp_path / "t.db"
+    init_db(db).close()
+    config = Config(db_path=db, data_dir=tmp_path)
+
+    source = _FakeSource([_t("s-heal", [("user", "why is recall empty"), ("assistant", "ok")])])
+    first = index_transcripts(config, source, make_cards=False)
+    assert first["titles_repaired"] == 0, first
+    assert first["stored"] == 1, first
+
+    # Simulate the pre-#817 state: the row on disk carries the wrapper title while
+    # its CONTENT is byte-identical to what the fixed adapter renders.
+    conn = connect(librarian_db(config))
+    try:
+        conn.execute("UPDATE documents SET title = ?", ("<local-command-caveat>Caveat: The",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    source2 = _FakeSource([_t("s-heal", [("user", "why is recall empty"), ("assistant", "ok")])])
+    second = index_transcripts(config, source2, make_cards=False)
+
+    assert second["titles_repaired"] == 1, (
+        f"the transcripts indexer repaired a title without counting it: {second}"
+    )
+    assert second["stored"] == 0 and second["unchanged"] == 1, second

@@ -267,6 +267,25 @@ class TestTitleDriftRepair:
             content="stable body",
         )
         store_document(db_path, stats=stats, **kwargs)
+
+        # A SENTINEL, NOT THE CLOCK. An earlier version of this test compared
+        # `updated_at` across two back-to-back passes and could not fail:
+        # `CURRENT_TIMESTAMP` is WHOLE-SECOND, the two calls are microseconds apart,
+        # so a rewritten timestamp compares EQUAL to the original. Measured — at a
+        # 0s gap the assertion passes under the unconditional-UPDATE mutation; only
+        # at a >1s gap does it discriminate, which back-to-back calls never reach.
+        # That was worse than the silence it replaced, because the docstring claimed
+        # the gap was closed and a reader would trust it. Stamping an impossible
+        # value makes any write visible regardless of clock resolution.
+        conn = connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE documents SET updated_at = ? WHERE source_url = ?",
+                ("1999-01-01 00:00:00", "cc:s2"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
         first_write = _updated_at()
 
         store_document(db_path, stats=stats, **kwargs)
