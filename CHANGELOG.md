@@ -32,7 +32,22 @@ All notable changes to techne are documented here. Format loosely follows
   on the healthy state trains its reader to ignore it. A backlog whose age cannot be
   read reports UNOBSERVABLE rather than healthy, and the remedy names the backlog
   size because `cards emit` defaults to `--limit 50` (#824).
-
+- Per-turn recall no longer severs every injected fact mid-word. `_build_context`
+  cut each row with a bare `content[:200]` from the day the rail landed; measured
+  over one real session, **58 of 58 injected facts ended mid-word** — a
+  cross-reference cut at `CORRECTS techne#`, a remedy command cut mid-path. The
+  cut now lands on a sentence boundary when one falls in the last 40% of the
+  budget, else a word boundary, and a truncated row ends in `…` with one header
+  line naming the cap, so a severed row announces itself instead of reading as the
+  whole rule. **The 200-character default is unchanged**: five rows at 200 is
+  ~250 tokens on every prompt and #808 measures per-session context as already the
+  dominant cost, so raising it is an operator decision — now available as
+  `hooks.per_turn_recall_chars` — the last fixed number in this rail's tuning
+  surface. It is clamped to 499, because `search()` already truncates knowledge rows
+  to 500 without marking them and an unclamped higher value would suppress the `…`
+  and report a severed row as whole (#842). A non-positive value injects no block at
+  all rather than removing the cap, matching the sibling `per_turn_recall_limit: 0`,
+  since unbounded is the expensive direction to reach by accident (#826).
 - Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
   adapter that omits them satisfies `isinstance` again. `TranscriptSource` is
   `@runtime_checkable`, and `isinstance()` enforces every *annotated* non-method data

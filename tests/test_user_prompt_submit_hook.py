@@ -366,10 +366,13 @@ def test_document_card_is_not_pushed(home, monkeypatch, capsys):
     """Arch cards are pull-only on THIS rail too (techne#561, decided 2026-08-13).
 
     This replaces a test that pinned the opposite behaviour while the question was
-    open. What decided it: `_build_context` truncates every row to 200 chars, and
-    an arch card's value is its full body — a 200-char slice chosen by embedding
-    similarity is a pointer at best. #449's edit-fired rail, matching on `anchor:`
-    paths exactly, is the delivery mechanism cards are supposed to get.
+    open. What decided it: `_build_context` truncates every row to
+    `hooks.per_turn_recall_chars` (200 by default), and an arch card's value is
+    its full body — a slice chosen by embedding similarity is a pointer at best.
+    techne#826 made the cap configurable and the cut boundary-aware; neither
+    changes this argument, because a slice is a pointer at any size. #449's
+    edit-fired rail, matching on `anchor:` paths exactly, is the delivery
+    mechanism cards are supposed to get.
     """
     _write_config(home, per_turn_recall=True)
     _seed_raw("Postgres was chosen over MongoDB for join semantics.", "document_card")
@@ -486,15 +489,200 @@ class TestInjectedTypeLabel:
         assert "[note]" in self._ctx([{"id": 5, "content": "c"}])
 
     def test_the_content_truncation_is_pinned(self):
-        """200 chars, and it was pinned by nothing — removing the slice entirely
-        left the suite green (#566 r2) while a recorded `document_card` decision
-        rests on it. An unbounded line here is a per-turn injection whose size is
-        set by whatever the longest matching row happens to be."""
+        """The CAP, and it was pinned by nothing — removing
+        the slice entirely left the suite green (#566 r2) while a recorded
+        `document_card` decision rests on it. An unbounded line here is a per-turn
+        injection whose size is set by whatever the longest matching row happens to
+        be.
+
+        This row is 500 unbroken `x`, so there is no boundary for techne#826's
+        boundary-seeking to find and the cut is hard at the cap — which is what
+        keeps this assertion a test of the CAP rather than of the cut point. The
+        boundary behaviour is pinned separately below."""
+        # AGAINST THE PRODUCTION DEFAULT, NOT THE RENDERER'S SIGNATURE (#839 r4
+        # Important 3). Deriving `cap` from `_build_context`'s parameter made this a
+        # TAUTOLOGY — changing that default to 400 left the test green, where the old
+        # hardcoded 200 would have failed. Worse, `main()` always passes the cap
+        # explicitly, so the signature default governs no production path at all: the
+        # derived version pinned a vestige while the CHANGELOG's bolded promise that
+        # "the 200-character default is unchanged" was pinned by nothing anywhere.
+        from techne.config import HookConfig
+
+        cap = HookConfig().per_turn_recall_chars
+        assert cap == 200, (
+            "the shipped default moved; #808 measures per-session context as already "
+            "the dominant cost, so this is a deliberate decision, not a tuning tweak"
+        )
         out = self._ctx(
             [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
         )
-        assert "x" * 200 in out
-        assert "x" * 201 not in out
+        assert "x" * cap in out
+        assert "x" * (cap + 1) not in out
+
+    def test_a_cut_row_never_ends_mid_word(self):
+        """techne#826, the measured defect: over one real session 58 of 58 injected
+        facts ended mid-word — a cross-reference severed at `CORRECTS techne#`, a
+        remedy command severed mid-path. The agent receives something that looks
+        like the rule, is topically correct, and is missing the operative half.
+        """
+        body = (
+            "X THE VERSION STRING CANNOT IDENTIFY THE RUNNING CODE. Two independent "
+            "defects, both measured 2026-08-13. CORRECTS techne#1078 and supersedes "
+            "the guidance recorded there, which nobody has re-read since. The rest "
+            "of this row exists to carry it past the cap so the cut actually fires."
+        )
+        # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
+        # An earlier version of this test could not fail: its character at the cap
+        # was a SPACE, so the bare `content[:cap]` defect satisfied both assertions
+        # below and the whole boundary mechanism could be deleted with the suite
+        # staying green (#839 r1). The row is shifted one character so the character
+        # AT the cap is non-whitespace — mid-word, in fact, which is precisely the
+        # condition the bare slice cannot survive. (#839 r2 nit 1: an earlier comment
+        # here claimed it was a full stop. It is not; the full stop is at index 201,
+        # one later — an earlier correction said "two", which was itself off by one. The
+        # guard was right and only its explanation was wrong — worth correcting
+        # because this is the comment that says why the fixture can be trusted.)
+        #
+        # THE CAP IS DERIVED, NOT WRITTEN AS 200 (#839 r2 nit 2). `_ctx` calls
+        # `_build_context` without a limit, so this fixture is coupled to that
+        # DEFAULT; a hardcoded 200 would check the wrong index if the default ever
+        # moved, and go quietly toothless in exactly the way this guard exists to
+        # prevent.
+        import inspect
+
+        from techne.hooks.user_prompt_submit import _build_context
+
+        cap = inspect.signature(_build_context).parameters["char_limit"].default
+        assert len(body) > cap, "fixture must exceed the cap or it tests nothing"
+        assert body[cap] not in " \t\n", (
+            f"fixture is toothless: whitespace at index {cap} lets the bare slice pass"
+        )
+
+        out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": body}])
+        rendered = out.splitlines()[-1]
+        # Anchored to the ROW, not the block: `" …" in out` is satisfied by the
+        # header's own "Rows ending in …" text, so a block-level check never
+        # inspects the row at all (#839 r1).
+        assert rendered.endswith(" …")
+
+        # "the cut is not inside a word", NOT "the cut is a full stop" — whether a
+        # sentence end is available depends on where it falls relative to the 40%
+        # floor, and demanding `.!?` failed against working code in an earlier draft.
+        visible = rendered.split("] ", 1)[1].removesuffix(" …")
+        assert body.startswith(visible), "the cut text must be a prefix of the row"
+        assert body[len(visible)] in " \t\n", (
+            f"cut lands mid-word: ...{visible[-30:]!r} then {body[len(visible)]!r}"
+        )
+
+    def test_a_cut_row_announces_itself_and_an_uncut_one_does_not(self):
+        """A truncated row that looks complete is the whole defect. The marker is
+        what lets a reader tell "I have this" from "I have the first sentence of
+        this", and the header names the knob so the remedy is in the block."""
+        long_out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": "word " * 200}])
+        # ROW-anchored: `" …" in long_out` also matches the header's own
+        # "Rows ending in …" text, so it passed without ever inspecting the row.
+        assert long_out.splitlines()[-1].endswith(" …")
+        assert "per_turn_recall_chars" in long_out
+
+        short_out = self._ctx([{"id": 2, "knowledge_type": "fact", "content": "short row"}])
+        assert " …" not in short_out
+        assert "per_turn_recall_chars" not in short_out, (
+            "an uncut block must not carry a truncation notice — a warning that "
+            "fires when nothing was cut trains the reader to ignore it"
+        )
+
+    def test_boundary_seeking_falls_back_rather_than_gutting_the_row(self):
+        """THE 40% FLOOR IS THE POINT. Without it, a row whose only sentence end
+        sits at char 12 would be cut to 12 characters in the name of tidiness —
+        boundary-seeking made strictly worse than the bare slice it replaced.
+        """
+        from techne.hooks.user_prompt_submit import _truncate_for_injection
+
+        body = "Yes. " + "a" * 400
+        out, was_cut = _truncate_for_injection(body, 200)
+        assert was_cut
+        assert len(out) > 150, f"gutted to {len(out)} chars at the early full stop"
+
+    def test_truncate_is_pinned_directly_not_only_through_the_renderer(self):
+        """`_truncate_for_injection` is pure, and reaching it only through
+        `_build_context` is what let the header's own text satisfy a row-level
+        claim (#839 r1). These assert the function itself.
+        """
+        from techne.hooks.user_prompt_submit import _truncate_for_injection as trunc
+
+        # under the cap: untouched, not marked
+        assert trunc("short", 200) == ("short", False)
+        # exactly at the cap: still untouched — the cut is len > limit, not >=
+        assert trunc("x" * 200, 200) == ("x" * 200, False)
+        # over the cap: marked, and the emitted CONTENT never exceeds the budget
+        out, cut = trunc("y" * 500, 200)
+        assert cut and out.endswith(" …")
+        assert len(out.removesuffix(" …")) <= 200
+
+        # A TERMINATOR STRADDLING THE WINDOW EDGE is still found (#839 r1 nit 4):
+        # full stop at 199, its space at 200, invisible to a search bounded at 200.
+        #
+        # THE PREFIX MUST CARRY WORD BOUNDARIES OR THIS TEST CANNOT FAIL (#839 r2
+        # Important 2). An earlier fixture was `"z" * 199 + ". "`: with the peek
+        # reverted the sentence branch misses, the word branch finds no space, and
+        # the HARD-CUT fallback returns the same 199 characters ending in the same
+        # full stop — so the assertion held on both sides of the change and the
+        # whole suite stayed byte-identical with the fix removed. Spacing the prefix
+        # gives the fallback somewhere to retreat to (the space at 194), so the two
+        # paths now produce different text.
+        straddle = ("zzzz " * 39) + "z" * 4 + ". " + "w" * 300
+        assert straddle[199] == "." and straddle[200] == " ", "fixture must straddle"
+        out, _ = trunc(straddle, 200)
+        assert out.endswith(". …"), f"straddling terminator missed: {out[-12:]!r}"
+        assert len(out.removesuffix(" …")) == 200, "the peeked char must not be emitted"
+
+    def test_a_non_positive_cap_never_means_unbounded(self):
+        """#839 r1. The first version returned the row untouched when `limit <= 0`,
+        so `per_turn_recall_chars: 0` produced UNLIMITED per-row injection — while
+        the sibling knob `per_turn_recall_limit: 0` means "inject nothing". An
+        operator switching the cap off would have got the expensive opposite.
+        """
+        from techne.hooks.user_prompt_submit import _truncate_for_injection as trunc
+
+        for limit in (0, -1, -500):
+            out, cut = trunc("a" * 5000, limit)
+            assert out == "", f"limit={limit} emitted {len(out)} chars"
+            assert cut is True, "withheld content must still be marked as cut"
+
+    def test_a_zero_cap_empties_the_rendered_block(self):
+        """#839 r2 Important 3. Withholding content is not enough — rendering the
+        withheld rows produced a block whose header promised "Rows ending in …"
+        above rows that ended in nothing, contradicting itself, and cost a header
+        plus one line per row of pure overhead on every prompt.
+
+        `per_turn_recall_limit: 0` feeds `rows[:0]` and the caller's
+        `if rows else ""` suppresses the block entirely. `0` must mean the same
+        thing on BOTH knobs, or the CHANGELOG's claim that it does is false.
+        """
+        from techne.hooks.user_prompt_submit import _build_context
+
+        rows = [
+            {"id": 1, "knowledge_type": "decision", "content": "x" * 400},
+            {"id": 2, "knowledge_type": "fact", "content": "y" * 400},
+        ]
+        assert _build_context(rows, 0) == ""
+        assert _build_context(rows, -5) == ""
+        # control: the same rows DO render under a normal cap
+        assert _build_context(rows, 200) != ""
+
+    def test_the_cap_parameter_is_honoured(self):
+        """The RENDERER half only. Renamed, because under its old name — "is read
+        from config, not hardcoded" — it asserted nothing of the kind: it passes the
+        cap as a positional argument, so the assertion is satisfied by the function
+        PARAMETER and the config path it claimed to pin was never exercised. Audit
+        instance 5: reverting the call site to `_build_context(rows)` so the knob
+        never reaches the rail left all 3889 tests green. The config path is pinned
+        end-to-end by `test_the_configured_cap_reaches_the_rail` below.
+        """
+        from techne.hooks.user_prompt_submit import _build_context
+
+        rows = [{"id": 1, "knowledge_type": "fact", "content": "word " * 200}]
+        assert len(_build_context(rows, 500)) > len(_build_context(rows, 200))
 
     def test_the_line_shape_is_pinned_including_the_id_prefix(self):
         """The `⟦techne#id⟧` prefix was pinned by nothing — deleting it left the
@@ -973,9 +1161,7 @@ def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
         conn = sqlite3.connect(str(Config.load().db_path))
         try:
             q = ",".join("?" * len(ids))
-            cur = conn.execute(
-                f"SELECT id, type, content FROM knowledge WHERE id IN ({q})", ids
-            )
+            cur = conn.execute(f"SELECT id, type, content FROM knowledge WHERE id IN ({q})", ids)
             by_id = {r[0]: r for r in cur.fetchall()}
         finally:
             conn.close()
@@ -1009,3 +1195,233 @@ def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
 
     full = search(Config.load().db_path, "XYZZY-827", table="knowledge", limit=page)
     assert [i for i, r in enumerate(full) if r["id"] == lex_id] == [page - 1]
+
+
+def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
+    """END-TO-END: config.yaml -> Config.load() -> the hook -> the injected row.
+
+    AUDIT INSTANCE 5. `per_turn_recall_chars` round-tripped through YAML (pinned by
+    test_fastconfig) and was honoured as a parameter (pinned above), and NOTHING
+    connected the two: reverting the call site to `_build_context(rows)` — so the
+    knob is read, saved, and then ignored by the rail it exists to tune — left all
+    3889 tests green. Two pinned halves with an unpinned join is the same shape as
+    the write/comparison split on #840.
+
+    A generous cap must therefore produce a LONGER injected row than the default,
+    driven through `main()` rather than by calling the renderer directly.
+
+    WHAT THE 600 ARM ACTUALLY DEMONSTRATES, corrected (#839 r3 Important 1): NOT a
+    cut at 600. `search()` pre-truncates knowledge rows to 500 and the hook then
+    clamps to 499, so the row is cut at 499 and marked — not at 600. (An earlier
+    version of this sentence said no truncation was applied at all; that predates
+    the r4 clamp, and the very next test asserts the opposite at the same cap.) The
+    test still pins the join — the config value has to reach the renderer for the
+    two arms to differ — but "600 works" is not what it shows, and the FTS half of the ceiling is
+    pinned separately by `test_search_itself_truncates_knowledge_rows`, and the VEC
+    half only by `test_both_search_sites_share_one_ceiling`.
+    """
+    long_fact = " ".join(f"word{i:03d}" for i in range(200))
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=600)
+    _seed(long_fact, type="fact")
+    wide = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=200)
+    narrow = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+
+    assert wide.strip() and narrow.strip(), "both runs must inject something"
+    assert len(wide) > len(narrow), (
+        f"the configured cap never reached the rail: wide={len(wide)} narrow={len(narrow)}"
+    )
+
+
+def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch, capsys):
+    """techne#842 / #839 r4 Important 1 — THE INERTNESS IS TOLERATED, THE SILENCE IS NOT.
+
+    `search()` hands knowledge rows in already cut at 500, unmarked, at BOTH sites
+    that build one — `search.py:416` (FTS) and `search.py:838` (VEC, which the
+    vec-first union puts at the head of the page, so it serves most rows on any
+    non-trivial store).
+
+    Two different defects follow, and only one is this PR's. That a cap above 500
+    delivers no more text needs `search()` and is techne#842. That a cap AT or ABOVE
+    500 used to switch the `…` marker OFF is reachable only because this change added
+    the knob — before it the cap was a hardcoded 200 — so the hook clamps to
+    `_SEARCH_ROW_CEILING - 1` and the row is still announced as cut.
+
+    The spurious `…` on a genuinely-500-char row is the accepted cost: an over-marked
+    whole row says "there may be more", an unmarked severed row says "this is all of
+    it", and only the second is the failure techne#826 exists to fix.
+    """
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
+    long_fact = " ".join(f"word{i:03d}" for i in range(200))
+    assert len(long_fact) > 900, "fixture must exceed the ceiling to test it"
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=600)
+    _seed(long_fact, type="fact")
+    out = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+
+    block = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    row = [ln for ln in block.splitlines() if ln.startswith("- ⟦techne#")]
+    assert row, f"expected an injected row: {block!r}"
+    body = row[0].split("] ", 1)[1]
+
+    # BOUNDED BY THE CLAMP, NOT BY search() — AND THAT IS THE POINT OF THIS ASSERTION
+    # NOW (#839 r5 Important 1). The hook caps at `_SEARCH_ROW_CEILING - 1` before
+    # `_truncate_for_injection` ever sees the row, so this length is identical whether
+    # search() truncates or not: deleting search.py:416's own `[:500]` left the whole
+    # suite green. The r4 "both bounds" fix landed on an assertion that the r4 clamp
+    # made inert IN THE SAME COMMIT. search()'s ceiling is witnessed directly by
+    # `test_search_itself_truncates_knowledge_rows` below; what THIS pins is that the
+    # clamp is applied and the marker survives.
+    assert 400 < len(body) < _SEARCH_ROW_CEILING, (
+        f"row is {len(body)} chars — expected the clamp at {_SEARCH_ROW_CEILING - 1}"
+    )
+    assert body.endswith(" …"), (
+        "a row at the ceiling shipped UNMARKED — the clamp is gone and the rail is "
+        "back to reading a severed row as whole"
+    )
+    assert "per_turn_recall_chars" in block, "the header notice must fire too"
+
+    # AND THE "AT" HALF OF THE NAME, which only "above" was covering (#839 r6
+    # Important 2). Exactly 500 is the one value where a plausible clamp goes wrong:
+    # `if chars > _SEARCH_ROW_CEILING: chars = _SEARCH_ROW_CEILING - 1` passes 500
+    # straight through, `_truncate_for_injection` returns `(content, False)` for a row
+    # of exactly 500, and both the marker and the header notice vanish — the honesty
+    # regression this PR exists to close, live at the boundary the name claims.
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=_SEARCH_ROW_CEILING)
+    at_out = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+    at_block = json.loads(at_out)["hookSpecificOutput"]["additionalContext"]
+    at_row = [ln for ln in at_block.splitlines() if ln.startswith("- ⟦techne#")]
+    assert at_row, f"expected an injected row at cap {_SEARCH_ROW_CEILING}: {at_block!r}"
+    assert at_row[0].split("] ", 1)[1].endswith(" …"), (
+        f"a cap of exactly {_SEARCH_ROW_CEILING} shipped an unmarked severed row"
+    )
+    assert "per_turn_recall_chars" in at_block
+
+
+def test_both_search_sites_share_one_ceiling():
+    """#839 r4 Important 2 — THE PIN WAS SINGLE-SITED AND THE DOCS INHERITED IT.
+
+    `search()` fuses two channels and truncates knowledge in BOTH: `search_fts` at
+    `search.py:416` and `search_vec` at `search.py:838`. The end-to-end test above
+    exercises whichever channel the fixture happens to hit; this one asserts the two
+    sites agree, so raising one without the other cannot pass unnoticed — which is
+    the failure mode that leaves `config.py`'s comment and the README quietly wrong.
+
+    Source-level on purpose — but NOT because the deps are missing: `sqlite_vec`
+    imports and loads here (vec_version reports v0.1.9) and `model2vec` imports. The
+    reason is that driving the vec channel end-to-end needs a populated vector index
+    and a cached model, which makes the test slow, environment-dependent, and prone
+    to being skipped — and a skipped guard on the busier channel witnesses nothing.
+    """
+    import re
+    from pathlib import Path as _P
+
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
+    src = _P("techne/core/search.py").read_text()
+
+    # Anchored on the knowledge row rather than on the truncation shape: matching
+    # the shape alone caught the OBSERVATIONS row at :366 too (#839 r5).
+    # The first version matched `[:NNN]` on any content field and caught THREE sites —
+    # including search.py:366, the OBSERVATIONS row, which has nothing to do with this
+    # knob. That was wrong in both directions, both demonstrated: deleting :416's
+    # ceiling still left two matching sites so the test stayed GREEN (false negative on
+    # the thing it exists to catch), and editing :366 alone turned it RED with a message
+    # about "knowledge rows" that was not true (false positive, and the kind that gets a
+    # test deleted as noise). Each knowledge block is found by its own source_table
+    # marker, and the count is EXACT so future slack cannot hide a lost site.
+    # TEMPERED, so a match cannot cross a `source_table` boundary. An unbounded
+    # `.*?` under re.S paired the knowledge marker with the THREAD block's
+    # truncation, so deleting site 416's slice still yielded two 500s and a pass.
+    # This pin is the SOLE witness for the VEC site (838) — the direct witness below
+    # reaches only FTS — so measuring the wrong block is the one thing it must not do.
+    blocks = re.findall(
+        r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:(\d+)\]',
+        src,
+        flags=re.S,
+    )
+    assert len(blocks) == 2, (
+        f"expected exactly two knowledge-row truncation sites, found {blocks} — "
+        "search.py's shape changed; re-derive this pin rather than widening it"
+    )
+    assert set(blocks) == {str(_SEARCH_ROW_CEILING)}, (
+        f"search.py truncates knowledge rows at {set(blocks)} but the hook clamps to "
+        f"{_SEARCH_ROW_CEILING} — they must move together (techne#842)"
+    )
+
+
+def test_a_withheld_row_is_not_marked_sent(home, monkeypatch, capsys):
+    """techne#839 r3 Important 2 — LOGGING A ROW AS DELIVERED SUPPRESSES IT.
+
+    `log_context_injection`'s own contract is "`rows` is what was INJECTED", and the
+    hook passed `rows` whether or not anything was emitted. That is not merely an
+    inaccurate audit row: `_already_sent_this_session` reads `hit_ids` back with NO
+    filter on whether the block was empty, so a row logged-but-never-sent is
+    suppressed for the rest of the session segment.
+
+    Two turns, one session, cap raised in between — which AGENTS.md lists as a
+    modelled operator behaviour ("edits ~/.techne/config.yaml while a techne MCP
+    server is live"), not a contrived one.
+    """
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=0)
+    _seed("the fact that must survive a withheld turn", type="fact")
+
+    first = _run(monkeypatch, capsys, {"session_id": "sup-1", "prompt": "withheld turn"})
+    assert first.strip() == "", f"cap 0 must inject nothing: {first!r}"
+
+    # THE NAME'S LITERAL CLAIM, not merely its consequence (#839 r4 nit 1). Asserting
+    # only that turn two emits would go green under a future change that made
+    # `_already_sent_this_session` skip empty-injection rows while still RECORDING
+    # them as sent — the audit log would stay wrong and this test would not say so.
+    logged = _injection_log_rows("per_turn_recall")
+    assert logged and logged[0]["hit_ids"] == "[]", (
+        f"a withheld row was recorded as sent: {logged[0]['hit_ids'] if logged else None}"
+    )
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=200)
+    second = _run(monkeypatch, capsys, {"session_id": "sup-1", "prompt": "withheld turn"})
+
+    assert second.strip(), (
+        "the row was suppressed as already-sent despite never having been injected"
+    )
+
+
+def test_search_itself_truncates_knowledge_rows(home):
+    """techne#842 / #839 r5 Important 1 — WITNESS THE CEILING WHERE IT LIVES.
+
+    The end-to-end test above cannot see this: the hook clamps to
+    `_SEARCH_ROW_CEILING - 1` BEFORE `_truncate_for_injection` runs, so its length
+    assertion is satisfied by the clamp whether or not `search()` truncates at all.
+    Deleting `search.py`'s own ceiling left the full suite green.
+
+    THE FTS CHANNEL ONLY, which the name does not say on its own. Deleting the VEC
+    slice at `search.py:838` leaves this GREEN — that site's sole guard is
+    `test_both_search_sites_share_one_ceiling`, a regex over source text. The
+    distinction matters because the vec-first union puts the VEC channel at the head
+    of the page, so the channel this test cannot see is the busier one on any
+    non-trivial store.
+
+    This calls `search()` directly, so the only thing that can satisfy it is
+    `search()`'s own behaviour on the channel it reaches. Together with the source
+    pin it makes the constant in `config.py`, the README line and the CHANGELOG line
+    falsifiable — every one of them is keyed to a number that, until this pair
+    existed, no test observed at its source at all.
+    """
+    from techne.config import Config
+    from techne.core.search import search
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
+    long_fact = " ".join(f"word{i:03d}" for i in range(300))
+    assert len(long_fact) > _SEARCH_ROW_CEILING * 2, "fixture must exceed the ceiling"
+    _seed(long_fact, type="fact")
+
+    rows = search(Config.load().db_path, "word001 word002", table="knowledge", limit=5)
+    assert rows, "fixture must be retrievable or this witnesses nothing"
+    longest = max(len(r.get("content") or "") for r in rows)
+    assert longest == _SEARCH_ROW_CEILING, (
+        f"search() returned a {longest}-char knowledge row; the hook and its docs are "
+        f"keyed to {_SEARCH_ROW_CEILING} (techne#842) and must move together"
+    )

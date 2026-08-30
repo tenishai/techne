@@ -549,6 +549,14 @@ hooks:
                               #   complement to the STABLE SessionStart block. Re-run 'techne init'
                               #   after flipping; loads from the next session.
   per_turn_recall_limit: 5    # max knowledge rows injected per turn
+  per_turn_recall_chars: 200  # max characters per injected row (#826). The cut lands on a
+                              #   sentence or word boundary and a shortened row ends in '…',
+                              #   so a truncated fact is distinguishable from a whole one.
+                              #   Raising this raises per-prompt token cost on EVERY turn.
+                              #   CEILING: search() already truncates knowledge rows to 500
+                              #   (unmarked), so this is CLAMPED to 499. A value at or above
+                              #   500 is not a no-op — unclamped it would suppress the '…'
+                              #   and report a severed row as whole (#842).
   timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
 sync:

@@ -157,6 +157,36 @@ class HookConfig:
     per_turn_recall: bool = False
     # Hard cap on the number of knowledge rows injected per turn.
     per_turn_recall_limit: int = 5
+    #: CHARACTER CAP PER INJECTED ROW (techne#826). Was a bare `[:200]` in
+    #: `_build_context` from the day per-turn recall landed (ffcb1a6) — the only
+    #: fixed number in this rail's tuning surface, and the one that decides
+    #: whether a multi-step SOP arrives as a procedure or as its title.
+    #:
+    #: THE DEFAULT IS DELIBERATELY UNCHANGED. Five rows at 200 is ~250 tokens on
+    #: EVERY prompt, and techne#808 measures per-session context cost as already
+    #: the dominant one; raising this for everyone is a cost decision an operator
+    #: should make, not a default. What changed instead is honesty — see
+    #: `_truncate_for_injection`: the cut now lands on a boundary and announces
+    #: itself, so a severed row can be recognised and pulled in full rather than
+    #: read as the whole rule.
+    #: THERE IS A HARD CEILING OF 500 AND IT IS NOT THIS KNOB'S (techne#842).
+    #: `search()` truncates knowledge rows to 500 at BOTH sites that build one —
+    #: `search_fts`'s knowledge branch and `search_vec`'s (the latter is what the vec-first
+    #: union puts at the head of the page, so it serves most rows on a non-trivial
+    #: store), both in `core/search.py` — unconditionally and with no marker, so a
+    #: row reaches
+    #: this rail ALREADY CUT at 500. Setting this above 500 therefore changes
+    #: nothing — and worse, a row arriving at exactly 500 looks un-truncated to
+    #: `_truncate_for_injection`, so it ships severed mid-word with the announcing
+    #: `…` and the header notice both SUPPRESSED. That is the one configuration in
+    #: which this rail is less honest than before techne#826.
+    #:
+    #: The motivating case is the affected one: a multi-step SOP is exactly a row
+    #: over 500 characters. Raising this to 600 does not deliver more of it — and
+    #: the hook CLAMPS to 499 (`_SEARCH_ROW_CEILING - 1`), because unclamped, a cap
+    #: at or above 500 makes a severed row look whole to `_truncate_for_injection`
+    #: and suppresses both the `…` and the header notice.
+    per_turn_recall_chars: int = 200
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable
     # (it left no trace before). The SessionStart tier-0 block is logged the same
@@ -889,6 +919,7 @@ class Config:
                 codex_edit_rail_limit=int(h.get("codex_edit_rail_limit", 10)),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
+                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 200)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
                 per_turn_recall_floor_vec_distance=(
                     float(h["per_turn_recall_floor_vec_distance"])
@@ -1125,6 +1156,7 @@ class Config:
                 "codex_edit_rail_limit": self.hooks.codex_edit_rail_limit,
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
+                "per_turn_recall_chars": self.hooks.per_turn_recall_chars,
                 "per_turn_recall_log": self.hooks.per_turn_recall_log,
                 "per_turn_recall_floor_vec_distance": (
                     self.hooks.per_turn_recall_floor_vec_distance
