@@ -203,8 +203,9 @@ def _startup_block(config, session_id: str | None) -> str | None:
 # `document_card` is the decided half (Richard, 2026-08-13). The case for keeping
 # arch cards here was that a query-driven per-turn rail IS the "pull at the moment
 # of need" #383 and techne#945 wanted. What decided it against: `_build_context`
-# truncates every row to 200 chars, and an arch card's value is its FULL body —
-# that is the entire premise of the gist-plus-pointer design. A 200-char slice
+# truncates every row to `hooks.per_turn_recall_chars` (200 by default, techne#826
+# made it a knob and the cut boundary-aware), and an arch card's value is its FULL
+# body — that is the entire premise of the gist-plus-pointer design. A 200-char slice
 # chosen by embedding similarity is a pointer at best, and at worst it is the
 # #539 hazard in miniature: prose that vouches for a seam nobody re-read. The
 # right delivery already has a design — #449's edit-fired rail, exact path match
@@ -281,6 +282,14 @@ def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
 #: — the symptom would be per_turn_recall logging hit_count=0 while the store
 #: plainly holds relevant rows.
 _RESEND_OVERFETCH = 3
+
+#: `search()` truncates knowledge rows to this before the hook ever sees them, at
+#: BOTH sites that build a knowledge row — `core/search.py:416` (the FTS channel)
+#: and `core/search.py:838` (the VEC channel, which the vec-first union puts at the
+#: head of the page, so it serves most rows on any non-trivial store). Neither marks
+#: the cut. `per_turn_recall_chars` is clamped below this; values at or above it
+#: cannot be honoured. Tracked as techne#842.
+_SEARCH_ROW_CEILING = 500
 
 
 def _claim_deferred_session_context(db_path, session_id: str | None) -> str | None:
@@ -469,7 +478,71 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     ]
 
 
-def _build_context(rows: list[dict]) -> str:
+def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
+    """Cut ``content`` to ``limit`` chars at a boundary, reporting whether it cut.
+
+    techne#826. This rail shipped with a bare ``content[:200]`` from the day it
+    landed, and measured over one real session it severed 58 of 58 injected facts
+    mid-word — a cross-reference cut at ``CORRECTS techne#``, a remedy command cut
+    mid-path. The failure is quiet in the worst way: the agent receives something
+    that looks like the rule, is topically correct, and is missing the operative
+    half, so it reads as "I have this" rather than "I have the first sentence of
+    this".
+
+    TWO CHANGES, AND NEITHER IS A BIGGER BUDGET. The cut lands on a sentence
+    boundary if one is available in the last 40% of the budget, else on a word
+    boundary, else hard; and a cut row ends with a single ``…`` so it ANNOUNCES
+    itself instead of impersonating a complete one. The caller adds one header
+    line naming the cap when any row was cut — one line per block rather than a
+    suffix per row, because a marker that costs more than the content it explains
+    is its own kind of dishonest.
+
+    The floor of 40% is what stops boundary-seeking from being worse than the bare
+    cut: without it, a row whose only full stop sits at char 12 would be truncated
+    to 12 chars in the name of tidiness.
+    """
+    if limit <= 0:
+        # A NON-POSITIVE CAP MUST NOT MEAN "UNBOUNDED" (techne#839 r1). The first
+        # version returned the row untouched here, so `per_turn_recall_chars: 0`
+        # produced UNLIMITED per-row injection on every prompt — and the sibling
+        # knob one line above sets the opposite expectation, since
+        # `per_turn_recall_limit: 0` feeds `rows[:0]` and means "inject nothing".
+        # An operator writing 0 to switch the cap off would have got nothing from
+        # one knob and everything from the other, with "everything" being the
+        # expensive direction on the rail #808 already calls the dominant cost.
+        # The hardcoded 200 meant this path did not exist; adding the knob added it.
+        return "", True
+
+    if len(content) <= limit:
+        return content, False
+
+    # `limit + 1`, not `limit`: a terminator STRADDLING the window edge — a full
+    # stop at limit-1 and its space at limit — is invisible to a search bounded at
+    # `limit`, and the cut falls back a whole word for no reason. Peeking one
+    # character past the budget costs nothing, because the extra character is only
+    # ever the SEPARATOR and is never emitted.
+    window = content[: limit + 1]
+    floor = int(limit * 0.6)
+
+    # Prefer a sentence end; `. ` and friends, not a bare `.`, so version numbers
+    # and `techne#1.2`-shaped tokens are not read as terminators.
+    best = -1
+    for end in (". ", ".\n", "! ", "?\n", "? ", "!\n"):
+        best = max(best, window.rfind(end))
+    if best >= floor:
+        # `best` indexes the terminator itself, which is <= limit-1 whenever the
+        # match was found in the peeked position, so the emitted slice never
+        # exceeds the budget.
+        return window[: best + 1].rstrip() + " …", True
+
+    cut = window[:limit].rfind(" ")
+    if cut >= floor:
+        return window[:cut].rstrip() + " …", True
+
+    return window[:limit].rstrip() + " …", True
+
+
+def _build_context(rows: list[dict], char_limit: int = 200) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 
     Mirrors egress `_render_line` formatting: each row carries its ⟦techne#id⟧
@@ -483,11 +556,12 @@ def _build_context(rows: list[dict]) -> str:
     reader does not read the fallback as EVIDENCE that it sometimes is, and
     weaken a guard on that basis. The tests already record this.
     """
-    lines = [
+    header = [
         "## techne — durable facts relevant to this prompt",
         "> Per-turn recall (techne#109); recalled memory, not ground truth — verify first.",
-        "",
     ]
+    lines: list[str] = []
+    truncated_any = False
     for r in rows:
         rid = r.get("id")
         # `knowledge_type` FIRST, and the ordering is the whole fix (techne#566).
@@ -516,9 +590,28 @@ def _build_context(rows: list[dict]) -> str:
         # observation) carry no `knowledge_type`, and for those the table IS the
         # most honest label available.
         rtype = r.get("knowledge_type") or r.get("source_table") or "note"
-        content = (r.get("content") or "")[:200]
+        content, was_cut = _truncate_for_injection(r.get("content") or "", char_limit)
+        if not content:
+            # WITHHELD ROWS ARE DROPPED, NOT RENDERED EMPTY (#839 r2 Important 3).
+            # At `char_limit <= 0` every row returns "", and emitting them produced a
+            # block whose header promised "Rows ending in …" above rows that ended in
+            # nothing — the block contradicting itself, and a header plus one line per
+            # row of pure overhead on every prompt, on the rail #808 calls the
+            # dominant cost. Dropping them empties `lines`, so the caller's existing
+            # `if rows else ""` suppresses the block entirely and `0` means "inject
+            # nothing" on THIS knob exactly as it already does on
+            # `per_turn_recall_limit`, which feeds `rows[:0]`.
+            continue
+        truncated_any = truncated_any or was_cut
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
-    return "\n".join(lines)
+    if not lines:
+        return ""
+    if truncated_any:
+        header.append(
+            f"> Rows ending in … are cut at {char_limit} chars "
+            "(hooks.per_turn_recall_chars); recall the id for the full entry."
+        )
+    return "\n".join(header + [""] + lines)
 
 
 def main() -> None:
@@ -654,7 +747,22 @@ def main() -> None:
                 # consume one of the k slots that a clearing row could have used.
                 rows = _apply_relevance_floor(rows, config)
                 rows = rows[:k]
-            recall_block = _build_context(rows) if rows else ""
+            # CLAMP BELOW search()'s OWN CEILING (#839 r4 Important 1, techne#842).
+            # `search()` hands knowledge rows in ALREADY cut at 500 and unmarked, at
+            # BOTH sites that build one — search.py:416 (FTS) and :838 (VEC). At a
+            # cap of 500 or more `_truncate_for_injection` sees `len <= limit`,
+            # returns `was_cut=False`, and the row ships severed with the `…` AND the
+            # header notice suppressed. THAT STATE IS REACHABLE ONLY BECAUSE THIS
+            # CHANGE ADDED THE KNOB — before it the cap was a hardcoded 200 — so the
+            # honesty regression is this PR's to close, separately from the inertness
+            # above 500, which does need search() and is techne#842.
+            #
+            # The trade is a spurious `…` on a genuinely-500-char row. That is the
+            # conservative direction: an over-marked whole row says "there may be
+            # more" (harmless); an unmarked severed row says "this is all of it",
+            # which is the exact defect techne#826 exists to fix.
+            chars = min(config.hooks.per_turn_recall_chars, _SEARCH_ROW_CEILING - 1)
+            recall_block = _build_context(rows, chars) if rows else ""
             if recall_block:
                 blocks.append(recall_block)
             # techne#329 — make the READ path auditable (the audit that motivated
@@ -668,7 +776,18 @@ def main() -> None:
                     source="per_turn_recall",
                     session_id=data.get("session_id"),
                     trigger=prompt,
-                    rows=rows,
+                    # `rows` IS WHAT WAS INJECTED (_injection_log.py:217, its own
+                    # words). Logging withheld rows as delivered is not merely an
+                    # inaccurate audit row: `_already_sent_this_session` reads
+                    # `hit_ids` back with no filter on whether anything was emitted,
+                    # so a row logged-but-not-sent is SUPPRESSED for the rest of the
+                    # session segment. Measured: at `per_turn_recall_chars: 0` turn
+                    # one emits nothing and logs hit_ids=[1]; turn two with the cap
+                    # raised to 200 then emits nothing either, because the row is
+                    # already "sent". Editing config.yaml mid-session is a modelled
+                    # operator behaviour (AGENTS.md lists it as a standing trigger),
+                    # and a silent recall miss is this project's named failure class.
+                    rows=rows if recall_block else [],
                     injected_text=recall_block,
                     k_requested=config.hooks.per_turn_recall_limit,
                 )

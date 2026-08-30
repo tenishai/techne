@@ -438,3 +438,35 @@ class TestCoercion:
         assert get_float({"k": "bogus"}, "k", 5.0) == 5.0
         assert get_int({"k": "bogus"}, "k", 8) == 8
         assert get_int({}, "k", 8) == 8
+
+
+def test_per_turn_recall_chars_survives_a_load_save_round_trip(tmp_path, monkeypatch):
+    """techne#839 r2 Important 1 — `techne init` silently ERASED this knob.
+
+    `to_yaml_dict()` is "what `save` writes", and it listed every sibling
+    (`per_turn_recall`, `_limit`, `_log`, both floors) but not `_chars`, which was
+    read on the way in and dropped on the way out. `techne init` is a load→save
+    round-trip and `save()` is a whole-file atomic overwrite, so an operator who
+    set the cap and then ran the command README tells them to run after editing
+    that very block lost the key.
+
+    Silent in BOTH directions: lower it to save tokens and you silently pay for
+    200; raise it and you silently get truncation you thought you had turned off.
+    """
+    from techne.config import Config
+
+    monkeypatch.setenv("TECHNE_HOME", str(tmp_path))
+    cfg = Config()
+    cfg.hooks.per_turn_recall_chars = 500
+    cfg.hooks.per_turn_recall_limit = 7
+
+    assert "per_turn_recall_chars" in cfg.to_yaml_dict()["hooks"], (
+        "the knob must be in the YAML surface `save` writes, or init erases it"
+    )
+
+    path = tmp_path / "config.yaml"
+    cfg.save(path)
+    reloaded = Config.load()
+
+    assert reloaded.hooks.per_turn_recall_chars == 500
+    assert reloaded.hooks.per_turn_recall_limit == 7, "sibling knob is the control"
