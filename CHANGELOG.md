@@ -16,13 +16,9 @@ hook chain and it does not embed anything.
 techne init             # only `init` writes the SessionStart chain, including the
                         #   vectors-backfill segment this release depends on. It also
                         #   refreshes the bundled skills.
-techne skills install   # for anyone who skipped init — otherwise a no-op
+techne skills install   # for anyone who skipped init or passed --no-skills
 techne vectors backfill # ONCE, from the CLI — see below
 ```
-
-**Pass `--posture` to `init` if you ever set one.** It defaults to `auto` and `init`
-re-resolves it unconditionally, so a bare `init` on a machine with Claude Code curated
-memory can flip a posture you chose. It is machine-wide and applies to all techne projects.
 
 **The third one is the easy one to skip and the one that decides whether recall works.**
 Embedding happens only through `techne vectors backfill`; nothing embeds on write. The
@@ -47,6 +43,14 @@ start on a network fetch, which is exactly why the cache never warms itself and 
 step is manual.
 `techne[recommended]` pulls the extra, which is what the README's **pipx** line uses — the
 `git clone` block at the top of the README is core only.
+
+**Pass `--posture` to `init` if you ever set one.** It defaults to `auto` and `init`
+re-resolves it every run, so a bare `init` can flip a posture you chose — in either
+direction, including out of `spool-primary`, which puts reflect back on auto-promotion.
+The resolved value is machine-wide and applies to all techne projects, while the detection
+that drives `auto` reads the *current repository*, so the same bare `init` can resolve
+differently depending on where you run it from. `init` reports the resolved state rather
+than announcing a change.
 
 `docs/deployment.md` carries the same thing as an agent trigger, so an assistant working
 in your repo raises it unprompted rather than waiting to be asked.
