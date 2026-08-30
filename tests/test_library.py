@@ -70,7 +70,15 @@ def test_index_markdown_dir(tmp_path):
     (root / "empty.md").write_text("   ", encoding="utf-8")
 
     counts = index_markdown_dir(db, root, source_type="docs")
-    assert counts == {"total": 3, "stored": 2, "unchanged": 0, "empty": 1}
+    assert counts == {
+        "total": 3,
+        "stored": 2,
+        "unchanged": 0,
+        "empty": 1,
+        # techne#819 — a fresh index repairs nothing; the key is present and zero so
+        # this path cannot report a pure no-op while having written.
+        "titles_repaired": 0,
+    }
 
     docs = list_documents(_lib(db), source_type="docs")
     urls = {d["source_url"] for d in docs}

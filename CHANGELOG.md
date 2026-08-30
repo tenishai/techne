@@ -19,7 +19,8 @@ All notable changes to techne are documented here. Format loosely follows
   content *is* the title and recall reads the card rather than the document; a
   filled card's agent-written gist is never overwritten. The repair updates in
   place rather than superseding — the document did not change, only our reading of
-  what it should be called (#819).
+  what it should be called. A repaired card is flagged for re-embedding, so the
+  correction reaches semantic recall and not only FTS (#819).
 
 - Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
   adapter that omits them satisfies `isinstance` again. `TranscriptSource` is

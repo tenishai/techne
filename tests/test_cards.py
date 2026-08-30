@@ -472,3 +472,95 @@ def db_row_content(db, card_id):
         ]
     finally:
         conn.close()
+
+
+def _row(db, card_id):
+    from techne.core.database import connect
+
+    conn = connect(db)
+    try:
+        r = conn.execute(
+            "SELECT content, tags, vec_stale FROM knowledge WHERE id = ?", (card_id,)
+        ).fetchone()
+        return dict(r)
+    finally:
+        conn.close()
+
+
+def test_a_repaired_card_is_flagged_for_re_embedding(db, config):
+    """techne#840 r1 CRITICAL 1. An in-place `content` edit on a stable rowid leaves
+    the OLD embedding in `knowledge_vec`. `backfill_vectors` re-embeds
+    `(NOT IN vec OR vec_stale = 1)`, so an unflagged repaired row is in NEITHER set
+    and semantic recall goes on matching the junk title forever.
+
+    FTS heals itself through the `knowledge_au` trigger, which is exactly what makes
+    this invisible: half of recall looks fixed. And doctor's vector-freshness check
+    counts `vec_stale = 1`, so it would report such a store 100% fresh — a false
+    green about the thing that is broken.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
+        source_version="v1", title="<local-command-caveat>Caveat: junk",
+    )
+    assert _row(db, card_id)["vec_stale"] == 0
+
+    upsert_document_card(
+        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
+        source_version="v1", title="why is recall empty",
+    )
+    row = _row(db, card_id)
+    assert row["content"] == "why is recall empty"
+    assert row["vec_stale"] == 1, "a repaired card must be queued for re-embedding"
+
+
+def test_a_repair_that_carries_a_real_summary_drops_pending(db, config):
+    """techne#840 r1 CRITICAL 2, and it is the guard's own premise.
+
+    `content` is `summary or title`, and `build_transcript_gist` returns None before
+    thread detection and a real string after — so the ordinary two-pass sequence
+    reaches this branch WITH a summary. Leaving `pending` on would keep a filled
+    card on the agent-assisted emit work-list forever, and would break
+    `is_pending(stored tags)` as a proxy for "never filled": that proxy is only
+    sound while EVERY path that fills a card drops the tag, and this branch is now
+    one of those paths.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
+        source_version="v1", title="junk title",
+    )
+    assert is_pending(_row(db, card_id)["tags"])
+
+    upsert_document_card(
+        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
+        source_version="v1", title="junk title",
+        summary="Session transcript (2026-08-29, 3 threads): a; b; c",
+    )
+    row = _row(db, card_id)
+    assert row["content"].startswith("Session transcript")
+    assert not is_pending(row["tags"]), "a filled card must leave the emit work-list"
+    assert card_id not in [c["id"] for c in pending_cards(db)]
+
+
+def test_the_repair_redacts_like_the_insert_path_does(db, config):
+    """techne#840 r1 Important 3. `_insert_card` redacts even though its callers do,
+    because "today's callers redact" is not a property you can hold still. This
+    UPDATE is the second write path into `knowledge.content` in this file.
+
+    The comparison is the second-order half: `content != existing["content"]` puts a
+    RAW incoming string against a stored one that went through redaction, so an
+    unredacted caller would not merely leak — the two could never be equal and the
+    row would be rewritten on every index pass, forever, carrying the credential.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
+        source_version="v1", title="a harmless title",
+    )
+    upsert_document_card(
+        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
+        source_version="v1", title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+    )
+    content = _row(db, card_id)["content"]
+    assert "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB" not in content, content
