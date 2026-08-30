@@ -56,7 +56,7 @@ techne init
 > across interpreter changes:
 >
 > ```bash
-> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.0"
+> pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.1"
 > techne init
 > ```
 >
@@ -65,9 +65,28 @@ techne init
 > [extras matrix](#extras--what-to-install) for the full possibility space.
 >
 > Upgrade later with `pipx install --force "techne[recommended] @ git+https://github.com/tenishai/techne.git@<newer-tag>"`
-> (a plain `pipx install` on an already-installed techne refuses without `--force`). **After an
-> upgrade, run `techne skills install`** — an upgrade does not re-run `techne init`, so the
-> bundled procedures below are not refreshed on their own.
+> (a plain `pipx install` on an already-installed techne refuses without `--force`).
+>
+> **An upgrade replaces the code and nothing else. Run all three afterwards:**
+>
+> ```sh
+> techne init              # ONLY init writes the SessionStart hook chain — an upgrade
+>                          #   leaves whatever chain was written last. Also refreshes
+>                          #   the bundled skills, so the next line is belt-and-braces.
+> techne skills install    # for anyone who skipped init (or passed `--no-skills`)
+> techne vectors backfill  # ONCE, from the CLI — nothing else embeds
+> ```
+>
+> Step three worked only if it printed a JSON counts block. A `vector search unavailable`
+> line means it embedded nothing and exited 0 — run `techne vectors status` to see whether
+> a backend resolved at all, then re-run `techne vectors backfill` somewhere the model
+> cache can be fetched. The bare command downloads by default; only the SessionStart hook
+> passes `--no-download`. See the CHANGELOG's Upgrading section.
+>
+> **If you ever ran `techne init --posture observe` (or `--posture spool-primary`), pass it
+> again.** `--posture` defaults to `auto` and `init` re-resolves it every run, so a bare
+> `init` can flip a posture you chose — in either direction. It is machine-wide, and `init`
+> reports the resolved state rather than announcing a change.
 > The `git clone` + `pip install -e .` flow above is for **developing** techne (live local edits).
 
 > **Bundled procedures.** `techne init` also installs two operator procedures as slash
@@ -134,7 +153,7 @@ gracefully** when absent (vector search returns empty, the CVE gate fails open, 
 
 Combine freely — extras compose: `pip install -e ".[vectors,watch,llm]"`. For the
 non-editable pinned install, use the direct-reference form:
-`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.0"`.
+`pipx install "techne[recommended] @ git+https://github.com/tenishai/techne.git@v0.16.1"`.
 
 **Python 3.14 note:** `fastembed` pulls in `onnxruntime` which has no 3.14 wheel yet. `techne` auto-selects `model2vec` (a numpy-only static embedding backend, no onnxruntime/torch) as the vector backend on 3.14+ instead. FTS5 search works fully on every supported Python (3.11+); vector search works via whichever backend is available.
 
