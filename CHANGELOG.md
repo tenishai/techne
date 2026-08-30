@@ -14,10 +14,15 @@ hook chain and it does not embed anything.
 
 ```sh
 techne init             # only `init` writes the SessionStart chain, including the
-                        #   vectors-backfill segment this release depends on
-techne skills install   # an upgrade does not refresh the bundled procedures
+                        #   vectors-backfill segment this release depends on. It also
+                        #   refreshes the bundled skills.
+techne skills install   # for anyone who skipped init — otherwise a no-op
 techne vectors backfill # ONCE, from the CLI — see below
 ```
+
+**Pass `--posture` to `init` if you ever set one.** It defaults to `auto` and `init`
+re-resolves it unconditionally, so a bare `init` on a machine with Claude Code curated
+memory can flip a posture you chose. It is machine-wide and applies to all techne projects.
 
 **The third one is the easy one to skip and the one that decides whether recall works.**
 Embedding happens only through `techne vectors backfill`; nothing embeds on write. The
@@ -33,6 +38,13 @@ no embedding backend installed` line means it embedded nothing and still exited 
 that same line appears for TWO different causes: the `vectors` extra absent, or the extra
 present but the embedding backend unable to load (a cold model cache with no reachable
 Hub). Do not diagnose from the cause; diagnose from whether you got counts.
+
+**If you did not get counts:** `techne vectors status` says whether a backend resolved at
+all, and re-running `techne vectors backfill` where the model cache can be fetched is the
+fix for the second cause — the bare command downloads by default, and only the SessionStart
+hook passes `--no-download`. That asymmetry is deliberate: a hook must never block session
+start on a network fetch, which is exactly why the cache never warms itself and why this
+step is manual.
 `techne[recommended]` pulls the extra, which is what the README's **pipx** line uses — the
 `git clone` block at the top of the README is core only.
 

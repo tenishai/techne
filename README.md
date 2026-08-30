@@ -71,13 +71,22 @@ techne init
 >
 > ```sh
 > techne init              # ONLY init writes the SessionStart hook chain — an upgrade
->                          #   leaves whatever chain was written last
-> techne skills install    # an upgrade does not refresh the bundled procedures
+>                          #   leaves whatever chain was written last. Also refreshes
+>                          #   the bundled skills, so the next line is belt-and-braces.
+> techne skills install    # for anyone who skipped init
 > techne vectors backfill  # ONCE, from the CLI — nothing else embeds
 > ```
 >
+> **If you ever ran `techne init --posture observe` (or `--posture spool-primary`), pass it
+> again.** `--posture` defaults to `auto` and `init` re-resolves it unconditionally, so a
+> bare `init` on a machine with Claude Code curated memory can flip a posture you chose.
+> It is a machine-wide setting, and `init` reports the result rather than the change.
+>
 > Step three worked only if it printed a JSON counts block. A `vector search unavailable`
-> line means it embedded nothing and exited 0. See the CHANGELOG's Upgrading section.
+> line means it embedded nothing and exited 0 — run `techne vectors status` to see whether
+> a backend resolved at all, then re-run `techne vectors backfill` somewhere the model
+> cache can be fetched. The bare command downloads by default; only the SessionStart hook
+> passes `--no-download`. See the CHANGELOG's Upgrading section.
 > The `git clone` + `pip install -e .` flow above is for **developing** techne (live local edits).
 
 > **Bundled procedures.** `techne init` also installs two operator procedures as slash
