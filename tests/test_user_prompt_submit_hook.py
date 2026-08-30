@@ -1215,8 +1215,8 @@ def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
     clamps to 499, so the row is cut at 499 and marked — not at 600. (An earlier
     version of this sentence said no truncation was applied at all; that predates
     the r4 clamp, and the very next test asserts the opposite at the same cap.) The
-    test still pins the join — the config value has to reach the renderer for the two arms to
-    differ — but "600 works" is not what it shows, and the FTS half of the ceiling is
+    test still pins the join — the config value has to reach the renderer for the
+    two arms to differ — but "600 works" is not what it shows, and the FTS half of the ceiling is
     pinned separately by `test_search_itself_truncates_knowledge_rows`, and the VEC
     half only by `test_both_search_sites_share_one_ceiling`.
     """
@@ -1336,7 +1336,7 @@ def test_both_search_sites_share_one_ceiling():
     # TEMPERED, so a match cannot cross a `source_table` boundary. An unbounded
     # `.*?` under re.S paired the knowledge marker with the THREAD block's
     # truncation, so deleting site 416's slice still yielded two 500s and a pass.
-    # This pin is the SOLE witness for the VEC site (838) — the direct witness above
+    # This pin is the SOLE witness for the VEC site (838) — the direct witness below
     # reaches only FTS — so measuring the wrong block is the one thing it must not do.
     blocks = re.findall(
         r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:(\d+)\]',
