@@ -583,8 +583,21 @@ def _build_context(rows: list[dict], char_limit: int = 200) -> str:
         # most honest label available.
         rtype = r.get("knowledge_type") or r.get("source_table") or "note"
         content, was_cut = _truncate_for_injection(r.get("content") or "", char_limit)
+        if not content:
+            # WITHHELD ROWS ARE DROPPED, NOT RENDERED EMPTY (#839 r2 Important 3).
+            # At `char_limit <= 0` every row returns "", and emitting them produced a
+            # block whose header promised "Rows ending in …" above rows that ended in
+            # nothing — the block contradicting itself, and a header plus one line per
+            # row of pure overhead on every prompt, on the rail #808 calls the
+            # dominant cost. Dropping them empties `lines`, so the caller's existing
+            # `if rows else ""` suppresses the block entirely and `0` means "inject
+            # nothing" on THIS knob exactly as it already does on
+            # `per_turn_recall_limit`, which feeds `rows[:0]`.
+            continue
         truncated_any = truncated_any or was_cut
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
+    if not lines:
+        return ""
     if truncated_any:
         header.append(
             f"> Rows ending in … are cut at {char_limit} chars "

@@ -1139,6 +1139,7 @@ class Config:
                 "codex_edit_rail_limit": self.hooks.codex_edit_rail_limit,
                 "per_turn_recall": self.hooks.per_turn_recall,
                 "per_turn_recall_limit": self.hooks.per_turn_recall_limit,
+                "per_turn_recall_chars": self.hooks.per_turn_recall_chars,
                 "per_turn_recall_log": self.hooks.per_turn_recall_log,
                 "per_turn_recall_floor_vec_distance": (
                     self.hooks.per_turn_recall_floor_vec_distance

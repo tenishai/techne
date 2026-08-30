@@ -518,14 +518,29 @@ class TestInjectedTypeLabel:
             "of this row exists to carry it past the cap so the cut actually fires."
         )
         # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
-        # An earlier version of this test could not fail: its 200th character was a
-        # SPACE, so the bare `content[:200]` defect satisfied both assertions below
-        # and the whole boundary mechanism could be deleted with the suite staying
-        # green (#839 r1). The row is shifted one character so index 200 is a full
-        # stop — pinning that here means the fixture cannot silently stop testing.
-        assert len(body) > 200, "fixture must exceed the cap or it tests nothing"
-        assert body[200] not in " \t\n", (
-            "fixture is toothless: with whitespace at the cap the bare slice passes"
+        # An earlier version of this test could not fail: its character at the cap
+        # was a SPACE, so the bare `content[:cap]` defect satisfied both assertions
+        # below and the whole boundary mechanism could be deleted with the suite
+        # staying green (#839 r1). The row is shifted one character so the character
+        # AT the cap is non-whitespace — mid-word, in fact, which is precisely the
+        # condition the bare slice cannot survive. (#839 r2 nit 1: an earlier comment
+        # here claimed it was a full stop. It is not; the full stop is two later. The
+        # guard was right and only its explanation was wrong — worth correcting
+        # because this is the comment that says why the fixture can be trusted.)
+        #
+        # THE CAP IS DERIVED, NOT WRITTEN AS 200 (#839 r2 nit 2). `_ctx` calls
+        # `_build_context` without a limit, so this fixture is coupled to that
+        # DEFAULT; a hardcoded 200 would check the wrong index if the default ever
+        # moved, and go quietly toothless in exactly the way this guard exists to
+        # prevent.
+        import inspect
+
+        from techne.hooks.user_prompt_submit import _build_context
+
+        cap = inspect.signature(_build_context).parameters["char_limit"].default
+        assert len(body) > cap, "fixture must exceed the cap or it tests nothing"
+        assert body[cap] not in " \t\n", (
+            f"fixture is toothless: whitespace at index {cap} lets the bare slice pass"
         )
 
         out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": body}])
@@ -589,12 +604,22 @@ class TestInjectedTypeLabel:
         assert cut and out.endswith(" …")
         assert len(out.removesuffix(" …")) <= 200
 
-        # a terminator STRADDLING the window edge is still found (#839 r1 nit 4):
-        # full stop at 199, its space at 200, invisible to a search bounded at 200
-        straddle = "z" * 199 + ". " + "w" * 300
+        # A TERMINATOR STRADDLING THE WINDOW EDGE is still found (#839 r1 nit 4):
+        # full stop at 199, its space at 200, invisible to a search bounded at 200.
+        #
+        # THE PREFIX MUST CARRY WORD BOUNDARIES OR THIS TEST CANNOT FAIL (#839 r2
+        # Important 2). An earlier fixture was `"z" * 199 + ". "`: with the peek
+        # reverted the sentence branch misses, the word branch finds no space, and
+        # the HARD-CUT fallback returns the same 199 characters ending in the same
+        # full stop — so the assertion held on both sides of the change and the
+        # whole suite stayed byte-identical with the fix removed. Spacing the prefix
+        # gives the fallback somewhere to retreat to (the space at 194), so the two
+        # paths now produce different text.
+        straddle = ("zzzz " * 39) + "z" * 4 + ". " + "w" * 300
+        assert straddle[199] == "." and straddle[200] == " ", "fixture must straddle"
         out, _ = trunc(straddle, 200)
         assert out.endswith(". …"), f"straddling terminator missed: {out[-12:]!r}"
-        assert len(out.removesuffix(" …")) <= 200
+        assert len(out.removesuffix(" …")) == 200, "the peeked char must not be emitted"
 
     def test_a_non_positive_cap_never_means_unbounded(self):
         """#839 r1. The first version returned the row untouched when `limit <= 0`,
@@ -608,6 +633,27 @@ class TestInjectedTypeLabel:
             out, cut = trunc("a" * 5000, limit)
             assert out == "", f"limit={limit} emitted {len(out)} chars"
             assert cut is True, "withheld content must still be marked as cut"
+
+    def test_a_zero_cap_injects_no_block_at_all(self):
+        """#839 r2 Important 3. Withholding content is not enough — rendering the
+        withheld rows produced a block whose header promised "Rows ending in …"
+        above rows that ended in nothing, contradicting itself, and cost a header
+        plus one line per row of pure overhead on every prompt.
+
+        `per_turn_recall_limit: 0` feeds `rows[:0]` and the caller's
+        `if rows else ""` suppresses the block entirely. `0` must mean the same
+        thing on BOTH knobs, or the CHANGELOG's claim that it does is false.
+        """
+        from techne.hooks.user_prompt_submit import _build_context
+
+        rows = [
+            {"id": 1, "knowledge_type": "decision", "content": "x" * 400},
+            {"id": 2, "knowledge_type": "fact", "content": "y" * 400},
+        ]
+        assert _build_context(rows, 0) == ""
+        assert _build_context(rows, -5) == ""
+        # control: the same rows DO render under a normal cap
+        assert _build_context(rows, 200) != ""
 
     def test_the_cap_is_read_from_config_not_hardcoded(self):
         """techne#826 direction (3): this was the only fixed number in the rail's
