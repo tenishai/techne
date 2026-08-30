@@ -15,7 +15,9 @@ All notable changes to techne are documented here. Format loosely follows
   only because a consolidate cluster happened to surface some of them. The new
   `cards:pending` check keys on **age**, not count, because a card is pending for
   the whole normal gap between indexing and the fill pass, and a check that fires
-  on the healthy state trains its reader to ignore it (#824).
+  on the healthy state trains its reader to ignore it. A backlog whose age cannot be
+  read reports UNOBSERVABLE rather than healthy, and the remedy names the backlog
+  size because `cards emit` defaults to `--limit 50` (#824).
 
 - Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
   adapter that omits them satisfies `isinstance` again. `TranscriptSource` is

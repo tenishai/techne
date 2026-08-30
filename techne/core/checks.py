@@ -2737,24 +2737,6 @@ def check_schema_versions(config) -> list[CheckResult]:
 _PENDING_CARD_STALE_DAYS = 1
 
 
-def _age_in_days(ts: str | None) -> int | None:
-    """Whole days between a stored timestamp and now, or None if unparseable.
-
-    techne stores timestamps as naive 'YYYY-MM-DD HH:MM:SS' strings in UTC with no
-    zone marker (techne#2667), so they must be parsed explicitly rather than handed
-    to `fromisoformat` and compared against an aware `now()`.
-    """
-    if not ts:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            when = datetime.strptime(ts[:19], fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        return max((datetime.now(timezone.utc) - when).days, 0)
-    return None
-
-
 @register_check
 def check_pending_cards(config) -> CheckResult:
     """Is any document card still carrying a stand-in gist? (techne#824)
@@ -2833,17 +2815,39 @@ def check_pending_cards(config) -> CheckResult:
         )
 
     oldest = row["oldest"]
-    age_days = _age_in_days(oldest)
-    stale = age_days is not None and age_days >= _PENDING_CARD_STALE_DAYS
+
+    # `temporal_verdict` + `_age`, NOT a local parser (#841 r1 Important 2). An
+    # earlier version of this check carried its own `_age_in_days`, which covered
+    # two of `_parse_ts`'s five formats and reached the rest by slicing `ts[:19]` —
+    # so `"...T10:00:00+05:00"` was truncated and stamped UTC, silently absorbing a
+    # five-hour error. A strictly weaker parser, 2,400 lines below a stronger one,
+    # in the same file, for the same column family.
+    #
+    # It also buys the honest verdict for free. `age is None` used to short-circuit
+    # `stale` to False and report LIVE — INDISTINGUISHABLE from age 0, so a store
+    # with N pending cards whose age cannot be read reported `ok=True`, which is the
+    # exact failure this check exists to end. `temporal_verdict` returns
+    # UNOBSERVABLE there, and its docstring says why: conflating "never ran" with
+    # "cannot be observed" is the ambiguity techne#468 was raised to remove.
+    verdict = temporal_verdict(oldest, timedelta(days=_PENDING_CARD_STALE_DAYS))
+    age = _age(oldest)
 
     detail = f"{count} card(s) pending"
-    detail += f", oldest {age_days}d old" if age_days is not None else ", age unknown"
+    detail += f", oldest {age.days}d old" if age is not None else ", age UNREADABLE"
     return CheckResult(
         name="cards:pending",
         subsystem="librarian",
         kind=Kind.COVERAGE,
-        verdict=Verdict.STALE if stale else Verdict.LIVE,
+        verdict=verdict,
         evidence=f"oldest pending card created_at={oldest or 'unknown'}",
         detail=detail,
-        remedy=("techne librarian cards emit -o /tmp/cards.json  # then ingest" if stale else None),
+        # `--limit {count}`, because it defaults to 50 (cli.py:3542) and a bare
+        # remedy tells an operator with a larger backlog that one emit drains it.
+        # AGENTS.md already carries a trigger for that exact trap on the reflection
+        # rail ("treats one emit call as having drained a session").
+        remedy=(
+            f"techne librarian cards emit -o /tmp/cards.json --limit {count}  # then ingest"
+            if verdict is not Verdict.LIVE
+            else None
+        ),
     )

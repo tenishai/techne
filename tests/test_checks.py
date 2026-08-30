@@ -2735,15 +2735,16 @@ class TestPendingCardBacklog:
         self._pend(config, url="u:filled")
         self._age(config)
 
-        card_id = next(c["id"] for c in __import__(
-            "techne.core.cards", fromlist=["pending_cards"]
-        ).pending_cards(config.db_path))
+        card_id = next(
+            c["id"]
+            for c in __import__("techne.core.cards", fromlist=["pending_cards"]).pending_cards(
+                config.db_path
+            )
+        )
         fill_card_summary(config.db_path, card_id, "A real gist, written by the fill pass.")
 
         result = check_pending_cards(config)
-        assert result.verdict is Verdict.LIVE, (
-            f"a filled card is not a backlog: {result.detail}"
-        )
+        assert result.verdict is Verdict.LIVE, f"a filled card is not a backlog: {result.detail}"
 
     def test_a_superseded_card_is_not_a_backlog(self, config):
         """`superseded_by IS NULL` was unwitnessed for the same reason — no fixture
@@ -2761,6 +2762,65 @@ class TestPendingCardBacklog:
         conn.close()
 
         assert check_pending_cards(config).verdict is Verdict.LIVE
+
+    def test_an_unreadable_age_is_not_reported_healthy(self, config):
+        """#841 r1 Important 1. `age is None` used to short-circuit the staleness
+        guard to False and report LIVE — INDISTINGUISHABLE from age 0, so a store
+        with N pending cards whose age cannot be read returned `ok=True`.
+
+        She teeth-checked it: replacing the parser's `return None` with `return 0`
+        — literally the failure the design claimed to avoid — left the full suite
+        green, so neither the None-ness nor the detail wording was pinned.
+
+        The module's own convention settles the verdict: `temporal_verdict` returns
+        UNOBSERVABLE for an unparseable timestamp, because conflating "never ran"
+        with "cannot be observed" is the ambiguity techne#468 was raised to remove.
+        Unreachable through today's write paths — every INSERT lets `created_at`
+        default — but the branch exists deliberately, so it must not report healthy.
+        """
+        import sqlite3
+
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config)
+        conn = sqlite3.connect(config.db_path)
+        conn.execute(
+            "UPDATE knowledge SET created_at = ? WHERE type='document_card'", ("not-a-ts",)
+        )
+        conn.commit()
+        conn.close()
+
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.UNOBSERVABLE, result
+        assert not result.ok, "a backlog whose age cannot be read is not healthy"
+        assert "UNREADABLE" in result.detail
+
+    def test_the_remedy_names_the_backlog_size(self, config):
+        """#841 r1 nit 4 — `cards emit` defaults to `--limit 50` (cli.py:3542), so a
+        bare remedy tells an operator with a larger backlog that one call drains it.
+        AGENTS.md carries a trigger for that exact trap on the reflection rail."""
+        from techne.core.checks import check_pending_cards
+
+        for i in range(3):
+            self._pend(config, url=f"u:{i}")
+        self._age(config)
+
+        remedy = check_pending_cards(config).remedy
+        assert remedy and "--limit 3" in remedy, remedy
+
+    def test_no_store_is_dormant_not_a_finding(self, config, tmp_path):
+        """#841 r1 nit 3 — the only branch of this check with no test at all;
+        flipping DORMANT to LIVE left the suite green. The existence guard is also
+        MORE careful than the house pattern (the other six `connect(config.db_path)`
+        sites in this module have none, and `connect()` would create the store), so
+        it deserves a witness."""
+        from techne.config import Config
+        from techne.core.checks import check_pending_cards
+
+        absent = Config(db_path=tmp_path / "nope" / "missing.db", data_dir=tmp_path)
+        result = check_pending_cards(absent)
+        assert result.verdict is Verdict.DORMANT, result
+        assert "no store" in result.evidence
 
     def test_a_probe_failure_is_unknown_not_green(self, config, monkeypatch):
         """A check that cannot read its own subject must never report healthy —

@@ -220,6 +220,9 @@ def test_the_command_triggers_tell_agents_to_offer_still_exists():
 #: this and forces a human to re-read the trigger that claims doctor does not do this.
 #: Re-bless by adding the name here, the same way an arch card is re-blessed.
 DOCTOR_CHECKS_AT_LAST_REVIEW = {
+    # techne#824. RE-READ DONE: deployment.md:78 claims `techne doctor` does
+    # not check whether anything SCHEDULES A BACKUP; a card-backlog check does
+    # not touch scheduling, so that trigger's claim stands as written.
     "check_pending_cards",
     "check_config_trust",
     "check_hooks",
@@ -236,10 +239,6 @@ DOCTOR_CHECKS_AT_LAST_REVIEW = {
 }
 
 
-# techne#824 added `check_pending_cards` (a librarian card-backlog COVERAGE check).
-# THE RE-READ THIS TEST DEMANDS WAS DONE: deployment.md:78 claims `techne doctor`
-# does not check whether anything SCHEDULES A BACKUP. A card-backlog check does not
-# touch scheduling, so the trigger's claim is unaffected and stays as written.
 def test_the_absence_the_backup_trigger_asserts_is_still_absent():
     """"`techne doctor` does not check this" is the sharpest claim to let rot: if doctor
     GAINS a scheduling check, the trigger keeps telling operators it has not got one, and
