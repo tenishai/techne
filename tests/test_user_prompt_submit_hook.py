@@ -1211,11 +1211,14 @@ def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
     driven through `main()` rather than by calling the renderer directly.
 
     WHAT THE 600 ARM ACTUALLY DEMONSTRATES, corrected (#839 r3 Important 1): NOT a
-    cut at 600. `search()` pre-truncates knowledge rows to 500, so at cap 600 no
-    truncation is applied at all and the row arrives at 500. The test still pins
-    the join — the config value has to reach the renderer for the two arms to
-    differ — but "600 works" is not what it shows, and the ceiling is pinned
-    separately by `test_search_itself_truncates_knowledge_rows`.
+    cut at 600. `search()` pre-truncates knowledge rows to 500 and the hook then
+    clamps to 499, so the row is cut at 499 and marked — not at 600. (An earlier
+    version of this sentence said no truncation was applied at all; that predates
+    the r4 clamp, and the very next test asserts the opposite at the same cap.) The
+    test still pins the join — the config value has to reach the renderer for the two arms to
+    differ — but "600 works" is not what it shows, and the FTS half of the ceiling is
+    pinned separately by `test_search_itself_truncates_knowledge_rows`, and the VEC
+    half only by `test_both_search_sites_share_one_ceiling`.
     """
     long_fact = " ".join(f"word{i:03d}" for i in range(200))
 
@@ -1307,8 +1310,11 @@ def test_both_search_sites_share_one_ceiling():
     sites agree, so raising one without the other cannot pass unnoticed — which is
     the failure mode that leaves `config.py`'s comment and the README quietly wrong.
 
-    Source-level on purpose: driving the vec channel needs sqlite-vec plus a cached
-    model, which this venv does not have, and a skipped test would witness nothing.
+    Source-level on purpose — but NOT because the deps are missing: `sqlite_vec`
+    imports and loads here (vec_version reports v0.1.9) and `model2vec` imports. The
+    reason is that driving the vec channel end-to-end needs a populated vector index
+    and a cached model, which makes the test slow, environment-dependent, and prone
+    to being skipped — and a skipped guard on the busier channel witnesses nothing.
     """
     import re
     from pathlib import Path as _P
@@ -1317,7 +1323,8 @@ def test_both_search_sites_share_one_ceiling():
 
     src = _P("techne/core/search.py").read_text()
 
-    # ANCHORED ON THE KNOWLEDGE ROW, NOT ON THE TRUNCATION SHAPE (#839 r5 Important 2).
+    # Anchored on the knowledge row rather than on the truncation shape: matching
+    # the shape alone caught the OBSERVATIONS row at :366 too (#839 r5).
     # The first version matched `[:NNN]` on any content field and caught THREE sites —
     # including search.py:366, the OBSERVATIONS row, which has nothing to do with this
     # knob. That was wrong in both directions, both demonstrated: deleting :416's
@@ -1326,19 +1333,11 @@ def test_both_search_sites_share_one_ceiling():
     # about "knowledge rows" that was not true (false positive, and the kind that gets a
     # test deleted as noise). Each knowledge block is found by its own source_table
     # marker, and the count is EXACT so future slack cannot hide a lost site.
-    # TEMPERED MATCH — the pattern must not cross into another block (#839 r6
-    # Important 1). An unbounded `.*?` under re.S let a knowledge marker pair with a
-    # truncation from a DIFFERENT source_table: with site 416's slice deleted, the
-    # marker at line 413 reached across `"source_table": "thread"` and matched the
-    # THREAD summary's truncation at 768, yielding two 500s and a green test whose
-    # own message claims "exactly two knowledge-row truncation sites".
-    #
-    # My r5 verification missed this because I checked the SUITE rather than THIS
-    # test: the new direct witness does red on that mutation, so "416 deleted reds"
-    # was true of the run and false of the sentence it was written about. This pin is
-    # the SOLE witness for site 838 — deleting the vec slice reds only this test —
-    # so a pin that can silently measure the wrong block is exactly what it must not
-    # be.
+    # TEMPERED, so a match cannot cross a `source_table` boundary. An unbounded
+    # `.*?` under re.S paired the knowledge marker with the THREAD block's
+    # truncation, so deleting site 416's slice still yielded two 500s and a pass.
+    # This pin is the SOLE witness for the VEC site (838) — the direct witness above
+    # reaches only FTS — so measuring the wrong block is the one thing it must not do.
     blocks = re.findall(
         r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:(\d+)\]',
         src,
@@ -1398,10 +1397,18 @@ def test_search_itself_truncates_knowledge_rows(home):
     assertion is satisfied by the clamp whether or not `search()` truncates at all.
     Deleting `search.py`'s own ceiling left the full suite green.
 
+    THE FTS CHANNEL ONLY, which the name does not say on its own. Deleting the VEC
+    slice at `search.py:838` leaves this GREEN — that site's sole guard is
+    `test_both_search_sites_share_one_ceiling`, a regex over source text. The
+    distinction matters because the vec-first union puts the VEC channel at the head
+    of the page, so the channel this test cannot see is the busier one on any
+    non-trivial store.
+
     This calls `search()` directly, so the only thing that can satisfy it is
-    `search()`'s own behaviour. It is what makes the constant in `config.py`, the
-    README line and the CHANGELOG line falsifiable — every one of them is keyed to a
-    number that, until now, no test observed at its source.
+    `search()`'s own behaviour on the channel it reaches. Together with the source
+    pin it makes the constant in `config.py`, the README line and the CHANGELOG line
+    falsifiable — every one of them is keyed to a number that, until this pair
+    existed, no test observed at its source at all.
     """
     from techne.config import Config
     from techne.core.search import search
