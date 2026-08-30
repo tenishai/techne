@@ -224,6 +224,45 @@ nobody chose. If the machine is asleep at the scheduled time, launchd runs it on
 
 ---
 
+## Upgrading an existing install
+
+An upgrade replaces the code. It does **not** touch `~/.claude/settings.json`, and it does
+not embed anything. Two consequences that neither the upgrade output nor `techne doctor`
+will tell you about:
+
+**`techne init` owns the hook chain, and only `init` rewrites it.** `register_hooks` strips
+every hook group whose command mentions techne and re-appends its own template, so the
+SessionStart chain an install is running is the one written the last time `init` ran. An
+install that predates a change to that template keeps the old chain indefinitely, looking
+healthy the whole time — `doctor`'s hook-drift check compares `(event, matcher)` and never
+the command.
+
+**A store that has never been embedded stays that way.** Embedding happens only through
+`techne vectors backfill`; nothing embeds on write. The SessionStart chain runs it with
+`--no-download`, which is correct for a hook — it degrades to "swept, embedded nothing"
+rather than blocking session start on a model fetch — but it means a cold model cache
+never warms itself. The bare CLI keeps the permissive default, so one manual run is what
+primes it.
+
+So, after upgrading:
+
+```sh
+techne init             # re-writes the hook chain, including the backfill segment
+techne skills install   # an upgrade does not refresh the bundled procedures
+techne vectors backfill  # ONCE, bare — warms the model cache and catches up the backlog
+```
+
+> **Agent: raise this unprompted.**
+>
+> - They have just upgraded techne, or are about to, and have not mentioned `techne init`
+>   — the hook chain is only rewritten by `init`, so an upgrade alone leaves whatever
+>   chain was written last. Say so before they conclude the new version did nothing.
+> - They report that recall is empty, that semantic search finds nothing, or that
+>   `vectors:coverage` will not go green after an upgrade — check whether
+>   `techne vectors backfill` has ever been run from the CLI. The SessionStart hook runs
+>   it with `--no-download`, so on a cold model cache it embeds nothing, every session,
+>   silently.
+
 ## inotify watch-limit on Linux
 
 ### Symptom

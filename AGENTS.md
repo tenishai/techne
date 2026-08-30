@@ -20,6 +20,8 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | points a file-level backup tool (Time Machine, restic, Dropbox) at `~/.techne` | [db-per-domain.md](docs/db-per-domain.md#the--wal-and--shm-files-next-to-every-db) |
 | asks what a `-wal`/`-shm` file is, or proposes deleting one | [db-per-domain.md](docs/db-per-domain.md#the--wal-and--shm-files-next-to-every-db) |
 | is moving techne between machines and mentions only the `.db` | [db-per-domain.md](docs/db-per-domain.md#the--wal-and--shm-files-next-to-every-db) |
+| has just upgraded techne, or is about to | [deployment.md](docs/deployment.md#upgrading-an-existing-install) |
+| reports recall empty or `vectors:coverage` stuck after an upgrade | [deployment.md](docs/deployment.md#upgrading-an-existing-install) |
 | is writing a cron job, timer, plist or CI step calling `techne backup` | [deployment.md](docs/deployment.md#scheduled-backups-techne742) |
 | asks "do I have backups?" | [deployment.md](docs/deployment.md#scheduled-backups-techne742) |
 | plans a machine migration, a wipe, or a disk replacement | [deployment.md](docs/deployment.md#what-is-not-automated-stated-plainly) |

@@ -520,6 +520,10 @@ def test_the_restore_trigger_is_still_all_or_nothing():
 #: kept producing: THE BULLET→TEST LINK EXISTED NOWHERE, so there was nothing to mutate and
 #: no mutant could have exposed it. Naming the witness is what makes the link checkable.
 TRIGGER_WITNESSES = {
+    "have not mentioned `techne init`": "test_only_init_writes_the_backfill_segment",
+    "recall is empty, that semantic search": (
+        "test_the_hook_runs_backfill_no_download_and_the_cli_does_not"
+    ),
     "`cp`, `rsync`, `scp`, `mv` or tar": "test_the_wal_premise_every_wal_trigger_rests_on",
     "file-level backup tool": "test_the_wal_premise_every_wal_trigger_rests_on",
     "propose deleting one": "test_the_wal_premise_every_wal_trigger_rests_on",
@@ -1276,3 +1280,52 @@ def test_the_sandbox_the_trigger_names_is_installable():
 
     assert CliRunner().invoke(main, ["agents", "status", "--help"]).exit_code == 0
     assert REQUIRED_TOOLS_LINE in bundled_agent_text("research-readonly")
+
+
+# ------------------------------------------------------- techne#814/#842: upgrading
+
+def test_only_init_writes_the_backfill_segment():
+    """WITNESS for the upgrade trigger's first bullet.
+
+    The claim is that the SessionStart chain an install runs is whatever `init`
+    last wrote, so an upgrade alone leaves the old chain. What is checkable here is
+    the half that makes it matter: the segment lives in `register_hooks`' TEMPLATE,
+    so a store only gains it by re-running init. Before techne#814 the segment was
+    not in the template at all — it existed solely as a hand edit, which is how one
+    machine drifted 883 observations behind while reporting healthy.
+    """
+    from techne.platforms.claude_code import hooks
+
+    src = (REPO / "techne/platforms/claude_code/hooks.py").read_text()
+    assert "vectors backfill" in src, (
+        "the backfill segment left register_hooks' template — an install can no "
+        "longer gain it by running init, and docs/deployment.md says it can"
+    )
+    assert hasattr(hooks, "register_hooks"), "the template's owner moved"
+
+
+def test_the_hook_runs_backfill_no_download_and_the_cli_does_not():
+    """WITNESS for the upgrade trigger's second bullet.
+
+    Two halves, and the trigger is only true if both hold: the HOOK passes
+    `--no-download` (so a cold model cache degrades to "embedded nothing" instead of
+    blocking session start), and the bare CLI does NOT (so one manual run is what
+    warms the cache). If the CLI ever gains the flag by default, the trigger's advice
+    becomes wrong — the manual run would no-op too, and there would be no way left to
+    prime it.
+    """
+    import subprocess
+    import sys
+
+    src = (REPO / "techne/platforms/claude_code/hooks.py").read_text()
+    assert "vectors backfill --no-download" in src, (
+        "the SessionStart hook no longer passes --no-download; a cold cache can now "
+        "block session start on a model fetch"
+    )
+
+    out = subprocess.run(
+        [sys.executable, "-m", "techne.cli", "vectors", "backfill", "--help"],
+        capture_output=True, text=True, cwd=REPO,
+    ).stdout
+    assert "--no-download" in out, "the CLI flag vanished; the hook's invocation is stale"
+    assert "--no-download" not in out.split("Options:")[0], "sanity: parsed the wrong section"

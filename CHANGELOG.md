@@ -5,8 +5,54 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-08-30
+
+### Upgrading
+
+Run all three. An upgrade replaces the code and nothing else — it does not rewrite your
+hook chain and it does not embed anything.
+
+```sh
+techne init             # only `init` writes the SessionStart chain, including the
+                        #   vectors-backfill segment this release depends on
+techne skills install   # an upgrade does not refresh the bundled procedures
+techne vectors backfill # ONCE, from the CLI — see below
+```
+
+**The third one is the easy one to skip and the one that decides whether recall works.**
+Embedding happens only through `techne vectors backfill`; nothing embeds on write. The
+SessionStart chain runs it with `--no-download`, which is right for a hook — a cold model
+cache degrades to "swept, embedded nothing" instead of blocking session start — but it
+means the cache never warms itself. The bare CLI keeps the permissive default, so one
+manual run primes it and catches up the backlog. An install that has never run it has an
+empty vector index and no signal saying so.
+
+`docs/deployment.md` carries the same thing as an agent trigger, so an assistant working
+in your repo raises it unprompted rather than waiting to be asked.
+
 ### Fixed
 
+- A session is titled from its dialogue rather than from whatever wrapper the client
+  injected first. Claude Code emits text-bearing `user` turns that no human typed —
+  slash commands and their output, shell runs, task notifications — so 25 transcripts
+  were titled `<local-command-caveat>Caveat: …` or `---BEGIN USER MESSAGES---`. Only
+  an adapter can know its own client's markers, so core never guesses: the optional
+  `dialogue_text` hook is read via `getattr` and forwarded to `derive_title`, and a
+  source that omits it is byte-for-byte unaffected (#816, #817).
+- `search()`'s fusion no longer discards the lexical channel. The vec-first union
+  appended FTS-only hits after the whole vector channel and then truncated, so a
+  vector channel that filled the page dropped every one — measured 108 of 108 across
+  15 identifier-shaped queries on a live store, which is the normal case rather than
+  an edge, because on any non-trivial store the vector channel always fills the page.
+  A one-slot tail floor now survives truncation. **The size is measured, not chosen**:
+  at limit 10 a floor of 2 or more costs a gold row, and only the limit-10 arm can
+  show that cost, so re-run that arm before widening it (#827).
+- The retrieval-quality gate diffs base against head on one runner instead of testing
+  head against an absolute floor. The floors passed the #827 regression green, which
+  is what a floor set below the current score will always do; a base-vs-head
+  comparison has no such blind spot. The epsilon is zero because the leg is
+  byte-deterministic — verified by running it twice and diffing the per-class means
+  — so any delta is a real change rather than run noise (#832).
 - A corrected document title now reaches rows that were already stored. Both dedup
   keys are content-derived and neither includes the title, so re-indexing with a
   fixed adapter produced byte-identical content, took the `document_unchanged`
