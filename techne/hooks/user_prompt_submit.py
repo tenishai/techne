@@ -283,6 +283,14 @@ def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
 #: plainly holds relevant rows.
 _RESEND_OVERFETCH = 3
 
+#: `search()` truncates knowledge rows to this before the hook ever sees them, at
+#: BOTH sites that build a knowledge row — `core/search.py:416` (the FTS channel)
+#: and `core/search.py:838` (the VEC channel, which the vec-first union puts at the
+#: head of the page, so it serves most rows on any non-trivial store). Neither marks
+#: the cut. `per_turn_recall_chars` is clamped below this; values at or above it
+#: cannot be honoured. Tracked as techne#842.
+_SEARCH_ROW_CEILING = 500
+
 
 def _claim_deferred_session_context(db_path, session_id: str | None) -> str | None:
     """Take this session's deferred SessionStart context, once (techne#562).
@@ -739,7 +747,22 @@ def main() -> None:
                 # consume one of the k slots that a clearing row could have used.
                 rows = _apply_relevance_floor(rows, config)
                 rows = rows[:k]
-            recall_block = _build_context(rows, config.hooks.per_turn_recall_chars) if rows else ""
+            # CLAMP BELOW search()'s OWN CEILING (#839 r4 Important 1, techne#842).
+            # `search()` hands knowledge rows in ALREADY cut at 500 and unmarked, at
+            # BOTH sites that build one — search.py:416 (FTS) and :838 (VEC). At a
+            # cap of 500 or more `_truncate_for_injection` sees `len <= limit`,
+            # returns `was_cut=False`, and the row ships severed with the `…` AND the
+            # header notice suppressed. THAT STATE IS REACHABLE ONLY BECAUSE THIS
+            # CHANGE ADDED THE KNOB — before it the cap was a hardcoded 200 — so the
+            # honesty regression is this PR's to close, separately from the inertness
+            # above 500, which does need search() and is techne#842.
+            #
+            # The trade is a spurious `…` on a genuinely-500-char row. That is the
+            # conservative direction: an over-marked whole row says "there may be
+            # more" (harmless); an unmarked severed row says "this is all of it",
+            # which is the exact defect techne#826 exists to fix.
+            chars = min(config.hooks.per_turn_recall_chars, _SEARCH_ROW_CEILING - 1)
+            recall_block = _build_context(rows, chars) if rows else ""
             if recall_block:
                 blocks.append(recall_block)
             # techne#329 — make the READ path auditable (the audit that motivated

@@ -489,7 +489,7 @@ class TestInjectedTypeLabel:
         assert "[note]" in self._ctx([{"id": 5, "content": "c"}])
 
     def test_the_content_truncation_is_pinned(self):
-        """The CAP, still 200 by default, and it was pinned by nothing — removing
+        """The CAP, and it was pinned by nothing — removing
         the slice entirely left the suite green (#566 r2) while a recorded
         `document_card` decision rests on it. An unbounded line here is a per-turn
         injection whose size is set by whatever the longest matching row happens to
@@ -499,11 +499,20 @@ class TestInjectedTypeLabel:
         boundary-seeking to find and the cut is hard at the cap — which is what
         keeps this assertion a test of the CAP rather than of the cut point. The
         boundary behaviour is pinned separately below."""
-        import inspect
+        # AGAINST THE PRODUCTION DEFAULT, NOT THE RENDERER'S SIGNATURE (#839 r4
+        # Important 3). Deriving `cap` from `_build_context`'s parameter made this a
+        # TAUTOLOGY — changing that default to 400 left the test green, where the old
+        # hardcoded 200 would have failed. Worse, `main()` always passes the cap
+        # explicitly, so the signature default governs no production path at all: the
+        # derived version pinned a vestige while the CHANGELOG's bolded promise that
+        # "the 200-character default is unchanged" was pinned by nothing anywhere.
+        from techne.config import HookConfig
 
-        from techne.hooks.user_prompt_submit import _build_context
-
-        cap = inspect.signature(_build_context).parameters["char_limit"].default
+        cap = HookConfig().per_turn_recall_chars
+        assert cap == 200, (
+            "the shipped default moved; #808 measures per-session context as already "
+            "the dominant cost, so this is a deliberate decision, not a tuning tweak"
+        )
         out = self._ctx(
             [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
         )
@@ -1223,24 +1232,26 @@ def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
     )
 
 
-def test_search_pre_truncates_at_500_which_caps_this_knob(home, monkeypatch, capsys):
-    """techne#842 / #839 r3 Important 1 — A CEILING THIS KNOB DOES NOT OWN.
+def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch, capsys):
+    """techne#842 / #839 r4 Important 1 — THE INERTNESS IS TOLERATED, THE SILENCE IS NOT.
 
-    `search()` returns `r["content"][:500]` for the knowledge table
-    (core/search.py:416), unconditionally and without a marker. So a row reaches
-    this rail already cut at 500, `per_turn_recall_chars` governs nothing above
-    that, and a row arriving at exactly 500 looks UN-truncated to
-    `_truncate_for_injection` — it ships severed mid-word with the `…` and the
-    header notice both suppressed, which is the one configuration where this rail
-    is less honest than before techne#826.
+    `search()` hands knowledge rows in already cut at 500, unmarked, at BOTH sites
+    that build one — `search.py:416` (FTS) and `search.py:838` (VEC, which the
+    vec-first union puts at the head of the page, so it serves most rows on any
+    non-trivial store).
 
-    Pinned rather than fixed, deliberately: threading the cap into `search()`
-    reaches into the retrieval layer and is techne#842. This test exists so the
-    ceiling is a KNOWN, ASSERTED property rather than a surprise, and so it reds
-    when someone raises or removes the 500 in search.py without revisiting here.
+    Two different defects follow, and only one is this PR's. That a cap above 500
+    delivers no more text needs `search()` and is techne#842. That a cap AT or ABOVE
+    500 used to switch the `…` marker OFF is reachable only because this change added
+    the knob — before it the cap was a hardcoded 200 — so the hook clamps to
+    `_SEARCH_ROW_CEILING - 1` and the row is still announced as cut.
+
+    The spurious `…` on a genuinely-500-char row is the accepted cost: an over-marked
+    whole row says "there may be more", an unmarked severed row says "this is all of
+    it", and only the second is the failure techne#826 exists to fix.
     """
     long_fact = " ".join(f"word{i:03d}" for i in range(200))
-    assert len(long_fact) > 900, "fixture must exceed the 500 ceiling to test it"
+    assert len(long_fact) > 900, "fixture must exceed the ceiling to test it"
 
     _write_config(home, per_turn_recall=True, per_turn_recall_chars=600)
     _seed(long_fact, type="fact")
@@ -1251,29 +1262,58 @@ def test_search_pre_truncates_at_500_which_caps_this_knob(home, monkeypatch, cap
     assert row, f"expected an injected row: {block!r}"
     body = row[0].split("] ", 1)[1]
 
-    assert len(body) <= 500, (
-        f"search() no longer pre-truncates at 500 (row is {len(body)}) — the knob's "
-        "ceiling has moved; see techne#842 and update this test with the new bound"
+    # BOTH BOUNDS. An upper bound alone stayed green when the ceiling was LOWERED
+    # (#839 r4 Important 2) — `[:120]` passed a `<= 500` assertion, so the test could
+    # not see the documentation going stale in that direction either.
+    assert 400 < len(body) <= 500, (
+        f"row is {len(body)} chars — search()'s 500 ceiling has moved (techne#842); "
+        "update this test and the _SEARCH_ROW_CEILING constant together"
     )
-    assert not body.endswith(" …"), (
-        "a row cut by search() carries no marker — if this now holds, the ceiling "
-        "was closed and the honesty gap with it"
+    assert body.endswith(" …"), (
+        "a row at the ceiling shipped UNMARKED — the clamp is gone and the rail is "
+        "back to reading a severed row as whole"
+    )
+    assert "per_turn_recall_chars" in block, "the header notice must fire too"
+
+
+def test_both_search_sites_share_one_ceiling():
+    """#839 r4 Important 2 — THE PIN WAS SINGLE-SITED AND THE DOCS INHERITED IT.
+
+    `search()` fuses two channels and truncates knowledge in BOTH: `search_fts` at
+    `search.py:416` and `search_vec` at `search.py:838`. The end-to-end test above
+    exercises whichever channel the fixture happens to hit; this one asserts the two
+    sites agree, so raising one without the other cannot pass unnoticed — which is
+    the failure mode that leaves `config.py`'s comment and the README quietly wrong.
+
+    Source-level on purpose: driving the vec channel needs sqlite-vec plus a cached
+    model, which this venv does not have, and a skipped test would witness nothing.
+    """
+    import re
+    from pathlib import Path as _P
+
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
+    src = _P("techne/core/search.py").read_text()
+    sites = re.findall(r'"content":\s*(?:r\["content"\]|k\[2\])\[:(\d+)\]', src)
+    assert len(sites) >= 2, f"expected both knowledge-row sites, found {sites}"
+    assert set(sites) == {str(_SEARCH_ROW_CEILING)}, (
+        f"search.py truncates knowledge rows at {set(sites)} but the hook clamps to "
+        f"{_SEARCH_ROW_CEILING} — they must move together (techne#842)"
     )
 
 
 def test_a_withheld_row_is_not_marked_sent(home, monkeypatch, capsys):
     """techne#839 r3 Important 2 — LOGGING A ROW AS DELIVERED SUPPRESSES IT.
 
-    `log_context_injection`'s own contract is "`rows` is what was INJECTED"
-    (_injection_log.py:217), and the hook passed `rows` whether or not anything was
-    emitted. That is not merely an inaccurate audit row: `_already_sent_this_session`
-    reads `hit_ids` back with NO filter on whether the block was empty, so a row
-    logged-but-never-sent is suppressed for the rest of the session segment.
+    `log_context_injection`'s own contract is "`rows` is what was INJECTED", and the
+    hook passed `rows` whether or not anything was emitted. That is not merely an
+    inaccurate audit row: `_already_sent_this_session` reads `hit_ids` back with NO
+    filter on whether the block was empty, so a row logged-but-never-sent is
+    suppressed for the rest of the session segment.
 
-    Two turns, one session, with the cap raised in between — which AGENTS.md lists
-    as a modelled operator behaviour ("edits ~/.techne/config.yaml while a techne
-    MCP server is live"), not a contrived one. A silent recall miss is this
-    project's own named failure class.
+    Two turns, one session, cap raised in between — which AGENTS.md lists as a
+    modelled operator behaviour ("edits ~/.techne/config.yaml while a techne MCP
+    server is live"), not a contrived one.
     """
     _write_config(home, per_turn_recall=True, per_turn_recall_chars=0)
     _seed("the fact that must survive a withheld turn", type="fact")
@@ -1281,10 +1321,18 @@ def test_a_withheld_row_is_not_marked_sent(home, monkeypatch, capsys):
     first = _run(monkeypatch, capsys, {"session_id": "sup-1", "prompt": "withheld turn"})
     assert first.strip() == "", f"cap 0 must inject nothing: {first!r}"
 
+    # THE NAME'S LITERAL CLAIM, not merely its consequence (#839 r4 nit 1). Asserting
+    # only that turn two emits would go green under a future change that made
+    # `_already_sent_this_session` skip empty-injection rows while still RECORDING
+    # them as sent — the audit log would stay wrong and this test would not say so.
+    logged = _injection_log_rows("per_turn_recall")
+    assert logged and logged[0]["hit_ids"] == "[]", (
+        f"a withheld row was recorded as sent: {logged[0]['hit_ids'] if logged else None}"
+    )
+
     _write_config(home, per_turn_recall=True, per_turn_recall_chars=200)
     second = _run(monkeypatch, capsys, {"session_id": "sup-1", "prompt": "withheld turn"})
 
     assert second.strip(), (
-        "the row was suppressed as already-sent despite never having been injected "
-        "— a withheld row must not be logged as delivered"
+        "the row was suppressed as already-sent despite never having been injected"
     )
