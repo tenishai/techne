@@ -68,6 +68,7 @@ _MANIFEST = (
     "investigating",
     "mcp-tools",
     "reflect-guide",
+    "releasing",
     "self-care",
     "surveying",
     "techne-promote",

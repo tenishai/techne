@@ -22,6 +22,8 @@ up. The *explanation* stays in the document; follow the link once a trigger fire
 | is moving techne between machines and mentions only the `.db` | [db-per-domain.md](docs/db-per-domain.md#the--wal-and--shm-files-next-to-every-db) |
 | has just upgraded techne, or is about to | [deployment.md](docs/deployment.md#upgrading-an-existing-install) |
 | reports recall empty or `vectors:coverage` stuck after an upgrade | [deployment.md](docs/deployment.md#upgrading-an-existing-install) |
+| says "cut a release", "tag `vX.Y.Z`", or "ship it" | [releasing.md](docs/releasing.md#the-checklist) |
+| finds a tagged version with no published GitHub Release | [releasing.md](docs/releasing.md#the-checklist) |
 | is writing a cron job, timer, plist or CI step calling `techne backup` | [deployment.md](docs/deployment.md#scheduled-backups-techne742) |
 | asks "do I have backups?" | [deployment.md](docs/deployment.md#scheduled-backups-techne742) |
 | plans a machine migration, a wipe, or a disk replacement | [deployment.md](docs/deployment.md#what-is-not-automated-stated-plainly) |

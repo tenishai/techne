@@ -141,4 +141,5 @@ markers = [
 "docs/deployment.md" = "techne/docs/deployment.md"
 "docs/welcome.md" = "techne/docs/welcome.md"
 "docs/mcp-tools.md" = "techne/docs/mcp-tools.md"
+"docs/releasing.md" = "techne/docs/releasing.md"
 "AGENTS.md" = "techne/docs/AGENTS.md"

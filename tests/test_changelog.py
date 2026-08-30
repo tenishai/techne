@@ -191,3 +191,57 @@ def test_an_attribute_bearing_details_tag_is_read_as_an_opener():
             f"{markup}: text BEFORE the block was deleted — the opener was read as "
             f"a closer, which the heading count cannot distinguish"
         )
+
+
+#: Matches a RELEASED block heading — `## [0.16.1] — 2026-08-30`. `[Unreleased]` is
+#: deliberately not matched: it is in flight, and the section it needs is written at
+#: cut time, which is exactly the moment the test below starts applying to it.
+_RELEASED = re.compile(r"^## \[\d+\.\d+\.\d+\]")
+
+
+def test_the_newest_released_block_carries_an_upgrading_section():
+    """A release must SAY what the operator has to run, or say that nothing is needed.
+
+    WHY THIS EXISTS, and why it is a test rather than a habit. v0.16.0 shipped with no
+    upgrade guidance in this file and none in its GitHub Release body: four headings,
+    Added/Changed/Fixed/Docs, and in 925 lines the string `vectors backfill` appears
+    once, inside a narrative aside. Two external users installed that tag, ran no
+    `techne init` and no `techne vectors backfill`, and got an install whose hook chain
+    was whatever their previous version wrote and whose vector index was empty. Recall
+    returned nothing and nothing said why.
+
+    That failure was already known. techne#575 — "no upgrade path for tag-installing
+    users" — was filed, fixed, and CLOSED on 2026-08-18. v0.15.0 shipped the next day
+    with an `### Upgrading` section. v0.16.0 shipped nine days later without one. The
+    practice survived exactly one release, because a closed issue is a claim that
+    something was fixed, not a mechanism that keeps it fixed. Two of eleven blocks in
+    this file carry the section; the check below is what makes the third onward.
+
+    SCOPED TO THE NEWEST RELEASED BLOCK ON PURPOSE. The nine older blocks cannot be
+    repaired — their releases are published and their bodies are history — so a check
+    that spanned the file would fire on nine permanent failures and be suppressed within
+    a day. This file already argues that case for the commit-coverage check it declines
+    to make: "a check that fires on legitimate omissions gets trained into noise." One
+    block, one assertion, firing exactly once per release cut.
+
+    WHAT THIS CANNOT SEE, stated so nobody reads it as broader cover than it is: the
+    PUBLISHED GitHub Release body. That is the surface that actually failed for v0.16.0,
+    and no test can reach it. The link is procedural — the release step sources the body
+    from this section — so this test pins the source and the SOP has to carry the rest.
+    If the body ever stops being generated from here, this check goes decorative and the
+    only warning will be another follow-up release.
+    """
+    for heading, subsections in _sections():
+        if not _RELEASED.match(heading):
+            continue
+        assert "Upgrading" in subsections, (
+            f"{heading} has no `### Upgrading` section. Every release states what the "
+            f"operator must run after upgrading — `techne init` to rewrite the hook "
+            f"chain, `techne vectors backfill` to embed — or states plainly that "
+            f"nothing is needed. v0.16.0 omitted this and shipped a silently broken "
+            f"recall path to two external users (techne#575, techne#814). Found: "
+            f"{subsections}"
+        )
+        return
+
+    pytest.fail("no released version block found — the heading format changed")

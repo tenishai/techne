@@ -550,6 +550,11 @@ TRIGGER_WITNESSES = {
         "test_the_sandbox_the_trigger_names_is_installable",
     "about to build something substantial": "test_the_survey_guide_teaches_the_same_sandbox",
     '"the landscape" or "who else does this"': "test_the_survey_guide_teaches_the_same_sandbox",
+    # techne#575/#727/#814 — the release checklist. Three releases each dropped a
+    # DIFFERENT step, so the doc is the artifact and these pin the two claims it makes
+    # that code can actually check.
+    '"cut a release"': "test_the_release_checklist_names_a_test_that_exists",
+    "cannot find its GitHub Release": "test_nothing_automates_publishing_the_github_release",
 }
 
 
@@ -1356,3 +1361,58 @@ def test_the_hook_runs_backfill_no_download_and_the_cli_does_not():
     ).stdout
     assert "--no-download" in out, "the CLI flag vanished; the hook's invocation is stale"
     assert "--no-download" not in out.split("Options:")[0], "sanity: parsed the wrong section"
+
+
+def test_the_release_checklist_names_a_test_that_exists():
+    """`docs/releasing.md` step 2 tells the releaser that the `### Upgrading` section is
+    enforced, and names the test doing the enforcing. A named test that has been renamed
+    or deleted leaves the checklist asserting a guard that is not there — and the
+    checklist is read at exactly the moment nobody is in a position to notice.
+
+    This pins the NAME against the collected suite, not against the file's source text: a
+    grep for the string would be satisfied by the doc quoting itself.
+    """
+    import subprocess
+    import sys
+
+    doc = (REPO / "docs" / "releasing.md").read_text(encoding="utf-8")
+    named = re.findall(r"tests/test_\w+\.py::(\w+)", doc)
+
+    assert named, "the checklist names no test — step 2's enforcement claim is unbacked"
+
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/test_changelog.py"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    missing = [t for t in named if t not in collected]
+    assert not missing, (
+        f"docs/releasing.md names {missing}, which pytest does not collect. The checklist "
+        f"tells the releaser these guard the release; rename the doc or restore the test."
+    )
+
+
+def test_nothing_automates_publishing_the_github_release():
+    """The trigger says nothing in CI publishes a Release, so the human must. That is an
+    ABSENCE, and an absence goes stale silently the moment someone adds the automation —
+    at which point the doc would be telling a releaser to do by hand what already
+    happened, and telling an agent to raise an alarm about a step that ran.
+
+    Same shape as the backup and transcript triggers in this file: assert the gap the
+    advice rests on is still a gap.
+    """
+    workflows = REPO / ".github" / "workflows"
+    publishers = [
+        f"{path.name}: {line.strip()[:60]}"
+        for path in sorted(workflows.glob("*.yml"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if any(m in line for m in ("gh release create", "action-gh-release", "create_release"))
+    ]
+
+    assert not publishers, (
+        f"something in CI now publishes a GitHub Release: {publishers}. docs/releasing.md "
+        f"tells the operator to run `gh release create` by hand and the trigger tells an "
+        f"agent to flag a tag with no Release — both are now wrong."
+    )
