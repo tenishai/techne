@@ -165,8 +165,8 @@ def upsert_document_card(
                 # branch is now one of those paths. Without it the clobber this guard
                 # closes re-opens one pass later, when a card sitting at
                 # `content=<real gist>, tags=pending` meets a pass whose summary is None.
-                new_tags = existing["tags"] if summary is None else _without_pending(
-                    existing["tags"]
+                new_tags = (
+                    existing["tags"] if summary is None else _without_pending(existing["tags"])
                 )
                 conn.execute(
                     """UPDATE knowledge

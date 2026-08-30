@@ -254,7 +254,9 @@ def test_repair_is_dry_run_by_default(db, config):
     assert result["applied"] is False
     conn = connect(db)
     try:
-        assert conn.execute("SELECT type FROM knowledge WHERE id=?", (kid,)).fetchone()[0] == CARD_TYPE
+        assert (
+            conn.execute("SELECT type FROM knowledge WHERE id=?", (kid,)).fetchone()[0] == CARD_TYPE
+        )
     finally:
         conn.close()
 
@@ -322,8 +324,11 @@ def test_fsck_names_a_remedy_for_a_repairable_fault(db, config):
     operator nothing. A check that can never go green trains them to ignore it."""
     from techne.core.maintenance import run_fsck
 
-    _doc(config, content="anything — this exists only to bring librarian.db into being,\n"
-         "which _check_dangling_cards requires before it will run at all")
+    _doc(
+        config,
+        content="anything — this exists only to bring librarian.db into being,\n"
+        "which _check_dangling_cards requires before it will run at all",
+    )
     _pointerless_card(db)
     report = run_fsck(config)
     check = next(c for c in report.checks if c.name == "dangling_cards")
@@ -474,6 +479,18 @@ def db_row_content(db, card_id):
         conn.close()
 
 
+def _clear_vec_stale(db, card_id):
+    """Stand in for `backfill_vectors` having run since the last write."""
+    from techne.core.database import connect
+
+    conn = connect(db)
+    try:
+        conn.execute("UPDATE knowledge SET vec_stale = 0 WHERE id = ?", (card_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _row(db, card_id):
     from techne.core.database import connect
 
@@ -500,14 +517,20 @@ def test_a_repaired_card_is_flagged_for_re_embedding(db, config):
     """
     doc_id = _doc(config)
     card_id, _ = upsert_document_card(
-        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
-        source_version="v1", title="<local-command-caveat>Caveat: junk",
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="<local-command-caveat>Caveat: junk",
     )
     assert _row(db, card_id)["vec_stale"] == 0
 
     upsert_document_card(
-        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
-        source_version="v1", title="why is recall empty",
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="why is recall empty",
     )
     row = _row(db, card_id)
     assert row["content"] == "why is recall empty"
@@ -527,14 +550,20 @@ def test_a_repair_that_carries_a_real_summary_drops_pending(db, config):
     """
     doc_id = _doc(config)
     card_id, _ = upsert_document_card(
-        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
-        source_version="v1", title="junk title",
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="junk title",
     )
     assert is_pending(_row(db, card_id)["tags"])
 
     upsert_document_card(
-        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
-        source_version="v1", title="junk title",
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="junk title",
         summary="Session transcript (2026-08-29, 3 threads): a; b; c",
     )
     row = _row(db, card_id)
@@ -555,12 +584,42 @@ def test_the_repair_redacts_like_the_insert_path_does(db, config):
     """
     doc_id = _doc(config)
     card_id, _ = upsert_document_card(
-        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
-        source_version="v1", title="a harmless title",
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="a harmless title",
     )
     upsert_document_card(
-        db, source_url="claude-code-transcript:s1", doc_id=doc_id,
-        source_version="v1", title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
     )
     content = _row(db, card_id)["content"]
     assert "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB" not in content, content
+
+    # THE COMPARISON HALF, WHICH THE ASSERTION ABOVE DOES NOT SEE (#840 r2).
+    # Reverting only the comparison to the RAW incoming string — keeping the write
+    # redacted — left all 3889 tests green. Yet it reintroduces the whole defect:
+    # raw incoming can never equal redacted stored, so the row is rewritten and
+    # re-queued for embedding on EVERY index pass, forever. Idempotence is the
+    # observable, and `vec_stale` is what makes it expensive rather than merely
+    # untidy — the mirror of `test_an_unchanged_title_writes_nothing`, which the
+    # document half already had and this half did not.
+    _clear_vec_stale(db, card_id)
+    before = _row(db, card_id)
+    upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+    )
+    after = _row(db, card_id)
+    assert after["content"] == before["content"]
+    assert after["vec_stale"] == before["vec_stale"], (
+        "an identical pass re-queued the row for embedding — the comparison is "
+        "asymmetric (raw vs redacted) and will never settle"
+    )
