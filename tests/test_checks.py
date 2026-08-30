@@ -2662,7 +2662,7 @@ class TestPendingCardBacklog:
         )
 
     @staticmethod
-    def _age(config, days=12):
+    def _age(config, days=12, hours=None):
         """RELATIVE, never a literal date. A first draft pinned "2026-08-17" and
         asserted "12d" in the detail — true on the day it was written and wrong
         every day after, which is a test that turns into a mystery failure rather
@@ -2672,7 +2672,7 @@ class TestPendingCardBacklog:
         conn = sqlite3.connect(config.db_path)
         conn.execute(
             "UPDATE knowledge SET created_at=? WHERE type='document_card'",
-            (_iso(timedelta(days=days)),),
+            (_iso(timedelta(hours=hours) if hours is not None else timedelta(days=days)),),
         )
         conn.commit()
         conn.close()
@@ -2763,6 +2763,43 @@ class TestPendingCardBacklog:
 
         assert check_pending_cards(config).verdict is Verdict.LIVE
 
+    def test_the_threshold_straddle(self, config):
+        """#841 r2 Important — THE CENTRAL CONSTANT WAS UNWITNESSED ACROSS (0, 12) DAYS.
+
+        She set `_PENDING_CARD_STALE_DAYS = 11` — an eleven-fold change — and the
+        full suite passed. The gap was structural, not accidental: one test used a
+        card created NOW and another one aged 12 DAYS, so every threshold strictly
+        between them was green, and so was every comparison operator separating
+        those two points.
+
+        That is exactly why adopting `temporal_verdict` silently moved the boundary
+        from `>=` to `>` last round and surfaced only when I wrote the review brief
+        by hand.
+
+        WHAT THIS PINS, AND WHAT IT DOES NOT. It pins the constant to within an
+        hour: an eleven-fold move reds it, and so does any move past 25h or below
+        23h. It does NOT pin the comparison operator — I checked rather than
+        claiming it, and flipping `<=` to `<` leaves this green, because the two
+        differ only at EXACTLY the interval. Pinning that would need a card aged to
+        the microsecond, which is a flaky test bought for a distinction worth
+        nothing operationally: nobody cares whether a card aged exactly 24h to the
+        instant reads LIVE or STALE. Recorded rather than left implied, because an
+        earlier draft of this docstring claimed both and only one is true.
+        """
+        from techne.core.checks import _PENDING_CARD_STALE_DAYS, check_pending_cards
+
+        assert _PENDING_CARD_STALE_DAYS == 1, (
+            "the interval moved; the straddle below is written against one day and "
+            "must move with it"
+        )
+
+        self._pend(config, url="u:just-over")
+        self._age(config, hours=25)
+        assert check_pending_cards(config).verdict is Verdict.STALE, "25h must be stale"
+
+        self._age(config, hours=23)
+        assert check_pending_cards(config).verdict is Verdict.LIVE, "23h must be live"
+
     def test_an_unreadable_age_is_not_reported_healthy(self, config):
         """#841 r1 Important 1. `age is None` used to short-circuit the staleness
         guard to False and report LIVE — INDISTINGUISHABLE from age 0, so a store
@@ -2820,6 +2857,9 @@ class TestPendingCardBacklog:
         absent = Config(db_path=tmp_path / "nope" / "missing.db", data_dir=tmp_path)
         result = check_pending_cards(absent)
         assert result.verdict is Verdict.DORMANT, result
+        # the NAME's second claim — "not a finding" — which nothing asserted (#841 r2
+        # nit). Breaking `CheckResult.ok` so DORMANT stopped counting left this green.
+        assert result.ok, "DORMANT must not read as a finding"
         assert "no store" in result.evidence
 
     def test_a_probe_failure_is_unknown_not_green(self, config, monkeypatch):
@@ -2833,4 +2873,6 @@ class TestPendingCardBacklog:
             raise RuntimeError("db is gone")
 
         monkeypatch.setattr(db_mod, "connect", boom)
-        assert check_pending_cards(config).verdict is Verdict.UNKNOWN
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.UNKNOWN
+        assert not result.ok, "the NAME says 'not green' — assert it, inherited gap"
