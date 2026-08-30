@@ -87,9 +87,7 @@ class TestDocumentsSchema:
         try:
             triggers = {
                 row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='trigger'"
-                )
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
             }
         finally:
             conn.close()
@@ -186,20 +184,14 @@ class TestStoreDocument:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert active == 1   # only one active row
-        assert total == 3    # three revisions in history
+        assert active == 1  # only one active row
+        assert total == 3  # three revisions in history
 
     def test_multiple_supersessions_chain(self, db_path):
         url = "https://github.com/acme/repo/issues/6"
-        id1, _ = store_document(
-            db_path, source_type="github_issue", source_url=url, content="v1"
-        )
-        id2, _ = store_document(
-            db_path, source_type="github_issue", source_url=url, content="v2"
-        )
-        id3, _ = store_document(
-            db_path, source_type="github_issue", source_url=url, content="v3"
-        )
+        id1, _ = store_document(db_path, source_type="github_issue", source_url=url, content="v1")
+        id2, _ = store_document(db_path, source_type="github_issue", source_url=url, content="v2")
+        id3, _ = store_document(db_path, source_type="github_issue", source_url=url, content="v3")
         assert get_document(db_path, id1)["superseded_by"] == id2
         assert get_document(db_path, id2)["superseded_by"] == id3
         assert get_document(db_path, id3)["superseded_by"] is None
@@ -210,15 +202,161 @@ class TestStoreDocument:
 # ---------------------------------------------------------------------------
 
 
+class TestTitleDriftRepair:
+    """techne#819 — a titling FIX must be able to reach rows already stored.
+
+    Both dedup keys here are content-derived and neither includes the title, so
+    re-indexing with a corrected adapter produces byte-identical content, lands in
+    the unchanged branch, and the old title survives. That is how #816's 25
+    `<local-command-caveat>Caveat: …` titles became unrepairable by the obvious
+    remedy — while #817's note invited exactly that inference.
+    """
+
+    def test_a_corrected_title_lands_on_the_same_row(self, db_path):
+        body = "the transcript body, byte-identical across both passes"
+        first, _ = store_document(
+            db_path,
+            source_type="cc-transcript",
+            source_url="cc:s1",
+            title="<local-command-caveat>Caveat: The messages below",
+            content=body,
+        )
+        stats: dict = {}
+        second, stored = store_document(
+            db_path,
+            source_type="cc-transcript",
+            source_url="cc:s1",
+            title="why is recall empty",
+            content=body,
+            stats=stats,
+        )
+        assert second == first, "a repair must not mint a new revision"
+        assert stored is False, (
+            "no new row was written; widening `stored` here would make the "
+            "caller's `unchanged` count wrong"
+        )
+        assert get_document(db_path, first)["title"] == "why is recall empty"
+        assert stats == {"titles_repaired": 1}
+
+    def test_an_unchanged_title_writes_nothing(self, db_path):
+        """The repair must not turn a pure no-op path into a per-index write.
+
+        THE ASSERTION USED TO BE `stats == {}` ALONE, WHICH CANNOT SEE A WRITE.
+        Making the UPDATE unconditional — firing on every unchanged pass and
+        bumping `updated_at` — while guarding only the stats increment left the
+        whole suite green (audit instance 7). The docstring named a write that no
+        assertion observed: one half pinned, the other free.
+        """
+        from techne.core.database import connect
+
+        def _updated_at():
+            conn = connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT updated_at FROM documents WHERE source_url = ?", ("cc:s2",)
+                ).fetchone()
+                return row["updated_at"] if row else None
+            finally:
+                conn.close()
+
+        stats: dict = {}
+        kwargs = dict(
+            source_type="cc-transcript",
+            source_url="cc:s2",
+            title="stable title",
+            content="stable body",
+        )
+        store_document(db_path, stats=stats, **kwargs)
+
+        # A SENTINEL, NOT THE CLOCK. An earlier version of this test compared
+        # `updated_at` across two back-to-back passes and could not fail:
+        # `CURRENT_TIMESTAMP` is WHOLE-SECOND, the two calls are microseconds apart,
+        # so a rewritten timestamp compares EQUAL to the original. Measured — at a
+        # 0s gap the assertion passes under the unconditional-UPDATE mutation; only
+        # at a >1s gap does it discriminate, which back-to-back calls never reach.
+        # That was worse than the silence it replaced, because the docstring claimed
+        # the gap was closed and a reader would trust it. Stamping an impossible
+        # value makes any write visible regardless of clock resolution.
+        conn = connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE documents SET updated_at = ? WHERE source_url = ?",
+                ("1999-01-01 00:00:00", "cc:s2"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        first_write = _updated_at()
+
+        store_document(db_path, stats=stats, **kwargs)
+
+        assert stats == {}, f"spurious repair on an unchanged title: {stats}"
+        assert _updated_at() == first_write, (
+            "the row was rewritten on an identical pass — a no-op path became a "
+            "per-index write, and on the card side that also re-queues embedding"
+        )
+
+    def test_a_repair_is_counted_through_the_real_indexer(self, tmp_path):
+        """`stats=` was severable at all three call sites with the suite green
+        (audit instance 6): the only nonzero `titles_repaired` assertion called
+        `store_document` DIRECTLY, and the `"titles_repaired": 0` keys elsewhere are
+        satisfied by the counts-dict initializer whether the plumbing exists or not.
+
+        So the count an operator reads after re-indexing to heal #816's titles —
+        the one the CHANGELOG points them at — was pinned by nothing. This drives a
+        real repair through `index_markdown_dir`, the indexer end of the wiring.
+        """
+        import json
+
+        from techne.config import Config
+        from techne.core.database import init_db
+        from techne.core.librarian import librarian_db
+        from techne.core.library import index_markdown_dir
+
+        config = Config(db_path=tmp_path / "t.db", data_dir=tmp_path)
+        init_db(config.db_path).close()
+        root = tmp_path / "md"
+        root.mkdir()
+        (root / "note.md").write_text("# Original Heading\n\nbody text that will not change\n")
+
+        first = index_markdown_dir(config, root, make_cards=False)
+        assert first["titles_repaired"] == 0, first
+
+        # same CONTENT hash is impossible if we edit the heading, so rename the title
+        # the way a titling FIX would: rewrite the stored row's title out of band,
+        # then re-index and watch the indexer repair it back.
+        conn = __import__("techne.core.database", fromlist=["connect"]).connect(
+            librarian_db(config)
+        )
+        try:
+            conn.execute("UPDATE documents SET title = ?", ("<junk-wrapper> Caveat:",))
+            conn.commit()
+        finally:
+            conn.close()
+
+        second = index_markdown_dir(config, root, make_cards=False)
+        assert second["titles_repaired"] == 1, (
+            f"the indexer repaired a title without counting it: {json.dumps(second)}"
+        )
+        assert second["stored"] == 0 and second["unchanged"] == 1, second
+
+    def test_a_content_change_still_supersedes(self, db_path):
+        """The repair branch must not swallow a genuine revision."""
+        first, _ = store_document(
+            db_path, source_type="x", source_url="cc:s3", title="T1", content="body one"
+        )
+        second, stored = store_document(
+            db_path, source_type="x", source_url="cc:s3", title="T2", content="body two"
+        )
+        assert stored is True
+        assert second != first
+
+
 class TestListDocuments:
     def test_list_returns_active_rows_only(self, db_path):
         url = "https://github.com/acme/repo/issues/7"
-        store_document(
-            db_path, source_type="github_issue", source_url=url, content="v1"
-        )
-        store_document(
-            db_path, source_type="github_issue", source_url=url, content="v2"
-        )
+        store_document(db_path, source_type="github_issue", source_url=url, content="v1")
+        store_document(db_path, source_type="github_issue", source_url=url, content="v2")
         rows = list_documents(db_path)
         urls = [r["source_url"] for r in rows]
         # Only one active row for this URL
@@ -243,12 +381,8 @@ class TestListDocuments:
 
     def test_list_include_superseded(self, db_path):
         url = "https://github.com/acme/repo/issues/8"
-        store_document(
-            db_path, source_type="github_issue", source_url=url, content="v1"
-        )
-        store_document(
-            db_path, source_type="github_issue", source_url=url, content="v2"
-        )
+        store_document(db_path, source_type="github_issue", source_url=url, content="v1")
+        store_document(db_path, source_type="github_issue", source_url=url, content="v2")
         all_rows = list_documents(db_path, include_superseded=True)
         this_url_rows = [r for r in all_rows if r["source_url"] == url]
         assert len(this_url_rows) == 2
@@ -423,9 +557,7 @@ def github_source(gh_config):
 
 class TestGitHubIssuesSource:
     def test_initial_walk_stores_documents(self, github_source, lib_db):
-        with patch(
-            "techne.sync.github_issues.subprocess.run"
-        ) as mock_run:
+        with patch("techne.sync.github_issues.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = json.dumps(_MOCK_ISSUES)
             mock_run.return_value.stderr = ""
@@ -687,8 +819,11 @@ class TestGitHubIssuesSource:
 def test_search_documents_sanitizes_fts_query(db_path):
     # hyphenated/operator-ish terms must not crash FTS5 (regression).
     store_document(
-        db_path, source_type="docs", source_url="docs:x.md",
-        content="the db-per-domain design splits stores", title="db-per-domain",
+        db_path,
+        source_type="docs",
+        source_url="docs:x.md",
+        content="the db-per-domain design splits stores",
+        title="db-per-domain",
     )
     hits = search_documents(db_path, "db-per-domain stores")
     assert len(hits) == 1

@@ -7,6 +7,20 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- A corrected document title now reaches rows that were already stored. Both dedup
+  keys are content-derived and neither includes the title, so re-indexing with a
+  fixed adapter produced byte-identical content, took the `document_unchanged`
+  path, and left the old title in place — which made #816's junk titles
+  (`<local-command-caveat>Caveat: …`) unrepairable by the one remedy #817's note
+  invited people to try. `store_document` now updates the title in place when the
+  content is unchanged, and `index_transcripts` reports a `titles_repaired` count
+  so the pass is not indistinguishable from a no-op. **Re-index to heal existing
+  rows.** A pending card's gist is repaired the same way, because a pending card's
+  content *is* the title and recall reads the card rather than the document; a
+  filled card's agent-written gist is never overwritten. The repair updates in
+  place rather than superseding — the document did not change, only our reading of
+  what it should be called. A repaired card is flagged for re-embedding, so the
+  correction reaches semantic recall and not only FTS (#819).
 - `techne doctor` and the SessionStart banner now report a pending document-card
   backlog. A card is created `pending`, holding the document title as a stand-in
   gist until the agent-assisted fill pass writes a real one — and it rides recall
