@@ -1215,7 +1215,7 @@ def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
     truncation is applied at all and the row arrives at 500. The test still pins
     the join — the config value has to reach the renderer for the two arms to
     differ — but "600 works" is not what it shows, and the ceiling is pinned
-    separately by `test_search_pre_truncates_at_500_which_caps_this_knob`.
+    separately by `test_search_itself_truncates_knowledge_rows`.
     """
     long_fact = " ".join(f"word{i:03d}" for i in range(200))
 
@@ -1281,6 +1281,22 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     )
     assert "per_turn_recall_chars" in block, "the header notice must fire too"
 
+    # AND THE "AT" HALF OF THE NAME, which only "above" was covering (#839 r6
+    # Important 2). Exactly 500 is the one value where a plausible clamp goes wrong:
+    # `if chars > _SEARCH_ROW_CEILING: chars = _SEARCH_ROW_CEILING - 1` passes 500
+    # straight through, `_truncate_for_injection` returns `(content, False)` for a row
+    # of exactly 500, and both the marker and the header notice vanish — the honesty
+    # regression this PR exists to close, live at the boundary the name claims.
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=_SEARCH_ROW_CEILING)
+    at_out = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+    at_block = json.loads(at_out)["hookSpecificOutput"]["additionalContext"]
+    at_row = [ln for ln in at_block.splitlines() if ln.startswith("- ⟦techne#")]
+    assert at_row, f"expected an injected row at cap {_SEARCH_ROW_CEILING}: {at_block!r}"
+    assert at_row[0].split("] ", 1)[1].endswith(" …"), (
+        f"a cap of exactly {_SEARCH_ROW_CEILING} shipped an unmarked severed row"
+    )
+    assert "per_turn_recall_chars" in at_block
+
 
 def test_both_search_sites_share_one_ceiling():
     """#839 r4 Important 2 — THE PIN WAS SINGLE-SITED AND THE DOCS INHERITED IT.
@@ -1310,8 +1326,23 @@ def test_both_search_sites_share_one_ceiling():
     # about "knowledge rows" that was not true (false positive, and the kind that gets a
     # test deleted as noise). Each knowledge block is found by its own source_table
     # marker, and the count is EXACT so future slack cannot hide a lost site.
+    # TEMPERED MATCH — the pattern must not cross into another block (#839 r6
+    # Important 1). An unbounded `.*?` under re.S let a knowledge marker pair with a
+    # truncation from a DIFFERENT source_table: with site 416's slice deleted, the
+    # marker at line 413 reached across `"source_table": "thread"` and matched the
+    # THREAD summary's truncation at 768, yielding two 500s and a green test whose
+    # own message claims "exactly two knowledge-row truncation sites".
+    #
+    # My r5 verification missed this because I checked the SUITE rather than THIS
+    # test: the new direct witness does red on that mutation, so "416 deleted reds"
+    # was true of the run and false of the sentence it was written about. This pin is
+    # the SOLE witness for site 838 — deleting the vec slice reds only this test —
+    # so a pin that can silently measure the wrong block is exactly what it must not
+    # be.
     blocks = re.findall(
-        r'"source_table":\s*"knowledge",.*?\[:(\d+)\]', src, flags=re.S
+        r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:(\d+)\]',
+        src,
+        flags=re.S,
     )
     assert len(blocks) == 2, (
         f"expected exactly two knowledge-row truncation sites, found {blocks} — "

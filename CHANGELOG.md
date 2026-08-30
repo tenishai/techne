@@ -42,13 +42,12 @@ All notable changes to techne are documented here. Format loosely follows
   whole rule. **The 200-character default is unchanged**: five rows at 200 is
   ~250 tokens on every prompt and #808 measures per-session context as already the
   dominant cost, so raising it is an operator decision — now available as
-  `hooks.per_turn_recall_chars`, clamped to 499 because `search()` already truncates
-  knowledge rows to 500 without marking them, so an unclamped higher value would
-  suppress the `…` and report a severed row as whole (#842) — the last fixed number in this rail's tuning
-  surface — a non-positive value injects no block at all rather than removing the
-  cap, matching the sibling `per_turn_recall_limit: 0`, since unbounded is the
-  expensive direction to reach by accident (#826).
-
+  `hooks.per_turn_recall_chars` — the last fixed number in this rail's tuning
+  surface. It is clamped to 499, because `search()` already truncates knowledge rows
+  to 500 without marking them and an unclamped higher value would suppress the `…`
+  and report a severed row as whole (#842). A non-positive value injects no block at
+  all rather than removing the cap, matching the sibling `per_turn_recall_limit: 0`,
+  since unbounded is the expensive direction to reach by accident (#826).
 - Optional hooks on the `TranscriptSource` Protocol are no longer annotated, so an
   adapter that omits them satisfies `isinstance` again. `TranscriptSource` is
   `@runtime_checkable`, and `isinstance()` enforces every *annotated* non-method data
