@@ -512,20 +512,32 @@ class TestInjectedTypeLabel:
         like the rule, is topically correct, and is missing the operative half.
         """
         body = (
-            "THE VERSION STRING CANNOT IDENTIFY THE RUNNING CODE. Two independent "
+            "X THE VERSION STRING CANNOT IDENTIFY THE RUNNING CODE. Two independent "
             "defects, both measured 2026-08-13. CORRECTS techne#1078 and supersedes "
             "the guidance recorded there, which nobody has re-read since. The rest "
             "of this row exists to carry it past the cap so the cut actually fires."
         )
+        # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
+        # An earlier version of this test could not fail: its 200th character was a
+        # SPACE, so the bare `content[:200]` defect satisfied both assertions below
+        # and the whole boundary mechanism could be deleted with the suite staying
+        # green (#839 r1). The row is shifted one character so index 200 is a full
+        # stop — pinning that here means the fixture cannot silently stop testing.
         assert len(body) > 200, "fixture must exceed the cap or it tests nothing"
+        assert body[200] not in " \t\n", (
+            "fixture is toothless: with whitespace at the cap the bare slice passes"
+        )
+
         out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": body}])
         rendered = out.splitlines()[-1]
+        # Anchored to the ROW, not the block: `" …" in out` is satisfied by the
+        # header's own "Rows ending in …" text, so a block-level check never
+        # inspects the row at all (#839 r1).
         assert rendered.endswith(" …")
 
-        # THE ASSERTION IS "the cut is not inside a word", not "the cut is a full
-        # stop". This fixture's only sentence end sits below the 40% floor, so the
-        # correct behaviour here is the WORD-boundary fallback — an earlier draft
-        # of this test demanded `.!?` and failed against working code.
+        # "the cut is not inside a word", NOT "the cut is a full stop" — whether a
+        # sentence end is available depends on where it falls relative to the 40%
+        # floor, and demanding `.!?` failed against working code in an earlier draft.
         visible = rendered.split("] ", 1)[1].removesuffix(" …")
         assert body.startswith(visible), "the cut text must be a prefix of the row"
         assert body[len(visible)] in " \t\n", (
@@ -537,7 +549,9 @@ class TestInjectedTypeLabel:
         what lets a reader tell "I have this" from "I have the first sentence of
         this", and the header names the knob so the remedy is in the block."""
         long_out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": "word " * 200}])
-        assert " …" in long_out
+        # ROW-anchored: `" …" in long_out` also matches the header's own
+        # "Rows ending in …" text, so it passed without ever inspecting the row.
+        assert long_out.splitlines()[-1].endswith(" …")
         assert "per_turn_recall_chars" in long_out
 
         short_out = self._ctx([{"id": 2, "knowledge_type": "fact", "content": "short row"}])
@@ -558,6 +572,42 @@ class TestInjectedTypeLabel:
         out, was_cut = _truncate_for_injection(body, 200)
         assert was_cut
         assert len(out) > 150, f"gutted to {len(out)} chars at the early full stop"
+
+    def test_truncate_is_pinned_directly_not_only_through_the_renderer(self):
+        """`_truncate_for_injection` is pure, and reaching it only through
+        `_build_context` is what let the header's own text satisfy a row-level
+        claim (#839 r1). These assert the function itself.
+        """
+        from techne.hooks.user_prompt_submit import _truncate_for_injection as trunc
+
+        # under the cap: untouched, not marked
+        assert trunc("short", 200) == ("short", False)
+        # exactly at the cap: still untouched — the cut is len > limit, not >=
+        assert trunc("x" * 200, 200) == ("x" * 200, False)
+        # over the cap: marked, and the emitted CONTENT never exceeds the budget
+        out, cut = trunc("y" * 500, 200)
+        assert cut and out.endswith(" …")
+        assert len(out.removesuffix(" …")) <= 200
+
+        # a terminator STRADDLING the window edge is still found (#839 r1 nit 4):
+        # full stop at 199, its space at 200, invisible to a search bounded at 200
+        straddle = "z" * 199 + ". " + "w" * 300
+        out, _ = trunc(straddle, 200)
+        assert out.endswith(". …"), f"straddling terminator missed: {out[-12:]!r}"
+        assert len(out.removesuffix(" …")) <= 200
+
+    def test_a_non_positive_cap_never_means_unbounded(self):
+        """#839 r1. The first version returned the row untouched when `limit <= 0`,
+        so `per_turn_recall_chars: 0` produced UNLIMITED per-row injection — while
+        the sibling knob `per_turn_recall_limit: 0` means "inject nothing". An
+        operator switching the cap off would have got the expensive opposite.
+        """
+        from techne.hooks.user_prompt_submit import _truncate_for_injection as trunc
+
+        for limit in (0, -1, -500):
+            out, cut = trunc("a" * 5000, limit)
+            assert out == "", f"limit={limit} emitted {len(out)} chars"
+            assert cut is True, "withheld content must still be marked as cut"
 
     def test_the_cap_is_read_from_config_not_hardcoded(self):
         """techne#826 direction (3): this was the only fixed number in the rail's

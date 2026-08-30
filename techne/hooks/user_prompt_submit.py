@@ -493,10 +493,27 @@ def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
     cut: without it, a row whose only full stop sits at char 12 would be truncated
     to 12 chars in the name of tidiness.
     """
-    if limit <= 0 or len(content) <= limit:
+    if limit <= 0:
+        # A NON-POSITIVE CAP MUST NOT MEAN "UNBOUNDED" (techne#839 r1). The first
+        # version returned the row untouched here, so `per_turn_recall_chars: 0`
+        # produced UNLIMITED per-row injection on every prompt — and the sibling
+        # knob one line above sets the opposite expectation, since
+        # `per_turn_recall_limit: 0` feeds `rows[:0]` and means "inject nothing".
+        # An operator writing 0 to switch the cap off would have got nothing from
+        # one knob and everything from the other, with "everything" being the
+        # expensive direction on the rail #808 already calls the dominant cost.
+        # The hardcoded 200 meant this path did not exist; adding the knob added it.
+        return "", True
+
+    if len(content) <= limit:
         return content, False
 
-    window = content[:limit]
+    # `limit + 1`, not `limit`: a terminator STRADDLING the window edge — a full
+    # stop at limit-1 and its space at limit — is invisible to a search bounded at
+    # `limit`, and the cut falls back a whole word for no reason. Peeking one
+    # character past the budget costs nothing, because the extra character is only
+    # ever the SEPARATOR and is never emitted.
+    window = content[: limit + 1]
     floor = int(limit * 0.6)
 
     # Prefer a sentence end; `. ` and friends, not a bare `.`, so version numbers
@@ -505,13 +522,16 @@ def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
     for end in (". ", ".\n", "! ", "?\n", "? ", "!\n"):
         best = max(best, window.rfind(end))
     if best >= floor:
+        # `best` indexes the terminator itself, which is <= limit-1 whenever the
+        # match was found in the peeked position, so the emitted slice never
+        # exceeds the budget.
         return window[: best + 1].rstrip() + " …", True
 
-    cut = window.rfind(" ")
+    cut = window[:limit].rfind(" ")
     if cut >= floor:
         return window[:cut].rstrip() + " …", True
 
-    return window.rstrip() + " …", True
+    return window[:limit].rstrip() + " …", True
 
 
 def _build_context(rows: list[dict], char_limit: int = 200) -> str:
