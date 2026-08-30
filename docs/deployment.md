@@ -252,6 +252,11 @@ techne skills install   # an upgrade does not refresh the bundled procedures
 techne vectors backfill  # ONCE, bare — warms the model cache and catches up the backlog
 ```
 
+The third needs the `vectors` extra installed. Without `sqlite_vec` it early-exits with
+"vector search unavailable: no embedding backend installed" and embeds nothing, so on a
+bare `pip install techne` the step that decides whether recall works is a silent no-op.
+`techne[recommended]` pulls it.
+
 > **Agent: raise this unprompted.**
 >
 > - They have just upgraded techne, or are about to, and have not mentioned `techne init`

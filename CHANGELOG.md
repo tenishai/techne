@@ -27,6 +27,11 @@ means the cache never warms itself. The bare CLI keeps the permissive default, s
 manual run primes it and catches up the backlog. An install that has never run it has an
 empty vector index and no signal saying so.
 
+**Step three needs the `vectors` extra.** Without `sqlite_vec` the command early-exits with
+"vector search unavailable: no embedding backend installed" and does nothing — so on a bare
+`pip install techne` the step that decides whether recall works is a no-op. `techne[recommended]`
+pulls it, which is what the README's install line uses.
+
 `docs/deployment.md` carries the same thing as an agent trigger, so an assistant working
 in your repo raises it unprompted rather than waiting to be asked.
 
@@ -47,11 +52,13 @@ in your repo raises it unprompted rather than waiting to be asked.
   A one-slot tail floor now survives truncation. **The size is measured, not chosen**:
   at limit 10 a floor of 2 or more costs a gold row, and only the limit-10 arm can
   show that cost, so re-run that arm before widening it (#827).
-- The retrieval-quality gate diffs base against head on one runner instead of testing
-  head against an absolute floor. The floors passed the #827 regression green, which
-  is what a floor set below the current score will always do; a base-vs-head
-  comparison has no such blind spot. The epsilon is zero because the leg is
-  byte-deterministic — verified by running it twice and diffing the per-class means
+- The retrieval-quality gate now **also** diffs base against head on one runner, rather
+  than relying on the absolute floors alone. The floors are still there and still fire;
+  what they cannot do is notice a regression that lands above them, which is exactly
+  what happened when they passed the #827 work green. A base-vs-head comparison has no
+  such blind spot. Metrics emission is opt-in (`TECHNE_EVAL_METRICS_OUT`), so with no
+  env var set the leg behaves exactly as it did before. The epsilon is zero because the
+  leg is byte-deterministic — verified by running it twice and diffing the per-class means
   — so any delta is a real change rather than run noise (#832).
 - A corrected document title now reaches rows that were already stored. Both dedup
   keys are content-derived and neither includes the title, so re-indexing with a

@@ -1284,24 +1284,52 @@ def test_the_sandbox_the_trigger_names_is_installable():
 
 # ------------------------------------------------------- techne#814/#842: upgrading
 
-def test_only_init_writes_the_backfill_segment():
+def test_only_init_writes_the_backfill_segment(tmp_path, monkeypatch):
     """WITNESS for the upgrade trigger's first bullet.
 
     The claim is that the SessionStart chain an install runs is whatever `init`
-    last wrote, so an upgrade alone leaves the old chain. What is checkable here is
-    the half that makes it matter: the segment lives in `register_hooks`' TEMPLATE,
-    so a store only gains it by re-running init. Before techne#814 the segment was
-    not in the template at all — it existed solely as a hand edit, which is how one
-    machine drifted 883 observations behind while reporting healthy.
-    """
-    from techne.platforms.claude_code import hooks
+    last wrote, so an upgrade alone leaves the old chain — which is why a stale
+    install never gains the backfill segment on its own.
 
-    src = (REPO / "techne/platforms/claude_code/hooks.py").read_text()
-    assert "vectors backfill" in src, (
-        "the backfill segment left register_hooks' template — an install can no "
-        "longer gain it by running init, and docs/deployment.md says it can"
+    DRIVES `register_hooks` AND READS THE EMITTED COMMAND (#843 r1 Important 1).
+    The first version grepped `hooks.py` for the substring "vectors backfill",
+    which also appears in `_backfill_command`'s own DOCSTRING — so it passed
+    whenever the helper merely existed, regardless of whether the chain carried
+    it. Review reproduced the historical v0.16.0 failure (the segment removed from
+    the assembly, helper and docstring untouched) and the whole trigger suite
+    stayed green: a witness that could not fail for the one bug this release
+    exists to fix.
+    """
+    import json
+
+    from techne.config import Config, HookConfig, SyncConfig
+    from techne.platforms import claude_code
+    from techne.platforms.claude_code import hooks as hooks_mod
+
+    home = tmp_path / "home"
+    home.mkdir()
+    settings_path = home / ".claude" / "settings.json"
+    monkeypatch.setattr(hooks_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(hooks_mod, "MCP_CONFIG_PATH", home / ".claude.json")
+    monkeypatch.setattr(claude_code, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(claude_code, "MCP_CONFIG_PATH", home / ".claude.json")
+
+    cfg = Config()
+    cfg.db_path = tmp_path / "techne.db"
+    cfg.data_dir = tmp_path
+    cfg.platform = "claude-code"
+    cfg.hooks = HookConfig(post_tool_use=True)
+    cfg.sync = SyncConfig(adapter="noop")
+
+    claude_code.register_hooks(cfg)
+    groups = json.loads(settings_path.read_text())["hooks"]["SessionStart"]
+    command = groups[0]["hooks"][0]["command"]
+
+    assert "vectors backfill" in command, (
+        "`techne init` no longer writes the backfill segment into the SessionStart "
+        "chain — an install cannot gain it by running init, and "
+        "docs/deployment.md tells operators it can"
     )
-    assert hasattr(hooks, "register_hooks"), "the template's owner moved"
 
 
 def test_the_hook_runs_backfill_no_download_and_the_cli_does_not():
