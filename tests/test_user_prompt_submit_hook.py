@@ -655,9 +655,14 @@ class TestInjectedTypeLabel:
         # control: the same rows DO render under a normal cap
         assert _build_context(rows, 200) != ""
 
-    def test_the_cap_is_read_from_config_not_hardcoded(self):
-        """techne#826 direction (3): this was the only fixed number in the rail's
-        tuning surface, while `per_turn_recall_limit` beside it was already a knob.
+    def test_the_cap_parameter_is_honoured(self):
+        """The RENDERER half only. Renamed, because under its old name — "is read
+        from config, not hardcoded" — it asserted nothing of the kind: it passes the
+        cap as a positional argument, so the assertion is satisfied by the function
+        PARAMETER and the config path it claimed to pin was never exercised. Audit
+        instance 5: reverting the call site to `_build_context(rows)` so the knob
+        never reaches the rail left all 3889 tests green. The config path is pinned
+        end-to-end by `test_the_configured_cap_reaches_the_rail` below.
         """
         from techne.hooks.user_prompt_submit import _build_context
 
@@ -1177,3 +1182,32 @@ def test_the_rail_drops_the_reserved_lexical_row(home, monkeypatch, capsys):
 
     full = search(Config.load().db_path, "XYZZY-827", table="knowledge", limit=page)
     assert [i for i, r in enumerate(full) if r["id"] == lex_id] == [page - 1]
+
+
+def test_the_configured_cap_reaches_the_rail(home, monkeypatch, capsys):
+    """END-TO-END: config.yaml -> Config.load() -> the hook -> the injected row.
+
+    AUDIT INSTANCE 5. `per_turn_recall_chars` round-tripped through YAML (pinned by
+    test_fastconfig) and was honoured as a parameter (pinned above), and NOTHING
+    connected the two: reverting the call site to `_build_context(rows)` — so the
+    knob is read, saved, and then ignored by the rail it exists to tune — left all
+    3889 tests green. Two pinned halves with an unpinned join is the same shape as
+    the write/comparison split on #840.
+
+    A generous cap must therefore produce a LONGER injected row than the default,
+    driven through `main()` rather than by calling the renderer directly.
+    """
+    long_fact = " ".join(f"word{i:03d}" for i in range(200))
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=600)
+    _seed(long_fact, type="fact")
+    wide = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+
+    _write_config(home, per_turn_recall=True, per_turn_recall_chars=200)
+    narrow = _run(monkeypatch, capsys, {"prompt": "word001 word002 recall"})
+
+    assert wide.strip() and narrow.strip(), "both runs must inject something"
+    assert len(wide) > len(narrow), (
+        f"the configured cap never reached the rail: wide={len(wide)} "
+        f"narrow={len(narrow)}"
+    )
