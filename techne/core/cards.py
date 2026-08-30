@@ -43,6 +43,17 @@ def card_doc_id(tags: str | None) -> int | None:
     return int(v) if v and v.isdigit() else None
 
 
+def _without_pending(tags: str | None) -> str:
+    """Drop the `pending` marker, preserving every other tag and their order.
+
+    ONE implementation, deliberately (techne#840 r1). `fill_card_summary` had this
+    inline and the techne#819 repair became a SECOND path that fills a card, so two
+    copies would have been two chances to drift on a tag that decides whether a
+    card stays on the agent-assisted work-list.
+    """
+    return ",".join(t for t in (tags or "").split(",") if t.strip() != "pending")
+
+
 def is_pending(tags: str | None) -> bool:
     return "pending" in [t.strip() for t in (tags or "").split(",")]
 
@@ -105,12 +116,67 @@ def upsert_document_card(
         # the insert-first supersede path is transiently two-active. (techne#170)
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
-            """SELECT id, tags FROM knowledge
+            """SELECT id, tags, content FROM knowledge
                WHERE type = ? AND source = ? AND superseded_by IS NULL""",
             (CARD_TYPE, source_url),
         ).fetchone()
 
         if existing is not None and _tag_value(existing["tags"], "ver:") == str(source_version):
+            # PENDING-CARD TITLE REPAIR (techne#819). A pending card's content IS
+            # the document title — the stand-in gist it carries until the
+            # agent-assisted pass fills a real one. The `ver:` tag is a CONTENT
+            # fingerprint, so a corrected title leaves it unchanged and lands here,
+            # and the junk title survives as the card's gist. That is the half of
+            # #819 the issue's own scope note misses: repairing `documents.title`
+            # alone still leaves recall returning the wrapper string, because recall
+            # reads the card, not the document.
+            #
+            # Only PENDING cards. A filled card's gist is real prose that no longer
+            # derives from the title, so rewriting it from a title would destroy
+            # work. Updated in place without superseding, on `fill_card_summary`'s
+            # precedent: the document version has not moved, only the stand-in.
+            # `is_pending(existing["tags"])`, NOT the `pending` computed from this
+            # call's arguments. Those are different questions: `pending` above means
+            # "this CALLER supplied no summary", which every indexer pass does, while
+            # what matters here is whether the STORED card has already been filled.
+            # Reading the caller's flag let an indexer clobber an agent-written gist
+            # — caught by test_a_filled_cards_gist_is_never_overwritten_by_a_title.
+            repaired = redact_credentials(content)
+            if is_pending(existing["tags"]) and repaired != existing["content"]:
+                # vec_stale=1 (techne#382) — CRITICAL, and it was missing. This is an
+                # in-place `content` edit on a STABLE rowid, so the row keeps its old
+                # embedding: `backfill_vectors` re-embeds `(NOT IN vec OR vec_stale=1)`
+                # and a repaired row is in NEITHER set, so the junk title would go on
+                # being what semantic recall matches, forever. FTS heals itself via the
+                # `knowledge_au` trigger, which is what makes the failure invisible —
+                # and doctor's vector-freshness check counts `vec_stale=1`, so it would
+                # have reported such a store 100% fresh. `fill_card_summary` sets this
+                # flag forty lines below and its comment says ANY in-place content edit
+                # must; this one did not.
+                #
+                # DROP `pending` WHEN A REAL SUMMARY ARRIVED, for two reasons. The card
+                # leaves the emit work-list, which it otherwise never would — `content`
+                # is `summary or title`, so on the ordinary two-pass sequence
+                # (`build_transcript_gist` returns None before thread detection and a
+                # string after) this branch writes a real gist and left the tag on,
+                # offering a filled card up for filling forever. And it keeps
+                # `is_pending(stored tags)` a SOUND PROXY for "never filled": that proxy
+                # holds only while every path that fills a card drops the tag, and this
+                # branch is now one of those paths. Without it the clobber this guard
+                # closes re-opens one pass later, when a card sitting at
+                # `content=<real gist>, tags=pending` meets a pass whose summary is None.
+                new_tags = (
+                    existing["tags"] if summary is None else _without_pending(existing["tags"])
+                )
+                conn.execute(
+                    """UPDATE knowledge
+                       SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP,
+                           vec_stale = 1
+                       WHERE id = ?""",
+                    (repaired, new_tags, existing["id"]),
+                )
+                conn.commit()
+                return existing["id"], False
             conn.commit()  # release the write lock; nothing changed
             return existing["id"], False
 
@@ -140,7 +206,7 @@ def fill_card_summary(db_path: Path, card_id: int, summary: str) -> bool:
         ).fetchone()
         if row is None:
             return False
-        tags = ",".join(t for t in (row["tags"] or "").split(",") if t.strip() != "pending")
+        tags = _without_pending(row["tags"])
         conn.execute(
             # vec_stale=1 (techne#382): the gist `content` changed, so this row's
             # existing embedding is now stale. This plain connection can't touch

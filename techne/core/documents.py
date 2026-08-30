@@ -48,8 +48,15 @@ def store_document(
     title: str | None = None,
     meta: str | None = None,
     owned_by: str = "librarian",
+    stats: dict | None = None,
 ) -> tuple[int, bool]:
     """Insert a document, or supersede the prior row if content changed.
+
+    ``stats``, when given, is incremented in place: ``titles_repaired`` counts rows
+    whose content was unchanged but whose title was corrected (techne#819). It is
+    an optional out-parameter rather than a third return value because ~40 call
+    sites unpack the 2-tuple, and a repair a caller cannot see is a repair an
+    operator cannot trust happened.
 
     Dedup key is `source_url`. Three outcomes:
       - No prior active row for this URL → INSERT, return (new_id, True).
@@ -70,13 +77,50 @@ def store_document(
         # two-active, which such an index would reject. (techne#170)
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
-            """SELECT id, content FROM documents
+            """SELECT id, title, content FROM documents
                WHERE source_url = ? AND superseded_by IS NULL""",
             (source_url,),
         ).fetchone()
 
         if existing is not None:
             if _content_hash(existing["content"]) == _content_hash(content):
+                # TITLE DRIFT REPAIR (techne#819). Both dedup keys here are
+                # CONTENT-derived and neither includes the title, so a titling FIX
+                # could never reach rows already stored: re-indexing with a
+                # corrected adapter produces byte-identical content, lands in this
+                # branch, and the old title survives. That is how #816's 25
+                # `<local-command-caveat>Caveat: …` titles became unrepairable by
+                # the obvious remedy, while #817's release note invited exactly
+                # that inference.
+                #
+                # Repairing in place rather than superseding is deliberate: the
+                # document itself did not change, only our reading of what it
+                # should be called, so a new revision would be a lie about the
+                # source. `fill_card_summary` sets the same precedent for a card
+                # whose gist got better without its document moving.
+                if title is not None and title != existing["title"]:
+                    conn.execute(
+                        """UPDATE documents SET title = ?, updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        (title, existing["id"]),
+                    )
+                    conn.commit()
+                    log.info(
+                        "document_title_repaired",
+                        source_url=source_url,
+                        id=existing["id"],
+                        old_title=existing["title"],
+                        new_title=title,
+                    )
+                    if stats is not None:
+                        stats["titles_repaired"] = stats.get("titles_repaired", 0) + 1
+                    # `stored` stays False ON PURPOSE — no new row was written, and
+                    # widening `stored` to mean "something was written" would make
+                    # the caller's `unchanged` count wrong. The repair is reported
+                    # through `stats` instead, so it is visible without the flag
+                    # having to carry two meanings.
+                    return existing["id"], False
+
                 log.debug(
                     "document_unchanged",
                     source_url=source_url,

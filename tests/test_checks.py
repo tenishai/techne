@@ -2633,3 +2633,263 @@ class TestTheThirdLane:
         assert "configure a sync adapter" not in blob, (
             f"offered a remedy that cannot revive this lane: {blob!r}"
         )
+
+
+class TestPendingCardBacklog:
+    """techne#824 — a pending card is a stand-in gist that RIDES RECALL.
+
+    28 cards sat pending for twelve days and were found only because a consolidate
+    cluster happened to surface some of them. `techne librarian cards list` could
+    always answer this and was the only thing that could — which is visibility for
+    someone who already suspects the backlog, i.e. the opposite of a check.
+    """
+
+    @staticmethod
+    def _pend(config, url="u:1", title="a stand-in title"):
+        from techne.core.cards import upsert_document_card
+        from techne.core.documents import store_document
+        from techne.core.librarian import librarian_db
+
+        doc_id, _ = store_document(
+            librarian_db(config),
+            source_type="x",
+            source_url=url,
+            title=title,
+            content=f"body {url}",
+        )
+        upsert_document_card(
+            config.db_path, source_url=url, doc_id=doc_id, source_version="v1", title=title
+        )
+
+    @staticmethod
+    def _age(config, days=None, hours=None):
+        """RELATIVE, never a literal date. A first draft pinned "2026-08-17" and
+        asserted "12d" in the detail — true on the day it was written and wrong
+        every day after, which is a test that turns into a mystery failure rather
+        than a signal."""
+        import sqlite3
+
+        # AT MOST ONE UNIT (#841 r3 nit 3). The first version defaulted `days=12` and
+        # let a passed `hours` silently SHADOW it, so `_age(days=3, hours=2)` would
+        # have aged the card two hours without complaint — a trap built into a helper
+        # with eleven call sites and growing. Bare `_age(config)` still means 12 days.
+        assert days is None or hours is None, "pass at most one of days= or hours="
+        if hours is not None:
+            delta = timedelta(hours=hours)
+        else:
+            delta = timedelta(days=12 if days is None else days)
+        conn = sqlite3.connect(config.db_path)
+        conn.execute(
+            "UPDATE knowledge SET created_at=? WHERE type='document_card'",
+            (_iso(delta),),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_no_pending_cards_is_live(self, config):
+        from techne.core.checks import check_pending_cards
+
+        assert check_pending_cards(config).verdict is Verdict.LIVE
+
+    def test_a_freshly_indexed_card_is_not_a_finding(self, config):
+        """THE HALF THAT STOPS THIS FIRING ON EVERY HEALTHY INSTALL. A card is
+        pending for the whole gap between indexing and the fill pass, so counting
+        alone would flag a store that just indexed a document — a check that fires
+        on the normal state trains its reader to ignore it."""
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config)
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.LIVE
+        assert result.remedy is None
+
+    def test_an_aged_backlog_is_stale_and_carries_its_remedy(self, config):
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config)
+        self._age(config)
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.STALE
+        assert "12d" in result.detail, result.detail
+        assert result.remedy and "cards emit" in result.remedy
+        # the evidence must be re-derivable, not a claim (techne#941)
+        assert _iso(timedelta(days=12))[:10] in result.evidence
+
+    def test_the_age_comes_from_the_OLDEST_card_not_the_newest(self, config):
+        """`MIN(created_at)`, and it is load-bearing: the helper this check first
+        used orders by `updated_at DESC`, so reading the first row would report the
+        NEWEST card's age and a long backlog would look fresh forever."""
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config, url="u:old")
+        self._age(config)
+        self._pend(config, url="u:new")  # today, and the most recently updated
+
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.STALE, "the old card must still decide the verdict"
+        assert "2 card(s)" in result.detail
+
+    def test_a_filled_card_is_not_a_backlog(self, config):
+        """THE CHECK'S NAMESAKE PREDICATE, which nothing witnessed (audit instance 8).
+
+        Dropping `AND tags LIKE '%pending%'` from the SQL left the whole suite
+        green, because no fixture had ever created a FILLED card. Without that
+        predicate the check counts every document card, so one day-old filled card
+        makes a healthy store report STALE forever — a check that can never go
+        green on a real install is worse than no check.
+        """
+        from techne.core.cards import fill_card_summary
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config, url="u:filled")
+        self._age(config)
+
+        card_id = next(
+            c["id"]
+            for c in __import__("techne.core.cards", fromlist=["pending_cards"]).pending_cards(
+                config.db_path
+            )
+        )
+        fill_card_summary(config.db_path, card_id, "A real gist, written by the fill pass.")
+
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.LIVE, f"a filled card is not a backlog: {result.detail}"
+
+    def test_a_superseded_card_is_not_a_backlog(self, config):
+        """`superseded_by IS NULL` was unwitnessed for the same reason — no fixture
+        ever superseded a card, so the clause could be dropped with the suite green.
+        A retired card is history, not work waiting."""
+        import sqlite3
+
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config, url="u:old")
+        self._age(config)
+        conn = sqlite3.connect(config.db_path)
+        conn.execute("UPDATE knowledge SET superseded_by = 99999 WHERE type='document_card'")
+        conn.commit()
+        conn.close()
+
+        assert check_pending_cards(config).verdict is Verdict.LIVE
+
+    def test_the_threshold_straddle(self, config):
+        """#841 r2 Important — THE CENTRAL CONSTANT WAS UNWITNESSED ACROSS (0, 12) DAYS.
+
+        She set `_PENDING_CARD_STALE_DAYS = 11` — an eleven-fold change — and the
+        full suite passed. The gap was structural, not accidental: one test used a
+        card created NOW and another one aged 12 DAYS, so every threshold strictly
+        between them was green, and so was every comparison operator separating
+        those two points.
+
+        That is exactly why adopting `temporal_verdict` silently moved the boundary
+        from `>=` to `>` last round and surfaced only when I wrote the review brief
+        by hand.
+
+        WHAT THIS PINS, AND WHAT IT DOES NOT. It pins the constant to within an
+        hour: an eleven-fold move reds it, and so does any move past 25h or below
+        23h. It does NOT pin the comparison operator — I checked rather than
+        claiming it, and flipping `<=` to `<` leaves this green, because the two
+        differ only at EXACTLY the interval.
+
+        That is left unpinned because the distinction is worth nothing
+        operationally: nobody cares whether a card aged exactly 24h to the instant
+        reads LIVE or STALE. NOT because pinning it would be flaky — an earlier
+        draft said that and it is FALSE, as review pointed out: monkeypatching
+        `_age` to return the interval exactly pins the boundary with no timing
+        involved at all. The weaker argument was leading, which in a repo where
+        docstrings are the durable record of WHY is worth swapping.
+        """
+        from techne.core.checks import _PENDING_CARD_STALE_DAYS, check_pending_cards
+
+        assert _PENDING_CARD_STALE_DAYS == 1, (
+            "the interval moved; the straddle below is written against one day and "
+            "must move with it"
+        )
+
+        self._pend(config, url="u:just-over")
+        self._age(config, hours=25)
+        assert check_pending_cards(config).verdict is Verdict.STALE, "25h must be stale"
+
+        self._age(config, hours=23)
+        assert check_pending_cards(config).verdict is Verdict.LIVE, "23h must be live"
+
+    def test_an_unreadable_age_is_not_reported_healthy(self, config):
+        """#841 r1 Important 1. `age is None` used to short-circuit the staleness
+        guard to False and report LIVE — INDISTINGUISHABLE from age 0, so a store
+        with N pending cards whose age cannot be read returned `ok=True`.
+
+        She teeth-checked it: replacing the parser's `return None` with `return 0`
+        — literally the failure the design claimed to avoid — left the full suite
+        green, so neither the None-ness nor the detail wording was pinned.
+
+        The module's own convention settles the verdict: `temporal_verdict` returns
+        UNOBSERVABLE for an unparseable timestamp, because conflating "never ran"
+        with "cannot be observed" is the ambiguity techne#468 was raised to remove.
+        Unreachable through today's write paths — every INSERT lets `created_at`
+        default — but the branch exists deliberately, so it must not report healthy.
+        """
+        import sqlite3
+
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config)
+        conn = sqlite3.connect(config.db_path)
+        conn.execute(
+            "UPDATE knowledge SET created_at = ? WHERE type='document_card'", ("not-a-ts",)
+        )
+        conn.commit()
+        conn.close()
+
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.UNOBSERVABLE, result
+        assert not result.ok, "a backlog whose age cannot be read is not healthy"
+        assert "UNREADABLE" in result.detail
+
+    def test_the_remedy_names_the_backlog_size(self, config):
+        """#841 r1 nit 4 — `cards emit` defaults to `--limit 50` (cli.py:3542), so a
+        bare remedy tells an operator with a larger backlog that one call drains it.
+        AGENTS.md carries a trigger for that exact trap on the reflection rail."""
+        from techne.core.checks import check_pending_cards
+
+        for i in range(3):
+            self._pend(config, url=f"u:{i}")
+        self._age(config)
+
+        remedy = check_pending_cards(config).remedy
+        assert remedy and "--limit 3" in remedy, remedy
+
+    def test_no_store_is_dormant_not_a_finding(self, config, tmp_path):
+        """#841 r1 nit 3 — the only branch of this check with no test at all;
+        flipping DORMANT to LIVE left the suite green. The existence guard is also
+        MORE careful than the house pattern (the other six `connect(config.db_path)`
+        sites in this module have none, and `connect()` would create the store), so
+        it deserves a witness."""
+        from techne.config import Config
+        from techne.core.checks import check_pending_cards
+
+        absent = Config(db_path=tmp_path / "nope" / "missing.db", data_dir=tmp_path)
+        result = check_pending_cards(absent)
+        assert result.verdict is Verdict.DORMANT, result
+        # the NAME's second claim — "not a finding" — which this test's own body did
+        # not assert (#841 r2 nit). NAME-ALIGNMENT, NOT NEW COVERAGE: `.ok` is a
+        # derived property already pinned exhaustively by
+        # TestSeverityInvariants::test_only_live_and_dormant_are_ok, and breaking
+        # DORMANT reds fourteen tests, of which this is one. The value is that the
+        # name stays honest against the body, not that a suite-level gap closes.
+        assert result.ok, "DORMANT must not read as a finding"
+        assert "no store" in result.evidence
+
+    def test_a_probe_failure_is_unknown_not_green(self, config, monkeypatch):
+        """A check that cannot read its own subject must never report healthy —
+        this branch is what surfaced an undefined `connect` during development
+        instead of silently reporting LIVE."""
+        import techne.core.database as db_mod
+        from techne.core.checks import check_pending_cards
+
+        def boom(*a, **k):
+            raise RuntimeError("db is gone")
+
+        monkeypatch.setattr(db_mod, "connect", boom)
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.UNKNOWN
+        assert not result.ok, "the NAME says 'not green' — assert it, inherited gap"

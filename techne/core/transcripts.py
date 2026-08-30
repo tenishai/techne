@@ -225,14 +225,29 @@ def index_transcripts(
     are deduped/superseded by source_url so re-running only rewrites changed
     sessions. When `make_cards`, each document also gets a pull-only Option D card
     (gist+pointer, pending) so it rides knowledge recall. Returns counts
-    {total, stored, unchanged, empty, unreadable}.
+    {total, stored, unchanged, empty, unreadable, titles_repaired}.
+
+    ``titles_repaired`` counts documents whose content was unchanged but whose
+    TITLE was corrected in place (techne#819) — a titling fix cannot otherwise
+    reach rows already stored, because both dedup keys are content-derived.
 
     ``unreadable`` is how many transcripts the source could not read at all. It is
     reported because ``total`` counts what was YIELDED — a source that skips a corrupt
     file comes up short, and a short count with no other signal is indistinguishable
     from a smaller corpus. Sources that do not track it report 0.
     """
-    counts = {"total": 0, "stored": 0, "unchanged": 0, "empty": 0, "unreadable": 0}
+    counts = {
+        "total": 0,
+        "stored": 0,
+        "unchanged": 0,
+        "empty": 0,
+        "unreadable": 0,
+        # techne#819. A title corrected on a row whose CONTENT is unchanged lands
+        # in `unchanged`, so without its own count a repair pass looks like a
+        # no-op — which is exactly what an operator re-indexing to heal #816's
+        # junk titles needs to be able to tell apart.
+        "titles_repaired": 0,
+    }
     transcripts = source.iter_transcripts()
     # `is not None`, not truthiness: `--limit 0` used to mean NO LIMIT and iterate
     # the whole directory — measured, and the opposite of what the flag says
@@ -276,6 +291,7 @@ def index_transcripts(
             make_card=make_cards,
             # thread index is built from techne.db (core threads), not the doc store
             summary=build_transcript_gist(config.db_path, t.id) if make_cards else None,
+            stats=counts,
         )
         counts["stored" if stored else "unchanged"] += 1
     # AFTER the loop — the source populates this as it iterates, so reading it earlier

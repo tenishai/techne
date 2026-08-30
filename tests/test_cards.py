@@ -254,7 +254,9 @@ def test_repair_is_dry_run_by_default(db, config):
     assert result["applied"] is False
     conn = connect(db)
     try:
-        assert conn.execute("SELECT type FROM knowledge WHERE id=?", (kid,)).fetchone()[0] == CARD_TYPE
+        assert (
+            conn.execute("SELECT type FROM knowledge WHERE id=?", (kid,)).fetchone()[0] == CARD_TYPE
+        )
     finally:
         conn.close()
 
@@ -322,8 +324,11 @@ def test_fsck_names_a_remedy_for_a_repairable_fault(db, config):
     operator nothing. A check that can never go green trains them to ignore it."""
     from techne.core.maintenance import run_fsck
 
-    _doc(config, content="anything — this exists only to bring librarian.db into being,\n"
-         "which _check_dangling_cards requires before it will run at all")
+    _doc(
+        config,
+        content="anything — this exists only to bring librarian.db into being,\n"
+        "which _check_dangling_cards requires before it will run at all",
+    )
     _pointerless_card(db)
     report = run_fsck(config)
     check = next(c for c in report.checks if c.name == "dangling_cards")
@@ -400,3 +405,221 @@ def test_insert_card_redacts_content_defense_in_depth(db, config):
     conn.close()
     assert "ghp_abcdefghijklmnopqrstuvwxyz1234" not in row["content"]
     assert "<redacted:github>" in row["content"]
+
+
+def test_a_pending_cards_title_is_repaired_at_the_same_version(db, config):
+    """techne#819, the half the issue's scope note misses.
+
+    A PENDING card's content IS the document title — the stand-in gist it carries
+    until the agent-assisted pass fills a real one. The `ver:` tag is a CONTENT
+    fingerprint, so a corrected title leaves it unchanged, the upsert no-ops, and
+    the junk title survives as the card's gist. Repairing `documents.title` alone
+    would still leave recall returning the wrapper string, because recall reads the
+    CARD, not the document.
+    """
+    doc_id = _doc(config)
+    first, _ = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="<local-command-caveat>Caveat: The messages below",
+    )
+    second, changed = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",  # SAME version — content did not move, only the title
+        title="why is recall empty",
+    )
+    assert second == first, "a title repair must not supersede the card"
+    assert changed is False, "no new card row was written"
+    card = next(r for r in pending_cards(db) if r["id"] == first)
+    assert card["content"] == "why is recall empty"
+    assert is_pending(card["tags"]), "the card is still awaiting a real gist"
+
+
+def test_a_filled_cards_gist_is_never_overwritten_by_a_title(db, config):
+    """The guard on the repair above. A filled card's gist is real prose that no
+    longer derives from the title, so rewriting it from one would destroy the
+    agent-assisted work `fill_card_summary` exists to produce.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="junk title",
+    )
+    fill_card_summary(db, card_id, "A real gist written by the agent-assisted pass.")
+
+    upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="a different title entirely",
+    )
+    row = db_row_content(db, card_id)
+    assert row == "A real gist written by the agent-assisted pass.", (
+        "a filled gist was clobbered by a title repair"
+    )
+
+
+def db_row_content(db, card_id):
+    from techne.core.database import connect
+
+    conn = connect(db)
+    try:
+        return conn.execute("SELECT content FROM knowledge WHERE id = ?", (card_id,)).fetchone()[
+            "content"
+        ]
+    finally:
+        conn.close()
+
+
+def _clear_vec_stale(db, card_id):
+    """Stand in for `backfill_vectors` having run since the last write."""
+    from techne.core.database import connect
+
+    conn = connect(db)
+    try:
+        conn.execute("UPDATE knowledge SET vec_stale = 0 WHERE id = ?", (card_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _row(db, card_id):
+    from techne.core.database import connect
+
+    conn = connect(db)
+    try:
+        r = conn.execute(
+            "SELECT content, tags, vec_stale FROM knowledge WHERE id = ?", (card_id,)
+        ).fetchone()
+        return dict(r)
+    finally:
+        conn.close()
+
+
+def test_a_repaired_card_is_flagged_for_re_embedding(db, config):
+    """techne#840 r1 CRITICAL 1. An in-place `content` edit on a stable rowid leaves
+    the OLD embedding in `knowledge_vec`. `backfill_vectors` re-embeds
+    `(NOT IN vec OR vec_stale = 1)`, so an unflagged repaired row is in NEITHER set
+    and semantic recall goes on matching the junk title forever.
+
+    FTS heals itself through the `knowledge_au` trigger, which is exactly what makes
+    this invisible: half of recall looks fixed. And doctor's vector-freshness check
+    counts `vec_stale = 1`, so it would report such a store 100% fresh — a false
+    green about the thing that is broken.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="<local-command-caveat>Caveat: junk",
+    )
+    assert _row(db, card_id)["vec_stale"] == 0
+
+    upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="why is recall empty",
+    )
+    row = _row(db, card_id)
+    assert row["content"] == "why is recall empty"
+    assert row["vec_stale"] == 1, "a repaired card must be queued for re-embedding"
+
+
+def test_a_repair_that_carries_a_real_summary_drops_pending(db, config):
+    """techne#840 r1 CRITICAL 2, and it is the guard's own premise.
+
+    `content` is `summary or title`, and `build_transcript_gist` returns None before
+    thread detection and a real string after — so the ordinary two-pass sequence
+    reaches this branch WITH a summary. Leaving `pending` on would keep a filled
+    card on the agent-assisted emit work-list forever, and would break
+    `is_pending(stored tags)` as a proxy for "never filled": that proxy is only
+    sound while EVERY path that fills a card drops the tag, and this branch is now
+    one of those paths.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="junk title",
+    )
+    assert is_pending(_row(db, card_id)["tags"])
+
+    upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="junk title",
+        summary="Session transcript (2026-08-29, 3 threads): a; b; c",
+    )
+    row = _row(db, card_id)
+    assert row["content"].startswith("Session transcript")
+    assert not is_pending(row["tags"]), "a filled card must leave the emit work-list"
+    assert card_id not in [c["id"] for c in pending_cards(db)]
+
+
+def test_the_repair_redacts_like_the_insert_path_does(db, config):
+    """techne#840 r1 Important 3. `_insert_card` redacts even though its callers do,
+    because "today's callers redact" is not a property you can hold still. This
+    UPDATE is the second write path into `knowledge.content` in this file.
+
+    The comparison is the second-order half: `content != existing["content"]` puts a
+    RAW incoming string against a stored one that went through redaction, so an
+    unredacted caller would not merely leak — the two could never be equal and the
+    row would be rewritten on every index pass, forever, carrying the credential.
+    """
+    doc_id = _doc(config)
+    card_id, _ = upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="a harmless title",
+    )
+    upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+    )
+    content = _row(db, card_id)["content"]
+    assert "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB" not in content, content
+
+    # THE COMPARISON HALF, WHICH THE ASSERTION ABOVE DOES NOT SEE (#840 r2).
+    # Reverting only the comparison to the RAW incoming string — keeping the write
+    # redacted — left all 3889 tests green. Yet it reintroduces the whole defect:
+    # raw incoming can never equal redacted stored, so the row is rewritten and
+    # re-queued for embedding on EVERY index pass, forever. Idempotence is the
+    # observable, and `vec_stale` is what makes it expensive rather than merely
+    # untidy — the mirror of `test_an_unchanged_title_writes_nothing`, which the
+    # document half already had and this half did not.
+    _clear_vec_stale(db, card_id)
+    before = _row(db, card_id)
+    upsert_document_card(
+        db,
+        source_url="claude-code-transcript:s1",
+        doc_id=doc_id,
+        source_version="v1",
+        title="token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+    )
+    after = _row(db, card_id)
+    assert after["content"] == before["content"]
+    assert after["vec_stale"] == before["vec_stale"], (
+        "an identical pass re-queued the row for embedding — the comparison is "
+        "asymmetric (raw vs redacted) and will never settle"
+    )
