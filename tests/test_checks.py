@@ -2720,6 +2720,48 @@ class TestPendingCardBacklog:
         assert result.verdict is Verdict.STALE, "the old card must still decide the verdict"
         assert "2 card(s)" in result.detail
 
+    def test_a_filled_card_is_not_a_backlog(self, config):
+        """THE CHECK'S NAMESAKE PREDICATE, which nothing witnessed (audit instance 8).
+
+        Dropping `AND tags LIKE '%pending%'` from the SQL left the whole suite
+        green, because no fixture had ever created a FILLED card. Without that
+        predicate the check counts every document card, so one day-old filled card
+        makes a healthy store report STALE forever — a check that can never go
+        green on a real install is worse than no check.
+        """
+        from techne.core.cards import fill_card_summary
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config, url="u:filled")
+        self._age(config)
+
+        card_id = next(c["id"] for c in __import__(
+            "techne.core.cards", fromlist=["pending_cards"]
+        ).pending_cards(config.db_path))
+        fill_card_summary(config.db_path, card_id, "A real gist, written by the fill pass.")
+
+        result = check_pending_cards(config)
+        assert result.verdict is Verdict.LIVE, (
+            f"a filled card is not a backlog: {result.detail}"
+        )
+
+    def test_a_superseded_card_is_not_a_backlog(self, config):
+        """`superseded_by IS NULL` was unwitnessed for the same reason — no fixture
+        ever superseded a card, so the clause could be dropped with the suite green.
+        A retired card is history, not work waiting."""
+        import sqlite3
+
+        from techne.core.checks import check_pending_cards
+
+        self._pend(config, url="u:old")
+        self._age(config)
+        conn = sqlite3.connect(config.db_path)
+        conn.execute("UPDATE knowledge SET superseded_by = 99999 WHERE type='document_card'")
+        conn.commit()
+        conn.close()
+
+        assert check_pending_cards(config).verdict is Verdict.LIVE
+
     def test_a_probe_failure_is_unknown_not_green(self, config, monkeypatch):
         """A check that cannot read its own subject must never report healthy —
         this branch is what surfaced an undefined `connect` during development
