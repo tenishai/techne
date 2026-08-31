@@ -134,3 +134,66 @@ def test_unknown_schema_is_refused_rather_than_guessed(tmp_path):
     r = _run(p, _dump(tmp_path / "h.json", t, c))
     assert r.returncode != 0
     assert "schema" in (r.stdout + r.stderr)
+
+
+# ---------------------------------------------------------------------------
+# techne#857 — a leg that measured fewer cases is a broken run, not a clean diff.
+#
+# WHY THESE EXIST. #857 adds `--continue-on-collection-errors` to eval-vec's BASE
+# leg, because that leg runs MAIN's library against HEAD's tests and any PR that
+# lands a module plus its test module makes that file unimportable — killing the
+# whole leg at collection over tests `-m eval_vec` would have deselected anyway.
+# The cost of tolerating the error is that a SHORT base run now reaches the
+# comparer. Diffing it against a full head run produces a table that looks clean
+# and compares different case sets, which is techne#832's defect wearing a new
+# hat. These pin the refusal.
+# ---------------------------------------------------------------------------
+
+
+def test_a_short_base_leg_is_refused_not_diffed(tmp_path):
+    """The #857 acceptance criterion: unequal `n` must not produce a verdict."""
+    t, base_c = _clean()
+    base_c["paraphrase"]["n"] = 4          # base collected fewer cases
+    _, head_c = _clean()                   # head has all 6
+    r = _run(_dump(tmp_path / "b.json", t, base_c), _dump(tmp_path / "h.json", t, head_c))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "CANNOT DIFF" in r.stdout
+    assert "base n=4, head n=6" in r.stdout
+
+
+def test_the_refusal_prints_no_comparison_table(tmp_path):
+    """Refuse BEFORE reporting, not after.
+
+    A printed `base -> head` row invites exactly the comparison the refusal
+    exists to prevent, and a reader who sees numbers will use them.
+    """
+    t, base_c = _clean()
+    base_c["paraphrase"]["n"] = 4
+    _, head_c = _clean()
+    r = _run(_dump(tmp_path / "b.json", t, base_c), _dump(tmp_path / "h.json", t, head_c))
+    assert "per-class means" not in r.stdout, r.stdout
+    assert "recall_at_10=" not in r.stdout, r.stdout
+
+
+def test_a_class_absent_from_one_leg_is_refused(tmp_path):
+    """A whole class vanishing is the same failure at larger amplitude."""
+    t, c = _clean()
+    two = {**c, "exact": {"recall_at_5": 1.0, "recall_at_10": 1.0, "mrr": 1.0,
+                          "fpr": 0.0, "n": 6}}
+    r = _run(_dump(tmp_path / "b.json", t, c), _dump(tmp_path / "h.json", t, two))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "MISSING from base" in r.stdout
+
+
+def test_equal_case_counts_still_reach_the_regression_check(tmp_path):
+    """The guard must not shadow the check it precedes.
+
+    Same `n` on both legs and a real regression: #832's verdict must still be
+    the one reported, not #857's.
+    """
+    bt, bc = _clean(r10=1.0)
+    ht, hc = _clean(r10=0.833)
+    r = _run(_dump(tmp_path / "b.json", bt, bc), _dump(tmp_path / "h.json", ht, hc))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "CANNOT DIFF" not in r.stdout
+    assert "REGRESSION vs base" in r.stdout

@@ -85,6 +85,35 @@ def _regressions(base: dict, head: dict, epsilon: float) -> list[dict]:
     return found
 
 
+def _case_count_drift(base: dict, head: dict) -> list[str]:
+    """Classes whose case count differs between the legs — techne#857.
+
+    THE GATE COMPARES TWO NUMBERS AND SAYS NOTHING ABOUT WHAT THEY WERE
+    COMPUTED OVER. That was fine while the base leg aborted on any collection
+    error, because a leg that measured a short case set produced no dump at
+    all. #857 relaxes that deliberately (the base leg runs MAIN's library
+    against HEAD's tests, so a PR adding a module makes its test file
+    unimportable and killed the whole leg), which means a short base run can
+    now reach here and diff cleanly against a full head run.
+
+    A missing class and a class measured over fewer cases both count. Reported
+    rather than raised, so main() can print every drifted class at once
+    instead of the first.
+    """
+    drift = []
+    for cls, b in sorted(base.get("per_class", {}).items()):
+        h = head.get("per_class", {}).get(cls)
+        if h is None:
+            drift.append(f"{cls}: present in base (n={b.get('n')}), MISSING from head")
+        elif b.get("n") != h.get("n"):
+            drift.append(f"{cls}: base n={b.get('n')}, head n={h.get('n')}")
+    for cls in sorted(head.get("per_class", {})):
+        if cls not in base.get("per_class", {}):
+            drift.append(f"{cls}: MISSING from base, present in head "
+                         f"(n={head['per_class'][cls].get('n')})")
+    return drift
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("base", type=Path, help="metrics JSON from the BASE commit")
@@ -97,6 +126,23 @@ def main() -> int:
     args = ap.parse_args()
 
     base, head = _load(args.base), _load(args.head)
+
+    # REFUSE TO DIFF UNEQUAL CASE SETS (#857) — before the table, not after, so
+    # no number is printed that invites comparison. A short leg is a broken run,
+    # not a regression, and saying so is the whole point.
+    if drift := _case_count_drift(base, head):
+        print("=== CANNOT DIFF: the two legs measured different case sets ===")
+        for line in drift:
+            print(f"  {line}")
+        print(
+            "\nOne leg did not measure what the other did, so any delta below "
+            "would be an artifact of the case set, not of the code.\n"
+            "Most likely the base leg hit a collection error that "
+            "--continue-on-collection-errors swallowed; check its pytest output "
+            "for ImportError in a file that DOES carry eval_vec cases."
+        )
+        return 1
+
     regressions = _regressions(base, head, args.epsilon)
 
     # ALWAYS REPORT THE CLASS MEANS, pass or fail. Half of #832 is that a
