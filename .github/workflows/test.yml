@@ -653,9 +653,23 @@ jobs:
           # `|| echo ::warning` is the ONE intended tolerance: a base that fails its own
           # kill-gates still emits (the gate writes metrics BEFORE asserting), and
           # its numbers are exactly what we want in that case.
+          # --continue-on-collection-errors IS LOAD-BEARING (#857). The line above
+          # gives the base leg HEAD's tests against MAIN's library, so a PR that
+          # adds a module and its test module together makes that test file
+          # unimportable here. Collection happens BEFORE marker selection, so the
+          # file kills the whole leg even though `-m eval_vec` would have
+          # deselected every test in it — no metrics, no diff, red job, on the
+          # ordinary shape of a feature PR. The flag collects what it can.
+          #
+          # It is safe ONLY because compare_retrieval_metrics.py now refuses to
+          # diff legs that measured different case counts (#857). Without that
+          # guard this flag would convert a loud collection failure into a
+          # quiet comparison over unequal case sets, which is techne#832's own
+          # defect in a new hat. Do not keep one without the other.
           ( cd "$BASE_WT" \
             && TECHNE_EVAL_METRICS_OUT="$BASE_METRICS" \
-               "$GITHUB_WORKSPACE/techne/.venv-ci/bin/python" -m pytest -m eval_vec -q ) \
+               "$GITHUB_WORKSPACE/techne/.venv-ci/bin/python" -m pytest -m eval_vec -q \
+                  --continue-on-collection-errors ) \
             || echo "::warning::base run did not pass its own kill-gates; diffing anyway"
 
           git worktree remove --force "$BASE_WT"
