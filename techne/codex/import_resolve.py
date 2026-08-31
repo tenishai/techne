@@ -50,29 +50,80 @@ log = logging.getLogger(__name__)
 _OVERWRITABLE = ("unresolved",)
 
 
-def _module_candidates(dotted: str) -> tuple[str, ...]:
-    """Repo-relative paths a dotted module could live at.
+#: Candidate file shapes per language. THE LANGUAGE IS PART OF THE QUESTION
+#: (Prudence r2 Important 2): offering `.py` and `.ts` shapes to every module
+#: regardless of the importing file let a Python call bind to a TypeScript
+#: symbol and assert it `import_resolved` — the status that survives
+#: `include_inferred=False`. Measured zero times on this repo, because it needs
+#: a module name absent in language A and present in language B, which `api`,
+#: `utils`, `types` and `config` make ordinary in a full-stack repo indexed with
+#: the default `--language python,typescript`.
+_CANDIDATE_SHAPES: dict[str, tuple[str, ...]] = {
+    "python": ("{stem}.py", "{stem}/__init__.py"),
+    "typescript": ("{stem}.ts", "{stem}/index.ts"),
+}
+
+
+def _module_candidates(dotted: str, language: str | None = None) -> tuple[str, ...]:
+    """Repo-relative paths a dotted module could live at, for one language.
 
     `a.b.c` is either `a/b/c.py` (a module) or `a/b/c/__init__.py` (a package).
     Both are checked because the indexer stores whichever the file actually is,
     and a package's `__init__.py` is where its re-exports live.
+
+    AN UNKNOWN LANGUAGE REFUSES rather than widening to every shape. This is the
+    ONLY gate against a cross-language binding — an earlier version also carried
+    an `AND language = ?` clause on the symbol lookup, and the two were
+    redundant: removing either left the other, so neither could be shown to be
+    load-bearing and drift in one would be silently covered by the other. That
+    is the declared-twice shape #852 fixed in the recall cap. Widening here would
+    reopen the hole for exactly the rows whose language we cannot name, so it
+    returns nothing and the edge stays honestly `unresolved`. No indexed symbol
+    in any live codex db has a NULL language (measured 2026-08-31 across techne,
+    liminal and cabal), so this costs nothing today and cannot rot into a bypass.
     """
+    shapes = _CANDIDATE_SHAPES.get(language or "")
+    if not shapes:
+        return ()
     stem = dotted.replace(".", "/")
-    return (f"{stem}.py", f"{stem}/__init__.py", f"{stem}.ts", f"{stem}/index.ts")
+    return tuple(sh.format(stem=stem) for sh in shapes)
 
 
-def _top_level_roots(known_files) -> frozenset[str]:
-    """First path segment of every indexed file — the repo's top-level names.
+def _in_repo_names(known_files) -> frozenset[str]:
+    """Every name a module root could legitimately be, anywhere in the tree.
 
-    This is the POSITIVE EVIDENCE that makes an `external` verdict sound. If a
-    module's root segment names nothing at the top of this repo, then no layout
-    this resolver understands could place it here, and "the callee is not in
-    this repo" is a fact rather than a failure to look.
+    This is the POSITIVE EVIDENCE that makes an `external` verdict sound: if a
+    module's root names nothing in this repo at all, no layout could place it
+    here and "the callee is not in this repo" is a fact rather than a failure
+    to look.
+
+    SEGMENTS, NOT SEGMENT ZERO (Prudence r2 Important 1). The first version took
+    `f.split("/", 1)[0]`, which is the repo's TOP-level names — correct only for
+    a flat layout. Under `src/` those are {'src', 'tests'} and never a package
+    name, so `mypkg` could not match and every unplaceable in-repo module fell
+    straight through to a false `external`: the exact failure r1 raised, one
+    layout further out, and invisible here because techne is flat. A pnpm
+    monorepo (`packages/foo/src/index.ts` imported as `'foo'`) is the same shape.
+
+    Directory segments AND file stems, because both can be a module root: `mypkg`
+    in `src/mypkg/app.py`, and `utils` in a top-level `utils.py`.
+
+    The cost is real and is the trade r1 already asked for: a stdlib name that
+    collides with an in-repo directory name (a repo with its own `types/`) stops
+    being a true `external` and becomes `unresolved`. A lost fact is cheaper
+    than a false one. Measured on this repo: it costs none of the 597.
     """
-    return frozenset(f.split("/", 1)[0] for f in known_files)
+    names: set[str] = set()
+    for f in known_files:
+        parts = f.split("/")
+        names.update(parts[:-1])
+        names.add(parts[-1].rsplit(".", 1)[0])
+    return frozenset(names)
 
 
-def _match_paths(module: str, known_files, memo: dict) -> tuple[list[str], bool]:
+def _match_paths(
+    module: str, language: str | None, known_files, memo: dict
+) -> tuple[list[str], bool]:
     """Indexed files a dotted module could be, exact match first.
 
     SUFFIX MATCHING EXISTS FOR `src/` LAYOUTS (techne#679, Prudence r1 Critical
@@ -82,9 +133,19 @@ def _match_paths(module: str, known_files, memo: dict) -> tuple[list[str], bool]
     repo that stores it at `src/mypkg/util.py` matched nothing and the edge was
     asserted `external` while the file sat in the index.
 
-    AMBIGUITY IS REFUSED, NOT GUESSED. If two indexed files both end with the
-    candidate path, this repo has two plausible callees and picking one is the
+    AMBIGUITY IS REFUSED, NOT GUESSED, IN BOTH BRANCHES. If two indexed files
+    match, this repo has two plausible callees and picking one is the
     name-matching behaviour the `external`/`unresolved` split exists to avoid.
+
+    KNOWN BOUNDARY, measured rather than assumed: a suffix match will bind
+    `from requests.models import Response` to a HAND-VENDORED
+    `vendor/requests/models.py` if the repo has one. `_SKIP_DIRS` already
+    excludes every conventional vendoring location — `node_modules`,
+    `site-packages`, `dist-packages`, `venv`, `.tox`, `build` — so this needs a
+    non-conventional directory, and in a repo that deliberately vendors there,
+    binding to the vendored copy is the answer the reader wants. Recorded
+    because it is a consequence of suffix matching that exact matching did not
+    have, not because it is known to be wrong.
 
     Returns (paths, ambiguous). THE FLAG MATTERS AS MUCH AS THE PATHS: two
     matches mean the module IS in-repo-shaped, we simply cannot say which file —
@@ -92,16 +153,23 @@ def _match_paths(module: str, known_files, memo: dict) -> tuple[list[str], bool]
     an empty list made the ambiguous repo report a false `external`, which the
     ambiguity test caught.
     """
-    if module in memo:
-        return memo[module]
-    cands = _module_candidates(module)
+    key = (module, language)
+    if key in memo:
+        return memo[key]
+    cands = _module_candidates(module, language)
     exact = [p for p in cands if p in known_files]
     if exact:
-        memo[module] = (exact, False)
-        return memo[module]
+        # THIS BRANCH REFUSES TOO (Prudence r2 Important 2). It previously handed
+        # every exact hit to a `LIMIT 1` with no ORDER BY, so a repo holding both
+        # `api.py` and `api/__init__.py` resolved to whichever row SQLite
+        # returned first — right by luck of row order, not by rule. The suffix
+        # branch already refused this; the two must answer alike.
+        out = (exact, False) if len(exact) == 1 else ([], True)
+        memo[key] = out
+        return out
     hits = {f for c in cands for f in known_files if f.endswith("/" + c)}
     out = (list(hits), False) if len(hits) == 1 else ([], len(hits) > 1)
-    memo[module] = out
+    memo[key] = out
     return out
 
 
@@ -128,11 +196,11 @@ def resolve_edges_by_import(conn) -> dict:
     resolved = external = 0
     unresolved_no_binding = unresolved_in_repo_no_symbol = 0
     unresolved_in_repo_no_path = 0
-    roots = _top_level_roots(known_files)
-    path_memo: dict[str, list[str]] = {}
+    in_repo_names = _in_repo_names(known_files)
+    path_memo: dict[tuple[str, str | None], tuple[list[str], bool]] = {}
 
     rows = conn.execute(
-        f"""SELECT e.rowid, s.file, e.to_name
+        f"""SELECT e.rowid, s.file, e.to_name, s.language
               FROM edges e JOIN symbols s ON s.id = e.from_symbol
              WHERE e.kind = 'call'
                AND e.to_symbol IS NULL
@@ -140,13 +208,13 @@ def resolve_edges_by_import(conn) -> dict:
         _OVERWRITABLE,
     ).fetchall()
 
-    for rowid, file, to_name in rows:
+    for rowid, file, to_name, language in rows:
         module = bindings.get((file, to_name))
         if module is None:
             unresolved_no_binding += 1
             continue
 
-        paths, ambiguous = _match_paths(module, known_files, path_memo)
+        paths, ambiguous = _match_paths(module, language, known_files, path_memo)
         if not paths:
             # `external` IS A FACT AND NEEDS POSITIVE EVIDENCE (Prudence r1
             # Critical 2 & 3). Not finding a path is not evidence — the
@@ -157,7 +225,7 @@ def resolve_edges_by_import(conn) -> dict:
             # at the top level by that name, the callee genuinely is not here.
             # Anything in-repo-shaped that we simply could not place stays
             # `unresolved`, which is the honest word for "we could not tell".
-            if ambiguous or module.split(".", 1)[0] in roots:
+            if ambiguous or module.split(".", 1)[0] in in_repo_names:
                 unresolved_in_repo_no_path += 1
                 continue
             conn.execute(

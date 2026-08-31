@@ -767,12 +767,10 @@ def test_v3_purge_binds_are_bounded_through_the_real_migration(tmp_path, monkeyp
     directly — because the bug is only reachable through the real chain, and a
     helper-level test would pass against a migration that was never wired in.
     """
-    from techne.core.codex import CODEX_VERSION
-
     import sqlite3
 
     from techne.core import codex as codex_mod
-    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration
+    from techne.core.codex import CODEX_SCHEMA, CODEX_VERSION, _apply_codex_migration
     from techne.core.stores import plain_connect
 
     limit, doomed_count = 600, 1500

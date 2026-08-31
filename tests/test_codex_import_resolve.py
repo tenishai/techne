@@ -318,6 +318,7 @@ def test_the_v4_step_is_wired_into_the_migration_chain(tmp_path):
     widened INSERT raising against a table that never gained the column.
     """
     from techne.core.codex import CODEX_VERSION, _apply_codex_migration
+    from techne.core.migrator import user_version_io
 
     db = tmp_path / "pre_v4.db"
     conn = sqlite3.connect(db)
@@ -340,6 +341,11 @@ def test_the_v4_step_is_wired_into_the_migration_chain(tmp_path):
     conn.commit()
     assert "to_module" not in {r[1] for r in conn.execute("PRAGMA table_info(edges)")}, (
         "fixture is not pre-v4; this test would prove nothing"
+    )
+    assert user_version_io.read(conn) == 3, (
+        "fixture is not stamped v3 — a v4 stamp or a missing symbols table makes "
+        "the assertion below fail with the CHAIN's message, sending the next "
+        "reader into codex.py after a fixture bug (Prudence r2 nit 4)"
     )
     conn.close()
 
@@ -531,4 +537,188 @@ def test_a_rebound_name_resolves_to_the_LAST_import(tmp_path):
     assert to_symbol is not None, "the shadowed call did not resolve at all"
     assert to_symbol.startswith("b.py"), (
         f"resolved to the SHADOWED import instead of the live one: {to_symbol}"
+    )
+
+
+class TestNestedLayoutsAndLanguage:
+    """Prudence r2 Importants 1 and 2 — the r1 fix, one layout and one language out.
+
+    r1 narrowed `external` to require positive evidence; r2 showed the evidence
+    test itself was flat-layout-only, so a `src/` tree still asserted the same
+    false fact. techne is flat Python, which is why neither round could surface
+    these from this repo's own numbers.
+
+    EVERY TEST HERE MUST CALL `resolve_edges_by_import` ITSELF. `_db` only walks
+    and indexes; it does not run the pass. The first draft of this class omitted
+    that call in all five tests, so each one read the indexer's untouched
+    `unresolved` and passed against every mutation — green, well-named, and
+    exercising nothing. Caught by mutating `_in_repo_names` and watching nothing
+    go red.
+    """
+
+    _db = TestExternalNeedsPositiveEvidence._db
+    _calls = TestExternalNeedsPositiveEvidence._calls
+
+    def test_an_unplaceable_module_under_src_stays_unresolved(self, tmp_path):
+        """IMPORTANT 1. The flat version of this fixture already passed.
+
+        `_in_repo_names` used to be the repo's TOP-level names, which under
+        `src/` are {'src'} and never the package — so `mypkg` could not match
+        and an unplaceable in-repo module fell through to `external`.
+        """
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "src/mypkg/__init__.py": "",
+                "src/mypkg/app.py": (
+                    "from mypkg.nowhere import ghost\n\n\ndef run():\n    return ghost()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        assert self._calls(db)["ghost"][0] != "external", (
+            "a src/-layout module was asserted out-of-repo; the evidence test is "
+            "still flat-layout-only"
+        )
+
+    def test_a_ts_monorepo_package_is_not_asserted_external(self, tmp_path):
+        """IMPORTANT 1, the TypeScript half — an ordinary pnpm/turborepo tree.
+
+        `packages/foo/src/index.ts` is indexed and is the callee. This pass
+        still cannot PLACE it (`_module_candidates` offers `foo/index.ts`, not
+        `foo/src/index.ts`), and that is fine — `unresolved` is the honest word.
+        Asserting `external` about an indexed file is not.
+        """
+        pytest.importorskip("tree_sitter_typescript")
+        db = self._db(
+            tmp_path,
+            {
+                "packages/foo/src/index.ts": "export function helper() { return 1; }\n",
+                "packages/bar/src/app.ts": (
+                    "import { helper } from 'foo';\n"
+                    "export function run() { return helper(); }\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        assert self._calls(db)["helper"][0] != "external"
+
+    def test_a_python_call_never_binds_to_a_typescript_symbol(self, tmp_path):
+        """IMPORTANT 2. Measured zero times on this repo, latent everywhere else.
+
+        A module name absent in one language and present in the other is
+        ordinary in a full-stack repo — `api`, `utils`, `types`, `config` — and
+        the default `--language` list indexes both.
+        """
+        pytest.importorskip("tree_sitter_python")
+        pytest.importorskip("tree_sitter_typescript")
+        db = self._db(
+            tmp_path,
+            {
+                "web/utils/index.ts": "export function format_date() { return 1; }\n",
+                "backend/main.py": (
+                    "from utils import format_date\n\n\ndef run():\n    return format_date()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["format_date"]
+        assert status != "import_resolved", (
+            f"a Python call was bound to a TypeScript symbol: {to_symbol}"
+        )
+
+    def test_a_typescript_call_never_binds_to_a_python_symbol(self, tmp_path):
+        """The same gate from the other side."""
+        pytest.importorskip("tree_sitter_python")
+        pytest.importorskip("tree_sitter_typescript")
+        db = self._db(
+            tmp_path,
+            {
+                "backend/utils.py": "def formatDate():\n    return 1\n",
+                "web/app.ts": (
+                    "import { formatDate } from 'utils';\n"
+                    "export function run() { return formatDate(); }\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["formatDate"]
+        assert status != "import_resolved", (
+            f"a TypeScript call was bound to a Python symbol: {to_symbol}"
+        )
+
+    def test_two_exact_candidates_are_refused_like_two_suffix_candidates(self, tmp_path):
+        """IMPORTANT 2, second half: the two branches must answer alike.
+
+        A module that is BOTH `api.py` and `api/__init__.py` gave every exact
+        hit to a `LIMIT 1` with no `ORDER BY`, so the answer was row order. The
+        suffix branch already refused this.
+        """
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "api.py": "def helper():\n    return 1\n",
+                "api/__init__.py": "def helper():\n    return 2\n",
+                "app.py": (
+                    "from api import helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        assert self._calls(db)["helper"][1] is None, "picked one of two exact candidates"
+
+
+def test_an_external_edge_does_not_arm_name_inference(tmp_path):
+    """`external` must COST something, or it is a fact with no consumer.
+
+    Prudence r2 nit 3: `resolution_status` was written by both resolvers and read
+    on codex edges by nothing — `codegraph`'s four fallbacks gated on
+    `to_symbol IS NULL` alone, so an edge this pass had RULED OUT of the repo
+    still name-matched a local symbol and invented exactly the hop the status
+    proves impossible. Measured 1 of 599 on this repo before the fix: small, and
+    a contradiction regardless.
+
+    The fixture is the collision itself — a local `Path` alongside a call bound
+    to `pathlib.Path` — because that is the only shape where the two answers
+    differ.
+    """
+    pytest.importorskip("tree_sitter_python")
+    from techne.core.codegraph import callees
+
+    (tmp_path / "local.py").write_text("class Path:\n    pass\n")
+    (tmp_path / "app.py").write_text(
+        "from pathlib import Path\n\n\ndef run():\n    return Path('/tmp')\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("local.py", "app.py"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    run_id = conn.execute("SELECT id FROM symbols WHERE name='run'").fetchone()[0]
+    inferred_before = [c for c in callees(db, run_id) if c["resolution"] == "name-inferred"]
+    conn.close()
+    assert any(c["name"] == "Path" for c in inferred_before), (
+        "fixture must produce a name-inferred hop BEFORE resolution or this "
+        "test cannot show the status removing one"
+    )
+
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    conn = sqlite3.connect(db)
+    status = conn.execute(
+        "SELECT resolution_status FROM edges WHERE kind='call' AND to_name='Path'"
+    ).fetchone()[0]
+    conn.close()
+    assert status == "external", f"fixture did not produce an external edge: {status}"
+
+    after = [c["name"] for c in callees(db, run_id) if c["resolution"] == "name-inferred"]
+    assert "Path" not in after, (
+        "an edge ruled OUT of this repo still name-matched a local symbol; "
+        "`external` is not being read by the inference fallback"
     )
