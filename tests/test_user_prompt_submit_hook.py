@@ -362,12 +362,58 @@ def test_filtered_row_is_not_logged_as_injected(home, monkeypatch, capsys):
     assert rows[0]["hit_count"] == len(ids)
 
 
+
+def test_the_two_declared_defaults_cannot_diverge():
+    """`_build_context`'s signature default must equal the config default.
+
+    The cap is declared twice — `HookConfig.per_turn_recall_chars` and
+    `_build_context`'s `char_limit` parameter. `main()` always passes the cap
+    explicitly, so the signature default governs no production path and reads as
+    harmless; that is exactly what let the two drift when the config default moved
+    200 -> 450 on 2026-08-31, silently capping every test that calls the renderer
+    without an explicit cap at the stale value. A vestige that can disagree with
+    the real setting is worse than one that cannot.
+    """
+    import inspect
+
+    from techne.config import HookConfig
+    from techne.hooks.user_prompt_submit import _build_context
+
+    sig_default = inspect.signature(_build_context).parameters["char_limit"].default
+    assert sig_default == HookConfig().per_turn_recall_chars, (
+        f"_build_context defaults char_limit={sig_default} but the shipped config "
+        f"default is {HookConfig().per_turn_recall_chars}; change both or neither"
+    )
+
+
+def test_the_shipped_default_is_actually_deliverable():
+    """The default cap must be a value the rail can honour (techne#826/#842).
+
+    `search()` pre-truncates knowledge rows to `_SEARCH_ROW_CEILING` before the
+    hook ever sees them, so a default at or above it cannot be delivered — and
+    worse, an unclamped cap there makes a severed row look whole and suppresses
+    the `…` marker. This pins the invariant, not the number: raise the default
+    freely, but never to a value the ceiling forbids.
+
+    WHY 450 AND NOT 200: measured 2026-08-31 over 2,468 live injectable rows,
+    median length 476 chars. At 200 the rail severed 2,442 of them (98%); at 450
+    it severs 1,305 (52%). The old default cut a typical entry in half.
+    """
+    from techne.config import HookConfig
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
+    default = HookConfig().per_turn_recall_chars
+    assert 0 < default < _SEARCH_ROW_CEILING, (
+        f"shipped default {default} is not deliverable: search() truncates at "
+        f"{_SEARCH_ROW_CEILING}, so the cap must sit strictly below it"
+    )
+
 def test_document_card_is_not_pushed(home, monkeypatch, capsys):
     """Arch cards are pull-only on THIS rail too (techne#561, decided 2026-08-13).
 
     This replaces a test that pinned the opposite behaviour while the question was
     open. What decided it: `_build_context` truncates every row to
-    `hooks.per_turn_recall_chars` (200 by default), and an arch card's value is
+    `hooks.per_turn_recall_chars` (450 by default), and an arch card's value is
     its full body — a slice chosen by embedding similarity is a pointer at best.
     techne#826 made the cap configurable and the cut boundary-aware; neither
     changes this argument, because a slice is a pointer at any size. #449's
@@ -509,10 +555,21 @@ class TestInjectedTypeLabel:
         from techne.config import HookConfig
 
         cap = HookConfig().per_turn_recall_chars
-        assert cap == 200, (
+        assert cap == 450, (
             "the shipped default moved; #808 measures per-session context as already "
             "the dominant cost, so this is a deliberate decision, not a tuning tweak"
         )
+        # MOVED 200 -> 450 on 2026-08-31, and this tripwire is why it was a decision
+        # rather than a drift: it failed, and the number was changed only after the
+        # measurement below. Over 2,468 live injectable rows (median length 476), a
+        # 200-cap severed 2,442 of them — 98% — and a severed row carried no marker
+        # distinguishing it from a whole one, so a multi-step procedure arrived as its
+        # own title. At 450 the severed count is 1,305 (52%). The added cost is ~312
+        # tokens per turn on a five-row push, against #808's finding that MCP tool
+        # schemas already account for 87% of per-session context. 450 not 500 because
+        # search() pre-truncates at _SEARCH_ROW_CEILING (#842) and the cap must sit
+        # strictly below it — pinned separately by
+        # test_the_shipped_default_is_actually_deliverable.
         out = self._ctx(
             [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
         )
@@ -530,6 +587,9 @@ class TestInjectedTypeLabel:
             "defects, both measured 2026-08-13. CORRECTS techne#1078 and supersedes "
             "the guidance recorded there, which nobody has re-read since. The rest "
             "of this row exists to carry it past the cap so the cut actually fires."
+            " It also has to reach past the raised cap, so this sentence carries it "
+            "beyond four hundred and fifty characters without introducing a boundary "
+            "at the cut point itself, which is the property the fixture exists to hold."
         )
         # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
         # An earlier version of this test could not fail: its character at the cap
@@ -542,6 +602,14 @@ class TestInjectedTypeLabel:
         # one later — an earlier correction said "two", which was itself off by one. The
         # guard was right and only its explanation was wrong — worth correcting
         # because this is the comment that says why the fixture can be trusted.)
+        #
+        # LENGTHENED 2026-08-31 when the cap moved 200 -> 450: the 282-char fixture no
+        # longer exceeded the cap, and this test says so out loud rather than passing
+        # on a row it never cuts — the `len(body) > cap` assertion below is what caught
+        # it. The property is re-established at the NEW cap, verified empirically, not
+        # counted: `body[450]` is `w`, mid-word in "which", so a bare `content[:cap]`
+        # still cannot satisfy the mid-word assertion. The index-201 note above refers
+        # to the old cap and is kept as the record of why the original fixture held.
         #
         # THE CAP IS DERIVED, NOT WRITTEN AS 200 (#839 r2 nit 2). `_ctx` calls
         # `_build_context` without a limit, so this fixture is coupled to that

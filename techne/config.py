@@ -186,7 +186,7 @@ class HookConfig:
     #: the hook CLAMPS to 499 (`_SEARCH_ROW_CEILING - 1`), because unclamped, a cap
     #: at or above 500 makes a severed row look whole to `_truncate_for_injection`
     #: and suppresses both the `…` and the header notice.
-    per_turn_recall_chars: int = 200
+    per_turn_recall_chars: int = 450
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable
     # (it left no trace before). The SessionStart tier-0 block is logged the same
@@ -919,7 +919,7 @@ class Config:
                 codex_edit_rail_limit=int(h.get("codex_edit_rail_limit", 10)),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
-                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 200)),
+                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 450)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
                 per_turn_recall_floor_vec_distance=(
                     float(h["per_turn_recall_floor_vec_distance"])

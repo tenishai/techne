@@ -5,6 +5,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- `hooks.per_turn_recall_chars` now defaults to **450**, was 200 (#826). Measured over
+  2,468 live injectable knowledge rows with a median length of 476 characters: the old
+  default severed 2,442 of them (98%), the new one severs 1,305 (52%). A severed row
+  carried no marker distinguishing it from a complete one, so a multi-step procedure
+  arrived as its own title. Costs roughly 312 extra tokens per turn on a five-row push.
+  The cap remains configurable; `search()` still pre-truncates at 500 (#842), so no
+  default above 499 can be honoured — now pinned by a test.
+
 ## [0.16.1] — 2026-08-30
 
 ### Upgrading
