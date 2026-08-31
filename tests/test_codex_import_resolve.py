@@ -1038,8 +1038,12 @@ class TestTheReExportIdiomSurvives:
     RENAMING alias and false of `from .m import Thing as Thing`, the idiom a
     module uses to mark a public re-export for type checkers. The bound name IS
     the original, so the lookup asks the right question. Measured on this repo:
-    58 such imports against 30 genuine renames, so the indiscriminate refusal
-    cost 58 real resolutions to close a defect that only renames cause.
+    62 such imports (all in `techne/`, all absolute) against 189 genuine renames,
+    and an A/B on one tree with the single line toggled puts the cost of the
+    indiscriminate refusal at 4 resolutions — 5,955 with the rule, 5,951 without.
+    Counted by `ast`, not by regex: an earlier annotation said 58 and 30, from a
+    regex that missed multi-name and multi-line imports, and it contradicted the
+    architecture card in the same commit.
     """
 
     _db = TestExternalNeedsPositiveEvidence._db
@@ -1075,6 +1079,13 @@ class TestTheReExportIdiomSurvives:
                 ),
             },
         )
+        conn = sqlite3.connect(db)
+        decoy = conn.execute(
+            "SELECT id FROM symbols WHERE file='pkg/util.py' AND name='helper'"
+        ).fetchone()
+        conn.close()
+        assert decoy, "the same-named decoy was not indexed; this fixture tests nothing"
+
         resolve_edges_by_import(sqlite3.connect(db))
         assert self._calls(db)["helper"][1] is None
 
@@ -1181,3 +1192,99 @@ def test_a_node_builtin_is_not_a_nested_repo_directory(tmp_path):
     finally:
         conn.close()
     assert to_symbol is None, f"bound a node builtin to a nested repo file: {to_symbol}"
+
+
+@pytest.mark.parametrize(
+    "specifier,filename",
+    [
+        ("fs/promises", "web/fs/promises.ts"),
+        ("timers/promises", "web/timers/promises.ts"),
+        ("stream/web", "web/stream/web.ts"),
+        ("util/types", "web/util/types.ts"),
+        ("path/posix", "web/path/posix.ts"),
+        ("node:fs/promises", "web/fs/promises.ts"),
+    ],
+)
+def test_a_node_builtin_SUBPATH_is_not_a_repo_file(tmp_path, specifier, filename):
+    """Prudence r5 Important 1 — r4's guard survived in the subpath form.
+
+    `_NODE_BUILTINS` holds bare roots, so `fs/promises` matched nothing and bound
+    to a same-named `web/fs/promises.ts` — a false `import_resolved`, the status
+    `include_inferred=False` reports as `exact`. `import { readFile } from
+    'fs/promises'` is about as ordinary as node TypeScript gets.
+
+    Nothing covered the subpath form in EITHER direction, so the rule was
+    flippable in silence; that is why this is parametrized over five builtins
+    rather than asserting the one case. `node:fs/promises` is included because it
+    already landed `external` before the fix, but by accident — the prefix
+    defeats path matching, so it reached the evidence gate instead of the guard.
+    """
+    pytest.importorskip("tree_sitter_typescript")
+    target = tmp_path / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("export function thing() { return 1; }\n")
+    (tmp_path / "web" / "app.ts").write_text(
+        f"import {{ thing }} from '{specifier}';\n"
+        "export function go() { return thing(); }\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in (filename, "web/app.ts"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    assert conn.execute(
+        "SELECT 1 FROM symbols WHERE file=? AND name='thing'", (filename,)
+    ).fetchone(), "the shadowing file was not indexed; this fixture tests nothing"
+    conn.close()
+
+    resolve_edges_by_import(sqlite3.connect(db))
+    conn = sqlite3.connect(db)
+    try:
+        to_symbol = conn.execute(
+            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='thing'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert to_symbol is None, f"bound the builtin {specifier!r} to {to_symbol}"
+
+
+def test_a_workspace_package_still_resolves(tmp_path):
+    """Prudence r5 Important 3 — the guard must stay scoped to BUILTINS.
+
+    pnpm/npm/yarn workspaces symlink `node_modules/ui` to `packages/ui` with no
+    tsconfig at all, so node resolves a bare `'ui'` for real. Refusing every bare
+    specifier — the broader rule an earlier comment here argued for — would have
+    deleted this, and it is the monorepo case the card advertises.
+    """
+    pytest.importorskip("tree_sitter_typescript")
+    (tmp_path / "packages" / "ui").mkdir(parents=True)
+    (tmp_path / "packages" / "ui" / "index.ts").write_text(
+        "export function Button() { return 1; }\n"
+    )
+    (tmp_path / "apps" / "web").mkdir(parents=True)
+    (tmp_path / "apps" / "web" / "app.ts").write_text(
+        "import { Button } from 'ui';\nexport function go() { return Button(); }\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("packages/ui/index.ts", "apps/web/app.ts"):
+        index_file(db, tmp_path / rel, tmp_path)
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        to_symbol = conn.execute(
+            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='Button'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert to_symbol == "packages/ui/index.ts::Button::function::1", (
+        f"a workspace package stopped resolving: {to_symbol}"
+    )

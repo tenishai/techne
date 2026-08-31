@@ -306,9 +306,13 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
                         # is how a module marks a name as public re-export for
                         # type checkers) binds the SAME name it imported, so the
                         # lookup asks the right question and the binding is a
-                        # true fact. Dropping it cost 58 real resolutions on this
-                        # repo — measured, after an earlier version of this fix
-                        # refused every alias indiscriminately.
+                        # true fact. Dropping it cost 4 resolutions on this repo
+                        # across 62 such imports — measured by A/B on one tree
+                        # with this one line toggled, after an earlier version of
+                        # this fix refused every alias indiscriminately. (An
+                        # earlier annotation here said 58 resolutions; that was a
+                        # regex count of imports, not an A/B of resolutions, and
+                        # it disagreed with the card in the same commit.)
                         alias = alias_node.text.decode("utf-8", errors="replace")
                         orig_node = child.child_by_field_name("name")
                         orig = None

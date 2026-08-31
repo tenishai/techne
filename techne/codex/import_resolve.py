@@ -199,7 +199,16 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
     builtin = (
         root in sys.stdlib_module_names
         if language == "python"
-        else module in _NODE_BUILTINS or module.removeprefix("node:") in _NODE_BUILTINS
+        # THE ROOT, NOT THE WHOLE SPECIFIER (Prudence r5 Important 1). `_NODE_BUILTINS`
+        # holds bare roots, so `fs/promises` — about as ordinary as node TypeScript
+        # gets — matched nothing and bound to a same-named `web/fs/promises.ts`, a
+        # false `import_resolved`. `timers/promises`, `stream/web`, `util/types` and
+        # `path/posix` are the same shape. The Python branch had taken the root since
+        # r3; the TS branch got r4's argument without r4's implementation.
+        # The `node:` prefix is stripped BEFORE splitting, and only once: a bare
+        # `module in _NODE_BUILTINS` disjunct was dead, since no member carries the
+        # prefix (r5 nit 4).
+        else module.removeprefix("node:").split("/", 1)[0] in _NODE_BUILTINS
     )
     if builtin:
         # A NESTED FILE NEVER SHADOWS THE STDLIB (Prudence r3 Important 2).
@@ -210,12 +219,17 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
         # module it shadows is the archetype, and `logging.py`, `json.py`,
         # `types.py` and `csv.py` are ordinary file names.
         #
-        # THE SAME RULE ON THE TYPESCRIPT SIDE, and there it is stronger: a bare
-        # specifier NEVER reaches a nested repo directory without a tsconfig
-        # `baseUrl`/`paths` this resolver does not read, so `import { promisify }
-        # from 'util'` binding to `web/util/index.ts` was a guess in every case,
-        # not only the shadowing one. This repo has no TypeScript at all, so no
-        # measurement here can ever see it — the same blind spot that hid r1's
+        # THE SAME RULE ON THE TYPESCRIPT SIDE, SCOPED TO BUILTINS AND NO WIDER
+        # (Prudence r5 Important 3). An earlier version of this comment argued
+        # that a bare specifier can never reach a nested repo directory, which is
+        # false and dangerously so: pnpm/npm/yarn WORKSPACES symlink
+        # `node_modules/ui` to `packages/ui` with no tsconfig at all, so
+        # `import { Button } from 'ui'` resolving to `packages/ui/index.ts` is
+        # CORRECT — and it is the monorepo case this card advertises. Acting on
+        # the broader rule would delete that. What is guessed is only the case
+        # where the specifier names a BUILTIN, because nothing in the repo can be
+        # `fs` or `util`. This repo has no TypeScript at all, so no measurement
+        # here can ever see any of it — the same blind spot that hid r1's
         # Criticals, one language over.
         #
         # ONLY THE SUFFIX BRANCH IS GUARDED. An EXACT match is a genuine
@@ -258,7 +272,18 @@ def _nested_symbol_ids(conn) -> frozenset[str]:
 
     Identical spans exclude each other, deliberately: two symbols claiming the
     same lines is a state this cannot rank, and refusing both fails toward
-    silence, which is the trade this file makes everywhere else.
+    silence, which is the trade this file makes everywhere else. NOTE that TS
+    sibling declarators are RIVALS ONLY BY ACCIDENT of the `.scm` — it captures
+    the `lexical_declaration`, so `export const a = …, b = …` gives both names
+    the parent's span and both are refused. Filed rather than worked around
+    here, because the fix belongs in the query.
+
+    A NULL OR MALFORMED SPAN FAILS TOWARD SPEECH, and it is the one place here
+    that does (Prudence r5 finding 8): such a row is dropped, so it is neither
+    refusable nor able to shield what it encloses. Unreachable today —
+    `_parse_file` always writes a span and `codegraph.add_symbol` has no
+    production caller — which is the same footing as the NULL-language case
+    above.
     """
     by_file: dict[str, list[tuple[int, int, str]]] = {}
     for sid, file, span in conn.execute(
