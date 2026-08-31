@@ -61,6 +61,50 @@ def _module_candidates(dotted: str) -> tuple[str, ...]:
     return (f"{stem}.py", f"{stem}/__init__.py", f"{stem}.ts", f"{stem}/index.ts")
 
 
+def _top_level_roots(known_files) -> frozenset[str]:
+    """First path segment of every indexed file — the repo's top-level names.
+
+    This is the POSITIVE EVIDENCE that makes an `external` verdict sound. If a
+    module's root segment names nothing at the top of this repo, then no layout
+    this resolver understands could place it here, and "the callee is not in
+    this repo" is a fact rather than a failure to look.
+    """
+    return frozenset(f.split("/", 1)[0] for f in known_files)
+
+
+def _match_paths(module: str, known_files, memo: dict) -> tuple[list[str], bool]:
+    """Indexed files a dotted module could be, exact match first.
+
+    SUFFIX MATCHING EXISTS FOR `src/` LAYOUTS (techne#679, Prudence r1 Critical
+    3). The resolver originally assumed dotted module path == repo-relative
+    path, which holds for a flat layout like techne's own and fails for the
+    other half of the Python ecosystem: `from mypkg.util import helper` in a
+    repo that stores it at `src/mypkg/util.py` matched nothing and the edge was
+    asserted `external` while the file sat in the index.
+
+    AMBIGUITY IS REFUSED, NOT GUESSED. If two indexed files both end with the
+    candidate path, this repo has two plausible callees and picking one is the
+    name-matching behaviour the `external`/`unresolved` split exists to avoid.
+
+    Returns (paths, ambiguous). THE FLAG MATTERS AS MUCH AS THE PATHS: two
+    matches mean the module IS in-repo-shaped, we simply cannot say which file —
+    so the caller must not fall through to `external`. Collapsing both cases to
+    an empty list made the ambiguous repo report a false `external`, which the
+    ambiguity test caught.
+    """
+    if module in memo:
+        return memo[module]
+    cands = _module_candidates(module)
+    exact = [p for p in cands if p in known_files]
+    if exact:
+        memo[module] = (exact, False)
+        return memo[module]
+    hits = {f for c in cands for f in known_files if f.endswith("/" + c)}
+    out = (list(hits), False) if len(hits) == 1 else ([], len(hits) > 1)
+    memo[module] = out
+    return out
+
+
 def resolve_edges_by_import(conn) -> dict:
     """Resolve call edges through recorded import bindings. Returns a report.
 
@@ -83,6 +127,9 @@ def resolve_edges_by_import(conn) -> dict:
 
     resolved = external = 0
     unresolved_no_binding = unresolved_in_repo_no_symbol = 0
+    unresolved_in_repo_no_path = 0
+    roots = _top_level_roots(known_files)
+    path_memo: dict[str, list[str]] = {}
 
     rows = conn.execute(
         f"""SELECT e.rowid, s.file, e.to_name
@@ -99,10 +146,20 @@ def resolve_edges_by_import(conn) -> dict:
             unresolved_no_binding += 1
             continue
 
-        paths = [p for p in _module_candidates(module) if p in known_files]
+        paths, ambiguous = _match_paths(module, known_files, path_memo)
         if not paths:
-            # Bound to something we have not indexed: stdlib, a dependency, or a
-            # file excluded from the walk. Either way no symbol here can be it.
+            # `external` IS A FACT AND NEEDS POSITIVE EVIDENCE (Prudence r1
+            # Critical 2 & 3). Not finding a path is not evidence — the
+            # module-path-to-file-path mapping can fail for reasons of LAYOUT,
+            # and asserting `external` on that failure produced rows claiming
+            # no symbol in this repo could be a callee that was sitting in the
+            # index. The evidence is the root segment: if this repo has nothing
+            # at the top level by that name, the callee genuinely is not here.
+            # Anything in-repo-shaped that we simply could not place stays
+            # `unresolved`, which is the honest word for "we could not tell".
+            if ambiguous or module.split(".", 1)[0] in roots:
+                unresolved_in_repo_no_path += 1
+                continue
             conn.execute(
                 "UPDATE edges SET resolution_status = 'external' WHERE rowid = ?", (rowid,)
             )
@@ -131,6 +188,7 @@ def resolve_edges_by_import(conn) -> dict:
         "external": external,
         "unresolved_no_binding": unresolved_no_binding,
         "unresolved_in_repo_no_symbol": unresolved_in_repo_no_symbol,
+        "unresolved_in_repo_no_path": unresolved_in_repo_no_path,
     }
     log.debug("codex_import_resolve %s", report)
     return report

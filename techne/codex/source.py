@@ -295,13 +295,28 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
     elif language == "typescript":
         # import { X, Y } from 'z'; import X from 'z'; import * as X from 'z'
         # EVERY TS import form carries its source, unlike Python — there is no
-        # module-only form, so `module` is set for all of them. The source is a
-        # quoted string node; the quotes are stripped so it matches the dotted
+        # module-only form. The source is a quoted string node; the quotes are
+        # stripped so a BARE specifier ('react', 'pkg/sub') matches the dotted
         # shape Python produces and one resolver can read both.
+        #
+        # A RELATIVE OR ALIASED SPECIFIER IS LEFT UNBOUND, deliberately, and for
+        # the identical reason `from . import x` is (techne#679, Prudence r1
+        # Critical 2). './util' is a path relative to the IMPORTING FILE, and
+        # this parser does not have that file's position; '@/x' is a tsconfig
+        # path alias whose meaning lives in a config this parser does not read.
+        # Passing either through as a module is worse than passing nothing:
+        # `_module_candidates` maps '.' to '/', so './util' becomes '//util.ts',
+        # which matches no repo-relative path and lands the edge in `external` —
+        # a row asserting as FACT that no symbol in this repo can be the callee,
+        # about a file sitting in the index. Relative specifiers are how
+        # essentially every in-repo TS import is written, so that mistake is the
+        # common case, not the edge case. NULL here leaves the edge honestly
+        # `unresolved` until something can resolve it properly.
         module = None
         src = node.child_by_field_name("source")
         if src is not None:
-            module = src.text.decode("utf-8", errors="replace").strip("\"'`")
+            spec = src.text.decode("utf-8", errors="replace").strip("\"'`")
+            module = None if spec.startswith((".", "@")) else spec
         for child in node.children:
             if child.type == "import_clause":
                 for sub in child.children:

@@ -75,6 +75,66 @@ class TestImportParsing:
         assert got == [("rel", None)]
 
 
+def _ts_node(src: str, kind: str = "import_statement"):
+    import tree_sitter_typescript as tst
+    from tree_sitter import Language, Parser
+
+    tree = Parser(Language(tst.language_typescript())).parse(src.encode())
+    for n in tree.root_node.children:
+        if n.type == kind:
+            return n
+    raise AssertionError(f"no {kind} in {src!r}")
+
+
+class TestTypeScriptImportParsing:
+    """The TS branch of `_extract_import_names` — Prudence r1 Important 6.
+
+    Every case in `TestImportParsing` is Python. The TS `module` capture is new,
+    does its own quote-stripping, and is where the false-`external` of Critical 2
+    lived. It went in unwitnessed.
+    """
+
+    @pytest.mark.parametrize(
+        "src,expected",
+        [
+            ("import { a, b } from 'pkg';", [("a", "pkg"), ("b", "pkg")]),
+            ("import X from 'pkg';", [("X", "pkg")]),
+            ("import * as ns from 'pkg';", [("ns", "pkg")]),
+            ("import { a } from \"pkg/sub\";", [("a", "pkg/sub")]),
+        ],
+    )
+    def test_a_bare_specifier_is_carried_with_its_quotes_stripped(self, src, expected):
+        pytest.importorskip("tree_sitter_typescript")
+        assert _extract_import_names(_ts_node(src), "typescript") == expected
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "import { helper } from './util';",
+            "import { y } from '../lib/a';",
+            "import { x } from '@/components/X';",
+        ],
+    )
+    def test_a_relative_or_aliased_specifier_is_left_unbound(self, src):
+        """The Critical-2 fix, at the parser.
+
+        A relative specifier is a path relative to the IMPORTING FILE and an
+        `@/` specifier is a tsconfig alias; this parser has neither the file's
+        position nor the config. Passing them through as modules sent every
+        in-repo TS call edge to `external` — a false fact — because
+        `_module_candidates` maps '.' to '/' and './util' becomes '//util.ts'.
+        """
+        pytest.importorskip("tree_sitter_typescript")
+        names = _extract_import_names(_ts_node(src), "typescript")
+        assert names, f"no name extracted from {src!r}"
+        assert all(module is None for _, module in names), names
+
+    def test_a_side_effect_import_binds_nothing(self):
+        """`import 'x';` introduces no name, so there is nothing to bind."""
+        pytest.importorskip("tree_sitter_typescript")
+        assert _extract_import_names(_ts_node("import 'side-effect';"), "typescript") == []
+
+
 class TestResolution:
     @pytest.fixture
     def repo(self, tmp_path):
@@ -150,17 +210,34 @@ class TestResolution:
         assert second["resolved"] == 0, "the pass must be idempotent on an unchanged index"
 
     def test_an_already_resolved_edge_is_skipped(self, repo):
-        """Guard one of two: a row with `to_symbol` set is never re-examined."""
+        """Guard one of two: a row with `to_symbol` set is never re-examined.
+
+        THE STATUS IS LEFT `unresolved` ON PURPOSE, and that is the whole test.
+        An earlier version set `resolution_status='lsp'` AND `to_symbol`, so
+        `_OVERWRITABLE` excluded the row on status alone and the `to_symbol IS
+        NULL` clause was never load-bearing — deleting that clause left the
+        suite green. Prudence r1 Important 4, caught by exactly the mutation
+        this file already documents once, one guard over. The two tests are
+        split so each isolates a single clause; splitting them is not enough if
+        both halves still set both columns.
+        """
         conn = sqlite3.connect(repo)
         conn.execute(
-            "UPDATE edges SET resolution_status='lsp', to_symbol='FAKE_LSP_ID' "
+            "UPDATE edges SET to_symbol='ALREADY_BOUND' "
             "WHERE kind='call' AND to_name='helper'"
         )
         conn.commit()
+        assert conn.execute(
+            "SELECT resolution_status FROM edges WHERE kind='call' AND to_name='helper'"
+        ).fetchone() == ("unresolved",), (
+            "the fixture must leave the status OVERWRITABLE or _OVERWRITABLE "
+            "excludes the row and this tests guard two again"
+        )
+
         resolve_edges_by_import(conn)
         assert conn.execute(
             "SELECT resolution_status, to_symbol FROM edges WHERE kind='call' AND to_name='helper'"
-        ).fetchone() == ("lsp", "FAKE_LSP_ID")
+        ).fetchone() == ("unresolved", "ALREADY_BOUND"), "guard one did not hold"
 
     def test_a_non_unresolved_status_is_skipped_even_with_a_null_symbol(self, repo):
         """Guard two of two, and it is the one `_OVERWRITABLE` actually carries.
@@ -222,3 +299,236 @@ def test_a_pre_v4_database_gains_the_column(tmp_path):
     assert "to_module" in cols
     _codex_v3_to_v4(conn)  # re-entrant
     assert "to_module" in {r[1] for r in conn.execute("PRAGMA table_info(edges)")}
+    conn.close()
+
+
+def test_the_v4_step_is_wired_into_the_migration_chain(tmp_path):
+    """The step must be REACHED, not merely correct — Prudence r1 Important 5.
+
+    The test above calls `_codex_v3_to_v4` directly, so it passes against a
+    migration that was never registered in `_run_codex_steps`. Deleting the
+    `if current < 4:` entry left the FULL suite green, which makes this the only
+    test that can catch it — the same reasoning `docs/arch/codex.md` and
+    `tests/test_codex_freshness.py` already give for the chain in general.
+
+    The failure it guards is silent where it matters most. Through `techne codex
+    index` a missing column surfaces as a non-zero exit (#610 doing its job),
+    but through the reindex-on-edit rail `index_file` swallows `IndexFailure`
+    and returns 0 — so every edit quietly stops entering the graph, with the
+    widened INSERT raising against a table that never gained the column.
+    """
+    from techne.core.codex import CODEX_VERSION, _apply_codex_migration
+
+    db = tmp_path / "pre_v4.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        # `symbols` MUST EXIST. `_apply_codex_migration` treats a db without it
+        # as fresh, stamps the version and returns WITHOUT running any step — so
+        # a fixture of `edges` alone reaches the assertion below with the version
+        # already at CODEX_VERSION and no column, which is how the first draft of
+        # this test failed against correct code.
+        """CREATE TABLE symbols (
+               id TEXT PRIMARY KEY, file TEXT NOT NULL, name TEXT NOT NULL,
+               kind TEXT NOT NULL, file_hash TEXT);
+           CREATE TABLE edges (
+               from_symbol TEXT NOT NULL, to_name TEXT NOT NULL, to_symbol TEXT,
+               kind TEXT NOT NULL, src_file_hash TEXT,
+               resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+               PRIMARY KEY (from_symbol, to_name, kind));
+           PRAGMA user_version = 3;"""
+    )
+    conn.commit()
+    assert "to_module" not in {r[1] for r in conn.execute("PRAGMA table_info(edges)")}, (
+        "fixture is not pre-v4; this test would prove nothing"
+    )
+    conn.close()
+
+    _apply_codex_migration(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)")}
+        assert "to_module" in cols, (
+            "the v3->v4 step is not registered in the migration chain; a db "
+            "written before v4 never gains the column"
+        )
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CODEX_VERSION
+    finally:
+        conn.close()
+
+
+class TestExternalNeedsPositiveEvidence:
+    """`external` is asserted as a FACT, so it must not be a synonym for "no match".
+
+    Prudence r1 Criticals 2 and 3, both demonstrated with two-file fixtures: a
+    TypeScript relative import and a `src/`-layout Python import each produced a
+    row claiming no symbol in this repo could be the callee, about a file that
+    was sitting in the index. techne is flat-layout Python, which is exactly why
+    the PR's own measurement could not surface either one.
+    """
+
+    def _db(self, tmp_path, files: dict[str, str]):
+        for rel, body in files.items():
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body)
+        db = tmp_path / "codex.db"
+        c = sqlite3.connect(db)
+        c.executescript(CODEX_SCHEMA)
+        c.commit()
+        c.close()
+        for rel in files:
+            index_file(db, tmp_path / rel, tmp_path)
+        return db
+
+    def _calls(self, db):
+        conn = sqlite3.connect(db)
+        try:
+            return {
+                r[0]: (r[1], r[2])
+                for r in conn.execute(
+                    "SELECT to_name, resolution_status, to_symbol FROM edges WHERE kind='call'"
+                )
+            }
+        finally:
+            conn.close()
+
+    def test_a_src_layout_import_resolves_instead_of_claiming_external(self, tmp_path):
+        """PRUDENCE r1 CRITICAL 3. `src/mypkg/util.py` is indexed and is the callee."""
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "src/mypkg/__init__.py": "",
+                "src/mypkg/util.py": "def helper():\n    return 1\n",
+                "src/mypkg/app.py": (
+                    "from mypkg.util import helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        rep = resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["helper"]
+        assert status == "import_resolved", (
+            f"a file in the index was not found: {status} (report={rep})"
+        )
+        assert to_symbol is not None
+
+    def test_a_ts_relative_import_is_not_asserted_external(self, tmp_path):
+        """PRUDENCE r1 CRITICAL 2. './util' is a path, not a dotted module.
+
+        It stays `unresolved` rather than resolving: this pass still cannot
+        place a specifier relative to the importing file. `unresolved` is the
+        honest word for that; `external` was a false fact.
+        """
+        pytest.importorskip("tree_sitter_typescript")
+        db = self._db(
+            tmp_path,
+            {
+                "src/util.ts": "export function helper() { return 1; }\n",
+                "src/app.ts": (
+                    "import { helper } from './util';\n"
+                    "export function run() { return helper(); }\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, _ = self._calls(db)["helper"]
+        assert status != "external", (
+            "a relative TS specifier was asserted as out-of-repo while src/util.ts "
+            "sits in the index"
+        )
+
+    def test_a_genuinely_out_of_repo_module_is_still_external(self, tmp_path):
+        """The narrowing must not cost the status its meaning.
+
+        `pathlib` names nothing at the top level of this repo, which is the
+        positive evidence `external` requires.
+        """
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {"app.py": "from pathlib import Path\n\n\ndef run():\n    return Path('/tmp')\n"},
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        assert self._calls(db)["Path"][0] == "external"
+
+    def test_an_in_repo_shaped_module_we_cannot_place_stays_unresolved(self, tmp_path):
+        """Root segment names a real top-level package, but no file matches.
+
+        This is the case the old code called `external`. It is not evidence of
+        anything except that this resolver could not map the path.
+        """
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "mypkg/__init__.py": "",
+                "mypkg/app.py": (
+                    "from mypkg.nowhere import ghost\n\n\ndef run():\n    return ghost()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        assert self._calls(db)["ghost"][0] == "unresolved"
+
+    def test_two_candidates_are_refused_rather_than_guessed(self, tmp_path):
+        """Suffix matching must not pick a winner when the repo offers two."""
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "a/mypkg/util.py": "def helper():\n    return 1\n",
+                "b/mypkg/util.py": "def helper():\n    return 2\n",
+                "a/app.py": (
+                    "from mypkg.util import helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["helper"]
+        assert to_symbol is None, "picked one of two plausible callees"
+        assert status == "unresolved"
+
+
+def test_a_rebound_name_resolves_to_the_LAST_import(tmp_path):
+    """A shadowed import replaces its module rather than being skipped.
+
+    Prudence r1 nit 7: `source.py`'s nine-line comment argues this correctly and
+    nothing witnessed it — reverting the replace to first-write-wins left the
+    suite green. The pattern is routine, not exotic:
+
+        try:    from ujson import loads
+        except ImportError: from json import loads
+
+    The edges table's PRIMARY KEY is (from_symbol, to_name, kind), so both
+    imports collide on one row. After `from a import x` then `from b import x`
+    the name `x` refers to b's, and recording a's would bind every call to the
+    wrong file — with `import_resolved` asserting it as fact.
+    """
+    pytest.importorskip("tree_sitter_python")
+    (tmp_path / "a.py").write_text("def x():\n    return 1\n")
+    (tmp_path / "b.py").write_text("def x():\n    return 2\n")
+    (tmp_path / "app.py").write_text(
+        "from a import x\nfrom b import x\n\n\ndef run():\n    return x()\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("a.py", "b.py", "app.py"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        to_symbol = conn.execute(
+            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='x'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert to_symbol is not None, "the shadowed call did not resolve at all"
+    assert to_symbol.startswith("b.py"), (
+        f"resolved to the SHADOWED import instead of the live one: {to_symbol}"
+    )
