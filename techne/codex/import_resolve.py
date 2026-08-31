@@ -59,6 +59,24 @@ _OVERWRITABLE = ("unresolved",)
 #: a module name absent in language A and present in language B, which `api`,
 #: `utils`, `types` and `config` make ordinary in a full-stack repo indexed with
 #: the default `--language python,typescript`.
+#: Node's builtin modules — the TypeScript analogue of `sys.stdlib_module_names`
+#: (Prudence r4 Important 3). `import { x } from 'util'` in `web/app.ts` is a BARE
+#: specifier: node and `moduleResolution: node` look in `web/node_modules`, then
+#: `node_modules`, then upward, and never at `web/util/`. Reaching a nested repo
+#: directory from a bare specifier needs an explicit `baseUrl`/`paths` in
+#: tsconfig, which this resolver does not read. And these names — `util`, `path`,
+#: `types`, `stream`, `events` — are among the most ordinary directory names in a
+#: TS repo, so the collision is likely rather than exotic. Hardcoded rather than
+#: imported because there is no `sys.stdlib_module_names` for node; the list is
+#: node 22's, and a name missing from it costs a false resolution, not a crash.
+_NODE_BUILTINS = frozenset(
+    """assert async_hooks buffer child_process cluster console constants crypto
+    dgram diagnostics_channel dns domain events fs http http2 https inspector
+    module net os path perf_hooks process punycode querystring readline repl
+    stream string_decoder sys timers tls trace_events tty url util v8 vm wasi
+    worker_threads zlib""".split()
+)
+
 _CANDIDATE_SHAPES: dict[str, tuple[str, ...]] = {
     "python": ("{stem}.py", "{stem}/__init__.py"),
     "typescript": ("{stem}.ts", "{stem}/index.ts"),
@@ -177,7 +195,13 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
         out = exact if len(exact) == 1 else []
         memo[key] = out
         return out
-    if language == "python" and module.split(".", 1)[0] in sys.stdlib_module_names:
+    root = module.split(".", 1)[0]
+    builtin = (
+        root in sys.stdlib_module_names
+        if language == "python"
+        else module in _NODE_BUILTINS or module.removeprefix("node:") in _NODE_BUILTINS
+    )
+    if builtin:
         # A NESTED FILE NEVER SHADOWS THE STDLIB (Prudence r3 Important 2).
         # `myapp/app.py` doing `from logging import getLogger` means the stdlib:
         # `myapp` is a package, not a `sys.path` entry, so Python could not reach
@@ -186,10 +210,21 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
         # module it shadows is the archetype, and `logging.py`, `json.py`,
         # `types.py` and `csv.py` are ordinary file names.
         #
+        # THE SAME RULE ON THE TYPESCRIPT SIDE, and there it is stronger: a bare
+        # specifier NEVER reaches a nested repo directory without a tsconfig
+        # `baseUrl`/`paths` this resolver does not read, so `import { promisify }
+        # from 'util'` binding to `web/util/index.ts` was a guess in every case,
+        # not only the shadowing one. This repo has no TypeScript at all, so no
+        # measurement here can ever see it — the same blind spot that hid r1's
+        # Criticals, one language over.
+        #
         # ONLY THE SUFFIX BRANCH IS GUARDED. An EXACT match is a genuine
         # top-level shadow — a repo-root `logging.py` IS what `import logging`
-        # resolves to when the root is on `sys.path` — so it is left to resolve
-        # above. This is the mirror of the vendoring boundary below: there, a
+        # resolves to when the root is on `sys.path` (running from the root, or
+        # from tests; an installed wheel puts site-packages AFTER the stdlib, so
+        # a shipped top-level `logging.py` would not shadow — the guard fails
+        # toward the plausible answer under both readings) — so it is left to
+        # resolve above. This is the mirror of the vendoring boundary below: there, a
         # deliberate vendored copy is what the reader wants; here, nothing was
         # vendored and a name merely collided.
         memo[key] = []
@@ -202,6 +237,47 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
     out = list(hits) if len(hits) == 1 else []
     memo[key] = out
     return out
+
+
+def _nested_symbol_ids(conn) -> frozenset[str]:
+    """Symbols enclosed by another symbol in the same file — i.e. NOT module-level.
+
+    THE PROMISE THIS KEEPS (Prudence r4 Important 2). The module docstring says a
+    callee that is "simply not a top-level symbol" stays `unresolved`, and the
+    kind allow-list only expresses half of that: a method is excluded, but a
+    function defined INSIDE another function is `kind='function'` too, because
+    `_is_method_python` looks for a class body and a closure has none. So
+    `from pkg.util import helper` bound to a `helper` nested in `outer` — which
+    raises ImportError in Python — was stamped `import_resolved`, and reported
+    by `include_inferred=False` as `exact`. Zero occurrences on this repo, like
+    the stdlib case; it is the residual of the Critical r3 closed.
+
+    KIND IS NOT THE DISCRIMINATOR HERE, NESTING IS, and nesting is already in the
+    index: `span` is "start:end" line numbers, so a symbol is module-level when no
+    other non-module symbol in its file encloses it. No schema change needed.
+
+    Identical spans exclude each other, deliberately: two symbols claiming the
+    same lines is a state this cannot rank, and refusing both fails toward
+    silence, which is the trade this file makes everywhere else.
+    """
+    by_file: dict[str, list[tuple[int, int, str]]] = {}
+    for sid, file, span in conn.execute(
+        "SELECT id, file, span FROM symbols WHERE kind != 'module' AND span IS NOT NULL"
+    ):
+        head, _, tail = str(span).partition(":")
+        try:
+            by_file.setdefault(file, []).append((int(head), int(tail), sid))
+        except ValueError:
+            continue
+    nested: set[str] = set()
+    for rows in by_file.values():
+        # Quadratic per FILE, not per repo; files hold tens of symbols.
+        for a, b, sid in rows:
+            for a2, b2, sid2 in rows:
+                if sid2 != sid and a2 <= a and b2 >= b:
+                    nested.add(sid)
+                    break
+    return frozenset(nested)
 
 
 def resolve_edges_by_import(conn) -> dict:
@@ -228,6 +304,7 @@ def resolve_edges_by_import(conn) -> dict:
     unresolved_no_binding = unresolved_in_repo_no_symbol = 0
     unresolved_in_repo_no_path = 0
     in_repo_names = _in_repo_names(known_files)
+    nested_ids = _nested_symbol_ids(conn)
     path_memo: dict[tuple[str, str | None], list[str]] = {}
 
     rows = conn.execute(
@@ -282,12 +359,19 @@ def resolve_edges_by_import(conn) -> dict:
         #
         # This is also the case the module docstring already promises: a callee
         # that is re-exported or is not a top-level symbol stays `unresolved`.
-        hit = conn.execute(
+        # `interface` IS NOT IN THE LIST because the indexer never emits it
+        # (Prudence r4 nit 4): `source.py`'s entry condition tests only
+        # symbol.function / symbol.class / symbol.method, so an
+        # `interface_declaration` match is discarded. Listing it read as covering
+        # three kinds while covering two. Nothing is lost — an interface is not
+        # callable — but the extraction gap is filed separately.
+        candidates = conn.execute(
             "SELECT id FROM symbols WHERE file IN (%s) AND name = ? "
-            "AND kind IN ('function', 'class', 'interface') LIMIT 1"
+            "AND kind IN ('function', 'class')"
             % ",".join("?" * len(paths)),
             (*paths, to_name),
-        ).fetchone()
+        ).fetchall()
+        hit = next((row for row in candidates if row[0] not in nested_ids), None)
         if hit is None:
             unresolved_in_repo_no_symbol += 1
             continue

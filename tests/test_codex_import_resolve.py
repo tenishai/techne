@@ -783,6 +783,13 @@ class TestTheLookupCannotInventASymbol:
                 ),
             },
         )
+        conn = sqlite3.connect(db)
+        decoy = conn.execute(
+            "SELECT id FROM symbols WHERE file='pkg/util.py' AND name='helper'"
+        ).fetchone()
+        conn.close()
+        assert decoy, "the same-named decoy was not indexed; this fixture tests nothing"
+
         resolve_edges_by_import(sqlite3.connect(db))
         status, to_symbol = self._calls(db)["helper"]
         assert to_symbol is None, (
@@ -809,6 +816,15 @@ class TestTheLookupCannotInventASymbol:
                 ),
             },
         )
+        conn = sqlite3.connect(db)
+        decoy = conn.execute(
+            "SELECT kind FROM symbols WHERE file='pkg/util.py' AND name='helper'"
+        ).fetchone()
+        conn.close()
+        assert decoy and decoy[0] == "method", (
+            f"the fixture must produce a METHOD named helper or it tests nothing: {decoy}"
+        )
+
         resolve_edges_by_import(sqlite3.connect(db))
         status, to_symbol = self._calls(db)["helper"]
         assert to_symbol is None, f"bound a module-level import to a method: {to_symbol}"
@@ -979,7 +995,7 @@ def test_every_fallback_site_refuses_an_external_edge(tmp_path):
     cover the others.
     """
     pytest.importorskip("tree_sitter_python")
-    from techne.core.codegraph import callers, callees, reachable
+    from techne.core.codegraph import callees, callers, reachable
 
     (tmp_path / "local.py").write_text("class Path:\n    pass\n")
     (tmp_path / "app.py").write_text(
@@ -1012,3 +1028,156 @@ def test_every_fallback_site_refuses_an_external_edge(tmp_path):
     assert run_id not in [
         x["id"] for x in reachable(db, path_id, direction="in", max_depth=2)
     ], "reachable direction=in site"
+
+
+class TestTheReExportIdiomSurvives:
+    """`X as X` is not a rename — found by testing my own r3 fix, not by review.
+
+    r3 refused EVERY aliased import on the reasoning that "the original name is
+    recorded nowhere, so there is no true fact to lose". That is true of a
+    RENAMING alias and false of `from .m import Thing as Thing`, the idiom a
+    module uses to mark a public re-export for type checkers. The bound name IS
+    the original, so the lookup asks the right question. Measured on this repo:
+    58 such imports against 30 genuine renames, so the indiscriminate refusal
+    cost 58 real resolutions to close a defect that only renames cause.
+    """
+
+    _db = TestExternalNeedsPositiveEvidence._db
+    _calls = TestExternalNeedsPositiveEvidence._calls
+
+    def test_x_as_x_still_resolves(self, tmp_path):
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/util.py": "def helper():\n    return 1\n",
+                "app.py": (
+                    "from pkg.util import helper as helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["helper"]
+        assert status == "import_resolved", "the re-export idiom stopped resolving"
+        assert to_symbol == "pkg/util.py::helper::function::1"
+
+    def test_x_as_y_still_refuses(self, tmp_path):
+        """The r3 defect must stay closed — this is the case that caused it."""
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/util.py": "def real():\n    return 1\n\n\ndef helper():\n    return 99\n",
+                "app.py": (
+                    "from pkg.util import real as helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        assert self._calls(db)["helper"][1] is None
+
+    def test_ts_x_as_x_keeps_its_module_and_a_rename_does_not(self):
+        pytest.importorskip("tree_sitter_typescript")
+        assert _extract_import_names(
+            _ts_node("import { helper as helper } from 'pkg';"), "typescript"
+        ) == [("helper", "pkg")]
+        assert _extract_import_names(
+            _ts_node("import { real as helper } from 'pkg';"), "typescript"
+        ) == [("helper", None)]
+
+
+def test_a_nested_function_is_not_a_module_level_symbol(tmp_path):
+    """Prudence r4 Important 2 — the residual of r3's Critical.
+
+    `kind IN ('function','class')` closes the METHOD case and the re-export case
+    but not the NESTING case: a function defined inside another function is
+    `kind='function'` too, because `_is_method_python` looks for a class body and
+    a closure has none. `from pkg.util import helper` for a `helper` nested in
+    `outer` raises ImportError in Python; the resolver called it
+    `import_resolved`, which `include_inferred=False` reports as `exact`.
+
+    Kind is not the discriminator here — nesting is, and it is already in the
+    index as `span`. Zero occurrences on this repo, like the stdlib case.
+    """
+    pytest.importorskip("tree_sitter_python")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "util.py").write_text(
+        "def outer():\n    def helper():\n        return 99\n    return helper\n"
+    )
+    (tmp_path / "app.py").write_text(
+        "from pkg.util import helper\n\n\ndef run():\n    return helper()\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("pkg/__init__.py", "pkg/util.py", "app.py"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    decoy = conn.execute(
+        "SELECT kind, span FROM symbols WHERE file='pkg/util.py' AND name='helper'"
+    ).fetchone()
+    conn.close()
+    assert decoy and decoy[0] == "function", (
+        f"the fixture must index the closure AS a function or it tests nothing: {decoy}"
+    )
+
+    resolve_edges_by_import(sqlite3.connect(db))
+    conn = sqlite3.connect(db)
+    try:
+        to_symbol = conn.execute(
+            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='helper'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert to_symbol is None, f"bound an import to a nested function: {to_symbol}"
+
+
+def test_a_node_builtin_is_not_a_nested_repo_directory(tmp_path):
+    """Prudence r4 Important 3 — the TypeScript half, and it is stronger there.
+
+    A BARE specifier never reaches a nested repo directory: node and
+    `moduleResolution: node` look in `node_modules` upward, never at `web/util/`.
+    Reaching one needs a tsconfig `baseUrl`/`paths` this resolver does not read,
+    so the suffix match was guessing on every bare specifier, not only shadowing
+    ones. `util`, `path`, `types`, `stream` are ordinary TS directory names.
+
+    This repo has no TypeScript at all, so no measurement here can ever see it —
+    the same blind spot that hid the r1 Criticals, one language over.
+    """
+    pytest.importorskip("tree_sitter_typescript")
+    (tmp_path / "web" / "util").mkdir(parents=True)
+    (tmp_path / "web" / "util" / "index.ts").write_text(
+        "export function promisify(f) { return f; }\n"
+    )
+    (tmp_path / "web" / "app.ts").write_text(
+        "import { promisify } from 'util';\nexport function go() { return promisify(1); }\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("web/util/index.ts", "web/app.ts"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    assert conn.execute(
+        "SELECT 1 FROM symbols WHERE file='web/util/index.ts' AND name='promisify'"
+    ).fetchone(), "the shadowing file was not indexed; this fixture tests nothing"
+    conn.close()
+
+    resolve_edges_by_import(sqlite3.connect(db))
+    conn = sqlite3.connect(db)
+    try:
+        to_symbol = conn.execute(
+            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='promisify'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert to_symbol is None, f"bound a node builtin to a nested repo file: {to_symbol}"

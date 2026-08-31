@@ -290,18 +290,36 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
                 elif child.type == "aliased_import":
                     alias_node = child.child_by_field_name("alias")
                     if alias_node:
-                        # AN ALIAS BINDS THE NAME BUT LOSES THE MODULE (techne#679,
-                        # Prudence r3 Critical 1). `to_name` is the name in the
-                        # IMPORTING scope, which is what a call site matches — but
-                        # the resolver then asks the source module for a symbol by
-                        # that same name, and after `from a.b import real as helper`
-                        # module `a.b` has no `helper`. Usually that misses and a
-                        # miss is free; when it HITS it binds the call to an
-                        # unrelated symbol and stamps it `import_resolved`, the
-                        # status that survives `include_inferred=False`.
-                        # The original name is recorded nowhere, so there is no
-                        # true fact to lose here — only a guess to decline.
-                        names.append((alias_node.text.decode("utf-8", errors="replace"), None))
+                        # A RENAMING ALIAS LOSES THE MODULE (techne#679, Prudence
+                        # r3 Critical 1). `to_name` is the name in the IMPORTING
+                        # scope, which is what a call site matches — but the
+                        # resolver then asks the source module for a symbol by
+                        # that same name, and after `from a.b import real as
+                        # helper` module `a.b` has no `helper`. Usually that
+                        # misses and a miss is free; when it HITS it binds the
+                        # call to an unrelated symbol and stamps it
+                        # `import_resolved`, the status that survives
+                        # `include_inferred=False`.
+                        #
+                        # `X as X` IS NOT A RENAME AND KEEPS ITS MODULE. The
+                        # re-export idiom (`from .m import Thing as Thing`, which
+                        # is how a module marks a name as public re-export for
+                        # type checkers) binds the SAME name it imported, so the
+                        # lookup asks the right question and the binding is a
+                        # true fact. Dropping it cost 58 real resolutions on this
+                        # repo — measured, after an earlier version of this fix
+                        # refused every alias indiscriminately.
+                        alias = alias_node.text.decode("utf-8", errors="replace")
+                        orig_node = child.child_by_field_name("name")
+                        orig = None
+                        if orig_node is not None:
+                            idents = [c for c in orig_node.children if c.type == "identifier"]
+                            orig = (
+                                idents[-1].text.decode("utf-8", errors="replace")
+                                if idents
+                                else orig_node.text.decode("utf-8", errors="replace")
+                            )
+                        names.append((alias, module if alias == orig else None))
                     else:
                         dotted = child.child_by_field_name("name")
                         if dotted:
@@ -347,13 +365,15 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
                                 nm = spec.child_by_field_name("name")
                                 target = alias or nm
                                 if target:
-                                    # Aliased -> no module, same as Python above.
-                                    names.append(
-                                        (
-                                            target.text.decode("utf-8", errors="replace"),
-                                            None if alias else module,
-                                        )
+                                    # A RENAMING alias drops the module; `X as X`
+                                    # keeps it. Same rule as Python above.
+                                    bound = target.text.decode("utf-8", errors="replace")
+                                    orig = (
+                                        nm.text.decode("utf-8", errors="replace")
+                                        if nm is not None
+                                        else bound
                                     )
+                                    names.append((bound, module if bound == orig else None))
                     elif sub.type == "namespace_import":
                         ident = next((c for c in sub.children if c.type == "identifier"), None)
                         if ident:
