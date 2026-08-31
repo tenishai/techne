@@ -5,6 +5,16 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- `context_injections` now records `rows_truncated` and `chars_dropped` for the
+  per-turn recall rail (#853). The table said what was injected and never what was
+  severed, so the char cap — a tuning knob — had no observable effect: raising or
+  lowering it could not be evaluated from data. Both columns arrive by lazy
+  migration on an existing db. The pair is deliberate; forty rows cut by five
+  characters and forty cut by four hundred are different worlds, and a count alone
+  cannot tell them apart.
+
 ### Changed
 
 - `hooks.per_turn_recall_chars` now defaults to **450**, was 200 (#826). Of the 2,468
