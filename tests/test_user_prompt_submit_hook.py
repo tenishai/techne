@@ -362,7 +362,6 @@ def test_filtered_row_is_not_logged_as_injected(home, monkeypatch, capsys):
     assert rows[0]["hit_count"] == len(ids)
 
 
-
 def test_the_two_declared_defaults_cannot_diverge():
     """`_build_context`'s signature default must equal the config default.
 
@@ -396,8 +395,10 @@ def test_the_shipped_default_is_actually_deliverable():
     freely, but never to a value the ceiling forbids.
 
     WHY 450 AND NOT 200: measured 2026-08-31 over 2,468 live injectable rows,
-    median length 476 chars. At 200 the rail severed 2,442 of them (98%); at 450
-    it severs 1,305 (52%). The old default cut a typical entry in half.
+    median length 476 chars. A 200-cap WOULD sever 2,442 of them (98%) where 450
+    severs 1,305 (52.88%) — properties of the STORE, not counts of rows the rail
+    cut; it injects five per turn by similarity, so it never severed 2,442 of
+    anything (#852 r1). The old default would have cut a typical entry in half.
     """
     from techne.config import HookConfig
     from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
@@ -407,6 +408,7 @@ def test_the_shipped_default_is_actually_deliverable():
         f"shipped default {default} is not deliverable: search() truncates at "
         f"{_SEARCH_ROW_CEILING}, so the cap must sit strictly below it"
     )
+
 
 def test_document_card_is_not_pushed(home, monkeypatch, capsys):
     """Arch cards are pull-only on THIS rail too (techne#561, decided 2026-08-13).
@@ -574,10 +576,15 @@ class TestInjectedTypeLabel:
         # unmeasured either way, so 52% is a bound, not a prediction. #853 adds the
         # telemetry that settles it.
         #
-        # Cost: UP TO ~312 tokens/turn on a five-row push — a ceiling, since only 52% of
-        # rows exceed 450 and boundary-seeking can cut at 60% of the budget. It is a
-        # PER-TURN cost and #808's schema block is PER-SESSION, so the two are only
-        # comparable multiplied out: ~12,500 tokens across a 40-turn session.
+        # Cost: ~312 tokens/turn TYPICAL on a five-row push, ~412 WORST CASE. 312 is
+        # the full-delta figure (5 × 250 / 4). It is NOT a ceiling, and calling it one
+        # was wrong (#852 r2): boundary-seeking floors at int(limit * 0.6), which
+        # applies to the OLD cap too — int(200*0.6)=120 against int(450*0.6)=270 — so
+        # it shrinks the old emission as well and WIDENS the worst-case delta to
+        # 450-120=330 chars/row, i.e. 5 × 330 / 4 = 412 tokens. Counting the floor
+        # against the new cap only was the same overstatement r1 raised, reintroduced
+        # by the word chosen to fix it. PER-TURN against #808's PER-SESSION block, so
+        # comparable only multiplied out: 312 × 40 ≈ 12,500 over a 40-turn session.
         #
         # 450 not 500 because search() pre-truncates at _SEARCH_ROW_CEILING (#842) and
         # the cap must sit strictly below it — pinned by
@@ -600,8 +607,8 @@ class TestInjectedTypeLabel:
             "the guidance recorded there, which nobody has re-read since. The rest "
             "of this row exists to carry it past the cap so the cut actually fires."
             " It also has to reach past the raised cap, so this sentence carries it "
-            "beyond four hundred and fifty characters without introducing a boundary "
-            "one at the cut point itself, which is the property the fixture exists to hold."
+            "beyond four hundred and fifty characters without a boundary landing exactly "
+            "at the cut point itself, which is the property the fixture exists to hold."
         )
         # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
         # An earlier version of this test could not fail: its character at the cap
@@ -647,6 +654,8 @@ class TestInjectedTypeLabel:
         # whitespace the bare-slice defect produces a string one shorter and the
         # mid-word assertion below reads the stripped space instead — passing with
         # boundary-seeking deleted. Checking only `body[cap]` cannot see that.
+        # SUBSUMES the cap-only check this replaced (#852 r2 nit 2): that assertion
+        # could never fire once this one holds, so it was dead and is gone.
         assert body[cap - 1] not in " \t\n" and body[cap] not in " \t\n", (
             f"fixture is toothless: the hard cut rstrips to index "
             f"{len(body[:cap].rstrip())}, and the char there must be non-whitespace"
