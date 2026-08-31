@@ -82,9 +82,15 @@ def test_sweep_removes_vendored_rows_a_stamped_v3_db_still_holds(tmp_path):
     repo.mkdir()
     db = _v3_db(tmp_path)
 
+    from techne.core.codex import CODEX_VERSION
+
     conn = plain_connect(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3, (
+        # CODEX_VERSION, not a literal. `_v3_db`'s own docstring says it builds a db
+        # "at the CURRENT version", so a hardcoded 3 was pinning a name that had
+        # drifted from what the fixture does — it broke on the v4 addition (#679)
+        # for a reason unconnected to what this test checks.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CODEX_VERSION, (
             "precondition: the migration is already spent"
         )
     finally:

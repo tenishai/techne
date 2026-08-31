@@ -15,6 +15,11 @@ Schema versions (PRAGMA user_version on codex.db):
   0 — original: edges(from_symbol, to_symbol NOT NULL, kind); no file_hash on symbols
   1 — v1 extraction: edges name-based (to_name, to_symbol nullable); symbols.file_hash
   2 — codex_meta KV table: persists repo_root (and future per-db metadata)
+  3 — v3 purge of vendored/fixture noise
+  4 — edges.to_module: the SOURCE MODULE of a from-import (techne#679). Without
+      it an import edge records a bare name with no binding, so a call to that
+      name cannot be tied to the module it came from — which is why 33,081 call
+      edges carried 1 resolved target on 2026-08-31.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ from techne.core.stores import (
 
 log = logging.getLogger(__name__)
 
-CODEX_VERSION = 3
+CODEX_VERSION = 4
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -73,6 +78,13 @@ CREATE TABLE IF NOT EXISTS edges (
     kind              TEXT NOT NULL,      -- call | import | def-use
     src_file_hash     TEXT,              -- hash of the REFERENCING file (incremental delete key)
     resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+    -- techne#679. For kind='import' ONLY, and ONLY for a from-import:
+    -- `from a.b import c` stores to_name='c', to_module='a.b'. A plain
+    -- `import a.b` stores to_name='b' and to_module IS NULL, which is what
+    -- distinguishes the two cases — before this column they were the same row
+    -- shape and 890 distinct to_name values mixed modules with imported names
+    -- indistinguishably. NULL on every non-import edge.
+    to_module         TEXT,
     PRIMARY KEY (from_symbol, to_name, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_symbol);
@@ -315,19 +327,49 @@ def _v3_purge_batch(conn, doomed: list[str]) -> None:
     # this migration neither causes nor cures it. Fixing it means qualifying the
     # fallback or representing "external" explicitly — see #606.
     #
-    # RESETTING `resolution_status` CHANGES NO QUERY, and two earlier versions of
-    # this comment got its rationale wrong in opposite directions. codegraph reads
-    # the column ONLY in `add_edge`'s INSERT; all four fallback sites
-    # (codegraph.py:261, 290, 341, 353) gate on `to_symbol IS NULL` alone, so
-    # 'lsp' and 'unresolved' return byte-identical results. It is reset purely to
-    # restore the v1 invariant that a NULL `to_symbol` is never 'lsp' — an
-    # impossible state forces the next reader to distrust the column.
+    # RESETTING `resolution_status` CHANGES NO QUERY *FOR THESE ROWS*, and three
+    # earlier versions of this comment got its rationale wrong in different
+    # directions. CORRECTED 2026-08-31 (techne#679): the claim used to be the
+    # unqualified "codegraph reads the column ONLY in `add_edge`'s INSERT; all
+    # four fallback sites gate on `to_symbol IS NULL` alone". THAT IS NO LONGER
+    # TRUE — codegraph's `_NOT_EXTERNAL` now appears in all four, so the column
+    # IS read on the query path. What survives is the narrower statement that
+    # matters here: every row this UPDATE touches is being reset to 'unresolved',
+    # which is not 'external', so it arms the fallback either way and the reset
+    # changes nothing for them.
+    #
+    # AND THE PARAGRAPH ABOVE IS NOW PARTLY HISTORY. It says fixing #606 means
+    # "qualifying the fallback or representing 'external' explicitly" — #679 did
+    # the second, so an edge whose callee is bound to an out-of-repo module is no
+    # longer name-matched against a local symbol. The vendored-`get` hazard it
+    # describes is only CLOSED for edges `import_resolve` could rule out; an edge
+    # it could not place is still 'unresolved' and still arms the fallback, so
+    # #606 is narrowed, not resolved.
+    #
+    # The reset itself is still for the v1 invariant that a NULL `to_symbol` is
+    # never 'lsp' — an impossible state forces the next reader to distrust the
+    # column.
     conn.execute(
         f"UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
         f"WHERE to_symbol IN ({marks})",
         doomed,
     )
     conn.execute(f"DELETE FROM symbols WHERE id IN ({marks})", doomed)
+
+
+def _codex_v3_to_v4(conn) -> None:
+    """Add edges.to_module (techne#679). Structurally guarded, so re-entrant.
+
+    ADD COLUMN, not a table rebuild: the column is nullable and every existing
+    row is legitimately NULL for it — an index written before v4 recorded no
+    module, and there is no way to recover one without re-parsing. Backfill is
+    therefore NOT attempted here; a re-index populates it, and until then
+    `import_resolve` simply finds no binding and leaves the call edge
+    'unresolved', which is exactly its pre-v4 behaviour.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+    if "to_module" not in cols:
+        conn.execute("ALTER TABLE edges ADD COLUMN to_module TEXT")
 
 
 def _run_codex_steps(conn, current: int, target: int) -> None:
@@ -343,6 +385,8 @@ def _run_codex_steps(conn, current: int, target: int) -> None:
         _codex_v1_to_v2(conn)
     if current < 3:
         _codex_v2_to_v3(conn)
+    if current < 4:
+        _codex_v3_to_v4(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 

@@ -230,7 +230,7 @@ def test_a_migration_killed_mid_work_does_not_claim_to_have_finished(tmp_path):
     the store is genuinely mid-transition rather than untouched.
     """
     from techne.core.codegraph import add_symbol
-    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration
+    from techne.core.codex import CODEX_SCHEMA, CODEX_VERSION, _apply_codex_migration
     from techne.core.stores import plain_connect
 
     db = tmp_path / "codex.db"
@@ -293,7 +293,10 @@ def test_a_migration_killed_mid_work_does_not_claim_to_have_finished(tmp_path):
     _apply_codex_migration(db)
     conn = sqlite3.connect(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        # CODEX_VERSION, not a literal: this asserts the chain REACHED ITS END,
+        # not that it stopped at v3. The `== 2` above IS correctly a literal — it
+        # names the fixture's starting version, which the crash must not advance.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CODEX_VERSION
         files = [r[0] for r in conn.execute("SELECT DISTINCT file FROM symbols")]
     finally:
         conn.close()
