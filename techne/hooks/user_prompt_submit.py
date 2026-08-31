@@ -205,7 +205,7 @@ def _startup_block(config, session_id: str | None) -> str | None:
 # of need" #383 and techne#945 wanted. What decided it against: `_build_context`
 # truncates every row to `hooks.per_turn_recall_chars` (450 by default, techne#826
 # made it a knob and the cut boundary-aware), and an arch card's value is its FULL
-# body — that is the entire premise of the gist-plus-pointer design. A 200-char slice
+# body — that is the entire premise of the gist-plus-pointer design. A capped slice
 # chosen by embedding similarity is a pointer at best, and at worst it is the
 # #539 hazard in miniature: prose that vouches for a seam nobody re-read. The
 # right delivery already has a design — #449's edit-fired rail, exact path match

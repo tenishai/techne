@@ -7,11 +7,25 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Changed
 
-- `hooks.per_turn_recall_chars` now defaults to **450**, was 200 (#826). Measured over
-  2,468 live injectable knowledge rows with a median length of 476 characters: the old
-  default severed 2,442 of them (98%), the new one severs 1,305 (52%). A severed row
-  carried no marker distinguishing it from a complete one, so a multi-step procedure
-  arrived as its own title. Costs roughly 312 extra tokens per turn on a five-row push.
+- `hooks.per_turn_recall_chars` now defaults to **450**, was 200 (#826). Of the 2,468
+  live injectable knowledge rows (median length 476), **a 200-char cap would sever
+  2,442 — 98% — where 450 severs 1,305, or 52%.** Those are properties of the store,
+  not counts of rows the rail actually cut: it injects five rows per turn selected by
+  embedding similarity and BM25, so the severance it delivers is drawn from that
+  population by a decidedly non-uniform process. #826 measured 58 of 58 injected facts
+  severed in the field at 200, which agrees with the corpus figure — but at 200 nearly
+  everything severs however it was selected, so that agreement says nothing about 450,
+  where 47% of the store now sits below the cap and selection bias has room to move the
+  number. Treat 52% as a bound on the store, not a prediction for the rail; #853 adds
+  the telemetry that will settle it.
+  Until #839 (released in 0.16.1) a severed row carried no marker distinguishing it from
+  a complete one; that is fixed, and what this change adds is that 48% of rows now
+  arrive **whole** rather than marked-and-severed, with the still-severed ones carrying
+  ~2.25× the content.
+  Costs up to ~312 extra tokens per turn on a five-row push — a ceiling, since only 52%
+  of rows exceed 450 and boundary-seeking can cut as low as 60% of the budget. Note this
+  is a **per-turn** cost: over a 40-turn session it is ~12,500 tokens, which is not
+  comparable to #808's per-session schema block without multiplying it out first.
   The cap remains configurable; `search()` still pre-truncates at 500 (#842), so no
   default above 499 can be honoured — now pinned by a test.
 
