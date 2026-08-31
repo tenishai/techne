@@ -899,3 +899,110 @@ def test_a_symlinked_directory_blocks_the_absence_claim(tmp_path):
 
     assert out["index"]["coverage"] == "unknown"
     assert "genuine absence" not in out["notice"]
+
+
+# ---------------------------------------------------------------------------
+# techne#679 — the resolver must actually RUN, not merely exist.
+#
+# WHY THESE EXIST. #856 shipped `edges.to_module` (schema v4) and
+# `techne/codex/import_resolve.py` to consume it, and argued in its own body
+# that shipping the column without a reader would be a fresh instance of the
+# declared-and-never-read class #517 tracks. It was — one level up.
+# `resolve_edges_by_import` had NO production caller: not the indexer, not the
+# CLI, not the MCP server. Only tests. So a merged, deployed, fully re-indexed
+# corpus would still have resolved zero call edges, and the PR's measured
+# "5,864 resolved" was reachable only by invoking the function by hand.
+#
+# These assert the END STATE IN THE DB, not a line of CLI output, because the
+# output is what a wiring bug leaves behind most convincingly.
+# ---------------------------------------------------------------------------
+
+
+def _resolvable_repo(root: Path) -> None:
+    """A repo whose call edge is resolvable ONLY through an import binding."""
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "__init__.py").write_text("")
+    (root / "pkg" / "helpers.py").write_text("def helper():\n    return 1\n")
+    (root / "app.py").write_text(
+        "from pkg.helpers import helper\n\n\ndef run():\n    return helper()\n"
+    )
+
+
+def _import_resolved(db) -> int:
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE kind='call' "
+            "AND resolution_status='import_resolved' AND to_symbol IS NOT NULL"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_codex_index_resolves_call_edges_without_being_asked(tmp_path, monkeypatch):
+    """THE ACCEPTANCE CRITERION FOR #679: plain `codex index` leaves resolved edges.
+
+    No `--lsp`, no second command, no manual call. If this passes only when a
+    human remembers an extra step, the corpus stays at 1 resolved edge in
+    33,081, which is the measured state this issue exists to change.
+    """
+    pytest.importorskip("tree_sitter_python")
+    (tmp_path / "techne.db").touch()
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    runner, main = _cli(monkeypatch, cfg)
+
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    _resolvable_repo(repo)
+
+    r = runner.invoke(main, ["codex", "index", str(repo)])
+    assert r.exit_code == 0, r.output
+    assert _import_resolved(repo_db_path(cfg, repo)) >= 1, (
+        "codex index left every call edge unresolved — the import-binding pass "
+        f"did not run. Output was:\n{r.output}"
+    )
+
+
+def test_codex_index_all_resolves_too(tmp_path, monkeypatch):
+    """The second call site, pinned separately.
+
+    `index` and `index-all` walk repos through separate code paths, so wiring
+    the pass into one and not the other is the ordinary way this regresses —
+    the same declared-twice shape #852 fixed in the recall cap.
+    """
+    pytest.importorskip("tree_sitter_python")
+    (tmp_path / "techne.db").touch()
+    cfg = Config(db_path=tmp_path / "techne.db", data_dir=tmp_path)
+    runner, main = _cli(monkeypatch, cfg)
+
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    _resolvable_repo(repo)
+
+    assert runner.invoke(main, ["codex", "index", str(repo)]).exit_code == 0
+    db = repo_db_path(cfg, repo)
+
+    # THE FIXTURE MUST REACH THE CONDITION. `codex index` above already
+    # resolved these edges, so without this reset `index-all` inherits a
+    # resolved db and the assertion below passes whether or not the pass is
+    # wired into it — which is exactly what the first draft of this test did,
+    # caught by mutating the index-all call site and watching nothing go red.
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
+        "WHERE kind = 'call'"
+    )
+    conn.commit()
+    conn.close()
+    assert _import_resolved(db) == 0, "reset did not take; the test below proves nothing"
+
+    r = runner.invoke(main, ["codex", "index-all"])
+    assert r.exit_code == 0, r.output
+    assert _import_resolved(db) >= 1, (
+        f"index-all left every call edge unresolved — the pass is wired into "
+        f"`index` but not `index-all`. Output was:\n{r.output}"
+    )

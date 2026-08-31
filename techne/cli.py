@@ -4599,6 +4599,33 @@ def codex(ctx):
         click.echo(f"  {root}  —  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
 
 
+def _import_resolve_pass(db_path: Path) -> dict:
+    """Run the dependency-free import-binding resolver and report it (techne#679).
+
+    UNCONDITIONAL, and deliberately not behind a flag the way `--lsp` is. It
+    needs no language server, it never overwrites an `lsp` row, and it costs
+    ~0.2s on a 24k-edge index. A resolver that has to be REMEMBERED is a
+    resolver that does not run: `--lsp` existed for months and the live corpus
+    still measured 33,081 call edges with 1 resolved target, that one in a demo
+    shard. Making this one opt-in would reproduce that outcome exactly.
+
+    ORDERING IS LOAD-BEARING. This runs BEFORE the optional `--lsp` step, not
+    after. `import_resolve` only touches rows whose `resolution_status` is in
+    its `_OVERWRITABLE` set, so it cannot clobber LSP; `resolve_edges_lsp`
+    updates by (from_symbol, to_name) with no `to_symbol IS NULL` guard, so it
+    still upgrades a row this pass resolved. Reversing the two would leave the
+    cheap pass unable to fill anything the expensive one missed.
+    """
+    from techne.codex.import_resolve import resolve_edges_by_import
+    from techne.core.stores import plain_connect
+
+    conn = plain_connect(db_path)
+    try:
+        return resolve_edges_by_import(conn)
+    finally:
+        conn.close()
+
+
 @codex.command("index")
 @click.argument("repo", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
@@ -4644,6 +4671,12 @@ def codex_index(ctx, repo, languages, lsp):
             f"(#613 — stored before the current skip list)"
         )
     click.echo(f"Totals:  {s['symbols']} symbols  {s['edges']} edges  {s['files']} files")
+
+    rep = _import_resolve_pass(db_path)
+    click.echo(
+        f"Resolved: {rep['resolved']} call edges by import binding, "
+        f"{rep['external']} ruled external (no toolchain, techne#679)"
+    )
     if src.last_failed:
         # Not a warning tucked into a log file: a run that could not index N files
         # exits NON-ZERO. Those files kept their previous rows, so the graph is
@@ -4703,7 +4736,11 @@ def codex_index_all(ctx, languages):
         # the run non-zero.
         failed = f", {src.last_failed} FAILED (stale, #610)" if src.last_failed else ""
         total_failed += src.last_failed
-        click.echo(f"reindexed {root}: {count} symbols{swept}{failed}")
+        rep = _import_resolve_pass(db_path)
+        click.echo(
+            f"reindexed {root}: {count} symbols{swept}{failed}"
+            f"; resolved {rep['resolved']} calls, {rep['external']} external"
+        )
 
     if total_failed:
         raise click.ClickException(
