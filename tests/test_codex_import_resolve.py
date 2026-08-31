@@ -53,12 +53,41 @@ class TestImportParsing:
         [
             ("from pathlib import Path\n", [("Path", "pathlib")]),
             ("from a.b import c\n", [("c", "a.b")]),
-            ("from a.b import c as d\n", [("d", "a.b")]),
             ("from x import a, b\n", [("a", "x"), ("b", "x")]),
         ],
     )
     def test_from_import_carries_its_module(self, src, expected):
         assert _extract_import_names(_py_node(src, "import_from_statement"), "python") == expected
+
+    def test_an_aliased_from_import_carries_NO_module(self):
+        """CHANGED IN r3 — this case used to expect ``[("d", "a.b")]``.
+
+        Prudence r3 Critical 1: the name and the module are each correct and
+        wrong TOGETHER. `to_name` must be the binding in the importing scope so
+        a call site matches it, but the resolver then looks that same name up
+        INSIDE the source module — and after ``from a.b import c as d`` module
+        ``a.b`` has no ``d``. The original name is recorded nowhere, so the pair
+        cannot be resolved truthfully.
+
+        It is not hypothetical: `documents.py` does
+        ``from techne.core.stores import plain_connect as connect`` and four
+        calls were bound to `DomainStore.connect`, a method none of them calls,
+        and stamped `import_resolved` — which `include_inferred=False` reports
+        as `exact`.
+        """
+        assert _extract_import_names(
+            _py_node("from a.b import c as d\n", "import_from_statement"), "python"
+        ) == [("d", None)]
+
+    def test_an_aliased_ts_import_carries_no_module_either(self):
+        """The same rule on the other side; `X as X` re-export is unaffected."""
+        pytest.importorskip("tree_sitter_typescript")
+        assert _extract_import_names(
+            _ts_node("import { real as helper } from 'pkg';"), "typescript"
+        ) == [("helper", None)]
+        assert _extract_import_names(
+            _ts_node("import { plain } from 'pkg';"), "typescript"
+        ) == [("plain", "pkg")]
 
     def test_a_relative_import_is_left_unbound_rather_than_guessed(self):
         """`from . import x` yields no module, and that is deliberate.
@@ -722,3 +751,264 @@ def test_an_external_edge_does_not_arm_name_inference(tmp_path):
         "an edge ruled OUT of this repo still name-matched a local symbol; "
         "`external` is not being read by the inference fallback"
     )
+
+
+class TestTheLookupCannotInventASymbol:
+    """Prudence r3 Critical 1 — `import_resolved` was guessing, and it was LIVE.
+
+    Three rounds argued about `external` while `import_resolved` sat unexamined.
+    Four false edges existed on this repo at 0482e6f: `documents.py` does
+    `from techne.core.stores import plain_connect as connect`, `stores.py` has no
+    module-level `connect` but does have `DomainStore.connect`, and four calls to
+    `plain_connect` were bound to a method none of them calls — reported by
+    `include_inferred=False` as `exact`, i.e. 52 symbols of "proven" blast radius
+    reached through edges that do not exist.
+
+    TWO INDEPENDENT MECHANISMS, one test each. Neither needs the other.
+    """
+
+    _db = TestExternalNeedsPositiveEvidence._db
+    _calls = TestExternalNeedsPositiveEvidence._calls
+
+    def test_an_alias_never_binds_to_a_same_named_stranger(self, tmp_path):
+        """MECHANISM ONE: the bound name is looked up in the source module."""
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/util.py": "def real():\n    return 1\n\n\ndef helper():\n    return 99\n",
+                "app.py": (
+                    "from pkg.util import real as helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["helper"]
+        assert to_symbol is None, (
+            f"bound an aliased import to an unrelated same-named symbol: {to_symbol}"
+        )
+        assert status != "import_resolved"
+
+    def test_a_module_level_import_never_binds_to_a_method(self, tmp_path):
+        """MECHANISM TWO: no alias needed — a re-export plus a same-named method.
+
+        This is the case the module docstring already promises stays
+        `unresolved`: "the callee may be re-exported, conditionally defined, or
+        simply not a top-level symbol — guessing here is how name-matching got
+        its reputation."
+        """
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/util.py": "class Thing:\n    def helper(self):\n        return 1\n",
+                "app.py": (
+                    "from pkg.util import helper\n\n\ndef run():\n    return helper()\n"
+                ),
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["helper"]
+        assert to_symbol is None, f"bound a module-level import to a method: {to_symbol}"
+        assert status != "import_resolved"
+
+    def test_a_plain_from_import_of_a_real_function_still_resolves(self, tmp_path):
+        """The narrowing must not cost the status its purpose."""
+        pytest.importorskip("tree_sitter_python")
+        db = self._db(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/util.py": "def helper():\n    return 1\n",
+                "app.py": "from pkg.util import helper\n\n\ndef run():\n    return helper()\n",
+            },
+        )
+        resolve_edges_by_import(sqlite3.connect(db))
+        status, to_symbol = self._calls(db)["helper"]
+        assert status == "import_resolved", "the honest case stopped resolving"
+        assert to_symbol == "pkg/util.py::helper::function::1"
+
+
+def test_a_nested_file_never_shadows_the_stdlib(tmp_path):
+    """Prudence r3 Important 2 — the mirror of the r1 Criticals.
+
+    `myapp/app.py` doing `from logging import getLogger` means the stdlib:
+    `myapp` is a package, not a `sys.path` entry, so Python's import machinery
+    could never reach `myapp/logging.py` that way. Suffix matching had no notion
+    of stdlib and ended happily at `/logging.py`. A module that wraps the stdlib
+    module it shadows is the archetype, and `logging.py`, `json.py`, `types.py`
+    and `csv.py` are ordinary file names. Zero occurrences on this repo, so it
+    was latent, not live.
+    """
+    pytest.importorskip("tree_sitter_python")
+    (tmp_path / "myapp").mkdir()
+    (tmp_path / "myapp" / "__init__.py").write_text("")
+    (tmp_path / "myapp" / "logging.py").write_text("def getLogger(name):\n    return name\n")
+    (tmp_path / "myapp" / "app.py").write_text(
+        "from logging import getLogger\n\n\ndef run():\n    return getLogger('x')\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("myapp/__init__.py", "myapp/logging.py", "myapp/app.py"):
+        index_file(db, tmp_path / rel, tmp_path)
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        to_symbol = conn.execute(
+            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='getLogger'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert to_symbol is None, f"bound a stdlib import to a nested repo file: {to_symbol}"
+
+
+def test_the_memo_is_keyed_by_language_not_module_alone(tmp_path):
+    """Prudence r3 Important 4 — a one-line drift restores the r2 defect in full.
+
+    The language gate lives in `_module_candidates`, but its answer is CACHED.
+    Key the memo on the module alone and the first caller's language decides
+    every later caller's candidates, so the second language reads the first
+    one's answer out of the cache and binds across languages anyway.
+
+    The existing cross-language tests cannot catch this: each has a single call
+    edge, so nothing is ever served from the cache. This needs TWO callers, TWO
+    languages and ONE module name.
+    """
+    pytest.importorskip("tree_sitter_python")
+    pytest.importorskip("tree_sitter_typescript")
+    files = {
+        "backend/utils.py": "def shared():\n    return 1\n",
+        "web/utils/index.ts": "export function shared() { return 2; }\n",
+        "backend/main.py": "from utils import shared\n\n\ndef run():\n    return shared()\n",
+        "web/app.ts": (
+            "import { shared } from 'utils';\nexport function go() { return shared(); }\n"
+        ),
+    }
+    for rel, body in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in files:
+        index_file(db, tmp_path / rel, tmp_path)
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT s.language, e.to_symbol FROM edges e JOIN symbols s ON s.id = e.from_symbol "
+            "WHERE e.kind='call' AND e.to_name='shared' AND e.to_symbol IS NOT NULL"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows, "fixture resolved nothing; it cannot show a cross-language bind"
+    for language, to_symbol in rows:
+        expected = ".py" if language == "python" else ".ts"
+        assert expected in to_symbol, (
+            f"a {language} call was served a {to_symbol} binding — the memo is "
+            "keyed by module alone, so the first language's answer was cached "
+            "for the second"
+        )
+
+
+def test_an_lsp_row_with_a_null_symbol_is_still_never_overwritten(tmp_path):
+    """`_OVERWRITABLE` must exclude `lsp` ON ITS OWN — Prudence r3 Important 4.
+
+    This is the claim the PR repeats most: module docstring, arch card and PR
+    body all call the ordering "a claim about evidence quality". Widening the
+    tuple to `("unresolved", "lsp")` left the whole suite green, because
+    `lsp_resolve` always writes `to_symbol` alongside the status and the
+    `to_symbol IS NULL` clause excluded the row anyway. That is safe by
+    coincidence of another component's behaviour, not by this one's rule — and
+    it is precisely the invariant `_codex_v2_to_v3` exists to RESTORE, i.e. one
+    the codebase already treats as violable.
+
+    The isolating state is therefore `lsp` with a NULL symbol.
+    """
+    pytest.importorskip("tree_sitter_python")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "util.py").write_text("def helper():\n    return 1\n")
+    (tmp_path / "app.py").write_text(
+        "from pkg.util import helper\n\n\ndef run():\n    return helper()\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("pkg/__init__.py", "pkg/util.py", "app.py"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE edges SET resolution_status='lsp', to_symbol=NULL "
+        "WHERE kind='call' AND to_name='helper'"
+    )
+    conn.commit()
+    assert conn.execute(
+        "SELECT resolution_status, to_symbol FROM edges WHERE kind='call' AND to_name='helper'"
+    ).fetchone() == ("lsp", None), "fixture must isolate _OVERWRITABLE, not the to_symbol clause"
+
+    resolve_edges_by_import(conn)
+    assert conn.execute(
+        "SELECT resolution_status, to_symbol FROM edges WHERE kind='call' AND to_name='helper'"
+    ).fetchone() == ("lsp", None), (
+        "an lsp row was re-examined; _OVERWRITABLE is not excluding it on status alone"
+    )
+    conn.close()
+
+
+def test_every_fallback_site_refuses_an_external_edge(tmp_path):
+    """All four, not just `callees` — Prudence r3 Important 4.
+
+    Dropping `_NOT_EXTERNAL` from `callers` or from either `reachable` direction
+    left the suite green; only the `callees` site had a witness. The constant is
+    interpolated into four different SQL shapes — two inside larger OR clauses,
+    one a conditional fragment, one a JOIN condition — so one witness does not
+    cover the others.
+    """
+    pytest.importorskip("tree_sitter_python")
+    from techne.core.codegraph import callers, callees, reachable
+
+    (tmp_path / "local.py").write_text("class Path:\n    pass\n")
+    (tmp_path / "app.py").write_text(
+        "from pathlib import Path\n\n\ndef run():\n    return Path('/tmp')\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("local.py", "app.py"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    run_id = conn.execute("SELECT id FROM symbols WHERE name='run'").fetchone()[0]
+    path_id = conn.execute("SELECT id FROM symbols WHERE name='Path'").fetchone()[0]
+    conn.close()
+
+    # The phantom hop must EXIST first, or none of the four assertions mean anything.
+    assert any(x["name"] == "Path" for x in callees(db, run_id)), "no phantom callee to remove"
+    assert any(x["id"] == run_id for x in callers(db, path_id)), "no phantom caller to remove"
+
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    assert not [x for x in callees(db, run_id) if x["name"] == "Path"], "callees site"
+    assert not [x for x in callers(db, path_id) if x["id"] == run_id], "callers site"
+    assert path_id not in [
+        x["id"] for x in reachable(db, run_id, direction="out", max_depth=2)
+    ], "reachable direction=out site"
+    assert run_id not in [
+        x["id"] for x in reachable(db, path_id, direction="in", max_depth=2)
+    ], "reachable direction=in site"

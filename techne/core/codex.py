@@ -327,13 +327,28 @@ def _v3_purge_batch(conn, doomed: list[str]) -> None:
     # this migration neither causes nor cures it. Fixing it means qualifying the
     # fallback or representing "external" explicitly — see #606.
     #
-    # RESETTING `resolution_status` CHANGES NO QUERY, and two earlier versions of
-    # this comment got its rationale wrong in opposite directions. codegraph reads
-    # the column ONLY in `add_edge`'s INSERT; all four fallback sites
-    # (codegraph.py:261, 290, 341, 353) gate on `to_symbol IS NULL` alone, so
-    # 'lsp' and 'unresolved' return byte-identical results. It is reset purely to
-    # restore the v1 invariant that a NULL `to_symbol` is never 'lsp' — an
-    # impossible state forces the next reader to distrust the column.
+    # RESETTING `resolution_status` CHANGES NO QUERY *FOR THESE ROWS*, and three
+    # earlier versions of this comment got its rationale wrong in different
+    # directions. CORRECTED 2026-08-31 (techne#679): the claim used to be the
+    # unqualified "codegraph reads the column ONLY in `add_edge`'s INSERT; all
+    # four fallback sites gate on `to_symbol IS NULL` alone". THAT IS NO LONGER
+    # TRUE — codegraph's `_NOT_EXTERNAL` now appears in all four, so the column
+    # IS read on the query path. What survives is the narrower statement that
+    # matters here: every row this UPDATE touches is being reset to 'unresolved',
+    # which is not 'external', so it arms the fallback either way and the reset
+    # changes nothing for them.
+    #
+    # AND THE PARAGRAPH ABOVE IS NOW PARTLY HISTORY. It says fixing #606 means
+    # "qualifying the fallback or representing 'external' explicitly" — #679 did
+    # the second, so an edge whose callee is bound to an out-of-repo module is no
+    # longer name-matched against a local symbol. The vendored-`get` hazard it
+    # describes is only CLOSED for edges `import_resolve` could rule out; an edge
+    # it could not place is still 'unresolved' and still arms the fallback, so
+    # #606 is narrowed, not resolved.
+    #
+    # The reset itself is still for the v1 invariant that a NULL `to_symbol` is
+    # never 'lsp' — an impossible state forces the next reader to distrust the
+    # column.
     conn.execute(
         f"UPDATE edges SET to_symbol = NULL, resolution_status = 'unresolved' "
         f"WHERE to_symbol IN ({marks})",

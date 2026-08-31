@@ -229,6 +229,13 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
     The NAME is the binding as it appears in the importing scope, so an alias
     wins: after ``import json as j`` the callable in scope is ``j``, and
     recording ``json`` would not match any call site.
+
+    BUT AN ALIASED from-IMPORT RECORDS NO MODULE. The name and the module are
+    correct individually and wrong together: `resolve_edges_by_import` looks the
+    BOUND name up inside the SOURCE module, and after
+    ``from a.b import real as helper`` module ``a.b`` has no ``helper``. The
+    original name is stored nowhere, so the pair cannot be resolved truthfully
+    and the honest binding is none at all.
     """
     names: list[tuple[str, str | None]] = []
     if language == "python":
@@ -283,7 +290,18 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
                 elif child.type == "aliased_import":
                     alias_node = child.child_by_field_name("alias")
                     if alias_node:
-                        names.append((alias_node.text.decode("utf-8", errors="replace"), module))
+                        # AN ALIAS BINDS THE NAME BUT LOSES THE MODULE (techne#679,
+                        # Prudence r3 Critical 1). `to_name` is the name in the
+                        # IMPORTING scope, which is what a call site matches — but
+                        # the resolver then asks the source module for a symbol by
+                        # that same name, and after `from a.b import real as helper`
+                        # module `a.b` has no `helper`. Usually that misses and a
+                        # miss is free; when it HITS it binds the call to an
+                        # unrelated symbol and stamps it `import_resolved`, the
+                        # status that survives `include_inferred=False`.
+                        # The original name is recorded nowhere, so there is no
+                        # true fact to lose here — only a guess to decline.
+                        names.append((alias_node.text.decode("utf-8", errors="replace"), None))
                     else:
                         dotted = child.child_by_field_name("name")
                         if dotted:
@@ -329,8 +347,12 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
                                 nm = spec.child_by_field_name("name")
                                 target = alias or nm
                                 if target:
+                                    # Aliased -> no module, same as Python above.
                                     names.append(
-                                        (target.text.decode("utf-8", errors="replace"), module)
+                                        (
+                                            target.text.decode("utf-8", errors="replace"),
+                                            None if alias else module,
+                                        )
                                     )
                     elif sub.type == "namespace_import":
                         ident = next((c for c in sub.children if c.type == "identifier"), None)

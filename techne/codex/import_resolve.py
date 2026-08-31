@@ -40,6 +40,7 @@ overwritten here.
 from __future__ import annotations
 
 import logging
+import sys
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +79,14 @@ def _module_candidates(dotted: str, language: str | None = None) -> tuple[str, .
     load-bearing and drift in one would be silently covered by the other. That
     is the declared-twice shape #852 fixed in the recall cap. Widening here would
     reopen the hole for exactly the rows whose language we cannot name, so it
-    returns nothing and the edge stays honestly `unresolved`. No indexed symbol
+    returns nothing. NOTE WHAT THAT DOES AND DOES NOT DO: with no candidates the
+    row reaches the evidence gate with no lookup attempted, so it can still be
+    written `external` if its module root names nothing in the repo — it does not
+    become `unresolved` by default. That is correct for a genuine stdlib import
+    and is unreachable today anyway: `_EXT_LANGUAGE` maps exactly two extensions
+    and `_parse_file` always writes one, so the only NULL-language route is
+    `codegraph.add_symbol`'s default, which has no production caller. `.tsx` is
+    the language that would first walk into it. No indexed symbol
     in any live codex db has a NULL language (measured 2026-08-31 across techne,
     liminal and cabal), so this costs nothing today and cannot rot into a bypass.
     """
@@ -121,9 +129,7 @@ def _in_repo_names(known_files) -> frozenset[str]:
     return frozenset(names)
 
 
-def _match_paths(
-    module: str, language: str | None, known_files, memo: dict
-) -> tuple[list[str], bool]:
+def _match_paths(module: str, language: str | None, known_files, memo: dict) -> list[str]:
     """Indexed files a dotted module could be, exact match first.
 
     SUFFIX MATCHING EXISTS FOR `src/` LAYOUTS (techne#679, Prudence r1 Critical
@@ -147,11 +153,15 @@ def _match_paths(
     because it is a consequence of suffix matching that exact matching did not
     have, not because it is known to be wrong.
 
-    Returns (paths, ambiguous). THE FLAG MATTERS AS MUCH AS THE PATHS: two
-    matches mean the module IS in-repo-shaped, we simply cannot say which file —
-    so the caller must not fall through to `external`. Collapsing both cases to
-    an empty list made the ambiguous repo report a false `external`, which the
-    ambiguity test caught.
+    NO `ambiguous` FLAG ANY MORE. It existed so two matches would not fall
+    through to `external`, and at the time that was load-bearing. Once
+    `_in_repo_names` learned about nested layouts the flag became PROVABLY dead:
+    every candidate is the module path with dots turned to slashes, so any file
+    matching one necessarily carries the module's root as a directory segment or
+    its own stem — which is exactly `_in_repo_names`' membership test. Two
+    matches cannot occur without the root already being in that set, so the
+    caller's `or` could never change the outcome. Keeping it would be the
+    redundant-gate shape this file removed one finding earlier.
     """
     key = (module, language)
     if key in memo:
@@ -164,11 +174,32 @@ def _match_paths(
         # `api.py` and `api/__init__.py` resolved to whichever row SQLite
         # returned first — right by luck of row order, not by rule. The suffix
         # branch already refused this; the two must answer alike.
-        out = (exact, False) if len(exact) == 1 else ([], True)
+        out = exact if len(exact) == 1 else []
         memo[key] = out
         return out
+    if language == "python" and module.split(".", 1)[0] in sys.stdlib_module_names:
+        # A NESTED FILE NEVER SHADOWS THE STDLIB (Prudence r3 Important 2).
+        # `myapp/app.py` doing `from logging import getLogger` means the stdlib:
+        # `myapp` is a package, not a `sys.path` entry, so Python could not reach
+        # `myapp/logging.py` that way. Suffix matching has no notion of stdlib
+        # and happily ended at `/logging.py`. A module that wraps the stdlib
+        # module it shadows is the archetype, and `logging.py`, `json.py`,
+        # `types.py` and `csv.py` are ordinary file names.
+        #
+        # ONLY THE SUFFIX BRANCH IS GUARDED. An EXACT match is a genuine
+        # top-level shadow — a repo-root `logging.py` IS what `import logging`
+        # resolves to when the root is on `sys.path` — so it is left to resolve
+        # above. This is the mirror of the vendoring boundary below: there, a
+        # deliberate vendored copy is what the reader wants; here, nothing was
+        # vendored and a name merely collided.
+        memo[key] = []
+        return memo[key]
     hits = {f for c in cands for f in known_files if f.endswith("/" + c)}
-    out = (list(hits), False) if len(hits) == 1 else ([], len(hits) > 1)
+    # ONE, OR NOTHING. Two matches used to be reported to the caller as an
+    # `ambiguous` flag so it would not fall through to `external`; that flag is
+    # gone (Prudence r3 Important 3) because `_in_repo_names` made it provably
+    # dead — see its docstring.
+    out = list(hits) if len(hits) == 1 else []
     memo[key] = out
     return out
 
@@ -197,7 +228,7 @@ def resolve_edges_by_import(conn) -> dict:
     unresolved_no_binding = unresolved_in_repo_no_symbol = 0
     unresolved_in_repo_no_path = 0
     in_repo_names = _in_repo_names(known_files)
-    path_memo: dict[tuple[str, str | None], tuple[list[str], bool]] = {}
+    path_memo: dict[tuple[str, str | None], list[str]] = {}
 
     rows = conn.execute(
         f"""SELECT e.rowid, s.file, e.to_name, s.language
@@ -214,18 +245,21 @@ def resolve_edges_by_import(conn) -> dict:
             unresolved_no_binding += 1
             continue
 
-        paths, ambiguous = _match_paths(module, language, known_files, path_memo)
+        paths = _match_paths(module, language, known_files, path_memo)
         if not paths:
             # `external` IS A FACT AND NEEDS POSITIVE EVIDENCE (Prudence r1
             # Critical 2 & 3). Not finding a path is not evidence — the
             # module-path-to-file-path mapping can fail for reasons of LAYOUT,
             # and asserting `external` on that failure produced rows claiming
             # no symbol in this repo could be a callee that was sitting in the
-            # index. The evidence is the root segment: if this repo has nothing
-            # at the top level by that name, the callee genuinely is not here.
+            # index. The evidence is the module's ROOT NAME, tested against every
+            # name in the tree — directory segment at any depth or file stem, NOT
+            # just the top level, which is the flat-layout mistake r2 caught here
+            # (see `_in_repo_names`). If this repo has nothing by that name
+            # anywhere, the callee genuinely is not here.
             # Anything in-repo-shaped that we simply could not place stays
             # `unresolved`, which is the honest word for "we could not tell".
-            if ambiguous or module.split(".", 1)[0] in in_repo_names:
+            if module.split(".", 1)[0] in in_repo_names:
                 unresolved_in_repo_no_path += 1
                 continue
             conn.execute(
@@ -234,8 +268,23 @@ def resolve_edges_by_import(conn) -> dict:
             external += 1
             continue
 
+        # AN ALLOW-LIST, NOT `kind != 'module'` (Prudence r1 nit 8, corrected in
+        # r3 Critical 1: that clause was not too defensive, it was too weak). A
+        # module-level from-import binds a module-level object, never a METHOD
+        # hanging off a class in that file — in either language. Accepting one
+        # produced four false `import_resolved` edges on this repo: documents.py
+        # does `from techne.core.stores import plain_connect as connect`, and
+        # `stores.py` has no module-level `connect` but does have
+        # `DomainStore.connect`, so four calls to `plain_connect` were bound to a
+        # method none of them calls — and `include_inferred=False` labelled them
+        # `exact`, which is 52 symbols of "proven" blast radius reached through
+        # edges that do not exist.
+        #
+        # This is also the case the module docstring already promises: a callee
+        # that is re-exported or is not a top-level symbol stays `unresolved`.
         hit = conn.execute(
-            "SELECT id FROM symbols WHERE file IN (%s) AND name = ? AND kind != 'module' LIMIT 1"
+            "SELECT id FROM symbols WHERE file IN (%s) AND name = ? "
+            "AND kind IN ('function', 'class', 'interface') LIMIT 1"
             % ",".join("?" * len(paths)),
             (*paths, to_name),
         ).fetchone()
