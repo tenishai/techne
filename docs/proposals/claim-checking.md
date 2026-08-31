@@ -74,7 +74,7 @@ was retiring it*.
 
 No query over project state answers this. It needs a search for the claim's
 other instances, which is why it is the one case that genuinely wants an agent
-rather than a command.
+rather than a command. That agent is **Constance** — see below.
 
 ### Arithmetic (claim 4)
 
@@ -98,7 +98,7 @@ comments, 2 evaluation docs, 4 architect pattern bodies, 3 skip records, ~6
 knowledge rows, 1 repo doc. Plus the standing corpus — 542 pattern bodies, 2,643
 knowledge rows, 28 evaluation docs — none of which any review path touches.
 
-## The mechanical majority does not need an agent
+## The mechanical majority does not need Constance
 
 Four of the five are settleable by one command. For those, the stronger design
 is not to check the claim after the fact but to **make the claim carry its
@@ -124,18 +124,39 @@ The checker re-runs the command and compares. A changed number is drift, not
 failure — the same non-blocking posture #505 argues for and `check_arch_cards`
 already takes.
 
-## What does need an agent
+## Constance — what does need an agent
 
 The distributional case, and only that. "Where else does this claim live" is a
 search problem with judgement in it: the same assertion appears in a CHANGELOG,
 a docstring, a comment and an issue body in four different phrasings, and no
 regex spans them.
 
-Scope it narrowly. Per the 2026-08-29 routing note, this shape is **Sonnet-shaped
+**Named for the property she checks.** Not whether a claim is true — whether it
+holds *constant* across every place it appears. When the misattribution above
+was fixed in two of three places, nothing was false in isolation; each instance
+was individually defensible and they disagreed with each other. That is a
+failure of constancy, not of truth, and it is the one Prudence cannot reach
+because it spans artifacts rather than sitting inside one.
+
+The mechanism she runs is a **concordance** — an index of every place a claim
+appears — which is the same relationship a biblical concordance has to a text.
+Build the index, then judge whether the entries agree.
+
+**Sibling to Prudence, with a clean division:** Prudence reviews a *diff*,
+Constance reviews a *claim*. Neither reaches the other's territory, and today's
+evidence shows why both are needed — Prudence caught four of five failures
+because they were in a PR, and could not have caught the fifth, which lived in
+chat and an evaluation doc.
+
+*(The obvious name from the truth family is unavailable: `veritas` is a reviewer
+on a partner team, asked about in agora discussion #11. A cross-team collision
+is worse than a local one.)*
+
+Scope her narrowly. Per the 2026-08-29 routing note, this shape is **Sonnet-shaped
 and the intelligence belongs in the brief** — name the claim, demand a search
 across the working tree and the stores, require the negative result (*which
 carriers did you check and find consistent*) so an audit is distinguishable from
-a list of whatever the agent happened to look at.
+a list of whatever she happened to look at.
 
 ## What fires it
 
@@ -160,11 +181,11 @@ would not be. Three mechanisms that do not depend on memory:
   the interface and added claim *types*, not a parser. The marker-based trigger
   above implies some extraction. These need reconciling, and #584's position is
   the conservative one.
-- **Does the distributional agent pay for itself?** It caught one failure in one
+- **Does Constance pay for herself?** The distributional case cost one failure in one
   day here. That is a real rate but a small sample, and it is the most expensive
   of the three mechanisms.
 - **Sequencing.** The arithmetic check is nearly free, the `evidence:` line is a
-  format decision, the agent is a build. They are independent; the cheapest one
+  format decision, Constance is a build. They are independent; the cheapest one
   is not the one this note spends the most words on.
 
 [#584]: https://github.com/tenishai/techne/issues/584
