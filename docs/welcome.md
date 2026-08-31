@@ -167,7 +167,7 @@ nothing relevant turns up. **Opt-in, experimental** — off by default:
 hooks:
   per_turn_recall: true       # default: false
   per_turn_recall_limit: 5    # max facts injected per prompt
-  per_turn_recall_chars: 200  # max characters per fact; a shortened one ends in '…'
+  per_turn_recall_chars: 450  # max characters per fact; a shortened one ends in '…'
 ```
 
 Then `techne init` and restart the session to load the hook.

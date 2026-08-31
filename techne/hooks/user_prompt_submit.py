@@ -203,7 +203,7 @@ def _startup_block(config, session_id: str | None) -> str | None:
 # `document_card` is the decided half (Richard, 2026-08-13). The case for keeping
 # arch cards here was that a query-driven per-turn rail IS the "pull at the moment
 # of need" #383 and techne#945 wanted. What decided it against: `_build_context`
-# truncates every row to `hooks.per_turn_recall_chars` (200 by default, techne#826
+# truncates every row to `hooks.per_turn_recall_chars` (450 by default, techne#826
 # made it a knob and the cut boundary-aware), and an arch card's value is its FULL
 # body — that is the entire premise of the gist-plus-pointer design. A 200-char slice
 # chosen by embedding similarity is a pointer at best, and at worst it is the
@@ -542,7 +542,7 @@ def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
     return window[:limit].rstrip() + " …", True
 
 
-def _build_context(rows: list[dict], char_limit: int = 200) -> str:
+def _build_context(rows: list[dict], char_limit: int = 450) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 
     Mirrors egress `_render_line` formatting: each row carries its ⟦techne#id⟧

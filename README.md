@@ -568,7 +568,7 @@ hooks:
                               #   complement to the STABLE SessionStart block. Re-run 'techne init'
                               #   after flipping; loads from the next session.
   per_turn_recall_limit: 5    # max knowledge rows injected per turn
-  per_turn_recall_chars: 200  # max characters per injected row (#826). The cut lands on a
+  per_turn_recall_chars: 450  # max characters per injected row (#826). The cut lands on a
                               #   sentence or word boundary and a shortened row ends in '…',
                               #   so a truncated fact is distinguishable from a whole one.
                               #   Raising this raises per-prompt token cost on EVERY turn.
