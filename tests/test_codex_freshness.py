@@ -295,18 +295,12 @@ def test_annotate_freshness_stale_after_edit(tmp_path):
     # Search each name individually (FTS5 "foo bar" = AND, won't match across files).
     foo_hits = search_symbols(db, "foo")
     bar_hits = search_symbols(db, "bar")
-    hits = [s for s in foo_hits if s["name"] == "foo"] + [
-        s for s in bar_hits if s["name"] == "bar"
-    ]
+    hits = [s for s in foo_hits if s["name"] == "foo"] + [s for s in bar_hits if s["name"] == "bar"]
     annotated = annotate_freshness(db, hits)
     by_name = {s["name"]: s["freshness"] for s in annotated}
 
-    assert by_name.get("foo") == "stale", (
-        f"expected stale for foo, got {by_name.get('foo')}"
-    )
-    assert by_name.get("bar") == "fresh", (
-        f"expected fresh for bar, got {by_name.get('bar')}"
-    )
+    assert by_name.get("foo") == "stale", f"expected stale for foo, got {by_name.get('foo')}"
+    assert by_name.get("bar") == "fresh", f"expected fresh for bar, got {by_name.get('bar')}"
 
 
 @pytest.mark.skipif(not _HAS_GRAMMARS, reason="tree-sitter grammars not installed")
@@ -384,9 +378,7 @@ def test_migration_adds_codex_meta_table(tmp_path):
 
         tables = {
             row[0]
-            for row in conn2.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for row in conn2.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         assert "codex_meta" in tables, f"codex_meta table missing; tables={tables}"
     finally:
@@ -470,9 +462,7 @@ def test_cli_search_shows_stale_marker(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(main, ["codex", "search", "stalefn", "--repo", str(repo)])
     assert result.exit_code == 0, f"CLI exited {result.exit_code}:\n{result.output}"
-    assert "[stale]" in result.output, (
-        f"expected [stale] in output:\n{result.output}"
-    )
+    assert "[stale]" in result.output, f"expected [stale] in output:\n{result.output}"
 
 
 # ---------------------------------------------------------------------------
@@ -526,11 +516,9 @@ def test_codex_watch_requires_watchdog(tmp_path, monkeypatch):
         result = runner.invoke(main, ["codex", "watch", str(repo)])
     # Should produce a readable error about watchdog, not a raw traceback.
     output_lower = result.output.lower()
-    assert (
-        result.exit_code != 0
-        or "error" in output_lower
-        or "watchdog" in output_lower
-    ), f"Expected a clean error about watchdog:\n{result.output}"
+    assert result.exit_code != 0 or "error" in output_lower or "watchdog" in output_lower, (
+        f"Expected a clean error about watchdog:\n{result.output}"
+    )
 
 
 # ---- techne#604 v3: a polluted index must not survive the fix ----------------
@@ -782,7 +770,7 @@ def test_v3_purge_binds_are_bounded_through_the_real_migration(tmp_path, monkeyp
     import sqlite3
 
     from techne.core import codex as codex_mod
-    from techne.core.codex import CODEX_SCHEMA, _apply_codex_migration
+    from techne.core.codex import CODEX_SCHEMA, CODEX_VERSION, _apply_codex_migration
     from techne.core.stores import plain_connect
 
     limit, doomed_count = 600, 1500
@@ -822,7 +810,10 @@ def test_v3_purge_binds_are_bounded_through_the_real_migration(tmp_path, monkeyp
 
     conn = plain_connect(db)
     try:
-        assert user_version_io.read(conn) == 3, (
+        # CODEX_VERSION, not a literal: this asserts the chain REACHED ITS END,
+        # not that the end is any particular number. Hardcoding 3 made it fail on
+        # the v4 addition (#679) for no reason connected to what it tests.
+        assert user_version_io.read(conn) == CODEX_VERSION, (
             "migration did not reach the version write — a mid-purge raise leaves "
             "user_version at 2 and every later codex_store() re-raises"
         )

@@ -33,6 +33,21 @@ from techne.core.stores import plain_connect
 #      deep leaks persist. Leaf collisions (the common case) are fully filtered.
 #   2. PATH-CONVENTION-LOCKED. Matches this repo's POSIX `tests/fixtures/` layout;
 #      a `tests\fixtures\` (Windows) or `test/fixtures` (singular) path would leak.
+#: An `external` edge is one `import_resolve` RULED OUT of this repo: the callee
+#: is bound to a module this index does not contain, so no symbol here can be it
+#: (techne#679). Name inference must therefore not arm on it — matching `e.to_name`
+#: against a local symbol would invent precisely the hop the status proves
+#: impossible. Measured on the index of the day this clause landed (b539c6d):
+#: 1 of 599 external edges name-matched a local symbol. On the current index it
+#: is 0 of 593 — later narrowings moved both the count and that edge — so the
+#: cost is smaller than the original note implies and the contradiction is not:
+#: an edge ruled OUT of this repo must not name-match into it. The 599 is kept
+#: DATED rather than refreshed, because it is the measurement that justified the
+#: clause and a re-measurement after the fix cannot re-justify it.
+#: Declared ONCE and interpolated into all four fallbacks, because four copies of
+#: a rule is how they drift (Prudence r2 nit 3).
+_NOT_EXTERNAL = "e.resolution_status != 'external'"
+
 _FIXTURE_LIKE = "%tests/fixtures/%"
 
 
@@ -294,7 +309,7 @@ def callers(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
                WHERE e.kind = 'call'
                  AND (
                      e.to_symbol = ?
-                     OR (e.to_symbol IS NULL
+                     OR (e.to_symbol IS NULL AND {_NOT_EXTERNAL}
                          AND e.to_name = (SELECT name FROM symbols WHERE id = ?))
                  ){fixture_clause}""",
             [symbol_id, *params],
@@ -359,7 +374,7 @@ def callees(db_path: Path, symbol_id: str, *, exclude_fixtures: bool = True,
                FROM edges e
                JOIN symbols s ON (
                    s.id = e.to_symbol
-                   OR (e.to_symbol IS NULL AND s.name = e.to_name)
+                   OR (e.to_symbol IS NULL AND {_NOT_EXTERNAL} AND s.name = e.to_name)
                )
                WHERE e.from_symbol = ?
                  AND e.kind = 'call'{fixture_clause}""",
@@ -417,7 +432,7 @@ def reachable(
     # wanted. '0' (never true) is used rather than removing the OR arm so the two
     # SQL shapes stay textually parallel and diffable.
     inferred_clause_out = "" if include_inferred else " AND e.to_symbol IS NOT NULL"
-    inferred_join_in = "e.to_symbol IS NULL" if include_inferred else "0"
+    inferred_join_in = f"e.to_symbol IS NULL AND {_NOT_EXTERNAL}" if include_inferred else "0"
     kind_filter = ""
     if kinds:
         kind_filter = " AND e.kind IN (%s)" % ", ".join("?" * len(kinds))
@@ -430,6 +445,7 @@ def reachable(
             FROM reach r
             JOIN edges e ON e.from_symbol = r.id
             LEFT JOIN symbols s2 ON s2.name = e.to_name AND e.to_symbol IS NULL
+                                        AND {_NOT_EXTERNAL}
             WHERE r.depth < ?{kind_filter}
               AND COALESCE(e.to_symbol, s2.id) IS NOT NULL{inferred_clause_out}
         """

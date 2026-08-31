@@ -207,9 +207,56 @@ def _find_enclosing_symbol(byte_pos: int, spans: list[tuple[int, int, str]]) -> 
     return best
 
 
-def _extract_import_names(node, language: str) -> list[str]:
-    """Pull the leaf imported names out of an import node."""
-    names: list[str] = []
+#: Prefixes that mark a TypeScript specifier as UNRESOLVABLE BY THIS PARSER.
+#: Each names a path this resolver cannot follow, for the same reason:
+#:   "."  relative to the IMPORTING FILE, whose position the parser lacks
+#:   "@"  a scoped package, or a tsconfig `paths` alias
+#:   "$"  a Vite / SvelteKit alias — `$lib/queries` maps to `./src/lib/queries`
+#:        via tsconfig `paths` and vite `resolve.alias`, neither of which is read
+#:
+#: `$` WAS MISSING AND IT COST A FALSE FACT ON REAL CODE. Found 2026-08-31 by
+#: indexing tenishai/ladon — the first repo with real TypeScript this resolver
+#: had ever run on — where `ui/src/main.ts` importing `setApiClient` from
+#: `$lib/queries` was asserted `external`, i.e. "no symbol in this repo can be
+#: it", about `ui/src/lib/queries.ts:23`. Seven rounds of hand-built fixtures
+#: never produced it because nobody thought of `$`, which is exactly what a
+#: fixture cannot do: it can only contain the cases its author already knows.
+#: A bare specifier is deliberately NOT in this set — that one resolves through
+#: node_modules and is handled by the builtin guard and the workspace cost.
+_TS_ALIAS_SIGILS = (".", "@", "$")
+
+
+def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
+    """Pull the imported names out of an import node, each with its SOURCE MODULE.
+
+    Returns ``(name, module)`` pairs (techne#679). ``module`` is the dotted path a
+    name was imported FROM, and is ``None`` for a plain ``import x``:
+
+        import os                  -> ("os",   None)
+        import a.b.c               -> ("c",    None)
+        import json as j           -> ("j",    None)
+        from pathlib import Path   -> ("Path", "pathlib")
+        from a.b import c as d     -> ("d",    "a.b")
+
+    The ``None`` is load-bearing, not a placeholder: it is what distinguishes a
+    module brought into scope from a name brought out of one. Before this pair
+    the two were both a bare string, so 890 distinct ``to_name`` values on the
+    live index mixed ``os`` and ``techne`` (modules) with ``Config`` and ``Enum``
+    (names) with nothing to tell them apart — and a call to ``Config`` could not
+    be tied back to the module that supplied it.
+
+    The NAME is the binding as it appears in the importing scope, so an alias
+    wins: after ``import json as j`` the callable in scope is ``j``, and
+    recording ``json`` would not match any call site.
+
+    BUT AN ALIASED from-IMPORT RECORDS NO MODULE. The name and the module are
+    correct individually and wrong together: `resolve_edges_by_import` looks the
+    BOUND name up inside the SOURCE module, and after
+    ``from a.b import real as helper`` module ``a.b`` has no ``helper``. The
+    original name is stored nowhere, so the pair cannot be resolved truthfully
+    and the honest binding is none at all.
+    """
+    names: list[tuple[str, str | None]] = []
     if language == "python":
         node_type = node.type
         if node_type == "import_statement":
@@ -219,47 +266,121 @@ def _extract_import_names(node, language: str) -> list[str]:
                     # last identifier is the usable name
                     idents = [c for c in child.children if c.type == "identifier"]
                     if idents:
-                        names.append(idents[-1].text.decode("utf-8", errors="replace"))
+                        names.append((idents[-1].text.decode("utf-8", errors="replace"), None))
                 elif child.type == "aliased_import":
                     # import json as j → the alias (j) is what's in scope
                     alias_node = child.child_by_field_name("alias")
                     if alias_node:
-                        names.append(alias_node.text.decode("utf-8", errors="replace"))
+                        names.append((alias_node.text.decode("utf-8", errors="replace"), None))
                     else:
                         # no alias — use the module's last component
                         dotted = child.child_by_field_name("name")
                         if dotted:
                             idents = [c for c in dotted.children if c.type == "identifier"]
                             if idents:
-                                names.append(idents[-1].text.decode("utf-8", errors="replace"))
+                                names.append(
+                                    (idents[-1].text.decode("utf-8", errors="replace"), None)
+                                )
         elif node_type == "import_from_statement":
-            # from foo import bar, baz
+            # from foo.bar import baz, qux
+            # The module is the dotted_name BEFORE the `import` keyword; every
+            # name after it is bound FROM that module. The `in_names` flip is
+            # what separates the two, so the module capture must read the same
+            # children in the same pass rather than re-walking.
             in_names = False
+            module: str | None = None
             for child in node.children:
                 if child.type == "import":
                     in_names = True
                     continue
-                if in_names and child.type == "dotted_name":
+                if not in_names:
+                    # `from . import x` / `from .. import y` — a relative import
+                    # has no dotted_name here, only import_prefix dots. Left as
+                    # None: a relative module cannot be resolved to a repo path
+                    # without the importing file's own package position, which
+                    # this function does not have. Deliberately not guessed.
+                    if child.type == "dotted_name":
+                        module = child.text.decode("utf-8", errors="replace")
+                    continue
+                if child.type == "dotted_name":
                     idents = [c for c in child.children if c.type == "identifier"]
                     if idents:
-                        names.append(idents[-1].text.decode("utf-8", errors="replace"))
-                elif in_names and child.type == "aliased_import":
+                        names.append((idents[-1].text.decode("utf-8", errors="replace"), module))
+                elif child.type == "aliased_import":
                     alias_node = child.child_by_field_name("alias")
                     if alias_node:
-                        names.append(alias_node.text.decode("utf-8", errors="replace"))
+                        # A RENAMING ALIAS LOSES THE MODULE (techne#679, Prudence
+                        # r3 Critical 1). `to_name` is the name in the IMPORTING
+                        # scope, which is what a call site matches — but the
+                        # resolver then asks the source module for a symbol by
+                        # that same name, and after `from a.b import real as
+                        # helper` module `a.b` has no `helper`. Usually that
+                        # misses and a miss is free; when it HITS it binds the
+                        # call to an unrelated symbol and stamps it
+                        # `import_resolved`, the status that survives
+                        # `include_inferred=False`.
+                        #
+                        # `X as X` IS NOT A RENAME AND KEEPS ITS MODULE. The
+                        # re-export idiom (`from .m import Thing as Thing`, which
+                        # is how a module marks a name as public re-export for
+                        # type checkers) binds the SAME name it imported, so the
+                        # lookup asks the right question and the binding is a
+                        # true fact. Dropping it cost 4 resolutions on this repo
+                        # across 62 such imports — measured by A/B on one tree
+                        # with this one line toggled, after an earlier version of
+                        # this fix refused every alias indiscriminately. (An
+                        # earlier annotation here said 58 resolutions; that was a
+                        # regex count of imports, not an A/B of resolutions, and
+                        # it disagreed with the card in the same commit.)
+                        alias = alias_node.text.decode("utf-8", errors="replace")
+                        orig_node = child.child_by_field_name("name")
+                        orig = None
+                        if orig_node is not None:
+                            idents = [c for c in orig_node.children if c.type == "identifier"]
+                            orig = (
+                                idents[-1].text.decode("utf-8", errors="replace")
+                                if idents
+                                else orig_node.text.decode("utf-8", errors="replace")
+                            )
+                        names.append((alias, module if alias == orig else None))
                     else:
                         dotted = child.child_by_field_name("name")
                         if dotted:
                             idents = [c for c in dotted.children if c.type == "identifier"]
                             if idents:
-                                names.append(idents[-1].text.decode("utf-8", errors="replace"))
+                                names.append(
+                                    (idents[-1].text.decode("utf-8", errors="replace"), module)
+                                )
     elif language == "typescript":
         # import { X, Y } from 'z'; import X from 'z'; import * as X from 'z'
+        # EVERY TS import form carries its source, unlike Python — there is no
+        # module-only form. The source is a quoted string node; the quotes are
+        # stripped so a BARE specifier ('react', 'pkg/sub') matches the dotted
+        # shape Python produces and one resolver can read both.
+        #
+        # A RELATIVE OR ALIASED SPECIFIER IS LEFT UNBOUND, deliberately, and for
+        # the identical reason `from . import x` is (techne#679, Prudence r1
+        # Critical 2). './util' is a path relative to the IMPORTING FILE, and
+        # this parser does not have that file's position; '@/x' is a tsconfig
+        # path alias whose meaning lives in a config this parser does not read.
+        # Passing either through as a module is worse than passing nothing:
+        # `_module_candidates` maps '.' to '/', so './util' becomes '//util.ts',
+        # which matches no repo-relative path and lands the edge in `external` —
+        # a row asserting as FACT that no symbol in this repo can be the callee,
+        # about a file sitting in the index. Relative specifiers are how
+        # essentially every in-repo TS import is written, so that mistake is the
+        # common case, not the edge case. NULL here leaves the edge honestly
+        # `unresolved` until something can resolve it properly.
+        module = None
+        src = node.child_by_field_name("source")
+        if src is not None:
+            spec = src.text.decode("utf-8", errors="replace").strip("\"'`")
+            module = None if spec.startswith(_TS_ALIAS_SIGILS) else spec
         for child in node.children:
             if child.type == "import_clause":
                 for sub in child.children:
                     if sub.type == "identifier":
-                        names.append(sub.text.decode("utf-8", errors="replace"))
+                        names.append((sub.text.decode("utf-8", errors="replace"), module))
                     elif sub.type == "named_imports":
                         for spec in sub.children:
                             if spec.type == "import_specifier":
@@ -267,11 +388,19 @@ def _extract_import_names(node, language: str) -> list[str]:
                                 nm = spec.child_by_field_name("name")
                                 target = alias or nm
                                 if target:
-                                    names.append(target.text.decode("utf-8", errors="replace"))
+                                    # A RENAMING alias drops the module; `X as X`
+                                    # keeps it. Same rule as Python above.
+                                    bound = target.text.decode("utf-8", errors="replace")
+                                    orig = (
+                                        nm.text.decode("utf-8", errors="replace")
+                                        if nm is not None
+                                        else bound
+                                    )
+                                    names.append((bound, module if bound == orig else None))
                     elif sub.type == "namespace_import":
                         ident = next((c for c in sub.children if c.type == "identifier"), None)
                         if ident:
-                            names.append(ident.text.decode("utf-8", errors="replace"))
+                            names.append((ident.text.decode("utf-8", errors="replace"), module))
     return names
 
 
@@ -424,18 +553,35 @@ def _parse_file(
     for caps in import_matches:
         imp_nodes = caps.get("import.range", [])
         for imp_node in imp_nodes:
-            for name in _extract_import_names(imp_node, language):
+            for name, to_module in _extract_import_names(imp_node, language):
+                # KEY EXCLUDES to_module ON PURPOSE — it mirrors the table's
+                # PRIMARY KEY (from_symbol, to_name, kind). Two imports binding
+                # the same name in one module is a shadow, not two edges: after
+                # `from a import x` then `from b import x`, the name `x` refers
+                # to b's, so first-write-wins here would record the wrong one.
+                # Later bindings therefore REPLACE the module rather than being
+                # skipped, matching the language's own scoping.
                 key = (module_sym_id, name, "import")
-                if key not in seen_edges:
-                    seen_edges.add(key)
-                    edges.append(
-                        {
-                            "from_symbol": module_sym_id,
-                            "to_name": name,
-                            "kind": "import",
-                            "src_file_hash": file_hash,
-                        }
-                    )
+                if key in seen_edges:
+                    for e in edges:
+                        if (
+                            e["kind"] == "import"
+                            and e["from_symbol"] == module_sym_id
+                            and e["to_name"] == name
+                        ):
+                            e["to_module"] = to_module
+                            break
+                    continue
+                seen_edges.add(key)
+                edges.append(
+                    {
+                        "from_symbol": module_sym_id,
+                        "to_name": name,
+                        "kind": "import",
+                        "src_file_hash": file_hash,
+                        "to_module": to_module,
+                    }
+                )
 
     return symbols, edges
 
@@ -534,10 +680,19 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
         )
         # Bulk-insert edges.
         if edges:
+            # NORMALISED HERE, NOT AT EVERY EMISSION SITE (techne#679). Only
+            # import edges carry `to_module`; call and def-use edges never do,
+            # and `executemany` with named parameters raises on the first dict
+            # missing a key rather than substituting NULL. Defaulting once at
+            # the boundary means a new edge kind added later cannot break the
+            # insert by forgetting a field that does not apply to it.
+            for e in edges:
+                e.setdefault("to_module", None)
             conn.executemany(
                 """INSERT OR IGNORE INTO edges
-                   (from_symbol, to_name, kind, src_file_hash, resolution_status)
-                   VALUES (:from_symbol, :to_name, :kind, :src_file_hash, 'unresolved')""",
+                   (from_symbol, to_name, kind, src_file_hash, resolution_status, to_module)
+                   VALUES (:from_symbol, :to_name, :kind, :src_file_hash, 'unresolved',
+                           :to_module)""",
                 edges,
             )
         conn.commit()
