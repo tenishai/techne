@@ -142,6 +142,11 @@ class TestTypeScriptImportParsing:
             "import { helper } from './util';",
             "import { y } from '../lib/a';",
             "import { x } from '@/components/X';",
+            # `$lib` is the Vite/SvelteKit alias, and it was MISSING from the
+            # sigil set until real TypeScript exposed it — see
+            # test_a_vite_alias_is_not_asserted_external below.
+            "import { setApiClient } from '$lib/queries';",
+            "import { z } from '$components/Thing';",
         ],
     )
     def test_a_relative_or_aliased_specifier_is_left_unbound(self, src):
@@ -1453,4 +1458,58 @@ def test_a_bare_specifier_binds_at_any_depth_and_that_is_a_known_cost(tmp_path):
         conn.close()
     assert to_symbol == "apps/web/ui/index.ts::Button::function::1", (
         "the known cost changed shape — re-read this docstring before updating it"
+    )
+
+
+def test_a_vite_alias_is_not_asserted_external(tmp_path):
+    """FOUND ON REAL TYPESCRIPT, NOT ON A FIXTURE — and that is the point.
+
+    Seven review rounds hand-built TypeScript fixtures for this resolver and
+    none used `$`. Indexing tenishai/ladon, the first repo with real TypeScript
+    this resolver had ever run on, produced a false `external` in ninety
+    seconds: `ui/src/main.ts` imports `setApiClient` from `$lib/queries`, and
+    `ui/src/lib/queries.ts:23` exports it. The row asserted, as FACT, that no
+    symbol in this repo could be the callee — the round-1 Critical verbatim.
+
+    `$lib` is a Vite `resolve.alias` plus a tsconfig `paths` entry, neither of
+    which this parser reads, so it belongs with `.` and `@` in the sigil set
+    rather than being passed through as a module name. Left UNBOUND, not
+    resolved: placing it would need the tsconfig.
+
+    A fixture can only contain the cases its author already knows. This one
+    could not have been written before the corpus produced it.
+    """
+    pytest.importorskip("tree_sitter_typescript")
+    (tmp_path / "src" / "lib").mkdir(parents=True)
+    (tmp_path / "src" / "lib" / "queries.ts").write_text(
+        "export function setApiClient(next) { return next; }\n"
+    )
+    (tmp_path / "src" / "main.ts").write_text(
+        "import { setApiClient } from '$lib/queries';\n"
+        "export function boot() { return setApiClient(1); }\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("src/lib/queries.ts", "src/main.ts"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    assert conn.execute(
+        "SELECT 1 FROM symbols WHERE file='src/lib/queries.ts' AND name='setApiClient'"
+    ).fetchone(), "the aliased target was not indexed; this fixture tests nothing"
+    conn.close()
+
+    resolve_edges_by_import(sqlite3.connect(db))
+    conn = sqlite3.connect(db)
+    try:
+        status = conn.execute(
+            "SELECT resolution_status FROM edges WHERE kind='call' AND to_name='setApiClient'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert status != "external", (
+        "a Vite $-alias naming an in-repo file was asserted out-of-repo"
     )

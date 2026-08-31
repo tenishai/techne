@@ -207,6 +207,25 @@ def _find_enclosing_symbol(byte_pos: int, spans: list[tuple[int, int, str]]) -> 
     return best
 
 
+#: Prefixes that mark a TypeScript specifier as UNRESOLVABLE BY THIS PARSER.
+#: Each names a path this resolver cannot follow, for the same reason:
+#:   "."  relative to the IMPORTING FILE, whose position the parser lacks
+#:   "@"  a scoped package, or a tsconfig `paths` alias
+#:   "$"  a Vite / SvelteKit alias — `$lib/queries` maps to `./src/lib/queries`
+#:        via tsconfig `paths` and vite `resolve.alias`, neither of which is read
+#:
+#: `$` WAS MISSING AND IT COST A FALSE FACT ON REAL CODE. Found 2026-08-31 by
+#: indexing tenishai/ladon — the first repo with real TypeScript this resolver
+#: had ever run on — where `ui/src/main.ts` importing `setApiClient` from
+#: `$lib/queries` was asserted `external`, i.e. "no symbol in this repo can be
+#: it", about `ui/src/lib/queries.ts:23`. Seven rounds of hand-built fixtures
+#: never produced it because nobody thought of `$`, which is exactly what a
+#: fixture cannot do: it can only contain the cases its author already knows.
+#: A bare specifier is deliberately NOT in this set — that one resolves through
+#: node_modules and is handled by the builtin guard and the workspace cost.
+_TS_ALIAS_SIGILS = (".", "@", "$")
+
+
 def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
     """Pull the imported names out of an import node, each with its SOURCE MODULE.
 
@@ -356,7 +375,7 @@ def _extract_import_names(node, language: str) -> list[tuple[str, str | None]]:
         src = node.child_by_field_name("source")
         if src is not None:
             spec = src.text.decode("utf-8", errors="replace").strip("\"'`")
-            module = None if spec.startswith((".", "@")) else spec
+            module = None if spec.startswith(_TS_ALIAS_SIGILS) else spec
         for child in node.children:
             if child.type == "import_clause":
                 for sub in child.children:
