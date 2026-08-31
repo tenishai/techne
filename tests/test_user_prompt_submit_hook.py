@@ -560,15 +560,27 @@ class TestInjectedTypeLabel:
             "the dominant cost, so this is a deliberate decision, not a tuning tweak"
         )
         # MOVED 200 -> 450 on 2026-08-31, and this tripwire is why it was a decision
-        # rather than a drift: it failed, and the number was changed only after the
-        # measurement below. Over 2,468 live injectable rows (median length 476), a
-        # 200-cap severed 2,442 of them — 98% — and a severed row carried no marker
-        # distinguishing it from a whole one, so a multi-step procedure arrived as its
-        # own title. At 450 the severed count is 1,305 (52%). The added cost is ~312
-        # tokens per turn on a five-row push, against #808's finding that MCP tool
-        # schemas already account for 87% of per-session context. 450 not 500 because
-        # search() pre-truncates at _SEARCH_ROW_CEILING (#842) and the cap must sit
-        # strictly below it — pinned separately by
+        # rather than a drift: it failed, and the number changed only after measuring.
+        #
+        # THE MEASUREMENT IS OF THE STORE, NOT THE RAIL (#852 r1 Important 3). Of 2,468
+        # live injectable rows (median 476), a 200-cap WOULD sever 2,442 (98%) and 450
+        # WOULD sever 1,305 (52%) — if each were injected. The rail injects five rows a
+        # turn chosen by embedding similarity and BM25, so it never severed 2,442 of
+        # anything. #826's field figure (58/58 at 200) matches the corpus number, but at
+        # 200 nearly everything severs however it was chosen; the agreement carries no
+        # information about 450, where 47% of the store sits below the cap and selection
+        # bias finally has room. docs/roadmap.md:87 records that BM25 length-norm ranks
+        # longer rows BELOW shorter ones, which would push true severance under 52% —
+        # unmeasured either way, so 52% is a bound, not a prediction. #853 adds the
+        # telemetry that settles it.
+        #
+        # Cost: UP TO ~312 tokens/turn on a five-row push — a ceiling, since only 52% of
+        # rows exceed 450 and boundary-seeking can cut at 60% of the budget. It is a
+        # PER-TURN cost and #808's schema block is PER-SESSION, so the two are only
+        # comparable multiplied out: ~12,500 tokens across a 40-turn session.
+        #
+        # 450 not 500 because search() pre-truncates at _SEARCH_ROW_CEILING (#842) and
+        # the cap must sit strictly below it — pinned by
         # test_the_shipped_default_is_actually_deliverable.
         out = self._ctx(
             [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
@@ -589,7 +601,7 @@ class TestInjectedTypeLabel:
             "of this row exists to carry it past the cap so the cut actually fires."
             " It also has to reach past the raised cap, so this sentence carries it "
             "beyond four hundred and fifty characters without introducing a boundary "
-            "at the cut point itself, which is the property the fixture exists to hold."
+            "one at the cut point itself, which is the property the fixture exists to hold."
         )
         # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
         # An earlier version of this test could not fail: its character at the cap
@@ -607,9 +619,17 @@ class TestInjectedTypeLabel:
         # longer exceeded the cap, and this test says so out loud rather than passing
         # on a row it never cuts — the `len(body) > cap` assertion below is what caught
         # it. The property is re-established at the NEW cap, verified empirically, not
-        # counted: `body[450]` is `w`, mid-word in "which", so a bare `content[:cap]`
-        # still cannot satisfy the mid-word assertion. The index-201 note above refers
-        # to the old cap and is kept as the record of why the original fixture held.
+        # counted — AND THE FIRST ATTEMPT AT THAT WAS WRONG, which is the part worth
+        # keeping. It padded to `body[450] == 'w'` and called that mid-word. It is not:
+        # `body[449]` was a SPACE, so 'w' opened "which", the hard cut's `rstrip()`
+        # removed that space, and the assertion read the stripped position instead —
+        # this guard passed with boundary-seeking deleted outright. Caught in #852 r1
+        # by executing the defect rather than reasoning about it. The cap index was
+        # checked and the one before it was not, which is the whole error: "verified
+        # empirically" is only true of the index you actually looked at.
+        # Now `body[449]='e'` and `body[450]='l'`, both interior to "itself".
+        # The index-201 note above refers to the old cap and is kept as the record of
+        # why the original fixture held.
         #
         # THE CAP IS DERIVED, NOT WRITTEN AS 200 (#839 r2 nit 2). `_ctx` calls
         # `_build_context` without a limit, so this fixture is coupled to that
@@ -622,6 +642,15 @@ class TestInjectedTypeLabel:
 
         cap = inspect.signature(_build_context).parameters["char_limit"].default
         assert len(body) > cap, "fixture must exceed the cap or it tests nothing"
+        # NECESSARY AND SUFFICIENT, WHICH THE cap-ONLY CHECK WAS NOT (#852 r1).
+        # The hard-cut path ends `window[:limit].rstrip()`, so if `body[cap - 1]` is
+        # whitespace the bare-slice defect produces a string one shorter and the
+        # mid-word assertion below reads the stripped space instead — passing with
+        # boundary-seeking deleted. Checking only `body[cap]` cannot see that.
+        assert body[cap - 1] not in " \t\n" and body[cap] not in " \t\n", (
+            f"fixture is toothless: the hard cut rstrips to index "
+            f"{len(body[:cap].rstrip())}, and the char there must be non-whitespace"
+        )
         assert body[cap] not in " \t\n", (
             f"fixture is toothless: whitespace at index {cap} lets the bare slice pass"
         )
