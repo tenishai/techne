@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS context_injections (
     native_scores   TEXT,
     score_kinds     TEXT,
     match_sources   TEXT,
-    k_requested     INTEGER
+    k_requested     INTEGER,
+    rows_truncated  INTEGER,
+    chars_dropped   INTEGER
 )
 """
 
@@ -70,6 +72,8 @@ _LATER_COLUMNS = {
     "score_kinds": "TEXT",
     "match_sources": "TEXT",
     "k_requested": "INTEGER",
+    "rows_truncated": "INTEGER",  # techne#853 ↓
+    "chars_dropped": "INTEGER",
 }
 
 
@@ -210,6 +214,8 @@ def log_context_injection(
     injected_text: str,
     total_hits: int | None = None,
     k_requested: int | None = None,
+    rows_truncated: int | None = None,
+    chars_dropped: int | None = None,
 ) -> None:
     """Record one context-injection event. Best-effort — never raises.
 
@@ -233,6 +239,16 @@ def log_context_injection(
     retrieval score), ``score_kinds`` (which scale that score is on — never compare
     across kinds), and ``match_sources`` (which channel produced it: vec / fts /
     fts+vec).
+
+    ``rows_truncated`` / ``chars_dropped`` (techne#853) record what the reader did
+    NOT receive: how many of ``hit_count`` were cut by the source's char cap, and
+    how many characters of content were withheld across the payload. Both ``None``
+    for sources that do not truncate. The pair matters more than either alone —
+    forty rows cut by five characters and forty cut by four hundred are different
+    worlds, and a count cannot tell them apart. Recorded because the cap is a tuning
+    knob whose effect was previously unobservable: this table said what was injected
+    and never what was severed, so raising or lowering the cap could not be
+    evaluated from data (techne#826, #852).
 
     ``native_scores`` is the row's PLACEMENT value only where ``score_kinds`` is
     ``"vec_distance"`` — stated in terms of the column a floor actually joins on,
@@ -262,8 +278,8 @@ def log_context_injection(
                 "INSERT INTO context_injections "
                 "(source, session_id, trigger_snippet, hit_count, hit_ids, scores, "
                 "approx_tokens, total_hits, native_scores, score_kinds, "
-                "match_sources, k_requested) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "match_sources, k_requested, rows_truncated, chars_dropped) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     source,
                     session_id,
@@ -277,6 +293,8 @@ def log_context_injection(
                     json.dumps(score_kinds),
                     json.dumps(match_sources),
                     k_requested,
+                    rows_truncated,
+                    chars_dropped,
                 ),
             )
             conn.commit()
