@@ -15,6 +15,11 @@ Schema versions (PRAGMA user_version on codex.db):
   0 — original: edges(from_symbol, to_symbol NOT NULL, kind); no file_hash on symbols
   1 — v1 extraction: edges name-based (to_name, to_symbol nullable); symbols.file_hash
   2 — codex_meta KV table: persists repo_root (and future per-db metadata)
+  3 — v3 purge of vendored/fixture noise
+  4 — edges.to_module: the SOURCE MODULE of a from-import (techne#679). Without
+      it an import edge records a bare name with no binding, so a call to that
+      name cannot be tied to the module it came from — which is why 33,081 call
+      edges carried 1 resolved target on 2026-08-31.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ from techne.core.stores import (
 
 log = logging.getLogger(__name__)
 
-CODEX_VERSION = 3
+CODEX_VERSION = 4
 
 # v1 shape — the authoritative schema for fresh databases.
 # Incremental: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS are
@@ -73,6 +78,13 @@ CREATE TABLE IF NOT EXISTS edges (
     kind              TEXT NOT NULL,      -- call | import | def-use
     src_file_hash     TEXT,              -- hash of the REFERENCING file (incremental delete key)
     resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+    -- techne#679. For kind='import' ONLY, and ONLY for a from-import:
+    -- `from a.b import c` stores to_name='c', to_module='a.b'. A plain
+    -- `import a.b` stores to_name='b' and to_module IS NULL, which is what
+    -- distinguishes the two cases — before this column they were the same row
+    -- shape and 890 distinct to_name values mixed modules with imported names
+    -- indistinguishably. NULL on every non-import edge.
+    to_module         TEXT,
     PRIMARY KEY (from_symbol, to_name, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_symbol);
@@ -330,6 +342,21 @@ def _v3_purge_batch(conn, doomed: list[str]) -> None:
     conn.execute(f"DELETE FROM symbols WHERE id IN ({marks})", doomed)
 
 
+def _codex_v3_to_v4(conn) -> None:
+    """Add edges.to_module (techne#679). Structurally guarded, so re-entrant.
+
+    ADD COLUMN, not a table rebuild: the column is nullable and every existing
+    row is legitimately NULL for it — an index written before v4 recorded no
+    module, and there is no way to recover one without re-parsing. Backfill is
+    therefore NOT attempted here; a re-index populates it, and until then
+    `import_resolve` simply finds no binding and leaves the call edge
+    'unresolved', which is exactly its pre-v4 behaviour.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+    if "to_module" not in cols:
+        conn.execute("ALTER TABLE edges ADD COLUMN to_module TEXT")
+
+
 def _run_codex_steps(conn, current: int, target: int) -> None:
     """Chain all codex migration steps from *current* to *target*.
 
@@ -343,6 +370,8 @@ def _run_codex_steps(conn, current: int, target: int) -> None:
         _codex_v1_to_v2(conn)
     if current < 3:
         _codex_v2_to_v3(conn)
+    if current < 4:
+        _codex_v3_to_v4(conn)
     migrator.user_version_io.write(conn, target)
     conn.commit()
 
