@@ -4604,7 +4604,7 @@ def _import_resolve_pass(db_path: Path) -> dict:
 
     UNCONDITIONAL, and deliberately not behind a flag the way `--lsp` is. It
     needs no language server, it never overwrites an `lsp` row, and it costs
-    ~0.2s on a 24k-edge index. A resolver that has to be REMEMBERED is a
+    ~0.3s on a 24k-edge index. A resolver that has to be REMEMBERED is a
     resolver that does not run: `--lsp` existed for months and the live corpus
     still measured 33,081 call edges with 1 resolved target, that one in a demo
     shard. Making this one opt-in would reproduce that outcome exactly.

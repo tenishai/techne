@@ -115,6 +115,57 @@ def _module_candidates(dotted: str, language: str | None = None) -> tuple[str, .
     return tuple(sh.format(stem=stem) for sh in shapes)
 
 
+def _module_root(module: str, language: str | None) -> str:
+    """The first segment of a module specifier, in that language's own spelling.
+
+    ONE DEFINITION, THREE CALL SITES, AND THAT IS THE WHOLE POINT (Prudence r6
+    Important 2). This concept had three literal spellings in this file — the
+    Python guard split on ".", the TypeScript guard split on "/" after stripping
+    `node:`, and the evidence gate split on "." for BOTH languages. Each round
+    fixed the root in one place and left it wrong in another, three rounds
+    running.
+
+    The gate was the one that never got fixed, and its failure was silent rather
+    than wrong-looking: `_in_repo_names` returns path segments and file stems, so
+    NO entry can ever contain a "/". Splitting a TypeScript specifier on "." left
+    `ui/button` whole, which nothing in that set can equal — a test that cannot be
+    satisfied rather than one that fails. Every unplaceable TS subpath fell
+    through to `external`, asserting as fact that no symbol here can be a callee
+    that was sitting in the index.
+
+    This is the redundant-declaration shape this file has now deleted twice on
+    its own account (the second language gate in `_module_candidates`, the dead
+    `ambiguous` flag in `_match_paths`). A single function makes the disagreement
+    impossible instead of merely corrected.
+    """
+    if language == "python":
+        return module.split(".", 1)[0]
+    return module.removeprefix("node:").split("/", 1)[0]
+
+
+def _is_builtin(module: str, language: str | None) -> bool:
+    """Does this specifier name a language builtin — stdlib, or a node builtin.
+
+    A BUILTIN NAME IS POSITIVE EVIDENCE OF OUT-OF-REPO, and that is why this is a
+    predicate the CALLER consults rather than an early return inside the matcher.
+    An earlier shape returned no candidates for a builtin and let the evidence
+    gate decide, which produced `unresolved` whenever the repo happened to hold a
+    same-named directory — precisely the collision the guard exists for. A repo
+    with a top-level `util/` would have had `import { promisify } from 'util'`
+    reported as "we could not tell", when in fact we can: nothing in this repo is
+    the node `util` module.
+
+    Splitting it out also stops the rule being spelled twice, once in the matcher
+    and once in the gate, which is the shape this file has now removed three
+    times (the second language gate, the dead `ambiguous` flag, and three
+    spellings of the module root).
+    """
+    root = _module_root(module, language)
+    if language == "python":
+        return root in sys.stdlib_module_names
+    return root in _NODE_BUILTINS
+
+
 def _in_repo_names(known_files) -> frozenset[str]:
     """Every name a module root could legitimately be, anywhere in the tree.
 
@@ -137,7 +188,7 @@ def _in_repo_names(known_files) -> frozenset[str]:
     The cost is real and is the trade r1 already asked for: a stdlib name that
     collides with an in-repo directory name (a repo with its own `types/`) stops
     being a true `external` and becomes `unresolved`. A lost fact is cheaper
-    than a false one. Measured on this repo: it costs none of the 597.
+    than a false one. Measured on this repo: it costs none of the 593.
     """
     names: set[str] = set()
     for f in known_files:
@@ -185,6 +236,27 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
     if key in memo:
         return memo[key]
     cands = _module_candidates(module, language)
+
+    # THE BUILTIN TEST RUNS BEFORE THE EXACT BRANCH FOR TYPESCRIPT, AND AFTER IT
+    # FOR PYTHON (Prudence r6 Important 1). The exact-match carve-out below is
+    # defended by an argument that is Python's and only Python's: a repo-root
+    # `logging.py` IS what `import logging` resolves to when the root is on
+    # `sys.path`. THERE IS NO `sys.path` IN NODE. A bare specifier resolves
+    # through `node_modules` and never against a repo-relative path, and builtins
+    # outrank `node_modules` besides — so for TypeScript the exact branch is not
+    # the plausible answer, it is the impossible one.
+    #
+    # r5 fixed this guard for the suffix branch and the exact branch kept
+    # returning above it, so `import { promisify } from 'util'` bound to a
+    # TOP-LEVEL `util/index.ts` — the likeliest form of exactly the collision the
+    # guard exists to stop, since `util`, `path`, `types` and `stream` are among
+    # the most ordinary top-level directory names in a TS repo. Both shipped
+    # tests used a NESTED shadow, so the top-level shape was uncovered in both
+    # directions, the same way the subpath shape was one round earlier.
+    if language != "python" and _is_builtin(module, language):
+        memo[key] = []
+        return memo[key]
+
     exact = [p for p in cands if p in known_files]
     if exact:
         # THIS BRANCH REFUSES TOO (Prudence r2 Important 2). It previously handed
@@ -195,9 +267,8 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
         out = exact if len(exact) == 1 else []
         memo[key] = out
         return out
-    root = module.split(".", 1)[0]
     builtin = (
-        root in sys.stdlib_module_names
+        _is_builtin(module, language)
         if language == "python"
         # THE ROOT, NOT THE WHOLE SPECIFIER (Prudence r5 Important 1). `_NODE_BUILTINS`
         # holds bare roots, so `fs/promises` — about as ordinary as node TypeScript
@@ -208,7 +279,7 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
         # The `node:` prefix is stripped BEFORE splitting, and only once: a bare
         # `module in _NODE_BUILTINS` disjunct was dead, since no member carries the
         # prefix (r5 nit 4).
-        else module.removeprefix("node:").split("/", 1)[0] in _NODE_BUILTINS
+        else False  # already returned above for TS
     )
     if builtin:
         # A NESTED FILE NEVER SHADOWS THE STDLIB (Prudence r3 Important 2).
@@ -232,15 +303,24 @@ def _match_paths(module: str, language: str | None, known_files, memo: dict) -> 
         # here can ever see any of it — the same blind spot that hid r1's
         # Criticals, one language over.
         #
-        # ONLY THE SUFFIX BRANCH IS GUARDED. An EXACT match is a genuine
-        # top-level shadow — a repo-root `logging.py` IS what `import logging`
-        # resolves to when the root is on `sys.path` (running from the root, or
-        # from tests; an installed wheel puts site-packages AFTER the stdlib, so
-        # a shipped top-level `logging.py` would not shadow — the guard fails
-        # toward the plausible answer under both readings) — so it is left to
-        # resolve above. This is the mirror of the vendoring boundary below: there, a
-        # deliberate vendored copy is what the reader wants; here, nothing was
-        # vendored and a name merely collided.
+        # THIS BLOCK IS NOW PYTHON-ONLY, AND SAYING SO IS THE POINT. It is reached
+        # only for `language == "python"`: TypeScript returns at the early guard
+        # ~50 lines above, before the exact branch. An earlier version of this
+        # paragraph opened "ONLY THE SUFFIX BRANCH IS GUARDED" and described, in
+        # the present tense, a TypeScript path that r6 had already made
+        # unreachable — dead prose contradicting the live comment 50 lines up and
+        # the architecture card, left behind because the control flow was fixed
+        # and its old justification was not.
+        #
+        # FOR PYTHON only the suffix branch is guarded, and an EXACT match is left
+        # to resolve: a repo-root `logging.py` IS what `import logging` resolves
+        # to when the root is on `sys.path` (running from the root, or from
+        # tests; an installed wheel puts site-packages AFTER the stdlib, so a
+        # shipped top-level `logging.py` would not shadow — the guard fails
+        # toward the plausible answer under both readings). This is the mirror of
+        # the vendoring boundary below: there, a deliberate vendored copy is what
+        # the reader wants; here, nothing was vendored and a name merely
+        # collided.
         memo[key] = []
         return memo[key]
     hits = {f for c in cands for f in known_files if f.endswith("/" + c)}
@@ -361,7 +441,13 @@ def resolve_edges_by_import(conn) -> dict:
             # anywhere, the callee genuinely is not here.
             # Anything in-repo-shaped that we simply could not place stays
             # `unresolved`, which is the honest word for "we could not tell".
-            if module.split(".", 1)[0] in in_repo_names:
+            # A BUILTIN SHORT-CIRCUITS THE NAME TEST. `_in_repo_names` would
+            # otherwise veto the verdict whenever the repo holds a same-named
+            # directory — a top-level `util/` turning `import … from 'util'`
+            # into "we could not tell", when we can tell exactly.
+            if not _is_builtin(module, language) and (
+                _module_root(module, language) in in_repo_names
+            ):
                 unresolved_in_repo_no_path += 1
                 continue
             conn.execute(

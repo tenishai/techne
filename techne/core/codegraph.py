@@ -37,10 +37,15 @@ from techne.core.stores import plain_connect
 #: is bound to a module this index does not contain, so no symbol here can be it
 #: (techne#679). Name inference must therefore not arm on it — matching `e.to_name`
 #: against a local symbol would invent precisely the hop the status proves
-#: impossible. Measured 2026-08-31 before this clause existed: 1 of 599 external
-#: edges on this repo name-matched a local symbol, so the cost was small and the
-#: contradiction was real. Declared ONCE and interpolated into all four fallbacks,
-#: because four copies of a rule is how they drift (Prudence r2 nit 3).
+#: impossible. Measured on the index of the day this clause landed (b539c6d):
+#: 1 of 599 external edges name-matched a local symbol. On the current index it
+#: is 0 of 593 — later narrowings moved both the count and that edge — so the
+#: cost is smaller than the original note implies and the contradiction is not:
+#: an edge ruled OUT of this repo must not name-match into it. The 599 is kept
+#: DATED rather than refreshed, because it is the measurement that justified the
+#: clause and a re-measurement after the fix cannot re-justify it.
+#: Declared ONCE and interpolated into all four fallbacks, because four copies of
+#: a rule is how they drift (Prudence r2 nit 3).
 _NOT_EXTERNAL = "e.resolution_status != 'external'"
 
 _FIXTURE_LIKE = "%tests/fixtures/%"

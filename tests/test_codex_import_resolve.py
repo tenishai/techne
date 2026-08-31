@@ -706,7 +706,9 @@ def test_an_external_edge_does_not_arm_name_inference(tmp_path):
     on codex edges by nothing — `codegraph`'s four fallbacks gated on
     `to_symbol IS NULL` alone, so an edge this pass had RULED OUT of the repo
     still name-matched a local symbol and invented exactly the hop the status
-    proves impossible. Measured 1 of 599 on this repo before the fix: small, and
+    proves impossible. Measured 1 of 599 on the index of the day the clause landed
+    (b539c6d); 0 of 593 on the current one, later narrowings having moved both. Small,
+    and
     a contradiction regardless.
 
     The fixture is the collision itself — a local `Path` alongside a call bound
@@ -1040,7 +1042,11 @@ class TestTheReExportIdiomSurvives:
     the original, so the lookup asks the right question. Measured on this repo:
     62 such imports (all in `techne/`, all absolute) against 189 genuine renames,
     and an A/B on one tree with the single line toggled puts the cost of the
-    indiscriminate refusal at 4 resolutions — 5,955 with the rule, 5,951 without.
+    indiscriminate refusal at 4 resolutions. The DELTA is the load-bearing half and
+    it has held at 4 across every round; the absolutes move with the head, so they
+    are given as a delta here rather than as a pair that goes stale (they were
+    "5,955 with, 5,951 without" one commit before this one, and "5,955" is now the
+    WITHOUT-rule count — a confusing thing for the next reader to meet).
     Counted by `ast`, not by regex: an earlier annotation said 58 and 30, from a
     regex that missed multi-name and multi-line imports, and it contradicted the
     architecture card in the same commit.
@@ -1244,12 +1250,20 @@ def test_a_node_builtin_SUBPATH_is_not_a_repo_file(tmp_path, specifier, filename
     resolve_edges_by_import(sqlite3.connect(db))
     conn = sqlite3.connect(db)
     try:
-        to_symbol = conn.execute(
-            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='thing'"
-        ).fetchone()[0]
+        status, to_symbol = conn.execute(
+            "SELECT resolution_status, to_symbol FROM edges "
+            "WHERE kind='call' AND to_name='thing'"
+        ).fetchone()
     finally:
         conn.close()
-    assert to_symbol is None, f"bound the builtin {specifier!r} to {to_symbol}"
+    # ASSERT THE STATUS, NOT ITS SHADOW (Prudence r6 nit 5). `to_symbol is None`
+    # cannot tell `external` from `unresolved`, and would stay green if the guard
+    # started returning the wrong one — or if `_module_candidates` stopped
+    # producing TS shapes at all. `external` is the correct verdict here:
+    # `fs/promises` genuinely is not in this repo.
+    assert (status, to_symbol) == ("external", None), (
+        f"builtin {specifier!r} resolved to {to_symbol} with status {status}"
+    )
 
 
 def test_a_workspace_package_still_resolves(tmp_path):
@@ -1287,4 +1301,156 @@ def test_a_workspace_package_still_resolves(tmp_path):
         conn.close()
     assert to_symbol == "packages/ui/index.ts::Button::function::1", (
         f"a workspace package stopped resolving: {to_symbol}"
+    )
+
+
+@pytest.mark.parametrize(
+    "specifier,filename",
+    [
+        ("util", "util/index.ts"),
+        ("fs", "fs.ts"),
+        ("fs/promises", "fs/promises.ts"),
+        ("path/posix", "path/posix.ts"),
+    ],
+)
+def test_a_TOP_LEVEL_file_never_shadows_a_node_builtin(tmp_path, specifier, filename):
+    """Prudence r6 Important 1 — the guard was bypassed by the exact branch.
+
+    r5 put the builtin test after the exact-match branch, which RETURNS first, so
+    only a NESTED shadow was caught. Both shipped tests used `web/...`, leaving
+    the top-level shape uncovered in both directions — and the top-level shape is
+    the likely one: `util`, `path`, `types` and `stream` are among the most
+    ordinary top-level directory names in a TS repo, which is the argument
+    `_NODE_BUILTINS` itself makes.
+
+    THE CARVE-OUT THAT LET IT THROUGH IS PYTHON'S AND ONLY PYTHON'S: a repo-root
+    `logging.py` IS what `import logging` resolves to when the root is on
+    `sys.path`. There is no `sys.path` in node — a bare specifier resolves through
+    `node_modules`, and builtins outrank it — so for TypeScript the exact branch
+    is not the plausible answer but the impossible one.
+    """
+    pytest.importorskip("tree_sitter_typescript")
+    target = tmp_path / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("export function thing() { return 1; }\n")
+    (tmp_path / "app.ts").write_text(
+        f"import {{ thing }} from '{specifier}';\nexport function go() {{ return thing(); }}\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in (filename, "app.ts"):
+        index_file(db, tmp_path / rel, tmp_path)
+
+    conn = sqlite3.connect(db)
+    assert conn.execute(
+        "SELECT 1 FROM symbols WHERE file=? AND name='thing'", (filename,)
+    ).fetchone(), "the shadowing file was not indexed; this fixture tests nothing"
+    conn.close()
+
+    resolve_edges_by_import(sqlite3.connect(db))
+    conn = sqlite3.connect(db)
+    try:
+        status, to_symbol = conn.execute(
+            "SELECT resolution_status, to_symbol FROM edges "
+            "WHERE kind='call' AND to_name='thing'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert (status, to_symbol) == ("external", None), (
+        f"top-level {filename} shadowed the builtin {specifier!r}: {status}/{to_symbol}"
+    )
+
+
+def test_a_ts_subpath_specifier_can_reach_the_evidence_gate(tmp_path):
+    """Prudence r6 Important 2 — the gate asked a question TS could not answer.
+
+    `_in_repo_names` returns path segments and file stems, so no entry can ever
+    contain a "/". Splitting a TypeScript specifier on "." left `ui/button`
+    whole, which nothing in that set can equal — not a test that fails but one
+    that cannot be satisfied. Every unplaceable TS subpath fell through to
+    `external`, about a file sitting in the index.
+
+    `_module_root` now spells the root once for both languages, which is why this
+    can pass at all.
+    """
+    pytest.importorskip("tree_sitter_typescript")
+    (tmp_path / "packages" / "ui" / "src").mkdir(parents=True)
+    (tmp_path / "packages" / "ui" / "src" / "button.ts").write_text(
+        "export function Button() { return 1; }\n"
+    )
+    (tmp_path / "apps" / "web").mkdir(parents=True)
+    (tmp_path / "apps" / "web" / "app.ts").write_text(
+        "import { Button } from 'ui/button';\nexport function go() { return Button(); }\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("packages/ui/src/button.ts", "apps/web/app.ts"):
+        index_file(db, tmp_path / rel, tmp_path)
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        status = conn.execute(
+            "SELECT resolution_status FROM edges WHERE kind='call' AND to_name='Button'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert status != "external", (
+        "a TS subpath naming an in-repo package was asserted out-of-repo; the "
+        "evidence gate cannot be satisfied by any specifier containing '/'"
+    )
+
+
+def test_a_bare_specifier_binds_at_any_depth_and_that_is_a_known_cost(tmp_path):
+    """Prudence r6 Important 4 — recording the boundary rather than moving it.
+
+    The workspace test one class up passes because `{stem}/index.ts` is a
+    candidate shape and the suffix branch matches it AT ANY DEPTH — not because
+    the resolver knows anything about workspaces. It has no `package.json`, no
+    `node_modules`, no workspace declaration, and no notion of any of them.
+
+    So a bare specifier binding to an ORDINARY NESTED DIRECTORY resolves too, and
+    that one is a false `import_resolved`: nothing in node resolves a bare `'ui'`
+    to `apps/web/ui/index.ts`. It is a GOOD guess — right in a workspace, wrong
+    in a plain nested directory — and the resolver cannot tell which it is
+    looking at.
+
+    NOT FIXED, DELIBERATELY, and this test is the record of that choice. Refusing
+    bare specifiers deletes the monorepo case; reading workspace globs out of
+    `package.json` is new capability at round six. Pinned here as a known cost
+    the way the vendoring boundary is pinned in `_match_paths`' docstring, so the
+    next reader meets it as a decision rather than as a surprise.
+    """
+    pytest.importorskip("tree_sitter_typescript")
+    (tmp_path / "apps" / "web" / "ui").mkdir(parents=True)
+    (tmp_path / "apps" / "web" / "ui" / "index.ts").write_text(
+        "export function Button() { return 1; }\n"
+    )
+    (tmp_path / "apps" / "web" / "app.ts").write_text(
+        "import { Button } from 'ui';\nexport function go() { return Button(); }\n"
+    )
+    db = tmp_path / "codex.db"
+    c = sqlite3.connect(db)
+    c.executescript(CODEX_SCHEMA)
+    c.commit()
+    c.close()
+    for rel in ("apps/web/ui/index.ts", "apps/web/app.ts"):
+        index_file(db, tmp_path / rel, tmp_path)
+    resolve_edges_by_import(sqlite3.connect(db))
+
+    conn = sqlite3.connect(db)
+    try:
+        to_symbol = conn.execute(
+            "SELECT to_symbol FROM edges WHERE kind='call' AND to_name='Button'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert to_symbol == "apps/web/ui/index.ts::Button::function::1", (
+        "the known cost changed shape — re-read this docstring before updating it"
     )
