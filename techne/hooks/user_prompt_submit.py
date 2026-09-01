@@ -478,6 +478,12 @@ def _drop_pull_only(db_path, rows: list[dict]) -> list[dict]:
     ]
 
 
+#: What `_truncate_for_injection` appends to a row it cut. Named because
+#: `chars_dropped` (techne#853) must subtract it to count what the reader
+#: LOST rather than what we added.
+_CUT_SUFFIX = " …"
+
+
 def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
     """Cut ``content`` to ``limit`` chars at a boundary, reporting whether it cut.
 
@@ -542,7 +548,9 @@ def _truncate_for_injection(content: str, limit: int) -> tuple[str, bool]:
     return window[:limit].rstrip() + " …", True
 
 
-def _build_context(rows: list[dict], char_limit: int = 450) -> str:
+def _build_context(
+    rows: list[dict], char_limit: int = 450, stats: dict | None = None
+) -> str:
     """Render recalled knowledge rows into a compact additionalContext block.
 
     Mirrors egress `_render_line` formatting: each row carries its ⟦techne#id⟧
@@ -562,6 +570,8 @@ def _build_context(rows: list[dict], char_limit: int = 450) -> str:
     ]
     lines: list[str] = []
     truncated_any = False
+    _cut_rows = 0
+    _cut_chars = 0
     for r in rows:
         rid = r.get("id")
         # `knowledge_type` FIRST, and the ordering is the whole fix (techne#566).
@@ -590,7 +600,8 @@ def _build_context(rows: list[dict], char_limit: int = 450) -> str:
         # observation) carry no `knowledge_type`, and for those the table IS the
         # most honest label available.
         rtype = r.get("knowledge_type") or r.get("source_table") or "note"
-        content, was_cut = _truncate_for_injection(r.get("content") or "", char_limit)
+        original = r.get("content") or ""
+        content, was_cut = _truncate_for_injection(original, char_limit)
         if not content:
             # WITHHELD ROWS ARE DROPPED, NOT RENDERED EMPTY (#839 r2 Important 3).
             # At `char_limit <= 0` every row returns "", and emitting them produced a
@@ -601,9 +612,38 @@ def _build_context(rows: list[dict], char_limit: int = 450) -> str:
             # `if rows else ""` suppresses the block entirely and `0` means "inject
             # nothing" on THIS knob exactly as it already does on
             # `per_turn_recall_limit`, which feeds `rows[:0]`.
+            # THE COUNTERS STILL FIRE FOR A WITHHELD ROW (#854 r1 Important 2).
+            # The row is dropped from the BLOCK, not from the accounting: at
+            # `char_limit <= 0` every row is severed to nothing, and reporting
+            # `{0, 0}` for a payload where everything was cut is the telemetry
+            # saying the opposite of what happened. `chars_dropped` is the whole
+            # original, since none of it was delivered.
+            if was_cut:
+                truncated_any = True
+                _cut_rows += 1
+                _cut_chars += len(original)
             continue
         truncated_any = truncated_any or was_cut
+        if was_cut:
+            # COUNTED AT THE CUT, NOT RE-DERIVED AT THE LOG SITE (techne#853).
+            # Recomputing "would this row have been cut?" downstream would be a
+            # second copy of the truncation decision — the exact shape of the bug
+            # #852 fixed, where the cap was declared twice and the dead copy drifted
+            # the moment the live one moved.
+            #
+            # `chars_dropped` counts CONTENT withheld from the reader, so it
+            # measures against the rendered body with the cut marker removed: the
+            # " …" is what we added, not what they lost. Without the strip every
+            # cut row would under-report by the marker's width.
+            _cut_rows += 1
+            _cut_chars += len(original) - len(content) + len(_CUT_SUFFIX)
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
+    # Populated on EVERY exit, including the empty one: "the rail fired and cut
+    # nothing" and "the rail never fired" are different facts, and a caller that
+    # only sees stats on the happy path cannot tell them apart.
+    if stats is not None:
+        stats["rows_truncated"] = _cut_rows
+        stats["chars_dropped"] = _cut_chars
     if not lines:
         return ""
     if truncated_any:
@@ -762,7 +802,11 @@ def main() -> None:
             # more" (harmless); an unmarked severed row says "this is all of it",
             # which is the exact defect techne#826 exists to fix.
             chars = min(config.hooks.per_turn_recall_chars, _SEARCH_ROW_CEILING - 1)
-            recall_block = _build_context(rows, chars) if rows else ""
+            # techne#853 — the cap's effect is otherwise unobservable: this table
+            # recorded what was injected and never what was severed, so raising or
+            # lowering `per_turn_recall_chars` could not be evaluated from data.
+            trunc_stats: dict = {}
+            recall_block = _build_context(rows, chars, trunc_stats) if rows else ""
             if recall_block:
                 blocks.append(recall_block)
             # techne#329 — make the READ path auditable (the audit that motivated
@@ -788,6 +832,12 @@ def main() -> None:
                     # operator behaviour (AGENTS.md lists it as a standing trigger),
                     # and a silent recall miss is this project's named failure class.
                     rows=rows if recall_block else [],
+                    # Mirrors `rows` above: a row that was withheld was not
+                    # delivered, so it cannot have been truncated on delivery
+                    # either. Reporting cuts for a block that never shipped would
+                    # make `chars_dropped` count losses the reader never sustained.
+                    rows_truncated=trunc_stats.get("rows_truncated") if recall_block else 0,
+                    chars_dropped=trunc_stats.get("chars_dropped") if recall_block else 0,
                     injected_text=recall_block,
                     k_requested=config.hooks.per_turn_recall_limit,
                 )
