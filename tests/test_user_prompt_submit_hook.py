@@ -583,7 +583,14 @@ class TestInjectedTypeLabel:
         # it shrinks the old emission as well and WIDENS the worst-case delta to
         # 450-120=330 chars/row, i.e. 5 × 330 / 4 = 412 tokens. Counting the floor
         # against the new cap only was the same overstatement r1 raised, reintroduced
-        # by the word chosen to fix it. PER-TURN against #808's PER-SESSION block, so
+        # by the word chosen to fix it.
+        # AND 412 IS STILL NOT A BOUND (#852 r3 nit): the floor floors the CUT INDEX
+        # and `.rstrip()` runs after it, so a whitespace run ending at 120 emits 116
+        # against a new 452 — a 336-char delta, 420 tokens. Constructed against the
+        # real function, not argued. Read 412 as TYPICAL-WORST; rstrip can push a
+        # little past it. Third numeric claim in this PR and the third to need
+        # narrowing, which is the argument for stating deltas rather than bounds.
+        # PER-TURN against #808's PER-SESSION block, so
         # comparable only multiplied out: 312 × 40 ≈ 12,500 over a 40-turn session.
         #
         # 450 not 500 because search() pre-truncates at _SEARCH_ROW_CEILING (#842) and
@@ -654,16 +661,17 @@ class TestInjectedTypeLabel:
         # whitespace the bare-slice defect produces a string one shorter and the
         # mid-word assertion below reads the stripped space instead — passing with
         # boundary-seeking deleted. Checking only `body[cap]` cannot see that.
-        # SUBSUMES the cap-only check this replaced (#852 r2 nit 2): that assertion
-        # could never fire once this one holds, so it was dead and is gone.
+        # SUBSUMES the cap-only check this replaced (#852 r2 nit 2): `A and B`
+        # implies `B`, so that assertion could never fire once this one holds.
+        # r2 asked for the fold and r2's fix SHIPPED THE NOTE WITHOUT THE FOLD —
+        # the deleted assertion sat three lines below this comment for a whole
+        # round, which is a claim and its falsifier in one file, six lines apart:
+        # the exact shape r2's own Important 1 was retiring, recurring inside the
+        # commit that retired it (#852 r3). Actually gone now.
         assert body[cap - 1] not in " \t\n" and body[cap] not in " \t\n", (
             f"fixture is toothless: the hard cut rstrips to index "
             f"{len(body[:cap].rstrip())}, and the char there must be non-whitespace"
         )
-        assert body[cap] not in " \t\n", (
-            f"fixture is toothless: whitespace at index {cap} lets the bare slice pass"
-        )
-
         out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": body}])
         rendered = out.splitlines()[-1]
         # Anchored to the ROW, not the block: `" …" in out` is satisfied by the

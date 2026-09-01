@@ -22,7 +22,7 @@ All notable changes to techne are documented here. Format loosely follows
   a complete one; that is fixed, and what this change adds is that 47.1% of rows now
   arrive **whole** rather than marked-and-severed, with the still-severed ones carrying
   ~2.25× the content.
-  Costs ~312 extra tokens per turn on a five-row push typically, ~412 worst case. (312
+  Costs ~312 extra tokens per turn on a five-row push typically, ~412 typical-worst (not a bound — `rstrip` runs after the floor, so a whitespace run at the cut reaches ~420). (312
   is the full-delta figure; the worst case is wider, not narrower, because
   boundary-seeking floors at 60% of the cap and so shrinks the *old* emission too —
   `int(200×0.6)=120` against `int(450×0.6)=270`, a 330-char delta.) This is a **per-turn**
