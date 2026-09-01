@@ -306,6 +306,7 @@ def _fts_match_rows(
     candidate_limit: int,
     include_archived: bool = True,
     include_uncertain: bool = False,
+    row_chars: int | None = None,
 ) -> list[dict]:
     """Run the per-table FTS5 MATCH queries for ``fts_query`` and return raw
     candidate rows (pre-rerank). Shared by the implicit-AND pass and the #70
@@ -317,6 +318,9 @@ def _fts_match_rows(
     only DEFAULT recall (techne_recall) passes False. Affects the knowledge
     table only; threads/observations have no archive lifecycle.
     """
+    # The caller's cap wins for KNOWLEDGE rows; the ledger tables keep
+    # `_ROW_CHAR_CAP` regardless (techne#842).
+    _cap = row_chars if row_chars is not None else _ROW_CHAR_CAP
     results: list[dict] = []
 
     if table in ("threads", "all"):
@@ -337,7 +341,7 @@ def _fts_match_rows(
                     "source_table": "thread",
                     "id": r["id"],
                     "label": r["label"],
-                    "summary": r["summary"][:500],
+                    "summary": r["summary"][:_ROW_CHAR_CAP],
                     "resume_points": r["resume_points"],
                     "status": r["status"],
                     "session_id": r["session_id"],
@@ -363,7 +367,7 @@ def _fts_match_rows(
                 {
                     "source_table": "observation",
                     "id": r["id"],
-                    "content": r["content"][:500],
+                    "content": r["content"][:_ROW_CHAR_CAP],
                     "tool_name": r["tool_name"],
                     "session_id": r["session_id"],
                     "timestamp": r["timestamp"],
@@ -413,7 +417,8 @@ def _fts_match_rows(
                     "source_table": "knowledge",
                     "id": r["id"],
                     "knowledge_type": r["type"],
-                    "content": r["content"][:500],
+                    # KNOWLEDGE HONOURS THE CALLER'S CAP (techne#842).
+                    "content": r["content"][:_cap],
                     "tags": r["tags"],
                     "confidence": r["confidence"],
                     # Decay metadata (techne#214): used by _rerank to compute
@@ -433,6 +438,28 @@ def _fts_match_rows(
     return results
 
 
+#: DEFAULT per-row character cap for search results. NOT A CEILING ANY MORE
+#: (techne#842): callers that need whole rows pass `row_chars`, and the per-turn
+#: recall rail passes its own `hooks.per_turn_recall_chars`, so nothing arrives
+#: pre-cut below what the caller asked for.
+#:
+#: WHAT THE UNCONDITIONAL SLICE COST, measured rather than argued. A row arriving
+#: at exactly 500 took `_truncate_for_injection`'s `len(content) <= limit` branch,
+#: so `was_cut` stayed False and the row shipped severed mid-word with BOTH the
+#: announcing marker and the header notice suppressed — the one configuration in
+#: which that rail was less honest than before techne#826, whose entire point was
+#: that a truncated row announces itself. And it hit the rows worth having:
+#: knowledge#750 (1,359 chars, a review procedure) cut immediately before its
+#: worked example, knowledge#673 (2,247 chars, a re-auth runbook) immediately
+#: before the actual steps.
+#:
+#: OBSERVATIONS AND THREADS KEEP THE DEFAULT, deliberately. The observation table
+#: is a tool ledger — mostly shell echoes — and truncating it costs nothing a
+#: reader wanted. `knowledge` is the curated layer someone deliberately wrote.
+#: That asymmetry is the whole content of this constant.
+_ROW_CHAR_CAP = 500
+
+
 def search_fts(
     db_path: Path,
     query: str,
@@ -446,6 +473,7 @@ def search_fts(
     half_life_days: float = 30.0,
     include_archived: bool = True,
     include_uncertain: bool = False,
+    row_chars: int | None = None,
 ) -> list[dict]:
     """Full-text search across techne tables.
 
@@ -490,6 +518,7 @@ def search_fts(
             candidate_limit,
             include_archived=include_archived,
             include_uncertain=include_uncertain,
+            row_chars=row_chars,
         )
 
         # #70: bare space-separated terms are FTS5 implicit-AND, so a multi-word
@@ -507,6 +536,7 @@ def search_fts(
                     candidate_limit,
                     include_archived=include_archived,
                     include_uncertain=include_uncertain,
+                    row_chars=row_chars,
                 )
 
         # For multi-table ("all"), pre-sort by raw rank for a deterministic input
@@ -664,6 +694,7 @@ def search_vec(
     limit: int = 10,
     include_archived: bool = True,
     include_uncertain: bool = False,
+    row_chars: int | None = None,
 ) -> list[dict]:
     """Semantic vector search. Requires sqlite-vec and an embedding backend
     (model2vec or fastembed — techne#601/#602; see core/embeddings.py).
@@ -674,6 +705,9 @@ def search_vec(
     are excluded from the vector channel too, so search()'s DEFAULT-recall
     exclusion holds regardless of which channel surfaced the row.
     """
+    # The caller's cap wins for KNOWLEDGE rows; the ledger tables keep
+    # `_ROW_CHAR_CAP` regardless (techne#842).
+    _cap = row_chars if row_chars is not None else _ROW_CHAR_CAP
     try:
         import sqlite_vec
     except ImportError:
@@ -765,7 +799,7 @@ def search_vec(
                                 "source_table": "thread",
                                 "id": thread[0],
                                 "label": thread[1],
-                                "summary": thread[2][:500],
+                                "summary": thread[2][:_ROW_CHAR_CAP],
                                 "status": thread[3],
                                 "distance": row[1],
                             }
@@ -793,7 +827,7 @@ def search_vec(
                             {
                                 "source_table": "observation",
                                 "id": obs[0],
-                                "content": obs[1][:500],
+                                "content": obs[1][:_ROW_CHAR_CAP],
                                 "tool_name": obs[2],
                                 "session_id": obs[3],
                                 "timestamp": obs[4],
@@ -835,7 +869,9 @@ def search_vec(
                                 "source_table": "knowledge",
                                 "id": k[0],
                                 "knowledge_type": k[1],
-                                "content": k[2][:500],
+                                # KNOWLEDGE HONOURS THE CALLER'S CAP
+                                # (techne#842).
+                                "content": k[2][:_cap],
                                 "tags": k[3],
                                 "confidence": k[4],
                                 # techne#501: the FTS row has always carried `status`;
@@ -1066,6 +1102,7 @@ def search(
     half_life_days: float = 30.0,
     include_archived: bool = True,
     include_uncertain: bool = False,
+    row_chars: int | None = None,
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
     union (techne#401).
@@ -1118,6 +1155,7 @@ def search(
         half_life_days=half_life_days,
         include_archived=include_archived,
         include_uncertain=include_uncertain,
+        row_chars=row_chars,
     )
 
     if not use_vectors:
@@ -1130,6 +1168,7 @@ def search(
         limit=limit,
         include_archived=include_archived,
         include_uncertain=include_uncertain,
+        row_chars=row_chars,
     )
     if not vec_results:
         return fts_results

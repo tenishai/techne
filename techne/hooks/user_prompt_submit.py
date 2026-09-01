@@ -286,9 +286,14 @@ _RESEND_OVERFETCH = 3
 #: `search()` truncates knowledge rows to this before the hook ever sees them, at
 #: BOTH sites that build a knowledge row — `core/search.py:416` (the FTS channel)
 #: and `core/search.py:838` (the VEC channel, which the vec-first union puts at the
-#: head of the page, so it serves most rows on any non-trivial store). Neither marks
-#: the cut. `per_turn_recall_chars` is clamped below this; values at or above it
-#: cannot be honoured. Tracked as techne#842.
+#: head of the page, so it serves most rows on any non-trivial store).
+#:
+#: RESOLVED BY techne#842 AND KEPT AS THE DEFAULT, not as a ceiling. `search()`
+#: now takes `row_chars` and this rail passes `per_turn_recall_chars`, so the knob
+#: governs above 500 as its own docstring always claimed. `_ROW_CHAR_CAP` in
+#: `core/search.py` is the value a caller gets when it asks for nothing, and the
+#: observation and thread tables still take it unconditionally — a tool ledger
+#: loses nothing to truncation, and curated knowledge does.
 _SEARCH_ROW_CEILING = 500
 
 
@@ -772,6 +777,23 @@ def main() -> None:
                     table="knowledge",
                     limit=k * _RESEND_OVERFETCH,
                     include_archived=False,
+                    # techne#842 — ASK FOR ONE MORE CHARACTER THAN WE WILL
+                    # RENDER, and the +1 is load-bearing rather than defensive.
+                    # `_truncate_for_injection` decides "was this cut?" by
+                    # `len(content) > limit`, so a row that `search()` already
+                    # sliced to EXACTLY the cap reads as whole: `was_cut` stays
+                    # False and both the announcing marker and the header notice
+                    # are suppressed. That is the dishonest state techne#826
+                    # exists to prevent, and threading the cap unchanged would
+                    # have spread it from cap>=500 to EVERY cap. Measured before
+                    # the +1: at caps 600, 500 and 200 the row ended mid-word
+                    # with no marker.
+                    #
+                    # At cap+1 the renderer sees the overflow it needs: a row
+                    # shorter than the cap still arrives whole and is correctly
+                    # unmarked; a longer one arrives one char over and is cut and
+                    # marked by the code that owns that decision.
+                    row_chars=config.hooks.per_turn_recall_chars + 1,
                 )
                 rows = _drop_pull_only(config.db_path, rows)
                 already = _already_sent_this_session(config.db_path, data.get("session_id"))
@@ -801,7 +823,14 @@ def main() -> None:
             # conservative direction: an over-marked whole row says "there may be
             # more" (harmless); an unmarked severed row says "this is all of it",
             # which is the exact defect techne#826 exists to fix.
-            chars = min(config.hooks.per_turn_recall_chars, _SEARCH_ROW_CEILING - 1)
+            # NO LONGER CLAMPED (techne#842 fixed). `search()` now takes a
+            # `row_chars` argument and this rail passes its own cap, so a row
+            # arrives cut at exactly what was asked for rather than at a hidden
+            # 500. The clamp existed because a value at or above the ceiling made
+            # `_truncate_for_injection` see a whole row and suppress both the
+            # marker and the header notice — the one state in which this rail was
+            # less honest than before techne#826. That state is now unreachable.
+            chars = config.hooks.per_turn_recall_chars
             # techne#853 — the cap's effect is otherwise unobservable: this table
             # recorded what was injected and never what was severed, so raising or
             # lowering `per_turn_recall_chars` could not be evaluated from data.

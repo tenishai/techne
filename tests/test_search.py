@@ -1281,3 +1281,66 @@ class TestResultRowContract:
         # And the CORRECT spelling actually discriminates, rather than passing all.
         excluded = [r for r in results if r.get("knowledge_type") in PULL_ONLY_TYPES]
         assert excluded, "the document row must be identifiable by its real kind"
+
+
+def test_search_honours_the_callers_row_chars_for_knowledge(tmp_path):
+    """techne#842 — the knob governs above 500, which is the whole issue.
+
+    `search()` used to slice every knowledge row at a hardcoded 500 before any
+    caller saw it, so `hooks.per_turn_recall_chars` was inert above that value.
+    Measured on a 2,399-char row at caps 200/500/600/1200: each must come back at
+    exactly the cap, and asking for nothing must still give the 500 default.
+
+    The motivating case is the affected one — `config.py` says this knob "decides
+    whether a multi-step SOP arrives as a procedure or as its title", and a
+    multi-step SOP is exactly a row over 500 characters.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store as store_knowledge
+    from techne.core.search import _ROW_CHAR_CAP, search
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    body = " ".join(f"word{i:03d}" for i in range(300))
+    assert len(body) > 2000, "fixture must exceed the default cap several times over"
+    store_knowledge(db, content=body, type="procedure", tags="probe", confidence="high")
+
+    for cap in (200, 500, 600, 1200):
+        rows = search(db, "word001", table="knowledge", limit=5, row_chars=cap)
+        assert rows, f"no row at cap {cap}"
+        assert len(rows[0]["content"]) == cap, (
+            f"cap {cap} returned {len(rows[0]['content'])} chars — search is still "
+            "pre-truncating below what the caller asked for (techne#842)"
+        )
+
+    default = search(db, "word001", table="knowledge", limit=5)
+    assert len(default[0]["content"]) == _ROW_CHAR_CAP, (
+        "a caller that asks for nothing must still get the documented default"
+    )
+
+
+def test_the_ledger_tables_keep_the_default_cap(tmp_path):
+    """The asymmetry is the point, not an oversight (techne#842).
+
+    Observations are a tool ledger — mostly shell echoes — and truncating them
+    costs nothing a reader wanted. `knowledge` is the curated layer someone
+    deliberately wrote. So `row_chars` moves the knowledge cap and must NOT move
+    the observation one, or the recall payload grows by the ledger rather than by
+    the thing that was asked for.
+    """
+    from techne.core.database import init_db
+    from techne.core.search import _ROW_CHAR_CAP, search
+    from techne.core.state import add_observation, ensure_session
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    ensure_session(db, "s-842")
+    body = " ".join(f"word{i:03d}" for i in range(300))
+    add_observation(db, "s-842", "Bash", body)
+
+    rows = search(db, "word001", table="observations", limit=5, row_chars=1200)
+    assert rows, "fixture produced no observation row"
+    assert len(rows[0]["content"]) == _ROW_CHAR_CAP, (
+        f"observation row is {len(rows[0]['content'])} chars — the ledger must keep "
+        "the default regardless of row_chars"
+    )

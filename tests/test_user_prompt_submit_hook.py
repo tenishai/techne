@@ -1357,15 +1357,19 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     vec-first union puts at the head of the page, so it serves most rows on any
     non-trivial store).
 
-    Two different defects follow, and only one is this PR's. That a cap above 500
-    delivers no more text needs `search()` and is techne#842. That a cap AT or ABOVE
-    500 used to switch the `…` marker OFF is reachable only because this change added
-    the knob — before it the cap was a hardcoded 200 — so the hook clamps to
-    `_SEARCH_ROW_CEILING - 1` and the row is still announced as cut.
+    REWRITTEN BY techne#842, WHICH FIXED BOTH HALVES rather than tolerating one.
+    `search()` now takes `row_chars` and this rail passes `per_turn_recall_chars + 1`,
+    so a cap above 500 delivers what it asks for AND the cut is still announced.
 
-    The spurious `…` on a genuinely-500-char row is the accepted cost: an over-marked
-    whole row says "there may be more", an unmarked severed row says "this is all of
-    it", and only the second is the failure techne#826 exists to fix.
+    THE +1 IS WHAT THIS TEST NOW PINS. `_truncate_for_injection` decides "was this
+    cut?" by `len(content) > limit`, so a row `search()` sliced to EXACTLY the cap
+    reads as whole and the marker is suppressed. Threading the cap unchanged would
+    have spread that dishonest state from cap>=500 to EVERY cap — measured at 600,
+    500 and 200, all ending mid-word with no marker. Over-fetching by one gives the
+    renderer the overflow it needs to tell the two cases apart.
+
+    The old clamp to `_SEARCH_ROW_CEILING - 1` is gone with the defect that motivated
+    it, so a 600-char cap now yields a 600-char row rather than 499.
     """
     from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
 
@@ -1389,8 +1393,17 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     # made inert IN THE SAME COMMIT. search()'s ceiling is witnessed directly by
     # `test_search_itself_truncates_knowledge_rows` below; what THIS pins is that the
     # clamp is applied and the marker survives.
-    assert 400 < len(body) < _SEARCH_ROW_CEILING, (
-        f"row is {len(body)} chars — expected the clamp at {_SEARCH_ROW_CEILING - 1}"
+    # BOUNDED BY THE CAP THE OPERATOR SET, not by a hidden ceiling (techne#842).
+    # The configured cap is 600 and the row must reach it; before this fix the
+    # clamp held it at 499 no matter what the knob said, which is the inertness
+    # the issue is named for. `_SEARCH_ROW_CEILING` survives as the DEFAULT a
+    # caller gets when it asks for nothing, so it is still imported and still
+    # meaningful — it is just no longer a ceiling on this rail.
+    assert len(body) > _SEARCH_ROW_CEILING, (
+        f"row is {len(body)} chars — a 600-char cap must now beat the old 499 clamp"
+    )
+    assert len(body) <= 600 + len(" …"), (
+        f"row is {len(body)} chars — must not exceed the cap it was given"
     )
     assert body.endswith(" …"), (
         "a row at the ceiling shipped UNMARKED — the clamp is gone and the rail is "
@@ -1453,7 +1466,7 @@ def test_both_search_sites_share_one_ceiling():
     # This pin is the SOLE witness for the VEC site (838) — the direct witness below
     # reaches only FTS — so measuring the wrong block is the one thing it must not do.
     blocks = re.findall(
-        r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:(\d+)\]',
+        r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:([A-Za-z_0-9]+)\]',
         src,
         flags=re.S,
     )
@@ -1461,9 +1474,61 @@ def test_both_search_sites_share_one_ceiling():
         f"expected exactly two knowledge-row truncation sites, found {blocks} — "
         "search.py's shape changed; re-derive this pin rather than widening it"
     )
-    assert set(blocks) == {str(_SEARCH_ROW_CEILING)}, (
-        f"search.py truncates knowledge rows at {set(blocks)} but the hook clamps to "
-        f"{_SEARCH_ROW_CEILING} — they must move together (techne#842)"
+    # STRONGER THAN "BOTH ARE 500" (techne#842). Both sites must slice by `_cap`,
+    # the caller-aware value, rather than by any literal. A literal at either site
+    # is the defect this issue fixed: it silently overrode whatever the caller
+    # asked for, so `per_turn_recall_chars` governed nothing above 500 and a row
+    # arriving at exactly the cap read as whole. Pinning the NAME rather than the
+    # NUMBER also survives a change to the default, which a numeric pin would not.
+    assert set(blocks) == {"_cap"}, (
+        f"knowledge rows are sliced by {set(blocks)} — both sites must use `_cap` so "
+        "the caller's `row_chars` is honoured; a literal here reintroduces techne#842"
+    )
+    # And the default the two fall back to is still the one the hook documents.
+    from techne.core.search import _ROW_CHAR_CAP
+
+    assert _ROW_CHAR_CAP == _SEARCH_ROW_CEILING, (
+        f"search default {_ROW_CHAR_CAP} and the hook's documented ceiling "
+        f"{_SEARCH_ROW_CEILING} have diverged — the comment at the knob is now wrong"
+    )
+
+
+def test_the_ledger_rows_are_pinned_to_the_default_at_both_sites():
+    """The other half of techne#842's contract: `row_chars` moves knowledge ONLY.
+
+    Observations and threads are the tool ledger — mostly shell echoes — so raising
+    the recall cap must not drag them along, or the payload the operator paid for
+    grows by transcript instead of by the curated row they asked for. There is a
+    behavioural witness for the FTS ledger site, but the VEC ledger site has none:
+    driving that channel needs a populated vector index and a cached model. So this
+    pin is the sole guard there, exactly as the knowledge pin above is for :838.
+
+    Written as its own test rather than folded into that one because its failure
+    means the opposite thing — a ledger site drifted ONTO the caller's knob — and a
+    message about "knowledge rows" would send the next reader the wrong way.
+    """
+    import re
+    from pathlib import Path as _P
+
+    src = _P("techne/core/search.py").read_text()
+
+    # Same tempered shape as the knowledge pin: `(?!"source_table")` keeps a match
+    # from crossing into the next block and pairing a ledger marker with the
+    # knowledge slice, which would let a real drift pass green.
+    blocks = re.findall(
+        r'"source_table":\s*"(observation|thread)",(?:(?!"source_table").)*?\[:([A-Za-z_0-9]+)\]',
+        src,
+        flags=re.S,
+    )
+    assert len(blocks) == 4, (
+        f"expected four ledger truncation sites (observation+thread across both "
+        f"channels), found {blocks} — search.py's shape changed; re-derive this pin"
+    )
+    sliced_by = {name for _table, name in blocks}
+    assert sliced_by == {"_ROW_CHAR_CAP"}, (
+        f"ledger rows are sliced by {sliced_by} — every one must stay on the fixed "
+        "default; a `_cap` here means raising per_turn_recall_chars now inflates the "
+        "observation ledger too, which techne#842 explicitly did not do"
     )
 
 
