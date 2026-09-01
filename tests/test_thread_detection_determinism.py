@@ -18,8 +18,6 @@ between processes — which is exactly why this survived every in-process test t
 repo already had.
 """
 
-import subprocess
-import sys
 
 from techne.core.threads.segmentation import _segment_dominant_repo
 
@@ -158,10 +156,71 @@ def test_the_entity_tie_break_matches_the_repo_one():
     assert clear == "zeta", f"count must beat name, got {clear!r}"
 
 
-def test_a_truncated_summary_does_not_depend_on_set_order():
-    """`fallback_summary` and `_recent_files` slice their output, so hash order
-    decided WHICH FIVE were shown, not merely the order (Prudence, #873 r1) —
-    12 distinct summaries across 12 seeds. Both land in FTS-indexed columns."""
+def test_fallback_summary_does_not_depend_on_set_order():
+    """`fallback_summary` slices `files` and `entities`, so hash order decided
+    WHICH FIVE were shown, not merely their order (Prudence, #873 r1) — 12
+    distinct summaries across 12 seeds. It lands in `threads.summary`, which is
+    FTS-indexed and which `link_threads` searches to pick a `parent_thread_id`.
+
+    THIS TEST EXISTS BECAUSE ITS PREDECESSOR NAMED `fallback_summary` AND NEVER
+    CALLED IT (Prudence, #873 r2): deleting both `sorted()` calls left 4044
+    tests passing, so the gap was CONCEALED by a docstring rather than merely
+    absent — worse than no test, and exactly the standard this file applies to
+    the guard three functions down.
+
+    Sorting is per-feature, not global, and that is deliberate: the outer loop
+    runs over `features` in observation order, so the accumulation is
+    first-touched-first. Measured by her at 1 distinct output across 12 seeds
+    with the sort and 12 without.
+    """
+    from techne.core.threads.features import ObsFeatures
+    from techne.core.threads.summary import fallback_summary
+
+    def _feat(i, files, ents):
+        return ObsFeatures(
+            index=i,
+            timestamp=None,
+            tool_family="bash",
+            repos=set(),
+            file_paths=set(files),
+            entities=set(ents),
+            is_meta=False,
+        )
+
+    # More than max_files/max_entities, so WHICH survive the slice is decided.
+    feats = [
+        _feat(0, {f"f{i:02d}.py" for i in range(9)}, {f"e{i:02d}" for i in range(9)}),
+        _feat(1, {f"g{i:02d}.py" for i in range(9)}, {f"h{i:02d}" for i in range(9)}),
+    ]
+    obs = [{"tool_name": "Bash", "content": "x", "timestamp": "2026-09-01T12:00:00"}] * 2
+
+    got = fallback_summary(obs, features=feats, max_files=5, max_entities=5)
+
+    # REPEATING THE CALL IN ONE PROCESS PROVES NOTHING, and an earlier version of
+    # this test did exactly that: set iteration order is FIXED for the life of an
+    # interpreter, so six calls always agree no matter how the sort behaves. The
+    # only in-process signal is that the SHOWN slice is ordered.
+    def _section(text, name):
+        seg = text.split(f"{name}: ", 1)[1]
+        seg = seg.split(" (+", 1)[0].split("; ", 1)[0]
+        return [tok.strip().rstrip(",") for tok in seg.split(", ") if tok.strip()]
+
+    files = _section(got, "files")
+    ents = _section(got, "entities")
+    assert len(files) == 5 and len(ents) == 5, (
+        f"fixture did not exercise the slice: files={files} entities={ents} — both "
+        "must be truncated or the ordering cannot matter"
+    )
+    assert files == sorted(files), (
+        f"shown files are {files} — a truncated list built from a set must be "
+        "ordered within each feature, or WHICH FIVE appear is decided by hash seed"
+    )
+    assert ents == sorted(ents), f"shown entities are {ents}, not ordered"
+
+
+def test_recent_files_does_not_depend_on_set_order():
+    """The sibling site: `_recent_files` returns early at `limit`, so hash order
+    decided which basenames reached `resume_points` — also FTS-indexed."""
     from techne.core.threads.summary import _recent_files
 
     obs = [
@@ -180,85 +239,27 @@ def test_a_truncated_summary_does_not_depend_on_set_order():
     )
 
 
-def test_detection_is_identical_under_different_hash_seeds(tmp_path):
-    """End to end, in two real processes.
 
-    An in-process test cannot observe this: PYTHONHASHSEED is fixed for the life
-    of the interpreter, so every in-process assertion agrees with itself. That is
-    precisely why the defect survived the existing suite.
-
-    THE FIXTURE NEEDS REAL REPO ROOTS. `ObsFeatures.repos` is populated by
-    `find_repo`, which walks the filesystem for a `.git` — so observations naming
-    invented paths produce an EMPTY repo set, no tie, and a test that passes
-    against the bug. A first version of this test did exactly that. Two real repo
-    dirs, and observations that name BOTH in one line, are what produce the
-    two-element set whose iteration order the defect read.
-
-    THIS TEST DOES NOT CURRENTLY DEMONSTRATE TEETH, AND SAYING SO IS THE POINT.
-    Reverting the fix leaves it GREEN across all eight seeds: reproducing the
-    original divergence needs a tie at a point where the dominant repo actually
-    decides a MERGE, and the live 521-observation session had that while forty
-    constructed observations do not reliably produce it. The unit tests above are
-    what hold the fix; this one is a property guard, kept because the property is
-    the real requirement and a future regression of a different shape would trip
-    it. It is labelled rather than deleted so the next reader does not count it as
-    coverage it has not earned.
-    """
-    script = tmp_path / "probe.py"
-    script.write_text(
-        "import json, sys\n"
-        "from pathlib import Path\n"
-        "from techne.config import Config\n"
-        "from techne.core.state import get_observations\n"
-        "from techne.core.thread_orchestrator import detect_summarize_with_metadata\n"
-        "db = Path(sys.argv[1])\n"
-        "cfg = Config()\n"
-        "cfg.db_path = db\n"
-        "obs = get_observations(db, 's-871')\n"
-        "threads, _ = detect_summarize_with_metadata(obs, cfg)\n"
-        "rows = [[t.thread_num, t.boundary_signal, list(t.observation_indices)]\n"
-        "        for t in threads]\n"
-        "print(json.dumps(rows))\n"
-    )
-
-    from techne.core.database import init_db
-    from techne.core.state import add_observation, ensure_session
-
-    repos = {}
-    for name in ("alpha", "beta"):
-        (tmp_path / name / ".git").mkdir(parents=True)
-        (tmp_path / name / "main.py").write_text("x = 1\n")
-        repos[name] = tmp_path / name
-
-    db = tmp_path / "t.db"
-    init_db(db)
-    ensure_session(db, "s-871")
-    for i in range(40):
-        # Every line names BOTH repos, so each observation's repo set has two
-        # members tied at equal count — the shape whose iteration order decided
-        # the dominant repo, and through it the merges.
-        add_observation(
-            db,
-            "s-871",
-            "Bash" if i % 3 else "Read",
-            f"step{i}: ran {repos['alpha']}/main.py then {repos['beta']}/main.py",
-        )
-
-    out = []
-    for seed in ("0", "1", "2", "3", "4", "5", "6", "7"):
-        r = subprocess.run(
-            [sys.executable, str(script), str(db)],
-            capture_output=True,
-            text=True,
-            env={"PYTHONHASHSEED": seed, "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
-        )
-        assert r.returncode == 0, f"probe failed under seed {seed}: {r.stderr[-800:]}"
-        out.append(r.stdout.strip())
-
-    assert len(set(out)) == 1, (
-        f"thread detection produced {len(set(out))} different segmentations across "
-        "eight PYTHONHASHSEED values.\n"
-        f"  one: {sorted(set(out))[0][:280]}\n  other: {sorted(set(out))[-1][:280]}\n"
-        "Segmentation must not depend on set iteration order — content-addressed "
-        "thread ids are derived from it, so unstable segments mean unstable ids."
-    )
+# DELETED HERE: `test_detection_is_identical_under_different_hash_seeds`.
+#
+# It never had teeth and two review rounds went into finding out why. Both halves
+# of the diagnosis are Prudence's (#873 r1 and r2), not mine:
+#
+#   1. `python /tmp/probe.py` puts the SCRIPT's directory on `sys.path[0]`, not
+#      the cwd — so `import techne` resolved to the editable install, a DIFFERENT
+#      checkout from the worktree under review. It coincided only when the run
+#      happened to be inside the dev tree, which is why it looked fine locally
+#      and why I misdiagnosed the cause as the fixture.
+#   2. The fixture yields ONE segment, and `merge_pass` returns immediately at
+#      `len(segments) <= 1`, so the dominant repo never decided anything.
+#
+# Fixing (1) did not fix (2): with PYTHONPATH corrected it was still green under
+# a reverted `_segment_dominant_repo`. A cross-process guard is worth having —
+# it is the only shape that could catch a NEW hash-order site elsewhere in this
+# pipeline — but a version that cannot fail is not that guard, it is eight
+# subprocesses of decoration. `test_a_repo_tie_must_not_decide_a_merge` covers
+# the property in-process with proven teeth.
+#
+# If someone builds the real cross-process canary: it needs observations that
+# actually SEGMENT (several distinct tool families and real time gaps) AND a
+# genuine two-way repo tie inside one of those segments.
