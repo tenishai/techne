@@ -283,12 +283,23 @@ def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
 #: plainly holds relevant rows.
 _RESEND_OVERFETCH = 3
 
-#: `search()` truncates knowledge rows to this before the hook ever sees them, at
-#: BOTH sites that build a knowledge row — `core/search.py:416` (the FTS channel)
-#: and `core/search.py:838` (the VEC channel, which the vec-first union puts at the
-#: head of the page, so it serves most rows on any non-trivial store). Neither marks
-#: the cut. `per_turn_recall_chars` is clamped below this; values at or above it
-#: cannot be honoured. Tracked as techne#842.
+#: THE DEFAULT `search()` APPLIES TO A KNOWLEDGE ROW WHEN A CALLER ASKS FOR
+#: NOTHING. It was a hard ceiling until techne#842 and is not one now: `search()`
+#: takes `row_chars`, and the knob governs at any value, as its own docstring had
+#: always claimed it did.
+#:
+#: THIS RAIL PASSES `per_turn_recall_chars + 1`, NOT `per_turn_recall_chars`, and
+#: the +1 is the load-bearing part rather than a rounding allowance. At exactly
+#: the cap, `_truncate_for_injection` (whose test is `len(content) <= limit`)
+#: cannot tell a severed row from a whole one and suppresses the `…`. Asking for
+#: one more character leaves it the overflow it needs to tell them apart — and
+#: `cap + 1` is precisely that function's own peek window, `content[:limit + 1]`,
+#: so boundary-seeking picks the same cut point it would have chosen given the
+#: entire row. Dropping the +1 turns a test red.
+#:
+#: `_ROW_CHAR_CAP` in `core/search.py` holds the same value, and the observation
+#: and thread tables still take it unconditionally — a tool ledger loses nothing
+#: to truncation, and curated knowledge does.
 _SEARCH_ROW_CEILING = 500
 
 
@@ -601,6 +612,24 @@ def _build_context(
         # most honest label available.
         rtype = r.get("knowledge_type") or r.get("source_table") or "note"
         original = r.get("content") or ""
+        # WHAT THE READER LOST IS MEASURED AGAINST THE STORED ROW, NOT THE ONE WE
+        # WERE HANDED (techne#853, repaired by techne#842). `search()` truncates
+        # before this rail ever sees a row, so `len(original)` is the length of an
+        # ALREADY-CUT row and differencing against it counts almost nothing. It was
+        # merely misleading before #842 and became useless after: this rail now asks
+        # for `cap + 1`, so `original` is always exactly one character longer than
+        # what we render and `chars_dropped` collapsed to the marker's width —
+        # measured 2/4/2/2 at caps 200/450/1200/2000 on a 3,199-char row whose true
+        # losses are 3000/2752/2000/1200. A constant is worse than a wrong number,
+        # because #853 exists precisely so that raising or lowering
+        # `per_turn_recall_chars` can be evaluated from the data, and a constant
+        # answers every cap identically. `content_chars_total` is the stored length,
+        # recorded by search at its own slice; falling back to `len(original)`
+        # keeps rows from any caller that does not supply it accounted for, under-
+        # reporting rather than crashing.
+        stored_len = r.get("content_chars_total")
+        if not isinstance(stored_len, int) or stored_len < len(original):
+            stored_len = len(original)
         content, was_cut = _truncate_for_injection(original, char_limit)
         if not content:
             # WITHHELD ROWS ARE DROPPED, NOT RENDERED EMPTY (#839 r2 Important 3).
@@ -618,10 +647,24 @@ def _build_context(
             # `{0, 0}` for a payload where everything was cut is the telemetry
             # saying the opposite of what happened. `chars_dropped` is the whole
             # original, since none of it was delivered.
+            #
+            # AND THIS COMMENT DISAGREES WITH THE ONE AT THE LOG SITE BELOW,
+            # which wins (Prudence, #869 r3). At `char_limit <= 0` every row is
+            # withheld, so `lines` is empty, so `recall_block` is "", so the
+            # caller forces BOTH counters to 0 — measured end-to-end with a
+            # 3,000-char row withheld in full: `('per_turn_recall', '[]', 0, 0)`.
+            # The number computed here never reaches the table, so the claim
+            # above that we avoid "telemetry saying the opposite of what
+            # happened" describes an outcome this rail does not have. It
+            # PRE-DATES techne#842 (#854 era) and is left standing rather than
+            # fixed here, because `hit_ids=[]` and an empty `injected_text`
+            # already tell an operator that nothing shipped. Recorded because
+            # #842 is what made this number meaningful, so the next reader
+            # arrives with a reason to trust it that the log site does not honour.
             if was_cut:
                 truncated_any = True
                 _cut_rows += 1
-                _cut_chars += len(original)
+                _cut_chars += stored_len
             continue
         truncated_any = truncated_any or was_cut
         if was_cut:
@@ -636,7 +679,7 @@ def _build_context(
             # " …" is what we added, not what they lost. Without the strip every
             # cut row would under-report by the marker's width.
             _cut_rows += 1
-            _cut_chars += len(original) - len(content) + len(_CUT_SUFFIX)
+            _cut_chars += stored_len - (len(content) - len(_CUT_SUFFIX))
         lines.append(f"- ⟦techne#{rid}⟧ [{rtype}] {content}")
     # Populated on EVERY exit, including the empty one: "the rail fired and cut
     # nothing" and "the rail never fired" are different facts, and a caller that
@@ -772,6 +815,23 @@ def main() -> None:
                     table="knowledge",
                     limit=k * _RESEND_OVERFETCH,
                     include_archived=False,
+                    # techne#842 — ASK FOR ONE MORE CHARACTER THAN WE WILL
+                    # RENDER, and the +1 is load-bearing rather than defensive.
+                    # `_truncate_for_injection` decides "was this cut?" by
+                    # `len(content) > limit`, so a row that `search()` already
+                    # sliced to EXACTLY the cap reads as whole: `was_cut` stays
+                    # False and both the announcing marker and the header notice
+                    # are suppressed. That is the dishonest state techne#826
+                    # exists to prevent, and threading the cap unchanged would
+                    # have spread it from cap>=500 to EVERY cap. Measured before
+                    # the +1: at caps 600, 500 and 200 the row ended mid-word
+                    # with no marker.
+                    #
+                    # At cap+1 the renderer sees the overflow it needs: a row
+                    # shorter than the cap still arrives whole and is correctly
+                    # unmarked; a longer one arrives one char over and is cut and
+                    # marked by the code that owns that decision.
+                    row_chars=config.hooks.per_turn_recall_chars + 1,
                 )
                 rows = _drop_pull_only(config.db_path, rows)
                 already = _already_sent_this_session(config.db_path, data.get("session_id"))
@@ -787,21 +847,19 @@ def main() -> None:
                 # consume one of the k slots that a clearing row could have used.
                 rows = _apply_relevance_floor(rows, config)
                 rows = rows[:k]
-            # CLAMP BELOW search()'s OWN CEILING (#839 r4 Important 1, techne#842).
-            # `search()` hands knowledge rows in ALREADY cut at 500 and unmarked, at
-            # BOTH sites that build one — search.py:416 (FTS) and :838 (VEC). At a
-            # cap of 500 or more `_truncate_for_injection` sees `len <= limit`,
-            # returns `was_cut=False`, and the row ships severed with the `…` AND the
-            # header notice suppressed. THAT STATE IS REACHABLE ONLY BECAUSE THIS
-            # CHANGE ADDED THE KNOB — before it the cap was a hardcoded 200 — so the
-            # honesty regression is this PR's to close, separately from the inertness
-            # above 500, which does need search() and is techne#842.
-            #
-            # The trade is a spurious `…` on a genuinely-500-char row. That is the
-            # conservative direction: an over-marked whole row says "there may be
-            # more" (harmless); an unmarked severed row says "this is all of it",
-            # which is the exact defect techne#826 exists to fix.
-            chars = min(config.hooks.per_turn_recall_chars, _SEARCH_ROW_CEILING - 1)
+            # THE CAP IS PASSED THROUGH UNCLAMPED (techne#842). It was clamped to
+            # `_SEARCH_ROW_CEILING - 1` from #839 until #842: `search()` cut every
+            # knowledge row at a hidden 500, so a cap at or above that made
+            # `_truncate_for_injection` see a whole row and suppress both the marker
+            # and the header notice — the one state in which this rail was less
+            # honest than before techne#826. `search()` now takes `row_chars` and
+            # this rail asks for `cap + 1` (see the call above, where the +1 is
+            # explained), so the row arrives one character over whatever was asked
+            # for and that state is unreachable at any cap. The whole clamp
+            # paragraph that stood here is deleted rather than annotated: it
+            # described a mechanism that no longer exists, and a retraction bolted
+            # under a still-assertive paragraph leaves the wrong half quotable.
+            chars = config.hooks.per_turn_recall_chars
             # techne#853 — the cap's effect is otherwise unobservable: this table
             # recorded what was injected and never what was severed, so raising or
             # lowering `per_turn_recall_chars` could not be evaluated from data.

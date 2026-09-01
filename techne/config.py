@@ -176,23 +176,32 @@ class HookConfig:
     #: `_truncate_for_injection`: the cut now lands on a boundary and announces
     #: itself, so a severed row can be recognised and pulled in full rather than
     #: read as the whole rule.
-    #: THERE IS A HARD CEILING OF 500 AND IT IS NOT THIS KNOB'S (techne#842).
-    #: `search()` truncates knowledge rows to 500 at BOTH sites that build one —
-    #: `search_fts`'s knowledge branch and `search_vec`'s (the latter is what the vec-first
-    #: union puts at the head of the page, so it serves most rows on a non-trivial
-    #: store), both in `core/search.py` — unconditionally and with no marker, so a
-    #: row reaches
-    #: this rail ALREADY CUT at 500. Setting this above 500 therefore changes
-    #: nothing — and worse, a row arriving at exactly 500 looks un-truncated to
-    #: `_truncate_for_injection`, so it ships severed mid-word with the announcing
-    #: `…` and the header notice both SUPPRESSED. That is the one configuration in
-    #: which this rail is less honest than before techne#826.
+    #: THERE WAS A HARD CEILING OF 500 AND techne#842 REMOVED IT. This knob now
+    #: governs at any value. Kept in the past tense on purpose: the ceiling was
+    #: documented here at length, and a reader who half-remembers that needs to
+    #: see it retracted rather than merely absent.
+    #:
+    #: What it was: `search()` truncated knowledge rows to 500 at both sites that
+    #: build one — `_fts_match_rows` and `search_vec` — before any caller saw them,
+    #: so setting this above 500 changed nothing. Worse, a row arriving at exactly
+    #: the cap looked un-truncated to `_truncate_for_injection` (whose test is
+    #: `len(content) <= limit`), so it shipped severed mid-word with the `…` and
+    #: the header notice both suppressed. The hook then CLAMPED to 499 to keep
+    #: that arithmetic self-consistent, which encoded the bug as a contract.
+    #:
+    #: What it is now: `search()` takes `row_chars`, this rail passes
+    #: `per_turn_recall_chars + 1`, and the +1 is load-bearing — it leaves the
+    #: renderer the one character of overflow it needs to tell a severed row from
+    #: a whole one. Measured on a 2,399-char row: caps 200, 500, 600 and 1200 all
+    #: come back at exactly the cap, with the marker present at every one.
     #:
     #: The motivating case is the affected one: a multi-step SOP is exactly a row
-    #: over 500 characters. Raising this to 600 does not deliver more of it — and
-    #: the hook CLAMPS to 499 (`_SEARCH_ROW_CEILING - 1`), because unclamped, a cap
-    #: at or above 500 makes a severed row look whole to `_truncate_for_injection`
-    #: and suppresses both the `…` and the header notice.
+    #: over 500 characters, so this knob decides whether it arrives as a procedure
+    #: or as its title. Raising it now delivers more of it.
+    #:
+    #: The 500 that remains is the DEFAULT (`_ROW_CHAR_CAP`), which still applies
+    #: to observation and thread rows unconditionally — those are the tool ledger,
+    #: and this knob deliberately does not move them.
     per_turn_recall_chars: int = 450
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable
