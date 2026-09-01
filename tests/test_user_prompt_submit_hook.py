@@ -362,12 +362,60 @@ def test_filtered_row_is_not_logged_as_injected(home, monkeypatch, capsys):
     assert rows[0]["hit_count"] == len(ids)
 
 
+def test_the_two_declared_defaults_cannot_diverge():
+    """`_build_context`'s signature default must equal the config default.
+
+    The cap is declared twice — `HookConfig.per_turn_recall_chars` and
+    `_build_context`'s `char_limit` parameter. `main()` always passes the cap
+    explicitly, so the signature default governs no production path and reads as
+    harmless; that is exactly what let the two drift when the config default moved
+    200 -> 450 on 2026-08-31, silently capping every test that calls the renderer
+    without an explicit cap at the stale value. A vestige that can disagree with
+    the real setting is worse than one that cannot.
+    """
+    import inspect
+
+    from techne.config import HookConfig
+    from techne.hooks.user_prompt_submit import _build_context
+
+    sig_default = inspect.signature(_build_context).parameters["char_limit"].default
+    assert sig_default == HookConfig().per_turn_recall_chars, (
+        f"_build_context defaults char_limit={sig_default} but the shipped config "
+        f"default is {HookConfig().per_turn_recall_chars}; change both or neither"
+    )
+
+
+def test_the_shipped_default_is_actually_deliverable():
+    """The default cap must be a value the rail can honour (techne#826/#842).
+
+    `search()` pre-truncates knowledge rows to `_SEARCH_ROW_CEILING` before the
+    hook ever sees them, so a default at or above it cannot be delivered — and
+    worse, an unclamped cap there makes a severed row look whole and suppresses
+    the `…` marker. This pins the invariant, not the number: raise the default
+    freely, but never to a value the ceiling forbids.
+
+    WHY 450 AND NOT 200: measured 2026-08-31 over 2,468 live injectable rows,
+    median length 476 chars. A 200-cap WOULD sever 2,442 of them (98%) where 450
+    severs 1,305 (52.88%) — properties of the STORE, not counts of rows the rail
+    cut; it injects five per turn by similarity, so it never severed 2,442 of
+    anything (#852 r1). The old default would have cut a typical entry in half.
+    """
+    from techne.config import HookConfig
+    from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
+
+    default = HookConfig().per_turn_recall_chars
+    assert 0 < default < _SEARCH_ROW_CEILING, (
+        f"shipped default {default} is not deliverable: search() truncates at "
+        f"{_SEARCH_ROW_CEILING}, so the cap must sit strictly below it"
+    )
+
+
 def test_document_card_is_not_pushed(home, monkeypatch, capsys):
     """Arch cards are pull-only on THIS rail too (techne#561, decided 2026-08-13).
 
     This replaces a test that pinned the opposite behaviour while the question was
     open. What decided it: `_build_context` truncates every row to
-    `hooks.per_turn_recall_chars` (200 by default), and an arch card's value is
+    `hooks.per_turn_recall_chars` (450 by default), and an arch card's value is
     its full body — a slice chosen by embedding similarity is a pointer at best.
     techne#826 made the cap configurable and the cut boundary-aware; neither
     changes this argument, because a slice is a pointer at any size. #449's
@@ -509,10 +557,45 @@ class TestInjectedTypeLabel:
         from techne.config import HookConfig
 
         cap = HookConfig().per_turn_recall_chars
-        assert cap == 200, (
+        assert cap == 450, (
             "the shipped default moved; #808 measures per-session context as already "
             "the dominant cost, so this is a deliberate decision, not a tuning tweak"
         )
+        # MOVED 200 -> 450 on 2026-08-31, and this tripwire is why it was a decision
+        # rather than a drift: it failed, and the number changed only after measuring.
+        #
+        # THE MEASUREMENT IS OF THE STORE, NOT THE RAIL (#852 r1 Important 3). Of 2,468
+        # live injectable rows (median 476), a 200-cap WOULD sever 2,442 (98%) and 450
+        # WOULD sever 1,305 (52%) — if each were injected. The rail injects five rows a
+        # turn chosen by embedding similarity and BM25, so it never severed 2,442 of
+        # anything. #826's field figure (58/58 at 200) matches the corpus number, but at
+        # 200 nearly everything severs however it was chosen; the agreement carries no
+        # information about 450, where 47% of the store sits below the cap and selection
+        # bias finally has room. docs/roadmap.md:87 records that BM25 length-norm ranks
+        # longer rows BELOW shorter ones, which would push true severance under 52% —
+        # unmeasured either way, so 52% is a bound, not a prediction. #853 adds the
+        # telemetry that settles it.
+        #
+        # Cost: ~312 tokens/turn TYPICAL on a five-row push, ~412 TYPICAL-WORST. 312 is
+        # the full-delta figure (5 × 250 / 4). It is NOT a ceiling, and calling it one
+        # was wrong (#852 r2): boundary-seeking floors at int(limit * 0.6), which
+        # applies to the OLD cap too — int(200*0.6)=120 against int(450*0.6)=270 — so
+        # it shrinks the old emission as well and WIDENS the worst-case delta to
+        # 450-120=330 chars/row, i.e. 5 × 330 / 4 = 412 tokens. Counting the floor
+        # against the new cap only was the same overstatement r1 raised, reintroduced
+        # by the word chosen to fix it.
+        # AND 412 IS STILL NOT A BOUND (#852 r3 nit): the floor floors the CUT INDEX
+        # and `.rstrip()` runs after it, so a whitespace run ending at 120 emits 116
+        # against a new 452 — a 336-char delta, 420 tokens. Constructed against the
+        # real function, not argued. Read 412 as TYPICAL-WORST; rstrip can push a
+        # little past it. Third numeric claim in this PR and the third to need
+        # narrowing, which is the argument for stating deltas rather than bounds.
+        # PER-TURN against #808's PER-SESSION block, so
+        # comparable only multiplied out: 312 × 40 ≈ 12,500 over a 40-turn session.
+        #
+        # 450 not 500 because search() pre-truncates at _SEARCH_ROW_CEILING (#842) and
+        # the cap must sit strictly below it — pinned by
+        # test_the_shipped_default_is_actually_deliverable.
         out = self._ctx(
             [{"id": 1, "source_table": "knowledge", "knowledge_type": "fact", "content": "x" * 500}]
         )
@@ -530,6 +613,9 @@ class TestInjectedTypeLabel:
             "defects, both measured 2026-08-13. CORRECTS techne#1078 and supersedes "
             "the guidance recorded there, which nobody has re-read since. The rest "
             "of this row exists to carry it past the cap so the cut actually fires."
+            " It also has to reach past the raised cap, so this sentence carries it "
+            "beyond four hundred and fifty characters without a boundary landing exactly "
+            "at the cut point itself, which is the property the fixture exists to hold."
         )
         # THE FIXTURE'S DISCRIMINATING PROPERTY, ASSERTED RATHER THAN ASSUMED.
         # An earlier version of this test could not fail: its character at the cap
@@ -543,6 +629,22 @@ class TestInjectedTypeLabel:
         # guard was right and only its explanation was wrong — worth correcting
         # because this is the comment that says why the fixture can be trusted.)
         #
+        # LENGTHENED 2026-08-31 when the cap moved 200 -> 450: the 282-char fixture no
+        # longer exceeded the cap, and this test says so out loud rather than passing
+        # on a row it never cuts — the `len(body) > cap` assertion below is what caught
+        # it. The property is re-established at the NEW cap, verified empirically, not
+        # counted — AND THE FIRST ATTEMPT AT THAT WAS WRONG, which is the part worth
+        # keeping. It padded to `body[450] == 'w'` and called that mid-word. It is not:
+        # `body[449]` was a SPACE, so 'w' opened "which", the hard cut's `rstrip()`
+        # removed that space, and the assertion read the stripped position instead —
+        # this guard passed with boundary-seeking deleted outright. Caught in #852 r1
+        # by executing the defect rather than reasoning about it. The cap index was
+        # checked and the one before it was not, which is the whole error: "verified
+        # empirically" is only true of the index you actually looked at.
+        # Now `body[449]='e'` and `body[450]='l'`, both interior to "itself".
+        # The index-201 note above refers to the old cap and is kept as the record of
+        # why the original fixture held.
+        #
         # THE CAP IS DERIVED, NOT WRITTEN AS 200 (#839 r2 nit 2). `_ctx` calls
         # `_build_context` without a limit, so this fixture is coupled to that
         # DEFAULT; a hardcoded 200 would check the wrong index if the default ever
@@ -554,10 +656,22 @@ class TestInjectedTypeLabel:
 
         cap = inspect.signature(_build_context).parameters["char_limit"].default
         assert len(body) > cap, "fixture must exceed the cap or it tests nothing"
-        assert body[cap] not in " \t\n", (
-            f"fixture is toothless: whitespace at index {cap} lets the bare slice pass"
+        # NECESSARY AND SUFFICIENT, WHICH THE cap-ONLY CHECK WAS NOT (#852 r1).
+        # The hard-cut path ends `window[:limit].rstrip()`, so if `body[cap - 1]` is
+        # whitespace the bare-slice defect produces a string one shorter and the
+        # mid-word assertion below reads the stripped space instead — passing with
+        # boundary-seeking deleted. Checking only `body[cap]` cannot see that.
+        # SUBSUMES the cap-only check this replaced (#852 r2 nit 2): `A and B`
+        # implies `B`, so that assertion could never fire once this one holds.
+        # r2 asked for the fold and r2's fix SHIPPED THE NOTE WITHOUT THE FOLD —
+        # the deleted assertion sat three lines below this comment for a whole
+        # round, which is a claim and its falsifier in one file, six lines apart:
+        # the exact shape r2's own Important 1 was retiring, recurring inside the
+        # commit that retired it (#852 r3). Actually gone now.
+        assert body[cap - 1] not in " \t\n" and body[cap] not in " \t\n", (
+            f"fixture is toothless: the hard cut rstrips to index "
+            f"{len(body[:cap].rstrip())}, and the char there must be non-whitespace"
         )
-
         out = self._ctx([{"id": 1, "knowledge_type": "fact", "content": body}])
         rendered = out.splitlines()[-1]
         # Anchored to the ROW, not the block: `" …" in out` is satisfied by the
