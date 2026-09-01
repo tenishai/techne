@@ -56,7 +56,9 @@ All notable changes to techne are documented here. Format loosely follows
   honours it once, says which schema version forced it, and clears it only once
   every stored file has actually been re-parsed — "nothing raised" is too weak,
   because a missing grammar, an unreadable file or a `--language`-limited run all
-  skip files without failing. `--rebuild` on `codex index` / `codex index-all` is the manual
+  skip files without failing. "Gone from disk" is decided by errno rather than
+  `Path.is_file()`, which is also False for an unreadable directory and for a
+  broken symlink — both of which still hold pre-migration rows. `--rebuild` on `codex index` / `codex index-all` is the manual
   equivalent, for extraction changes with no schema version to hang a debt on
   (a grammar or query fix). Verified against the real ladon index: 0 → 357 bound
   edges, 270 resolved and 89 external, matching the hand-rebuild #864 recorded.

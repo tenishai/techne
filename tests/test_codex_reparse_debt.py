@@ -342,3 +342,128 @@ def test_a_deleted_source_file_does_not_pin_the_debt_open(tmp_path):
         "stale rows for a deleted file kept the debt open — it can never be paid, "
         "so every future index re-parses the whole repo and says it was forced"
     )
+
+
+def _owe_fixture(tmp_path):
+    """A repo with a debt set and one file's rows deliberately left un-reparsed."""
+    root = _repo(tmp_path)
+    db = _new_db(tmp_path / "codex.db")
+    _index(db, root)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE edges SET to_module = NULL")
+    conn.execute(
+        "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '4') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+    conn.commit()
+    conn.close()
+    return root, db
+
+
+def test_a_broken_symlink_does_not_discharge_the_debt(tmp_path):
+    """Prudence, #872 r3 — ABSENT AND UNREADABLE ARE NOT THE SAME THING.
+
+    `Path.is_file()` is False for a file that is genuinely gone, for one inside
+    an unreadable directory, and for a broken symlink — and only the FIRST can
+    never be re-parsed. The other two still hold pre-migration rows, so treating
+    them as "gone" discharged the debt with the data still stale: techne#864
+    restored through the exclusion written to prevent it.
+
+    The symlink route needs no permissions at all — a `git checkout` that leaves
+    a dangling link is enough, which is why this is the case worth pinning.
+    """
+    import os
+
+    root, db = _owe_fixture(tmp_path)
+    target = root / "pkg" / "b.py"
+    target.unlink()
+    os.symlink(root / "pkg" / "vanished.py", target)  # dangling
+    assert not target.is_file() and os.path.lexists(target), "precondition: broken symlink"
+
+    src, _ = _index(db, root)
+    assert src.last_failed == 0, "precondition: a dangling link raises nothing"
+
+    conn = sqlite3.connect(db)
+    owed = conn.execute(
+        "SELECT value FROM codex_meta WHERE key = 'reparse_owed_since'"
+    ).fetchone()
+    conn.close()
+    assert owed is not None, (
+        "a broken symlink discharged the debt — pkg/b.py's rows are still "
+        "pre-migration and nothing will ever re-parse them"
+    )
+
+
+def test_an_unreadable_directory_does_not_discharge_the_debt(tmp_path):
+    """The same collapse by the other route. `_walk_repo` takes no `onerror`, so
+    an unreadable directory drops out of the walk with no exception (techne#599)
+    — its files never enter `reparsed`, `failed` stays 0, and stat then files
+    them under "gone"."""
+    import os
+
+    root, db = _owe_fixture(tmp_path)
+    locked = root / "pkg"
+    os.chmod(locked, 0o000)
+    try:
+        src, _ = _index(db, root)
+        assert src.last_failed == 0
+        conn = sqlite3.connect(db)
+        owed = conn.execute(
+            "SELECT value FROM codex_meta WHERE key = 'reparse_owed_since'"
+        ).fetchone()
+        conn.close()
+    finally:
+        os.chmod(locked, 0o755)
+    assert owed is not None, (
+        "an unreadable directory discharged the debt — its files kept their "
+        "pre-migration rows and were counted as absent"
+    )
+
+
+def test_the_owed_predicate_excludes_what_this_walk_can_never_reach(tmp_path):
+    """Prudence, #872 r3 — normalisation and its scope, tested at the predicate.
+
+    Driven directly rather than through `initial_walk`, because the end-to-end
+    route CANNOT express these rows: a symbol id embeds its file path, so
+    rewriting only `symbols.file` leaves ids that `INSERT OR REPLACE` restores on
+    the next walk. An earlier version of this test did exactly that and passed
+    against a deliberately broken predicate — it was measuring the re-insert, not
+    the rule.
+
+    She flagged the in-repo absolute case and said plainly she could not
+    demonstrate a live write path for it. Measured: `sweep_excluded_rows`
+    relativises in-repo absolute rows during the walk, so that shape does not
+    survive one. The reachable case is a row OUTSIDE the root, which this walk
+    can never reach and must therefore not demand — demanding it pins the debt,
+    and a pinned debt forces a full re-parse of every repo at every SessionStart.
+    """
+    from techne.codex.source import RepoSource
+
+    root = _repo(tmp_path)
+    db = _new_db(tmp_path / "codex.db")
+    _index(db, root)
+    src = RepoSource(db, root, languages=["python"])
+
+    outside = tmp_path / "elsewhere.py"
+    outside.write_text("def gamma():\n    return 1\n")
+    inside_abs = str(root / "pkg" / "a.py")
+
+    conn = sqlite3.connect(db)
+    for f in (str(outside), inside_abs):
+        conn.execute(
+            "INSERT INTO symbols (id, file, name, kind, language) VALUES (?,?,?,?,?)",
+            (f"{f}::<module>::module::0", f, "<module>", "module", "python"),
+        )
+    conn.commit()
+    conn.close()
+
+    owed = src._files_still_owed({"pkg/a.py", "pkg/b.py"})
+
+    assert str(outside) not in owed, (
+        "a row outside the repo root is owed — this walk can never reach it, so "
+        "the debt would never discharge and every index would re-parse everything"
+    )
+    assert inside_abs not in owed, (
+        "an in-repo ABSOLUTE row is owed despite its relative twin being re-parsed "
+        "— absolute and relative spellings of one file must not count as two"
+    )

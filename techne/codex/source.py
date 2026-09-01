@@ -783,6 +783,27 @@ def _walk_repo(
                 yield path
 
 
+def _paths_are_case_insensitive(root: Path) -> bool:
+    """Whether *root*'s filesystem folds case, probed rather than assumed.
+
+    macOS defaults to case-insensitive and Linux does not, but either can be
+    mounted the other way, so `sys.platform` is the wrong question. Used only to
+    decide whether two stored path strings can name one file (techne#872 r3).
+    Probing costs one `os.path.exists` and errs toward case-SENSITIVE, which is
+    the safe direction: it keeps a debt rather than discharging one.
+    """
+    # Probe the ROOT, which is known to exist — an earlier version probed a
+    # made-up filename, so both spellings were absent and it always answered
+    # "case-sensitive". A probe that cannot return True is not a probe.
+    try:
+        swapped = str(root).swapcase()
+        if swapped == str(root):  # no cased characters to test with
+            return False
+        return os.path.exists(root) and os.path.samefile(root, swapped)
+    except OSError:  # pragma: no cover — probe must never break an index
+        return False
+
+
 def _is_excluded_stored_path(file_str: str, repo_root: Path) -> bool:
     """True if a STORED ``symbols.file`` names a path `_walk_repo` would now skip.
 
@@ -980,13 +1001,73 @@ class RepoSource:
             log.debug("codex: could not enumerate stored files", exc_info=True)
             return set()
 
+        # NORMALISE BEFORE DIFFERENCING (Prudence, #872 r3). `reparsed` holds
+        # repo-relative strings; a stored row may be absolute — `_is_excluded_stored_path`
+        # relativises for exactly that reason — and an absolute row can never
+        # equal its relative twin, so it stays in the difference on every run and
+        # pins the debt open. That is expensive rather than merely untidy: a
+        # pinned debt forces `force=True` on every walk, and `index-all` runs at
+        # SessionStart, so it would re-parse every repo at every session start
+        # forever. Case is folded on a case-insensitive filesystem for the same
+        # reason: `Pkg/A.py` and `pkg/a.py` are one file there and two strings here.
+        fold = _paths_are_case_insensitive(self._root)
+
+        def _key(value: str) -> str:
+            path = Path(value)
+            if path.is_absolute():
+                try:
+                    value = str(path.relative_to(self._root))
+                except ValueError:
+                    value = str(path)  # outside the repo; handled below
+            return value.casefold() if fold else value
+
+        # `reparsed` is built by `initial_walk` two frames up and is ALWAYS
+        # repo-relative, so it needs no normalising — running `_key` over it
+        # too would add a branch no test can reach, which is the shape this
+        # PR has already had to delete once.
+        done = set(reparsed)
+
         owed: set[str] = set()
-        for file_str in stored - reparsed:
+        for file_str in stored:
+            if _key(file_str) in done:
+                continue
             path = Path(file_str)
-            if not path.is_absolute():
+            if path.is_absolute():
+                try:
+                    path.relative_to(self._root)
+                except ValueError:
+                    # OUTSIDE THE REPO ROOT — this walk can never reach it, so it
+                    # can never be re-parsed, and demanding it would pin the debt
+                    # open exactly as a deleted file would. `_walk_repo` only
+                    # descends from the root; a row like this comes from the
+                    # absolute-path fallback the arch card names, and belongs to
+                    # whatever indexed it, not to this run.
+                    continue
+            else:
                 path = self._root / file_str
-            if path.is_file() and path.suffix.lower() in _EXT_LANGUAGE:
-                owed.add(file_str)
+            if path.suffix.lower() not in _EXT_LANGUAGE:
+                continue  # the indexer never carried this file's column anyway
+
+            # ABSENT IS NOT THE SAME AS UNREADABLE, AND `is_file()` COLLAPSES THEM
+            # (Prudence, #872 r3). It returns False for a file that is genuinely
+            # gone (ENOENT), for one inside a directory we cannot read (EACCES),
+            # and for a broken symlink — and only the FIRST can never be
+            # re-parsed. The other two still have rows in this table holding
+            # pre-migration values, so excluding them discharged the debt with the
+            # data still stale: #864 restored through the exclusion written to
+            # prevent it. The broken-symlink route needs no permissions at all —
+            # a `git checkout` leaving a dangling link is enough.
+            #
+            # `lstat`, not `stat`: stat follows the link and reports ENOENT for a
+            # broken one, which is the collapse again by another name.
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue  # genuinely gone; its stale rows can never be re-parsed
+            except OSError:
+                owed.add(file_str)  # unreadable — backed by something, still owed
+                continue
+            owed.add(file_str)
         return owed
 
     def _clear_reparse_owed(self) -> None:
