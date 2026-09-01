@@ -597,12 +597,21 @@ class IndexFailure(Exception):
     """
 
 
-def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
+def _index_file(
+    db_path: Path, file_path: Path, repo_root: Path, *, force: bool = False
+) -> int:
     """Parse and index *file_path* into codex.db. Returns symbol count (0 = skipped).
 
     Incremental: reads the current file hash from the symbols table.  If the
     file is unchanged, returns 0 immediately.  On change or first-time index:
     deletes old symbols + edges for this file, inserts fresh rows.
+
+    ``force`` BYPASSES THE UNCHANGED-FILE SKIP, and exists because the skip is
+    keyed on the FILE, not on what we extracted from it (techne#864). A schema
+    version that adds a parse-derived column leaves every existing row NULL for
+    it, and no file has changed, so a normal re-index re-parses nothing and the
+    new column stays empty forever while `index` reports success. The bytes are
+    the same; the QUESTION we ask of them is not.
     """
     from techne.core.stores import plain_connect
 
@@ -629,7 +638,7 @@ def _index_file(db_path: Path, file_path: Path, repo_root: Path) -> int:
         existing = conn.execute(
             "SELECT file_hash FROM symbols WHERE file = ? LIMIT 1", (file_str,)
         ).fetchone()
-        if existing and existing[0] == file_hash:
+        if existing and existing[0] == file_hash and not force:
             return 0
 
         # Delete stale data for THIS file. Scope edge deletion by the file's symbols,
@@ -846,11 +855,13 @@ def sweep_excluded_rows(db_path: Path, repo_root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _index_file_safe(db_path: Path, file_path: Path, repo_root: Path) -> tuple[int, bool]:
+def _index_file_safe(
+    db_path: Path, file_path: Path, repo_root: Path, *, force: bool = False
+) -> tuple[int, bool]:
     """(symbol_count, failed). Best-effort per file — one bad file must never abort
     a whole-repo walk — but the failure is COUNTABLE instead of an anonymous 0."""
     try:
-        return _index_file(db_path, file_path, repo_root), False
+        return _index_file(db_path, file_path, repo_root, force=force), False
     except IndexFailure:
         return 0, True
 
@@ -913,25 +924,79 @@ class RepoSource:
         #: Files the last initial_walk could not index. Non-zero means the graph is
         #: stale for those paths and the run must not be read as a success (#610).
         self.last_failed = 0
+        #: Schema version whose reparse debt forced the last initial_walk, or None.
+        self.last_forced_by: str | None = None
+
+    #: codex_meta key naming the schema version that owes a reparse (techne#864).
+    #: A KEY RATHER THAN A BOOLEAN so the reason survives into the log and the
+    #: CLI line: "forced by v4" is actionable where "forced" is a mystery, and a
+    #: future v5 that adds another parse-derived column overwrites it with its
+    #: own number rather than colliding with a stale flag.
+    REPARSE_OWED_KEY = "reparse_owed_since"
+
+    def _reparse_owed(self) -> str | None:
+        """The schema version owing a reparse, or None. Never raises: a db too old
+        to have codex_meta simply owes nothing, which is correct — the column that
+        created the debt does not exist there either."""
+        try:
+            from techne.core.codex import get_meta
+
+            return get_meta(self._db_path, self.REPARSE_OWED_KEY)
+        except Exception:  # noqa: BLE001
+            log.debug("codex: could not read %s", self.REPARSE_OWED_KEY, exc_info=True)
+            return None
+
+    def _clear_reparse_owed(self) -> None:
+        from techne.core.stores import plain_connect
+
+        try:
+            conn = plain_connect(self._db_path)
+            try:
+                conn.execute(
+                    "DELETE FROM codex_meta WHERE key = ?", (self.REPARSE_OWED_KEY,)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            log.warning("codex: failed to clear %s", self.REPARSE_OWED_KEY, exc_info=True)
 
     # ------------------------------------------------------------------
     # SourceAdapter Protocol
     # ------------------------------------------------------------------
 
-    def initial_walk(self) -> int:
+    def initial_walk(self, *, force: bool = False) -> int:
         """Walk the repo, index all source files. Returns total symbol count.
 
         Also persists the repo_root absolute path in codex_meta so query-time
         staleness checks can resolve relative file paths without caller input.
+
+        A REPARSE DEBT RECORDED BY A MIGRATION FORCES THIS RUN (techne#864), and
+        clearing it is deferred until the walk has actually succeeded. The debt
+        says "a column added by schema version N is parse-derived, so every row
+        written before N is NULL for it"; nothing on disk changed, so the
+        incremental skip would otherwise make the migration permanently inert —
+        measured on the v3->v4 rollout, where four of nine live repos got zero
+        `to_module` values and `index-all` reported success on all of them.
+
+        CLEARED ONLY ON A RUN THAT INDEXED SOMETHING AND FAILED NOTHING. A debt
+        cleared by a run that crashed halfway leaves the remaining files NULL
+        with nothing left to say so, which is the original bug with an extra step.
         """
+        owed = self._reparse_owed()
+        force = force or owed is not None
         total = 0
         files = 0
         failed = 0
         for path in _walk_repo(self._root, self._languages):
             files += 1
-            n, did_fail = _index_file_safe(self._db_path, path, self._root)
+            n, did_fail = _index_file_safe(self._db_path, path, self._root, force=force)
             total += n
             failed += did_fail
+        #: Set when THIS run was forced by a migration debt, so the CLI can say
+        #: why an "unchanged" repo just re-parsed in full rather than leaving the
+        #: operator to infer it from a surprising duration.
+        self.last_forced_by = owed if owed is not None else None
         # A run that failed to index 461 files must SAY SO rather than exit 0
         # (techne#610). Each failure rolls back, so the file silently keeps its
         # previous rows: the graph is stale exactly where the run looked fine.
@@ -968,6 +1033,22 @@ class RepoSource:
             set_meta(self._db_path, "repo_root", str(self._root.resolve()))
         except Exception:  # noqa: BLE001
             log.warning("codex: failed to persist repo_root in codex_meta", exc_info=True)
+
+        # Discharge the migration debt, but only for a run that got through the
+        # whole walk. `failed` counts files that rolled back and KEPT their old
+        # rows — exactly the rows the reparse exists to replace — so clearing the
+        # debt here would strand them NULL with no record that they are owed.
+        if owed is not None and not failed:
+            self._clear_reparse_owed()
+        elif owed is not None:
+            log.warning(
+                "codex: reparse debt (schema v%s) KEPT for %s — %d file(s) failed this "
+                "run, so their parse-derived columns are still unpopulated "
+                "(tenishai/techne#864)",
+                owed,
+                self._root,
+                failed,
+            )
 
         # No-silent-failures guard: a non-empty repo that produces an empty graph
         # means grammars are missing or the layout is unsupported. total==0 alone

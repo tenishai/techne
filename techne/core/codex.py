@@ -371,6 +371,29 @@ def _codex_v3_to_v4(conn) -> None:
     if "to_module" not in cols:
         conn.execute("ALTER TABLE edges ADD COLUMN to_module TEXT")
 
+    # AND RECORD THAT A REPARSE IS OWED (techne#864), because "a re-index
+    # populates it" was true of the RESOLVER and false of the INDEXER. `index`
+    # is incremental on the file's SHA-256, and adding a column changes no
+    # file's bytes — so on any repo not otherwise edited, the re-index skips
+    # every file, `to_module` stays NULL forever, and the run prints
+    # "0 symbols ... resolved 0 calls" and exits 0. Measured on the live v3->v4
+    # rollout: four of nine repos got zero benefit and reported success.
+    #
+    # ONLY FOR A DB THAT ALREADY HOLDS ROWS. A fresh store is stamped straight
+    # to the current version and has nothing to re-parse; recording a debt there
+    # would force a full re-walk on the very first index, which is the walk it
+    # was already going to do.
+    try:
+        has_rows = conn.execute("SELECT 1 FROM symbols LIMIT 1").fetchone() is not None
+    except Exception:  # noqa: BLE001 — no symbols table yet: nothing owed
+        has_rows = False
+    if has_rows:
+        conn.execute("CREATE TABLE IF NOT EXISTS codex_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '4') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+
 
 def _run_codex_steps(conn, current: int, target: int) -> None:
     """Chain all codex migration steps from *current* to *target*.
