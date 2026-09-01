@@ -5,6 +5,32 @@ All notable changes to techne are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- `hooks.per_turn_recall_chars` now defaults to **450**, was 200 (#826). Of the 2,468
+  live injectable knowledge rows (median length 476), **a 200-char cap would sever
+  2,442 — 98.9% — where 450 severs 1,305, or 52.9%.** Those are properties of the store,
+  not counts of rows the rail actually cut: it injects five rows per turn selected by
+  embedding similarity and BM25, so the severance it delivers is drawn from that
+  population by a decidedly non-uniform process. #826 measured 58 of 58 injected facts
+  severed in the field at 200, which agrees with the corpus figure — but at 200 nearly
+  everything severs however it was selected, so that agreement says nothing about 450,
+  where 47.1% of the store now sits below the cap and selection bias has room to move the
+  number. Treat 52.9% as a bound on the store, not a prediction for the rail; #853 adds
+  the telemetry that will settle it.
+  Until #839 (released in 0.16.1) a severed row carried no marker distinguishing it from
+  a complete one; that is fixed, and what this change adds is that 47.1% of rows now
+  arrive **whole** rather than marked-and-severed, with the still-severed ones carrying
+  ~2.25× the content.
+  Costs ~312 extra tokens per turn on a five-row push typically, ~412 typical-worst (not a bound — `rstrip` runs after the floor, so a whitespace run at the cut reaches ~420). (312
+  is the full-delta figure; the worst case is wider, not narrower, because
+  boundary-seeking floors at 60% of the cap and so shrinks the *old* emission too —
+  `int(200×0.6)=120` against `int(450×0.6)=270`, a 330-char delta.) This is a **per-turn**
+  cost where #808's schema block is per-session: over 40 turns it is ~12,500 tokens, and
+  the two are not comparable until that multiplication is done.
+  The cap remains configurable; `search()` still pre-truncates at 500 (#842), so no
+  default above 499 can be honoured — now pinned by a test.
+
 ## [0.16.1] — 2026-08-30
 
 ### Upgrading

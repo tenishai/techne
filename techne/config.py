@@ -162,10 +162,17 @@ class HookConfig:
     #: fixed number in this rail's tuning surface, and the one that decides
     #: whether a multi-step SOP arrives as a procedure or as its title.
     #:
-    #: THE DEFAULT IS DELIBERATELY UNCHANGED. Five rows at 200 is ~250 tokens on
-    #: EVERY prompt, and techne#808 measures per-session context cost as already
-    #: the dominant one; raising this for everyone is a cost decision an operator
-    #: should make, not a default. What changed instead is honesty — see
+    #: THE DEFAULT IS 450, RAISED FROM 200 (techne#826). An earlier version of this
+    #: paragraph said "THE DEFAULT IS DELIBERATELY UNCHANGED. Five rows at 200 is
+    #: ~250 tokens on EVERY prompt … raising this for everyone is a cost decision
+    #: an operator should make, not a default" — and it sat twenty-four lines above
+    #: a field reading 450, arguing against the change the same commit was making.
+    #: Measured over 2,468 live injectable rows (median 476): a 200-cap WOULD sever
+    #: 2,442 (98.9%) where 450 severs 1,305 (52.9%) — properties of the STORE, not
+    #: counts of rows the rail cut. Costs ~312 tokens/turn typically, ~412
+    #: typical-worst. techne#808 measures per-session context cost as already the
+    #: dominant one, which is why the number is argued rather than assumed.
+    #: What changed alongside it is honesty — see
     #: `_truncate_for_injection`: the cut now lands on a boundary and announces
     #: itself, so a severed row can be recognised and pulled in full rather than
     #: read as the whole rule.
@@ -186,7 +193,7 @@ class HookConfig:
     #: the hook CLAMPS to 499 (`_SEARCH_ROW_CEILING - 1`), because unclamped, a cap
     #: at or above 500 makes a severed row look whole to `_truncate_for_injection`
     #: and suppresses both the `…` and the header notice.
-    per_turn_recall_chars: int = 200
+    per_turn_recall_chars: int = 450
     # techne#329 — log each per-turn recall attempt (trigger, hit ids, scores,
     # token cost) to the context_injections table so this READ path is auditable
     # (it left no trace before). The SessionStart tier-0 block is logged the same
@@ -919,7 +926,7 @@ class Config:
                 codex_edit_rail_limit=int(h.get("codex_edit_rail_limit", 10)),
                 per_turn_recall=h.get("per_turn_recall", False),
                 per_turn_recall_limit=int(h.get("per_turn_recall_limit", 5)),
-                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 200)),
+                per_turn_recall_chars=int(h.get("per_turn_recall_chars", 450)),
                 per_turn_recall_log=h.get("per_turn_recall_log", True),
                 per_turn_recall_floor_vec_distance=(
                     float(h["per_turn_recall_floor_vec_distance"])
