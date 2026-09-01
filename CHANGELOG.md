@@ -44,6 +44,18 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- Thread detection no longer depends on `PYTHONHASHSEED` (#871).
+  `_segment_dominant_repo` built its counts by iterating `ObsFeatures.repos` — a
+  **set** — so the dict's insertion order was hash-seeded and `max()` returned the
+  first of any tie. Which repo counted as dominant therefore varied per process,
+  and that decides segment merges. Measured on one 521-observation session: the
+  boundary **scores were byte-identical** across seeds while the thread count came
+  out **13 or 15**. Thread ids are content-addressed on the resulting segments, so
+  ids moved too — which is how a reflection-queue row stopped matching its own
+  session's detection and read as `superseded` one run in five, and why
+  `reconcile --apply`, which DELETES what that classifier returns, was deciding by
+  coin-flip. Ties now break by name in both dominance helpers.
+
 - A codex schema migration that adds a parse-derived column now forces a re-parse
   (#864). `codex index` skips files whose SHA-256 is unchanged, and adding a column
   changes no file's bytes — so the v3→v4 migration's own "a re-index populates it"
