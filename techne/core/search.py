@@ -419,6 +419,11 @@ def _fts_match_rows(
                     "knowledge_type": r["type"],
                     # KNOWLEDGE HONOURS THE CALLER'S CAP (techne#842).
                     "content": r["content"][:_cap],
+                    # THE PRE-TRUNCATION LENGTH, so a caller can count what the
+                    # reader LOST (techne#853, restored here by techne#842).
+                    # Without it, a caller that only ever sees an already-cut row
+                    # can measure the marker's width and nothing else.
+                    "content_chars_total": len(r["content"]),
                     "tags": r["tags"],
                     "confidence": r["confidence"],
                     # Decay metadata (techne#214): used by _rerank to compute
@@ -476,6 +481,14 @@ def search_fts(
     row_chars: int | None = None,
 ) -> list[dict]:
     """Full-text search across techne tables.
+
+    ``row_chars`` caps each KNOWLEDGE row's content, defaulting to
+    ``_ROW_CHAR_CAP`` when None (techne#842). It does NOT move observation or
+    thread rows: those are the tool ledger, and a caller raising its recall
+    budget wants more of the curated row, not more transcript. A caller that
+    renders a truncation marker should ask for one character MORE than it will
+    show — at exactly the cap a severed row is indistinguishable from a whole
+    one.
 
     Fetches ``expansion_ratio * limit`` BM25 candidates per table, then
     applies a two-stage reranker:
@@ -699,6 +712,14 @@ def search_vec(
     """Semantic vector search. Requires sqlite-vec and an embedding backend
     (model2vec or fastembed — techne#601/#602; see core/embeddings.py).
 
+    ``row_chars`` caps each KNOWLEDGE row's content, defaulting to
+    ``_ROW_CHAR_CAP`` when None (techne#842). It does NOT move observation or
+    thread rows: those are the tool ledger, and a caller raising its recall
+    budget wants more of the curated row, not more transcript. A caller that
+    renders a truncation marker should ask for one character MORE than it will
+    show — at exactly the cap a severed row is indistinguishable from a whole
+    one.
+
     Falls back gracefully if vector dependencies aren't installed.
 
     ``include_archived`` (techne#216): when False, soft-archived knowledge rows
@@ -872,6 +893,8 @@ def search_vec(
                                 # KNOWLEDGE HONOURS THE CALLER'S CAP
                                 # (techne#842).
                                 "content": k[2][:_cap],
+                                # Pre-truncation length; see the FTS site.
+                                "content_chars_total": len(k[2]),
                                 "tags": k[3],
                                 "confidence": k[4],
                                 # techne#501: the FTS row has always carried `status`;
@@ -1106,6 +1129,14 @@ def search(
 ) -> list[dict]:
     """Hybrid search: BM25 (FTS5) + vector (cosine) combined by a vec-first
     union (techne#401).
+
+    ``row_chars`` caps each KNOWLEDGE row's content, defaulting to
+    ``_ROW_CHAR_CAP`` when None (techne#842). It does NOT move observation or
+    thread rows: those are the tool ledger, and a caller raising its recall
+    budget wants more of the curated row, not more transcript. A caller that
+    renders a truncation marker should ask for one character MORE than it will
+    show — at exactly the cap a severed row is indistinguishable from a whole
+    one.
 
     With ``use_vectors=False``: returns BM25-only results (unchanged
     legacy behavior).

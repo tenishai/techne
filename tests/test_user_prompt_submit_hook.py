@@ -1671,3 +1671,52 @@ def test_no_carrier_still_documents_the_removed_ceiling():
         "config.py no longer retracts the ceiling explicitly — absence is not a "
         "correction for a claim that was documented at length"
     )
+
+
+def test_chars_dropped_still_moves_with_the_cap(tmp_path):
+    """techne#853's metric, which techne#842 collapsed to a constant.
+
+    #853 exists so that raising or lowering `per_turn_recall_chars` can be
+    evaluated from data. It differenced against the row this rail was handed —
+    but `search()` truncates first, so that was always the length of an
+    already-cut row. Merely misleading before #842; useless after, because the
+    rail now asks for `cap + 1` and the difference became the marker's width.
+    Measured on this 3,199-char row: 2/4/2/2 at caps 200/450/1200/2000, where
+    the true losses are 3000/2752/2000/1200.
+
+    A constant is worse than a wrong number. It answers every cap identically,
+    which is the one thing the metric was bought to avoid — so this asserts
+    MOVEMENT across caps as well as exactness, and the movement assertion is
+    the one that fails under a regression to any fixed value.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store as store_knowledge
+    from techne.core.search import search
+    from techne.hooks.user_prompt_submit import _build_context
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    body = " ".join(f"word{i:03d}" for i in range(400))
+    store_knowledge(db, content=body, type="procedure", tags="probe", confidence="high")
+
+    seen = {}
+    for cap in (200, 450, 1200, 2000):
+        rows = search(db, "word001", table="knowledge", limit=5, row_chars=cap + 1)
+        stats: dict = {}
+        block = _build_context(rows, char_limit=cap, stats=stats)
+        line = next(ln for ln in block.splitlines() if "⟦techne#" in ln)
+        rendered = line.split("] ", 1)[1]
+        delivered = len(rendered) - 2 if rendered.endswith(" …") else len(rendered)
+        assert stats["chars_dropped"] == len(body) - delivered, (
+            f"cap {cap}: chars_dropped={stats['chars_dropped']} but the reader "
+            f"lost {len(body) - delivered} of {len(body)} stored characters"
+        )
+        seen[cap] = stats["chars_dropped"]
+
+    assert len(set(seen.values())) == len(seen), (
+        f"chars_dropped is {seen} — it must differ per cap, or the telemetry "
+        "cannot tell one setting from another, which is all it is for"
+    )
+    assert seen[200] > seen[2000], (
+        f"a tighter cap must drop MORE: {seen}"
+    )
