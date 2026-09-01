@@ -946,6 +946,49 @@ class RepoSource:
             log.debug("codex: could not read %s", self.REPARSE_OWED_KEY, exc_info=True)
             return None
 
+    def _files_still_owed(self, reparsed: set[str]) -> set[str]:
+        """Stored files that still hold pre-reparse rows after this walk.
+
+        A file only picks up a migration's new parse-derived column by being
+        RE-PARSED. So the debt is discharged only when every file the index still
+        holds rows for was re-parsed in this run — not merely when nothing threw.
+
+        TWO EXCLUSIONS, both deliberate, because the strict form never clears:
+
+        - A file GONE FROM DISK keeps stale rows (nothing deletes them; the
+          skip-list sweep only touches excluded paths), and it can never be
+          re-parsed. Requiring it would pin the debt open forever on any repo
+          that has ever deleted a source file.
+        - A file whose extension the indexer does not handle at all cannot carry
+          the column either.
+
+        Language SELECTION is deliberately NOT an exclusion: a Python file
+        skipped because the run passed `--language typescript` still holds
+        pre-migration rows, so it still owes, and the debt must survive that run.
+        That is the case that made the weaker predicate wrong.
+        """
+        from techne.core.stores import plain_connect
+
+        try:
+            conn = plain_connect(self._db_path)
+            try:
+                stored = {r[0] for r in conn.execute("SELECT DISTINCT file FROM symbols")}
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — cannot read: assume nothing owed rather
+            # than pinning the debt open on an unreadable store.
+            log.debug("codex: could not enumerate stored files", exc_info=True)
+            return set()
+
+        owed: set[str] = set()
+        for file_str in stored - reparsed:
+            path = Path(file_str)
+            if not path.is_absolute():
+                path = self._root / file_str
+            if path.is_file() and path.suffix.lower() in _EXT_LANGUAGE:
+                owed.add(file_str)
+        return owed
+
     def _clear_reparse_owed(self) -> None:
         from techne.core.stores import plain_connect
 
@@ -979,18 +1022,38 @@ class RepoSource:
         measured on the v3->v4 rollout, where four of nine live repos got zero
         `to_module` values and `index-all` reported success on all of them.
 
-        CLEARED ONLY ON A RUN THAT INDEXED SOMETHING AND FAILED NOTHING. A debt
-        cleared by a run that crashed halfway leaves the remaining files NULL
-        with nothing left to say so, which is the original bug with an extra step.
+        CLEARED ONLY WHEN EVERY STORED FILE WAS ACTUALLY RE-PARSED, which is a
+        stronger predicate than "nothing raised" and had to be (Prudence, #872
+        r2). `failed` counts only `IndexFailure`, and `_index_file` returns 0
+        WITHOUT raising on three paths — an unknown extension, an `OSError` on
+        read, and a missing grammar, whose empty parse rolls the delete back so
+        the file keeps its pre-migration rows. `_walk_repo` also never visits a
+        file whose language is outside `self._languages`. Every one of those
+        leaves `failed == 0`, so a weaker predicate discharged the one-shot debt
+        while those files kept the very rows the reparse existed to replace.
+        Reproduced two ways: with the grammar absent (`symbols 0, forced_by 4,
+        failed 0`, debt gone, column still empty), and with
+        `codex index --language typescript` on a mixed repo, after which the
+        NEXT full-language run reported `forced_by None` — techne#864 again,
+        through the mechanism that fixed it.
         """
         owed = self._reparse_owed()
         force = force or owed is not None
         total = 0
         files = 0
         failed = 0
+        #: Files this run actually RE-PARSED, as stored-path strings. Only these
+        #: can have picked up a column added by the migration; see
+        #: `_files_still_owed`.
+        reparsed: set[str] = set()
         for path in _walk_repo(self._root, self._languages):
             files += 1
             n, did_fail = _index_file_safe(self._db_path, path, self._root, force=force)
+            if n:
+                try:
+                    reparsed.add(str(path.relative_to(self._root)))
+                except ValueError:  # pragma: no cover — walk stays under root
+                    reparsed.add(str(path))
             total += n
             failed += did_fail
         #: Set when THIS run was forced by a migration debt, so the CLI can say
@@ -1038,17 +1101,22 @@ class RepoSource:
         # whole walk. `failed` counts files that rolled back and KEPT their old
         # rows — exactly the rows the reparse exists to replace — so clearing the
         # debt here would strand them NULL with no record that they are owed.
-        if owed is not None and not failed:
-            self._clear_reparse_owed()
-        elif owed is not None:
-            log.warning(
-                "codex: reparse debt (schema v%s) KEPT for %s — %d file(s) failed this "
-                "run, so their parse-derived columns are still unpopulated "
-                "(tenishai/techne#864)",
-                owed,
-                self._root,
-                failed,
-            )
+        if owed is not None:
+            still_owed = self._files_still_owed(reparsed)
+            if not failed and not still_owed:
+                self._clear_reparse_owed()
+            else:
+                log.warning(
+                    "codex: reparse debt (schema v%s) KEPT for %s — %d file(s) failed and "
+                    "%d stored file(s) were never re-parsed this run, so their "
+                    "parse-derived columns are still unpopulated (tenishai/techne#864). "
+                    "First few: %s",
+                    owed,
+                    self._root,
+                    failed,
+                    len(still_owed),
+                    sorted(still_owed)[:5],
+                )
 
         # No-silent-failures guard: a non-empty repo that produces an empty graph
         # means grammars are missing or the layout is unsupported. total==0 alone

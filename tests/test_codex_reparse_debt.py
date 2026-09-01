@@ -206,3 +206,139 @@ def test_the_migration_itself_records_the_debt(tmp_path):
         "migrating a populated db to v4 recorded no reparse debt — the new column "
         "will stay NULL through every future incremental index (techne#864)"
     )
+
+
+def test_a_language_limited_run_does_not_discharge_the_debt(tmp_path):
+    """Prudence, #872 r2 — the sixth mutation, and #864 through its own fix.
+
+    `codex index --language typescript` on a mixed repo never visits the Python
+    files. Nothing raises, so `failed` is 0. Under a "nothing failed" predicate
+    the one-shot debt is deleted, the Python files keep their pre-migration rows
+    forever, and the NEXT full-language run reports `forced_by None` — the
+    original bug reached through the mechanism that fixed it.
+    """
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "helper.py").write_text("def helper():\n    return 1\n")
+    # An IMPORT is what produces a to_module row — a file with none would make
+    # the post-run assertion vacuous no matter which predicate shipped.
+    (root / "pkg" / "a.py").write_text(
+        "from pkg import helper\n\n\ndef alpha():\n    return helper.helper()\n"
+    )
+    (root / "web").mkdir()
+    (root / "web" / "b.ts").write_text("export function beta() { return 1; }\n")
+
+    db = _new_db(tmp_path / "codex.db")
+    from techne.codex.source import RepoSource
+
+    RepoSource(db, root, languages=["python", "typescript"]).initial_walk()
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE edges SET to_module = NULL")
+    conn.execute(
+        "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '4') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+    conn.commit()
+    conn.close()
+
+    ts_only = RepoSource(db, root, languages=["typescript"])
+    ts_only.initial_walk()
+    assert ts_only.last_failed == 0, "precondition: the ts-only run raises nothing"
+
+    conn = sqlite3.connect(db)
+    owed = conn.execute(
+        "SELECT value FROM codex_meta WHERE key = 'reparse_owed_since'"
+    ).fetchone()
+    conn.close()
+    assert owed is not None, (
+        "a --language-limited run discharged the debt — pkg/a.py was never visited, "
+        "so it keeps its pre-migration rows and no later run will ever re-parse it"
+    )
+
+    full = RepoSource(db, root, languages=["python", "typescript"])
+    full.initial_walk()
+    assert full.last_forced_by == "4", (
+        "the next full run must still be forced; if it reports None the debt was "
+        "spent by a run that could not pay it"
+    )
+    conn = sqlite3.connect(db)
+    after = conn.execute("SELECT COUNT(*) FROM edges WHERE to_module IS NOT NULL").fetchone()[0]
+    cleared = conn.execute(
+        "SELECT COUNT(*) FROM codex_meta WHERE key = 'reparse_owed_since'"
+    ).fetchone()[0]
+    conn.close()
+    assert after, "the full run re-parsed nothing"
+    assert cleared == 0, "the full run paid the debt and it must now be discharged"
+
+
+def test_a_file_that_yields_no_symbols_does_not_discharge_the_debt(tmp_path, monkeypatch):
+    """The other half of the same finding: `_index_file` returns 0 WITHOUT raising
+    when the grammar is absent. The delete rolls back, the file keeps its
+    pre-migration rows, and `failed` stays 0 — so "nothing raised" cannot be the
+    discharge condition."""
+    from techne.codex import source as src_mod
+
+    root = _repo(tmp_path)
+    db = _new_db(tmp_path / "codex.db")
+    _index(db, root)
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE edges SET to_module = NULL")
+    conn.execute(
+        "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '4') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+    conn.commit()
+    conn.close()
+
+    # Grammar absent: the real path returns ([], []) before any insert.
+    monkeypatch.setattr(src_mod, "_parse_file", lambda *a, **k: ([], []))
+    src, total = _index(db, root)
+    assert total == 0 and src.last_failed == 0, (
+        "precondition: an empty parse yields 0 symbols and raises nothing"
+    )
+
+    conn = sqlite3.connect(db)
+    owed = conn.execute(
+        "SELECT value FROM codex_meta WHERE key = 'reparse_owed_since'"
+    ).fetchone()
+    conn.close()
+    assert owed is not None, (
+        "a run that re-parsed nothing discharged the debt — every file kept its "
+        "pre-migration rows and the column stays empty forever"
+    )
+
+
+def test_a_deleted_source_file_does_not_pin_the_debt_open(tmp_path):
+    """The guard on the guard. Stale rows for a file no longer on disk can never
+    be re-parsed, so requiring them would make the debt permanent on any repo
+    that has ever deleted a source file — trading a silent failure for a
+    permanently red one, which #870 is the standing argument against."""
+    root = _repo(tmp_path)
+    db = _new_db(tmp_path / "codex.db")
+    _index(db, root)
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE edges SET to_module = NULL")
+    conn.execute(
+        "INSERT INTO codex_meta (key, value) VALUES ('reparse_owed_since', '4') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+    conn.commit()
+    conn.close()
+
+    (root / "pkg" / "b.py").unlink()  # rows survive; the file does not
+
+    src, _ = _index(db, root)
+    assert src.last_failed == 0
+
+    conn = sqlite3.connect(db)
+    cleared = conn.execute(
+        "SELECT COUNT(*) FROM codex_meta WHERE key = 'reparse_owed_since'"
+    ).fetchone()[0]
+    conn.close()
+    assert cleared == 0, (
+        "stale rows for a deleted file kept the debt open — it can never be paid, "
+        "so every future index re-parses the whole repo and says it was forced"
+    )

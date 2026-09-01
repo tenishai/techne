@@ -53,8 +53,10 @@ All notable changes to techne are documented here. Format loosely follows
   Measured on the live rollout: **four of nine repos got zero benefit from #679 and
   reported success**, ladon and liminal at 0 of 455 and 0 of 635 import edges.
   The migration now records `codex_meta.reparse_owed_since` and the next index
-  honours it once, says which schema version forced it, and clears it only if no
-  file failed. `--rebuild` on `codex index` / `codex index-all` is the manual
+  honours it once, says which schema version forced it, and clears it only once
+  every stored file has actually been re-parsed — "nothing raised" is too weak,
+  because a missing grammar, an unreadable file or a `--language`-limited run all
+  skip files without failing. `--rebuild` on `codex index` / `codex index-all` is the manual
   equivalent, for extraction changes with no schema version to hang a debt on
   (a grammar or query fix). Verified against the real ladon index: 0 → 357 bound
   edges, 270 resolved and 89 external, matching the hand-rebuild #864 recorded.
