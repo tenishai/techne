@@ -576,7 +576,7 @@ class TestInjectedTypeLabel:
         # unmeasured either way, so 52% is a bound, not a prediction. #853 adds the
         # telemetry that settles it.
         #
-        # Cost: ~312 tokens/turn TYPICAL on a five-row push, ~412 WORST CASE. 312 is
+        # Cost: ~312 tokens/turn TYPICAL on a five-row push, ~412 TYPICAL-WORST. 312 is
         # the full-delta figure (5 × 250 / 4). It is NOT a ceiling, and calling it one
         # was wrong (#852 r2): boundary-seeking floors at int(limit * 0.6), which
         # applies to the OLD cap too — int(200*0.6)=120 against int(450*0.6)=270 — so
