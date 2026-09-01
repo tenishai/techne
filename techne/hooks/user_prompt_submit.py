@@ -647,6 +647,20 @@ def _build_context(
             # `{0, 0}` for a payload where everything was cut is the telemetry
             # saying the opposite of what happened. `chars_dropped` is the whole
             # original, since none of it was delivered.
+            #
+            # AND THIS COMMENT DISAGREES WITH THE ONE AT THE LOG SITE BELOW,
+            # which wins (Prudence, #869 r3). At `char_limit <= 0` every row is
+            # withheld, so `lines` is empty, so `recall_block` is "", so the
+            # caller forces BOTH counters to 0 — measured end-to-end with a
+            # 3,000-char row withheld in full: `('per_turn_recall', '[]', 0, 0)`.
+            # The number computed here never reaches the table, so the claim
+            # above that we avoid "telemetry saying the opposite of what
+            # happened" describes an outcome this rail does not have. It
+            # PRE-DATES techne#842 (#854 era) and is left standing rather than
+            # fixed here, because `hit_ids=[]` and an empty `injected_text`
+            # already tell an operator that nothing shipped. Recorded because
+            # #842 is what made this number meaningful, so the next reader
+            # arrives with a reason to trust it that the log site does not honour.
             if was_cut:
                 truncated_any = True
                 _cut_rows += 1

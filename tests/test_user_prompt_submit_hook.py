@@ -1456,7 +1456,8 @@ def test_both_search_sites_share_one_ceiling():
     # including the OBSERVATIONS row, which has nothing to do with this
     # knob. That was wrong in both directions, both demonstrated: deleting the knowledge
     # ceiling still left two matching sites so the test stayed GREEN (false negative on
-    # the thing it exists to catch), and editing the observations row alone turned it RED with a message
+    # the thing it exists to catch), and editing the observations row alone turned
+    # it RED with a message
     # about "knowledge rows" that was not true (false positive, and the kind that gets a
     # test deleted as noise). Each knowledge block is found by its own source_table
     # marker, and the count is EXACT so future slack cannot hide a lost site.
