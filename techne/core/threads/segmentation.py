@@ -37,6 +37,20 @@ def split_at_boundaries(
     return segments
 
 
+#: TIES ARE BROKEN BY NAME, AND WITHOUT THAT THREAD DETECTION IS NON-DETERMINISTIC
+#: ACROSS PROCESSES (techne#871). `ObsFeatures.repos` is a SET, so iterating it to
+#: build `counts` gives the dict a hash-seeded insertion order, and `max()` returns
+#: the FIRST of any tie — so which repo counts as dominant depended on
+#: PYTHONHASHSEED. That decides merges, so the whole segmentation moved with it:
+#: measured on one 521-observation session, the boundary SCORES were byte-identical
+#: across seeds while the thread count came out 13 or 15. Content-addressed thread
+#: ids are derived from the resulting segments, so ids moved too, which is how a
+#: reflection-queue row stopped matching its own session's detection and read as
+#: "superseded" one run in five.
+#:
+#: `min` on `(-count, name)` rather than `max` on `count`: same winner by count,
+#: lowest name on a tie, and the tie-break is visible in the expression rather
+#: than inherited from whatever order the caller happened to produce.
 def _segment_dominant_repo(segment: list[int], features: list[ObsFeatures]) -> str | None:
     counts: dict[str, int] = {}
     for i in segment:
@@ -44,7 +58,7 @@ def _segment_dominant_repo(segment: list[int], features: list[ObsFeatures]) -> s
             counts[r] = counts.get(r, 0) + 1
     if not counts:
         return None
-    return max(counts.items(), key=lambda kv: kv[1])[0]
+    return min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
 
 
 def _segment_dominant_family(segment: list[int], features: list[ObsFeatures]) -> str | None:
@@ -57,7 +71,11 @@ def _segment_dominant_family(segment: list[int], features: list[ObsFeatures]) ->
         counts[f.tool_family] = counts.get(f.tool_family, 0) + 1
     if not counts:
         return None
-    return max(counts.items(), key=lambda kv: kv[1])[0]
+    # Same explicit tie-break as `_segment_dominant_repo`. Here the insertion
+    # order happens to follow `segment`, which is already deterministic, so this
+    # is not a live defect — it is spelled out anyway so the two helpers cannot
+    # be read as disagreeing about how a tie resolves.
+    return min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
 
 
 def _entity_overlap(seg_a: list[int], seg_b: list[int], features: list[ObsFeatures]) -> int:

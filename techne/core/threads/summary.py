@@ -62,7 +62,11 @@ def _recent_files(observations: list[dict], limit: int = 5) -> list[str]:
         if obs.get("tool_name") not in FILE_OP_TOOLS:
             continue
         basenames, _ = extract_file_paths(obs.get("content", "") or "")
-        for b in basenames:
+        # SORTED FOR THE SAME REASON AS fallback_summary (Prudence, #873 r1):
+        # `basenames` is a set and this loop RETURNS EARLY at `limit`, so hash
+        # order decided which files appeared in `Open files:` — 12 distinct lines
+        # across 12 seeds. It lands in `resume_points`, which is FTS-indexed.
+        for b in sorted(basenames):
             if b not in seen:
                 seen.append(b)
                 if len(seen) >= limit:
@@ -151,11 +155,18 @@ def fallback_summary(
     for f in features:
         if f.tool_family:
             fam_counts[f.tool_family] = fam_counts.get(f.tool_family, 0) + 1
-        for b in f.file_paths:
+        # SORTED BECAUSE THE OUTPUT IS TRUNCATED (Prudence, #873 r1). `file_paths`
+        # and `entities` are SETS, and these lists are later sliced to
+        # `max_files` / `max_entities` — so hash order decided not the display
+        # order but WHICH FIVE ARE SHOWN. Measured: 12 distinct summaries from 12
+        # seeds. `summary` is FTS-indexed and `link_threads` searches
+        # `label + summary[:200]` to choose a parent_thread_id, so a per-process
+        # summary can select a different parent and persist it as an FK.
+        for b in sorted(f.file_paths):
             if b not in seen_files:
                 seen_files.add(b)
                 files.append(b)
-        for e in f.entities:
+        for e in sorted(f.entities):
             if e in seen_files:
                 # file basenames already shown in `files:` — skip in entities
                 continue
