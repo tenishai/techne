@@ -1353,19 +1353,23 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     """techne#842 / #839 r4 Important 1 — THE INERTNESS IS TOLERATED, THE SILENCE IS NOT.
 
     `search()` hands knowledge rows in already cut at 500, unmarked, at BOTH sites
-    that build one — `search.py:416` (FTS) and `search.py:838` (VEC, which the
+    that build one — `_fts_match_rows` (FTS) and `search_vec` (VEC, which the
     vec-first union puts at the head of the page, so it serves most rows on any
     non-trivial store).
 
-    Two different defects follow, and only one is this PR's. That a cap above 500
-    delivers no more text needs `search()` and is techne#842. That a cap AT or ABOVE
-    500 used to switch the `…` marker OFF is reachable only because this change added
-    the knob — before it the cap was a hardcoded 200 — so the hook clamps to
-    `_SEARCH_ROW_CEILING - 1` and the row is still announced as cut.
+    REWRITTEN BY techne#842, WHICH FIXED BOTH HALVES rather than tolerating one.
+    `search()` now takes `row_chars` and this rail passes `per_turn_recall_chars + 1`,
+    so a cap above 500 delivers what it asks for AND the cut is still announced.
 
-    The spurious `…` on a genuinely-500-char row is the accepted cost: an over-marked
-    whole row says "there may be more", an unmarked severed row says "this is all of
-    it", and only the second is the failure techne#826 exists to fix.
+    THE +1 IS WHAT THIS TEST NOW PINS. `_truncate_for_injection` decides "was this
+    cut?" by `len(content) > limit`, so a row `search()` sliced to EXACTLY the cap
+    reads as whole and the marker is suppressed. Threading the cap unchanged would
+    have spread that dishonest state from cap>=500 to EVERY cap — measured at 600,
+    500 and 200, all ending mid-word with no marker. Over-fetching by one gives the
+    renderer the overflow it needs to tell the two cases apart.
+
+    The old clamp to `_SEARCH_ROW_CEILING - 1` is gone with the defect that motivated
+    it, so a 600-char cap now yields a 600-char row rather than 499.
     """
     from techne.hooks.user_prompt_submit import _SEARCH_ROW_CEILING
 
@@ -1384,13 +1388,22 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     # BOUNDED BY THE CLAMP, NOT BY search() — AND THAT IS THE POINT OF THIS ASSERTION
     # NOW (#839 r5 Important 1). The hook caps at `_SEARCH_ROW_CEILING - 1` before
     # `_truncate_for_injection` ever sees the row, so this length is identical whether
-    # search() truncates or not: deleting search.py:416's own `[:500]` left the whole
+    # search() truncates or not: deleting `_fts_match_rows`'s own knowledge slice left the whole
     # suite green. The r4 "both bounds" fix landed on an assertion that the r4 clamp
     # made inert IN THE SAME COMMIT. search()'s ceiling is witnessed directly by
     # `test_search_itself_truncates_knowledge_rows` below; what THIS pins is that the
     # clamp is applied and the marker survives.
-    assert 400 < len(body) < _SEARCH_ROW_CEILING, (
-        f"row is {len(body)} chars — expected the clamp at {_SEARCH_ROW_CEILING - 1}"
+    # BOUNDED BY THE CAP THE OPERATOR SET, not by a hidden ceiling (techne#842).
+    # The configured cap is 600 and the row must reach it; before this fix the
+    # clamp held it at 499 no matter what the knob said, which is the inertness
+    # the issue is named for. `_SEARCH_ROW_CEILING` survives as the DEFAULT a
+    # caller gets when it asks for nothing, so it is still imported and still
+    # meaningful — it is just no longer a ceiling on this rail.
+    assert len(body) > _SEARCH_ROW_CEILING, (
+        f"row is {len(body)} chars — a 600-char cap must now beat the old 499 clamp"
+    )
+    assert len(body) <= 600 + len(" …"), (
+        f"row is {len(body)} chars — must not exceed the cap it was given"
     )
     assert body.endswith(" …"), (
         "a row at the ceiling shipped UNMARKED — the clamp is gone and the rail is "
@@ -1419,7 +1432,7 @@ def test_both_search_sites_share_one_ceiling():
     """#839 r4 Important 2 — THE PIN WAS SINGLE-SITED AND THE DOCS INHERITED IT.
 
     `search()` fuses two channels and truncates knowledge in BOTH: `search_fts` at
-    `search.py:416` and `search_vec` at `search.py:838`. The end-to-end test above
+    `_fts_match_rows` and `search_vec`. The end-to-end test above
     exercises whichever channel the fixture happens to hit; this one asserts the two
     sites agree, so raising one without the other cannot pass unnoticed — which is
     the failure mode that leaves `config.py`'s comment and the README quietly wrong.
@@ -1438,22 +1451,23 @@ def test_both_search_sites_share_one_ceiling():
     src = _P("techne/core/search.py").read_text()
 
     # Anchored on the knowledge row rather than on the truncation shape: matching
-    # the shape alone caught the OBSERVATIONS row at :366 too (#839 r5).
+    # the shape alone caught the OBSERVATIONS row too (#839 r5).
     # The first version matched `[:NNN]` on any content field and caught THREE sites —
-    # including search.py:366, the OBSERVATIONS row, which has nothing to do with this
-    # knob. That was wrong in both directions, both demonstrated: deleting :416's
+    # including the OBSERVATIONS row, which has nothing to do with this
+    # knob. That was wrong in both directions, both demonstrated: deleting the knowledge
     # ceiling still left two matching sites so the test stayed GREEN (false negative on
-    # the thing it exists to catch), and editing :366 alone turned it RED with a message
+    # the thing it exists to catch), and editing the observations row alone turned
+    # it RED with a message
     # about "knowledge rows" that was not true (false positive, and the kind that gets a
     # test deleted as noise). Each knowledge block is found by its own source_table
     # marker, and the count is EXACT so future slack cannot hide a lost site.
     # TEMPERED, so a match cannot cross a `source_table` boundary. An unbounded
     # `.*?` under re.S paired the knowledge marker with the THREAD block's
     # truncation, so deleting site 416's slice still yielded two 500s and a pass.
-    # This pin is the SOLE witness for the VEC site (838) — the direct witness below
+    # This pin is the SOLE witness for the VEC site (`search_vec`) — the direct witness below
     # reaches only FTS — so measuring the wrong block is the one thing it must not do.
     blocks = re.findall(
-        r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:(\d+)\]',
+        r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:([A-Za-z_0-9]+)\]',
         src,
         flags=re.S,
     )
@@ -1461,9 +1475,61 @@ def test_both_search_sites_share_one_ceiling():
         f"expected exactly two knowledge-row truncation sites, found {blocks} — "
         "search.py's shape changed; re-derive this pin rather than widening it"
     )
-    assert set(blocks) == {str(_SEARCH_ROW_CEILING)}, (
-        f"search.py truncates knowledge rows at {set(blocks)} but the hook clamps to "
-        f"{_SEARCH_ROW_CEILING} — they must move together (techne#842)"
+    # STRONGER THAN "BOTH ARE 500" (techne#842). Both sites must slice by `_cap`,
+    # the caller-aware value, rather than by any literal. A literal at either site
+    # is the defect this issue fixed: it silently overrode whatever the caller
+    # asked for, so `per_turn_recall_chars` governed nothing above 500 and a row
+    # arriving at exactly the cap read as whole. Pinning the NAME rather than the
+    # NUMBER also survives a change to the default, which a numeric pin would not.
+    assert set(blocks) == {"_cap"}, (
+        f"knowledge rows are sliced by {set(blocks)} — both sites must use `_cap` so "
+        "the caller's `row_chars` is honoured; a literal here reintroduces techne#842"
+    )
+    # And the default the two fall back to is still the one the hook documents.
+    from techne.core.search import _ROW_CHAR_CAP
+
+    assert _ROW_CHAR_CAP == _SEARCH_ROW_CEILING, (
+        f"search default {_ROW_CHAR_CAP} and the hook's documented ceiling "
+        f"{_SEARCH_ROW_CEILING} have diverged — the comment at the knob is now wrong"
+    )
+
+
+def test_the_ledger_rows_are_pinned_to_the_default_at_both_sites():
+    """The other half of techne#842's contract: `row_chars` moves knowledge ONLY.
+
+    Observations and threads are the tool ledger — mostly shell echoes — so raising
+    the recall cap must not drag them along, or the payload the operator paid for
+    grows by transcript instead of by the curated row they asked for. There is a
+    behavioural witness for the FTS ledger site, but the VEC ledger site has none:
+    driving that channel needs a populated vector index and a cached model. So this
+    pin is the sole guard there, exactly as the knowledge pin above is for `search_vec`.
+
+    Written as its own test rather than folded into that one because its failure
+    means the opposite thing — a ledger site drifted ONTO the caller's knob — and a
+    message about "knowledge rows" would send the next reader the wrong way.
+    """
+    import re
+    from pathlib import Path as _P
+
+    src = _P("techne/core/search.py").read_text()
+
+    # Same tempered shape as the knowledge pin: `(?!"source_table")` keeps a match
+    # from crossing into the next block and pairing a ledger marker with the
+    # knowledge slice, which would let a real drift pass green.
+    blocks = re.findall(
+        r'"source_table":\s*"(observation|thread)",(?:(?!"source_table").)*?\[:([A-Za-z_0-9]+)\]',
+        src,
+        flags=re.S,
+    )
+    assert len(blocks) == 4, (
+        f"expected four ledger truncation sites (observation+thread across both "
+        f"channels), found {blocks} — search.py's shape changed; re-derive this pin"
+    )
+    sliced_by = {name for _table, name in blocks}
+    assert sliced_by == {"_ROW_CHAR_CAP"}, (
+        f"ledger rows are sliced by {sliced_by} — every one must stay on the fixed "
+        "default; a `_cap` here means raising per_turn_recall_chars now inflates the "
+        "observation ledger too, which techne#842 explicitly did not do"
     )
 
 
@@ -1512,7 +1578,7 @@ def test_search_itself_truncates_knowledge_rows(home):
     Deleting `search.py`'s own ceiling left the full suite green.
 
     THE FTS CHANNEL ONLY, which the name does not say on its own. Deleting the VEC
-    slice at `search.py:838` leaves this GREEN — that site's sole guard is
+    slice at `search_vec` leaves this GREEN — that site's sole guard is
     `test_both_search_sites_share_one_ceiling`, a regex over source text. The
     distinction matters because the vec-first union puts the VEC channel at the head
     of the page, so the channel this test cannot see is the busier one on any
@@ -1538,4 +1604,120 @@ def test_search_itself_truncates_knowledge_rows(home):
     assert longest == _SEARCH_ROW_CEILING, (
         f"search() returned a {longest}-char knowledge row; the hook and its docs are "
         f"keyed to {_SEARCH_ROW_CEILING} (techne#842) and must move together"
+    )
+
+
+def test_no_carrier_still_documents_the_removed_ceiling():
+    """techne#842 — the prose was the part that drifted, and nothing watched it.
+
+    Three files documented the 500 ceiling as current behaviour and none was in
+    the fix's diff: `config.py`'s docstring on the knob, the README's config
+    block, and CHANGELOG's `[Unreleased]`. The README even cited #842 as the
+    REASON for the clamp that #842 removes — a citation that had inverted.
+
+    The two tests above advertise themselves as making those three files
+    falsifiable. They do not: they pin the NUMERAL 500, which is still correct
+    everywhere (it is still the default). What went stale is the SENTENCE built
+    around it, and no test observed a sentence. This one does.
+
+    Phrases, not files, because the claim can move between them. Each is a
+    string that was true before #842 and is false after it, so a match means
+    someone reintroduced the ceiling narrative or restored a carrier from a
+    pre-#842 copy.
+    """
+    from pathlib import Path as _P
+
+    # PRESENT-TENSE ASSERTIONS ONLY, and that limit is deliberate rather than an
+    # oversight. The obvious entry — "clamped to 499" — is NOT here, because the
+    # correction in `config.py` names the clamp in order to retract it, and a test
+    # that bans the words also bans saying they were wrong. A ban list that forces
+    # a correction to be silent about what it corrects is worse than no ban list:
+    # absence is not a retraction for a claim that was documented at length. So
+    # each phrase below is one that can only be read as a statement about how the
+    # code behaves NOW.
+    retracted = [
+        "so no\n  default above 499 can be honoured",
+        "Setting this above 500 therefore changes",
+        "still pre-truncates at 500",
+        "HARD CEILING OF 500 AND IT IS NOT THIS KNOB'S",
+        "this is CLAMPED to 499",
+        "the hook CLAMPS to 499",
+    ]
+    # CHANGELOG's SHIPPED release sections are historical record and must keep
+    # describing what shipped — 0.16.1 really did clamp to 499. Only the live
+    # carriers are checked, plus CHANGELOG above its first dated release.
+    changelog = _P("CHANGELOG.md").read_text()
+    first_release = changelog.index("\n## [0.16.1]")
+    carriers = {
+        "techne/config.py": _P("techne/config.py").read_text(),
+        "README.md": _P("README.md").read_text(),
+        "CHANGELOG.md [Unreleased]": changelog[:first_release],
+    }
+
+    offenders = [
+        f"{name}: {phrase!r}"
+        for name, text in carriers.items()
+        for phrase in retracted
+        if phrase in text
+    ]
+    assert not offenders, (
+        "a live carrier still documents the ceiling techne#842 removed:\n  "
+        + "\n  ".join(offenders)
+        + "\nThese read as current behaviour to anyone tuning per_turn_recall_chars."
+    )
+
+    # And the fix is positively stated where the knob is defined, so a reader who
+    # half-remembers the ceiling sees it retracted rather than merely absent.
+    assert "techne#842 REMOVED IT" in carriers["techne/config.py"], (
+        "config.py no longer retracts the ceiling explicitly — absence is not a "
+        "correction for a claim that was documented at length"
+    )
+
+
+def test_chars_dropped_still_moves_with_the_cap(tmp_path):
+    """techne#853's metric, which techne#842 collapsed to a constant.
+
+    #853 exists so that raising or lowering `per_turn_recall_chars` can be
+    evaluated from data. It differenced against the row this rail was handed —
+    but `search()` truncates first, so that was always the length of an
+    already-cut row. Merely misleading before #842; useless after, because the
+    rail now asks for `cap + 1` and the difference became the marker's width.
+    Measured on this 3,199-char row: 2/4/2/2 at caps 200/450/1200/2000, where
+    the true losses are 3000/2752/2000/1200.
+
+    A constant is worse than a wrong number. It answers every cap identically,
+    which is the one thing the metric was bought to avoid — so this asserts
+    MOVEMENT across caps as well as exactness, and the movement assertion is
+    the one that fails under a regression to any fixed value.
+    """
+    from techne.core.database import init_db
+    from techne.core.knowledge import store as store_knowledge
+    from techne.core.search import search
+    from techne.hooks.user_prompt_submit import _build_context
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    body = " ".join(f"word{i:03d}" for i in range(400))
+    store_knowledge(db, content=body, type="procedure", tags="probe", confidence="high")
+
+    seen = {}
+    for cap in (200, 450, 1200, 2000):
+        rows = search(db, "word001", table="knowledge", limit=5, row_chars=cap + 1)
+        stats: dict = {}
+        block = _build_context(rows, char_limit=cap, stats=stats)
+        line = next(ln for ln in block.splitlines() if "⟦techne#" in ln)
+        rendered = line.split("] ", 1)[1]
+        delivered = len(rendered) - 2 if rendered.endswith(" …") else len(rendered)
+        assert stats["chars_dropped"] == len(body) - delivered, (
+            f"cap {cap}: chars_dropped={stats['chars_dropped']} but the reader "
+            f"lost {len(body) - delivered} of {len(body)} stored characters"
+        )
+        seen[cap] = stats["chars_dropped"]
+
+    assert len(set(seen.values())) == len(seen), (
+        f"chars_dropped is {seen} — it must differ per cap, or the telemetry "
+        "cannot tell one setting from another, which is all it is for"
+    )
+    assert seen[200] > seen[2000], (
+        f"a tighter cap must drop MORE: {seen}"
     )

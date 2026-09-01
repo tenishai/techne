@@ -38,8 +38,25 @@ All notable changes to techne are documented here. Format loosely follows
   `int(200×0.6)=120` against `int(450×0.6)=270`, a 330-char delta.) This is a **per-turn**
   cost where #808's schema block is per-session: over 40 turns it is ~12,500 tokens, and
   the two are not comparable until that multiplication is done.
-  The cap remains configurable; `search()` still pre-truncates at 500 (#842), so no
-  default above 499 can be honoured — now pinned by a test.
+  The cap remains configurable, and since #842 (below) it is honoured at any value —
+  when this entry was first written `search()` still pre-truncated at 500, so no
+  default above 499 could take effect.
+
+### Fixed
+
+- `hooks.per_turn_recall_chars` is no longer silently capped at 500 (#842). `search()`
+  truncated every knowledge row to `_ROW_CHAR_CAP = 500` before any caller saw it, so the
+  knob governed nothing above that — and the hook clamped its own request to 499 to keep
+  the arithmetic consistent, which made the defect look like a contract. The second
+  consequence was the worse one: a row cut to exactly the cap read as whole to
+  `_truncate_for_injection`, so the `…` marking a withheld tail was suppressed at every
+  cap, measured absent at 600, 500 and 200. `search()` now takes `row_chars`; the rail
+  asks for `per_turn_recall_chars + 1`, and that +1 is what leaves the renderer the
+  overflow it needs to tell a severed row from a whole one. Measured on a 2,399-char row:
+  caps 200/500/600/1200 all honoured, default still 500, marker present at every one.
+  The knob moves **knowledge only** — observation and thread rows stay on the fixed
+  default, because those are the tool ledger and raising a recall cap should not grow the
+  payload by transcript.
 
 ## [0.16.1] — 2026-08-30
 
