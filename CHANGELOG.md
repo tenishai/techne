@@ -44,6 +44,34 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- Thread detection no longer depends on `PYTHONHASHSEED` (#871).
+  `_segment_dominant_repo` built its counts by iterating `ObsFeatures.repos` — a
+  **set** — so the dict's insertion order was hash-seeded and `max()` returned the
+  first of any tie. Which repo counted as dominant therefore varied per process,
+  and that decides segment merges. Measured on one 521-observation session: the
+  boundary **scores were byte-identical** across seeds while the thread count came
+  out **13 or 15**. Thread ids are content-addressed on the resulting segments, so
+  ids moved too — which is how a reflection-queue row stopped matching its own
+  session's detection and read as `superseded` one run in five, and why
+  `reconcile --apply`, which DELETES what that classifier returns, was deciding by
+  coin-flip. Ties now break by name in all THREE dominance helpers — the third,
+  `_segment_dominant_entity`, sits in the file that imports the other two and had
+  the identical shape (8 distinct winners across 12 processes). `fallback_summary`
+  and `_recent_files` also iterated sets into TRUNCATED lists, so hash order chose
+  which five files and entities were shown, not merely their order — 12 distinct
+  summaries from 12 seeds. All of these land in FTS-indexed columns
+  (`threads_fts(label, summary, resume_points)`), and `link_threads` searches
+  `label + summary[:200]` to pick a `parent_thread_id`, so a per-process value
+  could select and persist a different parent FK.
+
+  **Upgrading — no migration, but read this before running `reconcile --apply`.**
+  Nothing is orphaned: `persist_detection`'s prune guards all three `NO ACTION` FK
+  columns. What changes is that thread classification becomes *stable* instead of
+  flickering, so a session whose rows were written under the old behaviour will
+  surface its superseded queue rows as a batch rather than intermittently. Run
+  `techne reflect reconcile` (dry) and read what it proposes before `--apply`,
+  which deletes.
+
 - A codex schema migration that adds a parse-derived column now forces a re-parse
   (#864). `codex index` skips files whose SHA-256 is unchanged, and adding a column
   changes no file's bytes — so the v3→v4 migration's own "a re-index populates it"
