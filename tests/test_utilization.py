@@ -1186,3 +1186,20 @@ def test_stats_are_populated_even_when_nothing_is_cut(tmp_path):
     out = _build_context([{"id": 1, "knowledge_type": "fact", "content": "short"}], 450, stats)
     assert out, "fixture should render"
     assert stats == {"rows_truncated": 0, "chars_dropped": 0}
+
+    # THE EMPTY EXIT, which is the one the source comment names and this test
+    # did not reach (#854 r1 Important 1). Asserting only the rendering path
+    # proved the weaker claim "populated on a row that was not cut"; moving the
+    # stats block below the `if not lines: return ""` guard left the whole suite
+    # green. At a non-positive cap every row is severed to nothing and dropped
+    # from the block, so `lines` is empty and the function returns "" — and the
+    # counters must still report what was cut, or the telemetry says the
+    # opposite of what happened (#854 r1 Important 2).
+    empty_stats: dict = {}
+    empty_out = _build_context(
+        [{"id": 1, "knowledge_type": "fact", "content": "x" * 700}], 0, empty_stats
+    )
+    assert empty_out == "", "a non-positive cap must render no block"
+    assert empty_stats == {"rows_truncated": 1, "chars_dropped": 700}, (
+        "the empty exit must still report what it severed"
+    )

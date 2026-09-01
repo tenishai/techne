@@ -612,6 +612,16 @@ def _build_context(
             # `if rows else ""` suppresses the block entirely and `0` means "inject
             # nothing" on THIS knob exactly as it already does on
             # `per_turn_recall_limit`, which feeds `rows[:0]`.
+            # THE COUNTERS STILL FIRE FOR A WITHHELD ROW (#854 r1 Important 2).
+            # The row is dropped from the BLOCK, not from the accounting: at
+            # `char_limit <= 0` every row is severed to nothing, and reporting
+            # `{0, 0}` for a payload where everything was cut is the telemetry
+            # saying the opposite of what happened. `chars_dropped` is the whole
+            # original, since none of it was delivered.
+            if was_cut:
+                truncated_any = True
+                _cut_rows += 1
+                _cut_chars += len(original)
             continue
         truncated_any = truncated_any or was_cut
         if was_cut:
