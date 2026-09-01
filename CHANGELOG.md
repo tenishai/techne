@@ -44,6 +44,25 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Fixed
 
+- A codex schema migration that adds a parse-derived column now forces a re-parse
+  (#864). `codex index` skips files whose SHA-256 is unchanged, and adding a column
+  changes no file's bytes — so the v3→v4 migration's own "a re-index populates it"
+  was true of the resolver and false of the indexer. On any repo nobody had edited,
+  the re-index skipped every file, `edges.to_module` stayed NULL forever, and
+  `index-all` printed `0 symbols; resolved 0 calls, 0 external` and exited 0.
+  Measured on the live rollout: **four of nine repos got zero benefit from #679 and
+  reported success**, ladon and liminal at 0 of 455 and 0 of 635 import edges.
+  The migration now records `codex_meta.reparse_owed_since` and the next index
+  honours it once, says which schema version forced it, and clears it only once
+  every stored file has actually been re-parsed — "nothing raised" is too weak,
+  because a missing grammar, an unreadable file or a `--language`-limited run all
+  skip files without failing. "Gone from disk" is decided by errno rather than
+  `Path.is_file()`, which is also False for an unreadable directory and for a
+  broken symlink — both of which still hold pre-migration rows. `--rebuild` on `codex index` / `codex index-all` is the manual
+  equivalent, for extraction changes with no schema version to hang a debt on
+  (a grammar or query fix). Verified against the real ladon index: 0 → 357 bound
+  edges, 270 resolved and 89 external, matching the hand-rebuild #864 recorded.
+
 - `hooks.per_turn_recall_chars` is no longer silently capped at 500 (#842). `search()`
   truncated every knowledge row to `_ROW_CHAR_CAP = 500` before any caller saw it, so the
   knob governed nothing above that — and the hook clamped its own request to 499 to keep

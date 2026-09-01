@@ -4651,12 +4651,22 @@ def _import_resolve_pass(db_path: Path) -> dict:
     "ground-truth `callers` — semantic, not name-matched (techne#321). Slower (per-symbol), "
     "so opt-in for now.",
 )
+@click.option(
+    "--rebuild",
+    is_flag=True,
+    default=False,
+    help="Re-parse every file, ignoring the unchanged-file skip. Needed when what "
+    "is EXTRACTED from a file changes while the file does not — a new parse-derived "
+    "column, or a grammar/query fix (techne#864). A schema migration records this "
+    "automatically; the flag is for the cases nothing recorded.",
+)
 @click.pass_context
-def codex_index(ctx, repo, languages, lsp):
+def codex_index(ctx, repo, languages, lsp, rebuild):
     """Walk REPO and index Python + TypeScript symbols into its per-repo db.
 
     Uses tree-sitter for parsing; requires `pip install techne[codex]`.
-    Incremental: files whose SHA-256 hash is unchanged are skipped.
+    Incremental: files whose SHA-256 hash is unchanged are skipped — pass
+    --rebuild to re-parse regardless.
     With --lsp, a language server then resolves call edges to exact symbols.
     """
     config = ctx.obj["config"]
@@ -4670,9 +4680,19 @@ def codex_index(ctx, repo, languages, lsp):
     lang_list = [lang.strip() for lang in languages.split(",") if lang.strip()]
     db_path = codex_db_for_repo(config, repo)
     src = RepoSource(db_path, repo, languages=lang_list)
-    count = src.initial_walk()
+    count = src.initial_walk(force=rebuild)
 
     s = stats(db_path)
+    if src.last_forced_by:
+        # SAY WHY THE "UNCHANGED" REPO JUST RE-PARSED IN FULL (techne#864).
+        # Without this the operator sees a long run on a repo they did not touch
+        # and has no way to tell a migration reparse from a bug.
+        click.echo(
+            f"Reparse: forced by the schema v{src.last_forced_by} migration — its new "
+            f"column is parse-derived, so unchanged files still had to be re-read"
+        )
+    elif rebuild:
+        click.echo("Reparse: forced by --rebuild (unchanged-file skip bypassed)")
     click.echo(f"Indexed: {count} symbols from {repo}")
     if src.last_swept:
         click.echo(
@@ -4714,12 +4734,22 @@ def codex_index(ctx, repo, languages, lsp):
     show_default=True,
     help="Comma-separated list of languages to index (python,typescript).",
 )
+@click.option(
+    "--rebuild",
+    is_flag=True,
+    default=False,
+    help="Re-parse every file in every repo, ignoring the unchanged-file skip "
+    "(techne#864).",
+)
 @click.pass_context
-def codex_index_all(ctx, languages):
+def codex_index_all(ctx, languages, rebuild):
     """Re-index every repo that already has a codex db (techne#209).
 
     Iterates the known per-repo dbs and re-walks each repo. Repos whose root no
     longer exists on disk are reported and skipped.
+
+    A repo carrying a migration reparse debt is re-parsed in full whether or not
+    --rebuild is passed, and says so (techne#864).
     """
     config = ctx.obj["config"]
     from techne.codex.source import RepoSource
@@ -4738,7 +4768,12 @@ def codex_index_all(ctx, languages):
             continue
         db_path = codex_db_for_repo(config, root)
         src = RepoSource(db_path, root, languages=lang_list)
-        count = src.initial_walk()
+        count = src.initial_walk(force=rebuild)
+        forced = ""
+        if src.last_forced_by:
+            forced = f", REPARSED for schema v{src.last_forced_by}"
+        elif rebuild:
+            forced = ", reparsed (--rebuild)"
         swept = f", swept {src.last_swept} excluded" if src.last_swept else ""
         # Reported per-repo rather than raised: this loop is a sweep over many repos
         # and one bad repo must not hide the rest. The summary below is what makes
@@ -4747,7 +4782,7 @@ def codex_index_all(ctx, languages):
         total_failed += src.last_failed
         rep = _import_resolve_pass(db_path)
         click.echo(
-            f"reindexed {root}: {count} symbols{swept}{failed}"
+            f"reindexed {root}: {count} symbols{forced}{swept}{failed}"
             f"; resolved {rep['resolved']} calls, {rep['external']} external"
         )
 
