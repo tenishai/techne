@@ -1092,3 +1092,114 @@ def test_a_domain_with_no_registered_read_tool_reports_false(db, monkeypatch):
 
     assert _has_mcp_read_tool("archivist") is False
     assert _has_mcp_read_tool("librarian") is True, "unrelated domains must be unaffected"
+
+
+def test_log_context_injection_self_migrates_truncation_columns(tmp_path):
+    """A db written before techne#853 gains the two columns on next write.
+
+    `context_injections` is created lazily by the hook, not by the core
+    schema-reconcile path, so an existing db has whatever columns existed when it
+    was first written. This is the fourth lazy migration of this table (#343,
+    #413, now #853) and the failure mode is silent: without the ADD COLUMN the
+    INSERT raises, the log swallows it by contract, and the rail goes quiet with
+    no error anywhere.
+    """
+    import sqlite3
+
+    from techne.hooks._injection_log import log_context_injection
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    # the pre-#853 shape, exactly
+    conn.executescript(
+        """
+        CREATE TABLE context_injections (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            source          TEXT NOT NULL,
+            session_id      TEXT,
+            timestamp       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            trigger_snippet TEXT,
+            hit_count       INTEGER NOT NULL,
+            hit_ids         TEXT,
+            scores          TEXT,
+            approx_tokens   INTEGER NOT NULL,
+            total_hits      INTEGER,
+            native_scores   TEXT,
+            score_kinds     TEXT,
+            match_sources   TEXT,
+            k_requested     INTEGER
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    log_context_injection(
+        db,
+        source="per_turn_recall",
+        session_id="s",
+        trigger="t",
+        rows=[{"id": 1}],
+        injected_text="x" * 400,
+        rows_truncated=1,
+        chars_dropped=97,
+    )
+
+    conn = sqlite3.connect(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(context_injections)")}
+    assert {"rows_truncated", "chars_dropped"} <= cols, "lazy migration did not fire"
+    assert conn.execute(
+        "SELECT rows_truncated, chars_dropped FROM context_injections"
+    ).fetchone() == (1, 97), "migrated columns did not receive the values"
+
+
+def test_chars_dropped_counts_content_lost_not_the_marker(tmp_path):
+    """`chars_dropped` must exclude the cut marker the renderer ADDS.
+
+    `_truncate_for_injection` appends `_CUT_SUFFIX` to a row it cut, so the
+    delivered string is longer than the cap. Measuring `len(original) -
+    len(delivered)` without accounting for it under-reports every cut row by the
+    marker's width — a small, systematic bias that would make the cap look
+    gentler than it is on exactly the rows it bit hardest.
+    """
+    from techne.hooks.user_prompt_submit import _build_context
+
+    stats: dict = {}
+    _build_context([{"id": 1, "knowledge_type": "fact", "content": "y" * 700}], 450, stats)
+    assert stats == {"rows_truncated": 1, "chars_dropped": 250}, (
+        "a 700-char row at cap 450 loses exactly 250 characters of content; "
+        f"got {stats}"
+    )
+
+
+def test_stats_are_populated_even_when_nothing_is_cut(tmp_path):
+    """"Fired and cut nothing" and "never fired" must be distinguishable.
+
+    If the out-param were only written on the truncating path, a caller reading
+    `.get("rows_truncated")` would see None for both a clean injection and a rail
+    that never ran, and the resulting NULLs would be indistinguishable in the
+    audit table.
+    """
+    from techne.hooks.user_prompt_submit import _build_context
+
+    stats: dict = {}
+    out = _build_context([{"id": 1, "knowledge_type": "fact", "content": "short"}], 450, stats)
+    assert out, "fixture should render"
+    assert stats == {"rows_truncated": 0, "chars_dropped": 0}
+
+    # THE EMPTY EXIT, which is the one the source comment names and this test
+    # did not reach (#854 r1 Important 1). Asserting only the rendering path
+    # proved the weaker claim "populated on a row that was not cut"; moving the
+    # stats block below the `if not lines: return ""` guard left the whole suite
+    # green. At a non-positive cap every row is severed to nothing and dropped
+    # from the block, so `lines` is empty and the function returns "" — and the
+    # counters must still report what was cut, or the telemetry says the
+    # opposite of what happened (#854 r1 Important 2).
+    empty_stats: dict = {}
+    empty_out = _build_context(
+        [{"id": 1, "knowledge_type": "fact", "content": "x" * 700}], 0, empty_stats
+    )
+    assert empty_out == "", "a non-positive cap must render no block"
+    assert empty_stats == {"rows_truncated": 1, "chars_dropped": 700}, (
+        "the empty exit must still report what it severed"
+    )
