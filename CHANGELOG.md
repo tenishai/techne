@@ -335,6 +335,27 @@ open and is not reversible — back up first.
   and an unpopulated one are indistinguishable in the result, so the zero is the agent's to
   explain when it appears.
 
+- **pi is a first-class client** (#57). `integrations/pi/` ships the pi capture
+  extension — the same three-lane bridge the opencode plugin has, on a better
+  host: pi's in-process TypeScript lifecycle events (`tool_execution_end` →
+  per-tool observation, `message_end` user-role → `UserPrompt`, `agent_settled`
+  → `techne session-end`, `before_agent_start` → `techne context` appended to
+  the system prompt). Sessions are stamped `platform: pi` and keyed by the
+  session-file UUID, so a resumed pi session keeps its techne session across
+  restarts. The first two clients proved the capture surface; pi is the third,
+  and it needed no new surface — one `techne observe` path, three clients.
+
+  The probe follows: `techne probe --runtime pi` (a `PiAdapter` on
+  `pi --print` in a throwaway workspace with `--no-tools`, so the extension's
+  push injection is the only channel — closing the whole class of pull paths
+  at once instead of a denylist against a moving target). pi has no native
+  memory, so `off-test` isolates the only techne path, as on opencode. Wired
+  into the probe CLI, exported from `techne.probe`, and covered by the same
+  unit tests the other adapters have plus a `@pytest.mark.probe` end-to-end.
+
+  One lane the non-Claude-Code clients still lack: pi (like opencode) has no
+  compaction checkpoint/restore — Claude Code's `PreCompact`/`PostCompact`
+  hooks have no pi equivalent, so pi has no compaction handling at all.
 
 - **Agent triggers are indexed, and the claims they rest on are tested** (#756, #757). Parts of
   the docs are written as *triggers* — conditions under which an agent should speak up

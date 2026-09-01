@@ -443,7 +443,7 @@ techne watch                               # exits 78 (EX_CONFIG) on a startup p
                                            # RestartPreventExitStatus=78, so it stops on the
                                            # FIRST failure instead of respawning forever.
                                            # BOTH halves are required; either alone loops.
-techne probe [--runtime claude-code|opencode] [--mode off-test|pull|differential]
+techne probe [--runtime claude-code|opencode|pi] [--mode off-test|pull|differential]
                                            # differential-canary memory-attribution probe (#94):
                                            # seeds a canary, spawns a fresh session, checks
                                            # whether techne carried the codeword into context

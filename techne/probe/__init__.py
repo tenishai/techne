@@ -23,6 +23,7 @@ from techne.probe.runtimes import (
     ClaudeCodeAdapter,
     NativeCanaryHandle,
     OpencodeAdapter,
+    PiAdapter,
     RuntimeAdapter,
 )
 
@@ -33,6 +34,7 @@ __all__ = [
     "RuntimeAdapter",
     "ClaudeCodeAdapter",
     "OpencodeAdapter",
+    "PiAdapter",
     "NativeCanaryHandle",
     "new_codeword",
     "run_probe",

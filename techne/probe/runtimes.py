@@ -6,11 +6,12 @@ memory optionally disabled and techne's pull tools optionally blocked, ask this
 prompt, and give me back what the agent said."
 
 Implemented: ClaudeCodeAdapter (CC headless `claude -p`), OpencodeAdapter
-(`opencode run`). Deferred (same Protocol): adapters for other AI *client*
-runtimes techne runs under — e.g. Aider, openwebui, or any MCP-only client (the
-#57 portability set). Each wraps that runtime's headless/one-shot invocation +
-its native-memory + tool-gating knobs. (Not the platform's own "Codex"
-code-storage persona — that's a domain agent, not a client to run techne under.)
+(`opencode run`), PiAdapter (`pi --print`). Deferred (same Protocol): adapters
+for other AI *client* runtimes techne runs under — e.g. Aider, openwebui, or
+any MCP-only client (the #57 portability set). Each wraps that runtime's
+headless/one-shot invocation + its native-memory + tool-gating knobs. (Not the
+platform's own "Codex" code-storage persona — that's a domain agent, not a
+client to run techne under.)
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,6 +221,116 @@ class ClaudeCodeAdapter:
         if proc.returncode != 0:
             logger.warning("ClaudeCodeAdapter: non-zero exit %d: %s", proc.returncode, proc.stderr)
         return proc.stdout or ""
+
+
+class PiAdapter:
+    """Drive a fresh headless pi session via `pi --print` (techne#57/#94).
+
+    pi has no native auto-memory — techne IS its memory — so:
+      - disable_native is a no-op (nothing to turn off).
+      - supports_native_seed() is False (no native store → no differential
+        control; differential degrades to a push/reachability test).
+
+    techne's push on pi is the capture extension's `before_agent_start` hook,
+    which appends a techne-memory block built by `techne context`. To test that
+    push in isolation (pull off) we run with `--no-tools` — the model needs
+    zero tools to answer the probe prompt, and this closes the whole class of
+    pull channels (built-ins, extension tools, the pi-mcp-adapter gateway) at
+    once instead of enumerating a denylist against a moving target. Extensions
+    still load, so the capture extension's injection still fires.
+
+    Runs in a throwaway temp workspace so the probe never touches a real repo;
+    techne's durable knowledge is not project-scoped, so the canary still
+    injects. Uses whatever model pi is configured with (override with `model`).
+    """
+
+    name = "pi"
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        timeout: int = 240,
+        pi_bin: str = "pi",
+    ):
+        self.model = model
+        self.timeout = timeout
+        self.pi_bin = pi_bin
+
+    # pi has no native auto-memory — the negative control isn't applicable.
+    def supports_native_seed(self) -> bool:
+        return False
+
+    def seed_native_canary(self, codeword: str, label: str) -> NativeCanaryHandle:
+        raise NotImplementedError("pi has no native auto-memory to seed")
+
+    def cleanup_native_canary(self, handle: NativeCanaryHandle) -> None:  # pragma: no cover
+        return None
+
+    def injected_context(self, config) -> str:
+        """pi's push surface = the extension's `techne context` block, computed
+        directly. The extension runs it with --project-path <workspace>; the
+        probe's workspace is a throwaway tempdir, so the threads slice is
+        project-empty — but the durable-knowledge slice (where the canary
+        lives) is global, which is what matters for the precondition."""
+        from techne.core.state import format_resume_context, get_resume_context
+
+        data = get_resume_context(config.db_path)
+        return format_resume_context(data)
+
+    def fresh_session(
+        self,
+        prompt: str,
+        *,
+        disable_native: bool,
+        allow_techne_tools: bool,
+    ) -> str:
+        # disable_native is intentionally ignored: pi has no native memory.
+        with tempfile.TemporaryDirectory(prefix="techne-probe-pi-") as workdir:
+            cwd = Path(workdir)
+            argv = [self.pi_bin, "--print", "--mode", "text"]
+            if self.model:
+                argv += ["--model", self.model]
+            if not allow_techne_tools:
+                # No tools at all — the model answers from context only, so the
+                # extension's push injection is the sole channel (see class doc).
+                argv += ["--no-tools"]
+            argv.append(prompt)
+
+            logger.debug(
+                "PiAdapter: pi --print (allow_techne_tools=%s, model=%s)",
+                allow_techne_tools,
+                self.model or "default",
+            )
+            env = dict(os.environ)
+            # The capture extension shells out to `techne` for the injection; make
+            # it resolvable from this process regardless of the operator's PATH.
+            # The techne entry point sits next to the venv python running the probe.
+            techne_bin = Path(sys.executable).with_name("techne")
+            if techne_bin.exists():
+                env["TECHNE_BIN"] = str(techne_bin)
+            try:
+                proc = subprocess.run(
+                    argv,
+                    env=env,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"`{self.pi_bin}` not found — the probe needs the pi CLI on PATH"
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"probe session timed out after {self.timeout}s") from exc
+
+            if proc.returncode != 0:
+                logger.warning(
+                    "PiAdapter: non-zero exit %d: %s", proc.returncode, proc.stderr
+                )
+            return proc.stdout or ""
 
 
 class OpencodeAdapter:
