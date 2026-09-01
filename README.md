@@ -572,10 +572,11 @@ hooks:
                               #   sentence or word boundary and a shortened row ends in '…',
                               #   so a truncated fact is distinguishable from a whole one.
                               #   Raising this raises per-prompt token cost on EVERY turn.
-                              #   CEILING: search() already truncates knowledge rows to 500
-                              #   (unmarked), so this is CLAMPED to 499. A value at or above
-                              #   500 is not a no-op — unclamped it would suppress the '…'
-                              #   and report a severed row as whole (#842).
+                              #   Governs at any value since #842. It used to be capped:
+                              #   search() pre-truncated knowledge rows to 500, so a higher
+                              #   setting changed nothing and a row landing exactly on the
+                              #   cap reported itself as whole. Both are fixed; 500 is now
+                              #   only the default when nothing is asked for.
   timeout_s: 5.0              # wall-clock budget for a hook (grep-assist / per-turn recall degrade to no-op if slow)
 
 sync:

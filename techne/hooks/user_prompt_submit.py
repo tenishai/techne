@@ -284,8 +284,8 @@ def _apply_relevance_floor(rows: list[dict], config) -> list[dict]:
 _RESEND_OVERFETCH = 3
 
 #: `search()` truncates knowledge rows to this before the hook ever sees them, at
-#: BOTH sites that build a knowledge row — `core/search.py:416` (the FTS channel)
-#: and `core/search.py:838` (the VEC channel, which the vec-first union puts at the
+#: BOTH sites that build a knowledge row — `_fts_match_rows` (the FTS channel)
+#: and `search_vec` (the VEC channel, which the vec-first union puts at the
 #: head of the page, so it serves most rows on any non-trivial store).
 #:
 #: RESOLVED BY techne#842 AND KEPT AS THE DEFAULT, not as a ceiling. `search()`
@@ -811,7 +811,7 @@ def main() -> None:
                 rows = rows[:k]
             # CLAMP BELOW search()'s OWN CEILING (#839 r4 Important 1, techne#842).
             # `search()` hands knowledge rows in ALREADY cut at 500 and unmarked, at
-            # BOTH sites that build one — search.py:416 (FTS) and :838 (VEC). At a
+            # BOTH sites that build one — `_fts_match_rows` (FTS) and `search_vec` (VEC). At a
             # cap of 500 or more `_truncate_for_injection` sees `len <= limit`,
             # returns `was_cut=False`, and the row ships severed with the `…` AND the
             # header notice suppressed. THAT STATE IS REACHABLE ONLY BECAUSE THIS

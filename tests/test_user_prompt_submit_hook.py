@@ -1353,7 +1353,7 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     """techne#842 / #839 r4 Important 1 — THE INERTNESS IS TOLERATED, THE SILENCE IS NOT.
 
     `search()` hands knowledge rows in already cut at 500, unmarked, at BOTH sites
-    that build one — `search.py:416` (FTS) and `search.py:838` (VEC, which the
+    that build one — `_fts_match_rows` (FTS) and `search_vec` (VEC, which the
     vec-first union puts at the head of the page, so it serves most rows on any
     non-trivial store).
 
@@ -1388,7 +1388,7 @@ def test_a_cap_at_or_above_searchs_ceiling_still_marks_the_cut(home, monkeypatch
     # BOUNDED BY THE CLAMP, NOT BY search() — AND THAT IS THE POINT OF THIS ASSERTION
     # NOW (#839 r5 Important 1). The hook caps at `_SEARCH_ROW_CEILING - 1` before
     # `_truncate_for_injection` ever sees the row, so this length is identical whether
-    # search() truncates or not: deleting search.py:416's own `[:500]` left the whole
+    # search() truncates or not: deleting `_fts_match_rows`'s own knowledge slice left the whole
     # suite green. The r4 "both bounds" fix landed on an assertion that the r4 clamp
     # made inert IN THE SAME COMMIT. search()'s ceiling is witnessed directly by
     # `test_search_itself_truncates_knowledge_rows` below; what THIS pins is that the
@@ -1432,7 +1432,7 @@ def test_both_search_sites_share_one_ceiling():
     """#839 r4 Important 2 — THE PIN WAS SINGLE-SITED AND THE DOCS INHERITED IT.
 
     `search()` fuses two channels and truncates knowledge in BOTH: `search_fts` at
-    `search.py:416` and `search_vec` at `search.py:838`. The end-to-end test above
+    `_fts_match_rows` and `search_vec`. The end-to-end test above
     exercises whichever channel the fixture happens to hit; this one asserts the two
     sites agree, so raising one without the other cannot pass unnoticed — which is
     the failure mode that leaves `config.py`'s comment and the README quietly wrong.
@@ -1451,19 +1451,19 @@ def test_both_search_sites_share_one_ceiling():
     src = _P("techne/core/search.py").read_text()
 
     # Anchored on the knowledge row rather than on the truncation shape: matching
-    # the shape alone caught the OBSERVATIONS row at :366 too (#839 r5).
+    # the shape alone caught the OBSERVATIONS row too (#839 r5).
     # The first version matched `[:NNN]` on any content field and caught THREE sites —
-    # including search.py:366, the OBSERVATIONS row, which has nothing to do with this
-    # knob. That was wrong in both directions, both demonstrated: deleting :416's
+    # including the OBSERVATIONS row, which has nothing to do with this
+    # knob. That was wrong in both directions, both demonstrated: deleting the knowledge
     # ceiling still left two matching sites so the test stayed GREEN (false negative on
-    # the thing it exists to catch), and editing :366 alone turned it RED with a message
+    # the thing it exists to catch), and editing the observations row alone turned it RED with a message
     # about "knowledge rows" that was not true (false positive, and the kind that gets a
     # test deleted as noise). Each knowledge block is found by its own source_table
     # marker, and the count is EXACT so future slack cannot hide a lost site.
     # TEMPERED, so a match cannot cross a `source_table` boundary. An unbounded
     # `.*?` under re.S paired the knowledge marker with the THREAD block's
     # truncation, so deleting site 416's slice still yielded two 500s and a pass.
-    # This pin is the SOLE witness for the VEC site (838) — the direct witness below
+    # This pin is the SOLE witness for the VEC site (`search_vec`) — the direct witness below
     # reaches only FTS — so measuring the wrong block is the one thing it must not do.
     blocks = re.findall(
         r'"source_table":\s*"knowledge",(?:(?!"source_table").)*?\[:([A-Za-z_0-9]+)\]',
@@ -1501,7 +1501,7 @@ def test_the_ledger_rows_are_pinned_to_the_default_at_both_sites():
     grows by transcript instead of by the curated row they asked for. There is a
     behavioural witness for the FTS ledger site, but the VEC ledger site has none:
     driving that channel needs a populated vector index and a cached model. So this
-    pin is the sole guard there, exactly as the knowledge pin above is for :838.
+    pin is the sole guard there, exactly as the knowledge pin above is for `search_vec`.
 
     Written as its own test rather than folded into that one because its failure
     means the opposite thing — a ledger site drifted ONTO the caller's knob — and a
@@ -1577,7 +1577,7 @@ def test_search_itself_truncates_knowledge_rows(home):
     Deleting `search.py`'s own ceiling left the full suite green.
 
     THE FTS CHANNEL ONLY, which the name does not say on its own. Deleting the VEC
-    slice at `search.py:838` leaves this GREEN — that site's sole guard is
+    slice at `search_vec` leaves this GREEN — that site's sole guard is
     `test_both_search_sites_share_one_ceiling`, a regex over source text. The
     distinction matters because the vec-first union puts the VEC channel at the head
     of the page, so the channel this test cannot see is the busier one on any
@@ -1603,4 +1603,71 @@ def test_search_itself_truncates_knowledge_rows(home):
     assert longest == _SEARCH_ROW_CEILING, (
         f"search() returned a {longest}-char knowledge row; the hook and its docs are "
         f"keyed to {_SEARCH_ROW_CEILING} (techne#842) and must move together"
+    )
+
+
+def test_no_carrier_still_documents_the_removed_ceiling():
+    """techne#842 — the prose was the part that drifted, and nothing watched it.
+
+    Three files documented the 500 ceiling as current behaviour and none was in
+    the fix's diff: `config.py`'s docstring on the knob, the README's config
+    block, and CHANGELOG's `[Unreleased]`. The README even cited #842 as the
+    REASON for the clamp that #842 removes — a citation that had inverted.
+
+    The two tests above advertise themselves as making those three files
+    falsifiable. They do not: they pin the NUMERAL 500, which is still correct
+    everywhere (it is still the default). What went stale is the SENTENCE built
+    around it, and no test observed a sentence. This one does.
+
+    Phrases, not files, because the claim can move between them. Each is a
+    string that was true before #842 and is false after it, so a match means
+    someone reintroduced the ceiling narrative or restored a carrier from a
+    pre-#842 copy.
+    """
+    from pathlib import Path as _P
+
+    # PRESENT-TENSE ASSERTIONS ONLY, and that limit is deliberate rather than an
+    # oversight. The obvious entry — "clamped to 499" — is NOT here, because the
+    # correction in `config.py` names the clamp in order to retract it, and a test
+    # that bans the words also bans saying they were wrong. A ban list that forces
+    # a correction to be silent about what it corrects is worse than no ban list:
+    # absence is not a retraction for a claim that was documented at length. So
+    # each phrase below is one that can only be read as a statement about how the
+    # code behaves NOW.
+    retracted = [
+        "so no\n  default above 499 can be honoured",
+        "Setting this above 500 therefore changes",
+        "still pre-truncates at 500",
+        "HARD CEILING OF 500 AND IT IS NOT THIS KNOB'S",
+        "this is CLAMPED to 499",
+        "the hook CLAMPS to 499",
+    ]
+    # CHANGELOG's SHIPPED release sections are historical record and must keep
+    # describing what shipped — 0.16.1 really did clamp to 499. Only the live
+    # carriers are checked, plus CHANGELOG above its first dated release.
+    changelog = _P("CHANGELOG.md").read_text()
+    first_release = changelog.index("\n## [0.16.1]")
+    carriers = {
+        "techne/config.py": _P("techne/config.py").read_text(),
+        "README.md": _P("README.md").read_text(),
+        "CHANGELOG.md [Unreleased]": changelog[:first_release],
+    }
+
+    offenders = [
+        f"{name}: {phrase!r}"
+        for name, text in carriers.items()
+        for phrase in retracted
+        if phrase in text
+    ]
+    assert not offenders, (
+        "a live carrier still documents the ceiling techne#842 removed:\n  "
+        + "\n  ".join(offenders)
+        + "\nThese read as current behaviour to anyone tuning per_turn_recall_chars."
+    )
+
+    # And the fix is positively stated where the knob is defined, so a reader who
+    # half-remembers the ceiling sees it retracted rather than merely absent.
+    assert "techne#842 REMOVED IT" in carriers["techne/config.py"], (
+        "config.py no longer retracts the ceiling explicitly — absence is not a "
+        "correction for a claim that was documented at length"
     )
