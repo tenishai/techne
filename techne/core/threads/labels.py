@@ -23,13 +23,20 @@ GENERIC_FAMILIES = {"filesystem", "bash", "meta", "other", "user_prompt"}
 
 def _segment_dominant_entity(segment: list[int], features: list[ObsFeatures]) -> str | None:
     """Most-common non-trivial entity in a segment, or None."""
+    # SAME TIE-BREAK AS THE TWO DOMINANCE HELPERS IN segmentation.py, and it was
+    # missing here (Prudence, #873 r1) — in the file that IMPORTS them. `entities`
+    # is a set, so the counts dict got a hash-seeded insertion order and `max()`
+    # took the first of any tie: measured 8 distinct winners across 12 processes
+    # on a 12-way tie, which propagates into `generate_label` and therefore into
+    # `threads.label`, an FTS-indexed column that `link_threads` searches to pick
+    # a parent_thread_id — a persisted FK chosen per-process.
     counts: dict[str, int] = {}
     for i in segment:
         for e in features[i].entities:
             counts[e] = counts.get(e, 0) + 1
     if not counts:
         return None
-    return max(counts.items(), key=lambda kv: kv[1])[0]
+    return min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
 
 
 def _humanize_family(family: str) -> str:

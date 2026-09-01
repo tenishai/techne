@@ -52,6 +52,134 @@ def test_a_clear_winner_still_wins():
     assert got == "zeta", f"dominance returned {got!r} — count must beat name"
 
 
+def test_a_repo_tie_must_not_decide_a_merge():
+    """The end-to-end guard, at `merge_pass` rather than through two processes
+    (Prudence, #873 r1 — she supplied this fixture).
+
+    REPLACES A SUBPROCESS TEST THAT WAS TESTING THE WRONG CODEBASE ENTIRELY.
+    `python /tmp/.../probe.py` puts the SCRIPT's directory on `sys.path[0]`, not
+    the cwd — so `import techne` fell through to the editable install and the
+    probe read the dev checkout while the fix under test sat in a worktree. That,
+    not the fixture, is why reverting the fix left it green across eight seeds.
+    The fixture was independently degenerate (one segment; `merge_pass` returns
+    early at `len(segments) <= 1`), but the import path would have defeated any
+    replacement. I had diagnosed the fixture and been wrong about the cause.
+
+    This needs no subprocesses. Rule 3 merges adjacent segments sharing a
+    dominant repo, so segment A is built with a two-way repo tie and segment B
+    dominated outright, with different families so Rule 4 cannot merge them on
+    its own. Tie->alpha leaves the repos unequal and the segments stand;
+    tie->beta merges them. Reverting `_segment_dominant_repo` gives 2 vs 1.
+    """
+    from datetime import datetime, timedelta
+
+    from techne.core.threads.features import ObsFeatures
+    from techne.core.threads.segmentation import merge_pass
+
+    t0 = datetime(2026, 9, 1, 12, 0, 0)
+
+    def _f(i, repos, fam):
+        return ObsFeatures(
+            index=i,
+            timestamp=t0 + timedelta(seconds=60 * i),
+            tool_family=fam,
+            repos=set(repos),
+            file_paths=set(),
+            entities={f"e{i}"},
+            is_meta=False,
+        )
+
+    def build(order):
+        head = [_f(i, order[i], "git") for i in range(4)]
+        return head + [_f(i, ["beta"], "web") for i in range(4, 7)]
+
+    a = merge_pass([[0, 1, 2, 3], [4, 5, 6]], build([["alpha"], ["alpha"], ["beta"], ["beta"]]))
+    b = merge_pass([[0, 1, 2, 3], [4, 5, 6]], build([["beta"], ["beta"], ["alpha"], ["alpha"]]))
+    assert len(a) == len(b), (
+        f"a repo tie changed the SEGMENTATION: {len(a)} vs {len(b)} segments. "
+        "Which repo wins a tie must not decide whether two segments merge — "
+        "thread ids are content-addressed on the resulting boundaries."
+    )
+
+
+def test_the_family_tie_break_is_path_independent():
+    """`_segment_dominant_family` was changed with nothing pinning it (Prudence,
+    #873 r1 Q5: 115 tests pass with it reverted), and an unpinned change should
+    not stand.
+
+    It is NOT a live hash-order defect — `tool_family` is a scalar and the loop
+    runs over `segment`, a list, so its insertion order is already deterministic.
+    The change is kept for the reason her Q3 gives for preferring name-ordering
+    over first-seen generally: first-seen is PATH-DEPENDENT. The same set of
+    observations reached by a different merge sequence arrives in a different
+    order, so a tie resolves differently for a segment that is otherwise
+    identical — and thread ids are content-addressed on what segmentation
+    produces. Name-ordering is arbitrary but path-independent, which is the
+    property that matters here.
+
+    So this pins the property directly: one segment, two arrival orders, same
+    winner.
+    """
+    from techne.core.threads.segmentation import _segment_dominant_family
+
+    class _F:
+        def __init__(self, fam):
+            self.tool_family = fam
+            self.is_meta = False
+
+    forward = _segment_dominant_family([0, 1], [_F("git"), _F("bash")])
+    reverse = _segment_dominant_family([1, 0], [_F("git"), _F("bash")])
+    assert forward == reverse == "bash", (
+        f"a family tie resolved to {forward!r} in one arrival order and {reverse!r} "
+        "in another — the winner must not depend on the path that built the segment"
+    )
+    clear = _segment_dominant_family([0, 1, 2], [_F("zsh"), _F("zsh"), _F("bash")])
+    assert clear == "zsh", f"count must beat name, got {clear!r}"
+
+
+def test_the_entity_tie_break_matches_the_repo_one():
+    """`_segment_dominant_entity` is the same defect in the file that imports the
+    other two helpers (Prudence, #873 r1) — 8 distinct winners across 12
+    processes on a 12-way tie, reaching `threads.label`, which is FTS-indexed and
+    which `link_threads` searches to choose a persisted `parent_thread_id`."""
+    from techne.core.threads.labels import _segment_dominant_entity
+
+    class _E:
+        def __init__(self, entities):
+            self.entities = entities
+
+    one = _segment_dominant_entity([0, 1], [_E({"alpha"}), _E({"beta"})])
+    two = _segment_dominant_entity([0, 1], [_E({"beta"}), _E({"alpha"})])
+    assert one == two == "alpha", (
+        f"entity tie resolved to {one!r}/{two!r} — it must break by name, exactly "
+        "as the repo and family helpers do"
+    )
+    clear = _segment_dominant_entity([0, 1, 2], [_E({"zeta"}), _E({"zeta"}), _E({"alpha"})])
+    assert clear == "zeta", f"count must beat name, got {clear!r}"
+
+
+def test_a_truncated_summary_does_not_depend_on_set_order():
+    """`fallback_summary` and `_recent_files` slice their output, so hash order
+    decided WHICH FIVE were shown, not merely the order (Prudence, #873 r1) —
+    12 distinct summaries across 12 seeds. Both land in FTS-indexed columns."""
+    from techne.core.threads.summary import _recent_files
+
+    obs = [
+        {
+            "tool_name": "Read",
+            "content": " ".join(f"/repo/f{i:02d}.py" for i in range(12)),
+            "timestamp": "2026-09-01T12:00:00",
+        }
+    ]
+    runs = {tuple(_recent_files(obs, limit=5)) for _ in range(5)}
+    assert len(runs) == 1, f"_recent_files returned {len(runs)} different lists: {runs}"
+    got = next(iter(runs))
+    assert got == tuple(sorted(got)), (
+        f"_recent_files returned {got} — a truncated list built from a set must be "
+        "sorted, or which entries survive the cut is hash-seeded"
+    )
+
+
 def test_detection_is_identical_under_different_hash_seeds(tmp_path):
     """End to end, in two real processes.
 
