@@ -1,14 +1,14 @@
 ---
 card: arch-card:techne-codex
 updated: 2026-09-01
-anchor: techne/core/codex.py sha=f355487cb10137ecf3c8763f1faf20dea9806f5b
+anchor: techne/core/codex.py sha=239b8dcf4171a9f8ec64ee24a277404f71f6daa6
 anchor: techne/codex/source.py sha=b912b27c96b3fc8b6f4ff9679a7b513c9832e26d
 anchor: techne/codex/import_resolve.py sha=103b52113b77175c8e0a5d6b1ca9d774d4370485
 ---
 # codex — code-graph store (EXPERIMENTAL)
 
 STATUS: experimental, P1 only; tree-sitter+graphqlite deferred until the Codex persona is scoped (docs/roadmap.md).
-SEAM: persona-agnostic code-graph substrate, db-per-repo (codex/<slug>-<hash>.db, PRAGMA user_version, CODEX_VERSION=3). files→symbols→call/import/def-use edges stored RELATIONALLY on SQLite — NOT a graph DB (keeps the single-file/portable substrate). Reachability/blast-radius = hand-rolled recursive CTEs, not a graph engine. graphqlite (Cypher + PageRank/Louvain UDF) = possible future techne[codex] upgrade, NOT built.
+SEAM: persona-agnostic code-graph substrate, db-per-repo (codex/<slug>-<hash>.db, PRAGMA user_version, CODEX_VERSION=4). files→symbols→call/import/def-use edges stored RELATIONALLY on SQLite — NOT a graph DB (keeps the single-file/portable substrate). Reachability/blast-radius = hand-rolled recursive CTEs, not a graph engine. graphqlite (Cypher + PageRank/Louvain UDF) = possible future techne[codex] upgrade, NOT built.
 PARSING: tree-sitter SourceAdapter (Python+TypeScript) lives SEPARATELY in techne/codex/source.py, behind the `techne[codex]` extra (tree-sitter, -python, -typescript, watchdog). LSP-assist: techne/codex/lsp_resolve.py + core/lsp_client.py.
 WHY source.py IS ANCHORED, since its churn will make this gate fire on edits that do not concern the card: this card makes load-bearing claims about code that lives THERE, not in core/codex.py — `_SKIP_DIRS`' exact/case-sensitive/repo-relative rule, `_walk_repo`, and the `sweep_excluded_rows` half of the purge story below. Anchoring only core/codex.py left those claims free to rot silently, which is the exact failure the cards exist to prevent. THE FRICTION IS THE PRICE AND IT IS DELIBERATE (techne#613 follow-up): a grammar or extraction change will trip the gate without touching anything this card says. WHEN THAT HAPPENS, RE-READ THE THREE CLAIMS ABOVE AND BUMP THE SHA — do not delete the anchor to make the gate quiet.
 WHAT GETS WALKED — `_SKIP_DIRS` MATCHES EXACT, CASE-SENSITIVE SEGMENTS **OF THE REPO-RELATIVE PATH**, AND IT SKIPS VENV *CONTENTS*, NOT JUST DIRECTORIES CALLED `venv` (techne#604). Those three words are load-bearing: testing the whole path would make a repo living UNDER a directory named `build`/`site-packages` index nothing at all, which is why `source.py:530-534` relativises first and says so. Exact names only, no patterns, so a virtualenv named anything else (`.venv-ci-3.12`) walks straight in unless its `site-packages` / `dist-packages` segment is caught. Measured before that entry existed: 114,412 vendored symbols against 5,137 real ones — 96% of this repo's graph — and `codex_blast_radius` returning `aiohttp/web.py` as a dependent of a techne hook. The failure is SILENT: a plausible symbol from site-packages reads exactly like one of ours. Residual, accepted: each venv's `bin/activate_this.py` (2 symbols) still indexes.

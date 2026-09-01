@@ -363,21 +363,28 @@ def _codex_v3_to_v4(conn) -> None:
     ADD COLUMN, not a table rebuild: the column is nullable and every existing
     row is legitimately NULL for it — an index written before v4 recorded no
     module, and there is no way to recover one without re-parsing. Backfill is
-    therefore NOT attempted here; a re-index populates it, and until then
-    `import_resolve` simply finds no binding and leaves the call edge
-    'unresolved', which is exactly its pre-v4 behaviour.
+    therefore NOT attempted here, and until a re-parse happens `import_resolve`
+    simply finds no binding and leaves the call edge 'unresolved', which is
+    exactly its pre-v4 behaviour.
+
+    AN EARLIER VERSION OF THIS DOCSTRING SAID "a re-index populates it" FLATLY,
+    AND THAT SENTENCE WAS THE BUG (techne#864). It was true of the RESOLVER and
+    false of the INDEXER: `_index_file` skips a file whose SHA-256 is unchanged,
+    and adding a column changes no file's bytes, so on a repo nobody had edited
+    the re-index re-parsed nothing at all. The step below records the reparse
+    debt that makes the sentence true; the sentence is corrected here rather
+    than annotated further down, because a reader who stops at the docstring —
+    the normal way to learn what a migration step does — must not leave with the
+    discredited claim (Constance, #872 r1).
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
     if "to_module" not in cols:
         conn.execute("ALTER TABLE edges ADD COLUMN to_module TEXT")
 
-    # AND RECORD THAT A REPARSE IS OWED (techne#864), because "a re-index
-    # populates it" was true of the RESOLVER and false of the INDEXER. `index`
-    # is incremental on the file's SHA-256, and adding a column changes no
-    # file's bytes — so on any repo not otherwise edited, the re-index skips
-    # every file, `to_module` stays NULL forever, and the run prints
-    # "0 symbols ... resolved 0 calls" and exits 0. Measured on the live v3->v4
-    # rollout: four of nine repos got zero benefit and reported success.
+    # RECORD THAT A REPARSE IS OWED (techne#864) — the mechanism the docstring
+    # above refers to. Measured on the live v3->v4 rollout before it existed:
+    # four of nine repos got zero benefit and reported success, printing
+    # "0 symbols ... resolved 0 calls" and exiting 0.
     #
     # ONLY FOR A DB THAT ALREADY HOLDS ROWS. A fresh store is stamped straight
     # to the current version and has nothing to re-parse; recording a debt there
