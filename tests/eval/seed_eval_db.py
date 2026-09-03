@@ -477,3 +477,83 @@ def seed(db_path: Path) -> dict[str, str]:
     gold["g385_neg_sup_ci_new"] = "knowledge:%d" % _ci_v2
 
     return gold
+
+
+# --------------------------------------------------------------------------
+# SCALE PADDING (techne#883)
+# --------------------------------------------------------------------------
+
+#: Combinatorial parts for synthetic distractors. Deliberately drawn from THIS
+#: project's own vocabulary — a corpus of lorem ipsum would not crowd the
+#: embedding space the way real neighbours do, and crowding is the whole
+#: variable under test. 12 x 11 x 11 x 11 = 15,972 distinct combinations, so
+#: `pad_corpus` can reach production scale without repeating itself.
+_PAD_SUBJECT = (
+    "the reflect rail", "the outbox sweeper", "the codex indexer", "the coord bus",
+    "the session-start hook", "the archivist sink", "the FTS trigger", "the vec backfill",
+    "the supersede path", "the thread detector", "the schema reconciler", "the doctor check",
+)
+_PAD_VERB = (
+    "was rewritten to", "now refuses to", "silently skipped", "was measured to",
+    "no longer needs to", "was changed so it can", "began to", "stopped being able to",
+    "was proven to", "must never", "was observed to",
+)
+_PAD_OBJECT = (
+    "write a row before the transaction commits", "resolve a symbol across files",
+    "drop a payload larger than the cap", "re-read a module already imported",
+    "hold a lock across an await", "emit a warning on an empty result",
+    "count a superseded row twice", "retry after a connection reset",
+    "parse a timestamp without a timezone", "cache a value past its TTL",
+    "fan out to more than one target",
+)
+_PAD_TAIL = (
+    "The fix landed behind a flag and the flag defaults off.",
+    "Measured before and after; the delta was inside noise.",
+    "Caught in review, not by a test, which is the part worth remembering.",
+    "The remedy it prints is the one the check itself accepts.",
+    "This is the third recurrence of the same shape.",
+    "Verified against the source rather than recalled.",
+    "The guard fails closed when the input is malformed.",
+    "Left deliberately unbuilt until the measurement justifies it.",
+    "The observed rate was one in five over thirty days.",
+    "Rolled back the same day; the branch is retained.",
+    "No behavioural change — the label was what misled.",
+)
+
+
+def pad_corpus(db_path: Path, n: int) -> int:
+    """Insert `n` deterministic synthetic knowledge rows as retrieval distractors.
+
+    WHY THIS EXISTS (techne#883). The #385/#399 gates score retrieval against
+    `seed()`'s 27-document corpus. Discrimination is trivial at that size — the
+    one right answer ranks top-k almost regardless of embedding quality — so the
+    gates report `paraphrase recall@10 = 1.0` while the same code on the live
+    2,740-row store measured 0.2. The gate was blind to the one variable that
+    actually breaks retrieval in production: how many plausible neighbours the
+    gold document has to outrank.
+
+    Determinism is by INDEX ARITHMETIC, not a seeded RNG: `random.Random` makes
+    guarantees about its own stream, not about how a future refactor consumes it,
+    and a gate whose corpus quietly changes between versions is worse than no
+    gate. Row i is a pure function of i, so any two runs at the same `n` build a
+    byte-identical corpus.
+
+    Rows are written with `store()` (not raw SQL) so the FTS triggers fire and
+    the padding is reachable by the same query path as the gold — padding that
+    the retriever cannot see would make the corpus look large and score small.
+
+    Returns the number of rows inserted.
+    """
+    for i in range(n):
+        subject = _PAD_SUBJECT[i % len(_PAD_SUBJECT)]
+        verb = _PAD_VERB[(i // len(_PAD_SUBJECT)) % len(_PAD_VERB)]
+        obj = _PAD_OBJECT[(i // (len(_PAD_SUBJECT) * len(_PAD_VERB))) % len(_PAD_OBJECT)]
+        tail = _PAD_TAIL[i % len(_PAD_TAIL)]
+        store(
+            db_path,
+            f"{subject.capitalize()} {verb} {obj}. {tail}",
+            type="fact",
+            tags="pad,synthetic",
+            source="eval-pad",
+        )
+    return n
