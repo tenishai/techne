@@ -3641,9 +3641,16 @@ def architect(ctx):
     from techne.core.patterns import stats
 
     s = stats(architect_db(config))
-    click.echo(
-        f"Patterns: {s['patterns']}  Investigations: {s['investigations']}  Skips: {s['skips']}"
+    # Say "active" and name the excluded rows. Printing a bare `Patterns: N` that
+    # silently drops supersessions is what sent a reader to `SELECT COUNT(*)`,
+    # find a different number, and report the counter as broken.
+    line = (
+        f"Patterns: {s['patterns']} active  "
+        f"Investigations: {s['investigations']}  Skips: {s['skips']}"
     )
+    if s["patterns_superseded"]:
+        line += f"  (+{s['patterns_superseded']} superseded)"
+    click.echo(line)
 
 
 @architect.command("ingest")

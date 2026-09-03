@@ -1110,3 +1110,66 @@ def test_a_rule_inside_a_fenced_block_is_not_stripped(db):
         body = conn.execute("SELECT body FROM patterns").fetchone()[0]
     assert "```" in body and "---" in body, "the fenced rule was stripped as a separator"
     assert not body.rstrip().endswith("\n---"), "the trailing separator survived"
+
+
+def test_stats_reports_superseded_patterns_beside_the_active_count(db):
+    """`stats()["patterns"]` COUNTS ACTIVE ONLY, and the excluded rows are now
+    reported rather than left to be inferred.
+
+    The regression this pins is a reporting one, not an arithmetic one. `patterns`
+    has always excluded supersessions; nothing in the output said so, so checking
+    it against a plain `SELECT COUNT(*) FROM patterns` shows a gap that reads as a
+    broken counter. Measured on the live store 2026-09-02: 555 vs 561, and the
+    6-row difference was reported as a bug in the summary.
+    """
+    from techne.core.patterns import tag_pattern
+
+    md = """## Alpha
+
+- **Source**: https://github.com/x/alpha
+- **Surveyed**: 2026-09-02
+
+First.
+
+---
+
+## Beta
+
+- **Source**: https://github.com/x/beta
+- **Surveyed**: 2026-09-02
+
+Second.
+
+---
+"""
+    ingest_patterns_md(db, md)
+    ids = {name: pid for pid, name in _pattern_ids(db)}
+    assert stats(db)["patterns"] == 2
+    assert stats(db)["patterns_superseded"] == 0
+
+    tag_pattern(db, ids["Alpha"], superseded_by=ids["Beta"], absorbed="the earlier framing")
+
+    s = stats(db)
+    assert s["patterns"] == 1, "active count must drop when a pattern is superseded"
+    assert s["patterns_superseded"] == 1, "the excluded row must be visible, not inferred"
+
+    # The whole point: active + superseded reconciles with the raw table count, so a
+    # reader comparing the summary against SELECT COUNT(*) lands on agreement.
+    from techne.core.patterns import plain_connect
+
+    conn = plain_connect(db)
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM patterns").fetchone()[0]
+    finally:
+        conn.close()
+    assert s["patterns"] + s["patterns_superseded"] == total == 2
+
+
+def _pattern_ids(db):
+    from techne.core.patterns import plain_connect
+
+    conn = plain_connect(db)
+    try:
+        return conn.execute("SELECT id, name FROM patterns").fetchall()
+    finally:
+        conn.close()
