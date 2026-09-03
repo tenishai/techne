@@ -486,8 +486,18 @@ def seed(db_path: Path) -> dict[str, str]:
 #: Combinatorial parts for synthetic distractors. Deliberately drawn from THIS
 #: project's own vocabulary — a corpus of lorem ipsum would not crowd the
 #: embedding space the way real neighbours do, and crowding is the whole
-#: variable under test. 12 x 11 x 11 x 11 = 15,972 distinct combinations, so
-#: `pad_corpus` can reach production scale without repeating itself.
+#: variable under test. See `pad_corpus` for what that choice costs in
+#: interpretation: it is a confound, not just a realism win.
+#:
+#: 12 x 11 x 11 x 11 = 15,972 combinations, and reaching that number requires
+#: all FOUR indices to be independent digits. An earlier version indexed `tail`
+#: as `i % 11` while the other three were the mixed-radix digits of `i` in base
+#: (12, 11, 11) — period 1,452. Because 11 divides 1,452, `tail` was a pure
+#: function of the other three and added no variety at all: `count(distinct
+#: content)` at n=2000 measured 1,452, so a "2,000-row" corpus was 548
+#: duplicates, and n=4000 was 2,548 of 4,000. Past the period the padding stops
+#: adding novel neighbours and adds only copies, which is a different crowding
+#: mechanism than the one the curve is read as showing (Prudence, PR #884).
 _PAD_SUBJECT = (
     "the reflect rail", "the outbox sweeper", "the codex indexer", "the coord bus",
     "the session-start hook", "the archivist sink", "the FTS trigger", "the vec backfill",
@@ -548,7 +558,10 @@ def pad_corpus(db_path: Path, n: int) -> int:
         subject = _PAD_SUBJECT[i % len(_PAD_SUBJECT)]
         verb = _PAD_VERB[(i // len(_PAD_SUBJECT)) % len(_PAD_VERB)]
         obj = _PAD_OBJECT[(i // (len(_PAD_SUBJECT) * len(_PAD_VERB))) % len(_PAD_OBJECT)]
-        tail = _PAD_TAIL[i % len(_PAD_TAIL)]
+        tail = _PAD_TAIL[
+            (i // (len(_PAD_SUBJECT) * len(_PAD_VERB) * len(_PAD_OBJECT)))
+            % len(_PAD_TAIL)
+        ]
         store(
             db_path,
             f"{subject.capitalize()} {verb} {obj}. {tail}",

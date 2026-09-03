@@ -6,13 +6,43 @@ size. Nothing about the queries, the scoring, or the retrieval code differs.
 The only variable is how many plausible neighbours the gold document has to
 outrank.
 
-WHY THIS EXISTS. #385/#399 seed 27 documents. The live store carries ~2,740
-knowledge rows. Measured on 2026-09-03, same code and the same pinned
-model2vec, five paraphrase probes against a read-only copy of the real store:
+WHY THIS EXISTS. #385/#399 seed 36 knowledge rows. The live store carries
+~2,740. Measured 2026-09-03, same code and the same pinned model2vec, five
+paraphrase probes against a read-only copy of the real store:
 
     corpus                    recall@5   recall@10   MRR
-    gate (n=27)                  0.667       1.000   0.546
+    gate (n=36)                  0.667       1.000   0.546
     live store (n=2,740)         0.200       0.200   0.040
+
+WHAT THIS ARM MEASURES, AND WHAT IT DOES NOT — read this before quoting a
+number from it. Padding with distinct rows (deltas from the n=36 baseline):
+
+    pad n     recall@5   recall@10     MRR
+        0        0.667       1.000   0.546   (control)
+      250        0.667       0.833   0.519
+    1,000        0.667       0.667   0.500
+    2,000        0.667       0.667   0.500
+    4,000        0.333       0.500   0.357
+
+The degradation is real, monotonic, and confined to `paraphrase` —
+exact/filter/negative hold at 1.000/1.000/1.000 with fpr 0.000 at every size.
+But it is SMALLER than this arm first reported, and the difference is
+instructive twice over:
+
+  - An earlier revision's generator repeated itself from row 1,452, so the
+    "2,000-row" corpus was 548 duplicates and n=4,000 was 2,548 of 4,000. That
+    inflated the apparent damage at n=2,000 by roughly 2x (Prudence, PR #884).
+  - The distractor vocabulary is drawn from this project, which makes the
+    padding a realistic crowd AND a confound. Prudence measured a same-shape
+    generator over a disjoint domain at the same size and recovered much of the
+    loss, so a large share of what remains is semantic adjacency between the
+    templates and the gold, not corpus size alone.
+
+So this number is a vocabulary-and-scale figure, not a pure scale figure, and
+#883's floor calibration must not treat it as the latter. The live store is
+still worse than any synthetic point here (0.200 vs 0.500 at n=4,000), which is
+the honest headline: real content crowds harder than templates do, and the arm
+UNDERSTATES production.
 
 Two of those five probes were real same-day incidents — a stored experiment
 (techne#889/#891) and a standing operator directive (techne#2812) that recall
@@ -44,6 +74,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from techne.core.database import connect
 from techne.core.search import backfill_vectors, search
 
 _EVAL_DIR = Path(__file__).parent
@@ -122,29 +153,50 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
 
     large = tmp_path / "eval_scale_large.db"
     large_gold = seed(large)
-    padded = pad_corpus(large, _PAD_N)
-    # Backfill AFTER padding so the vector channel indexes the same corpus the
-    # lexical one sees. Note what this ordering does NOT buy, because the
-    # obvious claim is wrong and was measured: running backfill BEFORE padding
-    # yields byte-identical class scores, even though the pad rows are then
-    # genuinely unembedded (`store()` does not embed inline — knowledge_vec
-    # stays at its pre-pad count until backfill runs again).
+    # Return value deliberately discarded: it is pad_corpus's own argument handed
+    # back, which is what made the old assertion a tautology. The row counts below
+    # come from the store.
+    pad_corpus(large, _PAD_N)
+    # MANDATORY, AND AFTER PADDING. `store()` does not embed inline, so backfill
+    # embeds exactly what exists when it runs: order it first and the pad rows
+    # stay unembedded, invisible to the vector channel, and this arm silently
+    # becomes #399 again — measured, every class delta +0.000, "golds that fell
+    # out of top-10: none".
     #
-    # That null result is itself a finding, and it narrows the diagnosis in
-    # #883: if unembedded distractors degrade paraphrase exactly as much as
-    # embedded ones, the degradation is not solely the embedding failing to
-    # discriminate — the LEXICAL arm is crowding the merged ranking too. Which
-    # channel dominates is unresolved and should not be asserted from these
-    # numbers alone; it wants an arm that varies the channels independently.
+    # That is not a hypothetical. An earlier revision of this file DELETED this
+    # comment on the strength of a broken experiment: the check ADDED a backfill
+    # before the padding while leaving this one in place, so backfill ran twice,
+    # the scores were identical for a trivial reason, and the null result was
+    # read as evidence that the lexical arm dominates. Both the deletion and the
+    # conclusion were wrong (Prudence, PR #884). The lesson is narrower than
+    # "be careful": when a check is supposed to REMOVE a step, assert that the
+    # step is gone, because adding its opposite leaves the original running.
     backfill_vectors(large)
     large_rows, large_cls = _score(large, tasks, large_gold, fpr_k)
 
+    # Read the corpus from the STORE, never from pad_corpus's return value — the
+    # header must state a size it observed (Critical 1, #884).
+    conn = connect(large)
+    try:
+        pad_rows, pad_distinct = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT content) FROM knowledge WHERE source='eval-pad'"
+        ).fetchone()
+        small_n = conn.execute(
+            "SELECT COUNT(*) FROM knowledge WHERE source!='eval-pad'"
+        ).fetchone()[0]
+        pad_ids = {r[0] for r in conn.execute("SELECT id FROM knowledge WHERE source='eval-pad'")}
+    finally:
+        conn.close()
+
     with capsys.disabled():
-        print(f"\n=== retrieval at scale (#883) — padding n={padded} ===")
-        print(f"{'class':<12} {'metric':<11} {'n=27':>7} {'n=%d' % (27 + padded):>7} {'delta':>8}")
+        print(f"\n=== retrieval at scale (#883) — {pad_rows} pad rows, {pad_distinct} distinct ===")
+        print(
+            f"{'class':<12} {'metric':<11} {'n=%d' % small_n:>7} "
+            f"{'n=%d' % (small_n + pad_rows):>7} {'delta':>8}"
+        )
         print("-" * 50)
         for cls in sorted(small_cls):
-            for metric in ("recall_at_5", "recall_at_10", "mrr"):
+            for metric in ("recall_at_5", "recall_at_10", "mrr", "fpr"):
                 a = small_cls[cls].get(metric)
                 b = large_cls[cls].get(metric)
                 if a is None or b is None:
@@ -161,9 +213,30 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
             f"{', '.join(collapsed) if collapsed else 'none'}"
         )
 
-    # The corpus must actually be large, or this test silently becomes #399
-    # again — the one assertion worth making while the metrics stay
-    # informational.
-    assert padded == _PAD_N
-    for cls in ("exact", "paraphrase", "filter"):
+    # INFORMATIONAL MEANS ASSERT THE INSTRUMENT, NOT THE RESULT (Prudence, #884).
+    # No floors — a threshold derived from five probes and synthetic padding
+    # would be invented and then enforced. But the instrument itself must be
+    # checked, and the previous `assert padded == _PAD_N` could not fail:
+    # `pad_corpus` returns its own argument, so it compared _PAD_N to _PAD_N and
+    # never touched the database. With the loop stubbed to insert zero rows the
+    # test still passed green, printing "padding n=2000" over a 36-row corpus —
+    # the #883 defect shape reproduced inside the fix for #883.
+    #
+    # These three check the instrument against the store, never the score:
+    #   (a) the padding is REALLY there  (b) it is DISTINCT  (c) it is REACHABLE
+    #       by the same search path the gold is scored through — padding the
+    #       retriever cannot see makes the corpus look large and score small,
+    #       and fails identically to everything working.
+    assert pad_rows == _PAD_N, f"padding not in the store: {pad_rows} rows, expected {_PAD_N}"
+    assert pad_distinct == _PAD_N, (
+        f"padding repeats itself: {pad_distinct} distinct of {pad_rows} — the corpus is "
+        "smaller than it claims and crowds with copies rather than novel neighbours"
+    )
+    if _PAD_N:
+        probe = search(large, "the outbox sweeper silently skipped", table="knowledge", limit=10)
+        assert any(r["id"] in pad_ids for r in probe), (
+            "no eval-pad row is reachable through search() — the padding is in the store but "
+            "invisible to the retriever, so the corpus is large and the scoring is not"
+        )
+    for cls in ("exact", "paraphrase", "filter", "negative"):
         assert cls in large_cls, f"{cls} missing from scored classes"
