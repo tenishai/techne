@@ -7,6 +7,23 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- `architect` stats now report `patterns_superseded` beside the active count, and
+  `techne architect` prints `Patterns: N active … (+M superseded)` (#878). Nothing was
+  miscounted — `patterns` has always meant *active* patterns — but the label said
+  less than the value held, so checking it against `SELECT COUNT(*) FROM patterns`
+  showed a gap that read as a broken counter. Measured on the live store: 555
+  reported against 561 rows, and the six supersessions were reported as a bug in
+  the summary. Active plus superseded now reconciles with the table.
+
+  `architect tag --status` is now a `click.Choice` over the two values those counts
+  report. It previously accepted anything: `--status archived` returned "updated" and
+  exit 0, after which the summary read `Patterns: 0 active … (+1 superseded)` against
+  two rows — itemised-looking and wrong, which is worse than the bare count it
+  replaced. The buckets are exhaustive by construction rather than by comment, so the
+  reconciliation above is true as written. Two limits: this does not heal a store that
+  already carries a third status, and it does not cover raw SQL. Neither is reachable
+  through the CLI, and no live store has a third value.
+
 - `context_injections` now records `rows_truncated` and `chars_dropped` for the
   per-turn recall rail (#853). The table said what was injected and never what was
   severed, so the char cap — a tuning knob — had no observable effect: raising or

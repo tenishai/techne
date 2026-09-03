@@ -3641,9 +3641,16 @@ def architect(ctx):
     from techne.core.patterns import stats
 
     s = stats(architect_db(config))
-    click.echo(
-        f"Patterns: {s['patterns']}  Investigations: {s['investigations']}  Skips: {s['skips']}"
+    # Say "active" and name the excluded rows. Printing a bare `Patterns: N` that
+    # silently drops supersessions is what sent a reader to `SELECT COUNT(*)`,
+    # find a different number, and report the counter as broken.
+    line = (
+        f"Patterns: {s['patterns']} active  "
+        f"Investigations: {s['investigations']}  Skips: {s['skips']}"
     )
+    if s["patterns_superseded"]:
+        line += f"  (+{s['patterns_superseded']} superseded)"
+    click.echo(line)
 
 
 @architect.command("ingest")
@@ -4275,7 +4282,18 @@ def architect_topic(ctx, name, as_of):
 @click.option(
     "--topic", default=None, help="Set the pattern's topic (problem-solved grouping key)."
 )
-@click.option("--status", default=None, help="Set status directly (active|superseded).")
+# EXHAUSTIVE BY CONSTRUCTION, which is what makes `architect`'s counts honest.
+# The help text always promised `active|superseded`; nothing enforced it, so
+# `--status archived` was accepted silently and the summary then reported
+# `Patterns: 0 active … (+1 superseded)` against 2 rows — itemised-looking and
+# wrong, which is worse than the bare count it replaced (#878, Prudence on #879).
+# This is the only caller of tag_pattern, so the Choice closes the in-product path.
+@click.option(
+    "--status",
+    type=click.Choice(["active", "superseded"]),
+    default=None,
+    help="Set status directly.",
+)
 @click.option(
     "--superseded-by",
     default=None,
