@@ -108,7 +108,7 @@ select = ["E", "F", "I", "W"]
 testpaths = ["tests"]
 # Keep the recall eval (#68) out of the default unit run — it's run explicitly
 # with `pytest -m eval`. Unit runs stay clean and fast.
-addopts = "-m 'not eval and not probe and not eval_llm and not eval_gate and not eval_vec and not crash'"
+addopts = "-m 'not eval and not probe and not eval_llm and not eval_gate and not eval_vec and not eval_scale and not crash'"
 markers = [
     "crash: SIGKILL fault-injection recovery gate (#388); excluded from default runs, RUN BY THE `crash-recovery` CI job",
     "eval: recall-effectiveness eval cases (#68); excluded from default runs",
@@ -116,6 +116,7 @@ markers = [
     "eval_llm: LLM-judged eval cases (#118 Stage 2); needs a reachable model, else skipped",
     "eval_gate: retrieval-correctness regression gate (#385); excluded from default runs",
     "eval_vec: vector/hybrid retrieval gate + RRF-vs-simple ablation (#399); needs sqlite-vec + a cached model2vec model, else skipped",
+    "eval_scale: the #399 gold set re-scored against a production-sized corpus (#883); informational, not gated — same deps as eval_vec",
 ]
 
 # Ship the OPERATOR-FACING guides inside the package (techne#754, 0.16.0).
