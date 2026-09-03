@@ -171,7 +171,7 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
     # conclusion were wrong (Prudence, PR #884). The lesson is narrower than
     # "be careful": when a check is supposed to REMOVE a step, assert that the
     # step is gone, because adding its opposite leaves the original running.
-    backfill_vectors(large)
+    embedded = backfill_vectors(large)
     large_rows, large_cls = _score(large, tasks, large_gold, fpr_k)
 
     # Read the corpus from the STORE, never from pad_corpus's return value — the
@@ -189,6 +189,10 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
         conn.close()
 
     with capsys.disabled():
+        # n counts KNOWLEDGE rows only. Of the seeded 36, six are superseded and so are
+        # never embedded and never retrievable, and the searched corpus also holds
+        # observations and threads that the `filter` tasks query — so this is a
+        # defensible knowledge-row count, not the size of the corpus the retriever ranks.
         print(f"\n=== retrieval at scale (#883) — {pad_rows} pad rows, {pad_distinct} distinct ===")
         print(
             f"{'class':<12} {'metric':<11} {'n=%d' % small_n:>7} "
@@ -232,7 +236,24 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
         f"padding repeats itself: {pad_distinct} distinct of {pad_rows} — the corpus is "
         "smaller than it claims and crowds with copies rather than novel neighbours"
     )
+    # (d) EMBEDDED. The reachability probe above passes on the LEXICAL channel alone:
+    # `store()` fires the FTS triggers inline, so a pad row is findable the instant it is
+    # written, embedded or not. This arm's whole thesis is about the vector channel, so
+    # without this assertion all three checks above go green while backfill sits in the
+    # wrong place and the arm silently reverts to #399 — the exact failure the comment at
+    # the backfill call describes, and one that has already been made once on this branch
+    # (Prudence, PR #884 r2, who demonstrated it passing).
+    #
+    # `>=` not `==`: the count includes the seeded gold rows too. It catches the REORDER,
+    # not the double-backfill that broke the round-1 experiment; a knowledge_vec rowid
+    # check would catch both, but `connect()` does not load sqlite_vec, so the return
+    # value is the practical seam.
     if _PAD_N:
+        assert embedded.get("knowledge", 0) >= _PAD_N, (
+            f"backfill embedded {embedded.get('knowledge')} knowledge rows, expected >= {_PAD_N} "
+            "— the padding is in the store but not in the vector index, so this arm is "
+            "measuring the FTS channel on a corpus the retriever ranks as if it were small"
+        )
         probe = search(large, "the outbox sweeper silently skipped", table="knowledge", limit=10)
         assert any(r["id"] in pad_ids for r in probe), (
             "no eval-pad row is reachable through search() — the padding is in the store but "

@@ -535,7 +535,7 @@ def pad_corpus(db_path: Path, n: int) -> int:
     """Insert `n` deterministic synthetic knowledge rows as retrieval distractors.
 
     WHY THIS EXISTS (techne#883). The #385/#399 gates score retrieval against
-    `seed()`'s 27-document corpus. Discrimination is trivial at that size — the
+    `seed()`'s 36-row corpus. Discrimination is trivial at that size — the
     one right answer ranks top-k almost regardless of embedding quality — so the
     gates report `paraphrase recall@10 = 1.0` while the same code on the live
     2,740-row store measured 0.2. The gate was blind to the one variable that
