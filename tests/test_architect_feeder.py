@@ -861,3 +861,41 @@ def test_a_missing_table_changes_the_digest_rather_than_narrowing_it(tmp_path, m
     conn.commit()
     conn.close()
     assert store_snapshot(db) != with_table, "a differently-shaped table matched the original"
+
+
+# --------------------------------------------------------------------------- tag --status
+
+
+def test_tag_status_rejects_a_value_outside_the_two_the_counts_report(cli_config, tmp_path):
+    """`--status` MUST be exhaustive over what `architect`'s summary counts, or the
+    summary itemises a store it cannot actually account for.
+
+    Before the Choice, `--status archived` was accepted silently (exit 0, "updated")
+    and the summary then read `Patterns: 0 active … (+1 superseded)` against 2 rows —
+    which is worse than the bare `Patterns: N` it replaced, because the parenthetical
+    makes it look fully itemised. Prudence raised this on #879 as #878 recurring one
+    level up: the fix carrying the defect it was written to remove.
+
+    The counts are only exhaustive by construction while this gate holds, so the gate
+    gets the test rather than the arithmetic.
+    """
+    md = tmp_path / "p.md"
+    md.write_text(
+        "## Alpha\n\n- **Source**: https://example.com/a\n- **Surveyed**: 2026-09-02\n\nbody\n"
+    )
+    CliRunner().invoke(main, ["architect", "ingest", str(md)])
+    pid = _query(architect_db(cli_config), "SELECT id FROM patterns")[0][0]
+
+    rejected = CliRunner().invoke(main, ["architect", "tag", pid, "--status", "archived"])
+    assert rejected.exit_code != 0, "a status the counts cannot report must not be accepted"
+    assert "archived" in rejected.output
+
+    # The two legitimate values still work — the gate must not be a blanket refusal.
+    for good in ("superseded", "active"):
+        ok = CliRunner().invoke(main, ["architect", "tag", pid, "--status", good])
+        assert ok.exit_code == 0, f"--status {good} must still be accepted: {ok.output}"
+
+    # And the store is left holding only values the summary counts.
+    rows = _query(architect_db(cli_config), "SELECT DISTINCT status FROM patterns")
+    statuses = {row[0] for row in rows}
+    assert statuses <= {"active", "superseded"}, statuses

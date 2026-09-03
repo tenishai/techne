@@ -1041,8 +1041,20 @@ def stats(db_path: Path) -> dict:
     try:
         return {
             "investigations": conn.execute("SELECT COUNT(*) FROM investigations").fetchone()[0],
+            # ACTIVE ONLY — and the excluded rows are reported beside it, not left
+            # to be inferred. `patterns` has always meant "active patterns", but
+            # nothing in the output said so, so a reader who checks it against a
+            # plain `SELECT COUNT(*) FROM patterns` finds a gap and reasonably
+            # concludes the counter is broken. It isn't; it was under-labelled.
+            # Measured 2026-09-02: 555 here against 561 total, and the 6-row
+            # difference read as a bug in the summary rather than as supersessions.
+            # Same defect class as techne#787's `heading`->`label` rename — a name
+            # that describes less than the value it holds.
             "patterns": conn.execute(
                 "SELECT COUNT(*) FROM patterns WHERE status = 'active'"
+            ).fetchone()[0],
+            "patterns_superseded": conn.execute(
+                "SELECT COUNT(*) FROM patterns WHERE status = 'superseded'"
             ).fetchone()[0],
             "skips": conn.execute(
                 "SELECT COUNT(*) FROM investigations WHERE verdict LIKE 'skip%'"
