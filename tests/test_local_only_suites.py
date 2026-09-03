@@ -32,7 +32,7 @@ WORKFLOWS = sorted(
 #: Markers the card documents as deliberately uncovered. Kept here rather than
 #: parsed out of the prose: the card is written for humans, and a regex over
 #: English is a worse contract than a list the test owns.
-LOCAL_ONLY_MARKERS = ("probe", "eval_llm")
+LOCAL_ONLY_MARKERS = ("probe", "eval_llm", "eval_scale")
 
 
 def test_workflows_exist_at_all():
