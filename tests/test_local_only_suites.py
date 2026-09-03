@@ -1,13 +1,13 @@
 """The local-only policy in ARCHITECTURE.md, made falsifiable (#453, #537).
 
-ARCHITECTURE.md states that three things are deliberately not covered by CI.
+ARCHITECTURE.md states that four things are deliberately not covered by CI.
 That is a claim about the repo, and a claim nobody can fail is documentation
 that drifts. These assertions fail the moment the repo and the policy disagree
 in EITHER direction: if someone wires one of these into CI without updating the
 card, or removes an exclusion so a suite starts running in the default job.
 
 WHAT THIS DOES NOT PIN, stated so the coverage is not overread: the per-suite
-test COUNTS quoted in the card (3 probe, 1 eval_llm, 2 LSP-gated) are
+test COUNTS quoted in the card (3 probe, 1 eval_llm, 1 eval_scale, 2 LSP-gated) are
 descriptive, not asserted — pinning them would fail on every added test and
 teach people to edit the number rather than think. What is asserted is the
 load-bearing half: these do not run in CI.

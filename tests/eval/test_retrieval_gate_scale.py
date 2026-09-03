@@ -26,6 +26,14 @@ number from it. Padding with distinct rows (deltas from the n=36 baseline):
 
 The degradation is real, monotonic, and confined to `paraphrase` —
 exact/filter/negative hold at 1.000/1.000/1.000 with fpr 0.000 at every size.
+
+READ `filter`'s +0.000 WITH CARE: `pad_corpus` writes knowledge rows only, and
+only 2 of the 6 filter tasks query `table=knowledge`. The other 4 query
+observations and threads, which this arm never pads, so they are averaged in
+having never been exposed. The two that ARE exposed hold at 1.000 throughout, so
+the number is not wrong — but a `filter` floor calibrated off this arm would
+rest on two tasks, not six. `exact` (6/6) and `negative` (`table=all`) are fully
+exposed (Prudence, PR #884 r3).
 But it is SMALLER than this arm first reported, and the difference is
 instructive twice over:
 
@@ -184,7 +192,6 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
         small_n = conn.execute(
             "SELECT COUNT(*) FROM knowledge WHERE source!='eval-pad'"
         ).fetchone()[0]
-        pad_ids = {r[0] for r in conn.execute("SELECT id FROM knowledge WHERE source='eval-pad'")}
     finally:
         conn.close()
 
@@ -227,10 +234,16 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
     # the #883 defect shape reproduced inside the fix for #883.
     #
     # These three check the instrument against the store, never the score:
-    #   (a) the padding is REALLY there  (b) it is DISTINCT  (c) it is REACHABLE
-    #       by the same search path the gold is scored through — padding the
-    #       retriever cannot see makes the corpus look large and score small,
-    #       and fails identically to everything working.
+    #   (a) the padding is REALLY there  (b) it is DISTINCT  (c) it is EMBEDDED
+    #
+    # A fourth check — probing that a pad row comes back from search() — was
+    # written and then REMOVED, because it could not fail on its own. Measured
+    # three ways: it passes with nothing embedded, it passes on the lexical
+    # channel alone, and it passes with the padding deleted from knowledge_fts.
+    # (a) covers the FTS half (store() fires those triggers inline) and (c)
+    # covers the vector half, so there is no state where the probe fails and the
+    # other two pass. Reachability is a real property; it just is not a separate
+    # check (Prudence, PR #884 r3, who proved it by construction).
     assert pad_rows == _PAD_N, f"padding not in the store: {pad_rows} rows, expected {_PAD_N}"
     assert pad_distinct == _PAD_N, (
         f"padding repeats itself: {pad_distinct} distinct of {pad_rows} — the corpus is "
@@ -253,11 +266,6 @@ def test_retrieval_gate_at_scale(pinned_model2vec, tmp_path, capsys):
             f"backfill embedded {embedded.get('knowledge')} knowledge rows, expected >= {_PAD_N} "
             "— the padding is in the store but not in the vector index, so this arm is "
             "measuring the FTS channel on a corpus the retriever ranks as if it were small"
-        )
-        probe = search(large, "the outbox sweeper silently skipped", table="knowledge", limit=10)
-        assert any(r["id"] in pad_ids for r in probe), (
-            "no eval-pad row is reachable through search() — the padding is in the store but "
-            "invisible to the retriever, so the corpus is large and the scoring is not"
         )
     for cls in ("exact", "paraphrase", "filter", "negative"):
         assert cls in large_cls, f"{cls} missing from scored classes"
