@@ -481,6 +481,39 @@ def cascade_uncertain(db_path: Path, trigger_id: int) -> int:
         conn.close()
 
 
+def mark_uncertain(db_path: Path, knowledge_id: int) -> bool:
+    """Mark an entry `uncertain` — live, retrievable on request, not established.
+
+    The write-side counterpart to `reconfirm`, which is its inverse. Until now
+    `uncertain` could only be REACHED by the dependency cascade: something was
+    superseded, so its dependents became doubtful. There was no way for a WRITER
+    to say "this is what I concluded, and nothing has checked it."
+
+    That is what an agent's self-authored memory is (cabal#141). It must not be
+    recallable as an established fact — `search()` already excludes `uncertain`
+    unless a caller opts in, which is techne#1027's decision: filter from
+    auto-injection, tag on explicit search — but before this there was no
+    supported way to put a row into that state at write time, so callers wrote
+    `current` and their own conclusions came back indistinguishable from
+    curated knowledge.
+
+    Returns True if a row changed. Idempotent: marking an already-uncertain row
+    returns False rather than raising, and a superseded row is left alone —
+    superseded is a stronger statement than uncertain and must not be weakened.
+    """
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            """UPDATE knowledge SET status = 'uncertain', updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status = 'current' AND superseded_by IS NULL""",
+            (knowledge_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def reconfirm(db_path: Path, knowledge_id: int) -> bool:
     """Clear an `uncertain` flag — the dependent was re-verified (techne#117). Sets
     status back to `current` and bumps last_confirmed_at. Returns True if a row
