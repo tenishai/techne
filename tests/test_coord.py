@@ -42,12 +42,12 @@ B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 # test.yml:22-23 declines to use it at all, and the one job that does (`fork-pr`,
 # test.yml:521/536, ubuntu-latest) has never been observed to run -- no fork of
 # this repo exists, and it reports `skipping` on every PR. The `test` job is
-# `runs-on: [self-hosted, linux, x64, dev02]` (test.yml:220) and builds its venv
+# `runs-on: [self-hosted, linux, x64, techne-ci]` and builds its venv
 # with `uv venv --python ${{ matrix.python-version }}` (test.yml:242) against
 # interpreters BAKED INTO THE RUNNER IMAGE, under `UV_PYTHON_PREFERENCE: only-system`
 # and `UV_PYTHON_DOWNLOADS: never` (test.yml:79-80). That second pin is precisely
 # what stops uv from substituting a managed standalone build there the way it did
-# here. So the dependency is the dev02 image plus those two pins -- rebuilt on a
+# here. So the dependency is the runner image plus those two pins -- rebuilt on a
 # different cadence by a different process than anything in this repo.
 #
 # Established by log, not by inference: CI runs `pytest -q -rs -n 4`, which
