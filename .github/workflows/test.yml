@@ -27,6 +27,19 @@ name: test
 # the same afternoon. Name a pool for its role, so the name cannot quietly stop
 # describing the thing while continuing to work.
 #
+# `dev02` STAYS ON THE RUNNERS PERMANENTLY as a compatibility label, and that is
+# a decision rather than an omission. All 14 tags carry it and every pre-merge
+# run would become non-re-runnable without it, so the exposure never resolves by
+# waiting. The harm was never the string: it was that HEAD TARGETED it, so a
+# reader of this file was reading a host name and reasoning about that host. A
+# label nothing at HEAD targets misleads nobody reading HEAD — inert, not lying.
+#
+# WHAT WOULD LET IT GO: nothing needs it once no reachable ref targets it, i.e.
+# when the last tag and workflow-run predating 2026-09-06 stops mattering.
+# WHAT IT DOES NOT BUY: it removes ONE reason an old re-run fails, not all of
+# them — that era's interpreters and pins come from a runner image rebuilt on a
+# different cadence by a different process than anything in this repo.
+#
 # THE POOL TODAY: mash1 only (i7-8700, 6c/12t, 61GB), running TWO ephemeral
 # runner instances (mash1-techne, mash1-techne-2), each container cpus:"12" and
 # 24g. Runner setup: /var/servers/gha-runner and
@@ -523,7 +536,12 @@ jobs:
         # apply to the REMOTE entry, never to the writable-layer copy.
         #
         # TWO COLD TRIGGERS, NOT ONE. A container replacement is the obvious one —
-        # and the runners are EPHEMERAL, so that is every job. The other is
+        # rare, not routine: see "one cold job in 847" above. (An earlier version
+        # of this line said "the runners are EPHEMERAL, so that is every job",
+        # which is the claim :534-536 records as CORRECTED TWICE. The
+        # REGISTRATION is ephemeral; the CONTAINER is not. Drawing the second
+        # from the first is exactly the inference this file already deleted.)
+        # The other is
         # `techne-ci` being a POOL LABEL (see the top of this file): legs distribute
         # across INSTANCES, so a job landing on one that has not served this matrix
         # entry finds nothing, however warm its sibling is. Both instances sit on one

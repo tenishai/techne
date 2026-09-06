@@ -39,11 +39,12 @@ B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 #
 # WHAT KEEPS THIS FROM FIRING IN CI -- name the right mechanism, because this is
 # the fact to re-check if the guard ever goes wrong. It is NOT actions/setup-python:
-# test.yml:22-23 declines to use it at all, and the one job that does (`fork-pr`,
+# test.yml's header declines to use it at all (see its `NO actions/setup-python`
+# note), and the one job that does (`fork-pr`,
 # test.yml:521/536, ubuntu-latest) has never been observed to run -- no fork of
 # this repo exists, and it reports `skipping` on every PR. The `test` job is
 # `runs-on: [self-hosted, linux, x64, techne-ci]` and builds its venv
-# with `uv venv --python ${{ matrix.python-version }}` (test.yml:242) against
+# with `uv venv --python ${{ matrix.python-version }}` (the `Create venv` step) against
 # interpreters BAKED INTO THE RUNNER IMAGE, under `UV_PYTHON_PREFERENCE: only-system`
 # and `UV_PYTHON_DOWNLOADS: never` (test.yml:79-80). That second pin is precisely
 # what stops uv from substituting a managed standalone build there the way it did
