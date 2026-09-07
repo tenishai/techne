@@ -7,6 +7,25 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- The evidence gate now covers **state claims**, not just deeds (#584). `evidence.py`
+  verifies what an agent *did* against the observation ledger; assertions about
+  *project state* — who owns an issue, whether a PR is merged, whether we already
+  do X — had no check at all, because conversation offers no diff and no suite for
+  a reviewer to read. The issue's measurement was four wrong state claims in one
+  session, three of them caught by the operator.
+
+  `techne/core/state_claims.py` adds three types, reachable through the same
+  `techne_check_evidence` call and mixable with deed claims in one list:
+  `ownership` (against the coord bus, newest claim wins so a handoff is visible),
+  `artifact_state` (against `gh`, keeping `merged` distinct from `closed`), and
+  `capability` (against our own source).
+
+  Absence is always `unverifiable`, never `unbacked` — a subject the bus never
+  mentions, an issue `gh` could not reach, a missing file. `unbacked` means the
+  source was read and contradicts the claim. The MCP result reports
+  `unverifiable_count` beside `unbacked_count` so "0 unbacked" cannot be misread
+  as "all checked". Advisory only, as the deed gate is.
+
 - `architect` stats now report `patterns_superseded` beside the active count, and
   `techne architect` prints `Patterns: N active … (+M superseded)` (#878). Nothing was
   miscounted — `patterns` has always meant *active* patterns — but the label said
