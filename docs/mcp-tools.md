@@ -52,7 +52,7 @@ second rendering path to drift.
 
 ### `techne_archivist_query`
 
-Call this to INTERROGATE team memory — ask the Archivist a question nobody wrote an endpoint for, as read-only SQL. `techne_recall` pushes results at you for a topic string; this lets you ask precisely: which decisions touch a project, what was written last week that superseded something, how many procedures are anchored to files that moved, who wrote what (`written_by`, techne#553). Call with NO `sql` first to get the readable schema.
+Call this to INTERROGATE team memory — ask the Archivist a question nobody wrote an endpoint for, as read-only SQL. techne_recall pushes results at you for a topic string; this lets you ask precisely: which decisions touch a project, what was written last week that superseded something, how many procedures are anchored to files that moved, who wrote what (written_by, techne#553). Call with NO…
 
 Read-only and guarded (techne#554): one `SELECT`, over the distilled knowledge tables only — `knowledge`, `knowledge_deps`, `knowledge_fts`. The raw observation tier and the personal store are out of reach, writes and `ATTACH` are denied, and a runaway query is stopped by a work budget. Three outcomes are distinguishable on purpose: `rows`, `no-rows` (the query ran and matched nothing — an ANSWER), and `store-absent` (no team store is bound here — NOT "the team knows nothing").
 
@@ -124,7 +124,7 @@ Feed back the claim-judgement JSON array from techne_memory_claims_emit. `respon
 
 ### `techne_check_evidence`
 
-Call this before asserting you did something (committed, ran tests, wrote a file) to verify the claim against the observation ledger — enforces 'no unbacked word'. Returns per-claim backed/unbacked/unverifiable verdicts by parsing what the agent actually DID (Write/Edit/Bash tool records) in the given session window. Advisory — does not block; use unbacked_count > 0 as the flag. Structured…
+Call this before asserting either that you DID something (committed, ran tests, wrote a file) or that PROJECT STATE is a certain way (whether a PR is merged, whether we already do X) — enforces 'no unbacked word'. Deed claims are checked against the observation ledger; state claims are checked against GitHub and our own source (techne#584). State claims are the ones the operator has…
 
 ## Coordination — talk to peer sessions on this machine
 
@@ -162,20 +162,15 @@ Dismiss a reminder by id so it no longer surfaces. The row is kept as status='do
 
 ### `archivist_search`
 
-What the TEAM knows, addressed by name. Resolves to this instance's own knowledge
-when the archivist is bound `local`, or to the team store when bound to one — the
-answer says which in its `binding` field.
+What the TEAM knows. Resolves to this instance's own knowledge when the archivist is bound `local`, or to the team store when bound to one — the answer says which. One of techne's four knowledge domains (archivist, librarian, architect, codex), addressable by name. Every answer carries the `binding` it resolved to, so the same call keeps working as the domain grows from a local store into a…
 
 ### `librarian_search`
 
-What is WRITTEN DOWN — documents, transcripts and cards. The role is the question
-("what is written down"), not a particular file set, which is what lets the corpus
-grow without the call changing.
+What is WRITTEN DOWN — documents, transcripts and cards. Today that is the operator's own corpus; the role is the question, not the file set. One of techne's four knowledge domains (archivist, librarian, architect, codex), addressable by name. Every answer carries the `binding` it resolved to, so the same call keeps working as the domain grows from a local store into a persona or a service.…
 
 ### `architect_search`
 
-Architectural PATTERNS — the "what is worth borrowing" corpus. Same corpus as
-`pattern_search`, addressed by the domain name rather than the mechanism.
+Architectural PATTERNS — the 'what is worth borrowing' corpus. Same corpus as pattern_search, addressed by the domain name rather than the mechanism. One of techne's four knowledge domains (archivist, librarian, architect, codex), addressable by name. Every answer carries the `binding` it resolved to, so the same call keeps working as the domain grows from a local store into a persona or a…
 
 The codex is the fourth domain and it has TWO calls rather than one, because the graph
 answers two different questions: `codex_search` finds a symbol, `codex_blast_radius`
