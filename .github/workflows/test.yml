@@ -10,13 +10,40 @@ name: test
 # same runs queued and ran on recovery. Neither cleared by a rerun.
 #
 # THE ONE EXCEPTION IS `fork-pr`, AND IT IS A SECURITY BOUNDARY, NOT A REGRESSION
-# (#556): fork PRs must not execute on dev02, so they are routed to a hosted runner
+# (#556): fork PRs must not execute on the self-hosted pool, so they are routed to a hosted runner
 # and accept the scheduling risk above. See the trust-split block below `env:`.
-# `dev02` is a POOL LABEL, not a host: dev02 + prinkle both carry it. Same
-# CONTAINER image on both (FROM ubuntu:24.04), both hosts 2 physical / 4 logical
-# cores, and both containers cpus:"3" — so the -n 4 calibration transfers. HOST
-# OS and RAM differ (dev02 24.04/15GB cap 8g, prinkle 26.04/7GB cap 5g).
-# Runner setup: /var/servers/gha-runner + /var/servers/docker-compose/ci on each.
+# `techne-ci` is a POOL LABEL, not a host — deliberately NOT named after one.
+# It replaced `dev02` on 2026-09-06, which had outlived its host by three weeks:
+# dev02 and prinkle were both retired as CI hosts on 2026-08-16 and the label
+# was kept so this file would not have to change. That saved one edit and cost a
+# long detour later, where the stale name and this comment sent a reader
+# reasoning about 2-physical-core boxes and cpus:"3" containers that no longer
+# existed.
+#
+# "ROTS" IS THE WRONG WORD, and the right one is the point: `dev02` never
+# stopped working. Jobs routed correctly the whole time. What decayed was the
+# name's TRUTHFULNESS, silently, while every run stayed green — which is why it
+# cost a day rather than five minutes. A label that BROKE would have been fixed
+# the same afternoon. Name a pool for its role, so the name cannot quietly stop
+# describing the thing while continuing to work.
+#
+# `dev02` STAYS ON THE RUNNERS PERMANENTLY as a compatibility label, and that is
+# a decision rather than an omission. All 14 tags carry it and every pre-merge
+# run would become non-re-runnable without it, so the exposure never resolves by
+# waiting. The harm was never the string: it was that HEAD TARGETED it, so a
+# reader of this file was reading a host name and reasoning about that host. A
+# label nothing at HEAD targets misleads nobody reading HEAD — inert, not lying.
+#
+# WHAT WOULD LET IT GO: nothing needs it once no reachable ref targets it, i.e.
+# when the last tag and workflow-run predating 2026-09-06 stops mattering.
+# WHAT IT DOES NOT BUY: it removes ONE reason an old re-run fails, not all of
+# them — that era's interpreters and pins come from a runner image rebuilt on a
+# different cadence by a different process than anything in this repo.
+#
+# THE POOL TODAY: mash1 only (i7-8700, 6c/12t, 61GB), running TWO ephemeral
+# runner instances (mash1-techne, mash1-techne-2), each container cpus:"12" and
+# 24g. Runner setup: /var/servers/gha-runner and
+# /var/servers/docker-compose/mash1/ci on mash1.
 #
 # The runner image bakes python 3.12/3.13/3.14 + uv, so the self-hosted jobs
 # deliberately use NO actions/setup-python.
@@ -114,7 +141,7 @@ env:
 #
 # TRUST SPLIT (#556). `pull_request:` above is deliberately unfiltered, so it fires
 # for FORK PRs too. Combined with `runs-on: [self-hosted, ...]` that is arbitrary
-# attacker code on dev02 the moment this repo goes public — GitHub's own guidance
+# attacker code on the CI host the moment this repo goes public — GitHub's own guidance
 # is "only use self-hosted runners with private repositories". This file also
 # documents runner paths (/var/servers/gha-runner, /var/servers/docker-compose/ci),
 # so the blast radius is not hypothetical.
@@ -134,11 +161,11 @@ env:
 # base. MEASURED on this branch: run 31971484190 (event `pull_request`, head_sha
 # 124040e) executed an `expr-probe` job that existed ONLY on the PR's branch. So a
 # fork PR runs the fork's copy of THIS FILE — an attacker deletes the three `if:`
-# guards, or simply adds their own `pwn.yml` targeting dev02, and none of the
+# guards, or simply adds their own `pwn.yml` targeting the pool, and none of the
 # machinery below applies to them.
 #
 # AGAINST A DELIBERATE ATTACKER THIS GUARD CONTRIBUTES NOTHING. What it does buy is
-# NON-ADVERSARIAL exposure: an honest fork PR that would otherwise run on dev02 by
+# NON-ADVERSARIAL exposure: an honest fork PR that would otherwise run on the pool by
 # default, and CI coverage for fork contributors via `fork-pr`. That is worth having
 # and it is all this is.
 #
@@ -178,7 +205,7 @@ env:
 #
 # THE [fork] ROWS INVERT ON A FORK PR, and that inversion IS the feature: the NEW guard
 # reads `true` above only because this was a same-repo PR — on a fork it is FALSE, which
-# is what keeps fork code off dev02. Do not "fix" it to true.
+# is what keeps fork code off the CI host. Do not "fix" it to true.
 #
 # FORK_ONLY IS *NOT* [fork], which is the correction #591 filed: both of its operands
 # are fork-invariant. `<absent> != github.repository` is `null != "tenishai/techne"` —
@@ -198,7 +225,7 @@ env:
 # The fork-side behaviour is a HAND TRACE. One fork PR from a personal account would
 # convert it to measured; until then, say "expected" rather than "verified" about it.
 #
-# So a typo'd property under the OLD guard ran fork code on dev02, silently; under the
+# So a typo'd property under the OLD guard ran fork code on the CI host, silently; under the
 # NEW guard the self-hosted job is SKIPPED. A mistake now costs a visibly missing job
 # instead of arbitrary code execution on a persistent host. `fork == false` looks like
 # the obvious fix and is not one: an absent property equals false, so it fails open too.
@@ -240,11 +267,17 @@ env:
 
 jobs:
   test:
-    # Legs distribute across the pool. Scale by adding a HOST (safe — its own 2
-    # physical cores). Adding a container to an EXISTING host oversubscribes:
-    # replicas x workers, so 2 replicas x -n 4 = 8 workers on 2 cores, which the
-    # pin does not prevent — lower -n in step if you do that.
-    runs-on: [self-hosted, linux, x64, dev02]
+    # Legs distribute across the pool: mash1, 6c/12t, running TWO instances
+    # each with cpus:"12". Both get the full thread count rather than a 6/6
+    # split — what techne#769 measured was cgroup THROTTLING, and partitioning
+    # reintroduces it at a lower cap on both halves. A ceiling is not a
+    # reservation: one job alone bursts to 12, two are fair-shared.
+    #
+    # A THIRD INSTANCE WILL HELP LESS THAN THE SECOND DID. Measured 2026-09-06,
+    # two runs each: 1 runner 301s mean -> 2 runners 233s/232s, ~23%. The suite
+    # is CPU-bound, so concurrent jobs SHARE threads rather than each getting
+    # them (test 3.12: 92s alone, 145s contended). No idle CPU is left.
+    runs-on: [self-hosted, linux, x64, techne-ci]
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     # Bound it: a hung job starves the small pool (#424). Legs are ~6-12min.
     timeout-minutes: 45
@@ -386,9 +419,12 @@ jobs:
       # COMPETES for cores, it does not overlap with itself. So this is not
       # I/O-wait that parallelism hides; the speedup ceiling is CORE COUNT.
       #
-      # That model predicts the runner correctly: 654s / 2 physical cores ~= 327s
-      # against 317s actual. The discarded "overlap the I/O" model predicted
-      # ~165s. Expect ~2x here, against ~4x on a 6-core dev laptop.
+      # The model held on the RETIRED 2-physical-core runner: 654s / 2 ~= 327s
+      # against 317s actual, where the discarded "overlap the I/O" model
+      # predicted ~165s. Those numbers are kept as the evidence FOR the model,
+      # not as a prediction for this pool — mash1 is 6c/12t and the same jobs
+      # now run 102s and 122s. What transfers is the CLAIM (the ceiling is core
+      # count), not the figures.
       #
       # WORKER COUNT IS PINNED, not `auto`, for the same reason this workflow
       # pins UV_PYTHON_PREFERENCE above: CI must not silently run something
@@ -397,9 +433,10 @@ jobs:
       # CPU AFFINITY, which `--cpus` does not constrain (only `--cpuset-cpus`
       # does), and it drops to PHYSICAL cores if `psutil` ever arrives as a
       # transitive dep. 4 matches what was measured here; change it
-      # deliberately. NOTE the pin does NOT bound total concurrency: adding a
-      # container to a host oversubscribes at any -n (see the jobs comment
-      # above), so replicas are not an argument for pinning either way.
+      # deliberately. NOTE the pin does NOT bound total concurrency: two
+      # instances at -n 4 put 8 workers on one host at any pin (see the jobs
+      # comment above), so replicas are not an argument for pinning either way.
+      # On 12 threads that is fine; it was not on the retired 2-core hosts.
       #
       # NOT applied to the eval gates below or to eval-vec: both select exactly
       # 2 tests (verified via --collect-only), where worker startup costs more
@@ -428,7 +465,7 @@ jobs:
   # run on the 3.12/3.13 matrix above. Kept separate so the deterministic gates
   # stay fast and dep-free.
   eval-vec:
-    runs-on: [self-hosted, linux, x64, dev02]
+    runs-on: [self-hosted, linux, x64, techne-ci]
     # Fork guard (#556) — see the block above `jobs:`.
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     # Observed at ~30s on the runner; 20 bounds a hang without being tight.
@@ -498,12 +535,19 @@ jobs:
         # in 847. Eviction does not change that: GitHub's 7-day and 10 GB limits
         # apply to the REMOTE entry, never to the writable-layer copy.
         #
-        # TWO COLD TRIGGERS, NOT ONE. A container replacement is the obvious one. The
-        # other is `dev02` being a POOL LABEL rather than a host (see the top of this
-        # file): legs distribute across it, so a job landing on a host that has not
-        # served this matrix entry before finds nothing, however warm the other host
-        # is. actions/cache is the ONLY thing that carries a warm cache ACROSS hosts,
-        # and that is the job it is really doing here.
+        # TWO COLD TRIGGERS, NOT ONE. A container replacement is the obvious one —
+        # rare, not routine: see "one cold job in 847" above. (An earlier version
+        # of this line said "the runners are EPHEMERAL, so that is every job",
+        # which is the claim :534-536 records as CORRECTED TWICE. The
+        # REGISTRATION is ephemeral; the CONTAINER is not. Drawing the second
+        # from the first is exactly the inference this file already deleted.)
+        # The other is
+        # `techne-ci` being a POOL LABEL (see the top of this file): legs distribute
+        # across INSTANCES, so a job landing on one that has not served this matrix
+        # entry finds nothing, however warm its sibling is. Both instances sit on one
+        # host today, so this is instance-level rather than host-level — actions/cache
+        # is what carries a warm cache across either, and a second host would restore
+        # the cross-host case without changing anything here.
         #
         # CORRECTED TWICE (techne#780). It first said "dies with each job", the claim
         # the 2026-08-26 incident falsified -- a container up three days discarded
@@ -717,12 +761,12 @@ jobs:
     # runner = ~24h queued, then expiry. timeout-minutes cannot bound either
     # case — it counts from job START (the 901s deaths above ran under the
     # default 360min).
-    runs-on: [self-hosted, linux, x64, dev02]
+    runs-on: [self-hosted, linux, x64, techne-ci]
     # Fork guard (#556) — see the block above `jobs:`. NOTE this does NOT undo
     # #461's "do not move back to ubuntu-latest": the non-fork path, which is
     # every push and every in-repo PR, still runs here. Only fork PRs are routed
     # away, and for those the scheduling risk #461 describes is the lesser of two
-    # evils against arbitrary code execution on dev02.
+    # evils against arbitrary code execution on the CI host.
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     timeout-minutes: 5
     steps:
@@ -751,7 +795,7 @@ jobs:
   # assert on a shared on-disk store; order independence is not a property worth
   # buying here, and a random order that flakes would teach people to re-run CI.
   crash-recovery:
-    runs-on: [self-hosted, linux, x64, dev02]
+    runs-on: [self-hosted, linux, x64, techne-ci]
     # Fork guard (#556) — same rationale as every self-hosted job above.
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     timeout-minutes: 10
@@ -785,7 +829,7 @@ jobs:
   # "unverified". A security fix that silently stops testing outside contributions
   # trades one invisible failure for another.
   #
-  # Runs on GitHub-hosted, so fork code never touches dev02.
+  # Runs on GitHub-hosted, so fork code never touches the self-hosted pool.
   fork-pr:
     if: ${{ !(github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     runs-on: ubuntu-latest

@@ -652,7 +652,7 @@ def test_the_default_suite_step_names_no_alternate_ini_or_plugin():
 #            <absent> == false                    -> true
 #            OLD  !(ev=='pull_request' && <absent>)                    -> true   OPEN
 #            NEW  ev!='pull_request' || <absent>==github.repository    -> false  CLOSED
-# So the OLD form ran fork code on dev02 for any unresolvable property, silently;
+# So the OLD form ran fork code on the CI host for any unresolvable property, silently;
 # `head.repo.fork == false` is no better (an absent property equals false); and the
 # identity check is the one that fails closed.
 #
@@ -723,7 +723,7 @@ def _is_self_hosted(runs_on) -> bool:
 def test_no_fork_reachable_job_runs_on_self_hosted():
     """THE INVARIANT (techne#556). `pull_request:` is unfiltered, so it fires for
     FORK PRs; a self-hosted job reachable from one is arbitrary attacker code on
-    dev02 the moment this repo goes public.
+    the CI host the moment this repo goes public.
 
     WHY THIS IS A TEST AND NOT A COMMENT — the same reason as the trigger above,
     and here there is evidence: this finding was raised against TWO jobs in a
@@ -740,7 +740,7 @@ def test_no_fork_reachable_job_runs_on_self_hosted():
         "every self-hosted job must carry the exact techne#556 fork guard.\n"
         f"expected: {FORK_GUARD}\n"
         f"offending jobs (name -> its `if`): {offenders}\n"
-        "A fork PR reaching dev02 is RCE on a persistent host that also stores "
+        "A fork PR reaching the CI host is RCE on a persistent host that also stores "
         "runner paths in this file."
     )
 
@@ -767,7 +767,7 @@ def test_the_two_guards_are_complements_not_overlaps():
     """No job may match BOTH sides, and the fork-only job must not be self-hosted.
 
     Belt-and-braces on the pair above: if the two expressions ever drift apart, a
-    job could satisfy both (running fork code on dev02) or neither (silently never
+    job could satisfy both (running fork code on the CI host) or neither (silently never
     running at all).
     """
     for name, job in _jobs().items():
@@ -916,7 +916,7 @@ def test_an_unknown_event_cannot_reach_the_self_hosted_pool():
 
     The old guard was a DENYLIST of one event name, so anything GitHub adds — or
     anything we declare without thinking — short-circuited it TRUE and reached
-    dev02. `_FORK_CARRYING_EVENTS` tried to police that with a hand-maintained
+    the CI host. `_FORK_CARRYING_EVENTS` tried to police that with a hand-maintained
     list, which is the same hazard one level up, and it was already missing
     `pull_request_review_thread` (verified against GitHub's payload docs: that
     event carries `pull_request` as a REQUIRED property).
