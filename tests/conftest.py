@@ -101,6 +101,44 @@ recursively would see anything created here. Keep these carve-outs empty.
 import pytest
 
 
+def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
+    """Refuse to run under an interpreter that has no techne installed (#893).
+
+    THE TRAP THIS CLOSES. `python3 -m pytest` from the repo root resolves to the
+    system interpreter on a dev box, where techne is not installed. The suite
+    then reports **36 failures** that read as a packaging regression —
+    `StopIteration` and `PackageNotFoundError` raised deep inside
+    `importlib.metadata`, in tests named `test_litellm_not_in_core_deps` and
+    `test_an_installed_build_still_trusts_dist_info`. Nothing in that output
+    says "wrong interpreter".
+
+    THE PART THAT MAKES IT EXPENSIVE, and the reason this is a hard exit rather
+    than a warning: the natural check — *does it fail on main too?* — comes back
+    YES, because the interpreter is wrong on both sides. So the check that
+    should catch the mistake instead certifies it, and the failures get written
+    off as pre-existing breakage. That happened on 2026-09-06 while verifying
+    #892; 36 phantom failures were nearly reported as pre-existing on main.
+
+    One line beats 36 misleading ones. `pytest.exit` rather than a fixture
+    because this must fire before collection, and collection is where the
+    misleading errors are raised.
+    """
+    import importlib.metadata
+    import sys
+
+    try:
+        importlib.metadata.version("techne")
+    except importlib.metadata.PackageNotFoundError:
+        pytest.exit(
+            f"techne is not installed in this interpreter ({sys.executable}).\n"
+            "Running the suite here produces failures that look like a packaging "
+            "regression and reproduce on main, because the interpreter is wrong on "
+            "both sides (techne#893).\n"
+            "Run it with the repo venv instead:  .venv/bin/python -m pytest",
+            returncode=4,
+        )
+
+
 @pytest.fixture(autouse=True)
 def _isolate_store_env(tmp_path, monkeypatch):
     """Pin TECHNE_HOME / CLAUDE_CONFIG_DIR so no test can reach the real stores.
