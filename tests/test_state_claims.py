@@ -301,3 +301,121 @@ def test_mcp_check_evidence_mixes_deed_and_state_claims(tmp_path):
     assert r["unbacked_count"] == 1
     # Surfaced separately so '0 unbacked' cannot be misread as 'all checked'.
     assert r["unverifiable_count"] >= 2
+
+
+# ---------------------- Prudence round 1 (#892) ---------------------------
+def test_a_mention_is_not_a_claim(tmp_path):
+    """A message that CORROBORATES ownership must not report it contradicted.
+
+    The false-`unbacked` Prudence found: a substring match cannot tell "claims
+    X" from "merely mentions X", so a later conversational message flipped the
+    true owner to unbacked — and the triggering message named that owner.
+    """
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE coord_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "from_session TEXT NOT NULL, from_name TEXT, recipient TEXT NOT NULL, "
+        "thread_id TEXT, body TEXT NOT NULL, created_at TIMESTAMP)"
+    )
+    for name, body in [
+        ("poe_1", "Claiming techne#570 - starting work."),
+        ("poe_9", "Nice work on techne#570, poe_1 - reviewed, no notes."),
+    ]:
+        conn.execute(
+            "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+            " VALUES ('s',?,'coord',?,'2026-09-07')",
+            (name, body),
+        )
+    conn.commit()
+    conn.close()
+
+    v = _one(
+        {"type": "ownership", "subject": "techne#570", "owner": "poe_1"}, StateContext(db_path=db)
+    )
+    assert v["status"] == "backed", v["detail"]
+    assert "poe_9" not in v["detail"]
+
+
+def test_a_subject_that_is_a_prefix_of_another(tmp_path):
+    """`techne#57` must not be judged against `techne#570`'s claimant."""
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE coord_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "from_session TEXT NOT NULL, from_name TEXT, recipient TEXT NOT NULL, "
+        "thread_id TEXT, body TEXT NOT NULL, created_at TIMESTAMP)"
+    )
+    for name, body in [
+        ("poe_1", "Claiming techne#57 - the small one."),
+        ("poe_9", "Claiming techne#570 - unrelated work."),
+    ]:
+        conn.execute(
+            "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+            " VALUES ('s',?,'coord',?,'2026-09-07')",
+            (name, body),
+        )
+    conn.commit()
+    conn.close()
+
+    ctx = StateContext(db_path=db)
+    assert (
+        _one({"type": "ownership", "subject": "techne#57", "owner": "poe_1"}, ctx)["status"]
+        == "backed"
+    )
+    assert (
+        _one({"type": "ownership", "subject": "techne#570", "owner": "poe_9"}, ctx)["status"]
+        == "backed"
+    )
+
+
+def test_mentioned_but_never_claimed_is_unverifiable(bus):
+    """Mentioned with no claim-shaped row: unknown, not contradicted."""
+    db = bus
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+        " VALUES ('s','poe_9','coord','Anyone looking at feat/orphan?','2026-09-07')"
+    )
+    conn.commit()
+    conn.close()
+    v = _one(
+        {"type": "ownership", "subject": "feat/orphan", "owner": "poe_1"}, StateContext(db_path=db)
+    )
+    assert v["status"] == "unverifiable"
+    assert "none of them claims it" in v["detail"]
+
+
+def test_gh_answered_but_unintelligibly_is_unverifiable():
+    """The mutation that survived: source responded and was not understood.
+
+    test_absence_is_never_unbacked covers bus-silent, gh-unreachable and
+    file-missing — but not "source responded, output unparseable", which is the
+    case the substring parse actually introduces.
+    """
+    v = _one(
+        {"type": "artifact_state", "ref": "o/r#1", "state": "open"},
+        StateContext(gh=_gh("not json at all", rc=0)),
+    )
+    assert v["status"] == "unverifiable", v["detail"]
+
+
+def test_a_merged_pr_satisfies_a_closed_claim():
+    """The second surviving mutation. A merged PR IS closed on GitHub, so
+    calling that claim contradicted would be another false unbacked."""
+    v = _one(
+        {"type": "artifact_state", "ref": "o/r#1", "state": "closed"},
+        StateContext(gh=_gh('{"state":"closed","merged":true,"pr":true}')),
+    )
+    assert v["status"] == "backed"
+
+
+def test_undecodable_file_is_unverifiable(tmp_path):
+    """Mojibake must not manufacture a contradiction."""
+    f = tmp_path / "blob.bin"
+    f.write_bytes(b"\xff\xfe\x00\x01 already_do_x \xc3\x28")
+    v = _one(
+        {"type": "capability", "path": "blob.bin", "pattern": "already_do_x"},
+        StateContext(repo_root=tmp_path),
+    )
+    assert v["status"] == "unverifiable", v["detail"]

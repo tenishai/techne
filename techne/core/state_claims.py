@@ -51,6 +51,15 @@ GH_TIMEOUT_S: int = 10
 
 VALID_STATES: frozenset[str] = frozenset({"open", "closed", "merged"})
 
+# What makes a bus message a CLAIM rather than a mention.  Deliberately a small
+# closed list: widening it starts reading commentary as ownership again, and the
+# safe direction here is `unverifiable`, never a false `unbacked`.
+_CLAIM_VERB = re.compile(
+    r"\b(?:claim(?:s|ed|ing)?|tak(?:e|es|ing)|took|pick(?:s|ed|ing)?\s+up|"
+    r"own(?:s|ing)?|mine|starting\s+on|working\s+on)\b",
+    re.I,
+)
+
 STATE_CLAIM_TYPES: frozenset[str] = frozenset({"ownership", "artifact_state", "capability"})
 
 
@@ -79,7 +88,13 @@ def _read_text(path: Path) -> str | None:
             return None
         if path.stat().st_size > CAPABILITY_READ_MAX_BYTES:
             return None
-        return path.read_text(encoding="utf-8", errors="replace")
+        # NOT errors="replace": mojibake makes the pattern "not found", so a
+        # `present: True` claim comes back `unbacked` — a contradiction
+        # manufactured from a file we could not read (Prudence, #892). None
+        # means unverifiable, the honest answer for undecodable content.
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
     except OSError:
         return None
 
@@ -145,9 +160,13 @@ def _check_ownership(claim: dict, ctx: StateContext) -> dict:
     finally:
         conn.close()
 
-    needle = subject.lower()
-    hits = [r for r in rows if needle in (r[2] or "").lower()]
-    if not hits:
+    # WORD-BOUNDED, because a bare substring makes `techne#57` match
+    # `techne#570` and judges a claim about one issue against another issue's
+    # claimant. Every `repo#N` subject with a higher-numbered sibling was
+    # exposed, which is most of them (Prudence, #892).
+    subj_re = re.compile(r"(?<!\w)" + re.escape(subject) + r"(?!\w)", re.I)
+    mentions = [r for r in rows if subj_re.search(r[2] or "")]
+    if not mentions:
         # Absence is not disproof. The bus is where claims are ANNOUNCED, and
         # plenty of real work is never announced there.
         return _verdict(
@@ -156,6 +175,21 @@ def _check_ownership(claim: dict, ctx: StateContext) -> dict:
             f"the coord bus never mentions {subject!r} in the last "
             f"{COORD_SCAN_LIMIT} messages, so ownership cannot be established "
             "either way.",
+        )
+
+    # A MENTION IS NOT A CLAIM, and conflating them produced the one outcome
+    # this module says it must never produce: a false `unbacked`. "Nice work on
+    # techne#570, poe_1 - reviewed, no notes" was read as poe_9 CLAIMING it, so
+    # a message that corroborates the claim reported it as contradicted
+    # (Prudence, #892). A row counts as a claimant only if it is claim-shaped;
+    # otherwise we fall to unverifiable, which is the safe direction.
+    hits = [r for r in mentions if _CLAIM_VERB.search(r[2] or "")]
+    if not hits:
+        return _verdict(
+            claim,
+            "unverifiable",
+            f"the coord bus mentions {subject!r} in {len(mentions)} message(s), but "
+            "none of them claims it — ownership cannot be established either way.",
         )
 
     newest = hits[0]

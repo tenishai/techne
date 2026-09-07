@@ -538,10 +538,18 @@ def test_mcp_tools_doc_descriptions_are_not_stale():
 
     stale = []
     for tool in TOOLS:
-        m = re.search(r"### `%s`\n\n(.*?)\n" % re.escape(tool["name"]), text, re.S)
+        # THE WHOLE PARAGRAPH, to the blank line -- not up to the first newline.
+        # A first-line-only match is blind to a garbled tail, and that is not
+        # hypothetical: the regeneration in 8b3248c replaced only the first
+        # physical line of three wrapped entries and left dangling fragments
+        # behind, and this test was GREEN over all three (Prudence, #892). A
+        # guard added to pin this file gave false assurance about this file.
+        m = re.search(r"### `%s`\n\n(.*?)\n\n" % re.escape(tool["name"]), text, re.S)
         if not m:
             continue  # absence is the other test's job
         shown = m.group(1).rstrip("…").rstrip()
+        # A wrapped paragraph is one logical line in the registry.
+        shown = " ".join(shown.split())
         if not tool["description"].startswith(shown):
             stale.append(tool["name"])
     assert not stale, (

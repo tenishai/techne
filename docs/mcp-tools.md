@@ -163,19 +163,14 @@ Dismiss a reminder by id so it no longer surfaces. The row is kept as status='do
 ### `archivist_search`
 
 What the TEAM knows. Resolves to this instance's own knowledge when the archivist is bound `local`, or to the team store when bound to one — the answer says which. One of techne's four knowledge domains (archivist, librarian, architect, codex), addressable by name. Every answer carries the `binding` it resolved to, so the same call keeps working as the domain grows from a local store into a…
-when the archivist is bound `local`, or to the team store when bound to one — the
-answer says which in its `binding` field.
 
 ### `librarian_search`
 
 What is WRITTEN DOWN — documents, transcripts and cards. Today that is the operator's own corpus; the role is the question, not the file set. One of techne's four knowledge domains (archivist, librarian, architect, codex), addressable by name. Every answer carries the `binding` it resolved to, so the same call keeps working as the domain grows from a local store into a persona or a service.…
-("what is written down"), not a particular file set, which is what lets the corpus
-grow without the call changing.
 
 ### `architect_search`
 
 Architectural PATTERNS — the 'what is worth borrowing' corpus. Same corpus as pattern_search, addressed by the domain name rather than the mechanism. One of techne's four knowledge domains (archivist, librarian, architect, codex), addressable by name. Every answer carries the `binding` it resolved to, so the same call keeps working as the domain grows from a local store into a persona or a…
-`pattern_search`, addressed by the domain name rather than the mechanism.
 
 The codex is the fourth domain and it has TWO calls rather than one, because the graph
 answers two different questions: `codex_search` finds a symbol, `codex_blast_radius`
