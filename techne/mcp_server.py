@@ -1484,14 +1484,21 @@ TOOLS = [
     {
         "name": "techne_check_evidence",
         "description": (
-            "Call this before asserting you did something (committed, ran tests, wrote a "
-            "file) to verify the claim against the observation ledger — enforces 'no "
-            "unbacked word'. Returns per-claim backed/unbacked/unverifiable verdicts by "
-            "parsing what the agent actually DID (Write/Edit/Bash tool records) in the "
-            "given session window. Advisory — does not block; use unbacked_count > 0 as "
-            "the flag. Structured claims only; free-text extraction is out of scope. NOTE: "
+            "Call this before asserting either that you DID something (committed, ran "
+            "tests, wrote a file) or that PROJECT STATE is a certain way (who owns an "
+            "issue, whether a PR is merged, whether we already do X) — enforces 'no "
+            "unbacked word'. Deed claims are checked against the observation ledger; "
+            "state claims are checked against the coord bus, GitHub and our own source "
+            "(techne#584). State claims are the ones the operator has historically had to "
+            "catch, because conversation has no diff and no suite for a reviewer to read. "
+            "Returns per-claim backed/unbacked/unverifiable verdicts in your claim order. "
+            "Advisory — does not block; use unbacked_count > 0 as the flag. Structured "
+            "claims only; free-text extraction is out of scope. NOTE: "
             "commit/tests_green/ran_action come from Bash, which is off by default — those "
-            "return 'unverifiable' (not 'unbacked') unless capture_bash is enabled."
+            "return 'unverifiable' (not 'unbacked') unless capture_bash is enabled. "
+            "'unverifiable' ALWAYS means the source could not be read, never that the "
+            "claim is false — check unverifiable_count before reading 0 unbacked as 'all "
+            "clear'."
         ),
         "inputSchema": {
             "type": "object",
@@ -1507,13 +1514,30 @@ TOOLS = [
                         "timestamp > since are checked (turn-boundary approximation)."
                     ),
                 },
+                "repo_root": {
+                    "type": "string",
+                    "description": (
+                        "Optional root for resolving relative 'path' in capability claims. "
+                        "Defaults to the server's cwd."
+                    ),
+                },
                 "claims": {
                     "type": "array",
                     "description": (
                         "Structured claims to check. Each object must have a 'type' field. "
-                        "Supported types: 'completion'/'did_work', 'commit' (optional 'sha'), "
-                        "'tests_green', 'ran_action' (required 'match'), "
-                        "'wrote_file' (required 'path')."
+                        "DEED types (checked against the ledger): 'completion'/'did_work', "
+                        "'commit' (optional 'sha'), 'tests_green', "
+                        "'ran_action' (required 'match'), 'wrote_file' (required 'path'). "
+                        "STATE types (techne#584): "
+                        "'ownership' (required 'subject' — a branch, 'repo#N', or worktree "
+                        "path — and 'owner'; checked against the coord bus, newest claim "
+                        "wins so handoffs are visible), "
+                        "'artifact_state' (required 'state' of open/closed/merged, and "
+                        "either 'ref' as 'owner/repo#N' or 'repo'+'number'; checked via gh. "
+                        "'merged' is distinct from 'closed'), "
+                        "'capability' (required 'path' and 'pattern', optional "
+                        "'present' default true and 'regex' default false; checked by "
+                        "reading the file — use this for 'we already do X' / 'X is missing')."
                     ),
                     "items": {"type": "object"},
                 },
@@ -2372,13 +2396,28 @@ def _techne_federation_conflict_ingest(args: dict, config: Config) -> dict:
 
 
 def _techne_check_evidence(args: dict, config: Config) -> dict:
-    """Verify structured claims against the observation ledger (techne#105).
+    """Verify structured claims against the ledger and against project state.
 
-    Calls query_turn_evidence to build the evidence window, then check_claims
-    to produce per-claim verdicts.  Returns a summary dict with the evidence
-    view, the verdict list, and an unbacked_count for the caller to flag.
+    Two gates behind one call:
+
+    * DEED claims (techne#105) — "I committed", "tests pass", "I wrote X" —
+      go to check_claims() against the observation ledger.
+    * STATE claims (techne#584) — ownership, artifact_state, capability — go to
+      check_state_claims() against the coord bus, GitHub and our own source.
+      These are the conversational half: assertions with no diff and no suite,
+      where the operator has been the only gate.
+
+    Verdicts come back in the caller's claim order, so a mixed list reads as one
+    result.  Both halves are advisory: flag, never block.
     """
+    from pathlib import Path
+
     from techne.core.evidence import check_claims, query_turn_evidence
+    from techne.core.state_claims import (
+        STATE_CLAIM_TYPES,
+        StateContext,
+        check_state_claims,
+    )
 
     session_id = args.get("session_id", "")
     if not session_id:
@@ -2395,8 +2434,27 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
         since_iso=since,
         bash_captured=config.hooks.capture_bash,
     )
-    verdicts = check_claims(claims, ev)
+
+    # Split by type, check each half, then reassemble IN THE CALLER'S ORDER.
+    # A caller that sent one list should get one list back, aligned with it.
+    deed_idx = [i for i, c in enumerate(claims)
+                if str(c.get("type", "")) not in STATE_CLAIM_TYPES]
+    state_idx = [i for i, c in enumerate(claims)
+                 if str(c.get("type", "")) in STATE_CLAIM_TYPES]
+
+    verdicts: list[dict] = [{} for _ in claims]
+    for i, v in zip(deed_idx, check_claims([claims[i] for i in deed_idx], ev)):
+        verdicts[i] = v
+    if state_idx:
+        ctx = StateContext(
+            db_path=config.db_path,
+            repo_root=Path(args["repo_root"]) if args.get("repo_root") else Path.cwd(),
+        )
+        for i, v in zip(state_idx, check_state_claims([claims[i] for i in state_idx], ctx)):
+            verdicts[i] = v
+
     unbacked_count = sum(1 for v in verdicts if v["status"] == "unbacked")
+    unverifiable_count = sum(1 for v in verdicts if v["status"] == "unverifiable")
 
     return {
         "evidence": {
@@ -2415,6 +2473,10 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
         },
         "verdicts": verdicts,
         "unbacked_count": unbacked_count,
+        # Surfaced separately so a caller cannot read "0 unbacked" as "all
+        # checked". Unverifiable means the source could not be read, which is
+        # exactly the state the operator needs to see rather than infer.
+        "unverifiable_count": unverifiable_count,
     }
 
 
