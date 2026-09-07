@@ -8,11 +8,23 @@ read.
 
 The measurement that motivated this (techne#584, one session, 2026-08-16): four
 wrong state claims in a day, **three caught by the operator**.  Every one was
-cheaply queryable at the moment it was made — ownership from the coord bus,
-issue/PR state from ``gh``, "we already do X" from our own source.  None needed
-judgement; each needed one query that was not run.  So the fix is an external
-check, not a firmer rule: the "never guess" instruction was in context the whole
-time and was violated anyway.
+cheaply queryable at the moment it was made — issue/PR state from ``gh``, "we
+already do X" from our own source.  None needed judgement; each needed one query
+that was not run.  So the fix is an external check, not a firmer rule: the
+"never guess" instruction was in context the whole time and was violated anyway.
+
+WHY OWNERSHIP IS NOT HERE, and the rule it encodes.  A fourth type — ownership,
+mined from the coord bus — was built and cut before merge (techne#894).  Both
+checkers here work because **the source answers the question that was asked**:
+``gh`` returns the state, the filesystem returns the file.  The coord bus does
+not answer "who owns X"; it holds prose from which ownership can sometimes be
+inferred, and measured against the real bus the miner named a claimant for 21%
+of subjects and was wrong for about 30% of those.  Shipping it would have made
+``backed`` mean a lookup in two types and a guess in the third, and a consumer
+of one verdict list cannot tell them apart — the weakest member would have set
+the trust level for all three.  A source authored by the claimant is also not
+independent of the claim.  Add a type here only when its source answers the
+question directly.
 
 Advisory only — flag, never block, exactly as ``check_claims()`` is today.
 
@@ -31,15 +43,10 @@ from __future__ import annotations
 
 import re
 import shutil
-import sqlite3
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-
-# Bound the bus scan.  Ownership is announced when work is claimed, so an
-# unbounded history mostly adds stale claimants; the newest claim wins anyway.
-COORD_SCAN_LIMIT: int = 500
 
 # Bound what a capability check will read, so a claim can never pull a large
 # file into a verdict detail.
@@ -51,73 +58,8 @@ GH_TIMEOUT_S: int = 10
 
 VALID_STATES: frozenset[str] = frozenset({"open", "closed", "merged"})
 
-# What makes a bus message a CLAIM rather than a mention.
-#
-# THIS IS A HEURISTIC OVER FREE PROSE AND IT IS WRONG IN BOTH DIRECTIONS.  Both
-# directions are dangerous, which is not obvious and was corrected in review
-# (#892 r2):
-#   * a NON-claim that matches yields a false `unbacked` -- the outcome this
-#     module forbids;
-#   * a real claim that does NOT match is only safe when no OTHER row is
-#     claim-shaped.  When an older row matches and the newer real claim does
-#     not, the result is `backed` FOR THE STALE OWNER -- exactly the handoff
-#     blindness techne#584 exists to catch.  So recall matters as much as
-#     precision, and a bare "be conservative" is the wrong instinct here.
-#
-# Three rules, each earned by a demonstrated false verdict:
-#   1. No bare ownership words.  `own`/`take`/`mine` fire on "your own branch",
-#      "takes nine minutes in CI", and this repo's own subject matter.
-#   2. Questions are not claims.  "Is anyone starting on X?" made the ASKER the
-#      recorded claimant, and that is how a coord bus actually reads.
-#   3. The verb must sit NEAR the subject -- see _CLAIM_WINDOW.  "X is blocked,
-#      so starting on Y instead" claimed X.
-_CLAIM_VERB = re.compile(
-    r"\b(?:"
-    r"claims|claimed|claiming"
-    # `taking X` is a claim; `taking a look at X` is not, and `takes` is
-    # duration ("takes nine minutes in CI"). Third person is excluded entirely.
-    r"|taking(?!\s+a\s+look)|took\s+(?:over|on)?"
-    r"|pick(?:s|ed|ing)?\s+(?:\S+\s+)?up"
-    r"|grabb?(?:s|ed|ing)?"
-    r"|owned|owning|i\s+own|it'?s\s+mine|is\s+mine"
-    r"|assigned\s+to\s+me|i'?ll\s+handle|on\s+it"
-    r"|starting\s+on|working\s+on|start(?:ed|ing)?\s+work"
-    r")\b",
-    re.I,
-)
 
-# How far from the subject the claim verb may sit, in characters.  Wide enough
-# for "Claiming branch <long-name> in <repo> -- implementing ...", narrow enough
-# that a verb about a DIFFERENT subject later in the message does not attach.
-_CLAIM_WINDOW: int = 30
-
-# A claim that is being DISCLAIMED is not a claim.  "I'm no longer working on X"
-# and "X is not mine" both put a claim verb next to the subject (#892 r2).
-_NEGATION = re.compile(r"\b(?:no\s+longer|not|isn'?t|aren'?t|never|n't)\b", re.I)
-
-
-def _is_claim_row(body: str, subj_re: re.Pattern[str]) -> bool:
-    """True when this message claims the subject, rather than mentioning it."""
-    if not body:
-        return False
-    # A question is a request for ownership information, not an assertion of it.
-    if body.rstrip().endswith("?"):
-        return False
-    for m in subj_re.finditer(body):
-        lo = max(0, m.start() - _CLAIM_WINDOW)
-        hi = min(len(body), m.end() + _CLAIM_WINDOW)
-        window = body[lo:hi]
-        verb = _CLAIM_VERB.search(window)
-        if not verb:
-            continue
-        # Reject a negated claim: look just before the verb, in the window.
-        if _NEGATION.search(window[: verb.start()]):
-            continue
-        return True
-    return False
-
-
-STATE_CLAIM_TYPES: frozenset[str] = frozenset({"ownership", "artifact_state", "capability"})
+STATE_CLAIM_TYPES: frozenset[str] = frozenset({"artifact_state", "capability"})
 
 
 def _run_gh(argv: list[str]) -> tuple[int, str]:
@@ -165,7 +107,6 @@ class StateContext:
     rather than a live query.
     """
 
-    db_path: Path | None = None
     repo_root: Path | None = None
     gh: Callable[[list[str]], tuple[int, str]] = _run_gh
     read: Callable[[Path], str | None] = _read_text
@@ -173,104 +114,6 @@ class StateContext:
 
 def _verdict(claim: dict, status: str, detail: str) -> dict:
     return {"claim": claim, "status": status, "detail": detail}
-
-
-# --------------------------------------------------------------------------
-# ownership — "that issue/branch/PR is mine"
-# --------------------------------------------------------------------------
-def _check_ownership(claim: dict, ctx: StateContext) -> dict:
-    """Check a claimed owner against the coord bus.
-
-    Claim fields: ``subject`` (branch name, ``repo#N``, worktree path — any
-    string the claim was announced with) and ``owner`` (who the agent says owns
-    it).  Announcements are free prose ("Claiming branch fix/51-... in ..."), so
-    the match is a case-insensitive substring over ``coord_messages.body``.
-
-    MOST RECENT CLAIM WINS, and that is the point rather than an implementation
-    detail: the failure this exists for was "techne#570 is mine" when the work
-    had come by handoff and the reassignment was on the bus the whole time.
-    Taking the newest claimant is what makes a handoff visible.
-    """
-    subject = str(claim.get("subject", "")).strip()
-    owner = str(claim.get("owner", "")).strip()
-    if not subject or not owner:
-        return _verdict(
-            claim,
-            "unverifiable",
-            "ownership claims need both 'subject' and 'owner'.",
-        )
-    if ctx.db_path is None:
-        return _verdict(claim, "unverifiable", "no db_path — the coord bus is unreadable.")
-
-    try:
-        conn = sqlite3.connect(f"file:{ctx.db_path}?mode=ro", uri=True)
-    except sqlite3.Error as exc:
-        return _verdict(claim, "unverifiable", f"could not open the coord bus: {exc}")
-    try:
-        rows = conn.execute(
-            "SELECT from_name, from_session, body, created_at FROM coord_messages "
-            "ORDER BY id DESC LIMIT ?",
-            (COORD_SCAN_LIMIT,),
-        ).fetchall()
-    except sqlite3.Error as exc:
-        return _verdict(claim, "unverifiable", f"could not read the coord bus: {exc}")
-    finally:
-        conn.close()
-
-    # WORD-BOUNDED, because a bare substring makes `techne#57` match
-    # `techne#570` and judges a claim about one issue against another issue's
-    # claimant. Every `repo#N` subject with a higher-numbered sibling was
-    # exposed, which is most of them (Prudence, #892).
-    # `-` EXCLUDED TOO, and `/` deliberately NOT. Digits are word characters, so
-    # `(?!\w)` closed the techne#57 / techne#570 case for free while leaving
-    # `feat/584` matching `feat/584-state-claims` -- branch names and worktree
-    # paths are two of the three documented subject shapes and `-followup` /
-    # `-old` siblings are ordinary (#892 r2). Excluding `/` as well would break
-    # a branch named inside a worktree path, which is a real shape.
-    subj_re = re.compile(r"(?<![\w-])" + re.escape(subject) + r"(?![\w-])", re.I)
-    mentions = [r for r in rows if subj_re.search(r[2] or "")]
-    if not mentions:
-        # Absence is not disproof. The bus is where claims are ANNOUNCED, and
-        # plenty of real work is never announced there.
-        return _verdict(
-            claim,
-            "unverifiable",
-            f"the coord bus never mentions {subject!r} in the last "
-            f"{COORD_SCAN_LIMIT} messages, so ownership cannot be established "
-            "either way.",
-        )
-
-    # A MENTION IS NOT A CLAIM, and conflating them produced the one outcome
-    # this module says it must never produce: a false `unbacked`. "Nice work on
-    # techne#570, poe_1 - reviewed, no notes" was read as poe_9 CLAIMING it, so
-    # a message that corroborates the claim reported it as contradicted
-    # (Prudence, #892). A row counts as a claimant only if it is claim-shaped;
-    # otherwise we fall to unverifiable, which is the safe direction.
-    hits = [r for r in mentions if _is_claim_row(r[2] or "", subj_re)]
-    if not hits:
-        return _verdict(
-            claim,
-            "unverifiable",
-            f"the coord bus mentions {subject!r} in {len(mentions)} message(s), but "
-            "none of them claims it — ownership cannot be established either way.",
-        )
-
-    newest = hits[0]
-    claimant = (newest[0] or newest[1] or "").strip()
-    if claimant.lower() == owner.lower():
-        return _verdict(
-            claim,
-            "backed",
-            f"the most recent coord message mentioning {subject!r} is from "
-            f"{claimant!r} ({newest[3]}); {len(hits)} mention(s) total.",
-        )
-    others = sorted({(r[0] or r[1] or "").strip() for r in hits})
-    return _verdict(
-        claim,
-        "unbacked",
-        f"the coord bus says {claimant!r} most recently claimed {subject!r} "
-        f"({newest[3]}), not {owner!r}. Claimants seen: {', '.join(others)}.",
-    )
 
 
 # --------------------------------------------------------------------------
@@ -446,7 +289,6 @@ def _check_capability(claim: dict, ctx: StateContext) -> dict:
 
 
 _CHECKERS: dict[str, Callable[[dict, StateContext], dict]] = {
-    "ownership": _check_ownership,
     "artifact_state": _check_artifact_state,
     "capability": _check_capability,
 }

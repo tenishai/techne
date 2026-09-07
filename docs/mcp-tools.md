@@ -124,7 +124,7 @@ Feed back the claim-judgement JSON array from techne_memory_claims_emit. `respon
 
 ### `techne_check_evidence`
 
-Call this before asserting either that you DID something (committed, ran tests, wrote a file) or that PROJECT STATE is a certain way (who owns an issue, whether a PR is merged, whether we already do X) — enforces 'no unbacked word'. Deed claims are checked against the observation ledger; state claims are checked against the coord bus, GitHub and our own source (techne#584). State claims ar…
+Call this before asserting either that you DID something (committed, ran tests, wrote a file) or that PROJECT STATE is a certain way (who owns an issue, whether a PR is merged, whether we already do X) — enforces 'no unbacked word'. Deed claims are checked against the observation ledger; state claims are checked against GitHub and our own source (techne#584). State claims are the ones the…
 
 ## Coordination — talk to peer sessions on this machine
 

@@ -1488,7 +1488,7 @@ TOOLS = [
             "tests, wrote a file) or that PROJECT STATE is a certain way (who owns an "
             "issue, whether a PR is merged, whether we already do X) — enforces 'no "
             "unbacked word'. Deed claims are checked against the observation ledger; "
-            "state claims are checked against the coord bus, GitHub and our own source "
+            "state claims are checked against GitHub and our own source "
             "(techne#584). State claims are the ones the operator has historically had to "
             "catch, because conversation has no diff and no suite for a reviewer to read. "
             "Returns per-claim backed/unbacked/unverifiable verdicts in your claim order. "
@@ -1530,9 +1530,6 @@ TOOLS = [
                         "'commit' (optional 'sha'), 'tests_green', "
                         "'ran_action' (required 'match'), 'wrote_file' (required 'path'). "
                         "STATE types (techne#584): "
-                        "'ownership' (required 'subject' — a branch, 'repo#N', or worktree "
-                        "path — and 'owner'; checked against the coord bus, newest claim "
-                        "wins so handoffs are visible), "
                         "'artifact_state' (required 'state' of open/closed/merged, and "
                         "either 'ref' as 'owner/repo#N' or 'repo'+'number'; checked via gh. "
                         "'merged' is distinct from 'closed'), "
@@ -2448,7 +2445,6 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
         verdicts[i] = v
     if state_idx:
         ctx = StateContext(
-            db_path=config.db_path,
             repo_root=Path(args["repo_root"]) if args.get("repo_root") else Path.cwd(),
         )
         for i, v in zip(state_idx, check_state_claims([claims[i] for i in state_idx], ctx)):
