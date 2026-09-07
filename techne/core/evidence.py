@@ -7,8 +7,8 @@ against the ledger rather than trusted on faith.  Advisory only — flag, not bl
 Free-text claim extraction is explicitly OUT of scope for this slice; callers
 must pass structured claim dicts.  See check_claims() for the supported types.
 
-This module covers DEEDS.  Claims about PROJECT STATE — who owns an issue,
-whether a PR is merged, whether we already do X — have no ledger record and are
+This module covers DEEDS.  Claims about PROJECT STATE — whether a PR is merged,
+whether we already do X — have no ledger record and are
 handled by ``techne/core/state_claims.py`` (techne#584), which shares this
 module's verdict shape and its rule that absence is ``unverifiable``, never
 ``unbacked``.  Both are reachable through one ``techne_check_evidence`` call.
@@ -1243,9 +1243,7 @@ def probe_length_test_pressure(db_path: Path) -> dict:
     )
     conn = plain_connect(db_path)
     try:
-        rows = conn.execute(
-            "SELECT content FROM observations WHERE tool_name = 'Bash'"
-        ).fetchall()
+        rows = conn.execute("SELECT content FROM observations WHERE tool_name = 'Bash'").fetchall()
     finally:
         conn.close()
 

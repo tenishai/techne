@@ -10,6 +10,8 @@ Coverage:
 
 from __future__ import annotations
 
+import pytest
+
 from techne.core.state_claims import StateContext, check_state_claims
 
 
@@ -86,10 +88,20 @@ def test_capability_present_and_absent(tmp_path):
         _one({"type": "capability", "path": "src.py", "pattern": "already_do_x"}, ctx)["status"]
         == "backed"
     )
+    # An absence claim now needs an anchor proving this is the right file. The
+    # old fixture here -- an arbitrary never-present string confirming an
+    # absence -- was itself an instance of the defect (Prudence, #892 r3).
     assert (
-        _one({"type": "capability", "path": "src.py", "pattern": "nope", "present": False}, ctx)[
-            "status"
-        ]
+        _one(
+            {
+                "type": "capability",
+                "path": "src.py",
+                "pattern": "nope",
+                "present": False,
+                "anchor": "already_do_x",
+            },
+            ctx,
+        )["status"]
         == "backed"
     )
 
@@ -101,7 +113,14 @@ def test_capability_contradicted(tmp_path):
     v = _one({"type": "capability", "path": "src.py", "pattern": "missing_thing"}, ctx)
     assert v["status"] == "unbacked"
     v2 = _one(
-        {"type": "capability", "path": "src.py", "pattern": "already_do_x", "present": False}, ctx
+        {
+            "type": "capability",
+            "path": "src.py",
+            "pattern": "already_do_x",
+            "present": False,
+            "anchor": "def ",
+        },
+        ctx,
     )
     assert v2["status"] == "unbacked"
 
@@ -140,7 +159,7 @@ def test_gate_never_raises():
 
 
 def test_absence_is_never_unbacked(tmp_path):
-    """The invariant, asserted as one property across all three types."""
+    """The invariant, asserted as one property across both types."""
     cases = [
         (
             {"type": "artifact_state", "ref": "o/r#1", "state": "open"},
@@ -221,3 +240,109 @@ def test_undecodable_file_is_unverifiable(tmp_path):
         StateContext(repo_root=tmp_path),
     )
     assert v["status"] == "unverifiable", v["detail"]
+
+
+# ------------------ Prudence round 3 (#892): the backed path ---------------
+def test_an_absence_claim_without_an_anchor_is_unverifiable(tmp_path):
+    """`present: False` is backed by finding NOTHING, so it needs a control.
+
+    Without one, a wrong path / typo / case mismatch all confirm the claim —
+    the evidence is the absence of evidence.
+    """
+    (tmp_path / "src.py").write_text("def already_do_x(): pass\n")
+    v = _one(
+        {"type": "capability", "path": "src.py", "pattern": "nope", "present": False},
+        StateContext(repo_root=tmp_path),
+    )
+    assert v["status"] == "unverifiable"
+    assert "anchor" in v["detail"]
+
+
+def test_the_wrong_file_cannot_confirm_an_absence(tmp_path):
+    """Prudence's case, verbatim: the project DOES retry; the gate must not
+    endorse "we do not" because the claim pointed at the wrong file."""
+    (tmp_path / "http.py").write_text("def send(req):\n    return req\n")
+    (tmp_path / "transport.py").write_text("MAX_RETRIES = 5\ndef send_with_retry(req): ...\n")
+    ctx = StateContext(repo_root=tmp_path)
+
+    # No anchor at all -> unverifiable, not a free `backed`.
+    assert (
+        _one({"type": "capability", "path": "http.py", "pattern": "retry", "present": False}, ctx)[
+            "status"
+        ]
+        == "unverifiable"
+    )
+
+    # An anchor that is not in this file proves we are looking in the wrong place.
+    v = _one(
+        {
+            "type": "capability",
+            "path": "http.py",
+            "pattern": "retry",
+            "present": False,
+            "anchor": "MAX_RETRIES",
+        },
+        ctx,
+    )
+    assert v["status"] == "unverifiable"
+    assert "not the file the claim is about" in v["detail"]
+
+
+@pytest.mark.parametrize("pattern", ["alredy_do_x", "ALREADY_DO_X", "nope"])
+def test_a_degenerate_pattern_no_longer_confirms_an_absence(tmp_path, pattern):
+    """Typo, case mismatch, and an arbitrary never-present string. All three
+    came back `backed` before the anchor (Prudence, #892 r3)."""
+    (tmp_path / "src.py").write_text("def already_do_x(): pass\n")
+    v = _one(
+        {"type": "capability", "path": "src.py", "pattern": pattern, "present": False},
+        StateContext(repo_root=tmp_path),
+    )
+    assert v["status"] == "unverifiable"
+
+
+def test_an_empty_file_cannot_confirm_an_absence(tmp_path):
+    (tmp_path / "empty.py").write_text("")
+    v = _one(
+        {
+            "type": "capability",
+            "path": "empty.py",
+            "pattern": "anything",
+            "present": False,
+            "anchor": "def ",
+        },
+        StateContext(repo_root=tmp_path),
+    )
+    assert v["status"] == "unverifiable"
+
+
+def test_a_real_absence_still_reads_backed(tmp_path):
+    """The feature must survive its own guard: a genuine absence, in a file
+    proven to be the right one, is still `backed`."""
+    (tmp_path / "http.py").write_text("def send(req):\n    return req\n")
+    v = _one(
+        {
+            "type": "capability",
+            "path": "http.py",
+            "pattern": "retry",
+            "present": False,
+            "anchor": "def send",
+        },
+        StateContext(repo_root=tmp_path),
+    )
+    assert v["status"] == "backed"
+
+
+def test_a_bad_anchor_regex_is_unverifiable(tmp_path):
+    (tmp_path / "s.py").write_text("x")
+    v = _one(
+        {
+            "type": "capability",
+            "path": "s.py",
+            "pattern": "x",
+            "present": False,
+            "anchor": "([",
+            "regex": True,
+        },
+        StateContext(repo_root=tmp_path),
+    )
+    assert v["status"] == "unverifiable"

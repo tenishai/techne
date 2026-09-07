@@ -1485,8 +1485,8 @@ TOOLS = [
         "name": "techne_check_evidence",
         "description": (
             "Call this before asserting either that you DID something (committed, ran "
-            "tests, wrote a file) or that PROJECT STATE is a certain way (who owns an "
-            "issue, whether a PR is merged, whether we already do X) — enforces 'no "
+            "tests, wrote a file) or that PROJECT STATE is a certain way (whether a PR "
+            "is merged, whether we already do X) — enforces 'no "
             "unbacked word'. Deed claims are checked against the observation ledger; "
             "state claims are checked against GitHub and our own source "
             "(techne#584). State claims are the ones the operator has historically had to "
@@ -1498,8 +1498,9 @@ TOOLS = [
             "return 'unverifiable' (not 'unbacked') unless capture_bash is enabled. "
             "'unverifiable' NEVER means the claim is false — it means the claim could "
             "not be established, either because the source was unreadable or because it "
-            "was read and does not speak to the claim (a branch the coord bus never "
-            "mentions). Check unverifiable_count before reading 0 unbacked as 'all clear'."
+            "was read and does not speak to the claim (an absence claim whose anchor is "
+            "not in the file). Check unverifiable_count before reading 0 unbacked as "
+            "'all clear'."
         ),
         "inputSchema": {
             "type": "object",
@@ -1535,7 +1536,11 @@ TOOLS = [
                         "'merged' is distinct from 'closed'), "
                         "'capability' (required 'path' and 'pattern', optional "
                         "'present' default true and 'regex' default false; checked by "
-                        "reading the file — use this for 'we already do X' / 'X is missing')."
+                        "reading the file — use this for 'we already do X' / 'X is "
+                        "missing'. An absence claim (present=false) ALSO requires "
+                        "'anchor': a pattern that must be in the file, proving it is the "
+                        "right one — without it a wrong path confirms the absence on no "
+                        "evidence)."
                     ),
                     "items": {"type": "object"},
                 },
@@ -1934,9 +1939,7 @@ def _techne_guide(args: dict, config: Config) -> dict:
     if not name:
         return {
             "guides": list(_MANIFEST),
-            "hint": (
-                "Call techne_guide with a name to read one. Start with four-functions."
-            ),
+            "hint": ("Call techne_guide with a name to read one. Start with four-functions."),
         }
     try:
         return {"name": name, "markdown": bundled_guide(name)}
@@ -2400,8 +2403,9 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
 
     * DEED claims (techne#105) — "I committed", "tests pass", "I wrote X" —
       go to check_claims() against the observation ledger.
-    * STATE claims (techne#584) — ownership, artifact_state, capability — go to
-      check_state_claims() against the coord bus, GitHub and our own source.
+    * STATE claims (techne#584) — artifact_state, capability — go to
+      check_state_claims() against GitHub and our own source.  (An ownership
+      type, mined from the coord bus, was built and cut before merge — #894.)
       These are the conversational half: assertions with no diff and no suite,
       where the operator has been the only gate.
 
@@ -2435,10 +2439,8 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
 
     # Split by type, check each half, then reassemble IN THE CALLER'S ORDER.
     # A caller that sent one list should get one list back, aligned with it.
-    deed_idx = [i for i, c in enumerate(claims)
-                if str(c.get("type", "")) not in STATE_CLAIM_TYPES]
-    state_idx = [i for i, c in enumerate(claims)
-                 if str(c.get("type", "")) in STATE_CLAIM_TYPES]
+    deed_idx = [i for i, c in enumerate(claims) if str(c.get("type", "")) not in STATE_CLAIM_TYPES]
+    state_idx = [i for i, c in enumerate(claims) if str(c.get("type", "")) in STATE_CLAIM_TYPES]
 
     verdicts: list[dict] = [{} for _ in claims]
     for i, v in zip(deed_idx, check_claims([claims[i] for i in deed_idx], ev)):
@@ -2474,9 +2476,9 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
         # checked". Unverifiable means the claim COULD NOT BE ESTABLISHED — the
         # source was unreadable, OR it was read and simply does not speak to the
         # claim. Both are states the operator needs to see rather than infer.
-        # Saying only "could not be read" understates it: an ownership claim for
-        # a branch the bus never mentions is unverifiable after a wholly
-        # successful read (Constance, #892).
+        # Saying only "could not be read" understates it: an absence claim whose
+        # anchor is missing from the file is unverifiable after a wholly
+        # successful read (Constance, #892; anchor added #892 r3).
         "unverifiable_count": unverifiable_count,
     }
 

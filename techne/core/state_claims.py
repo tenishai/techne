@@ -234,9 +234,17 @@ def _check_capability(claim: dict, ctx: StateContext) -> dict:
     """Check a 'we already do X' / 'X is missing' claim against our own source.
 
     Claim fields: ``path`` (repo-relative or absolute), ``pattern``, optional
-    ``present`` (default True — the claim is that the thing IS there), and
-    optional ``regex`` (default False; substring otherwise, because a claim
-    should not have to be a well-formed regex to be checkable).
+    ``present`` (default True — the claim is that the thing IS there),
+    ``anchor`` (REQUIRED when ``present`` is False), and optional ``regex``
+    (default False; substring otherwise, because a claim should not have to be
+    a well-formed regex to be checkable).
+
+    An absence claim is only as good as the path it was handed, so it must
+    carry an ``anchor`` that proves the file is the right one.  Without that,
+    any failure to match — a wrong path, a typo, a case difference — reads as
+    confirmation.  The anchor closes wrong-file and empty-file; it does not
+    close a typo in ``pattern`` itself, and "absent from one file" is not
+    "absent from the project".
     """
     pattern = str(claim.get("pattern", ""))
     path_s = str(claim.get("path", "")).strip()
@@ -249,6 +257,35 @@ def _check_capability(claim: dict, ctx: StateContext) -> dict:
     present = claim.get("present", True)
     if not isinstance(present, bool):
         return _verdict(claim, "unverifiable", f"'present' must be a boolean; got {present!r}.")
+    # AN ABSENCE CLAIM NEEDS A POSITIVE CONTROL (Prudence, #892 r3).
+    #
+    # The two halves are not symmetric. `present: True` is backed only when the
+    # pattern is actually found: the evidence is positive, and a bad pattern is
+    # SELF-CORRECTING because you get a loud `unbacked` and go fix it.
+    # `present: False` is backed when NOTHING is found -- so a wrong path, a
+    # typo or a case mismatch all confirm the claim, and a bad pattern is
+    # SELF-CONFIRMING. Measured: a `present: False` claim about "retry" in
+    # http.py came back `backed` while transport.py held MAX_RETRIES and
+    # send_with_retry. The project does retries; the gate endorsed "we do not."
+    #
+    # That is the class techne#584 exists to catch -- "we already do X" is one
+    # of its four motivating wrong claims, and this is that claim negated and
+    # returned endorsed. It is worse than a false `unbacked`: that trains a
+    # reader to ignore the gate, whereas a false `backed` is RELIED ON and
+    # launders an unverified assertion as verified.
+    #
+    # WHAT THE ANCHOR DOES NOT CLOSE, stated rather than hidden: a typo in
+    # `pattern` itself, and the larger gap that "absent from one file" cannot
+    # establish "absent from the project" -- a claim wanting that must name its
+    # own scope.
+    anchor = claim.get("anchor")
+    if not present and not anchor:
+        return _verdict(
+            claim,
+            "unverifiable",
+            "an absence claim (present=false) must carry an 'anchor' — a pattern "
+            "that MUST be in the file — or a wrong path confirms it on no evidence.",
+        )
 
     path = Path(path_s)
     if not path.is_absolute():
@@ -270,13 +307,34 @@ def _check_capability(claim: dict, ctx: StateContext) -> dict:
             f"could not read {path} — nothing can be concluded about the claim.",
         )
 
-    if claim.get("regex", False):
-        try:
-            found = re.search(pattern, text) is not None
-        except re.error as exc:
-            return _verdict(claim, "unverifiable", f"bad regex {pattern!r}: {exc}")
-    else:
-        found = pattern in text
+    use_regex = claim.get("regex", False)
+
+    def _seek(needle: str) -> bool | str:
+        if use_regex:
+            try:
+                return re.search(needle, text) is not None
+            except re.error as exc:
+                return f"bad regex {needle!r}: {exc}"
+        return needle in text
+
+    if anchor is not None:
+        hit = _seek(str(anchor))
+        if isinstance(hit, str):
+            return _verdict(claim, "unverifiable", hit)
+        if not hit:
+            # The positive control failed: this is not the file the claim is
+            # about, so finding nothing in it says nothing.
+            return _verdict(
+                claim,
+                "unverifiable",
+                f"the anchor {anchor!r} is not in {path}, so this is not the file "
+                "the claim is about — an absence here is not evidence.",
+            )
+
+    hit = _seek(pattern)
+    if isinstance(hit, str):
+        return _verdict(claim, "unverifiable", hit)
+    found = hit
 
     if found == present:
         shape = "present" if present else "absent"
