@@ -1,0 +1,377 @@
+"""State-claim gate (techne#584) — the conversational half of the evidence gate.
+
+``techne/core/evidence.py`` checks **deeds**: "I committed", "tests pass", "I
+wrote X", all verifiable against the observation ledger.  It scopes out the
+other half of an agent's output — **assertions about project state**, made in
+conversation, where there is no diff, no suite, and no verdict for Prudence to
+read.
+
+The measurement that motivated this (techne#584, one session, 2026-08-16): four
+wrong state claims in a day, **three caught by the operator**.  Every one was
+cheaply queryable at the moment it was made — issue/PR state from ``gh``, "we
+already do X" from our own source.  None needed judgement; each needed one query
+that was not run.  So the fix is an external check, not a firmer rule: the
+"never guess" instruction was in context the whole time and was violated anyway.
+
+WHY OWNERSHIP IS NOT HERE, and the rule it encodes.  A fourth type — ownership,
+mined from the coord bus — was built and cut before merge (techne#894).  Both
+checkers here work because **the source answers the question that was asked**:
+``gh`` returns the state, the filesystem returns the file.  The coord bus does
+not answer "who owns X"; it holds prose from which ownership can sometimes be
+inferred, and measured against the real bus the miner named a claimant for 21%
+of subjects and was wrong for about 30% of those.  Shipping it would have made
+``backed`` mean a lookup in two types and a guess in the third, and a consumer
+of one verdict list cannot tell them apart — the weakest member would have set
+the trust level for all three.  A source authored by the claimant is also not
+independent of the claim.  Add a type here only when its source answers the
+question directly.
+
+Advisory only — flag, never block, exactly as ``check_claims()`` is today.
+
+THE LOAD-BEARING RULE, inherited from evidence.py's ``bash_captured`` handling:
+**absence of evidence is not disproof.**  A claim the bus never mentions, an
+issue ``gh`` could not reach, a file that is not there — all resolve to
+``unverifiable``, never ``unbacked``.  ``unbacked`` means the source was read
+and it CONTRADICTS the claim.  Collapsing those two is how a gate starts
+crying wolf, and a gate the reader learns to skip is worse than none.
+
+External access is injected rather than imported so this module stays testable
+without a network or a repo: see ``StateContext.gh`` and ``StateContext.read``.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+# Bound what a capability check will read, so a claim can never pull a large
+# file into a verdict detail.
+CAPABILITY_READ_MAX_BYTES: int = 512_000
+
+# `gh` is network I/O on the critical path of a turn.  A slow check that blocks
+# an answer is worse than an absent one, so it fails to `unverifiable` fast.
+GH_TIMEOUT_S: int = 10
+
+VALID_STATES: frozenset[str] = frozenset({"open", "closed", "merged"})
+
+
+STATE_CLAIM_TYPES: frozenset[str] = frozenset({"artifact_state", "capability"})
+
+
+def _run_gh(argv: list[str]) -> tuple[int, str]:
+    """Default `gh` runner.  Returns (returncode, combined output)."""
+    if shutil.which("gh") is None:
+        return (127, "gh not on PATH")
+    try:
+        p = subprocess.run(
+            ["gh", *argv],
+            capture_output=True,
+            text=True,
+            timeout=GH_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return (124, f"gh timed out after {GH_TIMEOUT_S}s")
+    except OSError as exc:  # pragma: no cover - defensive
+        return (126, f"could not execute gh: {exc}")
+    return (p.returncode, (p.stdout or "") + (p.stderr or ""))
+
+
+def _read_text(path: Path) -> str | None:
+    """Default file reader.  Returns None when unreadable — never raises."""
+    try:
+        if not path.is_file():
+            return None
+        if path.stat().st_size > CAPABILITY_READ_MAX_BYTES:
+            return None
+        # NOT errors="replace": mojibake makes the pattern "not found", so a
+        # `present: True` claim comes back `unbacked` — a contradiction
+        # manufactured from a file we could not read (Prudence, #892). None
+        # means unverifiable, the honest answer for undecodable content.
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+    except OSError:
+        return None
+
+
+@dataclass
+class StateContext:
+    """Everything a state claim can be checked against.
+
+    ``gh`` and ``read`` are injected so the checks are exercisable without a
+    network or a checkout — the same reason ``Evidence`` is a plain projection
+    rather than a live query.
+    """
+
+    repo_root: Path | None = None
+    gh: Callable[[list[str]], tuple[int, str]] = _run_gh
+    read: Callable[[Path], str | None] = _read_text
+
+
+def _verdict(claim: dict, status: str, detail: str) -> dict:
+    return {"claim": claim, "status": status, "detail": detail}
+
+
+# --------------------------------------------------------------------------
+# artifact_state — "that PR is merged", "that issue is closed"
+# --------------------------------------------------------------------------
+_REF_RE = re.compile(r"^(?:([\w.-]+)/([\w.-]+)|([\w.-]+))?#(\d+)$")
+
+
+def _parse_ref(claim: dict) -> tuple[str | None, int | None, str | None]:
+    """Return (repo, number, error). Accepts explicit fields or a ``ref``."""
+    repo = str(claim.get("repo", "")).strip()
+    number = claim.get("number")
+    if repo and number is not None:
+        try:
+            return repo, int(number), None
+        except (TypeError, ValueError):
+            return None, None, f"'number' is not an integer: {number!r}"
+
+    ref = str(claim.get("ref", "")).strip()
+    if not ref:
+        return (
+            None,
+            None,
+            "artifact_state claims need 'ref' (e.g. 'owner/repo#12') or 'repo'+'number'.",
+        )
+    m = _REF_RE.match(ref)
+    if not m:
+        return None, None, f"could not parse ref {ref!r}; want 'owner/repo#12' or 'repo#12'."
+    owner, name, bare, num = m.groups()
+    if owner and name:
+        return f"{owner}/{name}", int(num), None
+    if bare:
+        # A repo name with no owner. Guessing an org is exactly the kind of
+        # inference this gate exists to stop, so refuse rather than assume.
+        return (
+            None,
+            None,
+            (
+                f"ref {ref!r} names a repo but no owner; pass 'owner/repo#N' or an "
+                "explicit 'repo' field."
+            ),
+        )
+    return None, None, f"ref {ref!r} has no repo; pass 'owner/repo#N' or 'repo'+'number'."
+
+
+def _check_artifact_state(claim: dict, ctx: StateContext) -> dict:
+    """Check an issue/PR's state against GitHub.
+
+    Claim fields: ``ref`` (``owner/repo#N``) or ``repo``+``number``, and
+    ``state`` — one of open / closed / merged.  ``merged`` is checked
+    separately from ``closed`` because GitHub reports a merged PR as closed,
+    and treating them as the same is how "it's closed" hides "it never landed".
+    """
+    want = str(claim.get("state", "")).strip().lower()
+    if want not in VALID_STATES:
+        return _verdict(
+            claim,
+            "unverifiable",
+            f"artifact_state needs 'state' in {sorted(VALID_STATES)}; got {want!r}.",
+        )
+    repo, number, err = _parse_ref(claim)
+    if err:
+        return _verdict(claim, "unverifiable", err)
+
+    rc, out = ctx.gh(
+        [
+            "api",
+            f"repos/{repo}/issues/{number}",
+            "--jq",
+            "{state:.state, merged:(.pull_request.merged_at != null), pr:(.pull_request != null)}",
+        ]
+    )
+    if rc != 0:
+        # Could not reach the source. NOT a contradiction of the claim.
+        return _verdict(
+            claim,
+            "unverifiable",
+            f"could not read {repo}#{number} from GitHub (rc={rc}): {out.strip()[:200]}",
+        )
+    text = out.strip()
+    actual = (
+        "closed"
+        if '"state":"closed"' in text.replace(" ", "")
+        else ("open" if '"state":"open"' in text.replace(" ", "") else "")
+    )
+    if not actual:
+        return _verdict(
+            claim,
+            "unverifiable",
+            f"could not parse GitHub's answer for {repo}#{number}: {text[:200]}",
+        )
+    is_pr = '"pr":true' in text.replace(" ", "")
+    merged = '"merged":true' in text.replace(" ", "")
+    if merged:
+        actual = "merged"
+
+    kind = "PR" if is_pr else "issue"
+    if actual == want:
+        return _verdict(claim, "backed", f"{repo}#{number} is a {kind} and is {actual}.")
+    if want == "closed" and actual == "merged":
+        # Defensible but worth naming rather than silently passing.
+        return _verdict(
+            claim,
+            "backed",
+            f"{repo}#{number} is a merged {kind} (GitHub also reports it closed).",
+        )
+    return _verdict(
+        claim,
+        "unbacked",
+        f"{repo}#{number} is a {kind} and is {actual}, not {want}.",
+    )
+
+
+# --------------------------------------------------------------------------
+# capability — "we already do X" / "X is missing"
+# --------------------------------------------------------------------------
+def _check_capability(claim: dict, ctx: StateContext) -> dict:
+    """Check a 'we already do X' / 'X is missing' claim against our own source.
+
+    Claim fields: ``path`` (repo-relative or absolute), ``pattern``, optional
+    ``present`` (default True — the claim is that the thing IS there),
+    ``anchor`` (REQUIRED when ``present`` is False), and optional ``regex``
+    (default False; substring otherwise, because a claim should not have to be
+    a well-formed regex to be checkable).
+
+    An absence claim is only as good as the path it was handed, so it must
+    carry an ``anchor`` that proves the file is the right one.  Without that,
+    any failure to match — a wrong path, a typo, a case difference — reads as
+    confirmation.  The anchor closes wrong-file and empty-file; it does not
+    close a typo in ``pattern`` itself, and "absent from one file" is not
+    "absent from the project".
+    """
+    pattern = str(claim.get("pattern", ""))
+    path_s = str(claim.get("path", "")).strip()
+    if not pattern or not path_s:
+        return _verdict(
+            claim,
+            "unverifiable",
+            "capability claims need both 'path' and 'pattern'.",
+        )
+    present = claim.get("present", True)
+    if not isinstance(present, bool):
+        return _verdict(claim, "unverifiable", f"'present' must be a boolean; got {present!r}.")
+    # AN ABSENCE CLAIM NEEDS A POSITIVE CONTROL (Prudence, #892 r3).
+    #
+    # The two halves are not symmetric. `present: True` is backed only when the
+    # pattern is actually found: the evidence is positive, and a bad pattern is
+    # SELF-CORRECTING because you get a loud `unbacked` and go fix it.
+    # `present: False` is backed when NOTHING is found -- so a wrong path, a
+    # typo or a case mismatch all confirm the claim, and a bad pattern is
+    # SELF-CONFIRMING. Measured: a `present: False` claim about "retry" in
+    # http.py came back `backed` while transport.py held MAX_RETRIES and
+    # send_with_retry. The project does retries; the gate endorsed "we do not."
+    #
+    # That is the class techne#584 exists to catch -- "we already do X" is one
+    # of its four motivating wrong claims, and this is that claim negated and
+    # returned endorsed. It is worse than a false `unbacked`: that trains a
+    # reader to ignore the gate, whereas a false `backed` is RELIED ON and
+    # launders an unverified assertion as verified.
+    #
+    # WHAT THE ANCHOR DOES NOT CLOSE, stated rather than hidden: a typo in
+    # `pattern` itself, and the larger gap that "absent from one file" cannot
+    # establish "absent from the project" -- a claim wanting that must name its
+    # own scope.
+    anchor = claim.get("anchor")
+    if not present and not anchor:
+        return _verdict(
+            claim,
+            "unverifiable",
+            "an absence claim (present=false) must carry an 'anchor' — a pattern "
+            "that MUST be in the file — or a wrong path confirms it on no evidence.",
+        )
+
+    path = Path(path_s)
+    if not path.is_absolute():
+        if ctx.repo_root is None:
+            return _verdict(
+                claim,
+                "unverifiable",
+                f"{path_s!r} is relative and no repo_root is set.",
+            )
+        path = ctx.repo_root / path
+
+    text = ctx.read(path)
+    if text is None:
+        # The file may simply not exist here. That is not evidence about the
+        # capability — a missing file cannot disprove "we do X".
+        return _verdict(
+            claim,
+            "unverifiable",
+            f"could not read {path} — nothing can be concluded about the claim.",
+        )
+
+    use_regex = claim.get("regex", False)
+
+    def _seek(needle: str) -> bool | str:
+        if use_regex:
+            try:
+                return re.search(needle, text) is not None
+            except re.error as exc:
+                return f"bad regex {needle!r}: {exc}"
+        return needle in text
+
+    if anchor is not None:
+        hit = _seek(str(anchor))
+        if isinstance(hit, str):
+            return _verdict(claim, "unverifiable", hit)
+        if not hit:
+            # The positive control failed: this is not the file the claim is
+            # about, so finding nothing in it says nothing.
+            return _verdict(
+                claim,
+                "unverifiable",
+                f"the anchor {anchor!r} is not in {path}, so this is not the file "
+                "the claim is about — an absence here is not evidence.",
+            )
+
+    hit = _seek(pattern)
+    if isinstance(hit, str):
+        return _verdict(claim, "unverifiable", hit)
+    found = hit
+
+    if found == present:
+        shape = "present" if present else "absent"
+        return _verdict(claim, "backed", f"{pattern!r} is {shape} in {path}, as claimed.")
+    if present:
+        return _verdict(
+            claim, "unbacked", f"{pattern!r} is NOT in {path}, but the claim says it is."
+        )
+    return _verdict(claim, "unbacked", f"{pattern!r} IS in {path}, but the claim says it is not.")
+
+
+_CHECKERS: dict[str, Callable[[dict, StateContext], dict]] = {
+    "artifact_state": _check_artifact_state,
+    "capability": _check_capability,
+}
+
+
+def check_state_claims(claims: list[dict], ctx: StateContext) -> list[dict]:
+    """Check state claims, returning evidence.py's verdict shape.
+
+    Verdicts are ``{claim, status, detail}`` with status backed / unbacked /
+    unverifiable, so a caller can merge these with ``check_claims()`` output
+    and count unbacked across both without special-casing.
+    """
+    verdicts: list[dict] = []
+    for claim in claims:
+        checker = _CHECKERS.get(str(claim.get("type", "")))
+        if checker is None:
+            verdicts.append(
+                _verdict(claim, "unverifiable", f"Unknown state claim type {claim.get('type')!r}.")
+            )
+            continue
+        try:
+            verdicts.append(checker(claim, ctx))
+        except Exception as exc:  # pragma: no cover - the gate must never raise
+            # A gate that can crash a turn is worse than a gate that abstains.
+            verdicts.append(
+                _verdict(claim, "unverifiable", f"check raised {type(exc).__name__}: {exc}")
+            )
+    return verdicts

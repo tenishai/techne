@@ -514,6 +514,70 @@ def test_mcp_tools_doc_is_complete():
     assert not missing, f"tools registered but undocumented in docs/mcp-tools.md: {missing}"
 
 
+def test_mcp_tools_doc_descriptions_are_not_stale():
+    """The doc's prose must still match the live registry (techne#584, #892).
+
+    `test_mcp_tools_doc_is_complete` above asserts only that a `### \u0060name\u0060`
+    HEADING exists. That is satisfiable by a heading over a description that no
+    longer resembles the tool — which is exactly what happened: #892 changed
+    `techne_check_evidence` from deeds-only to deeds-plus-state, and the doc kept
+    the byte-for-byte pre-PR text while the suite stayed green. Constance's
+    concordance found it; no test could have.
+
+    The doc truncates long descriptions at a word boundary and appends an
+    ellipsis, so the assertion is PREFIX-shaped rather than equality: whatever
+    the doc shows must be how the live description actually starts.
+    """
+    import re
+    from pathlib import Path
+
+    from techne.mcp_server import TOOLS
+
+    doc = Path(__file__).resolve().parent.parent / "docs" / "mcp-tools.md"
+    text = doc.read_text(encoding="utf-8")
+
+    stale: list[str] = []
+    unparseable: list[str] = []
+    for tool in TOOLS:
+        # THE WHOLE PARAGRAPH, to the blank line -- not up to the first newline.
+        # A first-line-only match is blind to a garbled tail, and that is not
+        # hypothetical: the regeneration in 8b3248c replaced only the first
+        # physical line of three wrapped entries and left dangling fragments
+        # behind, and this test was GREEN over all three (Prudence, #892). A
+        # guard added to pin this file gave false assurance about this file.
+        # `(?:\n\n|\Z)` so the LAST entry in the file terminates at end-of-file.
+        # Widening to \n\n made three wrapped entries visible and made the final
+        # entry invisible -- `pattern_related` was guarded before and was not
+        # after, a regression this test could not see (Prudence, #892 r2).
+        m = re.search(r"### `%s`\n\n(.*?)(?:\n\n|\Z)" % re.escape(tool["name"]), text, re.S)
+        if not m:
+            # NOT `continue`. The old comment ("absence is the other test's job")
+            # was true when a match was near-certain. It is not now:
+            # test_mcp_tools_doc_is_complete already guarantees the HEADING
+            # exists, so this branch is reachable only when the heading is there
+            # and the paragraph will not parse -- the one case nothing covered.
+            # A branch that swallows a hole, justified by a comment about a
+            # different case, is how this stayed silent twice.
+            unparseable.append(tool["name"])
+            continue
+        shown = m.group(1).rstrip("…").rstrip()
+        # A wrapped paragraph is one logical line in the registry. Collapse BOTH
+        # sides: collapsing only the doc side makes a registry description
+        # containing a double space fail with a message blaming the doc.
+        shown = " ".join(shown.split())
+        live = " ".join(tool["description"].split())
+        if not live.startswith(shown):
+            stale.append(tool["name"])
+    assert not unparseable, (
+        "docs/mcp-tools.md has a `### name` heading for these tools but the "
+        f"paragraph under it could not be parsed: {unparseable}"
+    )
+    assert not stale, (
+        "docs/mcp-tools.md describes these tools differently from the live "
+        f"registry — regenerate their entries: {stale}"
+    )
+
+
 def test_the_four_domains_section_names_all_four():
     """techne#744. `test_mcp_tools_doc_is_complete` above measures a PROXY: it asks
     whether a `### \u0060name\u0060` heading exists ANYWHERE in the file. That is

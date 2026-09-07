@@ -7,6 +7,33 @@ All notable changes to techne are documented here. Format loosely follows
 
 ### Added
 
+- The evidence gate now covers **state claims**, not just deeds (#584). `evidence.py`
+  verifies what an agent *did* against the observation ledger; assertions about
+  *project state* — who owns an issue, whether a PR is merged, whether we already
+  do X — had no check at all, because conversation offers no diff and no suite for
+  a reviewer to read. The issue's measurement was four wrong state claims in one
+  session, three of them caught by the operator.
+
+  `techne/core/state_claims.py` adds two types, reachable through the same
+  `techne_check_evidence` call and mixable with deed claims in one list:
+  `artifact_state` (against `gh`, keeping `merged` distinct from `closed`) and
+  `capability` (against our own source).
+
+  A third type, `ownership` — mined from the coord bus — was built and **cut
+  before merge** (#894). Both shipped checkers work because the source *answers
+  the question asked*: `gh` returns the state, the filesystem returns the file.
+  The bus does not answer "who owns X"; it holds prose ownership can sometimes
+  be inferred from. Measured against the real bus it named a claimant for 21% of
+  subjects and was wrong for about 30% of those. Shipping it would have made
+  `backed` mean a lookup in two types and a guess in a third, with no way for a
+  consumer of one verdict list to tell them apart.
+
+  Absence is always `unverifiable`, never `unbacked` — a subject the bus never
+  mentions, an issue `gh` could not reach, a missing file. `unbacked` means the
+  source was read and contradicts the claim. The MCP result reports
+  `unverifiable_count` beside `unbacked_count` so "0 unbacked" cannot be misread
+  as "all checked". Advisory only, as the deed gate is.
+
 - `architect` stats now report `patterns_superseded` beside the active count, and
   `techne architect` prints `Patterns: N active … (+M superseded)` (#878). Nothing was
   miscounted — `patterns` has always meant *active* patterns — but the label said
