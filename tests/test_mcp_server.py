@@ -536,7 +536,8 @@ def test_mcp_tools_doc_descriptions_are_not_stale():
     doc = Path(__file__).resolve().parent.parent / "docs" / "mcp-tools.md"
     text = doc.read_text(encoding="utf-8")
 
-    stale = []
+    stale: list[str] = []
+    unparseable: list[str] = []
     for tool in TOOLS:
         # THE WHOLE PARAGRAPH, to the blank line -- not up to the first newline.
         # A first-line-only match is blind to a garbled tail, and that is not
@@ -544,14 +545,33 @@ def test_mcp_tools_doc_descriptions_are_not_stale():
         # physical line of three wrapped entries and left dangling fragments
         # behind, and this test was GREEN over all three (Prudence, #892). A
         # guard added to pin this file gave false assurance about this file.
-        m = re.search(r"### `%s`\n\n(.*?)\n\n" % re.escape(tool["name"]), text, re.S)
+        # `(?:\n\n|\Z)` so the LAST entry in the file terminates at end-of-file.
+        # Widening to \n\n made three wrapped entries visible and made the final
+        # entry invisible -- `pattern_related` was guarded before and was not
+        # after, a regression this test could not see (Prudence, #892 r2).
+        m = re.search(r"### `%s`\n\n(.*?)(?:\n\n|\Z)" % re.escape(tool["name"]), text, re.S)
         if not m:
-            continue  # absence is the other test's job
+            # NOT `continue`. The old comment ("absence is the other test's job")
+            # was true when a match was near-certain. It is not now:
+            # test_mcp_tools_doc_is_complete already guarantees the HEADING
+            # exists, so this branch is reachable only when the heading is there
+            # and the paragraph will not parse -- the one case nothing covered.
+            # A branch that swallows a hole, justified by a comment about a
+            # different case, is how this stayed silent twice.
+            unparseable.append(tool["name"])
+            continue
         shown = m.group(1).rstrip("…").rstrip()
-        # A wrapped paragraph is one logical line in the registry.
+        # A wrapped paragraph is one logical line in the registry. Collapse BOTH
+        # sides: collapsing only the doc side makes a registry description
+        # containing a double space fail with a message blaming the doc.
         shown = " ".join(shown.split())
-        if not tool["description"].startswith(shown):
+        live = " ".join(tool["description"].split())
+        if not live.startswith(shown):
             stale.append(tool["name"])
+    assert not unparseable, (
+        "docs/mcp-tools.md has a `### name` heading for these tools but the "
+        f"paragraph under it could not be parsed: {unparseable}"
+    )
     assert not stale, (
         "docs/mcp-tools.md describes these tools differently from the live "
         f"registry — regenerate their entries: {stale}"

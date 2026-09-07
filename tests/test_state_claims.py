@@ -419,3 +419,137 @@ def test_undecodable_file_is_unverifiable(tmp_path):
         StateContext(repo_root=tmp_path),
     )
     assert v["status"] == "unverifiable", v["detail"]
+
+
+# ------------------- Prudence round 2 (#892) — her corpus ------------------
+def _two_row_bus(tmp_path, second_body, first="Claiming techne#570 - starting work."):
+    db = tmp_path / f"bus{abs(hash(second_body))}.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE coord_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "from_session TEXT NOT NULL, from_name TEXT, recipient TEXT NOT NULL, "
+        "thread_id TEXT, body TEXT NOT NULL, created_at TIMESTAMP)"
+    )
+    conn.execute(
+        "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+        " VALUES ('s','poe_1','coord',?, '2026-09-01')",
+        (first,),
+    )
+    conn.execute(
+        "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+        " VALUES ('s','poe_9','coord',?, '2026-09-02')",
+        (second_body,),
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+# Ordinary bus traffic that must NOT be read as poe_9 claiming the subject.
+# Every one of these produced a false `unbacked` in round 2 (Prudence, #892).
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Are you still working on techne#570?",
+        "techne#570 is blocked on review, so starting on techne#571 instead.",
+        "Is anyone starting on techne#570 today?",
+        "I'm no longer working on techne#570, it's poe_1's.",
+        "techne#570 is not mine, poe_1 has it.",
+        "Taking a look at techne#570 before you push.",
+        "techne#570 takes about nine minutes in CI.",
+        "I'd land techne#570 on your own branch rather than main.",
+        "The state-claims gate reports an unbacked claim in techne#570.",
+        "Heads up: I'm working on the docs rail, ignore my noise near techne#570.",
+        "Nice work on techne#570, poe_1 - reviewed, no notes.",
+    ],
+)
+def test_ordinary_traffic_is_not_a_claim(tmp_path, body):
+    v = _one(
+        {"type": "ownership", "subject": "techne#570", "owner": "poe_1"},
+        StateContext(db_path=_two_row_bus(tmp_path, body)),
+    )
+    assert v["status"] != "unbacked", f"{body!r} -> {v['detail']}"
+
+
+# Real claims that must be RECOGNISED. A missed claim is not safe: when an older
+# row is claim-shaped and the newer real claim is not, the verdict is `backed`
+# for the STALE owner — the handoff blindness techne#584 exists to catch.
+@pytest.mark.parametrize(
+    "body",
+    [
+        "I owned techne#570 since Tuesday.",
+        "Picking techne#570 up now.",
+        "Grabbing techne#570.",
+        "techne#570 assigned to me.",
+        "I'll handle techne#570.",
+        "On it: techne#570.",
+        "Claiming techne#570 now.",
+        "Taking techne#570 from poe_1 by handoff.",
+    ],
+)
+def test_a_real_claim_is_recognised(tmp_path, body):
+    v = _one(
+        {"type": "ownership", "subject": "techne#570", "owner": "poe_1"},
+        StateContext(db_path=_two_row_bus(tmp_path, body)),
+    )
+    assert v["status"] == "unbacked", f"{body!r} -> stale-owner {v['status']}"
+
+
+# `-` is not a word character, so the numeric collision closed for free while
+# branch and worktree-path siblings stayed open (Prudence, #892 r2).
+@pytest.mark.parametrize(
+    "subject,body",
+    [
+        ("feat/584", "Claiming feat/584-state-claims - unrelated."),
+        ("fix/51-thing", "Claiming fix/51-thing-followup - unrelated."),
+        ("/tmp/wt-3", "Claiming /tmp/wt-3-old - unrelated."),
+    ],
+)
+def test_a_suffixed_sibling_is_not_the_subject(tmp_path, subject, body):
+    db = tmp_path / f"s{abs(hash(subject))}.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE coord_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "from_session TEXT NOT NULL, from_name TEXT, recipient TEXT NOT NULL, "
+        "thread_id TEXT, body TEXT NOT NULL, created_at TIMESTAMP)"
+    )
+    conn.execute(
+        "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+        " VALUES ('s','poe_9','coord',?, '2026-09-02')",
+        (body,),
+    )
+    conn.commit()
+    conn.close()
+    v = _one({"type": "ownership", "subject": subject, "owner": "poe_9"}, StateContext(db_path=db))
+    assert v["status"] != "unbacked", v["detail"]
+
+
+# The anchor must not stop matching the shapes we actually use.
+@pytest.mark.parametrize(
+    "subject,body",
+    [
+        ("techne#570", "Claiming techne#570 - starting work."),
+        ("techne#570", "Claiming `techne#570` now."),
+        ("techne#570", "Claiming (techne#570)."),
+        ("feat/584-state-claims", "Claiming branch feat/584-state-claims in wt-3."),
+        ("feat/584-state-claims", "Claiming /tmp/wt/feat/584-state-claims/ now."),
+        ("fix/51-thing", "Claiming fix/51-thing."),
+    ],
+)
+def test_real_subject_shapes_still_match(tmp_path, subject, body):
+    db = tmp_path / f"m{abs(hash(subject + body))}.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE coord_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "from_session TEXT NOT NULL, from_name TEXT, recipient TEXT NOT NULL, "
+        "thread_id TEXT, body TEXT NOT NULL, created_at TIMESTAMP)"
+    )
+    conn.execute(
+        "INSERT INTO coord_messages (from_session, from_name, recipient, body, created_at)"
+        " VALUES ('s','poe_1','coord',?, '2026-09-02')",
+        (body,),
+    )
+    conn.commit()
+    conn.close()
+    v = _one({"type": "ownership", "subject": subject, "owner": "poe_1"}, StateContext(db_path=db))
+    assert v["status"] == "backed", v["detail"]
