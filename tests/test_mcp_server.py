@@ -514,6 +514,42 @@ def test_mcp_tools_doc_is_complete():
     assert not missing, f"tools registered but undocumented in docs/mcp-tools.md: {missing}"
 
 
+def test_mcp_tools_doc_descriptions_are_not_stale():
+    """The doc's prose must still match the live registry (techne#584, #892).
+
+    `test_mcp_tools_doc_is_complete` above asserts only that a `### \u0060name\u0060`
+    HEADING exists. That is satisfiable by a heading over a description that no
+    longer resembles the tool — which is exactly what happened: #892 changed
+    `techne_check_evidence` from deeds-only to deeds-plus-state, and the doc kept
+    the byte-for-byte pre-PR text while the suite stayed green. Constance's
+    concordance found it; no test could have.
+
+    The doc truncates long descriptions at a word boundary and appends an
+    ellipsis, so the assertion is PREFIX-shaped rather than equality: whatever
+    the doc shows must be how the live description actually starts.
+    """
+    import re
+    from pathlib import Path
+
+    from techne.mcp_server import TOOLS
+
+    doc = Path(__file__).resolve().parent.parent / "docs" / "mcp-tools.md"
+    text = doc.read_text(encoding="utf-8")
+
+    stale = []
+    for tool in TOOLS:
+        m = re.search(r"### `%s`\n\n(.*?)\n" % re.escape(tool["name"]), text, re.S)
+        if not m:
+            continue  # absence is the other test's job
+        shown = m.group(1).rstrip("…").rstrip()
+        if not tool["description"].startswith(shown):
+            stale.append(tool["name"])
+    assert not stale, (
+        "docs/mcp-tools.md describes these tools differently from the live "
+        f"registry — regenerate their entries: {stale}"
+    )
+
+
 def test_the_four_domains_section_names_all_four():
     """techne#744. `test_mcp_tools_doc_is_complete` above measures a PROXY: it asks
     whether a `### \u0060name\u0060` heading exists ANYWHERE in the file. That is

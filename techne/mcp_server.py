@@ -1496,9 +1496,10 @@ TOOLS = [
             "claims only; free-text extraction is out of scope. NOTE: "
             "commit/tests_green/ran_action come from Bash, which is off by default — those "
             "return 'unverifiable' (not 'unbacked') unless capture_bash is enabled. "
-            "'unverifiable' ALWAYS means the source could not be read, never that the "
-            "claim is false — check unverifiable_count before reading 0 unbacked as 'all "
-            "clear'."
+            "'unverifiable' NEVER means the claim is false — it means the claim could "
+            "not be established, either because the source was unreadable or because it "
+            "was read and does not speak to the claim (a branch the coord bus never "
+            "mentions). Check unverifiable_count before reading 0 unbacked as 'all clear'."
         ),
         "inputSchema": {
             "type": "object",
@@ -2474,8 +2475,12 @@ def _techne_check_evidence(args: dict, config: Config) -> dict:
         "verdicts": verdicts,
         "unbacked_count": unbacked_count,
         # Surfaced separately so a caller cannot read "0 unbacked" as "all
-        # checked". Unverifiable means the source could not be read, which is
-        # exactly the state the operator needs to see rather than infer.
+        # checked". Unverifiable means the claim COULD NOT BE ESTABLISHED — the
+        # source was unreadable, OR it was read and simply does not speak to the
+        # claim. Both are states the operator needs to see rather than infer.
+        # Saying only "could not be read" understates it: an ownership claim for
+        # a branch the bus never mentions is unverifiable after a wholly
+        # successful read (Constance, #892).
         "unverifiable_count": unverifiable_count,
     }
 
