@@ -127,6 +127,19 @@ techne reflect ingest /tmp/batch.json
 Run it once against a 31-thread backlog and you drain at most 25, with nothing in the
 procedure telling you to go again. The CLI does echo `note` to stderr — read it.
 
+**Declining a thread is allowed, and it ends the loop rather than spinning it.** Leave an
+item's `raw_response` blank and `ingest` skips it without draining: the debt stays owed, on
+purpose. Since techne#901 that refusal is *recorded*, so `emit` offers the thread once and
+then stops offering it — otherwise #900's re-offer and this decline chase each other and
+"until empty" never arrives. The row stays visible as `declined` in `reconcile`; answer the
+prompt you already hold whenever you want to pay it, and the record retires itself.
+
+**Watch the placeholder, because it is the same literal.** `emit` writes
+`raw_response: ""` into every item, so an item you simply have not filled yet reads as a
+refusal once you run `ingest`. That is survivable — `techne reflect undecline --session
+<id>` puts the thread back in the offer — but if you lose the batch file before noticing,
+the debt is owed with nothing offering it until you retract.
+
 **The one case where "until empty" never arrives.** A single thread whose rendered prompt
 alone exceeds `emit_max_chars` sets `oversized`, and the cursor is deliberately *not*
 advanced — so every further pass returns that same one item and the batch never empties.
@@ -182,8 +195,37 @@ distinction decides what you should do about them, so it is worth keeping straig
   standing.** They are the population techne#646 exists to keep visible, and `reconcile`
   deliberately does not touch them.
 
+Two more populations are the opposite shape: their prompts render perfectly well, and
+what separates them is what happens on the next `emit`.
+
+- **Orphaned** — the id is current, above threshold, and would render today, but the emit
+  cursor already counts it as delivered. The cursor advances when a batch is *rendered*, so
+  a pass whose answers never came back (the common case: `techne_reflect_emit` exceeded the
+  MCP token cap and spilled to a file) left the row owed and the cursor satisfied. The
+  symptom is `emit` returning `count: 0` for a session the SessionStart banner still calls
+  pending. **Do nothing.** Since techne#900 the next `emit` for that session detects the
+  disagreement and re-offers those threads by itself; `reconcile` reports the count and
+  never removes it. A nonzero `orphaned` that does not clear after an emit is a regression,
+  not a chore.
+
+- **Declined** — same shape as orphaned, opposite cause and opposite remedy. The prompt
+  was offered, the agent came back, and it left `raw_response` blank. Nothing will
+  re-offer it while the emit cursor claims the thread, by design (techne#901): a decline
+  is a decision, and re-asking makes the drain loop spin forever. The row stays owed and visible for as long as it goes
+  unanswered. **If the blank was an accident, retract it** — `emit` pre-fills
+  `raw_response: ""` as its placeholder, so a partial fill and a refusal look identical
+  in the file:
+
+  ```sh
+  techne reflect undecline --session <session-id>   # or --thread <id> for just one
+  ```
+
 `techne reflect reconcile` prints the split per session, which is the cheapest way to see
-which kind you have.
+which kind you have:
+
+```
+c7d98cb5-b932-40  superseded=0  below_threshold=1  orphaned=0  declined=0
+```
 
 **A historical note, because the old explanation is still quoted in places.** techne#646
 originally attributed all of this to the emittability predicate being "evaluated twice
@@ -193,9 +235,10 @@ because `run_session_end` replaced the boundary table but not the thread table. 
 "evidence, not residue" instruction still holds — but only for the below-threshold kind.
 Blanket-draining is still wrong; retiring a provably-superseded row is not draining.
 
-So the headline debt number overstates payable work by however many of both you have. Before
-a drain, run `reconcile` and read the split — otherwise you are measuring against a target
-you cannot reach.
+So the headline debt number overstates payable work by however many superseded and
+below-threshold rows you have. Before a drain, run `reconcile` and read the split —
+otherwise you are measuring against a target you cannot reach. Orphaned rows are the
+exception: they *are* payable, which is why they self-heal rather than being retired.
 
 ---
 

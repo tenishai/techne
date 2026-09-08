@@ -748,6 +748,151 @@ def emit_reflection_batch(
     return batch
 
 
+def _owed_thread_ids(config: Config, session_id: str) -> set[str]:
+    """Thread ids this session still owes: queue rows with no `drained_at` stamp.
+
+    The LEDGER half of the cursor/ledger pair. `_emitted_keys` says the two are keyed
+    on the same thing so they "agree by construction"; nothing enforced that, which is
+    techne#900. This is what lets a caller check it.
+    """
+    conn = connect(config.db_path)
+    try:
+        return {
+            r["thread_id"]
+            for r in conn.execute(
+                "SELECT thread_id FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NULL",
+                (session_id,),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
+def _declined_keys(config: Config, session_id: str) -> set[str]:
+    """Threads the agent RENDERED, came back for, and deliberately left unanswered.
+
+    THE DISTINCTION #900's HEAL TURNS ON (Prudence, #901 r1). A blank `raw_response` is
+    blessed by `ingest_reflection_batch` as a decline: skipped without draining, so the
+    debt stays owed. That leaves exactly the shape the heal fires on — owed row, cursor
+    claims it — so the documented "repeat until the batch comes back empty" loop never
+    terminated. Measured: 6 iterations, the same thread every time.
+
+    An orphan is a thread ingest NEVER SAW. A decline is one it saw and refused. Only the
+    first is a bookkeeping accident, and only the first should be re-offered.
+    """
+    from techne.core.extension_state import get_state
+
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    if not marker:
+        return set()
+    return set(marker.get("declined", []))
+
+
+def _record_declines(config: Config, session_id: str, thread_ids: list[str]) -> None:
+    """Add *thread_ids* to the session's declined set, preserving the rest of the marker."""
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id or not thread_ids:
+        return
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        # NEVER MINT A MARKER HERE (Prudence, #901 r2). `dict(... or {})` wrote
+        # `{"declined": [...]}` with no `emitted` key, and `_marker_has_unemitted_threads`
+        # reads `emitted is None` as a #268-era marker: NOT PENDING, permanently, ahead of
+        # the observations-growth re-open. That silences the SessionStart nudge AND
+        # `pending_reflection`, which is where emit picks its default target — so the
+        # session becomes unreachable from both hooks and both emit entry points, and only
+        # an explicit id can still get to it. Reachable two ways she measured: an oversized
+        # emit writes no marker, and a batch can name a session that never emitted.
+        #
+        # Skipping is not a compromise, it is the correct answer. With no marker
+        # `_emitted_keys` rebuilds from DRAINED rows, a declined row is not drained, so the
+        # cursor never claims it and the heal cannot re-offer it. There is nothing to
+        # suppress.
+        if not marker:
+            return
+        marker = dict(marker)
+        marker["declined"] = sorted(set(marker.get("declined", [])) | set(thread_ids))
+        set_state(conn, f"reflect:emitted:{session_id}", marker)
+    finally:
+        conn.close()
+
+
+def _clear_decline(config: Config, session_id: str, thread_id: str) -> None:
+    """Drop *thread_id* from the declined set — it was answered after all.
+
+    Without this the record would outlive the decision it describes, and a thread the
+    agent came back and answered would still read as refused.
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id or not thread_id:
+        return
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        if not marker or thread_id not in set(marker.get("declined", [])):
+            return
+        marker = dict(marker)
+        marker["declined"] = sorted(set(marker["declined"]) - {thread_id})
+        set_state(conn, f"reflect:emitted:{session_id}", marker)
+    finally:
+        conn.close()
+
+
+def clear_declines(config: Config, session_id: str, thread_ids: list[str] | None = None) -> int:
+    """Retract declines so `emit` offers those threads again. Returns the count cleared.
+
+    THE WAY BACK, AND WITHOUT IT THE DECLINE IS A TRAP (Prudence, #901 r2). `techne
+    reflect emit` PRE-FILLS `raw_response: ""` as a placeholder, and `ingest` reads that
+    same literal as a refusal — so an ordinary partial fill is indistinguishable from a
+    deliberate one. Before this PR the collision was harmless because #900's heal
+    re-offered the thread; #901 r1 removed that recovery to stop the drain loop spinning,
+    and removing a recovery without adding one leaves a thread owed forever and unpayable
+    if its batch file is lost.
+
+    A decline is still a decision — nothing re-offers it on its own. It is just no longer
+    an irreversible one.
+    """
+    from techne.core.extension_state import get_state, set_state
+
+    if not session_id:
+        return 0
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+        current = set((marker or {}).get("declined", []))
+        if not marker or not current:
+            return 0
+        drop = current if thread_ids is None else current & set(thread_ids)
+        if not drop:
+            return 0
+        marker = dict(marker)
+        marker["declined"] = sorted(current - drop)
+        set_state(conn, f"reflect:emitted:{session_id}", marker)
+        return len(drop)
+    finally:
+        conn.close()
+
+
+def declined_queue_rows(config: Config, session_id: str) -> list[str]:
+    """Undrained rows whose thread was rendered, returned for, and left unanswered.
+
+    Reported separately from `orphaned` because the two make OPPOSITE promises to the
+    operator: an orphan self-heals on the next emit, a decline is not re-offered while
+    the cursor claims the thread. Both are real owed debt and neither is ever swept
+    (#646).
+    """
+    owed = _owed_thread_ids(config, session_id)
+    return sorted(owed & _declined_keys(config, session_id)) if owed else []
+
+
 def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
     """Undrained queue rows for *session_id* that no emit can produce a prompt for.
 
@@ -837,6 +982,42 @@ def superseded_queue_rows(config: Config, session_id: str) -> list[str]:
     return [t for t in queued if t not in current]
 
 
+def orphaned_queue_rows(config: Config, session_id: str) -> list[str]:
+    """Undrained queue rows the emit cursor ALREADY counts as delivered (techne#900).
+
+    The third population, alongside superseded and below_threshold, and the one neither
+    of those can see: these rows render fine. The thread is current and above threshold.
+    The cursor was advanced when the batch was RENDERED and the answers were never
+    ingested, so emit excludes them and reports count:0 for a session reading pending.
+
+    DIAGNOSTIC ONLY. `emit_reflection_pass` now re-offers these once its batch comes out
+    empty, so a nonzero count here means the self-heal has not run yet for the session —
+    or that it regressed. Never drained here; #646's report-don't-sweep rule applies.
+    """
+    from techne.core.extension_state import get_state
+
+    owed = _owed_thread_ids(config, session_id)
+    if not owed:
+        return []
+    # A DECLINE IS NOT AN ORPHAN. Both are owed rows the cursor claims, but only the
+    # orphan self-heals, and `orphaned`'s whole promise to the operator is that it clears
+    # on the next emit. `declined_queue_rows` reports the other half.
+    renderable = owed - set(unemittable_queue_rows(config, session_id))
+    renderable -= _declined_keys(config, session_id)
+    if not renderable:
+        return []
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    # A legacy/absent marker claims nothing: `_emitted_keys` rebuilds those from the
+    # drained rows, so they cannot orphan anything by construction.
+    if not marker or marker.get("key") != _CURSOR_KEY:
+        return []
+    return sorted(renderable & set(marker.get("emitted", [])))
+
+
 def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
     """Find (and optionally remove) queue rows left behind by a replaced detection.
 
@@ -855,7 +1036,22 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
     links point into that table. Narrowing to undrained queue rows keeps the blast
     radius to exactly the rows that are provably meaningless.
 
-    Returns {sessions, superseded, below_threshold, removed, by_session}.
+    REPORTS TWO MORE POPULATIONS AND REMOVES NEITHER (techne#900, #901 r1). Both hold
+    rows that RENDER FINE, which is what makes them invisible to the first two — those
+    classify rows that cannot render at all. They differ in what happens next, and the
+    difference is the whole reason they are counted apart:
+      - `orphaned` — ingest never saw the thread. The next emit re-offers it, so a
+        nonzero count that does not clear is a regression signal, not a work list.
+      - `declined` — ingest saw it and the agent left it blank. NO EMIT RE-OFFERS IT
+        WHILE THE CURSOR CLAIMS IT, which is the only honest answer to a deliberate
+        refusal; the debt stays owed and visible. Read that as scoped, not absolute
+        (Prudence, #901 r3): a decline recorded against a thread the cursor does NOT
+        claim — a marker holding `emitted: []` — is offered normally, because the
+        exclusion it would need never applies. That is the safe direction, and
+        `clear_declines` is the deliberate way back.
+
+    Returns {sessions, superseded, below_threshold, orphaned, declined, removed,
+    by_session}.
     """
     conn = connect(config.db_path)
     try:
@@ -869,16 +1065,25 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         conn.close()
 
     by_session: dict[str, dict] = {}
-    superseded_total = below_total = 0
+    superseded_total = below_total = orphaned_total = declined_total = 0
     for sid in sessions:
         stale = superseded_queue_rows(config, sid)
         unemittable = unemittable_queue_rows(config, sid)
         below = [t for t in unemittable if t not in set(stale)]
-        if not stale and not below:
+        orphaned = orphaned_queue_rows(config, sid)
+        declined = declined_queue_rows(config, sid)
+        if not stale and not below and not orphaned and not declined:
             continue
-        by_session[sid] = {"superseded": stale, "below_threshold": below}
+        by_session[sid] = {
+            "superseded": stale,
+            "below_threshold": below,
+            "orphaned": orphaned,
+            "declined": declined,
+        }
         superseded_total += len(stale)
         below_total += len(below)
+        orphaned_total += len(orphaned)
+        declined_total += len(declined)
 
     removed = 0
     if apply and superseded_total:
@@ -900,6 +1105,8 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         "sessions": len(by_session),
         "superseded": superseded_total,
         "below_threshold": below_total,
+        "orphaned": orphaned_total,
+        "declined": declined_total,
         "removed": removed,
         "by_session": by_session,
     }
@@ -975,8 +1182,13 @@ def _emitted_keys(config: Config, session_id: str, marker: dict | None) -> set[s
 
     `thread_id` is the persisted FK — it is what `reflection_queue` is keyed on and what
     `drain_reflection_queue` stamps, so keying here on the same thing makes the cursor
-    and the ledger agree by construction instead of by coincidence. prompt_hash stays
-    exactly where it belongs: candidate dedup (#236), which WANTS to notice a re-render.
+    and the ledger COMPARABLE instead of incomparable. prompt_hash stays exactly where it
+    belongs: candidate dedup (#236), which WANTS to notice a re-render.
+
+    THIS PARAGRAPH SAID "agree by construction" UNTIL techne#900, AND THAT WAS THE NEXT
+    TWO WEEKS' BUG. A shared key does not make two records agree; it makes disagreement
+    detectable. Nothing detected it, so a cursor advanced on RENDER kept claiming threads
+    whose queue rows were still owed. `emit_reflection_pass` now checks.
 
     A pre-#733 marker is not migrated in place — its contents are unrecoverable — so the
     delivered set is rebuilt from the authoritative record: queue rows already drained.
@@ -1008,18 +1220,7 @@ def _owed_first(config: Config, session_id: str, batch: list[dict]) -> list[dict
     which on a session with paid early threads means re-rendering work already done
     while the owed rows stay unreachable pass after pass (techne#733).
     """
-    conn = connect(config.db_path)
-    try:
-        owed = {
-            r["thread_id"]
-            for r in conn.execute(
-                "SELECT thread_id FROM reflection_queue "
-                "WHERE session_id = ? AND drained_at IS NULL",
-                (session_id,),
-            ).fetchall()
-        }
-    finally:
-        conn.close()
+    owed = _owed_thread_ids(config, session_id)
     if not owed:
         return batch
     return sorted(batch, key=lambda i: i.get("thread_id") not in owed)
@@ -1089,7 +1290,28 @@ def emit_reflection_pass(
     # continuous, and the cursor keyed on it accumulated for two months (techne#733).
     # The cursor now keys on the persisted thread_id, so no stability claim about the
     # rendered prompt is load-bearing here any more.
-    batch = [item for item in batch if _cursor_key(item) not in already]
+    rendered = batch
+    batch = [item for item in rendered if _cursor_key(item) not in already]
+
+    # THE CURSOR DOES NOT OUTRANK THE LEDGER (techne#900). `delivered` below is set on
+    # RENDER, not on ingest, so a pass that renders and is never ingested — the routine
+    # case, since this tool's result regularly blows the MCP token cap and spills to a
+    # file — marks its threads emitted forever while their queue rows stay undrained.
+    #
+    # Heal only where the cursor is provably wrong: an EMPTY batch is the cursor saying
+    # "nothing left" about a session whose ledger still records owed rows that render
+    # today. Those were rendered and never paid. Drop them and re-offer.
+    #
+    # Scoped to the empty case on purpose. A non-empty batch changes nothing, so the
+    # multi-pass drain and the `emit -o file` / `ingest file` round trip — which
+    # legitimately renders long before it ingests — behave exactly as before.
+    if not batch:
+        stale = already & _owed_thread_ids(config, session_id) & current_ids
+        stale -= _declined_keys(config, session_id)
+        if stale:
+            already = already - stale
+            batch = [item for item in rendered if _cursor_key(item) in stale]
+
     batch = _owed_first(config, session_id, batch)
 
     # Bound the payload so a large session can't produce a batch that exceeds the MCP
@@ -1175,6 +1397,14 @@ def emit_reflection_pass(
                 f"reflect:emitted:{session_id}",
                 {
                     "key": _CURSOR_KEY,
+                    #: CARRIED FORWARD, not recomputed. emit rewrites this marker
+                    #: wholesale, so dropping the field erases every decline on the next
+                    #: pass. NOT an infinite loop -- this comment said so until #901 r3,
+                    #: and the teeth-check disproves it: the heal reads `declined` BEFORE
+                    #: this write, so the drain loop still terminates and the mutation is
+                    #: caught by a visibility assertion instead. The cost is "re-offered
+                    #: once per drain run", which is milder and still wrong.
+                    "declined": sorted(_declined_keys(config, session_id)),
                     #: The session's observation count AT WRITE TIME. `total` alone
                     #: cannot re-open a session that was judged empty and later grew,
                     #: because this marker is the only thing the nudge reads (#734 r2).
@@ -1268,6 +1498,7 @@ def ingest_one_and_drain(
     )
     if thread_id and not result.get("parse_failures") and not result.get("errors"):
         result["reflection_debt_drained"] = drain_reflection_queue(config.db_path, [thread_id])
+        _clear_decline(config, session_id, thread_id)
     return result
 
 
@@ -1278,16 +1509,24 @@ def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
     the agent fills each item's `raw_response`, `techne reflect ingest f`. An item
     whose raw_response is blank is a deliberately unanswered thread, not an error —
     it is skipped WITHOUT draining, so the debt stays owed.
+
+    THE DECLINE IS NOW RECORDED, AND IT HAS TO BE (Prudence, #901 r1). #900's heal
+    re-offers an owed row the cursor claims, which is exactly what a decline leaves
+    behind — so without this the documented drain loop never terminated. Recording it
+    keeps the debt owed and visible (`declined_queue_rows`, `reflect reconcile`) while
+    stopping the re-offer. Answering the thread later retires the record.
     """
     totals = new_ingest_counts()
     totals["skipped"] = 0
     totals["drained"] = 0
+    declined: dict[str, list[str]] = {}
     for it in items:
         raw = it.get("raw_response")
         if not isinstance(raw, str):
             raw = json.dumps(raw) if raw else ""  # tolerate an inlined array
         if not raw.strip():  # noqa: E501 - blank means the agent declined this thread
             totals["skipped"] += 1
+            declined.setdefault(it.get("session_id", ""), []).append(it.get("thread_id") or "")
             continue
         counts = ingest_one_and_drain(
             config,
@@ -1300,6 +1539,8 @@ def ingest_reflection_batch(config: Config, items: list[dict]) -> dict:
         totals["drained"] += counts.pop("reflection_debt_drained", 0)
         for k, v in counts.items():
             totals[k] += v
+    for sid, tids in declined.items():
+        _record_declines(config, sid, [t for t in tids if t])
     return totals
 
 
