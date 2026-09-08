@@ -3101,6 +3101,10 @@ def reflect_emit(ctx, session_id, limit, output):
 
     # Placeholder the agent fills in-place with its JSON candidate array per thread,
     # then feeds the SAME file to `ingest` — no id reconstruction needed.
+    #
+    # THIS LITERAL IS ALSO THE DECLINE SIGNAL, and the collision is deliberate but sharp
+    # (Prudence, #901 r2): an item still blank at ingest is read as "the agent declined",
+    # which stops emit re-offering it. `techne reflect undecline` is the way back.
     for it in batch:
         it["raw_response"] = ""
     payload = json.dumps(batch, indent=2)
@@ -3108,6 +3112,12 @@ def reflect_emit(ctx, session_id, limit, output):
         output.write_text(payload, encoding="utf-8")
         click.echo(
             f"Emitted {len(batch)} thread prompt(s) for session {session_id[:16]} -> {output}",
+            err=True,
+        )
+        click.echo(
+            "Fill each item's raw_response, then `techne reflect ingest`. An item left "
+            "blank counts as DECLINED and is not offered again — retract with "
+            f"`techne reflect undecline --session {session_id[:16]}` (a prefix is fine).",
             err=True,
         )
     else:
@@ -3215,6 +3225,67 @@ def reflect_discard(ctx, candidate_id, decided_by, decision_reason):
     click.echo(f"Discarded candidate #{candidate_id}")
 
 
+@reflect.command("undecline")
+@click.option("--session", "session_id", required=True, help="Session whose declines to retract.")
+@click.option(
+    "--thread",
+    "thread_ids",
+    multiple=True,
+    help="Retract only these thread ids (default: all declines for the session).",
+)
+@click.pass_context
+def reflect_undecline(ctx, session_id, thread_ids):
+    """Offer declined threads again.
+
+    Leaving an item's `raw_response` blank tells `ingest` the thread was declined, and
+    nothing re-offers a declined thread — that is deliberate, or `emit` and the decline
+    chase each other and the drain loop never ends (tenishai/techne#901).
+
+    But `emit` PRE-FILLS that same blank as a placeholder, so an ordinary partial fill
+    looks exactly like a refusal. This is the way back. The debt was never drained, so
+    nothing is being recovered here except the offer.
+    """
+    from techne.core.database import connect
+    from techne.core.reflect import clear_declines
+
+    config = ctx.obj["config"]
+    # SESSION_ID MAY BE A PREFIX, AND IT HAD BETTER BE (Prudence, #901 r3). `emit` prints
+    # the retraction command with `session_id[:16]` and a trailing "...", and no surface
+    # prints the full id — `reconcile` truncates, `techne history` truncates, and the batch
+    # file is the thing that is LOST in the case this command exists for. Matching the
+    # extension_state key exactly meant the printed command, pasted verbatim, exited 0 and
+    # retracted nothing. Same prefix resolution as `threads redetect`.
+    #: AN EMPTY PREFIX IS A WILDCARD, AND THE DELTA THAT ADDED RESOLUTION INTRODUCED IT
+    #: (Prudence, #901 r3). `LIKE '' || '%'` is `LIKE '%'`, so `--session ""` resolved to
+    #: the newest session and retracted all six of its declines -- measured. `required=True`
+    #: requires the FLAG, not a value, and the ordinary `--session "$SID"` with SID unset
+    #: is the trigger. `clear_declines` guards the empty id, but resolution now runs in
+    #: FRONT of that guard. `--session "."` reduces to the same wildcard via the rstrip.
+    prefix = session_id.rstrip(".")
+    row = None
+    if prefix:
+        conn = connect(config.db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE id LIKE ? || '%' ORDER BY started_at DESC LIMIT 1",
+                (prefix,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        # DISTINCT FROM "no declines", because they call for opposite actions and used to
+        # print identically — a mistyped id read as "nothing to do".
+        click.echo(f"No session matching: {session_id}", err=True)
+        ctx.exit(1)
+    sid = row["id"]
+
+    n = clear_declines(config, sid, list(thread_ids) or None)
+    if not n:
+        click.echo(f"No declines recorded for session {sid[:16]}...", err=True)
+        return
+    click.echo(f"Retracted {n} decline(s) for session {sid[:16]}...; `emit` will offer them again.")
+
+
 @reflect.command("reconcile")
 @click.option(
     "--apply",
@@ -3240,7 +3311,9 @@ def reflect_reconcile(ctx, apply_):
     for sid, rows in report["by_session"].items():
         click.echo(
             f"{sid[:16]}  superseded={len(rows['superseded'])}  "
-            f"below_threshold={len(rows['below_threshold'])}"
+            f"below_threshold={len(rows['below_threshold'])}  "
+            f"orphaned={len(rows['orphaned'])}  "
+            f"declined={len(rows['declined'])}"
         )
     click.echo(
         json.dumps(
@@ -3258,6 +3331,20 @@ def reflect_reconcile(ctx, apply_):
             f"{report['below_threshold']} row(s) left in place: their thread is current but "
             "now below reflect.min_observations_per_thread — that is tenishai/techne#646's "
             "real signal, not residue.",
+        )
+    if report["orphaned"]:
+        click.echo(
+            f"{report['orphaned']} row(s) the emit cursor already counts as delivered "
+            "but never had their answers ingested (tenishai/techne#900). Left in place "
+            "and never removed: the next `reflect emit` for those sessions re-offers "
+            "them.",
+        )
+    if report["declined"]:
+        click.echo(
+            f"{report['declined']} row(s) the agent was offered and left blank. Still "
+            "owed, never re-offered, never removed: a decline is a decision, and "
+            "re-asking would make `reflect emit` loop forever (tenishai/techne#901). "
+            "`techne reflect undecline --session <id-or-prefix>` offers them again.",
         )
 
 
