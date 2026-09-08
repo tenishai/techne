@@ -1922,7 +1922,7 @@ def test_a_drifting_hash_does_not_re_emit_or_inflate_the_cursor(tmp_path):
     re-emitted AND a second entry appended — accumulating without bound. Measured on the
     operator's store: 51 entries for 23 threads, remaining=-27."""
     from techne.core.knowledge import store
-    from techne.core.reflect import emit_reflection_pass
+    from techne.core.reflect import emit_reflection_pass, ingest_reflection_batch
 
     config = _mk_config(tmp_path, enabled=True)
     config.reflect.include_existing_knowledge = True  # the drift needs the block on
@@ -1930,6 +1930,15 @@ def test_a_drifting_hash_does_not_re_emit_or_inflate_the_cursor(tmp_path):
 
     first = emit_reflection_pass(config, session_id)
     assert first["count"] >= 1, "precondition: at least one thread emitted"
+
+    # THE DEBT IS PAID BEFORE THE SECOND EMIT, and it was not before techne#900.
+    # This test used to skip the ingest and still demand count == 0, which conflated two
+    # different claims: "a knowledge write must not re-emit" (#733, true) and "an
+    # un-ingested thread stays delivered forever" (#900, the bug). Draining first
+    # isolates hash drift, which is the only thing #733 is about — the cursor still has
+    # to recognise this thread across the write, and under the old prompt_hash key it
+    # would not. The unpaid path gets its own assertions below.
+    ingest_reflection_batch(config, _fill_raw_responses(first["batch"]))
 
     store(config.db_path, "Session work Filesystem observations tools filesystem", type="fact")
 
@@ -1939,6 +1948,18 @@ def test_a_drifting_hash_does_not_re_emit_or_inflate_the_cursor(tmp_path):
     marker = _cursor(config, session_id)
     assert len(marker["emitted"]) <= marker["total"], "cursor must never exceed the thread count"
     assert marker.get("remaining", 0) >= 0, "remaining must never go negative"
+
+    # THE CURSOR MUST NOT INFLATE ON THE RE-OFFER EITHER. #900 re-renders an un-ingested
+    # thread, so it walks the same ground #733's accumulation did — a second pass that
+    # appended rather than reconciled is what produced 51 entries for 23 threads.
+    other = _mk_db_backed_session(config)
+    emit_reflection_pass(config, other)
+    store(config.db_path, "Session work Filesystem observations tools filesystem two", type="fact")
+    reoffer = emit_reflection_pass(config, other)
+    assert reoffer["count"] == 1, "an unpaid thread is re-offered (techne#900)"
+    m2 = _cursor(config, other)
+    assert len(m2["emitted"]) <= m2["total"], "the re-offer must reconcile, not append"
+    assert m2.get("remaining", 0) >= 0
 
 
 def test_a_corrupt_cursor_reads_as_pending_not_done(tmp_path):
@@ -2212,4 +2233,135 @@ def test_a_thin_session_that_grows_is_nudged_again(tmp_path):
         "emit must record the EXACT count it judged the session at — the marker is the "
         "only thing the nudge reads, and `len(observations) + 1` passes the whole suite "
         "while making a session that grows by exactly one never re-open"
+    )
+
+
+# ---------------------------------------------------------------------------
+# techne#900 — the cursor stamped on RENDER, so an un-ingested pass orphaned
+# ---------------------------------------------------------------------------
+
+
+def _mk_multi_thread_session(config, days: int = 3, per_day: int = 6) -> str:
+    """A session detection splits into several threads, via hard time gaps.
+
+    `_mk_db_backed_session` writes its observations at one wall-clock instant, so
+    segmentation merges them into exactly one thread — which cannot exercise a
+    multi-pass drain. Inserting observations days apart clears GAP_HARD (60 min) and
+    gives the detector real boundaries to split on.
+    """
+    from techne.core.database import connect
+    from techne.core.state import start_session
+    from techne.lifecycle import redetect_threads
+
+    session_id = start_session(config.db_path, project_path="/tmp/p", agent_identity="test-agent")
+    conn = connect(config.db_path)
+    try:
+        for day in range(days):
+            for i in range(per_day):
+                conn.execute(
+                    "INSERT INTO observations (session_id, timestamp, tool_name, content) "
+                    "VALUES (?,?,?,?)",
+                    (session_id, f"2026-06-{10 + day * 3:02d} 0{i}:00:00", "Edit", f"d{day} s{i}"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    redetect_threads(config, session_id)
+    return session_id
+
+
+def test_an_un_ingested_emit_does_not_orphan_its_thread(tmp_path):
+    """THE BUG. `delivered` is set on RENDER, so a pass whose answers never come back
+    marked its thread emitted forever while the queue row stayed undrained. Every later
+    emit then reported count:0 for a session the banner still read as pending, and
+    `reflect reconcile` could not classify it — the row renders fine.
+
+    MEASURED on the operator's store before the fix: session e9be3469 listed 12 threads
+    emitted against 4 drained, orphaning 8 threads of 42-172 observations each.
+    """
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        ingest_reflection_batch,
+        pending_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+
+    first = emit_reflection_pass(config, session_id)
+    assert first["count"] == 1
+    tid = first["batch"][0]["thread_id"]
+    assert _cursor(config, session_id)["emitted"] == [tid], "the cursor stamps on render"
+    assert [r["thread_id"] for r in pending_reflection_queue(config.db_path)] == [tid], (
+        "and the ledger still records the row as owed — that disagreement IS the bug"
+    )
+
+    second = emit_reflection_pass(config, session_id)
+    assert second["count"] == 1, (
+        "an un-ingested thread that renders today and is still owed must be re-offered; "
+        f"got count={second['count']}, which is the permanent count:0 of techne#900"
+    )
+    assert second["batch"][0]["thread_id"] == tid
+
+    ingest_reflection_batch(config, _fill_raw_responses(second["batch"]))
+    assert not pending_reflection_queue(config.db_path), "ingest pays the debt"
+    third = emit_reflection_pass(config, session_id)
+    assert third["count"] == 0, (
+        "the self-heal must TERMINATE once the row is drained — a heal that re-offers a "
+        "paid thread is an infinite re-render, which is the opposite defect"
+    )
+
+
+def test_a_partial_pass_still_takes_the_next_slice(tmp_path):
+    """THE NO-REGRESSION HALF, and the reason the heal is scoped to an empty batch.
+
+    `techne reflect emit -o file` legitimately renders long before it ingests. If the
+    ledger simply overruled the cursor, a second emit before that ingest would re-render
+    everything already in the file. A non-empty batch must behave exactly as it did.
+    """
+    from techne.core.reflect import emit_reflection_pass
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_multi_thread_session(config)
+
+    first = emit_reflection_pass(config, session_id, limit=1)
+    second = emit_reflection_pass(config, session_id, limit=1)
+    assert first["count"] == second["count"] == 1
+    assert first["batch"][0]["thread_id"] != second["batch"][0]["thread_id"], (
+        "a second pass with nothing ingested must take the NEXT unemitted thread, not "
+        "re-offer the first — the cursor still governs while threads remain"
+    )
+
+
+def test_reconcile_reports_orphans_and_removes_none_of_them(tmp_path):
+    """The third population is visible and is never swept — #646's rule, unchanged.
+
+    Orphans are neither superseded nor below-threshold: their thread is current and
+    above the floor. Both existing reporters classify rows that CANNOT render, so
+    neither could ever see this one.
+    """
+    from techne.core.reflect import (
+        emit_reflection_pass,
+        pending_reflection_queue,
+        reconcile_reflection_queue,
+    )
+
+    config = _mk_config(tmp_path, enabled=True)
+    session_id = _mk_db_backed_session(config)
+    tid = emit_reflection_pass(config, session_id)["batch"][0]["thread_id"]
+
+    report = reconcile_reflection_queue(config)
+    assert report["orphaned"] == 1
+    assert report["by_session"][session_id]["orphaned"] == [tid]
+    assert report["superseded"] == 0 and report["below_threshold"] == 0, (
+        "an orphan must not be miscounted as one of the undrainable populations — "
+        "reconcile --apply DELETES the superseded ones"
+    )
+
+    owed = len(pending_reflection_queue(config.db_path))
+    applied = reconcile_reflection_queue(config, apply=True)
+    assert applied["removed"] == 0
+    assert len(pending_reflection_queue(config.db_path)) == owed, (
+        "reconcile must never drain or delete an orphan: the row is real debt, and the "
+        "next emit is what pays it"
     )

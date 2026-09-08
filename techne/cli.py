@@ -3240,7 +3240,8 @@ def reflect_reconcile(ctx, apply_):
     for sid, rows in report["by_session"].items():
         click.echo(
             f"{sid[:16]}  superseded={len(rows['superseded'])}  "
-            f"below_threshold={len(rows['below_threshold'])}"
+            f"below_threshold={len(rows['below_threshold'])}  "
+            f"orphaned={len(rows['orphaned'])}"
         )
     click.echo(
         json.dumps(
@@ -3258,6 +3259,13 @@ def reflect_reconcile(ctx, apply_):
             f"{report['below_threshold']} row(s) left in place: their thread is current but "
             "now below reflect.min_observations_per_thread — that is tenishai/techne#646's "
             "real signal, not residue.",
+        )
+    if report["orphaned"]:
+        click.echo(
+            f"{report['orphaned']} row(s) the emit cursor already counts as delivered "
+            "but never had their answers ingested (tenishai/techne#900). Left in place "
+            "and never removed: the next `reflect emit` for those sessions re-offers "
+            "them.",
         )
 
 

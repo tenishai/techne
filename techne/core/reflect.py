@@ -748,6 +748,27 @@ def emit_reflection_batch(
     return batch
 
 
+def _owed_thread_ids(config: Config, session_id: str) -> set[str]:
+    """Thread ids this session still owes: queue rows with no `drained_at` stamp.
+
+    The LEDGER half of the cursor/ledger pair. `_emitted_keys` says the two are keyed
+    on the same thing so they "agree by construction"; nothing enforced that, which is
+    techne#900. This is what lets a caller check it.
+    """
+    conn = connect(config.db_path)
+    try:
+        return {
+            r["thread_id"]
+            for r in conn.execute(
+                "SELECT thread_id FROM reflection_queue "
+                "WHERE session_id = ? AND drained_at IS NULL",
+                (session_id,),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
 def unemittable_queue_rows(config: Config, session_id: str) -> list[str]:
     """Undrained queue rows for *session_id* that no emit can produce a prompt for.
 
@@ -837,6 +858,38 @@ def superseded_queue_rows(config: Config, session_id: str) -> list[str]:
     return [t for t in queued if t not in current]
 
 
+def orphaned_queue_rows(config: Config, session_id: str) -> list[str]:
+    """Undrained queue rows the emit cursor ALREADY counts as delivered (techne#900).
+
+    The third population, alongside superseded and below_threshold, and the one neither
+    of those can see: these rows render fine. The thread is current and above threshold.
+    The cursor was advanced when the batch was RENDERED and the answers were never
+    ingested, so emit excludes them and reports count:0 for a session reading pending.
+
+    DIAGNOSTIC ONLY. `emit_reflection_pass` now re-offers these once its batch comes out
+    empty, so a nonzero count here means the self-heal has not run yet for the session —
+    or that it regressed. Never drained here; #646's report-don't-sweep rule applies.
+    """
+    from techne.core.extension_state import get_state
+
+    owed = _owed_thread_ids(config, session_id)
+    if not owed:
+        return []
+    renderable = owed - set(unemittable_queue_rows(config, session_id))
+    if not renderable:
+        return []
+    conn = connect(config.db_path)
+    try:
+        marker = get_state(conn, f"reflect:emitted:{session_id}")
+    finally:
+        conn.close()
+    # A legacy/absent marker claims nothing: `_emitted_keys` rebuilds those from the
+    # drained rows, so they cannot orphan anything by construction.
+    if not marker or marker.get("key") != _CURSOR_KEY:
+        return []
+    return sorted(renderable & set(marker.get("emitted", [])))
+
+
 def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
     """Find (and optionally remove) queue rows left behind by a replaced detection.
 
@@ -855,7 +908,12 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
     links point into that table. Narrowing to undrained queue rows keeps the blast
     radius to exactly the rows that are provably meaningless.
 
-    Returns {sessions, superseded, below_threshold, removed, by_session}.
+    REPORTS A THIRD POPULATION AND REMOVES NONE OF IT (techne#900). `orphaned` counts
+    undrained rows whose thread renders fine and whose emit cursor already claims it —
+    invisible to the other two, which both classify rows that CANNOT render. These
+    self-heal on the next emit, so a nonzero count is a regression signal.
+
+    Returns {sessions, superseded, below_threshold, orphaned, removed, by_session}.
     """
     conn = connect(config.db_path)
     try:
@@ -869,16 +927,22 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         conn.close()
 
     by_session: dict[str, dict] = {}
-    superseded_total = below_total = 0
+    superseded_total = below_total = orphaned_total = 0
     for sid in sessions:
         stale = superseded_queue_rows(config, sid)
         unemittable = unemittable_queue_rows(config, sid)
         below = [t for t in unemittable if t not in set(stale)]
-        if not stale and not below:
+        orphaned = orphaned_queue_rows(config, sid)
+        if not stale and not below and not orphaned:
             continue
-        by_session[sid] = {"superseded": stale, "below_threshold": below}
+        by_session[sid] = {
+            "superseded": stale,
+            "below_threshold": below,
+            "orphaned": orphaned,
+        }
         superseded_total += len(stale)
         below_total += len(below)
+        orphaned_total += len(orphaned)
 
     removed = 0
     if apply and superseded_total:
@@ -900,6 +964,7 @@ def reconcile_reflection_queue(config: Config, *, apply: bool = False) -> dict:
         "sessions": len(by_session),
         "superseded": superseded_total,
         "below_threshold": below_total,
+        "orphaned": orphaned_total,
         "removed": removed,
         "by_session": by_session,
     }
@@ -1008,18 +1073,7 @@ def _owed_first(config: Config, session_id: str, batch: list[dict]) -> list[dict
     which on a session with paid early threads means re-rendering work already done
     while the owed rows stay unreachable pass after pass (techne#733).
     """
-    conn = connect(config.db_path)
-    try:
-        owed = {
-            r["thread_id"]
-            for r in conn.execute(
-                "SELECT thread_id FROM reflection_queue "
-                "WHERE session_id = ? AND drained_at IS NULL",
-                (session_id,),
-            ).fetchall()
-        }
-    finally:
-        conn.close()
+    owed = _owed_thread_ids(config, session_id)
     if not owed:
         return batch
     return sorted(batch, key=lambda i: i.get("thread_id") not in owed)
@@ -1089,7 +1143,27 @@ def emit_reflection_pass(
     # continuous, and the cursor keyed on it accumulated for two months (techne#733).
     # The cursor now keys on the persisted thread_id, so no stability claim about the
     # rendered prompt is load-bearing here any more.
-    batch = [item for item in batch if _cursor_key(item) not in already]
+    rendered = batch
+    batch = [item for item in rendered if _cursor_key(item) not in already]
+
+    # THE CURSOR DOES NOT OUTRANK THE LEDGER (techne#900). `delivered` below is set on
+    # RENDER, not on ingest, so a pass that renders and is never ingested — the routine
+    # case, since this tool's result regularly blows the MCP token cap and spills to a
+    # file — marks its threads emitted forever while their queue rows stay undrained.
+    #
+    # Heal only where the cursor is provably wrong: an EMPTY batch is the cursor saying
+    # "nothing left" about a session whose ledger still records owed rows that render
+    # today. Those were rendered and never paid. Drop them and re-offer.
+    #
+    # Scoped to the empty case on purpose. A non-empty batch changes nothing, so the
+    # multi-pass drain and the `emit -o file` / `ingest file` round trip — which
+    # legitimately renders long before it ingests — behave exactly as before.
+    if not batch:
+        stale = already & _owed_thread_ids(config, session_id) & current_ids
+        if stale:
+            already = already - stale
+            batch = [item for item in rendered if _cursor_key(item) in stale]
+
     batch = _owed_first(config, session_id, batch)
 
     # Bound the payload so a large session can't produce a batch that exceeds the MCP
